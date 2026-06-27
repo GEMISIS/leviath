@@ -5,12 +5,14 @@ use leviath_core::blueprint::{ModelConfig, StageMode, ToolResultRouting};
 use leviath_core::lifecycle::CompactionConfig;
 use leviath_core::{Blueprint, ContextLayout, Region, RegionKind, Stage};
 use leviath_core::layout::RegionDefinition;
-use leviath_runtime::{AgentEngine, AgentPool, ContextWindow, ProviderRegistry};
+use leviath_runtime::{AgentEngine, AgentPool, AgentState, ContextWindow, ProviderRegistry};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio_stream::StreamExt;
 
 use crate::config::Config;
+use crate::runstate::{self, RunMeta, RunStatus};
+use crate::tools::ToolRegistry;
 
 #[derive(Args)]
 pub struct RunArgs {
@@ -25,17 +27,123 @@ pub struct RunArgs {
     /// Model override
     #[arg(short, long)]
     pub model: Option<String>,
+
+    /// Run in the foreground (inline, blocking) instead of the default background mode
+    #[arg(short = 'f', long)]
+    pub foreground: bool,
+}
+
+/// Arguments for the hidden `__run-worker` subcommand.
+#[derive(Args)]
+pub struct WorkerArgs {
+    /// Path to agent manifest or directory
+    #[arg(value_name = "PATH")]
+    pub path: String,
+
+    /// Task prompt
+    #[arg(short, long)]
+    pub task: String,
+
+    /// Run ID for on-disk state tracking
+    #[arg(long)]
+    pub run_id: String,
+
+    /// Model override
+    #[arg(short, long)]
+    pub model: Option<String>,
 }
 
 pub async fn execute(args: RunArgs) -> anyhow::Result<()> {
-    let path = args.path.unwrap_or_else(|| ".".to_string());
-    tracing::info!(path = %path, task = %args.task, "Running agent");
+    if args.foreground {
+        return run_foreground(args).await;
+    }
 
-    // Find agent.leviath manifest
+    // Background mode: create run state, spawn detached worker process
+    let path = args.path.unwrap_or_else(|| ".".to_string());
+    let manifest_path = find_manifest(&path)?;
+
+    let manifest_content = std::fs::read_to_string(&manifest_path)
+        .map_err(|e| anyhow::anyhow!("Failed to read manifest: {}", e))?;
+    let blueprint = parse_manifest(&manifest_content)?;
+
+    let workdir = std::env::current_dir()?;
+    let run_id = runstate::new_run_id(&blueprint.name);
+
+    let meta = RunMeta::new(
+        run_id.clone(),
+        blueprint.name.clone(),
+        manifest_path
+            .parent()
+            .unwrap_or(Path::new("."))
+            .to_string_lossy()
+            .to_string(),
+        args.task.clone(),
+        args.model.clone(),
+        workdir.to_string_lossy().to_string(),
+        blueprint.stages.len(),
+    );
+    runstate::create_run(&meta)?;
+
+    // Redirect the worker's stdout + stderr to the run's output.log
+    let log_path = runstate::run_dir(&run_id).join("output.log");
+    let log_file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)?;
+    let log_file2 = log_file.try_clone()?;
+
+    let exe = std::env::current_exe()
+        .map_err(|e| anyhow::anyhow!("Failed to locate current executable: {}", e))?;
+
+    let mut cmd = std::process::Command::new(&exe);
+    cmd.arg("__run-worker")
+        .arg(manifest_path.to_string_lossy().as_ref())
+        .arg("--task")
+        .arg(&args.task)
+        .arg("--run-id")
+        .arg(&run_id);
+
+    if let Some(ref model) = args.model {
+        cmd.arg("--model").arg(model);
+    }
+
+    cmd.current_dir(&workdir)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::from(log_file))
+        .stderr(std::process::Stdio::from(log_file2));
+
+    // On Unix: setsid() detaches the worker into its own session so it
+    // survives the spawning terminal being closed.
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        unsafe {
+            cmd.pre_exec(|| {
+                libc::setsid();
+                Ok(())
+            });
+        }
+    }
+
+    cmd.spawn()
+        .map_err(|e| anyhow::anyhow!("Failed to spawn worker process: {}", e))?;
+
+    println!("Started run: {}", run_id);
+    println!("  lev ps                — check all runs");
+    println!("  lev logs {}  — stream output", &run_id[..run_id.len().min(24)]);
+    println!("  lev dashboard         — view in TUI dashboard");
+
+    Ok(())
+}
+
+/// Run an agent in the foreground (inline, blocking) — the original behavior.
+async fn run_foreground(args: RunArgs) -> anyhow::Result<()> {
+    let path = args.path.unwrap_or_else(|| ".".to_string());
+    tracing::info!(path = %path, task = %args.task, "Running agent (foreground)");
+
     let manifest_path = find_manifest(&path)?;
     println!("Loading agent from: {}", manifest_path.display());
 
-    // Parse manifest into blueprint
     let manifest_content = std::fs::read_to_string(&manifest_path)
         .map_err(|e| anyhow::anyhow!("Failed to read manifest: {}", e))?;
     let blueprint = parse_manifest(&manifest_content)?;
@@ -43,41 +151,60 @@ pub async fn execute(args: RunArgs) -> anyhow::Result<()> {
     println!("Agent: {} v{}", blueprint.name, blueprint.version);
     println!("Task: {}", args.task);
 
-    // Load config for API keys
     let config = Config::load()?;
-
-    // Validate API key formats
     for warning in config.validate_keys() {
         println!("Warning: {}", warning);
     }
 
-    // Create provider registry
     let registry = build_provider_registry(&config);
-
-    // Create engine with providers
     let mut engine = AgentEngine::with_providers(registry);
 
-    // Create agent pool and spawn agent
     let mut pool = AgentPool::new(blueprint.clone());
     let agent_id = pool.spawn_agent(engine.world_mut());
     let entity = pool
         .get_agent(&agent_id)
         .ok_or_else(|| anyhow::anyhow!("Failed to get spawned agent entity"))?;
 
-    // Initialize context window regions from blueprint layout
+    let workdir = std::env::current_dir()?;
     initialize_context_window(&mut engine, entity, &blueprint, &args.task);
 
-    // Get compaction config from blueprint (or use default if blueprint has compacting regions)
+    let tool_registry = Arc::new(ToolRegistry::build(workdir, &config).await);
+
+    // Build executor closure (Arcs cloned once here, then again per call)
+    let builtins = tool_registry.builtins.clone();
+    let mcp = tool_registry.mcp.clone();
+    let builtin_names = tool_registry.builtin_names.clone();
+    let mut exec = move |calls: Vec<leviath_providers::ToolCall>| {
+        let builtins = builtins.clone();
+        let mcp = mcp.clone();
+        let builtin_names = builtin_names.clone();
+        async move {
+            let mut out: Vec<(String, String)> = Vec::new();
+            for tc in calls {
+                let res = if builtin_names.contains(&tc.name) {
+                    builtins.execute(&tc.name, tc.arguments.clone()).await
+                } else {
+                    let mut mcp_lock = mcp.lock().await;
+                    match mcp_lock.execute(&tc.name, tc.arguments.clone()).await {
+                        Ok(r) if r.success => r.text,
+                        Ok(r) => format!("[error] {}", r.text),
+                        Err(e) => format!("[error] tool error: {}", e),
+                    }
+                };
+                out.push((tc.id.clone(), res));
+            }
+            out
+        }
+    };
+
     let compaction_config = blueprint.compaction_config.clone();
     let compaction_ref = compaction_config.as_ref();
 
-    // Run through ALL stages sequentially
     let num_stages = blueprint.stages.len();
     for (stage_idx, stage) in blueprint.stages.iter().enumerate() {
         let provider_name = &stage.model.provider;
         let model_name = args.model.as_deref().unwrap_or(&stage.model.model);
 
-        // Check if provider is available
         if !engine.providers().has(provider_name) {
             println!(
                 "\nProvider '{}' is not configured. Please set an API key in ~/.leviath/config.toml",
@@ -99,20 +226,28 @@ pub async fn execute(args: RunArgs) -> anyhow::Result<()> {
             model_name,
         );
 
-        // If stage has its own context_layout, swap to it
         if let Some(ref stage_layout) = stage.context_layout {
             swap_context_layout(&mut engine, entity, stage_layout);
         }
 
-        // Build tool filter from stage's available_tools
-        let tool_filter: Option<Vec<String>> = if stage.available_tools.is_empty() {
-            None
-        } else {
-            Some(stage.available_tools.clone())
-        };
-        let tool_filter_ref = tool_filter.as_deref();
+        // Inject per-stage system prompt into context
+        if let Some(sp) = stage.config.get("system_prompt").and_then(|v| v.as_str()) {
+            if let Some(mut window) = engine.world_mut().get_mut::<ContextWindow>(entity) {
+                let tokens = sp.len() / 4 + 1;
+                let _ = window.add_to_region("conversation", format!("[Stage instructions: {}]", sp), tokens);
+            }
+        }
 
-        // Build tool result routing config
+        let all_tools = tool_registry.all_tool_defs();
+        let effective_tools: Vec<leviath_providers::Tool> = if stage.available_tools.is_empty() {
+            Vec::new()
+        } else {
+            all_tools
+                .into_iter()
+                .filter(|t| stage.available_tools.iter().any(|f| f == &t.name))
+                .collect()
+        };
+
         let routing_config = stage.tool_result_routing.as_ref().map(|r| {
             leviath_runtime::ToolResultRoutingConfig {
                 default_region: r.default_region.clone(),
@@ -122,10 +257,8 @@ pub async fn execute(args: RunArgs) -> anyhow::Result<()> {
             }
         });
         let routing_ref = routing_config.as_ref();
+        let max_iterations = stage.max_iterations.unwrap_or(20);
 
-        let max_iterations = stage.max_iterations.unwrap_or(10);
-
-        // Run stage based on mode
         match &stage.mode {
             StageMode::Interactive => {
                 run_interactive_stage(
@@ -134,7 +267,8 @@ pub async fn execute(args: RunArgs) -> anyhow::Result<()> {
                     provider_name,
                     model_name,
                     max_iterations,
-                    tool_filter_ref,
+                    &effective_tools,
+                    &mut exec,
                 )
                 .await?;
             }
@@ -145,10 +279,11 @@ pub async fn execute(args: RunArgs) -> anyhow::Result<()> {
                     provider_name,
                     model_name,
                     max_iterations,
-                    tool_filter_ref,
+                    &effective_tools,
                     routing_ref,
-                    points,
                     compaction_ref,
+                    points,
+                    &mut exec,
                 )
                 .await?;
             }
@@ -159,15 +294,15 @@ pub async fn execute(args: RunArgs) -> anyhow::Result<()> {
                     provider_name,
                     model_name,
                     max_iterations,
-                    tool_filter_ref,
+                    &effective_tools,
                     routing_ref,
                     compaction_ref,
+                    &mut exec,
                 )
                 .await?;
             }
         }
 
-        // Add stage transition marker if not the last stage
         if stage_idx + 1 < num_stages {
             let next_name = &blueprint.stages[stage_idx + 1].name;
             if let Some(mut window) = engine.world_mut().get_mut::<ContextWindow>(entity) {
@@ -182,56 +317,338 @@ pub async fn execute(args: RunArgs) -> anyhow::Result<()> {
     }
 
     println!("\n[All stages complete]");
+    tool_registry.shutdown().await;
     Ok(())
 }
 
-/// Run an interactive stage with streaming output.
-async fn run_interactive_stage(
+/// Background worker entrypoint: runs stages and writes progress to run-state dir.
+pub async fn execute_worker(args: WorkerArgs) -> anyhow::Result<()> {
+    let mut meta = runstate::read_meta(&args.run_id).unwrap_or_else(|_| {
+        RunMeta::new(
+            args.run_id.clone(),
+            "unknown".to_string(),
+            args.path.clone(),
+            args.task.clone(),
+            args.model.clone(),
+            std::env::current_dir()
+                .map(|p| p.to_string_lossy().to_string())
+                .unwrap_or_default(),
+            0,
+        )
+    });
+
+    meta.pid = std::process::id();
+    meta.status = RunStatus::Running;
+    meta.touch();
+    let _ = runstate::write_meta(&meta);
+
+    let result = run_worker_inner(&args, &mut meta).await;
+
+    match &result {
+        Ok(()) => meta.status = RunStatus::Complete,
+        Err(e) => {
+            meta.status = RunStatus::Error;
+            meta.error = Some(e.to_string());
+        }
+    }
+    meta.touch();
+    let _ = runstate::write_meta(&meta);
+
+    result
+}
+
+async fn run_worker_inner(args: &WorkerArgs, meta: &mut RunMeta) -> anyhow::Result<()> {
+    let manifest_path = find_manifest(&args.path)?;
+    println!("Loading agent from: {}", manifest_path.display());
+
+    let manifest_content = std::fs::read_to_string(&manifest_path)
+        .map_err(|e| anyhow::anyhow!("Failed to read manifest: {}", e))?;
+    let blueprint = parse_manifest(&manifest_content)?;
+
+    println!("Agent: {} v{}", blueprint.name, blueprint.version);
+    println!("Task: {}", args.task);
+
+    let config = Config::load()?;
+    for warning in config.validate_keys() {
+        println!("Warning: {}", warning);
+    }
+
+    let prov_registry = build_provider_registry(&config);
+    let mut engine = AgentEngine::with_providers(prov_registry);
+
+    let mut pool = AgentPool::new(blueprint.clone());
+    let agent_id = pool.spawn_agent(engine.world_mut());
+    let entity = pool
+        .get_agent(&agent_id)
+        .ok_or_else(|| anyhow::anyhow!("Failed to get spawned agent entity"))?;
+
+    let workdir = std::env::current_dir()?;
+    initialize_context_window(&mut engine, entity, &blueprint, &args.task);
+
+    let tool_registry = Arc::new(ToolRegistry::build(workdir, &config).await);
+
+    let builtins = tool_registry.builtins.clone();
+    let mcp = tool_registry.mcp.clone();
+    let builtin_names = tool_registry.builtin_names.clone();
+    let mut exec = move |calls: Vec<leviath_providers::ToolCall>| {
+        let builtins = builtins.clone();
+        let mcp = mcp.clone();
+        let builtin_names = builtin_names.clone();
+        async move {
+            let mut out: Vec<(String, String)> = Vec::new();
+            for tc in calls {
+                let res = if builtin_names.contains(&tc.name) {
+                    builtins.execute(&tc.name, tc.arguments.clone()).await
+                } else {
+                    let mut mcp_lock = mcp.lock().await;
+                    match mcp_lock.execute(&tc.name, tc.arguments.clone()).await {
+                        Ok(r) if r.success => r.text,
+                        Ok(r) => format!("[error] {}", r.text),
+                        Err(e) => format!("[error] tool error: {}", e),
+                    }
+                };
+                out.push((tc.id.clone(), res));
+            }
+            out
+        }
+    };
+
+    let compaction_config = blueprint.compaction_config.clone();
+    let compaction_ref = compaction_config.as_ref();
+
+    meta.num_stages = blueprint.stages.len();
+    let _ = runstate::write_meta(meta);
+
+    let num_stages = blueprint.stages.len();
+    for (stage_idx, stage) in blueprint.stages.iter().enumerate() {
+        let provider_name = &stage.model.provider;
+        let model_name = args.model.as_deref().unwrap_or(&stage.model.model);
+
+        if !engine.providers().has(provider_name) {
+            let msg = format!("Provider '{}' is not configured", provider_name);
+            println!("\n{}", msg);
+            meta.status = RunStatus::Error;
+            meta.error = Some(msg);
+            meta.touch();
+            let _ = runstate::write_meta(meta);
+            return Ok(());
+        }
+
+        println!(
+            "\n--- Stage {}/{}: {} ({}:{}) ---",
+            stage_idx + 1,
+            num_stages,
+            stage.name,
+            provider_name,
+            model_name,
+        );
+
+        meta.current_stage = stage.name.clone();
+        meta.stage_index = stage_idx;
+        meta.status = RunStatus::Running;
+        meta.touch();
+        let _ = runstate::write_meta(meta);
+
+        if let Some(ref stage_layout) = stage.context_layout {
+            swap_context_layout(&mut engine, entity, stage_layout);
+        }
+
+        // Inject per-stage system prompt into context
+        if let Some(sp) = stage.config.get("system_prompt").and_then(|v| v.as_str()) {
+            if let Some(mut window) = engine.world_mut().get_mut::<ContextWindow>(entity) {
+                let tokens = sp.len() / 4 + 1;
+                let _ = window.add_to_region("conversation", format!("[Stage instructions: {}]", sp), tokens);
+            }
+        }
+
+        let all_tools = tool_registry.all_tool_defs();
+        let effective_tools: Vec<leviath_providers::Tool> = if stage.available_tools.is_empty() {
+            Vec::new()
+        } else {
+            all_tools
+                .into_iter()
+                .filter(|t| stage.available_tools.iter().any(|f| f == &t.name))
+                .collect()
+        };
+
+        let routing_config = stage.tool_result_routing.as_ref().map(|r| {
+            leviath_runtime::ToolResultRoutingConfig {
+                default_region: r.default_region.clone(),
+                tool_overrides: r.tool_overrides.clone(),
+                persist: r.persist,
+                max_result_tokens: r.max_result_tokens,
+            }
+        });
+        let routing_ref = routing_config.as_ref();
+        let max_iterations = stage.max_iterations.unwrap_or(20);
+
+        // Workers run all stages autonomously (headless — no stdin).
+        // Interactive stages behave like autonomous in the background.
+        let response = engine
+            .run_inference_loop_filtered(
+                entity,
+                provider_name,
+                model_name,
+                effective_tools,
+                max_iterations,
+                None,
+                routing_ref,
+                compaction_ref,
+                &mut exec,
+            )
+            .await;
+
+        match response {
+            Ok(resp) => {
+                println!("{}", resp.content);
+                println!(
+                    "\n[Tokens: {} in, {} out]",
+                    resp.tokens_used.prompt_tokens, resp.tokens_used.completion_tokens
+                );
+                meta.prompt_tokens += resp.tokens_used.prompt_tokens;
+                meta.completion_tokens += resp.tokens_used.completion_tokens;
+
+                // Carry the final response forward so the next stage sees the previous stage's output
+                if !resp.content.is_empty() {
+                    if let Some(mut window) = engine.world_mut().get_mut::<ContextWindow>(entity) {
+                        let tokens = resp.content.len() / 4 + 1;
+                        let _ = window.add_to_region(
+                            "conversation",
+                            format!("Assistant ({}): {}", stage.name, resp.content),
+                            tokens,
+                        );
+                    }
+                }
+            }
+            Err(e) => {
+                let msg = format!("Stage '{}' inference error: {}", stage.name, e);
+                println!("{}", msg);
+                meta.status = RunStatus::Error;
+                meta.error = Some(msg);
+                meta.touch();
+                let _ = runstate::write_meta(meta);
+                return Ok(());
+            }
+        }
+
+        if let Some(state) = engine.world().get::<AgentState>(entity) {
+            meta.iteration = state.iteration;
+        }
+        meta.touch();
+        let _ = runstate::write_meta(meta);
+
+        if stage_idx + 1 < num_stages {
+            let next_name = &blueprint.stages[stage_idx + 1].name;
+            if let Some(mut window) = engine.world_mut().get_mut::<ContextWindow>(entity) {
+                let marker = format!(
+                    "[Stage complete: {}, transitioning to: {}]",
+                    stage.name, next_name
+                );
+                let tokens = marker.len() / 4 + 1;
+                let _ = window.add_to_region("conversation", marker, tokens);
+            }
+        }
+    }
+
+    println!("\n[All stages complete]");
+    tool_registry.shutdown().await;
+    Ok(())
+}
+
+// ─── Stage runners ───────────────────────────────────────────────────────────
+
+/// Run an interactive (conversational) stage.
+/// If the stage has tools, uses the inference loop; otherwise streams.
+#[allow(clippy::too_many_arguments)]
+async fn run_interactive_stage<F, Fut>(
     engine: &mut AgentEngine,
     entity: bevy_ecs::prelude::Entity,
     provider_name: &str,
     model_name: &str,
     max_iterations: usize,
-    tool_filter: Option<&[String]>,
-) -> anyhow::Result<()> {
-    let mut iteration = 0;
+    tools: &[leviath_providers::Tool],
+    executor: &mut F,
+) -> anyhow::Result<()>
+where
+    F: FnMut(Vec<leviath_providers::ToolCall>) -> Fut,
+    Fut: std::future::Future<Output = Vec<(String, String)>>,
+{
+    let has_tools = !tools.is_empty();
+    let mut turn = 0;
+
     loop {
-        if iteration >= max_iterations {
-            println!("\n[Max iterations reached]");
+        if turn >= max_iterations {
+            println!("\n[Max turns reached]");
             break;
         }
 
-        // Use streaming for interactive mode
-        let response = match stream_inference(engine, entity, provider_name, model_name, tool_filter).await {
-            Ok(resp) => resp,
-            Err(e) => {
-                // Fall back to non-streaming
-                tracing::debug!("Streaming unavailable, falling back: {}", e);
-                let resp = engine
-                    .run_inference_filtered(entity, provider_name, model_name, Vec::new(), tool_filter)
-                    .await
-                    .map_err(|e| anyhow::anyhow!("Inference error: {}", e))?;
-                println!("\nAssistant: {}", resp.content);
-                resp
-            }
-        };
+        if has_tools {
+            let per_turn_iters = 10_usize.min(max_iterations.saturating_sub(turn));
+            let response = engine
+                .run_inference_loop_filtered(
+                    entity,
+                    provider_name,
+                    model_name,
+                    tools.to_vec(),
+                    per_turn_iters,
+                    None,
+                    None,
+                    None,
+                    executor,
+                )
+                .await
+                .map_err(|e| anyhow::anyhow!("Inference error: {}", e))?;
 
-        println!(
-            "\n[Tokens: {} input, {} output]",
-            response.tokens_used.prompt_tokens, response.tokens_used.completion_tokens
-        );
-
-        // Add response to context
-        if let Some(mut window) = engine.world_mut().get_mut::<ContextWindow>(entity) {
-            let tokens = response.content.len() / 4 + 1;
-            let _ = window.add_to_region(
-                "conversation",
-                format!("Assistant: {}", response.content),
-                tokens,
+            println!("\nAssistant: {}", response.content);
+            println!(
+                "\n[Tokens: {} in, {} out]",
+                response.tokens_used.prompt_tokens, response.tokens_used.completion_tokens
             );
+
+            if let Some(mut window) = engine.world_mut().get_mut::<ContextWindow>(entity) {
+                let tokens = response.content.len() / 4 + 1;
+                let _ = window.add_to_region(
+                    "conversation",
+                    format!("Assistant: {}", response.content),
+                    tokens,
+                );
+            }
+        } else {
+            let response =
+                match stream_inference(engine, entity, provider_name, model_name, None).await {
+                    Ok(r) => r,
+                    Err(e) => {
+                        tracing::debug!("Streaming unavailable, falling back: {}", e);
+                        let r = engine
+                            .run_inference_filtered(
+                                entity,
+                                provider_name,
+                                model_name,
+                                Vec::new(),
+                                None,
+                            )
+                            .await
+                            .map_err(|e| anyhow::anyhow!("Inference error: {}", e))?;
+                        println!("\nAssistant: {}", r.content);
+                        r
+                    }
+                };
+
+            println!(
+                "\n[Tokens: {} in, {} out]",
+                response.tokens_used.prompt_tokens, response.tokens_used.completion_tokens
+            );
+
+            if let Some(mut window) = engine.world_mut().get_mut::<ContextWindow>(entity) {
+                let tokens = response.content.len() / 4 + 1;
+                let _ = window.add_to_region(
+                    "conversation",
+                    format!("Assistant: {}", response.content),
+                    tokens,
+                );
+            }
         }
 
-        // Prompt for user input
         print!("\nYou: ");
         use std::io::Write;
         std::io::stdout().flush().ok();
@@ -245,44 +662,45 @@ async fn run_interactive_stage(
             break;
         }
 
-        // Add user input to context
         if let Some(mut window) = engine.world_mut().get_mut::<ContextWindow>(entity) {
             let tokens = input.len() / 4 + 1;
-            let _ = window.add_to_region(
-                "conversation",
-                format!("User: {}", input),
-                tokens,
-            );
+            let _ = window.add_to_region("conversation", format!("User: {}", input), tokens);
         }
 
-        iteration += 1;
+        turn += 1;
     }
+
     Ok(())
 }
 
-/// Run an autonomous stage.
+/// Run an autonomous stage with the real tool executor.
 #[allow(clippy::too_many_arguments)]
-async fn run_autonomous_stage(
+async fn run_autonomous_stage<F, Fut>(
     engine: &mut AgentEngine,
     entity: bevy_ecs::prelude::Entity,
     provider_name: &str,
     model_name: &str,
     max_iterations: usize,
-    tool_filter: Option<&[String]>,
+    tools: &[leviath_providers::Tool],
     routing: Option<&leviath_runtime::ToolResultRoutingConfig>,
     compaction_config: Option<&CompactionConfig>,
-) -> anyhow::Result<()> {
+    executor: &mut F,
+) -> anyhow::Result<()>
+where
+    F: FnMut(Vec<leviath_providers::ToolCall>) -> Fut,
+    Fut: std::future::Future<Output = Vec<(String, String)>>,
+{
     let response = engine
         .run_inference_loop_filtered(
             entity,
             provider_name,
             model_name,
-            Vec::new(),
+            tools.to_vec(),
             max_iterations,
-            tool_filter,
+            None,
             routing,
             compaction_config,
-            &mut |_tool_calls| async { Vec::new() },
+            executor,
         )
         .await;
 
@@ -301,24 +719,39 @@ async fn run_autonomous_stage(
     Ok(())
 }
 
-/// Run an InteractivePoints stage: run iterations autonomously, pausing at each interaction point.
+/// Run an InteractivePoints stage: autonomous iterations with pauses at each interaction point.
 #[allow(clippy::too_many_arguments)]
-async fn run_interactive_points_stage(
+async fn run_interactive_points_stage<F, Fut>(
     engine: &mut AgentEngine,
     entity: bevy_ecs::prelude::Entity,
     provider_name: &str,
     model_name: &str,
     max_iterations: usize,
-    tool_filter: Option<&[String]>,
+    tools: &[leviath_providers::Tool],
     routing: Option<&leviath_runtime::ToolResultRoutingConfig>,
-    points: &[leviath_core::blueprint::InteractionPoint],
     compaction_config: Option<&CompactionConfig>,
-) -> anyhow::Result<()> {
+    points: &[leviath_core::blueprint::InteractionPoint],
+    executor: &mut F,
+) -> anyhow::Result<()>
+where
+    F: FnMut(Vec<leviath_providers::ToolCall>) -> Fut,
+    Fut: std::future::Future<Output = Vec<(String, String)>>,
+{
     if points.is_empty() {
-        return run_autonomous_stage(engine, entity, provider_name, model_name, max_iterations, tool_filter, routing, compaction_config).await;
+        return run_autonomous_stage(
+            engine,
+            entity,
+            provider_name,
+            model_name,
+            max_iterations,
+            tools,
+            routing,
+            compaction_config,
+            executor,
+        )
+        .await;
     }
 
-    // Divide iterations across interaction points
     let segments = points.len() + 1;
     let iterations_per_segment = max_iterations / segments;
     let mut remaining_iterations = max_iterations;
@@ -331,12 +764,12 @@ async fn run_interactive_points_stage(
                     entity,
                     provider_name,
                     model_name,
-                    Vec::new(),
+                    tools.to_vec(),
                     iters,
-                    tool_filter,
+                    None,
                     routing,
                     compaction_config,
-                    &mut |_tool_calls| async { Vec::new() },
+                    executor,
                 )
                 .await;
 
@@ -348,7 +781,6 @@ async fn run_interactive_points_stage(
             remaining_iterations = remaining_iterations.saturating_sub(iters);
         }
 
-        // Show interaction point
         println!("\n[Interaction Point: {}]", point.name);
         println!("{}", point.prompt);
 
@@ -386,19 +818,18 @@ async fn run_interactive_points_stage(
         }
     }
 
-    // Run remaining iterations
     if remaining_iterations > 0 {
         let response = engine
             .run_inference_loop_filtered(
                 entity,
                 provider_name,
                 model_name,
-                Vec::new(),
+                tools.to_vec(),
                 remaining_iterations,
-                tool_filter,
+                None,
                 routing,
                 compaction_config,
-                &mut |_tool_calls| async { Vec::new() },
+                executor,
             )
             .await;
 
@@ -416,7 +847,10 @@ async fn run_interactive_points_stage(
     Ok(())
 }
 
+// ─── Streaming inference ─────────────────────────────────────────────────────
+
 /// Stream inference output directly to stdout, collecting the full response.
+/// Used only for tool-less interactive stages.
 async fn stream_inference(
     engine: &mut AgentEngine,
     entity: bevy_ecs::prelude::Entity,
@@ -428,7 +862,6 @@ async fn stream_inference(
         .get_provider(provider_name)
         .ok_or_else(|| anyhow::anyhow!("Provider '{}' not registered", provider_name))?;
 
-    // Build messages from context window
     let (messages, max_tokens) = {
         let window = engine
             .world()
@@ -441,7 +874,7 @@ async fn stream_inference(
         (messages, max_tokens)
     };
 
-    // Build filtered tools list (empty for now — tools come from MCP in the future)
+    // Tool-less streaming: always empty tools list
     let tools: Vec<leviath_providers::Tool> = Vec::new();
     let filtered_tools = if let Some(filter) = tool_filter {
         if filter.is_empty() {
@@ -465,7 +898,9 @@ async fn stream_inference(
         extra: serde_json::Value::Null,
     };
 
-    let mut stream = provider.infer_stream(request).await
+    let mut stream = provider
+        .infer_stream(request)
+        .await
         .map_err(|e| anyhow::anyhow!("Stream error: {}", e))?;
 
     let mut full_content = String::new();
@@ -492,7 +927,6 @@ async fn stream_inference(
             final_finish_reason = Some(reason);
         }
 
-        // Accumulate tool calls from stream deltas
         for tc_delta in &chunk.tool_calls {
             while all_tool_calls.len() <= tc_delta.index {
                 all_tool_calls.push(leviath_providers::ToolCall {
@@ -516,9 +950,8 @@ async fn stream_inference(
         }
     }
 
-    println!(); // newline after streaming
+    println!();
 
-    // Update agent state iteration
     if let Some(mut state) = engine.world_mut().get_mut::<leviath_runtime::AgentState>(entity) {
         state.iteration += 1;
     }
@@ -536,6 +969,8 @@ async fn stream_inference(
         finish_reason: final_finish_reason.unwrap_or(leviath_providers::FinishReason::Complete),
     })
 }
+
+// ─── Shared helpers ───────────────────────────────────────────────────────────
 
 /// Build a ProviderRegistry from Config.
 pub fn build_provider_registry(config: &Config) -> ProviderRegistry {
@@ -593,7 +1028,6 @@ pub fn initialize_context_window(
             window.add_region(region);
         }
 
-        // Add a tool_results region if not present
         if window.get_region("tool_results").is_none() {
             let tool_region = Region::new(
                 "tool_results".to_string(),
@@ -603,7 +1037,6 @@ pub fn initialize_context_window(
             window.add_region(tool_region);
         }
 
-        // Add a conversation region if not present
         if window.get_region("conversation").is_none() {
             let conv_region = Region::new(
                 "conversation".to_string(),
@@ -613,7 +1046,6 @@ pub fn initialize_context_window(
             window.add_region(conv_region);
         }
 
-        // Add task to the first pinned/system region
         let system_region_name = blueprint
             .context_layout
             .regions
@@ -643,7 +1075,6 @@ fn swap_context_layout(
                 region_def.max_tokens,
             );
 
-            // Copy content from existing region with same name
             if let Some(existing) = window.get_region(&region_def.name) {
                 for entry in &existing.content {
                     let _ = new_region.add_entry(entry.content.clone(), entry.tokens);
@@ -683,7 +1114,7 @@ fn find_manifest(path: &str) -> anyhow::Result<PathBuf> {
     )
 }
 
-/// Parse an agent.leviath TOML manifest into a Blueprint (public API for other commands).
+/// Public alias for parse_manifest (used by dashboard).
 pub fn parse_manifest_public(content: &str) -> anyhow::Result<Blueprint> {
     parse_manifest(content)
 }
@@ -693,7 +1124,6 @@ fn parse_manifest(content: &str) -> anyhow::Result<Blueprint> {
     let parsed: toml::Value = toml::from_str(content)
         .map_err(|e| anyhow::anyhow!("Failed to parse agent.leviath: {}", e))?;
 
-    // Parse [agent] section
     let agent = parsed
         .get("agent")
         .ok_or_else(|| anyhow::anyhow!("Missing [agent] section"))?;
@@ -714,7 +1144,6 @@ fn parse_manifest(content: &str) -> anyhow::Result<Blueprint> {
         .unwrap_or("")
         .to_string();
 
-    // Parse [stages.*] sections
     let mut stages = Vec::new();
     if let Some(stages_table) = parsed.get("stages").and_then(|v| v.as_table()) {
         for (stage_name, stage_value) in stages_table {
@@ -727,26 +1156,36 @@ fn parse_manifest(content: &str) -> anyhow::Result<Blueprint> {
                         .to_string(),
                     mt.get("model")
                         .and_then(|v| v.as_str())
-                        .unwrap_or("claude-sonnet-4-5")
+                        .unwrap_or("claude-sonnet-4-6")
                         .to_string(),
                 )
             } else {
-                ModelConfig::new("anthropic".to_string(), "claude-sonnet-4-5".to_string())
+                ModelConfig::new("anthropic".to_string(), "claude-sonnet-4-6".to_string())
             };
 
             let mut stage = Stage::new(stage_name.clone(), model_config);
 
-            // Parse mode
             if let Some(mode_str) = stage_value.get("mode").and_then(|v| v.as_str()) {
                 stage = match mode_str {
                     "interactive" => stage.with_mode(StageMode::Interactive),
                     "interactive_points" => {
                         let mut points = Vec::new();
-                        if let Some(pts_arr) = stage_value.get("interaction_points").and_then(|v| v.as_array()) {
+                        if let Some(pts_arr) =
+                            stage_value.get("interaction_points").and_then(|v| v.as_array())
+                        {
                             for pt in pts_arr {
-                                let pt_name = pt.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                                let pt_prompt = pt.get("prompt").and_then(|v| v.as_str()).unwrap_or("").to_string();
-                                let pt_required = pt.get("required").and_then(|v| v.as_bool()).unwrap_or(true);
+                                let pt_name = pt
+                                    .get("name")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("")
+                                    .to_string();
+                                let pt_prompt = pt
+                                    .get("prompt")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("")
+                                    .to_string();
+                                let pt_required =
+                                    pt.get("required").and_then(|v| v.as_bool()).unwrap_or(true);
                                 points.push(leviath_core::blueprint::InteractionPoint {
                                     name: pt_name,
                                     prompt: pt_prompt,
@@ -760,21 +1199,31 @@ fn parse_manifest(content: &str) -> anyhow::Result<Blueprint> {
                 };
             }
 
-            // Parse max_iterations
-            if let Some(max_iter) = stage_value.get("max_iterations").and_then(|v| v.as_integer()) {
+            if let Some(max_iter) =
+                stage_value.get("max_iterations").and_then(|v| v.as_integer())
+            {
                 stage.max_iterations = Some(max_iter as usize);
             }
 
-            // Parse available_tools
-            if let Some(tools_arr) = stage_value.get("available_tools").and_then(|v| v.as_array()) {
+            if let Some(tools_arr) =
+                stage_value.get("available_tools").and_then(|v| v.as_array())
+            {
                 stage.available_tools = tools_arr
                     .iter()
                     .filter_map(|v| v.as_str().map(|s| s.to_string()))
                     .collect();
             }
 
-            // Parse tool_routing
-            if let Some(routing_table) = stage_value.get("tool_routing").and_then(|v| v.as_table()) {
+            if let Some(sp) = stage_value.get("system_prompt").and_then(|v| v.as_str()) {
+                stage.config.insert(
+                    "system_prompt".to_string(),
+                    serde_json::Value::String(sp.trim().to_string()),
+                );
+            }
+
+            if let Some(routing_table) =
+                stage_value.get("tool_routing").and_then(|v| v.as_table())
+            {
                 let mut routing = ToolResultRouting::default();
 
                 if let Some(dr) = routing_table.get("default_region").and_then(|v| v.as_str()) {
@@ -783,13 +1232,20 @@ fn parse_manifest(content: &str) -> anyhow::Result<Blueprint> {
                 if let Some(p) = routing_table.get("persist").and_then(|v| v.as_bool()) {
                     routing.persist = p;
                 }
-                if let Some(mt) = routing_table.get("max_result_tokens").and_then(|v| v.as_integer()) {
+                if let Some(mt) = routing_table
+                    .get("max_result_tokens")
+                    .and_then(|v| v.as_integer())
+                {
                     routing.max_result_tokens = Some(mt as usize);
                 }
-                if let Some(overrides_table) = routing_table.get("overrides").and_then(|v| v.as_table()) {
+                if let Some(overrides_table) =
+                    routing_table.get("overrides").and_then(|v| v.as_table())
+                {
                     for (tool_name, region_val) in overrides_table {
                         if let Some(region_name) = region_val.as_str() {
-                            routing.tool_overrides.insert(tool_name.clone(), region_name.to_string());
+                            routing
+                                .tool_overrides
+                                .insert(tool_name.clone(), region_name.to_string());
                         }
                     }
                 }
@@ -804,11 +1260,10 @@ fn parse_manifest(content: &str) -> anyhow::Result<Blueprint> {
     if stages.is_empty() {
         stages.push(Stage::new(
             "main".to_string(),
-            ModelConfig::new("anthropic".to_string(), "claude-sonnet-4-5".to_string()),
+            ModelConfig::new("anthropic".to_string(), "claude-sonnet-4-6".to_string()),
         ));
     }
 
-    // Parse [context.regions] section
     let mut regions = Vec::new();
     let mut total_tokens = 0usize;
 
@@ -842,7 +1297,8 @@ fn parse_manifest(content: &str) -> anyhow::Result<Blueprint> {
                     let threshold = region_value
                         .get("threshold_tokens")
                         .and_then(|v| v.as_integer())
-                        .unwrap_or((max_tokens as i64) * 8 / 10) as usize;
+                        .unwrap_or((max_tokens as i64) * 8 / 10)
+                        as usize;
                     RegionKind::Compacting {
                         threshold_tokens: threshold,
                     }
@@ -862,11 +1318,7 @@ fn parse_manifest(content: &str) -> anyhow::Result<Blueprint> {
             };
 
             total_tokens += max_tokens;
-            regions.push(RegionDefinition::new(
-                region_name.clone(),
-                kind,
-                max_tokens,
-            ));
+            regions.push(RegionDefinition::new(region_name.clone(), kind, max_tokens));
         }
     }
 
@@ -889,7 +1341,6 @@ fn parse_manifest(content: &str) -> anyhow::Result<Blueprint> {
     let mut blueprint = Blueprint::new(name, description, stages, layout);
     blueprint.version = version;
 
-    // Parse optional [compaction] section
     if let Some(compaction_table) = parsed.get("compaction").and_then(|v| v.as_table()) {
         let mut cc = CompactionConfig::default();
 
@@ -902,7 +1353,10 @@ fn parse_manifest(content: &str) -> anyhow::Result<Blueprint> {
         if let Some(sp) = compaction_table.get("system_prompt").and_then(|v| v.as_str()) {
             cc.system_prompt = Some(sp.to_string());
         }
-        if let Some(mst) = compaction_table.get("max_summary_tokens").and_then(|v| v.as_integer()) {
+        if let Some(mst) = compaction_table
+            .get("max_summary_tokens")
+            .and_then(|v| v.as_integer())
+        {
             cc.max_summary_tokens = mst as usize;
         }
         if let Some(temp) = compaction_table.get("temperature").and_then(|v| v.as_float()) {

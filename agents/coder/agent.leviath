@@ -5,22 +5,46 @@ description = "Multi-stage coding agent with structured context"
 
 [stages.analyze]
 mode = "autonomous"
-model = { provider = "anthropic", model = "claude-sonnet-4-5" }
+model = { provider = "anthropic", model = "claude-sonnet-4-6" }
 description = "Understand requirements and plan implementation"
+available_tools = ["read_file", "list_dir"]
+max_iterations = 15
+system_prompt = """
+You are analyzing a coding task to produce a concise implementation plan.
+Use list_dir or read_file only if you need to check what already exists in the project.
+For a fresh task with no existing code, skip exploration entirely.
+Output a short bullet-list plan: which files to create, what each does, and any key decisions.
+Be brief — the implement stage will do the actual coding.
+"""
 
 [stages.implement]
 mode = "autonomous"
-model = { provider = "anthropic", model = "claude-sonnet-4-5" }
+model = { provider = "anthropic", model = "claude-sonnet-4-6" }
 description = "Write code according to the plan"
+available_tools = ["write_file", "read_file", "edit_file", "list_dir", "bash"]
+max_iterations = 50
+system_prompt = """
+You are implementing a coding task. Write working, production-quality code.
+Use write_file to create each file. Use bash to run tests or verify the build once all files are written.
+Do NOT spend iterations reading the codebase unless you need to check something specific.
+Create all files needed to complete the task, then confirm with a short summary of what was created.
+"""
 
 [stages.review]
 mode = "interactive"
-model = { provider = "anthropic", model = "claude-opus-4-5" }
+model = { provider = "anthropic", model = "claude-opus-4-8" }
 description = "Review code before finalizing (requires human approval)"
+available_tools = ["read_file", "list_dir"]
+max_iterations = 10
+system_prompt = """
+You are reviewing the implementation. Use read_file to read the files that were just created.
+Provide concise, actionable feedback: correctness, edge cases, error handling, and code quality.
+End with a clear verdict: approve as-is, or list specific changes needed.
+"""
 
 [compaction]
 provider = "anthropic"
-model = "claude-sonnet-4"
+model = "claude-sonnet-4-6"
 
 [context.regions]
 architecture = { kind = "pinned", max_tokens = 4000 }

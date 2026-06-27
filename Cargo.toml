@@ -8,6 +8,7 @@ members = [
     "crates/leviath-scripting",
     "crates/leviath-package",
     "crates/leviath-cli",
+    "crates/leviath-tools",
 ]
 
 [workspace.package]
@@ -24,6 +25,7 @@ leviath-providers = { path = "crates/leviath-providers" }
 leviath-mcp = { path = "crates/leviath-mcp" }
 leviath-scripting = { path = "crates/leviath-scripting" }
 leviath-package = { path = "crates/leviath-package" }
+leviath-tools = { path = "crates/leviath-tools" }
 
 # External dependencies
 bevy_ecs = "0.15"

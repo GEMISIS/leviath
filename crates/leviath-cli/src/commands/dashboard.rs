@@ -7,7 +7,7 @@ use crossterm::{
     ExecutableCommand,
 };
 use leviath_runtime::{
-    AgentEngine, AgentPool, AgentState, AgentStatus, ContextWindow,
+    AgentEngine, AgentState, AgentStatus, ContextWindow,
 };
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
@@ -17,13 +17,13 @@ use ratatui::{
     Frame, Terminal,
 };
 use std::io::stdout;
-use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{mpsc, Mutex};
 
-use super::run::{build_provider_registry, initialize_context_window, parse_manifest_public};
+use super::run::build_provider_registry;
 use crate::config::Config;
+use crate::runstate::{self, RunStatus};
 
 #[derive(Args)]
 pub struct DashboardArgs {
@@ -83,8 +83,12 @@ pub struct DashboardAgent {
     pub tokens: (usize, usize),
     pub iteration: usize,
     pub waiting_prompt: Option<String>,
-    /// The ECS entity for this agent
+    /// The ECS entity for this agent (dummy sentinel for run-state agents)
     pub entity: bevy_ecs::prelude::Entity,
+    /// True when tracked via on-disk run-state (background worker process)
+    pub is_run_state: bool,
+    /// PID of worker process (0 for in-process agents)
+    pub pid: u32,
 }
 
 /// Event from an agent back to the dashboard.
@@ -111,13 +115,6 @@ struct LogEntry {
 /// Command sent from the dashboard to the engine background task.
 #[derive(Debug)]
 enum EngineCommand {
-    RunAgent {
-        agent_id: String,
-        entity: bevy_ecs::prelude::Entity,
-        provider_name: String,
-        model_name: String,
-        max_iterations: usize,
-    },
     CancelAgent { agent_id: String },
     SendInput { agent_id: String, input: String },
 }
@@ -129,7 +126,7 @@ struct Dashboard {
     log: Vec<LogEntry>,
     input_buffer: String,
     input_mode: bool,
-    /// For spawning new agents inline
+    /// For spawning new agents via `lev run`
     new_agent_mode: NewAgentInputMode,
     event_rx: mpsc::UnboundedReceiver<AgentEvent>,
     event_tx: mpsc::UnboundedSender<AgentEvent>,
@@ -137,7 +134,6 @@ struct Dashboard {
     table_state: TableState,
     should_quit: bool,
     confirm_quit: bool,
-    engine: Arc<Mutex<AgentEngine>>,
 }
 
 /// Tracks the state of inline new-agent creation.
@@ -149,10 +145,7 @@ enum NewAgentInputMode {
 }
 
 impl Dashboard {
-    fn new(
-        engine: Arc<Mutex<AgentEngine>>,
-        cmd_tx: mpsc::UnboundedSender<EngineCommand>,
-    ) -> Self {
+    fn new(cmd_tx: mpsc::UnboundedSender<EngineCommand>) -> Self {
         let (event_tx, event_rx) = mpsc::unbounded_channel();
         let mut table_state = TableState::default();
         table_state.select(Some(0));
@@ -169,7 +162,6 @@ impl Dashboard {
             table_state,
             should_quit: false,
             confirm_quit: false,
-            engine,
         }
     }
 
@@ -181,9 +173,47 @@ impl Dashboard {
         }
     }
 
-    /// Sync agent state from the ECS world.
+    /// Sync agent list from on-disk run-state dir (background workers).
+    fn sync_from_run_state(&mut self) {
+        let runs = runstate::list_runs();
+        let dummy = bevy_ecs::prelude::Entity::from_raw(u32::MAX);
+        for run in runs {
+            let status = match run.status {
+                RunStatus::Starting | RunStatus::Running => AgentDisplayStatus::Active,
+                RunStatus::WaitingInput => AgentDisplayStatus::Waiting,
+                RunStatus::Complete => AgentDisplayStatus::Complete,
+                RunStatus::Error => AgentDisplayStatus::Error(run.error.clone().unwrap_or_default()),
+                RunStatus::Cancelled => AgentDisplayStatus::Cancelled,
+            };
+            if let Some(agent) = self.agents.iter_mut().find(|a| a.id == run.run_id) {
+                agent.stage = run.current_stage.clone();
+                agent.iteration = run.iteration;
+                agent.tokens = (run.prompt_tokens + run.completion_tokens, 0);
+                agent.pid = run.pid;
+                agent.status = status;
+            } else {
+                self.agents.push(DashboardAgent {
+                    id: run.run_id.clone(),
+                    blueprint_name: run.agent_name.clone(),
+                    stage: run.current_stage.clone(),
+                    status,
+                    tokens: (run.prompt_tokens + run.completion_tokens, 0),
+                    iteration: run.iteration,
+                    waiting_prompt: None,
+                    entity: dummy,
+                    is_run_state: true,
+                    pid: run.pid,
+                });
+            }
+        }
+    }
+
+    /// Sync agent state from the ECS world (in-process agents only).
     fn sync_agent_state_from_world(&mut self, engine: &AgentEngine) {
         for agent in &mut self.agents {
+            if agent.is_run_state {
+                continue;
+            }
             if let Some(state) = engine.world().get::<AgentState>(agent.entity) {
                 agent.iteration = state.iteration;
                 agent.stage = state.current_stage.clone();
@@ -260,94 +290,32 @@ impl Dashboard {
         }
     }
 
+    /// Spawn a background run via `lev run`; it will appear in the next sync_from_run_state tick.
     fn spawn_agent_from_path_task(&mut self, path: &str, task: &str) {
-        let project_path = Path::new(path);
-        let manifest_path = if project_path.is_dir() {
-            project_path.join("agent.leviath")
-        } else {
-            project_path.to_path_buf()
-        };
-
-        let content = match std::fs::read_to_string(&manifest_path) {
-            Ok(c) => c,
+        let exe = match std::env::current_exe() {
+            Ok(e) => e,
             Err(e) => {
-                self.add_log(format!("Error reading {}: {}", manifest_path.display(), e));
+                self.add_log(format!("Error locating executable: {}", e));
                 return;
             }
         };
 
-        let blueprint = match parse_manifest_public(&content) {
-            Ok(b) => b,
-            Err(e) => {
-                self.add_log(format!("Error parsing manifest: {}", e));
-                return;
-            }
-        };
-
-        let stage = match blueprint.stages.first() {
-            Some(s) => s,
-            None => {
-                self.add_log("Blueprint has no stages".to_string());
-                return;
-            }
-        };
-
-        let provider_name = stage.model.provider.clone();
-        let model_name = stage.model.model.clone();
-        let max_iterations = stage.max_iterations.unwrap_or(10);
-        let stage_name = stage.name.clone();
-
-        // Spawn entity in the engine
-        let task_str = task.to_string();
-
-        // Clone engine Arc to avoid borrowing self during lock
-        let engine_arc = self.engine.clone();
-        let spawn_result = match engine_arc.try_lock() {
-            Ok(mut engine) => {
-                let mut pool = AgentPool::new(blueprint.clone());
-                let agent_id = pool.spawn_agent(engine.world_mut());
-                match pool.get_agent(&agent_id) {
-                    Some(entity) => {
-                        initialize_context_window(&mut engine, entity, &blueprint, &task_str);
-                        Some((agent_id, entity))
-                    }
-                    None => None,
-                }
-            }
-            Err(_) => None,
-        };
-
-        match spawn_result {
-            Some((agent_id, entity)) => {
-                let dashboard_agent = DashboardAgent {
-                    id: agent_id.clone(),
-                    blueprint_name: blueprint.name.clone(),
-                    stage: stage_name,
-                    status: AgentDisplayStatus::Active,
-                    tokens: (0, blueprint.context_layout.total_budget_tokens),
-                    iteration: 0,
-                    waiting_prompt: None,
-                    entity,
-                };
-
-                self.agents.push(dashboard_agent);
-
-                let _ = self.cmd_tx.send(EngineCommand::RunAgent {
-                    agent_id: agent_id.clone(),
-                    entity,
-                    provider_name,
-                    model_name,
-                    max_iterations,
-                });
-
+        match std::process::Command::new(&exe)
+            .arg("run")
+            .arg(path)
+            .arg("--task")
+            .arg(task)
+            .spawn()
+        {
+            Ok(_) => {
                 self.add_log(format!(
-                    "Spawned {} with task: {}",
-                    agent_id,
-                    truncate(&task_str, 60)
+                    "Started background run: {} — {}",
+                    path,
+                    truncate(task, 50)
                 ));
             }
-            None => {
-                self.add_log("Engine busy, try again".to_string());
+            Err(e) => {
+                self.add_log(format!("Error starting run: {}", e));
             }
         }
     }
@@ -477,7 +445,17 @@ impl Dashboard {
                 if let Some(agent) = self.agents.get(self.selected) {
                     if matches!(agent.status, AgentDisplayStatus::Active | AgentDisplayStatus::Waiting) {
                         let agent_id = agent.id.clone();
-                        let _ = self.cmd_tx.send(EngineCommand::CancelAgent { agent_id: agent_id.clone() });
+                        if agent.is_run_state {
+                            #[cfg(unix)]
+                            if agent.pid > 0 {
+                                unsafe { libc::kill(agent.pid as libc::pid_t, libc::SIGTERM); }
+                            }
+                            if let Some(a) = self.agents.get_mut(self.selected) {
+                                a.status = AgentDisplayStatus::Cancelled;
+                            }
+                        } else {
+                            let _ = self.cmd_tx.send(EngineCommand::CancelAgent { agent_id: agent_id.clone() });
+                        }
                         self.add_log(format!("{}: Cancel requested", agent_id));
                     }
                 }
@@ -485,10 +463,16 @@ impl Dashboard {
             KeyCode::Char('k') => {
                 if let Some(agent) = self.agents.get(self.selected) {
                     let agent_id = agent.id.clone();
-                    let _ = self.cmd_tx.send(EngineCommand::CancelAgent { agent_id: agent_id.clone() });
-                    // Mark as cancelled immediately in the UI
-                    if let Some(agent) = self.agents.get_mut(self.selected) {
-                        agent.status = AgentDisplayStatus::Cancelled;
+                    if agent.is_run_state {
+                        #[cfg(unix)]
+                        if agent.pid > 0 {
+                            unsafe { libc::kill(agent.pid as libc::pid_t, libc::SIGTERM); }
+                        }
+                    } else {
+                        let _ = self.cmd_tx.send(EngineCommand::CancelAgent { agent_id: agent_id.clone() });
+                    }
+                    if let Some(a) = self.agents.get_mut(self.selected) {
+                        a.status = AgentDisplayStatus::Cancelled;
                     }
                     self.add_log(format!("{}: Killed", agent_id));
                 }
@@ -598,6 +582,16 @@ impl Dashboard {
                     )),
                 ]),
             ];
+
+            if agent.is_run_state {
+                let log_tail = runstate::tail_log(&agent.id, 2048);
+                for line in log_tail.lines().rev().take(4).collect::<Vec<_>>().into_iter().rev() {
+                    lines.push(Line::from(Span::styled(
+                        line.to_string(),
+                        Style::default().fg(Color::DarkGray),
+                    )));
+                }
+            }
 
             if let Some(ref prompt) = agent.waiting_prompt {
                 lines.push(Line::from(""));
@@ -714,7 +708,7 @@ fn truncate(s: &str, max: usize) -> String {
     }
 }
 
-/// Background task that processes engine commands and runs agent inference.
+/// Background task that processes engine commands (cancel/input) for in-process agent state.
 async fn engine_background_loop(
     engine: Arc<Mutex<AgentEngine>>,
     mut cmd_rx: mpsc::UnboundedReceiver<EngineCommand>,
@@ -722,75 +716,6 @@ async fn engine_background_loop(
 ) {
     while let Some(cmd) = cmd_rx.recv().await {
         match cmd {
-            EngineCommand::RunAgent {
-                agent_id,
-                entity,
-                provider_name,
-                model_name,
-                max_iterations,
-            } => {
-                let engine = engine.clone();
-                let event_tx = event_tx.clone();
-                let agent_id_clone = agent_id.clone();
-
-                tokio::spawn(async move {
-                    let _ = event_tx.send(AgentEvent::StatusChanged {
-                        agent_id: agent_id_clone.clone(),
-                        status: AgentDisplayStatus::Active,
-                    });
-
-                    // Run inference loop
-                    let result = {
-                        let mut eng = engine.lock().await;
-                        eng.run_inference_loop_filtered(
-                            entity,
-                            &provider_name,
-                            &model_name,
-                            Vec::new(),
-                            max_iterations,
-                            None,
-                            None,
-                            None,
-                            &mut |tool_calls| {
-                                let tx = event_tx.clone();
-                                let aid = agent_id_clone.clone();
-                                async move {
-                                    for tc in &tool_calls {
-                                        let _ = tx.send(AgentEvent::ToolCalled {
-                                            agent_id: aid.clone(),
-                                            tool: tc.name.clone(),
-                                            args: tc.arguments.to_string(),
-                                        });
-                                    }
-                                    Vec::new()
-                                }
-                            },
-                        )
-                        .await
-                    };
-
-                    match result {
-                        Ok(resp) => {
-                            let _ = event_tx.send(AgentEvent::InferenceComplete {
-                                agent_id: agent_id_clone.clone(),
-                                content: resp.content,
-                                tokens_used: resp.tokens_used.completion_tokens,
-                                tokens_prompt: resp.tokens_used.prompt_tokens,
-                            });
-                        }
-                        Err(e) => {
-                            let _ = event_tx.send(AgentEvent::Error {
-                                agent_id: agent_id_clone.clone(),
-                                error: e.to_string(),
-                            });
-                        }
-                    }
-
-                    let _ = event_tx.send(AgentEvent::AgentDone {
-                        agent_id: agent_id_clone,
-                    });
-                });
-            }
             EngineCommand::CancelAgent { agent_id } => {
                 let mut eng = engine.lock().await;
                 let _ = eng.cancel_agent(&agent_id);
@@ -822,7 +747,7 @@ pub async fn execute(args: DashboardArgs) -> anyhow::Result<()> {
     // Create command channel
     let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
 
-    let mut dashboard = Dashboard::new(engine.clone(), cmd_tx);
+    let mut dashboard = Dashboard::new(cmd_tx);
 
     // Store event_tx for background loop
     let bg_event_tx = dashboard.event_tx.clone();
@@ -856,6 +781,9 @@ pub async fn execute(args: DashboardArgs) -> anyhow::Result<()> {
     loop {
         // Process agent events
         dashboard.process_events();
+
+        // Sync background runs from on-disk run-state dir
+        dashboard.sync_from_run_state();
 
         // Sync state from ECS world (try_lock to avoid blocking the UI)
         if let Ok(eng) = engine.try_lock() {

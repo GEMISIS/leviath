@@ -70,12 +70,25 @@ impl AnthropicProvider {
             }
         }
 
-        let mut body = serde_json::json!({
-            "model": request.model,
-            "max_tokens": request.max_tokens,
-            "temperature": request.temperature,
-            "messages": messages,
-        });
+        // claude-4.x and newer models have deprecated the temperature parameter.
+        let omit_temperature = request.model.contains("claude-sonnet-4")
+            || request.model.contains("claude-opus-4")
+            || request.model.contains("claude-haiku-4");
+
+        let mut body = if omit_temperature {
+            serde_json::json!({
+                "model": request.model,
+                "max_tokens": request.max_tokens,
+                "messages": messages,
+            })
+        } else {
+            serde_json::json!({
+                "model": request.model,
+                "max_tokens": request.max_tokens,
+                "temperature": request.temperature,
+                "messages": messages,
+            })
+        };
 
         // Add system prompt as top-level field
         if system_parts.len() == 1 {

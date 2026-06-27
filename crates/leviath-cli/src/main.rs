@@ -5,6 +5,8 @@ use tracing::info;
 
 mod commands;
 mod config;
+mod runstate;
+mod tools;
 
 /// Leviath CLI - Agent framework with structured context windows
 #[derive(Parser)]
@@ -48,6 +50,19 @@ enum Commands {
 
     /// Interactive agent dashboard
     Dashboard(commands::dashboard::DashboardArgs),
+
+    /// List background agent runs
+    Ps(commands::ps::PsArgs),
+
+    /// Stream output from a background run
+    Logs(commands::logs::LogsArgs),
+
+    /// Stop a background run
+    Stop(commands::stop::StopArgs),
+
+    /// (Internal) Background worker process — do not call directly
+    #[command(name = "__run-worker", hide = true)]
+    RunWorker(commands::run::WorkerArgs),
 }
 
 #[tokio::main]
@@ -73,5 +88,9 @@ async fn main() -> anyhow::Result<()> {
         Commands::Context(args) => commands::context::execute(args).await,
         Commands::Pack(args) => commands::pack::execute(args).await,
         Commands::Dashboard(args) => commands::dashboard::execute(args).await,
+        Commands::Ps(args) => commands::ps::execute(args).await,
+        Commands::Logs(args) => commands::logs::execute(args).await,
+        Commands::Stop(args) => commands::stop::execute(args).await,
+        Commands::RunWorker(args) => commands::run::execute_worker(args).await,
     }
 }
