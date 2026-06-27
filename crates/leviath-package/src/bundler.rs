@@ -23,6 +23,15 @@ impl AgentBundler {
                 ".git".to_string(),
                 ".DS_Store".to_string(),
                 "target".to_string(),
+                ".env".to_string(),
+                ".env.local".to_string(),
+                ".env.production".to_string(),
+                "*.key".to_string(),
+                "*.pem".to_string(),
+                "*.p12".to_string(),
+                "config.toml".to_string(),
+                ".leviath".to_string(),
+                "*.leviath-bundle".to_string(),
             ],
         }
     }
@@ -94,6 +103,20 @@ impl AgentBundler {
         Ok(output)
     }
 
+    /// Check if a filename should be excluded based on patterns.
+    ///
+    /// Supports wildcard patterns like `*.key` (matches any file ending in `.key`)
+    /// and exact filename matches like `.env`.
+    pub fn should_exclude(&self, filename: &str) -> bool {
+        self.exclude_patterns.iter().any(|pattern| {
+            if let Some(suffix) = pattern.strip_prefix("*.") {
+                filename.ends_with(&format!(".{}", suffix))
+            } else {
+                filename == pattern
+            }
+        })
+    }
+
     /// Recursively add a directory's contents to the tar archive.
     fn add_directory_to_tar<W: Write>(
         &self,
@@ -110,11 +133,7 @@ impl AgentBundler {
             let name_str = file_name.to_string_lossy();
 
             // Check exclusion patterns
-            if self
-                .exclude_patterns
-                .iter()
-                .any(|p| name_str.contains(p.as_str()))
-            {
+            if self.should_exclude(&name_str) {
                 continue;
             }
 
@@ -142,5 +161,46 @@ impl AgentBundler {
 impl Default for AgentBundler {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_should_exclude_env_files() {
+        let bundler = AgentBundler::new();
+        assert!(bundler.should_exclude(".env"));
+        assert!(bundler.should_exclude(".env.local"));
+        assert!(bundler.should_exclude(".env.production"));
+    }
+
+    #[test]
+    fn test_should_exclude_wildcard_patterns() {
+        let bundler = AgentBundler::new();
+        assert!(bundler.should_exclude("server.key"));
+        assert!(bundler.should_exclude("cert.pem"));
+        assert!(bundler.should_exclude("keystore.p12"));
+        assert!(bundler.should_exclude("my-agent.leviath-bundle"));
+    }
+
+    #[test]
+    fn test_should_not_exclude_safe_files() {
+        let bundler = AgentBundler::new();
+        assert!(!bundler.should_exclude("agent.leviath"));
+        assert!(!bundler.should_exclude("README.md"));
+        assert!(!bundler.should_exclude("main.rs"));
+        assert!(!bundler.should_exclude("keyboard.rs"));
+    }
+
+    #[test]
+    fn test_should_exclude_exact_matches() {
+        let bundler = AgentBundler::new();
+        assert!(bundler.should_exclude(".git"));
+        assert!(bundler.should_exclude(".DS_Store"));
+        assert!(bundler.should_exclude("target"));
+        assert!(bundler.should_exclude("config.toml"));
+        assert!(bundler.should_exclude(".leviath"));
     }
 }

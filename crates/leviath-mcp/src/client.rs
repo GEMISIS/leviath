@@ -105,8 +105,29 @@ impl MCPClient {
         tracing::info!(command = %command, "Spawning MCP server process");
 
         let mut cmd = Command::new(command);
+
+        // Build clean environment - strip sensitive keys from parent env
+        let sensitive_patterns = [
+            "API_KEY",
+            "API_SECRET",
+            "SECRET_KEY",
+            "ACCESS_TOKEN",
+            "AUTH_TOKEN",
+            "PRIVATE_KEY",
+            "PASSWORD",
+        ];
+        cmd.env_clear();
+        for (key, value) in std::env::vars() {
+            let key_upper = key.to_uppercase();
+            let is_sensitive = sensitive_patterns.iter().any(|p| key_upper.contains(p));
+            if !is_sensitive {
+                cmd.env(&key, &value);
+            }
+        }
+        // Add explicitly configured env vars (intentional, from MCP config)
+        cmd.envs(env);
+
         cmd.args(args)
-            .envs(env)
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::null());
@@ -273,6 +294,28 @@ impl MCPClient {
             .ok_or_else(|| anyhow::anyhow!("MCP server returned no result"))
     }
 
+    /// Filter environment variables, stripping sensitive keys.
+    ///
+    /// Used internally by `spawn()` to build a clean environment for child processes.
+    pub fn filter_env(vars: &[(String, String)]) -> HashMap<String, String> {
+        let sensitive_patterns = [
+            "API_KEY",
+            "API_SECRET",
+            "SECRET_KEY",
+            "ACCESS_TOKEN",
+            "AUTH_TOKEN",
+            "PRIVATE_KEY",
+            "PASSWORD",
+        ];
+        vars.iter()
+            .filter(|(key, _)| {
+                let key_upper = key.to_uppercase();
+                !sensitive_patterns.iter().any(|p| key_upper.contains(p))
+            })
+            .cloned()
+            .collect()
+    }
+
     /// Send a JSON-RPC notification (fire-and-forget, no response expected).
     async fn send_notification(&mut self, method: &str, params: Value) -> anyhow::Result<()> {
         let request = JsonRpcRequest {
@@ -301,5 +344,51 @@ impl MCPClient {
             .map_err(|e| anyhow::anyhow!("Failed to flush notification: {}", e))?;
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_filter_env_strips_api_keys() {
+        let vars = vec![
+            ("HOME".to_string(), "/home/user".to_string()),
+            ("ANTHROPIC_API_KEY".to_string(), "sk-ant-secret".to_string()),
+            ("OPENAI_API_KEY".to_string(), "sk-secret".to_string()),
+            ("PATH".to_string(), "/usr/bin".to_string()),
+            ("MY_PASSWORD".to_string(), "hunter2".to_string()),
+            ("DB_ACCESS_TOKEN".to_string(), "tok123".to_string()),
+            ("SOME_AUTH_TOKEN".to_string(), "auth456".to_string()),
+            ("SSH_PRIVATE_KEY".to_string(), "key789".to_string()),
+            ("MY_API_SECRET".to_string(), "sec000".to_string()),
+            ("SECRET_KEY_BASE".to_string(), "skb111".to_string()),
+        ];
+
+        let filtered = MCPClient::filter_env(&vars);
+
+        assert_eq!(filtered.get("HOME"), Some(&"/home/user".to_string()));
+        assert_eq!(filtered.get("PATH"), Some(&"/usr/bin".to_string()));
+        assert!(!filtered.contains_key("ANTHROPIC_API_KEY"));
+        assert!(!filtered.contains_key("OPENAI_API_KEY"));
+        assert!(!filtered.contains_key("MY_PASSWORD"));
+        assert!(!filtered.contains_key("DB_ACCESS_TOKEN"));
+        assert!(!filtered.contains_key("SOME_AUTH_TOKEN"));
+        assert!(!filtered.contains_key("SSH_PRIVATE_KEY"));
+        assert!(!filtered.contains_key("MY_API_SECRET"));
+        assert!(!filtered.contains_key("SECRET_KEY_BASE"));
+    }
+
+    #[test]
+    fn test_filter_env_keeps_safe_vars() {
+        let vars = vec![
+            ("EDITOR".to_string(), "vim".to_string()),
+            ("RUST_LOG".to_string(), "debug".to_string()),
+            ("TERM".to_string(), "xterm".to_string()),
+        ];
+
+        let filtered = MCPClient::filter_env(&vars);
+        assert_eq!(filtered.len(), 3);
     }
 }

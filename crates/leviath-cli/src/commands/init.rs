@@ -38,7 +38,19 @@ pub async fn execute(args: InitArgs) -> anyhow::Result<()> {
     // Create README
     let readme = create_readme(&args.name);
     fs::write(project_dir.join("README.md"), readme)?;
-    
+
+    // Create .gitignore
+    fs::write(
+        project_dir.join(".gitignore"),
+        ".env\n*.leviath-bundle\n.leviath/\n",
+    )?;
+
+    // Create .env.example
+    fs::write(
+        project_dir.join(".env.example"),
+        "# Copy this to .env and fill in your API key\n# ANTHROPIC_API_KEY=sk-ant-...\n# OPENAI_API_KEY=sk-...\n# OPENROUTER_API_KEY=sk-or-...\n",
+    )?;
+
     println!("✓ Created agent project: {}", args.name);
     println!("\nNext steps:");
     println!("  cd {}", args.name);

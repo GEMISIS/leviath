@@ -31,6 +31,9 @@ impl OllamaProvider {
 
     /// Create a new Ollama provider with custom base URL.
     pub fn with_base_url(base_url: String) -> Self {
+        if !base_url.starts_with("http://") && !base_url.starts_with("https://") {
+            tracing::warn!(url = %base_url, "Ollama base URL should start with http:// or https://");
+        }
         Self {
             client: Client::new(),
             base_url,

@@ -10,11 +10,13 @@ Leviath gives LLM agents structured, tiered memory instead of flat conversation 
 # Install the CLI
 cargo install --path crates/leviath-cli
 
-# Set an API key (pick your provider)
-export ANTHROPIC_API_KEY="sk-ant-..."   # or OPENAI_API_KEY, OPENROUTER_API_KEY
-
-# Create an agent and run it
+# Create an agent
 lev init my-agent && cd my-agent
+
+# Set your API key (already gitignored)
+echo 'ANTHROPIC_API_KEY=sk-ant-...' > .env
+
+# Run it
 lev run --task "Explain how CPU cache hierarchies work"
 ```
 
@@ -42,6 +44,8 @@ lev dashboard agents/coder --task "Refactor the auth module"
 ```
 
 Your agent is defined in `agent.leviath` — edit it to change models, add stages, or configure memory regions. No Rust code needed.
+
+**API Key Priority:** `~/.leviath/config.toml` (chmod 600) > `.env` in project dir (gitignored) > environment variables (stripped from MCP child processes).
 
 ## The Problem
 
@@ -88,31 +92,6 @@ flowchart LR
     style ERR fill:#991b1b,color:#fff
     style P fill:#4a9eff,color:#fff
     style SW fill:#22c55e,color:#fff
-```
-
-## Quick Start
-
-```bash
-# Install
-git clone https://github.com/GEMISIS/leviath.git
-cd leviath
-cargo install --path crates/leviath-cli
-
-# Set your API key
-export ANTHROPIC_API_KEY="sk-ant-..."
-
-# Create and run an agent
-lev init my-agent
-cd my-agent
-lev run --task "Explain how memory hierarchies work"
-```
-
-Other supported key sources: `OPENAI_API_KEY`, `OPENROUTER_API_KEY`, `OLLAMA_HOST`, or `~/.leviath/config.toml`:
-
-```toml
-[providers]
-anthropic_api_key = "sk-ant-..."
-openai_api_key = "sk-..."
 ```
 
 ## How It Works

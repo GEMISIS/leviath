@@ -33,3 +33,4 @@ crossterm = { workspace = true }
 ratatui = { workspace = true }
 tokio-stream = { workspace = true }
 futures = { workspace = true }
+dotenvy = { workspace = true }

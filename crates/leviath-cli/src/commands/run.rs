@@ -46,6 +46,11 @@ pub async fn execute(args: RunArgs) -> anyhow::Result<()> {
     // Load config for API keys
     let config = Config::load()?;
 
+    // Validate API key formats
+    for warning in config.validate_keys() {
+        println!("Warning: {}", warning);
+    }
+
     // Create provider registry
     let registry = build_provider_registry(&config);
 
