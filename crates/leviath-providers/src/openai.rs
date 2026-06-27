@@ -351,7 +351,7 @@ where
         loop {
             // Check for complete SSE events
             if let Some(chunk) = parse_openai_sse_event(this.buffer) {
-                return std::task::Poll::Ready(chunk.map(|c| Ok(c)));
+                return std::task::Poll::Ready(chunk.map(Ok));
             }
 
             match this.inner.as_mut().poll_next(cx) {
@@ -367,7 +367,7 @@ where
                 }
                 std::task::Poll::Ready(None) => {
                     if let Some(chunk) = parse_openai_sse_event(this.buffer) {
-                        return std::task::Poll::Ready(chunk.map(|c| Ok(c)));
+                        return std::task::Poll::Ready(chunk.map(Ok));
                     }
                     return std::task::Poll::Ready(None);
                 }
@@ -461,7 +461,7 @@ fn parse_openai_sse_event(buffer: &mut String) -> Option<Option<StreamChunk>> {
             let finish_reason = choice
                 .get("finish_reason")
                 .and_then(|v| v.as_str())
-                .map(|r| OpenAIProvider::parse_finish_reason(r));
+                .map(OpenAIProvider::parse_finish_reason);
 
             // Check for usage in the chunk
             let tokens = json.get("usage").map(|usage| {

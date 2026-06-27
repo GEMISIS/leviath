@@ -158,6 +158,11 @@ impl AgentEngine {
         &mut self.provider_registry
     }
 
+    /// Get a specific provider by name.
+    pub fn get_provider(&self, name: &str) -> Option<Arc<dyn Provider>> {
+        self.provider_registry.get(name).cloned()
+    }
+
     /// Send a message to a running agent via the channel.
     pub fn send_message(&self, msg: AgentMessage) -> std::result::Result<(), ProviderError> {
         self.message_tx.send(msg).map_err(|e| {
@@ -289,17 +294,17 @@ impl AgentEngine {
             })?
             .clone();
 
-        // Build the prompt from the context window
-        let (prompt, max_tokens) = {
+        // Build structured messages from the context window
+        let (messages, max_tokens) = {
             let window = self
                 .world
                 .get::<ContextWindow>(entity)
                 .ok_or_else(|| ProviderError::Other("Entity has no ContextWindow".to_string()))?;
 
-            let prompt = window.assemble_prompt();
+            let messages = window.assemble_messages();
             let remaining = window.max_tokens.saturating_sub(window.current_tokens);
             let max_tokens = remaining.min(4096); // Cap at 4096 for response
-            (prompt, max_tokens)
+            (messages, max_tokens)
         };
 
         // Apply tool filter if provided
@@ -317,10 +322,7 @@ impl AgentEngine {
         };
 
         let request = InferenceRequest {
-            messages: vec![Message {
-                role: "user".to_string(),
-                content: prompt,
-            }],
+            messages,
             model: model.to_string(),
             max_tokens,
             temperature: 0.7,
@@ -398,6 +400,7 @@ impl AgentEngine {
     ///
     /// `tool_filter`: if Some, only tools matching these names are included.
     /// `tool_result_routing`: if Some, routes tool results to configured regions.
+    #[allow(clippy::too_many_arguments)]
     pub async fn run_inference_loop_filtered<F, Fut>(
         &mut self,
         entity: Entity,
@@ -451,7 +454,8 @@ impl AgentEngine {
             }
 
             // Execute tool calls
-            let tool_results = tool_executor(response.tool_calls.clone()).await;
+            let tool_calls_snapshot = response.tool_calls.clone();
+            let tool_results = tool_executor(tool_calls_snapshot.clone()).await;
 
             // Add tool results to context window
             if let Some(mut window) = self.world.get_mut::<ContextWindow>(entity) {
@@ -481,10 +485,16 @@ impl AgentEngine {
                     let result_tokens = result_text.len() / 4 + 1;
                     let formatted = format!("[Tool {}]: {}", tool_call_id, result_text);
 
+                    // Find the tool name for this tool_call_id to use for routing lookup
+                    let tool_name = tool_calls_snapshot.iter()
+                        .find(|tc| tc.id == *tool_call_id)
+                        .map(|tc| tc.name.as_str())
+                        .unwrap_or("");
+
                     // Determine target region
                     let target_region = if let Some(routing) = tool_result_routing {
-                        // Check per-tool overrides first
-                        if let Some(override_region) = routing.tool_overrides.get(tool_call_id) {
+                        // Check per-tool overrides using tool NAME (not call ID)
+                        if let Some(override_region) = routing.tool_overrides.get(tool_name) {
                             override_region.as_str()
                         } else {
                             routing.default_region.as_str()

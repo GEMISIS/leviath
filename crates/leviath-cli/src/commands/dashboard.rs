@@ -6,7 +6,9 @@ use crossterm::{
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
     ExecutableCommand,
 };
-use leviath_core::Blueprint;
+use leviath_runtime::{
+    AgentEngine, AgentPool, AgentState, AgentStatus, ContextWindow,
+};
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
@@ -16,10 +18,12 @@ use ratatui::{
 };
 use std::io::stdout;
 use std::path::Path;
+use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, Mutex};
 
-use super::run::parse_manifest_public;
+use super::run::{build_provider_registry, initialize_context_window, parse_manifest_public};
+use crate::config::Config;
 
 #[derive(Args)]
 pub struct DashboardArgs {
@@ -79,18 +83,22 @@ pub struct DashboardAgent {
     pub tokens: (usize, usize),
     pub iteration: usize,
     pub waiting_prompt: Option<String>,
+    /// The ECS entity for this agent
+    pub entity: bevy_ecs::prelude::Entity,
 }
 
 /// Event from an agent back to the dashboard.
 #[derive(Debug, Clone)]
+#[allow(dead_code)] // All variants are part of the agent event protocol
 pub enum AgentEvent {
     StageChanged { agent_id: String, stage: String },
     StatusChanged { agent_id: String, status: AgentDisplayStatus },
     NeedsInput { agent_id: String, prompt: String },
     ToolCalled { agent_id: String, tool: String, args: String },
-    InferenceComplete { agent_id: String },
+    InferenceComplete { agent_id: String, content: String, tokens_used: usize, tokens_prompt: usize },
     Error { agent_id: String, error: String },
     Log(String),
+    AgentDone { agent_id: String },
 }
 
 /// Log entry for the dashboard log panel.
@@ -100,6 +108,20 @@ struct LogEntry {
     message: String,
 }
 
+/// Command sent from the dashboard to the engine background task.
+#[derive(Debug)]
+enum EngineCommand {
+    RunAgent {
+        agent_id: String,
+        entity: bevy_ecs::prelude::Entity,
+        provider_name: String,
+        model_name: String,
+        max_iterations: usize,
+    },
+    CancelAgent { agent_id: String },
+    SendInput { agent_id: String, input: String },
+}
+
 /// The interactive dashboard state.
 struct Dashboard {
     agents: Vec<DashboardAgent>,
@@ -107,15 +129,30 @@ struct Dashboard {
     log: Vec<LogEntry>,
     input_buffer: String,
     input_mode: bool,
+    /// For spawning new agents inline
+    new_agent_mode: NewAgentInputMode,
     event_rx: mpsc::UnboundedReceiver<AgentEvent>,
     event_tx: mpsc::UnboundedSender<AgentEvent>,
+    cmd_tx: mpsc::UnboundedSender<EngineCommand>,
     table_state: TableState,
     should_quit: bool,
     confirm_quit: bool,
+    engine: Arc<Mutex<AgentEngine>>,
+}
+
+/// Tracks the state of inline new-agent creation.
+#[derive(Debug, Clone, PartialEq)]
+enum NewAgentInputMode {
+    None,
+    WaitingForPath,
+    WaitingForTask { path: String },
 }
 
 impl Dashboard {
-    fn new() -> Self {
+    fn new(
+        engine: Arc<Mutex<AgentEngine>>,
+        cmd_tx: mpsc::UnboundedSender<EngineCommand>,
+    ) -> Self {
         let (event_tx, event_rx) = mpsc::unbounded_channel();
         let mut table_state = TableState::default();
         table_state.select(Some(0));
@@ -125,20 +162,47 @@ impl Dashboard {
             log: Vec::new(),
             input_buffer: String::new(),
             input_mode: false,
+            new_agent_mode: NewAgentInputMode::None,
             event_rx,
             event_tx,
+            cmd_tx,
             table_state,
             should_quit: false,
             confirm_quit: false,
+            engine,
         }
     }
 
     fn add_log(&mut self, msg: String) {
         let timestamp = chrono::Local::now().format("%H:%M:%S").to_string();
         self.log.push(LogEntry { timestamp, message: msg });
-        // Keep last 50 entries
         if self.log.len() > 50 {
             self.log.remove(0);
+        }
+    }
+
+    /// Sync agent state from the ECS world.
+    fn sync_agent_state_from_world(&mut self, engine: &AgentEngine) {
+        for agent in &mut self.agents {
+            if let Some(state) = engine.world().get::<AgentState>(agent.entity) {
+                agent.iteration = state.iteration;
+                agent.stage = state.current_stage.clone();
+                match &state.status {
+                    AgentStatus::Active => agent.status = AgentDisplayStatus::Active,
+                    AgentStatus::Waiting => {
+                        agent.status = AgentDisplayStatus::Waiting;
+                    }
+                    AgentStatus::Complete => agent.status = AgentDisplayStatus::Complete,
+                    AgentStatus::Error { message } => {
+                        agent.status = AgentDisplayStatus::Error(message.clone());
+                    }
+                    AgentStatus::Cancelled => agent.status = AgentDisplayStatus::Cancelled,
+                    AgentStatus::Idle => agent.status = AgentDisplayStatus::Idle,
+                }
+            }
+            if let Some(window) = engine.world().get::<ContextWindow>(agent.entity) {
+                agent.tokens = (window.current_tokens, window.max_tokens);
+            }
         }
     }
 
@@ -149,7 +213,7 @@ impl Dashboard {
                     if let Some(agent) = self.agents.iter_mut().find(|a| a.id == agent_id) {
                         agent.stage = stage.clone();
                     }
-                    self.add_log(format!("{}: Stage changed to {}", agent_id, stage));
+                    self.add_log(format!("{}: Stage -> {}", agent_id, stage));
                 }
                 AgentEvent::StatusChanged { agent_id, status } => {
                     if let Some(agent) = self.agents.iter_mut().find(|a| a.id == agent_id) {
@@ -161,26 +225,129 @@ impl Dashboard {
                         agent.status = AgentDisplayStatus::Waiting;
                         agent.waiting_prompt = Some(prompt.clone());
                     }
-                    self.add_log(format!("{}: Waiting for user input", agent_id));
+                    self.add_log(format!("{}: Waiting for input", agent_id));
                 }
                 AgentEvent::ToolCalled { agent_id, tool, args } => {
-                    self.add_log(format!("{}: Called tool {}({})", agent_id, tool, truncate(&args, 40)));
+                    self.add_log(format!("{}: Tool {}({})", agent_id, tool, truncate(&args, 40)));
                 }
-                AgentEvent::InferenceComplete { agent_id } => {
+                AgentEvent::InferenceComplete { agent_id, content, tokens_used, tokens_prompt } => {
                     if let Some(agent) = self.agents.iter_mut().find(|a| a.id == agent_id) {
                         agent.iteration += 1;
                     }
-                    self.add_log(format!("{}: Inference complete", agent_id));
+                    self.add_log(format!(
+                        "{}: Inference done ({}tok in, {}tok out) {}",
+                        agent_id, tokens_prompt, tokens_used, truncate(&content, 60)
+                    ));
                 }
                 AgentEvent::Error { agent_id, error } => {
                     if let Some(agent) = self.agents.iter_mut().find(|a| a.id == agent_id) {
                         agent.status = AgentDisplayStatus::Error(error.clone());
                     }
-                    self.add_log(format!("{}: Error: {}", agent_id, error));
+                    self.add_log(format!("{}: ERROR: {}", agent_id, error));
                 }
                 AgentEvent::Log(msg) => {
                     self.add_log(msg);
                 }
+                AgentEvent::AgentDone { agent_id } => {
+                    if let Some(agent) = self.agents.iter_mut().find(|a| a.id == agent_id) {
+                        if !matches!(agent.status, AgentDisplayStatus::Error(_) | AgentDisplayStatus::Cancelled) {
+                            agent.status = AgentDisplayStatus::Complete;
+                        }
+                    }
+                    self.add_log(format!("{}: Done", agent_id));
+                }
+            }
+        }
+    }
+
+    fn spawn_agent_from_path_task(&mut self, path: &str, task: &str) {
+        let project_path = Path::new(path);
+        let manifest_path = if project_path.is_dir() {
+            project_path.join("agent.leviath")
+        } else {
+            project_path.to_path_buf()
+        };
+
+        let content = match std::fs::read_to_string(&manifest_path) {
+            Ok(c) => c,
+            Err(e) => {
+                self.add_log(format!("Error reading {}: {}", manifest_path.display(), e));
+                return;
+            }
+        };
+
+        let blueprint = match parse_manifest_public(&content) {
+            Ok(b) => b,
+            Err(e) => {
+                self.add_log(format!("Error parsing manifest: {}", e));
+                return;
+            }
+        };
+
+        let stage = match blueprint.stages.first() {
+            Some(s) => s,
+            None => {
+                self.add_log("Blueprint has no stages".to_string());
+                return;
+            }
+        };
+
+        let provider_name = stage.model.provider.clone();
+        let model_name = stage.model.model.clone();
+        let max_iterations = stage.max_iterations.unwrap_or(10);
+        let stage_name = stage.name.clone();
+
+        // Spawn entity in the engine
+        let task_str = task.to_string();
+
+        // Clone engine Arc to avoid borrowing self during lock
+        let engine_arc = self.engine.clone();
+        let spawn_result = match engine_arc.try_lock() {
+            Ok(mut engine) => {
+                let mut pool = AgentPool::new(blueprint.clone());
+                let agent_id = pool.spawn_agent(engine.world_mut());
+                match pool.get_agent(&agent_id) {
+                    Some(entity) => {
+                        initialize_context_window(&mut engine, entity, &blueprint, &task_str);
+                        Some((agent_id, entity))
+                    }
+                    None => None,
+                }
+            }
+            Err(_) => None,
+        };
+
+        match spawn_result {
+            Some((agent_id, entity)) => {
+                let dashboard_agent = DashboardAgent {
+                    id: agent_id.clone(),
+                    blueprint_name: blueprint.name.clone(),
+                    stage: stage_name,
+                    status: AgentDisplayStatus::Active,
+                    tokens: (0, blueprint.context_layout.total_budget_tokens),
+                    iteration: 0,
+                    waiting_prompt: None,
+                    entity,
+                };
+
+                self.agents.push(dashboard_agent);
+
+                let _ = self.cmd_tx.send(EngineCommand::RunAgent {
+                    agent_id: agent_id.clone(),
+                    entity,
+                    provider_name,
+                    model_name,
+                    max_iterations,
+                });
+
+                self.add_log(format!(
+                    "Spawned {} with task: {}",
+                    agent_id,
+                    truncate(&task_str, 60)
+                ));
+            }
+            None => {
+                self.add_log("Engine busy, try again".to_string());
             }
         }
     }
@@ -198,6 +365,48 @@ impl Dashboard {
             return;
         }
 
+        // New agent input mode
+        if self.new_agent_mode != NewAgentInputMode::None {
+            match key {
+                KeyCode::Esc => {
+                    self.new_agent_mode = NewAgentInputMode::None;
+                    self.input_buffer.clear();
+                    self.add_log("Cancelled new agent".to_string());
+                }
+                KeyCode::Enter => {
+                    let input = self.input_buffer.clone();
+                    self.input_buffer.clear();
+
+                    match &self.new_agent_mode {
+                        NewAgentInputMode::WaitingForPath => {
+                            if input.is_empty() {
+                                self.new_agent_mode = NewAgentInputMode::None;
+                            } else {
+                                self.new_agent_mode = NewAgentInputMode::WaitingForTask { path: input };
+                                self.add_log("Enter task for the new agent:".to_string());
+                            }
+                        }
+                        NewAgentInputMode::WaitingForTask { path } => {
+                            let path = path.clone();
+                            self.new_agent_mode = NewAgentInputMode::None;
+                            if !input.is_empty() {
+                                self.spawn_agent_from_path_task(&path, &input);
+                            }
+                        }
+                        NewAgentInputMode::None => {}
+                    }
+                }
+                KeyCode::Backspace => {
+                    self.input_buffer.pop();
+                }
+                KeyCode::Char(c) => {
+                    self.input_buffer.push(c);
+                }
+                _ => {}
+            }
+            return;
+        }
+
         if self.input_mode {
             match key {
                 KeyCode::Esc => {
@@ -209,13 +418,16 @@ impl Dashboard {
                     self.input_buffer.clear();
                     self.input_mode = false;
                     if !input.is_empty() {
-                        let agent_id = self.agents.get(self.selected).map(|a| a.id.clone());
                         if let Some(agent) = self.agents.get_mut(self.selected) {
+                            let agent_id = agent.id.clone();
                             agent.waiting_prompt = None;
                             agent.status = AgentDisplayStatus::Active;
-                        }
-                        if let Some(id) = agent_id {
-                            self.add_log(format!("Sent response to {}: {}", id, truncate(&input, 40)));
+                            // Send input to engine
+                            let _ = self.cmd_tx.send(EngineCommand::SendInput {
+                                agent_id: agent_id.clone(),
+                                input: input.clone(),
+                            });
+                            self.add_log(format!("Sent to {}: {}", agent_id, truncate(&input, 40)));
                         }
                     }
                 }
@@ -262,27 +474,29 @@ impl Dashboard {
                 }
             }
             KeyCode::Char('c') => {
-                let agent_id = self.agents.get(self.selected).map(|a| a.id.clone());
-                if let Some(agent) = self.agents.get_mut(self.selected) {
+                if let Some(agent) = self.agents.get(self.selected) {
                     if matches!(agent.status, AgentDisplayStatus::Active | AgentDisplayStatus::Waiting) {
-                        agent.status = AgentDisplayStatus::Cancelled;
+                        let agent_id = agent.id.clone();
+                        let _ = self.cmd_tx.send(EngineCommand::CancelAgent { agent_id: agent_id.clone() });
+                        self.add_log(format!("{}: Cancel requested", agent_id));
                     }
-                }
-                if let Some(id) = agent_id {
-                    self.add_log(format!("{}: Cancelled", id));
                 }
             }
             KeyCode::Char('k') => {
-                let agent_id = self.agents.get(self.selected).map(|a| a.id.clone());
-                if let Some(agent) = self.agents.get_mut(self.selected) {
-                    agent.status = AgentDisplayStatus::Cancelled;
-                }
-                if let Some(id) = agent_id {
-                    self.add_log(format!("{}: Killed", id));
+                if let Some(agent) = self.agents.get(self.selected) {
+                    let agent_id = agent.id.clone();
+                    let _ = self.cmd_tx.send(EngineCommand::CancelAgent { agent_id: agent_id.clone() });
+                    // Mark as cancelled immediately in the UI
+                    if let Some(agent) = self.agents.get_mut(self.selected) {
+                        agent.status = AgentDisplayStatus::Cancelled;
+                    }
+                    self.add_log(format!("{}: Killed", agent_id));
                 }
             }
             KeyCode::Char('n') => {
-                self.add_log("New agent spawning is available via CLI: lev dashboard --task <task>".to_string());
+                self.new_agent_mode = NewAgentInputMode::WaitingForPath;
+                self.input_buffer.clear();
+                self.add_log("Enter path to agent.leviath (or directory):".to_string());
             }
             _ => {}
         }
@@ -292,10 +506,10 @@ impl Dashboard {
         let chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Min(8),       // Agent table
-                Constraint::Length(8),     // Detail panel
-                Constraint::Length(8),     // Log panel
-                Constraint::Length(1),     // Help bar
+                Constraint::Min(8),
+                Constraint::Length(8),
+                Constraint::Length(8),
+                Constraint::Length(1),
             ])
             .split(frame.area());
 
@@ -353,7 +567,25 @@ impl Dashboard {
     }
 
     fn draw_detail_panel(&self, frame: &mut Frame, area: Rect) {
-        let detail_text = if let Some(agent) = self.agents.get(self.selected) {
+        let detail_text = if self.new_agent_mode != NewAgentInputMode::None {
+            let prompt_text = match &self.new_agent_mode {
+                NewAgentInputMode::WaitingForPath => "Path to agent: ",
+                NewAgentInputMode::WaitingForTask { .. } => "Task: ",
+                NewAgentInputMode::None => "",
+            };
+            vec![
+                Line::from(Span::styled(
+                    "New Agent",
+                    Style::default().add_modifier(Modifier::BOLD),
+                )),
+                Line::from(""),
+                Line::from(vec![
+                    Span::raw(prompt_text),
+                    Span::raw(&self.input_buffer),
+                    Span::styled("█", Style::default().fg(Color::Green)),
+                ]),
+            ]
+        } else if let Some(agent) = self.agents.get(self.selected) {
             let mut lines = vec![
                 Line::from(vec![
                     Span::styled(
@@ -386,7 +618,7 @@ impl Dashboard {
 
             lines
         } else {
-            vec![Line::from("No agents selected")]
+            vec![Line::from("No agents selected. Press 'n' to add one.")]
         };
 
         let detail = Paragraph::new(detail_text)
@@ -421,7 +653,7 @@ impl Dashboard {
     }
 
     fn draw_help_bar(&self, frame: &mut Frame, area: Rect) {
-        let help = if self.input_mode {
+        let help = if self.input_mode || self.new_agent_mode != NewAgentInputMode::None {
             Line::from(vec![
                 Span::styled("[Esc]", Style::default().add_modifier(Modifier::BOLD)),
                 Span::raw("cancel  "),
@@ -482,57 +714,133 @@ fn truncate(s: &str, max: usize) -> String {
     }
 }
 
-pub async fn execute(args: DashboardArgs) -> anyhow::Result<()> {
-    let mut dashboard = Dashboard::new();
+/// Background task that processes engine commands and runs agent inference.
+async fn engine_background_loop(
+    engine: Arc<Mutex<AgentEngine>>,
+    mut cmd_rx: mpsc::UnboundedReceiver<EngineCommand>,
+    event_tx: mpsc::UnboundedSender<AgentEvent>,
+) {
+    while let Some(cmd) = cmd_rx.recv().await {
+        match cmd {
+            EngineCommand::RunAgent {
+                agent_id,
+                entity,
+                provider_name,
+                model_name,
+                max_iterations,
+            } => {
+                let engine = engine.clone();
+                let event_tx = event_tx.clone();
+                let agent_id_clone = agent_id.clone();
 
-    // If a path+task was provided, set up the initial agent
+                tokio::spawn(async move {
+                    let _ = event_tx.send(AgentEvent::StatusChanged {
+                        agent_id: agent_id_clone.clone(),
+                        status: AgentDisplayStatus::Active,
+                    });
+
+                    // Run inference loop
+                    let result = {
+                        let mut eng = engine.lock().await;
+                        eng.run_inference_loop_filtered(
+                            entity,
+                            &provider_name,
+                            &model_name,
+                            Vec::new(),
+                            max_iterations,
+                            None,
+                            None,
+                            &mut |tool_calls| {
+                                let tx = event_tx.clone();
+                                let aid = agent_id_clone.clone();
+                                async move {
+                                    for tc in &tool_calls {
+                                        let _ = tx.send(AgentEvent::ToolCalled {
+                                            agent_id: aid.clone(),
+                                            tool: tc.name.clone(),
+                                            args: tc.arguments.to_string(),
+                                        });
+                                    }
+                                    Vec::new()
+                                }
+                            },
+                        )
+                        .await
+                    };
+
+                    match result {
+                        Ok(resp) => {
+                            let _ = event_tx.send(AgentEvent::InferenceComplete {
+                                agent_id: agent_id_clone.clone(),
+                                content: resp.content,
+                                tokens_used: resp.tokens_used.completion_tokens,
+                                tokens_prompt: resp.tokens_used.prompt_tokens,
+                            });
+                        }
+                        Err(e) => {
+                            let _ = event_tx.send(AgentEvent::Error {
+                                agent_id: agent_id_clone.clone(),
+                                error: e.to_string(),
+                            });
+                        }
+                    }
+
+                    let _ = event_tx.send(AgentEvent::AgentDone {
+                        agent_id: agent_id_clone,
+                    });
+                });
+            }
+            EngineCommand::CancelAgent { agent_id } => {
+                let mut eng = engine.lock().await;
+                let _ = eng.cancel_agent(&agent_id);
+                let _ = event_tx.send(AgentEvent::StatusChanged {
+                    agent_id,
+                    status: AgentDisplayStatus::Cancelled,
+                });
+            }
+            EngineCommand::SendInput { agent_id, input } => {
+                let eng = engine.lock().await;
+                let msg = leviath_runtime::AgentMessage {
+                    agent_id,
+                    content: input,
+                    target_region: Some("conversation".to_string()),
+                    priority: 0,
+                };
+                let _ = eng.send_message(msg);
+            }
+        }
+    }
+}
+
+pub async fn execute(args: DashboardArgs) -> anyhow::Result<()> {
+    // Load config and create engine
+    let config = Config::load()?;
+    let registry = build_provider_registry(&config);
+    let engine = Arc::new(Mutex::new(AgentEngine::with_providers(registry)));
+
+    // Create command channel
+    let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
+
+    let mut dashboard = Dashboard::new(engine.clone(), cmd_tx);
+
+    // Store event_tx for background loop
+    let bg_event_tx = dashboard.event_tx.clone();
+
+    // Start engine background loop
+    tokio::spawn(engine_background_loop(engine.clone(), cmd_rx, bg_event_tx));
+
+    // If a path+task was provided, spawn the initial agent
     if let Some(ref path) = args.path {
         let task = args
             .task
             .as_deref()
             .ok_or_else(|| anyhow::anyhow!("--task is required when a path is specified"))?;
 
-        let project_path = Path::new(path);
-        let manifest_path = if project_path.is_dir() {
-            project_path.join("agent.leviath")
-        } else {
-            project_path.to_path_buf()
-        };
-
-        if manifest_path.exists() {
-            let content = std::fs::read_to_string(&manifest_path)?;
-            let blueprint = parse_manifest_public(&content)?;
-
-            let stage_name = blueprint
-                .stages
-                .first()
-                .map(|s| s.name.clone())
-                .unwrap_or_else(|| "main".to_string());
-
-            let agent = DashboardAgent {
-                id: format!("{}-1", blueprint.name),
-                blueprint_name: blueprint.name.clone(),
-                stage: stage_name,
-                status: AgentDisplayStatus::Active,
-                tokens: (0, blueprint.context_layout.total_budget_tokens),
-                iteration: 0,
-                waiting_prompt: None,
-            };
-
-            dashboard.add_log(format!(
-                "Agent {} started with task: {}",
-                agent.id,
-                truncate(task, 60)
-            ));
-            dashboard.agents.push(agent);
-        } else {
-            anyhow::bail!("Could not find agent.leviath at {}", manifest_path.display());
-        }
+        dashboard.spawn_agent_from_path_task(path, task);
     }
 
-    // If no agents provided, add a placeholder message
     if dashboard.agents.is_empty() {
-        dashboard.add_log("Dashboard started. Use 'n' to add agents or start with: lev dashboard <path> --task <task>".to_string());
+        dashboard.add_log("Dashboard started. Press 'n' to add agents or start with: lev dashboard <path> --task <task>".to_string());
     }
 
     // Enter TUI mode
@@ -542,11 +850,16 @@ pub async fn execute(args: DashboardArgs) -> anyhow::Result<()> {
     let backend = ratatui::backend::CrosstermBackend::new(stdout());
     let mut terminal = Terminal::new(backend)?;
 
-    let tick_rate = Duration::from_millis(100); // ~10fps
+    let tick_rate = Duration::from_millis(100);
 
     loop {
         // Process agent events
         dashboard.process_events();
+
+        // Sync state from ECS world (try_lock to avoid blocking the UI)
+        if let Ok(eng) = engine.try_lock() {
+            dashboard.sync_agent_state_from_world(&eng);
+        }
 
         // Draw
         terminal.draw(|frame| dashboard.draw(frame))?;

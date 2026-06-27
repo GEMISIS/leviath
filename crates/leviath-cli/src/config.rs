@@ -63,25 +63,46 @@ impl Default for Config {
 
 impl Config {
     /// Load configuration from the default location (~/.leviath/config.toml).
+    ///
+    /// After loading from file (or using defaults), environment variables are
+    /// checked as fallbacks. Env vars override config file values if set.
     pub fn load() -> anyhow::Result<Self> {
         let path = Self::config_path();
 
-        if !path.exists() {
+        let mut config = if !path.exists() {
             tracing::debug!("No config file found at {}, using defaults", path.display());
-            return Ok(Self::default());
+            Self::default()
+        } else {
+            let content = std::fs::read_to_string(&path)
+                .map_err(|e| anyhow::anyhow!("Failed to read config from '{}': {}", path.display(), e))?;
+
+            let c: Self = toml::from_str(&content)
+                .map_err(|e| anyhow::anyhow!("Failed to parse config: {}", e))?;
+
+            tracing::debug!("Loaded config from {}", path.display());
+            c
+        };
+
+        // Env var fallbacks (env vars override config file if set)
+        if config.providers.anthropic_api_key.is_none() {
+            config.providers.anthropic_api_key = std::env::var("ANTHROPIC_API_KEY").ok();
+        }
+        if config.providers.openai_api_key.is_none() {
+            config.providers.openai_api_key = std::env::var("OPENAI_API_KEY").ok();
+        }
+        if config.openrouter_api_key.is_none() {
+            config.openrouter_api_key = std::env::var("OPENROUTER_API_KEY").ok();
+        }
+        // OLLAMA_HOST is the standard env var for Ollama
+        if config.ollama_base_url.is_none() {
+            config.ollama_base_url = std::env::var("OLLAMA_HOST").ok();
         }
 
-        let content = std::fs::read_to_string(&path)
-            .map_err(|e| anyhow::anyhow!("Failed to read config from '{}': {}", path.display(), e))?;
-
-        let config: Self = toml::from_str(&content)
-            .map_err(|e| anyhow::anyhow!("Failed to parse config: {}", e))?;
-
-        tracing::debug!("Loaded config from {}", path.display());
         Ok(config)
     }
 
     /// Save configuration to the default location.
+    #[allow(dead_code)] // Public API for config editing (used by init, future commands)
     pub fn save(&self) -> anyhow::Result<()> {
         let path = Self::config_path();
 

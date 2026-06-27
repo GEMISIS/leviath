@@ -1,6 +1,6 @@
 //! Integration tests for context management and region lifecycle.
 
-use leviath_core::{Region, RegionKind, RegionEntry};
+use leviath_core::{Region, RegionKind};
 use leviath_runtime::ContextWindow;
 
 #[test]

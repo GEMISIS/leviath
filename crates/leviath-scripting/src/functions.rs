@@ -36,7 +36,7 @@ pub fn register_functions(engine: &mut Engine) {
 
     // Token counting (approximate for now)
     engine.register_fn("count_tokens", |text: &str| -> i64 {
-        ((text.len() + 3) / 4) as i64
+        text.len().div_ceil(4) as i64
     });
 
     // Content validation

@@ -11,9 +11,10 @@ use serde::{Deserialize, Serialize};
 /// The eviction policy determines the order and strategy for removing content
 /// from regions to make room for new content when the context window approaches
 /// its token budget.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub enum EvictionPolicy {
     /// Least Recently Used - evict oldest entries first
+    #[default]
     LRU,
 
     /// First In First Out - evict in insertion order
@@ -24,12 +25,6 @@ pub enum EvictionPolicy {
 
     /// Custom policy with user-defined scoring
     Custom { scorer: String },
-}
-
-impl Default for EvictionPolicy {
-    fn default() -> Self {
-        Self::LRU
-    }
 }
 
 /// Strategy for compacting (summarizing) region content.

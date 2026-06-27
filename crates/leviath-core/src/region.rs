@@ -141,6 +141,9 @@ impl Region {
         });
         self.current_tokens += tokens;
 
+        // Enforce SlidingWindow max_items limit
+        self.enforce_sliding_window();
+
         Ok(())
     }
 
@@ -173,7 +176,23 @@ impl Region {
         });
         self.current_tokens += tokens;
 
+        // Enforce SlidingWindow max_items limit
+        self.enforce_sliding_window();
+
         Ok(())
+    }
+
+    /// Enforce the SlidingWindow max_items limit by removing oldest entries.
+    fn enforce_sliding_window(&mut self) {
+        if let RegionKind::SlidingWindow { max_items } = &self.kind {
+            let max = *max_items;
+            while self.content.len() > max {
+                if let Some(removed) = self.content.first() {
+                    self.current_tokens -= removed.tokens;
+                }
+                self.content.remove(0);
+            }
+        }
     }
 
     /// Clear all content from this region.
@@ -369,5 +388,51 @@ mod tests {
             RegionKind::SlidingWindow { max_items } => assert_eq!(max_items, 10),
             _ => panic!("Wrong region kind"),
         }
+    }
+
+    #[test]
+    fn test_sliding_window_enforces_max_items() {
+        let mut region = Region::new(
+            "conv".to_string(),
+            RegionKind::SlidingWindow { max_items: 3 },
+            50000,
+        );
+
+        region.add_entry("msg1".to_string(), 10).unwrap();
+        region.add_entry("msg2".to_string(), 20).unwrap();
+        region.add_entry("msg3".to_string(), 30).unwrap();
+        assert_eq!(region.entry_count(), 3);
+        assert_eq!(region.current_tokens, 60);
+
+        // Adding a 4th entry should evict the oldest
+        region.add_entry("msg4".to_string(), 40).unwrap();
+        assert_eq!(region.entry_count(), 3);
+        assert_eq!(region.content[0].content, "msg2");
+        assert_eq!(region.content[2].content, "msg4");
+        assert_eq!(region.current_tokens, 90); // 20 + 30 + 40
+
+        // Adding a 5th entry should evict again
+        region.add_entry("msg5".to_string(), 50).unwrap();
+        assert_eq!(region.entry_count(), 3);
+        assert_eq!(region.content[0].content, "msg3");
+        assert_eq!(region.current_tokens, 120); // 30 + 40 + 50
+    }
+
+    #[test]
+    fn test_sliding_window_enforces_max_items_with_metadata() {
+        let mut region = Region::new(
+            "conv".to_string(),
+            RegionKind::SlidingWindow { max_items: 2 },
+            50000,
+        );
+
+        region.add_entry_with_metadata("a".to_string(), 10, serde_json::json!({"idx": 1})).unwrap();
+        region.add_entry_with_metadata("b".to_string(), 20, serde_json::json!({"idx": 2})).unwrap();
+        region.add_entry_with_metadata("c".to_string(), 30, serde_json::json!({"idx": 3})).unwrap();
+
+        assert_eq!(region.entry_count(), 2);
+        assert_eq!(region.content[0].content, "b");
+        assert_eq!(region.content[1].content, "c");
+        assert_eq!(region.current_tokens, 50);
     }
 }

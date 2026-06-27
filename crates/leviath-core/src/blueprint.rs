@@ -104,9 +104,10 @@ impl Blueprint {
 }
 
 /// Interaction mode for a stage.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub enum StageMode {
     /// Runs without user input, fully autonomous
+    #[default]
     Autonomous,
 
     /// Requires user input before starting
@@ -197,12 +198,6 @@ pub struct Stage {
 
     /// Optional routing configuration for tool results
     pub tool_result_routing: Option<ToolResultRouting>,
-}
-
-impl Default for StageMode {
-    fn default() -> Self {
-        Self::Autonomous
-    }
 }
 
 impl Stage {

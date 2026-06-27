@@ -43,14 +43,12 @@ fn approximate_count_anthropic(text: &str) -> usize {
 /// Uses the common heuristic of ~4 characters per token, which is reasonably
 /// accurate for English text with GPT-style tokenizers.
 pub fn approximate_count(text: &str) -> usize {
-    (text.len() + 3) / 4
+    text.len().div_ceil(4)
 }
 
 /// Get maximum context tokens for a model.
 pub fn max_context_tokens(model: &str) -> usize {
-    if model.contains("claude-opus-4") || model.contains("claude-sonnet-4") {
-        200_000
-    } else if model.contains("claude-3") {
+    if model.contains("claude-opus-4") || model.contains("claude-sonnet-4") || model.contains("claude-3") {
         200_000
     } else if model.starts_with("gpt-4") {
         128_000

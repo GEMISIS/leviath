@@ -1,12 +1,13 @@
 //! `lev run` - Run an agent
 
 use clap::Args;
-use leviath_core::blueprint::{ModelConfig, ToolResultRouting};
+use leviath_core::blueprint::{ModelConfig, StageMode, ToolResultRouting};
 use leviath_core::{Blueprint, ContextLayout, Region, RegionKind, Stage};
 use leviath_core::layout::RegionDefinition;
-use leviath_runtime::{AgentEngine, AgentPool, ProviderRegistry};
+use leviath_runtime::{AgentEngine, AgentPool, ContextWindow, ProviderRegistry};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use tokio_stream::StreamExt;
 
 use crate::config::Config;
 
@@ -45,43 +46,7 @@ pub async fn execute(args: RunArgs) -> anyhow::Result<()> {
     let config = Config::load()?;
 
     // Create provider registry
-    let mut registry = ProviderRegistry::new();
-
-    // Register Anthropic provider if key available
-    if let Some(ref key) = config.providers.anthropic_api_key {
-        registry.register(
-            "anthropic".to_string(),
-            Arc::new(leviath_providers::AnthropicProvider::new(key.clone())),
-        );
-    }
-
-    // Register OpenAI provider if key available
-    if let Some(ref key) = config.providers.openai_api_key {
-        registry.register(
-            "openai".to_string(),
-            Arc::new(leviath_providers::OpenAIProvider::new(key.clone())),
-        );
-    }
-
-    // Register OpenRouter provider if key available
-    if let Some(ref key) = config.openrouter_api_key {
-        registry.register(
-            "openrouter".to_string(),
-            Arc::new(leviath_providers::OpenRouterProvider::new(key.clone())),
-        );
-    }
-
-    // Register Ollama provider (no key needed)
-    let ollama_url = config
-        .ollama_base_url
-        .as_deref()
-        .unwrap_or("http://localhost:11434");
-    registry.register(
-        "ollama".to_string(),
-        Arc::new(leviath_providers::OllamaProvider::with_base_url(
-            ollama_url.to_string(),
-        )),
-    );
+    let registry = build_provider_registry(&config);
 
     // Create engine with providers
     let mut engine = AgentEngine::with_providers(registry);
@@ -94,7 +59,513 @@ pub async fn execute(args: RunArgs) -> anyhow::Result<()> {
         .ok_or_else(|| anyhow::anyhow!("Failed to get spawned agent entity"))?;
 
     // Initialize context window regions from blueprint layout
-    if let Some(mut window) = engine.world_mut().get_mut::<leviath_runtime::ContextWindow>(entity) {
+    initialize_context_window(&mut engine, entity, &blueprint, &args.task);
+
+    // Run through ALL stages sequentially
+    let num_stages = blueprint.stages.len();
+    for (stage_idx, stage) in blueprint.stages.iter().enumerate() {
+        let provider_name = &stage.model.provider;
+        let model_name = args.model.as_deref().unwrap_or(&stage.model.model);
+
+        // Check if provider is available
+        if !engine.providers().has(provider_name) {
+            println!(
+                "\nProvider '{}' is not configured. Please set an API key in ~/.leviath/config.toml",
+                provider_name
+            );
+            println!("\nExample config:");
+            println!("  [providers]");
+            println!("  anthropic_api_key = \"sk-ant-...\"");
+            println!("\nOr set the ANTHROPIC_API_KEY environment variable.");
+            return Ok(());
+        }
+
+        println!(
+            "\n--- Stage {}/{}: {} ({}:{}) ---",
+            stage_idx + 1,
+            num_stages,
+            stage.name,
+            provider_name,
+            model_name,
+        );
+
+        // If stage has its own context_layout, swap to it
+        if let Some(ref stage_layout) = stage.context_layout {
+            swap_context_layout(&mut engine, entity, stage_layout);
+        }
+
+        // Build tool filter from stage's available_tools
+        let tool_filter: Option<Vec<String>> = if stage.available_tools.is_empty() {
+            None
+        } else {
+            Some(stage.available_tools.clone())
+        };
+        let tool_filter_ref = tool_filter.as_deref();
+
+        // Build tool result routing config
+        let routing_config = stage.tool_result_routing.as_ref().map(|r| {
+            leviath_runtime::ToolResultRoutingConfig {
+                default_region: r.default_region.clone(),
+                tool_overrides: r.tool_overrides.clone(),
+                persist: r.persist,
+                max_result_tokens: r.max_result_tokens,
+            }
+        });
+        let routing_ref = routing_config.as_ref();
+
+        let max_iterations = stage.max_iterations.unwrap_or(10);
+
+        // Run stage based on mode
+        match &stage.mode {
+            StageMode::Interactive => {
+                run_interactive_stage(
+                    &mut engine,
+                    entity,
+                    provider_name,
+                    model_name,
+                    max_iterations,
+                    tool_filter_ref,
+                )
+                .await?;
+            }
+            StageMode::InteractivePoints { points } => {
+                run_interactive_points_stage(
+                    &mut engine,
+                    entity,
+                    provider_name,
+                    model_name,
+                    max_iterations,
+                    tool_filter_ref,
+                    routing_ref,
+                    points,
+                )
+                .await?;
+            }
+            StageMode::Autonomous => {
+                run_autonomous_stage(
+                    &mut engine,
+                    entity,
+                    provider_name,
+                    model_name,
+                    max_iterations,
+                    tool_filter_ref,
+                    routing_ref,
+                )
+                .await?;
+            }
+        }
+
+        // Add stage transition marker if not the last stage
+        if stage_idx + 1 < num_stages {
+            let next_name = &blueprint.stages[stage_idx + 1].name;
+            if let Some(mut window) = engine.world_mut().get_mut::<ContextWindow>(entity) {
+                let marker = format!(
+                    "[Stage complete: {}, transitioning to: {}]",
+                    stage.name, next_name
+                );
+                let tokens = marker.len() / 4 + 1;
+                let _ = window.add_to_region("conversation", marker, tokens);
+            }
+        }
+    }
+
+    println!("\n[All stages complete]");
+    Ok(())
+}
+
+/// Run an interactive stage with streaming output.
+async fn run_interactive_stage(
+    engine: &mut AgentEngine,
+    entity: bevy_ecs::prelude::Entity,
+    provider_name: &str,
+    model_name: &str,
+    max_iterations: usize,
+    tool_filter: Option<&[String]>,
+) -> anyhow::Result<()> {
+    let mut iteration = 0;
+    loop {
+        if iteration >= max_iterations {
+            println!("\n[Max iterations reached]");
+            break;
+        }
+
+        // Use streaming for interactive mode
+        let response = match stream_inference(engine, entity, provider_name, model_name, tool_filter).await {
+            Ok(resp) => resp,
+            Err(e) => {
+                // Fall back to non-streaming
+                tracing::debug!("Streaming unavailable, falling back: {}", e);
+                let resp = engine
+                    .run_inference_filtered(entity, provider_name, model_name, Vec::new(), tool_filter)
+                    .await
+                    .map_err(|e| anyhow::anyhow!("Inference error: {}", e))?;
+                println!("\nAssistant: {}", resp.content);
+                resp
+            }
+        };
+
+        println!(
+            "\n[Tokens: {} input, {} output]",
+            response.tokens_used.prompt_tokens, response.tokens_used.completion_tokens
+        );
+
+        // Add response to context
+        if let Some(mut window) = engine.world_mut().get_mut::<ContextWindow>(entity) {
+            let tokens = response.content.len() / 4 + 1;
+            let _ = window.add_to_region(
+                "conversation",
+                format!("Assistant: {}", response.content),
+                tokens,
+            );
+        }
+
+        // Prompt for user input
+        print!("\nYou: ");
+        use std::io::Write;
+        std::io::stdout().flush().ok();
+
+        let mut input = String::new();
+        std::io::stdin().read_line(&mut input)?;
+        let input = input.trim().to_string();
+
+        if input.is_empty() || input == "/quit" || input == "/exit" {
+            println!("\n[Session ended]");
+            break;
+        }
+
+        // Add user input to context
+        if let Some(mut window) = engine.world_mut().get_mut::<ContextWindow>(entity) {
+            let tokens = input.len() / 4 + 1;
+            let _ = window.add_to_region(
+                "conversation",
+                format!("User: {}", input),
+                tokens,
+            );
+        }
+
+        iteration += 1;
+    }
+    Ok(())
+}
+
+/// Run an autonomous stage.
+async fn run_autonomous_stage(
+    engine: &mut AgentEngine,
+    entity: bevy_ecs::prelude::Entity,
+    provider_name: &str,
+    model_name: &str,
+    max_iterations: usize,
+    tool_filter: Option<&[String]>,
+    routing: Option<&leviath_runtime::ToolResultRoutingConfig>,
+) -> anyhow::Result<()> {
+    let response = engine
+        .run_inference_loop_filtered(
+            entity,
+            provider_name,
+            model_name,
+            Vec::new(),
+            max_iterations,
+            tool_filter,
+            routing,
+            &mut |_tool_calls| async { Vec::new() },
+        )
+        .await;
+
+    match response {
+        Ok(resp) => {
+            println!("{}", resp.content);
+            println!(
+                "\n[Tokens used: {} input, {} output]",
+                resp.tokens_used.prompt_tokens, resp.tokens_used.completion_tokens
+            );
+        }
+        Err(e) => {
+            println!("Inference error: {}", e);
+        }
+    }
+    Ok(())
+}
+
+/// Run an InteractivePoints stage: run iterations autonomously, pausing at each interaction point.
+#[allow(clippy::too_many_arguments)]
+async fn run_interactive_points_stage(
+    engine: &mut AgentEngine,
+    entity: bevy_ecs::prelude::Entity,
+    provider_name: &str,
+    model_name: &str,
+    max_iterations: usize,
+    tool_filter: Option<&[String]>,
+    routing: Option<&leviath_runtime::ToolResultRoutingConfig>,
+    points: &[leviath_core::blueprint::InteractionPoint],
+) -> anyhow::Result<()> {
+    if points.is_empty() {
+        return run_autonomous_stage(engine, entity, provider_name, model_name, max_iterations, tool_filter, routing).await;
+    }
+
+    // Divide iterations across interaction points
+    let segments = points.len() + 1;
+    let iterations_per_segment = max_iterations / segments;
+    let mut remaining_iterations = max_iterations;
+
+    for point in points {
+        let iters = iterations_per_segment.min(remaining_iterations);
+        if iters > 0 {
+            let response = engine
+                .run_inference_loop_filtered(
+                    entity,
+                    provider_name,
+                    model_name,
+                    Vec::new(),
+                    iters,
+                    tool_filter,
+                    routing,
+                    &mut |_tool_calls| async { Vec::new() },
+                )
+                .await;
+
+            if let Ok(resp) = response {
+                if !resp.content.is_empty() {
+                    println!("{}", resp.content);
+                }
+            }
+            remaining_iterations = remaining_iterations.saturating_sub(iters);
+        }
+
+        // Show interaction point
+        println!("\n[Interaction Point: {}]", point.name);
+        println!("{}", point.prompt);
+
+        if point.required {
+            print!("\n> ");
+            use std::io::Write;
+            std::io::stdout().flush().ok();
+
+            let mut input = String::new();
+            std::io::stdin().read_line(&mut input)?;
+            let input = input.trim().to_string();
+
+            if let Some(mut window) = engine.world_mut().get_mut::<ContextWindow>(entity) {
+                let tokens = input.len() / 4 + 1;
+                let content = format!("User [{}]: {}", point.name, input);
+                let _ = window.add_to_region("conversation", content, tokens);
+            }
+        } else {
+            println!("(Press Enter to skip or type a response)");
+            print!("\n> ");
+            use std::io::Write;
+            std::io::stdout().flush().ok();
+
+            let mut input = String::new();
+            std::io::stdin().read_line(&mut input)?;
+            let input = input.trim().to_string();
+
+            if !input.is_empty() {
+                if let Some(mut window) = engine.world_mut().get_mut::<ContextWindow>(entity) {
+                    let tokens = input.len() / 4 + 1;
+                    let content = format!("User [{}]: {}", point.name, input);
+                    let _ = window.add_to_region("conversation", content, tokens);
+                }
+            }
+        }
+    }
+
+    // Run remaining iterations
+    if remaining_iterations > 0 {
+        let response = engine
+            .run_inference_loop_filtered(
+                entity,
+                provider_name,
+                model_name,
+                Vec::new(),
+                remaining_iterations,
+                tool_filter,
+                routing,
+                &mut |_tool_calls| async { Vec::new() },
+            )
+            .await;
+
+        if let Ok(resp) = response {
+            if !resp.content.is_empty() {
+                println!("{}", resp.content);
+            }
+            println!(
+                "\n[Tokens used: {} input, {} output]",
+                resp.tokens_used.prompt_tokens, resp.tokens_used.completion_tokens
+            );
+        }
+    }
+
+    Ok(())
+}
+
+/// Stream inference output directly to stdout, collecting the full response.
+async fn stream_inference(
+    engine: &mut AgentEngine,
+    entity: bevy_ecs::prelude::Entity,
+    provider_name: &str,
+    model_name: &str,
+    tool_filter: Option<&[String]>,
+) -> anyhow::Result<leviath_providers::InferenceResponse> {
+    let provider = engine
+        .get_provider(provider_name)
+        .ok_or_else(|| anyhow::anyhow!("Provider '{}' not registered", provider_name))?;
+
+    // Build messages from context window
+    let (messages, max_tokens) = {
+        let window = engine
+            .world()
+            .get::<ContextWindow>(entity)
+            .ok_or_else(|| anyhow::anyhow!("Entity has no ContextWindow"))?;
+
+        let messages = window.assemble_messages();
+        let remaining = window.max_tokens.saturating_sub(window.current_tokens);
+        let max_tokens = remaining.min(4096);
+        (messages, max_tokens)
+    };
+
+    // Build filtered tools list (empty for now — tools come from MCP in the future)
+    let tools: Vec<leviath_providers::Tool> = Vec::new();
+    let filtered_tools = if let Some(filter) = tool_filter {
+        if filter.is_empty() {
+            tools
+        } else {
+            tools
+                .into_iter()
+                .filter(|t| filter.iter().any(|f| f == &t.name))
+                .collect()
+        }
+    } else {
+        tools
+    };
+
+    let request = leviath_providers::InferenceRequest {
+        messages,
+        model: model_name.to_string(),
+        max_tokens,
+        temperature: 0.7,
+        tools: filtered_tools,
+        extra: serde_json::Value::Null,
+    };
+
+    let mut stream = provider.infer_stream(request).await
+        .map_err(|e| anyhow::anyhow!("Stream error: {}", e))?;
+
+    let mut full_content = String::new();
+    let mut final_tokens = None;
+    let mut final_finish_reason = None;
+    let mut all_tool_calls: Vec<leviath_providers::ToolCall> = Vec::new();
+
+    print!("\nAssistant: ");
+    use std::io::Write;
+
+    while let Some(chunk_result) = stream.next().await {
+        let chunk = chunk_result.map_err(|e| anyhow::anyhow!("Stream chunk error: {}", e))?;
+
+        if !chunk.delta.is_empty() {
+            print!("{}", chunk.delta);
+            std::io::stdout().flush().ok();
+            full_content.push_str(&chunk.delta);
+        }
+
+        if let Some(tokens) = chunk.tokens {
+            final_tokens = Some(tokens);
+        }
+        if let Some(reason) = chunk.finish_reason {
+            final_finish_reason = Some(reason);
+        }
+
+        // Accumulate tool calls from stream deltas
+        for tc_delta in &chunk.tool_calls {
+            while all_tool_calls.len() <= tc_delta.index {
+                all_tool_calls.push(leviath_providers::ToolCall {
+                    id: String::new(),
+                    name: String::new(),
+                    arguments: serde_json::Value::Null,
+                });
+            }
+            let tc = &mut all_tool_calls[tc_delta.index];
+            if let Some(ref id) = tc_delta.id {
+                tc.id.clone_from(id);
+            }
+            if let Some(ref name) = tc_delta.name {
+                tc.name.clone_from(name);
+            }
+            if !tc_delta.arguments_delta.is_empty() && tc.arguments.is_null() {
+                if let Ok(val) = serde_json::from_str(&tc_delta.arguments_delta) {
+                    tc.arguments = val;
+                }
+            }
+        }
+    }
+
+    println!(); // newline after streaming
+
+    // Update agent state iteration
+    if let Some(mut state) = engine.world_mut().get_mut::<leviath_runtime::AgentState>(entity) {
+        state.iteration += 1;
+    }
+
+    let tokens_used = final_tokens.unwrap_or(leviath_providers::TokenUsage {
+        prompt_tokens: 0,
+        completion_tokens: full_content.len() / 4,
+        total_tokens: full_content.len() / 4,
+    });
+
+    Ok(leviath_providers::InferenceResponse {
+        content: full_content,
+        tool_calls: all_tool_calls,
+        tokens_used,
+        finish_reason: final_finish_reason.unwrap_or(leviath_providers::FinishReason::Complete),
+    })
+}
+
+/// Build a ProviderRegistry from Config.
+pub fn build_provider_registry(config: &Config) -> ProviderRegistry {
+    let mut registry = ProviderRegistry::new();
+
+    if let Some(ref key) = config.providers.anthropic_api_key {
+        registry.register(
+            "anthropic".to_string(),
+            Arc::new(leviath_providers::AnthropicProvider::new(key.clone())),
+        );
+    }
+
+    if let Some(ref key) = config.providers.openai_api_key {
+        registry.register(
+            "openai".to_string(),
+            Arc::new(leviath_providers::OpenAIProvider::new(key.clone())),
+        );
+    }
+
+    if let Some(ref key) = config.openrouter_api_key {
+        registry.register(
+            "openrouter".to_string(),
+            Arc::new(leviath_providers::OpenRouterProvider::new(key.clone())),
+        );
+    }
+
+    let ollama_url = config
+        .ollama_base_url
+        .as_deref()
+        .unwrap_or("http://localhost:11434");
+    registry.register(
+        "ollama".to_string(),
+        Arc::new(leviath_providers::OllamaProvider::with_base_url(
+            ollama_url.to_string(),
+        )),
+    );
+
+    registry
+}
+
+/// Initialize context window regions on an entity from the blueprint.
+pub fn initialize_context_window(
+    engine: &mut AgentEngine,
+    entity: bevy_ecs::prelude::Entity,
+    blueprint: &Blueprint,
+    task: &str,
+) {
+    if let Some(mut window) = engine.world_mut().get_mut::<ContextWindow>(entity) {
         for region_def in &blueprint.context_layout.regions {
             let region = Region::new(
                 region_def.name.clone(),
@@ -104,7 +575,7 @@ pub async fn execute(args: RunArgs) -> anyhow::Result<()> {
             window.add_region(region);
         }
 
-        // Add a tool_results region if not present (used by inference loop)
+        // Add a tool_results region if not present
         if window.get_region("tool_results").is_none() {
             let tool_region = Region::new(
                 "tool_results".to_string(),
@@ -112,6 +583,16 @@ pub async fn execute(args: RunArgs) -> anyhow::Result<()> {
                 5000,
             );
             window.add_region(tool_region);
+        }
+
+        // Add a conversation region if not present
+        if window.get_region("conversation").is_none() {
+            let conv_region = Region::new(
+                "conversation".to_string(),
+                RegionKind::SlidingWindow { max_items: 50 },
+                10000,
+            );
+            window.add_region(conv_region);
         }
 
         // Add task to the first pinned/system region
@@ -123,169 +604,49 @@ pub async fn execute(args: RunArgs) -> anyhow::Result<()> {
             .map(|r| r.name.clone());
 
         if let Some(region_name) = system_region_name {
-            let task_tokens = args.task.len() / 4 + 1;
-            let _ = window.add_to_region(&region_name, args.task.clone(), task_tokens);
+            let task_tokens = task.len() / 4 + 1;
+            let _ = window.add_to_region(&region_name, task.to_string(), task_tokens);
         }
     }
+}
 
-    // Get model config from the first stage
-    let stage = blueprint
-        .stages
-        .first()
-        .ok_or_else(|| anyhow::anyhow!("Blueprint has no stages"))?;
+/// Swap context layout to a stage-specific layout (preserving existing content where possible).
+fn swap_context_layout(
+    engine: &mut AgentEngine,
+    entity: bevy_ecs::prelude::Entity,
+    layout: &ContextLayout,
+) {
+    if let Some(mut window) = engine.world_mut().get_mut::<ContextWindow>(entity) {
+        let mut new_regions = Vec::new();
+        for region_def in &layout.regions {
+            let mut new_region = Region::new(
+                region_def.name.clone(),
+                region_def.kind.clone(),
+                region_def.max_tokens,
+            );
 
-    let provider_name = &stage.model.provider;
-    let model_name = args.model.as_deref().unwrap_or(&stage.model.model);
-
-    // Check if provider is available
-    if !engine.providers().has(provider_name) {
-        println!(
-            "\nProvider '{}' is not configured. Please set an API key in ~/.leviath/config.toml",
-            provider_name
-        );
-        println!("\nExample config:");
-        println!("  [providers]");
-        println!("  anthropic_api_key = \"sk-ant-...\"");
-        return Ok(());
-    }
-
-    println!("Provider: {}, Model: {}", provider_name, model_name);
-    println!("Running inference...\n");
-
-    // Check if this stage is interactive
-    let is_interactive = matches!(stage.mode, leviath_core::blueprint::StageMode::Interactive);
-
-    // Build tool filter from stage's available_tools
-    let tool_filter: Option<Vec<String>> = if stage.available_tools.is_empty() {
-        None
-    } else {
-        Some(stage.available_tools.clone())
-    };
-    let tool_filter_ref = tool_filter.as_deref();
-
-    // Build tool result routing config
-    let routing_config = stage.tool_result_routing.as_ref().map(|r| {
-        leviath_runtime::ToolResultRoutingConfig {
-            default_region: r.default_region.clone(),
-            tool_overrides: r.tool_overrides.clone(),
-            persist: r.persist,
-            max_result_tokens: r.max_result_tokens,
-        }
-    });
-    let routing_ref = routing_config.as_ref();
-
-    // Run the inference loop
-    let max_iterations = stage.max_iterations.unwrap_or(10);
-
-    if is_interactive {
-        // Interactive mode: run inference, show response, prompt for input, repeat
-        let mut iteration = 0;
-        loop {
-            if iteration >= max_iterations {
-                println!("\n[Max iterations reached]");
-                break;
-            }
-
-            let response = engine
-                .run_inference_filtered(
-                    entity,
-                    provider_name,
-                    model_name,
-                    Vec::new(),
-                    tool_filter_ref,
-                )
-                .await;
-
-            match response {
-                Ok(resp) => {
-                    println!("\nAssistant: {}", resp.content);
-                    println!(
-                        "[Tokens: {} input, {} output]",
-                        resp.tokens_used.prompt_tokens, resp.tokens_used.completion_tokens
-                    );
-
-                    // Add response to context
-                    if let Some(mut window) = engine.world_mut().get_mut::<leviath_runtime::ContextWindow>(entity) {
-                        let tokens = resp.content.len() / 4 + 1;
-                        let _ = window.add_to_region(
-                            "conversation",
-                            format!("Assistant: {}", resp.content),
-                            tokens,
-                        );
-                    }
-
-                    // Prompt for user input
-                    print!("\nYou: ");
-                    use std::io::Write;
-                    std::io::stdout().flush().ok();
-
-                    let mut input = String::new();
-                    std::io::stdin().read_line(&mut input)?;
-                    let input = input.trim().to_string();
-
-                    if input.is_empty() || input == "/quit" || input == "/exit" {
-                        println!("\n[Session ended]");
-                        break;
-                    }
-
-                    // Add user input to context
-                    if let Some(mut window) = engine.world_mut().get_mut::<leviath_runtime::ContextWindow>(entity) {
-                        let tokens = input.len() / 4 + 1;
-                        let _ = window.add_to_region(
-                            "conversation",
-                            format!("User: {}", input),
-                            tokens,
-                        );
-                    }
-                }
-                Err(e) => {
-                    println!("Inference error: {}", e);
-                    break;
+            // Copy content from existing region with same name
+            if let Some(existing) = window.get_region(&region_def.name) {
+                for entry in &existing.content {
+                    let _ = new_region.add_entry(entry.content.clone(), entry.tokens);
                 }
             }
-            iteration += 1;
-        }
-    } else {
-        // Autonomous mode: run the full inference loop
-        let response = engine
-            .run_inference_loop_filtered(
-                entity,
-                provider_name,
-                model_name,
-                Vec::new(),
-                max_iterations,
-                tool_filter_ref,
-                routing_ref,
-                &mut |_tool_calls| async { Vec::new() },
-            )
-            .await;
 
-        match response {
-            Ok(resp) => {
-                println!("{}", resp.content);
-                println!(
-                    "\n[Tokens used: {} input, {} output]",
-                    resp.tokens_used.prompt_tokens, resp.tokens_used.completion_tokens
-                );
-            }
-            Err(e) => {
-                println!("Inference error: {}", e);
-            }
+            new_regions.push(new_region);
         }
+
+        window.regions = new_regions;
+        window.current_tokens = window.calculate_tokens();
     }
-
-    Ok(())
 }
 
 fn find_manifest(path: &str) -> anyhow::Result<PathBuf> {
     let path = Path::new(path);
 
-    // If path is a file named agent.leviath, use it directly
     if path.is_file() && path.file_name() == Some(std::ffi::OsStr::new("agent.leviath")) {
         return Ok(path.to_path_buf());
     }
 
-    // If path is a directory, look for agent.leviath inside it
     if path.is_dir() {
         let manifest = path.join("agent.leviath");
         if manifest.exists() {
@@ -293,7 +654,6 @@ fn find_manifest(path: &str) -> anyhow::Result<PathBuf> {
         }
     }
 
-    // Fall back to current directory
     let current_manifest = PathBuf::from("agent.leviath");
     if current_manifest.exists() {
         return Ok(current_manifest);
@@ -361,8 +721,24 @@ fn parse_manifest(content: &str) -> anyhow::Result<Blueprint> {
             // Parse mode
             if let Some(mode_str) = stage_value.get("mode").and_then(|v| v.as_str()) {
                 stage = match mode_str {
-                    "interactive" => stage.with_mode(leviath_core::blueprint::StageMode::Interactive),
-                    _ => stage.with_mode(leviath_core::blueprint::StageMode::Autonomous),
+                    "interactive" => stage.with_mode(StageMode::Interactive),
+                    "interactive_points" => {
+                        let mut points = Vec::new();
+                        if let Some(pts_arr) = stage_value.get("interaction_points").and_then(|v| v.as_array()) {
+                            for pt in pts_arr {
+                                let pt_name = pt.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                                let pt_prompt = pt.get("prompt").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                                let pt_required = pt.get("required").and_then(|v| v.as_bool()).unwrap_or(true);
+                                points.push(leviath_core::blueprint::InteractionPoint {
+                                    name: pt_name,
+                                    prompt: pt_prompt,
+                                    required: pt_required,
+                                });
+                            }
+                        }
+                        stage.with_mode(StageMode::InteractivePoints { points })
+                    }
+                    _ => stage.with_mode(StageMode::Autonomous),
                 };
             }
 

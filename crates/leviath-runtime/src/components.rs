@@ -206,21 +206,101 @@ impl ContextWindow {
         }
     }
 
-    /// Assemble the complete prompt from all regions in order.
+    /// Assemble structured messages from all regions for proper LLM API usage.
+    ///
+    /// Maps region types to appropriate message roles:
+    /// - Pinned → system messages
+    /// - CompactHistory → system messages (compressed knowledge)
+    /// - Conversation entries → parsed as user/assistant based on prefix
+    /// - Tool results → user messages with [Tool results] prefix
+    /// - Other regions → user messages with region header
+    pub fn assemble_messages(&self) -> Vec<leviath_providers::Message> {
+        let mut messages = Vec::new();
+
+        for region in &self.regions {
+            if region.content.is_empty() {
+                continue;
+            }
+
+            match &region.kind {
+                leviath_core::RegionKind::Pinned | leviath_core::RegionKind::CompactHistory { .. } => {
+                    // System-level content
+                    let content = region.content
+                        .iter()
+                        .map(|e| e.content.as_str())
+                        .collect::<Vec<_>>()
+                        .join("\n\n");
+                    messages.push(leviath_providers::Message {
+                        role: "system".to_string(),
+                        content,
+                    });
+                }
+                leviath_core::RegionKind::SlidingWindow { .. } | leviath_core::RegionKind::Compacting { .. } => {
+                    // Conversation-style: parse each entry by prefix
+                    for entry in &region.content {
+                        let trimmed = entry.content.trim();
+                        if let Some(rest) = trimmed.strip_prefix("Assistant: ") {
+                            messages.push(leviath_providers::Message {
+                                role: "assistant".to_string(),
+                                content: rest.to_string(),
+                            });
+                        } else if let Some(rest) = trimmed.strip_prefix("User: ") {
+                            messages.push(leviath_providers::Message {
+                                role: "user".to_string(),
+                                content: rest.to_string(),
+                            });
+                        } else {
+                            messages.push(leviath_providers::Message {
+                                role: "user".to_string(),
+                                content: entry.content.clone(),
+                            });
+                        }
+                    }
+                }
+                leviath_core::RegionKind::Temporary => {
+                    // Tool results or temporary data
+                    let content = region.content
+                        .iter()
+                        .map(|e| e.content.as_str())
+                        .collect::<Vec<_>>()
+                        .join("\n\n");
+                    messages.push(leviath_providers::Message {
+                        role: "user".to_string(),
+                        content: format!("[Tool results from {}]:\n{}", region.name, content),
+                    });
+                }
+                leviath_core::RegionKind::Clearable => {
+                    let content = region.content
+                        .iter()
+                        .map(|e| e.content.as_str())
+                        .collect::<Vec<_>>()
+                        .join("\n\n");
+                    messages.push(leviath_providers::Message {
+                        role: "user".to_string(),
+                        content: format!("[{}]:\n{}", region.name, content),
+                    });
+                }
+            }
+        }
+
+        // Ensure there's at least one user message (LLM APIs require it)
+        if !messages.iter().any(|m| m.role == "user") {
+            messages.push(leviath_providers::Message {
+                role: "user".to_string(),
+                content: "Begin.".to_string(),
+            });
+        }
+
+        messages
+    }
+
+    /// Assemble the complete prompt from all regions in order (convenience wrapper).
     pub fn assemble_prompt(&self) -> String {
-        self.regions
+        self.assemble_messages()
             .iter()
-            .map(|region| {
-                let header = format!("## Region: {}\n", region.name);
-                let content = region.content
-                    .iter()
-                    .map(|entry| entry.content.as_str())
-                    .collect::<Vec<_>>()
-                    .join("\n\n");
-                format!("{}{}", header, content)
-            })
+            .map(|m| format!("[{}]: {}", m.role, m.content))
             .collect::<Vec<_>>()
-            .join("\n\n---\n\n")
+            .join("\n\n")
     }
 }
 
@@ -486,22 +566,42 @@ mod tests {
     #[test]
     fn test_assemble_prompt() {
         let mut window = ContextWindow::new(10000);
-        
+
         let mut region1 = Region::new("system".to_string(), RegionKind::Pinned, 1000);
         region1.add_entry("You are a helpful assistant.".to_string(), 100).unwrap();
         window.add_region(region1);
-        
+
         let mut region2 = Region::new("conversation".to_string(), RegionKind::Temporary, 2000);
         region2.add_entry("User: Hello".to_string(), 50).unwrap();
         region2.add_entry("Assistant: Hi there!".to_string(), 50).unwrap();
         window.add_region(region2);
-        
+
         let prompt = window.assemble_prompt();
-        assert!(prompt.contains("## Region: system"));
         assert!(prompt.contains("You are a helpful assistant."));
-        assert!(prompt.contains("## Region: conversation"));
         assert!(prompt.contains("User: Hello"));
-        assert!(prompt.contains("Assistant: Hi there!"));
+        assert!(prompt.contains("Hi there!"));
+    }
+
+    #[test]
+    fn test_assemble_messages() {
+        let mut window = ContextWindow::new(10000);
+
+        let mut system = Region::new("system".to_string(), RegionKind::Pinned, 1000);
+        system.add_entry("You are a helpful assistant.".to_string(), 100).unwrap();
+        window.add_region(system);
+
+        let mut conv = Region::new("conversation".to_string(), RegionKind::SlidingWindow { max_items: 10 }, 5000);
+        conv.add_entry("User: Hello".to_string(), 50).unwrap();
+        conv.add_entry("Assistant: Hi there!".to_string(), 50).unwrap();
+        window.add_region(conv);
+
+        let msgs = window.assemble_messages();
+        assert_eq!(msgs[0].role, "system");
+        assert_eq!(msgs[0].content, "You are a helpful assistant.");
+        assert_eq!(msgs[1].role, "user");
+        assert_eq!(msgs[1].content, "Hello");
+        assert_eq!(msgs[2].role, "assistant");
+        assert_eq!(msgs[2].content, "Hi there!");
     }
 
     #[test]
