@@ -18,6 +18,10 @@ mode = "autonomous"
 model = { provider = "anthropic", model = "claude-sonnet-4-5" }
 description = "Create a concise summary"
 
+[compaction]
+provider = "anthropic"
+model = "claude-sonnet-4"
+
 [context.regions]
 query = { kind = "pinned", max_tokens = 1000 }
 findings = { kind = "temporary", max_tokens = 40000 }

@@ -18,6 +18,10 @@ mode = "interactive"
 model = { provider = "anthropic", model = "claude-opus-4-5" }
 description = "Review code before finalizing (requires human approval)"
 
+[compaction]
+provider = "anthropic"
+model = "claude-sonnet-4"
+
 [context.regions]
 architecture = { kind = "pinned", max_tokens = 4000 }
 task = { kind = "pinned", max_tokens = 2000 }

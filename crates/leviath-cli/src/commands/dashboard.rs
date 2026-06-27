@@ -750,6 +750,7 @@ async fn engine_background_loop(
                             max_iterations,
                             None,
                             None,
+                            None,
                             &mut |tool_calls| {
                                 let tx = event_tx.clone();
                                 let aid = agent_id_clone.clone();

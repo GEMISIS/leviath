@@ -11,7 +11,7 @@ use tracing::info;
 
 use crate::components::{
     AgentMessage, AgentState, AgentStatus, CancellationToken, ContextWindow, InferenceResult,
-    MessageInbox,
+    MessageInbox, NeedsCompaction,
 };
 use crate::systems;
 
@@ -391,6 +391,7 @@ impl AgentEngine {
             max_iterations,
             None,
             None,
+            None,
             &mut tool_executor,
         )
         .await
@@ -400,6 +401,8 @@ impl AgentEngine {
     ///
     /// `tool_filter`: if Some, only tools matching these names are included.
     /// `tool_result_routing`: if Some, routes tool results to configured regions.
+    /// `compaction_config`: if Some, automatically runs eviction + compaction after
+    /// each iteration when the context window is filling up.
     #[allow(clippy::too_many_arguments)]
     pub async fn run_inference_loop_filtered<F, Fut>(
         &mut self,
@@ -410,6 +413,7 @@ impl AgentEngine {
         max_iterations: usize,
         tool_filter: Option<&[String]>,
         tool_result_routing: Option<&ToolResultRoutingConfig>,
+        compaction_config: Option<&leviath_core::CompactionConfig>,
         tool_executor: &mut F,
     ) -> std::result::Result<InferenceResponse, ProviderError>
     where
@@ -523,12 +527,63 @@ impl AgentEngine {
                 }
             }
 
+            // After adding tool results, check if context needs eviction + compaction
+            if let Some(cc) = compaction_config {
+                match self.evict_and_compact(entity, cc).await {
+                    Ok(freed) if freed > 0 => {
+                        tracing::info!(iteration, tokens_freed = freed, "Auto-eviction during inference loop");
+                    }
+                    Err(e) => {
+                        tracing::warn!(iteration, error = %e, "Auto-eviction/compaction failed during inference loop");
+                    }
+                    _ => {}
+                }
+            }
+
             last_response = Some(response);
         }
 
         tracing::warn!(max_iterations, "Inference loop hit max iterations");
         last_response
             .ok_or_else(|| ProviderError::Other("No response generated".to_string()))
+    }
+
+    /// Check if the context window needs eviction, evict what can be evicted
+    /// synchronously, and then compact any regions that need LLM-based compaction.
+    ///
+    /// Returns the number of tokens freed (by eviction only; compaction clears
+    /// regions separately).
+    pub async fn evict_and_compact(
+        &mut self,
+        entity: Entity,
+        compaction_config: &leviath_core::CompactionConfig,
+    ) -> std::result::Result<usize, ProviderError> {
+        let eviction_result = {
+            let mut window = self
+                .world
+                .get_mut::<ContextWindow>(entity)
+                .ok_or_else(|| ProviderError::Other("No ContextWindow".to_string()))?;
+
+            if !window.needs_eviction(0.9) {
+                return Ok(0);
+            }
+
+            let target_free = window.max_tokens / 10;
+            window
+                .try_evict(target_free)
+                .map_err(|e| ProviderError::Other(e.to_string()))?
+        };
+
+        // Compact any regions that need it
+        for region_name in &eviction_result.needs_compaction {
+            self.compact_region(entity, region_name, compaction_config)
+                .await?;
+        }
+
+        // Remove NeedsCompaction marker if present (engine handled it)
+        self.world.entity_mut(entity).remove::<NeedsCompaction>();
+
+        Ok(eviction_result.tokens_freed)
     }
 
     /// Perform LLM-based compaction for a specific region.

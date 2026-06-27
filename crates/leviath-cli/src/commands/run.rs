@@ -2,6 +2,7 @@
 
 use clap::Args;
 use leviath_core::blueprint::{ModelConfig, StageMode, ToolResultRouting};
+use leviath_core::lifecycle::CompactionConfig;
 use leviath_core::{Blueprint, ContextLayout, Region, RegionKind, Stage};
 use leviath_core::layout::RegionDefinition;
 use leviath_runtime::{AgentEngine, AgentPool, ContextWindow, ProviderRegistry};
@@ -60,6 +61,10 @@ pub async fn execute(args: RunArgs) -> anyhow::Result<()> {
 
     // Initialize context window regions from blueprint layout
     initialize_context_window(&mut engine, entity, &blueprint, &args.task);
+
+    // Get compaction config from blueprint (or use default if blueprint has compacting regions)
+    let compaction_config = blueprint.compaction_config.clone();
+    let compaction_ref = compaction_config.as_ref();
 
     // Run through ALL stages sequentially
     let num_stages = blueprint.stages.len();
@@ -138,6 +143,7 @@ pub async fn execute(args: RunArgs) -> anyhow::Result<()> {
                     tool_filter_ref,
                     routing_ref,
                     points,
+                    compaction_ref,
                 )
                 .await?;
             }
@@ -150,6 +156,7 @@ pub async fn execute(args: RunArgs) -> anyhow::Result<()> {
                     max_iterations,
                     tool_filter_ref,
                     routing_ref,
+                    compaction_ref,
                 )
                 .await?;
             }
@@ -249,6 +256,7 @@ async fn run_interactive_stage(
 }
 
 /// Run an autonomous stage.
+#[allow(clippy::too_many_arguments)]
 async fn run_autonomous_stage(
     engine: &mut AgentEngine,
     entity: bevy_ecs::prelude::Entity,
@@ -257,6 +265,7 @@ async fn run_autonomous_stage(
     max_iterations: usize,
     tool_filter: Option<&[String]>,
     routing: Option<&leviath_runtime::ToolResultRoutingConfig>,
+    compaction_config: Option<&CompactionConfig>,
 ) -> anyhow::Result<()> {
     let response = engine
         .run_inference_loop_filtered(
@@ -267,6 +276,7 @@ async fn run_autonomous_stage(
             max_iterations,
             tool_filter,
             routing,
+            compaction_config,
             &mut |_tool_calls| async { Vec::new() },
         )
         .await;
@@ -297,9 +307,10 @@ async fn run_interactive_points_stage(
     tool_filter: Option<&[String]>,
     routing: Option<&leviath_runtime::ToolResultRoutingConfig>,
     points: &[leviath_core::blueprint::InteractionPoint],
+    compaction_config: Option<&CompactionConfig>,
 ) -> anyhow::Result<()> {
     if points.is_empty() {
-        return run_autonomous_stage(engine, entity, provider_name, model_name, max_iterations, tool_filter, routing).await;
+        return run_autonomous_stage(engine, entity, provider_name, model_name, max_iterations, tool_filter, routing, compaction_config).await;
     }
 
     // Divide iterations across interaction points
@@ -319,6 +330,7 @@ async fn run_interactive_points_stage(
                     iters,
                     tool_filter,
                     routing,
+                    compaction_config,
                     &mut |_tool_calls| async { Vec::new() },
                 )
                 .await;
@@ -380,6 +392,7 @@ async fn run_interactive_points_stage(
                 remaining_iterations,
                 tool_filter,
                 routing,
+                compaction_config,
                 &mut |_tool_calls| async { Vec::new() },
             )
             .await;
@@ -870,6 +883,29 @@ fn parse_manifest(content: &str) -> anyhow::Result<Blueprint> {
 
     let mut blueprint = Blueprint::new(name, description, stages, layout);
     blueprint.version = version;
+
+    // Parse optional [compaction] section
+    if let Some(compaction_table) = parsed.get("compaction").and_then(|v| v.as_table()) {
+        let mut cc = CompactionConfig::default();
+
+        if let Some(provider) = compaction_table.get("provider").and_then(|v| v.as_str()) {
+            cc.provider = provider.to_string();
+        }
+        if let Some(model) = compaction_table.get("model").and_then(|v| v.as_str()) {
+            cc.model = model.to_string();
+        }
+        if let Some(sp) = compaction_table.get("system_prompt").and_then(|v| v.as_str()) {
+            cc.system_prompt = Some(sp.to_string());
+        }
+        if let Some(mst) = compaction_table.get("max_summary_tokens").and_then(|v| v.as_integer()) {
+            cc.max_summary_tokens = mst as usize;
+        }
+        if let Some(temp) = compaction_table.get("temperature").and_then(|v| v.as_float()) {
+            cc.temperature = temp as f32;
+        }
+
+        blueprint.compaction_config = Some(cc);
+    }
 
     Ok(blueprint)
 }

@@ -80,8 +80,8 @@ fn test_eviction_cascade_temporary_then_compacting() {
     assert_eq!(window.current_tokens, 4500);
 
     // Evict with small target — should clear Clearable first
-    let freed = window.try_evict(1000).unwrap();
-    assert!(freed >= 1500);
+    let result = window.try_evict(1000).unwrap();
+    assert!(result.tokens_freed >= 1500);
 
     // Clearable should be empty
     assert_eq!(window.get_region("scratch").unwrap().current_tokens, 0);
@@ -193,4 +193,83 @@ fn test_context_window_add_to_region() {
 
     // Add content to non-existent region should fail
     assert!(window.add_to_region("nonexistent", "test".to_string(), 5).is_err());
+}
+
+#[test]
+fn test_eviction_result_needs_compaction_when_compacting_full() {
+    // Small window — compacting content nearly fills it
+    let mut window = ContextWindow::new(1500);
+
+    // Add a compacting region over its threshold
+    let mut compacting = Region::new(
+        "analysis".to_string(),
+        RegionKind::Compacting { threshold_tokens: 1000 },
+        1400,
+    );
+    compacting.add_entry("data block 1".to_string(), 600).unwrap();
+    compacting.add_entry("data block 2".to_string(), 600).unwrap();
+    window.add_region(compacting);
+
+    assert_eq!(window.current_tokens, 1200);
+
+    // Only 300 free, request 500 → can't free enough, should identify compacting region
+    let result = window.try_evict(500).unwrap();
+    assert_eq!(result.tokens_freed, 0);
+    assert_eq!(result.needs_compaction, vec!["analysis"]);
+}
+
+#[test]
+fn test_eviction_clears_then_identifies_compaction() {
+    // Small window so after clearing, still not enough free space
+    let mut window = ContextWindow::new(1800);
+
+    // Add clearable region
+    let mut clearable = Region::new("scratch".to_string(), RegionKind::Clearable, 1000);
+    clearable.add_entry("scratch stuff".to_string(), 400).unwrap();
+    window.add_region(clearable);
+
+    // Add compacting region over threshold
+    let mut compacting = Region::new(
+        "impl".to_string(),
+        RegionKind::Compacting { threshold_tokens: 800 },
+        1200,
+    );
+    compacting.add_entry("impl data".to_string(), 900).unwrap();
+    window.add_region(compacting);
+
+    assert_eq!(window.current_tokens, 1300);
+
+    // 500 free. Clear scratch → 900 free. Need 1000 → still short, should identify compacting.
+    let result = window.try_evict(1000).unwrap();
+
+    // Should have freed the clearable region
+    assert_eq!(result.tokens_freed, 400);
+    assert_eq!(window.get_region("scratch").unwrap().current_tokens, 0);
+
+    // And identified the compacting region for compaction
+    assert_eq!(result.needs_compaction, vec!["impl"]);
+}
+
+#[test]
+fn test_needs_compaction_component_in_ecs() {
+    use bevy_ecs::prelude::*;
+    use leviath_runtime::NeedsCompaction;
+
+    let mut world = World::new();
+    let entity = world.spawn_empty().id();
+
+    // Initially no NeedsCompaction
+    assert!(world.get::<NeedsCompaction>(entity).is_none());
+
+    // Add it
+    world.entity_mut(entity).insert(NeedsCompaction {
+        regions: vec!["analysis".to_string()],
+    });
+
+    let comp = world.get::<NeedsCompaction>(entity).unwrap();
+    assert_eq!(comp.regions, vec!["analysis"]);
+
+    // Remove it
+    world.entity_mut(entity).remove::<NeedsCompaction>();
+    assert!(world.get::<NeedsCompaction>(entity).is_none());
 }

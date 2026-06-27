@@ -14,8 +14,8 @@ pub mod systems;
 
 pub use engine::{AgentEngine, ProviderRegistry, ToolResultRoutingConfig};
 pub use components::{
-    AgentMessage, AgentState, AgentStatus, CancellationToken, ContextWindow, InferenceResult,
-    MessageInbox, TaskAssignment,
+    AgentMessage, AgentState, AgentStatus, CancellationToken, ContextWindow, EvictionResult,
+    InferenceResult, MessageInbox, NeedsCompaction, TaskAssignment,
 };
 pub use pool::AgentPool;
 pub use scheduler::TaskScheduler;

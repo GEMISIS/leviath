@@ -47,6 +47,25 @@ pub enum AgentStatus {
     Cancelled,
 }
 
+/// Result of an eviction attempt, including tokens freed and regions needing LLM compaction.
+#[derive(Debug, Clone)]
+pub struct EvictionResult {
+    /// Number of tokens freed by eviction phases 1-2 (Clearable + Temporary).
+    pub tokens_freed: usize,
+    /// Region names that need LLM-based compaction (phase 3).
+    pub needs_compaction: Vec<String>,
+}
+
+/// Marker component added by the eviction system when regions need async LLM compaction.
+///
+/// The inference loop or engine tick checks for this component and performs
+/// compaction asynchronously, since ECS systems are synchronous.
+#[derive(Component, Debug, Clone)]
+pub struct NeedsCompaction {
+    /// Region names that need compaction.
+    pub regions: Vec<String>,
+}
+
 /// Context window component storing the agent's memory regions.
 #[derive(Component, Debug, Clone)]
 pub struct ContextWindow {
@@ -109,18 +128,20 @@ impl ContextWindow {
     }
 
     /// Execute eviction cascade to free up space.
-    /// 
-    /// Returns the number of tokens freed, or an error if eviction failed.
-    pub fn try_evict(&mut self, target_free_tokens: usize) -> leviath_core::Result<usize> {
+    ///
+    /// Returns an `EvictionResult` with tokens freed and any regions that need
+    /// LLM-based compaction. The caller is responsible for performing compaction
+    /// on the listed regions (since it requires async LLM access).
+    pub fn try_evict(&mut self, target_free_tokens: usize) -> leviath_core::Result<EvictionResult> {
         use leviath_core::RegionKind;
 
         let initial_tokens = self.current_tokens;
-        
+
         // Check if we have any evictable regions
         let has_evictable = self.regions.iter().any(|r| {
             matches!(r.kind, RegionKind::Clearable | RegionKind::Temporary)
         });
-        
+
         if !has_evictable {
             tracing::warn!(
                 "Context window has no Clearable or Temporary regions. \
@@ -141,7 +162,10 @@ impl ContextWindow {
                 );
 
                 if self.max_tokens - self.current_tokens >= target_free_tokens {
-                    return Ok(initial_tokens - self.current_tokens);
+                    return Ok(EvictionResult {
+                        tokens_freed: initial_tokens - self.current_tokens,
+                        needs_compaction: Vec::new(),
+                    });
                 }
             }
         }
@@ -149,14 +173,14 @@ impl ContextWindow {
         // Phase 2: Evict from Temporary regions (oldest first, one at a time)
         loop {
             let mut evicted_any = false;
-            
+
             for region in &mut self.regions {
                 if matches!(region.kind, RegionKind::Temporary) {
                     if let Some(entry) = region.remove_oldest() {
                         let freed = entry.tokens;
                         self.current_tokens -= freed;
                         evicted_any = true;
-                        
+
                         tracing::debug!(
                             region = %region.name,
                             tokens_freed = freed,
@@ -164,46 +188,50 @@ impl ContextWindow {
                         );
 
                         if self.max_tokens - self.current_tokens >= target_free_tokens {
-                            return Ok(initial_tokens - self.current_tokens);
+                            return Ok(EvictionResult {
+                                tokens_freed: initial_tokens - self.current_tokens,
+                                needs_compaction: Vec::new(),
+                            });
                         }
                     }
                 }
             }
-            
+
             if !evicted_any {
                 break;
             }
         }
 
-        // Phase 3: Compact Compacting regions
-        // Note: This requires LLM access, which should be done by the caller
-        // For now, we just check if compaction is needed and return an error
-        for region in &self.regions {
-            if region.needs_compaction() {
-                return Err(leviath_core::Error::Other(
-                    format!("Region '{}' needs compaction but cannot be compacted without LLM provider", region.name)
-                ));
+        // Phase 3: If still need space, identify Compacting regions that need compaction
+        let mut needs_compaction = Vec::new();
+        if self.max_tokens - self.current_tokens < target_free_tokens {
+            for region in &self.regions {
+                if region.needs_compaction() {
+                    needs_compaction.push(region.name.clone());
+                }
             }
         }
 
         // Phase 4: SlidingWindow regions are NEVER reduced
         // Phase 5: Pinned and CompactHistory regions are NEVER touched
-        
-        // If we get here, we couldn't free enough space
+
+        // Check for pinned regions over budget
         let pinned_tokens: usize = self.regions.iter()
             .filter(|r| matches!(r.kind, RegionKind::Pinned | RegionKind::CompactHistory { .. }))
             .map(|r| r.current_tokens)
             .sum();
-        
+
         if pinned_tokens > self.max_tokens {
-            Err(leviath_core::Error::PinnedRegionsOverBudget {
+            return Err(leviath_core::Error::PinnedRegionsOverBudget {
                 pinned_tokens,
                 total_budget: self.max_tokens,
-            })
-        } else {
-            // We freed some tokens but not enough
-            Ok(initial_tokens - self.current_tokens)
+            });
         }
+
+        Ok(EvictionResult {
+            tokens_freed: initial_tokens - self.current_tokens,
+            needs_compaction,
+        })
     }
 
     /// Assemble structured messages from all regions for proper LLM API usage.
@@ -472,12 +500,13 @@ mod tests {
         region.add_entry("test content 1".to_string(), 1000).unwrap();
         region.add_entry("test content 2".to_string(), 1000).unwrap();
         window.add_region(region);
-        
+
         assert_eq!(window.current_tokens, 2000);
-        
+
         // Evict should clear the entire Clearable region
-        let freed = window.try_evict(1000).unwrap();
-        assert_eq!(freed, 2000);
+        let result = window.try_evict(1000).unwrap();
+        assert_eq!(result.tokens_freed, 2000);
+        assert!(result.needs_compaction.is_empty());
         assert_eq!(window.current_tokens, 0);
     }
 
@@ -489,13 +518,14 @@ mod tests {
         region.add_entry("middle content".to_string(), 1000).unwrap();
         region.add_entry("new content".to_string(), 1000).unwrap();
         window.add_region(region);
-        
+
         assert_eq!(window.current_tokens, 3000);
-        
+
         // Evict should remove oldest first
-        let freed = window.try_evict(500).unwrap();
-        assert!(freed >= 1000); // Should free at least one entry
-        
+        let result = window.try_evict(500).unwrap();
+        assert!(result.tokens_freed >= 1000); // Should free at least one entry
+        assert!(result.needs_compaction.is_empty());
+
         // Check that oldest was removed
         let region = window.get_region("temp").unwrap();
         assert_eq!(region.content.len(), 2);
@@ -667,6 +697,57 @@ mod tests {
         assert_eq!(msgs[0].content, "high");
         assert_eq!(msgs[1].content, "medium");
         assert_eq!(msgs[2].content, "low");
+    }
+
+    #[test]
+    fn test_eviction_result_identifies_compaction_regions() {
+        // Small window so compacting region fills most of it
+        let mut window = ContextWindow::new(1000);
+        // Add a compacting region that's over threshold
+        let mut compacting = Region::new(
+            "impl".to_string(),
+            RegionKind::Compacting { threshold_tokens: 500 },
+            900,
+        );
+        compacting.add_entry("lots of content".to_string(), 600).unwrap();
+        window.add_region(compacting);
+
+        assert_eq!(window.current_tokens, 600);
+
+        // Request 500 free tokens — only 400 free, can't free clearable/temporary, so compacting should be identified
+        let result = window.try_evict(500).unwrap();
+        assert_eq!(result.tokens_freed, 0);
+        assert_eq!(result.needs_compaction, vec!["impl".to_string()]);
+    }
+
+    #[test]
+    fn test_try_evict_returns_needs_compaction_when_full() {
+        let mut window = ContextWindow::new(1200);
+
+        // Fill with compacting region content above threshold
+        let mut compacting = Region::new(
+            "analysis".to_string(),
+            RegionKind::Compacting { threshold_tokens: 800 },
+            1100,
+        );
+        compacting.add_entry("data 1".to_string(), 500).unwrap();
+        compacting.add_entry("data 2".to_string(), 500).unwrap();
+        window.add_region(compacting);
+
+        // 200 free tokens, request 500 → needs compaction
+        let result = window.try_evict(500).unwrap();
+        assert_eq!(result.tokens_freed, 0);
+        assert!(result.needs_compaction.contains(&"analysis".to_string()));
+    }
+
+    #[test]
+    fn test_needs_compaction_component() {
+        let comp = NeedsCompaction {
+            regions: vec!["impl".to_string(), "analysis".to_string()],
+        };
+        assert_eq!(comp.regions.len(), 2);
+        assert_eq!(comp.regions[0], "impl");
+        assert_eq!(comp.regions[1], "analysis");
     }
 
     #[test]

@@ -6,22 +6,25 @@
 //! - Tool execution: running tools and updating context with results
 
 use bevy_ecs::prelude::*;
-use crate::components::{AgentState, AgentStatus, ContextWindow, MessageInbox, TaskAssignment};
+use crate::components::{AgentState, AgentStatus, ContextWindow, MessageInbox, NeedsCompaction, TaskAssignment};
 
 /// System that manages context window state.
 ///
 /// Monitors token usage and triggers eviction when needed.
+/// If eviction identifies regions needing LLM compaction, adds a
+/// `NeedsCompaction` component so the async engine can handle it.
 pub fn context_management_system(
-    mut query: Query<(&AgentState, &mut ContextWindow)>,
+    mut commands: Commands,
+    mut query: Query<(Entity, &AgentState, &mut ContextWindow)>,
 ) {
-    for (_state, mut window) in query.iter_mut() {
+    for (entity, state, mut window) in query.iter_mut() {
         // Update current token count
         window.current_tokens = window.calculate_tokens();
 
         // Check if eviction is needed
         if window.needs_eviction(0.9) {
             tracing::debug!(
-                agent_id = %_state.agent_id,
+                agent_id = %state.agent_id,
                 tokens = window.current_tokens,
                 max_tokens = window.max_tokens,
                 "Context window needs eviction"
@@ -29,16 +32,28 @@ pub fn context_management_system(
 
             let target_free = window.max_tokens / 10; // Free up 10%
             match window.try_evict(target_free) {
-                Ok(freed) => {
-                    tracing::info!(
-                        agent_id = %_state.agent_id,
-                        tokens_freed = freed,
-                        "Eviction cascade freed tokens"
-                    );
+                Ok(result) => {
+                    if result.tokens_freed > 0 {
+                        tracing::info!(
+                            agent_id = %state.agent_id,
+                            tokens_freed = result.tokens_freed,
+                            "Eviction cascade freed tokens"
+                        );
+                    }
+                    if !result.needs_compaction.is_empty() {
+                        tracing::info!(
+                            agent_id = %state.agent_id,
+                            regions = ?result.needs_compaction,
+                            "Regions need LLM compaction"
+                        );
+                        commands.entity(entity).insert(NeedsCompaction {
+                            regions: result.needs_compaction,
+                        });
+                    }
                 }
                 Err(e) => {
                     tracing::warn!(
-                        agent_id = %_state.agent_id,
+                        agent_id = %state.agent_id,
                         error = %e,
                         "Eviction cascade incomplete"
                     );
@@ -79,13 +94,17 @@ pub fn inference_system(
 /// Implements the eviction cascade:
 /// 1. Clearable regions → clear entirely
 /// 2. Temporary regions → evict oldest
-/// 3. Compacting regions → summarize (needs LLM)
+/// 3. Compacting regions → identified for async LLM compaction
 /// 4. SlidingWindow regions → never reduced
 /// 5. Pinned regions → never touched
+///
+/// When compacting regions are identified, adds a `NeedsCompaction` component
+/// so the async engine or inference loop can perform compaction.
 pub fn eviction_system(
-    mut query: Query<(&AgentState, &mut ContextWindow)>,
+    mut commands: Commands,
+    mut query: Query<(Entity, &AgentState, &mut ContextWindow)>,
 ) {
-    for (state, mut window) in query.iter_mut() {
+    for (entity, state, mut window) in query.iter_mut() {
         if !window.needs_eviction(0.95) {
             continue;
         }
@@ -99,18 +118,30 @@ pub fn eviction_system(
 
         let target_free = window.max_tokens / 5; // Free up 20%
         match window.try_evict(target_free) {
-            Ok(freed) => {
-                tracing::info!(
-                    agent_id = %state.agent_id,
-                    tokens_freed = freed,
-                    "Eviction freed tokens"
-                );
+            Ok(result) => {
+                if result.tokens_freed > 0 {
+                    tracing::info!(
+                        agent_id = %state.agent_id,
+                        tokens_freed = result.tokens_freed,
+                        "Eviction freed tokens"
+                    );
+                }
+                if !result.needs_compaction.is_empty() {
+                    tracing::info!(
+                        agent_id = %state.agent_id,
+                        regions = ?result.needs_compaction,
+                        "Regions need LLM compaction (eviction system)"
+                    );
+                    commands.entity(entity).insert(NeedsCompaction {
+                        regions: result.needs_compaction,
+                    });
+                }
             }
             Err(e) => {
                 tracing::warn!(
                     agent_id = %state.agent_id,
                     error = %e,
-                    "Eviction failed — may need compaction"
+                    "Eviction failed"
                 );
             }
         }
