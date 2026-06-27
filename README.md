@@ -18,7 +18,30 @@ lev init my-agent && cd my-agent
 lev run --task "Explain how CPU cache hierarchies work"
 ```
 
-That's it. Your agent is defined in `agent.leviath` — edit it to change models, add stages, or configure memory regions. No Rust code needed.
+Or run one of the pre-built agents:
+
+```bash
+# Run the multi-stage coding agent (analyze → implement → review)
+lev run agents/coder --task "Build a CLI tool that converts CSV to JSON"
+
+# Run the research agent (gather → analyze → summarize)
+lev run agents/researcher --task "Compare spiking neural networks vs transformers"
+```
+
+Managing multiple agents at once:
+
+```bash
+# Launch the interactive dashboard
+lev dashboard agents/coder --task "Refactor the auth module"
+
+# Inside the dashboard:
+#   [n] to spawn more agents
+#   [↑↓] to select an agent
+#   [Enter] to respond when an agent is waiting for input
+#   [c] to cancel, [k] to kill, [q] to quit
+```
+
+Your agent is defined in `agent.leviath` — edit it to change models, add stages, or configure memory regions. No Rust code needed.
 
 ## The Problem
 
