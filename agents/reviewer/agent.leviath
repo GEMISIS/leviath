@@ -1,0 +1,26 @@
+[agent]
+name = "reviewer"
+version = "0.1.0"
+description = "Code review agent with focus on quality, security, and best practices"
+
+[stages.scan]
+mode = "autonomous"
+model = { provider = "anthropic", model = "claude-sonnet-4-5" }
+description = "Initial scan for obvious issues"
+
+[stages.deep_review]
+mode = "autonomous"
+model = { provider = "anthropic", model = "claude-opus-4-5" }
+description = "In-depth analysis of code quality, security, and architecture"
+
+[stages.report]
+mode = "autonomous"
+model = { provider = "anthropic", model = "claude-sonnet-4-5" }
+description = "Generate actionable review report"
+
+[context.regions]
+guidelines = { kind = "pinned", max_tokens = 3000 }
+diff = { kind = "pinned", max_tokens = 20000 }
+findings = { kind = "temporary", max_tokens = 25000 }
+analysis = { kind = "sliding_window", max_items = 15, max_tokens = 20000 }
+report = { kind = "clearable", max_tokens = 8000 }

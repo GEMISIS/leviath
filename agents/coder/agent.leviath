@@ -1,0 +1,28 @@
+[agent]
+name = "coder"
+version = "0.1.0"
+description = "Multi-stage coding agent with structured context"
+
+[stages.analyze]
+mode = "autonomous"
+model = { provider = "anthropic", model = "claude-sonnet-4-5" }
+description = "Understand requirements and plan implementation"
+
+[stages.implement]
+mode = "autonomous"
+model = { provider = "anthropic", model = "claude-sonnet-4-5" }
+description = "Write code according to the plan"
+
+[stages.review]
+mode = "interactive"
+model = { provider = "anthropic", model = "claude-opus-4-5" }
+description = "Review code before finalizing (requires human approval)"
+
+[context.regions]
+architecture = { kind = "pinned", max_tokens = 4000 }
+task = { kind = "pinned", max_tokens = 2000 }
+codebase = { kind = "temporary", max_tokens = 30000 }
+conversation = { kind = "sliding_window", max_items = 20, max_tokens = 15000 }
+implementation = { kind = "compacting", threshold_tokens = 25000, max_tokens = 40000 }
+history = { kind = "compact_history", source_region = "implementation", max_tokens = 8000 }
+scratch = { kind = "clearable", max_tokens = 10000 }

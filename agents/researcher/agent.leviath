@@ -1,0 +1,26 @@
+[agent]
+name = "researcher"
+version = "0.1.0"
+description = "Research assistant for gathering and synthesizing information"
+
+[stages.gather]
+mode = "autonomous"
+model = { provider = "anthropic", model = "claude-sonnet-4-5" }
+description = "Gather relevant information on the topic"
+
+[stages.analyze]
+mode = "autonomous"
+model = { provider = "anthropic", model = "claude-opus-4-5" }
+description = "Analyze and synthesize findings"
+
+[stages.summarize]
+mode = "autonomous"
+model = { provider = "anthropic", model = "claude-sonnet-4-5" }
+description = "Create a concise summary"
+
+[context.regions]
+query = { kind = "pinned", max_tokens = 1000 }
+findings = { kind = "temporary", max_tokens = 40000 }
+analysis = { kind = "compacting", threshold_tokens = 30000, max_tokens = 50000 }
+summary = { kind = "compact_history", source_region = "analysis", max_tokens = 10000 }
+scratch = { kind = "clearable", max_tokens = 5000 }
