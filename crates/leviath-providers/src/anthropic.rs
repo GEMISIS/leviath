@@ -1,13 +1,14 @@
 //! Anthropic Claude provider implementation.
 
 use crate::provider::{
-    FinishReason, InferenceRequest, InferenceResponse, Provider, ProviderConfig, ProviderError,
-    Result, StreamChunk, ToolCallDelta, TokenUsage, ToolCall,
+    FinishReason, InferenceRequest, InferenceResponse, ModelCapabilities, ModelInfo, Provider,
+    ProviderConfig, ProviderError, Result, StreamChunk, ToolCallDelta, TokenUsage, ToolCall,
 };
 use crate::rate_limit::RateLimiter;
 use async_trait::async_trait;
 use futures_core::Stream;
 use reqwest::Client;
+use std::collections::HashMap;
 use std::pin::Pin;
 
 /// Anthropic Claude provider.
@@ -23,6 +24,9 @@ pub struct AnthropicProvider {
 
     /// Rate limiter
     rate_limiter: Option<RateLimiter>,
+
+    /// Per-model capability overrides
+    capability_overrides: HashMap<String, ModelCapabilities>,
 }
 
 impl AnthropicProvider {
@@ -33,6 +37,7 @@ impl AnthropicProvider {
             api_key,
             base_url: "https://api.anthropic.com/v1".to_string(),
             rate_limiter: None,
+            capability_overrides: HashMap::new(),
         }
     }
 
@@ -46,6 +51,46 @@ impl AnthropicProvider {
                 .base_url
                 .unwrap_or_else(|| "https://api.anthropic.com/v1".to_string()),
             rate_limiter,
+            capability_overrides: HashMap::new(),
+        }
+    }
+
+    /// Create a new Anthropic provider with per-model capability overrides.
+    pub fn with_overrides(api_key: String, overrides: HashMap<String, ModelCapabilities>) -> Self {
+        Self {
+            client: Client::new(),
+            api_key,
+            base_url: "https://api.anthropic.com/v1".to_string(),
+            rate_limiter: None,
+            capability_overrides: overrides,
+        }
+    }
+
+    /// Return built-in capabilities for a model based on its name pattern.
+    fn builtin_capabilities(&self, model: &str) -> ModelCapabilities {
+        if model.contains("claude-opus-4")
+            || model.contains("claude-sonnet-4")
+            || model.contains("claude-haiku-4")
+        {
+            ModelCapabilities {
+                supports_temperature: false,
+                supports_streaming: true,
+                supports_tools: true,
+                supports_system_prompt: true,
+                max_context_tokens: 200_000,
+                max_output_tokens: 32_768,
+            }
+        } else if model.contains("claude-3-5") || model.contains("claude-3") {
+            ModelCapabilities {
+                supports_temperature: true,
+                supports_streaming: true,
+                supports_tools: true,
+                supports_system_prompt: true,
+                max_context_tokens: 200_000,
+                max_output_tokens: 8192,
+            }
+        } else {
+            ModelCapabilities::default()
         }
     }
 
@@ -70,22 +115,19 @@ impl AnthropicProvider {
             }
         }
 
-        // claude-4.x and newer models have deprecated the temperature parameter.
-        let omit_temperature = request.model.contains("claude-sonnet-4")
-            || request.model.contains("claude-opus-4")
-            || request.model.contains("claude-haiku-4");
+        let caps = self.capabilities(&request.model);
 
-        let mut body = if omit_temperature {
+        let mut body = if caps.supports_temperature {
             serde_json::json!({
                 "model": request.model,
                 "max_tokens": request.max_tokens,
+                "temperature": request.temperature,
                 "messages": messages,
             })
         } else {
             serde_json::json!({
                 "model": request.model,
                 "max_tokens": request.max_tokens,
-                "temperature": request.temperature,
                 "messages": messages,
             })
         };
@@ -341,6 +383,67 @@ impl Provider for AnthropicProvider {
 
     fn name(&self) -> &str {
         "anthropic"
+    }
+
+    fn capabilities(&self, model: &str) -> ModelCapabilities {
+        if let Some(overridden) = self.capability_overrides.get(model) {
+            overridden.clone()
+        } else {
+            self.builtin_capabilities(model)
+        }
+    }
+
+    async fn list_models(&self) -> Result<Vec<ModelInfo>> {
+        let response = self
+            .client
+            .get(format!("{}/models", self.base_url))
+            .header("x-api-key", &self.api_key)
+            .header("anthropic-version", "2023-06-01")
+            .send()
+            .await
+            .map_err(|e| ProviderError::RequestFailed(e.to_string()))?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let error_body = response
+                .text()
+                .await
+                .unwrap_or_else(|_| "unknown error".to_string());
+            return Err(ProviderError::RequestFailed(format!(
+                "HTTP {}: {}",
+                status, error_body
+            )));
+        }
+
+        let body: serde_json::Value = response
+            .json()
+            .await
+            .map_err(|e| ProviderError::RequestFailed(e.to_string()))?;
+
+        let data = body
+            .get("data")
+            .and_then(|d| d.as_array())
+            .ok_or_else(|| ProviderError::RequestFailed("missing 'data' field in /models response".to_string()))?;
+
+        let models = data
+            .iter()
+            .filter_map(|entry| {
+                let id = entry.get("id").and_then(|v| v.as_str())?.to_string();
+                let display_name = entry
+                    .get("display_name")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string());
+                let capabilities = self.capabilities(&id);
+                Some(ModelInfo {
+                    id,
+                    display_name,
+                    provider: "anthropic".to_string(),
+                    capabilities,
+                })
+            })
+            .collect();
+
+        Ok(models)
     }
 }
 
@@ -642,5 +745,44 @@ mod tests {
         assert_eq!(response.tool_calls.len(), 1);
         assert_eq!(response.tool_calls[0].name, "search");
         assert!(matches!(response.finish_reason, FinishReason::ToolCall));
+    }
+
+    #[test]
+    fn test_builtin_capabilities_claude4() {
+        let provider = AnthropicProvider::new("test-key".to_string());
+        let caps = provider.builtin_capabilities("claude-sonnet-4-20250514");
+        assert!(!caps.supports_temperature);
+        assert!(caps.supports_streaming);
+        assert!(caps.supports_tools);
+        assert_eq!(caps.max_output_tokens, 32_768);
+    }
+
+    #[test]
+    fn test_builtin_capabilities_claude3() {
+        let provider = AnthropicProvider::new("test-key".to_string());
+        let caps = provider.builtin_capabilities("claude-3-5-sonnet-20241022");
+        assert!(caps.supports_temperature);
+        assert_eq!(caps.max_output_tokens, 8192);
+    }
+
+    #[test]
+    fn test_capability_overrides() {
+        let mut overrides = HashMap::new();
+        overrides.insert(
+            "claude-sonnet-4-20250514".to_string(),
+            ModelCapabilities {
+                supports_temperature: true,
+                supports_streaming: true,
+                supports_tools: true,
+                supports_system_prompt: true,
+                max_context_tokens: 200_000,
+                max_output_tokens: 16_384,
+            },
+        );
+        let provider = AnthropicProvider::with_overrides("test-key".to_string(), overrides);
+        let caps = provider.capabilities("claude-sonnet-4-20250514");
+        // Override should take precedence over built-in (which would be false)
+        assert!(caps.supports_temperature);
+        assert_eq!(caps.max_output_tokens, 16_384);
     }
 }

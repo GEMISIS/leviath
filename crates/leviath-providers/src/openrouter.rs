@@ -5,13 +5,14 @@
 
 use crate::openai::OpenAiSseStream;
 use crate::provider::{
-    FinishReason, InferenceRequest, InferenceResponse, Provider, ProviderConfig, ProviderError,
-    Result, StreamChunk, TokenUsage, ToolCall,
+    FinishReason, InferenceRequest, InferenceResponse, ModelCapabilities, ModelInfo, Provider,
+    ProviderConfig, ProviderError, Result, StreamChunk, TokenUsage, ToolCall,
 };
 use crate::rate_limit::RateLimiter;
 use async_trait::async_trait;
 use futures_core::Stream;
 use reqwest::Client;
+use std::collections::HashMap;
 use std::pin::Pin;
 
 /// OpenRouter provider.
@@ -27,6 +28,9 @@ pub struct OpenRouterProvider {
 
     /// Rate limiter
     rate_limiter: Option<RateLimiter>,
+
+    /// Per-model capability overrides
+    capability_overrides: HashMap<String, ModelCapabilities>,
 }
 
 impl OpenRouterProvider {
@@ -37,6 +41,7 @@ impl OpenRouterProvider {
             api_key,
             base_url: "https://openrouter.ai/api/v1".to_string(),
             rate_limiter: None,
+            capability_overrides: HashMap::new(),
         }
     }
 
@@ -50,6 +55,18 @@ impl OpenRouterProvider {
                 .base_url
                 .unwrap_or_else(|| "https://openrouter.ai/api/v1".to_string()),
             rate_limiter,
+            capability_overrides: HashMap::new(),
+        }
+    }
+
+    /// Create a new OpenRouter provider with per-model capability overrides.
+    pub fn with_overrides(api_key: String, overrides: HashMap<String, ModelCapabilities>) -> Self {
+        Self {
+            client: Client::new(),
+            api_key,
+            base_url: "https://openrouter.ai/api/v1".to_string(),
+            rate_limiter: None,
+            capability_overrides: overrides,
         }
     }
 
@@ -314,6 +331,97 @@ impl Provider for OpenRouterProvider {
 
     fn name(&self) -> &str {
         "openrouter"
+    }
+
+    fn capabilities(&self, model: &str) -> ModelCapabilities {
+        // Check per-model overrides first
+        if let Some(overrides) = self.capability_overrides.get(model) {
+            return overrides.clone();
+        }
+
+        // Default capabilities for all OpenRouter models (pass-through aggregator)
+        let supports_temperature = !model.starts_with("anthropic/claude-opus-4")
+            && !model.starts_with("anthropic/claude-sonnet-4")
+            && !model.starts_with("anthropic/claude-haiku-4");
+
+        ModelCapabilities {
+            supports_temperature,
+            supports_streaming: true,
+            supports_tools: true,
+            supports_system_prompt: true,
+            max_context_tokens: 128_000,
+            max_output_tokens: 8192,
+        }
+    }
+
+    async fn list_models(&self) -> Result<Vec<ModelInfo>> {
+        let response = self
+            .client
+            .get(format!("{}/models", self.base_url))
+            .header("Authorization", format!("Bearer {}", self.api_key))
+            .send()
+            .await
+            .map_err(|e| ProviderError::RequestFailed(e.to_string()))?;
+
+        let status = response.status();
+        if !status.is_success() {
+            let error_body = response
+                .text()
+                .await
+                .unwrap_or_else(|_| "unknown error".to_string());
+            return Err(ProviderError::ApiError(format!(
+                "HTTP {}: {}",
+                status, error_body
+            )));
+        }
+
+        let body: serde_json::Value = response
+            .json()
+            .await
+            .map_err(|e| ProviderError::InvalidResponse(e.to_string()))?;
+
+        let data = body
+            .get("data")
+            .and_then(|d| d.as_array())
+            .ok_or_else(|| ProviderError::InvalidResponse("Missing 'data' array".to_string()))?;
+
+        let mut models = Vec::with_capacity(data.len());
+        for entry in data {
+            let id = entry
+                .get("id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let name = entry
+                .get("name")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+            let context_length = entry
+                .get("context_length")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(128_000) as usize;
+            let max_completion_tokens = entry
+                .get("top_provider")
+                .and_then(|tp| tp.get("max_completion_tokens"))
+                .and_then(|v| v.as_u64())
+                .map(|v| v as usize);
+
+            let base_caps = self.capabilities(&id);
+            let capabilities = ModelCapabilities {
+                max_context_tokens: context_length,
+                max_output_tokens: max_completion_tokens.unwrap_or(8192),
+                ..base_caps
+            };
+
+            models.push(ModelInfo {
+                id,
+                display_name: name,
+                provider: "openrouter".into(),
+                capabilities,
+            });
+        }
+
+        Ok(models)
     }
 }
 

@@ -21,7 +21,7 @@ pub mod tokenizer;
 pub use provider::{
     Provider, InferenceRequest, InferenceResponse, Message, Tool, ToolCall,
     TokenUsage, FinishReason, ProviderError, Result, StreamChunk, ToolCallDelta,
-    ProviderConfig, RateLimitConfig,
+    ProviderConfig, RateLimitConfig, ModelCapabilities, ModelInfo,
 };
 pub use rate_limit::RateLimiter;
 pub use anthropic::AnthropicProvider;

@@ -60,6 +60,9 @@ enum Commands {
     /// Stop a background run
     Stop(commands::stop::StopArgs),
 
+    /// List and inspect available models
+    Models(commands::models::ModelsArgs),
+
     /// (Internal) Background worker process — do not call directly
     #[command(name = "__run-worker", hide = true)]
     RunWorker(commands::run::WorkerArgs),
@@ -91,6 +94,7 @@ async fn main() -> anyhow::Result<()> {
         Commands::Ps(args) => commands::ps::execute(args).await,
         Commands::Logs(args) => commands::logs::execute(args).await,
         Commands::Stop(args) => commands::stop::execute(args).await,
+        Commands::Models(args) => commands::models::execute(args).await,
         Commands::RunWorker(args) => commands::run::execute_worker(args).await,
     }
 }

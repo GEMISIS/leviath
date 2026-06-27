@@ -1,7 +1,9 @@
 //! CLI configuration management.
 
 use leviath_mcp::MCPServerConfig;
+use leviath_providers::ModelCapabilities;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 /// CLI configuration.
@@ -31,6 +33,11 @@ pub struct Config {
 
     /// Default model override
     pub default_model: Option<String>,
+
+    /// Per-model capability overrides. Key is model ID (e.g. "my-local-llama").
+    /// Takes precedence over the provider's built-in capability table.
+    #[serde(default)]
+    pub model_capabilities: HashMap<String, ModelCapabilities>,
 }
 
 /// Provider configuration.
@@ -57,6 +64,7 @@ impl Default for Config {
             ollama_base_url: None,
             mcp_servers: Vec::new(),
             default_model: None,
+            model_capabilities: HashMap::new(),
         }
     }
 }

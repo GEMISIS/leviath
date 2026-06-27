@@ -3,12 +3,13 @@
 //! Ollama provides local LLM execution via NDJSON streaming.
 
 use crate::provider::{
-    FinishReason, InferenceRequest, InferenceResponse, Provider, ProviderError, Result,
-    StreamChunk, TokenUsage,
+    FinishReason, InferenceRequest, InferenceResponse, ModelCapabilities, ModelInfo, Provider,
+    ProviderError, Result, StreamChunk, TokenUsage,
 };
 use async_trait::async_trait;
 use futures_core::Stream;
 use reqwest::Client;
+use std::collections::HashMap;
 use std::pin::Pin;
 
 /// Ollama provider for local LLM execution.
@@ -18,6 +19,9 @@ pub struct OllamaProvider {
 
     /// API base URL (defaults to local)
     base_url: String,
+
+    /// Per-model capability overrides
+    capability_overrides: HashMap<String, ModelCapabilities>,
 }
 
 impl OllamaProvider {
@@ -26,6 +30,7 @@ impl OllamaProvider {
         Self {
             client: Client::new(),
             base_url: "http://localhost:11434".to_string(),
+            capability_overrides: HashMap::new(),
         }
     }
 
@@ -37,6 +42,19 @@ impl OllamaProvider {
         Self {
             client: Client::new(),
             base_url,
+            capability_overrides: HashMap::new(),
+        }
+    }
+
+    /// Create a new Ollama provider with a custom base URL and per-model capability overrides.
+    pub fn with_overrides(base_url: String, overrides: HashMap<String, ModelCapabilities>) -> Self {
+        if !base_url.starts_with("http://") && !base_url.starts_with("https://") {
+            tracing::warn!(url = %base_url, "Ollama base URL should start with http:// or https://");
+        }
+        Self {
+            client: Client::new(),
+            base_url,
+            capability_overrides: overrides,
         }
     }
 
@@ -235,6 +253,68 @@ impl Provider for OllamaProvider {
 
     fn name(&self) -> &str {
         "ollama"
+    }
+
+    fn capabilities(&self, model: &str) -> ModelCapabilities {
+        if let Some(overridden) = self.capability_overrides.get(model) {
+            return overridden.clone();
+        }
+        ModelCapabilities {
+            supports_temperature: true,
+            supports_streaming: true,
+            supports_tools: false,
+            supports_system_prompt: true,
+            max_context_tokens: 8192,
+            max_output_tokens: 4096,
+        }
+    }
+
+    async fn list_models(&self) -> Result<Vec<ModelInfo>> {
+        let response = self
+            .client
+            .get(format!("{}/api/tags", self.base_url))
+            .send()
+            .await
+            .map_err(|e| ProviderError::RequestFailed(e.to_string()))?;
+
+        let status = response.status();
+        if !status.is_success() {
+            let error_body = response
+                .text()
+                .await
+                .unwrap_or_else(|_| "unknown error".to_string());
+            return Err(ProviderError::RequestFailed(format!(
+                "HTTP {}: {}",
+                status, error_body
+            )));
+        }
+
+        let body: serde_json::Value = response
+            .json()
+            .await
+            .map_err(|e| ProviderError::InvalidResponse(e.to_string()))?;
+
+        let models = body
+            .get("models")
+            .and_then(|m| m.as_array())
+            .map(|entries| {
+                entries
+                    .iter()
+                    .filter_map(|entry| {
+                        let id = entry.get("name")?.as_str()?.to_string();
+                        let capabilities = self.capabilities(&id);
+                        Some(ModelInfo {
+                            display_name: Some(id.clone()),
+                            provider: "ollama".into(),
+                            capabilities,
+                            id,
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        Ok(models)
     }
 }
 

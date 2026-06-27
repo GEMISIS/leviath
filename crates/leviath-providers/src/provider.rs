@@ -37,6 +37,57 @@ pub enum ProviderError {
     Other(String),
 }
 
+/// Capabilities supported by a model.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModelCapabilities {
+    /// Whether the model supports temperature sampling
+    pub supports_temperature: bool,
+
+    /// Whether the model supports streaming responses
+    pub supports_streaming: bool,
+
+    /// Whether the model supports tool/function calling
+    pub supports_tools: bool,
+
+    /// Whether the model supports a system prompt
+    pub supports_system_prompt: bool,
+
+    /// Maximum number of context (input) tokens
+    pub max_context_tokens: usize,
+
+    /// Maximum number of output tokens
+    pub max_output_tokens: usize,
+}
+
+impl Default for ModelCapabilities {
+    fn default() -> Self {
+        Self {
+            supports_temperature: true,
+            supports_streaming: true,
+            supports_tools: true,
+            supports_system_prompt: true,
+            max_context_tokens: 8192,
+            max_output_tokens: 4096,
+        }
+    }
+}
+
+/// Information about a model offered by a provider.
+#[derive(Debug, Clone)]
+pub struct ModelInfo {
+    /// Model identifier used in API requests
+    pub id: String,
+
+    /// Human-readable name for the model
+    pub display_name: Option<String>,
+
+    /// Name of the provider that owns this model
+    pub provider: String,
+
+    /// Capabilities of this model
+    pub capabilities: ModelCapabilities,
+}
+
 /// Request for LLM inference.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InferenceRequest {
@@ -237,6 +288,17 @@ pub trait Provider: Send + Sync {
 
     /// Get the provider name.
     fn name(&self) -> &str;
+
+    /// Get the capabilities of the given model.
+    fn capabilities(&self, model: &str) -> ModelCapabilities;
+
+    /// List models available from this provider.
+    ///
+    /// Returns an empty list by default; providers may override to enumerate
+    /// their available models.
+    async fn list_models(&self) -> Result<Vec<ModelInfo>> {
+        Ok(Vec::new())
+    }
 }
 
 // Helper module for single-item streams
@@ -261,4 +323,3 @@ mod stream_once {
         Once { item: Some(item) }
     }
 }
-

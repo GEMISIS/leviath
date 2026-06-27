@@ -979,21 +979,21 @@ pub fn build_provider_registry(config: &Config) -> ProviderRegistry {
     if let Some(ref key) = config.providers.anthropic_api_key {
         registry.register(
             "anthropic".to_string(),
-            Arc::new(leviath_providers::AnthropicProvider::new(key.clone())),
+            Arc::new(leviath_providers::AnthropicProvider::with_overrides(key.clone(), config.model_capabilities.clone())),
         );
     }
 
     if let Some(ref key) = config.providers.openai_api_key {
         registry.register(
             "openai".to_string(),
-            Arc::new(leviath_providers::OpenAIProvider::new(key.clone())),
+            Arc::new(leviath_providers::OpenAIProvider::with_overrides(key.clone(), config.model_capabilities.clone())),
         );
     }
 
     if let Some(ref key) = config.openrouter_api_key {
         registry.register(
             "openrouter".to_string(),
-            Arc::new(leviath_providers::OpenRouterProvider::new(key.clone())),
+            Arc::new(leviath_providers::OpenRouterProvider::with_overrides(key.clone(), config.model_capabilities.clone())),
         );
     }
 
@@ -1003,8 +1003,9 @@ pub fn build_provider_registry(config: &Config) -> ProviderRegistry {
         .unwrap_or("http://localhost:11434");
     registry.register(
         "ollama".to_string(),
-        Arc::new(leviath_providers::OllamaProvider::with_base_url(
+        Arc::new(leviath_providers::OllamaProvider::with_overrides(
             ollama_url.to_string(),
+            config.model_capabilities.clone(),
         )),
     );
 

@@ -6,6 +6,7 @@ pub mod init;
 pub mod install;
 pub mod list;
 pub mod logs;
+pub mod models;
 pub mod pack;
 pub mod ps;
 pub mod run;
