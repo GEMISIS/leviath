@@ -4,92 +4,124 @@
 
 Leviath gives LLM agents structured, tiered memory instead of flat conversation arrays. Inspired by hardware memory architectures — think CPU cache hierarchies, not chat logs — it provides explicit control over what stays in context, what gets summarized, and what gets evicted when memory fills up.
 
-## Why Leviath?
+## The Problem
 
-Every LLM agent framework today manages context the same way: a flat array of messages with uniform compaction when it gets too long. This is like running a computer with no memory hierarchy — just one big pool that gets randomly wiped when full.
+Every LLM agent framework manages context the same way: a flat array of messages with uniform compaction when it gets too long. This is like running a computer with one big memory pool that gets randomly wiped when full.
 
-Leviath replaces this with **typed memory regions**, each with its own lifecycle policy:
+Leviath replaces this with **typed memory regions**, each with its own lifecycle:
 
-| Region Type | Behavior | Use Case |
-|---|---|---|
-| **Pinned** | Never evicted | System prompts, architecture docs |
-| **SlidingWindow** | Keeps last N entries | Conversation history |
-| **Temporary** | First to be evicted | Tool outputs, file contents |
-| **Clearable** | Cleared entirely when space needed | Scratch space |
-| **Compacting** | LLM-summarized when full | Long-running context |
-| **CompactHistory** | Stores compaction summaries | Compressed knowledge |
+```mermaid
+graph LR
+    subgraph Context Window
+        P[🔒 Pinned<br><i>Never evicted</i>]
+        SW[📜 SlidingWindow<br><i>Last N entries</i>]
+        T[📎 Temporary<br><i>First evicted</i>]
+        CL[🧹 Clearable<br><i>Wiped when needed</i>]
+        CO[📦 Compacting<br><i>LLM-summarized</i>]
+        CH[🗂️ CompactHistory<br><i>Stored summaries</i>]
+    end
 
-The eviction cascade is deterministic: **Clearable → Temporary → Compacting → error**. Pinned and SlidingWindow regions are never touched.
+    CO -- summarizes into --> CH
+
+    style P fill:#4a9eff,color:#fff
+    style SW fill:#22c55e,color:#fff
+    style T fill:#f59e0b,color:#fff
+    style CL fill:#ef4444,color:#fff
+    style CO fill:#8b5cf6,color:#fff
+    style CH fill:#6366f1,color:#fff
+```
+
+When context fills up, eviction is deterministic:
+
+```mermaid
+flowchart LR
+    Full[Context Full] --> CL[Clear<br>Clearable]
+    CL -->|still full| T[Evict oldest<br>Temporary]
+    T -->|still full| CO[Compact via LLM<br>Compacting → History]
+    CO -->|still full| ERR[Error<br>Can't free more]
+
+    P[Pinned] -.-x|NEVER| ERR
+    SW[SlidingWindow] -.-x|NEVER| ERR
+
+    style CL fill:#ef4444,color:#fff
+    style T fill:#f59e0b,color:#fff
+    style CO fill:#8b5cf6,color:#fff
+    style ERR fill:#991b1b,color:#fff
+    style P fill:#4a9eff,color:#fff
+    style SW fill:#22c55e,color:#fff
+```
 
 ## Quick Start
 
-### Install
-
 ```bash
-# From source
+# Install
 git clone https://github.com/GEMISIS/leviath.git
 cd leviath
 cargo install --path crates/leviath-cli
+
+# Set your API key
+export ANTHROPIC_API_KEY="sk-ant-..."
+
+# Create and run an agent
+lev init my-agent
+cd my-agent
+lev run --task "Explain how memory hierarchies work"
 ```
 
-### Configure API Keys
+Other supported key sources: `OPENAI_API_KEY`, `OPENROUTER_API_KEY`, `OLLAMA_HOST`, or `~/.leviath/config.toml`:
 
-Set an API key via environment variable or config file:
-
-```bash
-# Option 1: Environment variables (easiest)
-export ANTHROPIC_API_KEY="sk-ant-..."
-# or
-export OPENAI_API_KEY="sk-..."
-# or
-export OPENROUTER_API_KEY="sk-or-..."
-
-# Option 2: Config file (~/.leviath/config.toml)
-mkdir -p ~/.leviath
-cat > ~/.leviath/config.toml << 'EOF'
-default_provider = "anthropic"
-
+```toml
 [providers]
 anthropic_api_key = "sk-ant-..."
 openai_api_key = "sk-..."
-
-# Optional
-# openrouter_api_key = "sk-or-..."
-# ollama_base_url = "http://localhost:11434"
-EOF
 ```
 
-Environment variables are checked as fallback when the config file doesn't have a key:
-- `ANTHROPIC_API_KEY`
-- `OPENAI_API_KEY`
-- `OPENROUTER_API_KEY`
-- `OLLAMA_HOST`
+## How It Works
 
-### Create and Run an Agent
+```mermaid
+flowchart TB
+    subgraph Agent["agent.leviath"]
+        direction TB
+        B[Blueprint] --> S1[Stage: analyze<br><i>claude-sonnet-4-5</i>]
+        B --> S2[Stage: implement<br><i>claude-sonnet-4-5</i>]
+        B --> S3[Stage: review<br><i>claude-opus-4</i>]
+        B --> CW[Context Window]
+    end
 
-```bash
-# Create a new agent project
-lev init my-agent
-cd my-agent
+    subgraph CW[" "]
+        direction LR
+        R1["🔒 architecture<br>4,000 tok"]
+        R2["📎 files<br>30,000 tok"]
+        R3["📜 conversation<br>15,000 tok"]
+        R4["📦 impl_history<br>15,000 tok"]
+        R5["🧹 scratch<br>10,000 tok"]
+    end
 
-# Run it
-lev run --task "Explain how memory hierarchies work"
+    S1 -->|sequential| S2 -->|sequential| S3
 
-# Or with a model override
-lev run --task "Explain caching" --model claude-sonnet-4
+    subgraph Providers
+        A[Anthropic]
+        O[OpenAI]
+        OR[OpenRouter]
+        OL[Ollama]
+    end
+
+    subgraph Tools["MCP Tools"]
+        T1[read_file]
+        T2[write_file]
+        T3[search]
+    end
+
+    S2 --> A
+    S2 --> Tools
+
+    style Agent fill:#1e293b,color:#fff
+    style R1 fill:#4a9eff,color:#fff
+    style R2 fill:#f59e0b,color:#fff
+    style R3 fill:#22c55e,color:#fff
+    style R4 fill:#8b5cf6,color:#fff
+    style R5 fill:#ef4444,color:#fff
 ```
-
-### Templates
-
-`lev init` supports three templates:
-
-```bash
-lev init my-coder --template coding      # analyze → implement stages
-lev init my-researcher --template research  # gather → analyze → synthesize stages
-lev init my-agent                          # single-stage default
-```
-
-## Agent Definition (`agent.leviath`)
 
 Agents are defined in a single TOML file — no Rust code needed:
 
@@ -103,7 +135,6 @@ description = "A research assistant"
 [stages.gather]
 mode = "autonomous"
 model = { provider = "anthropic", model = "claude-sonnet-4-5" }
-max_iterations = 10
 available_tools = ["web_search", "read_file"]
 
 [stages.analyze]
@@ -123,69 +154,66 @@ findings_history = { kind = "compact_history", source_region = "findings", max_t
 conversation = { kind = "sliding_window", max_items = 15, max_tokens = 12000 }
 scratch = { kind = "clearable", max_tokens = 8000 }
 
-# LLM-based compaction config (optional — uses defaults if omitted)
+# Compaction config (optional — uses defaults if omitted)
 [compaction]
 provider = "anthropic"
 model = "claude-sonnet-4"
-max_summary_tokens = 2000
-temperature = 0.2
-# system_prompt = "Custom summarization prompt..."  # optional
 ```
 
-### Stage Modes
+## Stage Modes
 
-- **`autonomous`** — runs without user input
-- **`interactive`** — pauses after each inference for user input (Claude Code-style UX)
+```mermaid
+flowchart LR
+    subgraph Autonomous
+        A1[Infer] --> A2{Tool calls?}
+        A2 -->|yes| A3[Execute tools] --> A1
+        A2 -->|no| A4[Done]
+    end
+
+    subgraph Interactive
+        I1[Infer] --> I2[Show response]
+        I2 --> I3[Wait for input]
+        I3 --> I1
+    end
+
+    subgraph InteractivePoints
+        IP1[Run N iterations] --> IP2[Pause at checkpoint]
+        IP2 --> IP3[Get input]
+        IP3 --> IP1
+    end
+```
+
+- **`autonomous`** — runs without user input until complete
+- **`interactive`** — pauses after each inference for user input
 - **`interactive_points`** — runs autonomously but pauses at named checkpoints:
 
 ```toml
 [stages.implement]
 mode = "interactive_points"
-model = { provider = "anthropic", model = "claude-sonnet-4-5" }
 
 [[stages.implement.interaction_points]]
 name = "design_review"
 prompt = "Here's the proposed design. Approve or suggest changes:"
 required = true
-
-[[stages.implement.interaction_points]]
-name = "pre_commit"
-prompt = "Ready to commit. Any final changes?"
-required = false
 ```
 
-### Tool Result Routing
-
-Control where tool outputs are stored in the context window:
-
-```toml
-[stages.implement.tool_routing]
-default_region = "tool_results"
-persist = true
-max_result_tokens = 5000
-
-[stages.implement.tool_routing.overrides]
-read_file = "codebase"      # read_file results go to "codebase" region
-search = "findings"          # search results go to "findings" region
-```
-
-## CLI Reference
+## CLI
 
 | Command | Description |
 |---|---|
-| `lev init <name>` | Create a new agent project (`--template default\|coding\|research`) |
+| `lev init <name>` | Create agent project (`--template default\|coding\|research`) |
 | `lev run [path] --task <task>` | Run an agent (`--model` to override) |
-| `lev dashboard [path] --task <task>` | Interactive TUI for managing multiple agents |
-| `lev spawn <blueprint>` | Spawn agent(s) from an installed blueprint (`--count N`) |
+| `lev dashboard [path] --task <task>` | TUI for managing multiple concurrent agents |
+| `lev pack [path]` | Bundle for distribution → `.leviath-bundle` |
+| `lev install <package>` | Install from bundle or registry |
+| `lev spawn <name>` | Spawn from installed blueprint (`--count N`) |
 | `lev list` | List installed and available agents |
-| `lev install <package>` | Install from `.leviath-bundle` file or registry |
-| `lev pack [path]` | Bundle agent project for distribution (`--output` to override) |
-| `lev test [path]` | Run agent tests (`--dry-run` for structure validation only) |
-| `lev context [agent_id]` | Inspect context window state (`--detailed` for entries) |
+| `lev test [path]` | Run tests (`--dry-run` for no API calls) |
+| `lev context [agent_id]` | Inspect context window state |
 
 ## Dashboard
 
-`lev dashboard` provides a terminal UI for managing multiple concurrent agents:
+`lev dashboard` provides a terminal UI for managing multiple agents at once:
 
 ```
 ┌─ Agents ──────────────────────────────────────────────────┐
@@ -204,197 +232,112 @@ search = "findings"          # search results go to "findings" region
  [q]uit  [Enter]respond  [↑↓]select  [c]ancel  [k]ill  [n]ew
 ```
 
-## Testing Agents
+## Tool Result Routing
 
-Create a `tests/` directory in your agent project:
+Control where tool outputs land in the context window:
 
-**TOML test cases** (`tests/basic.toml`) — run the agent and check assertions:
 ```toml
+[stages.implement.tool_routing]
+default_region = "tool_results"
+persist = true
+max_result_tokens = 5000
+
+[stages.implement.tool_routing.overrides]
+read_file = "codebase"
+search = "findings"
+```
+
+## Testing
+
+Create `tests/` in your agent project:
+
+```toml
+# tests/basic.toml — run agent, check assertions
 [[test]]
 name = "greeting"
 input = "Say hello"
 expect_contains = "hello"
-
-[[test]]
-name = "tool_usage"
-input = "List the files"
-expect_tool_call = "list_files"
 ```
 
-**Rhai scripts** (`tests/validate.rhai`) — test validators and transforms:
 ```rhai
-// Test that token counting works
+// tests/validate.rhai — test validators
 let tokens = count_tokens("Hello world");
 tokens > 0 && tokens < 100
 ```
 
-Run tests:
 ```bash
-lev test                  # Run all tests (requires API key)
-lev test --dry-run        # Validate test structure only (no API calls)
-lev test --filter greet   # Run only matching tests
+lev test                  # Run all (requires API key)
+lev test --dry-run        # Validate structure only
 ```
 
-## Packaging & Distribution
+## Packaging
 
 ```bash
-# Bundle your agent
-lev pack
-# → my-agent-0.1.0.leviath-bundle
-
-# Install a bundled agent
-lev install my-agent-0.1.0.leviath-bundle
-
-# Now you can spawn it by name
+lev pack                  # → my-agent-0.1.0.leviath-bundle
+lev install agent.leviath-bundle
 lev spawn my-agent
 ```
 
 ## Architecture
 
+```mermaid
+graph TB
+    CLI["leviath-cli<br><code>lev</code> binary"]
+    CLI --> Runtime
+    CLI --> Package
+
+    subgraph Engine
+        Runtime["leviath-runtime<br>bevy_ecs engine"]
+        Runtime --> Core["leviath-core<br>regions, layouts, blueprints"]
+        Runtime --> Providers["leviath-providers<br>Anthropic, OpenAI,<br>OpenRouter, Ollama"]
+        Runtime --> MCP["leviath-mcp<br>MCP tools (JSON-RPC)"]
+    end
+
+    Scripting["leviath-scripting<br>Rhai sandbox"] --> Core
+    Package["leviath-package<br>bundling, registry"] --> Core
+
+    style CLI fill:#4a9eff,color:#fff
+    style Runtime fill:#22c55e,color:#fff
+    style Core fill:#6366f1,color:#fff
+    style Providers fill:#f59e0b,color:#fff
+    style MCP fill:#ef4444,color:#fff
+    style Scripting fill:#8b5cf6,color:#fff
+    style Package fill:#64748b,color:#fff
 ```
-leviath/
-├── crates/
-│   ├── leviath-core        # Types, regions, layouts, blueprints (no I/O)
-│   ├── leviath-runtime     # bevy_ecs engine, scheduling, messaging
-│   ├── leviath-providers   # Anthropic, OpenAI, OpenRouter, Ollama
-│   ├── leviath-scripting   # Rhai scripting sandbox
-│   ├── leviath-mcp         # MCP tool integration (JSON-RPC 2.0)
-│   ├── leviath-package     # Manifests, bundling, registry client
-│   └── leviath-cli         # `lev` binary
-├── agents/                 # Pre-built agent definitions
-│   ├── coder/              # Multi-stage coding agent
-│   ├── reviewer/           # Code review agent
-│   └── researcher/         # Research assistant
-└── examples/               # Example code
-```
-
-## Development Setup
-
-### Prerequisites
-
-- **Rust 1.75+** (stable)
-- **Git** (for worktree support)
-
-### Building from Source
-
-```bash
-git clone https://github.com/GEMISIS/leviath.git
-cd leviath
-cargo build
-cargo test
-```
-
-### Running During Development
-
-```bash
-# Run the CLI directly without installing
-cargo run --bin lev -- init my-agent
-cargo run --bin lev -- run --task "hello" my-agent/
-
-# Or install locally for easier iteration
-cargo install --path crates/leviath-cli
-```
-
-### Working with Git Worktrees
-
-If you're developing multiple features or versions in parallel, git worktrees let you have multiple checked-out branches simultaneously, each with its own build and installed binary:
-
-```bash
-# Main development tree (you already have this)
-cd ~/dev/leviath          # main branch
-
-# Create worktrees for parallel work
-git worktree add ../leviath-feat-serve feat/serve
-git worktree add ../leviath-feat-google feat/google-provider
-git worktree add ../leviath-v1 v1
-
-# Each worktree has its own target/ directory and can build independently
-cd ../leviath-feat-serve
-cargo build                # builds in its own target/
-cargo test                 # runs its own tests
-
-# Install a specific version to a custom location
-cargo install --path crates/leviath-cli --root ~/.local/leviath-feat-serve
-# Binary at: ~/.local/leviath-feat-serve/bin/lev
-
-# Or use aliases to switch between versions
-alias lev-main='~/dev/leviath/target/debug/lev'
-alias lev-serve='~/dev/leviath-feat-serve/target/debug/lev'
-alias lev-v1='~/dev/leviath-v1/target/debug/lev'
-```
-
-**Tips for worktree development:**
-
-- Each worktree gets its own `target/` directory — builds don't interfere
-- Use `cargo install --root <path>` to install different versions to different locations
-- Share the same `~/.leviath/config.toml` across all versions (API keys are version-independent)
-- Worktree-specific config: set `LEVIATH_CONFIG=./local-config.toml` if you need different settings per branch
-- List worktrees: `git worktree list`
-- Clean up: `git worktree remove ../leviath-feat-serve`
-
-### Running Tests
-
-```bash
-cargo test                           # All tests
-cargo test -p leviath-core           # Just core crate
-cargo test -p leviath-runtime        # Just runtime crate
-cargo test -- --nocapture            # See test output
-```
-
-### Code Quality
-
-```bash
-cargo clippy                         # Lint check (should be zero warnings)
-cargo fmt --check                    # Format check
-```
-
-### Project Conventions
-
-- **No TODOs in code** — if it's not implemented, it's not merged
-- **Zero warnings** — both `cargo build` and `cargo clippy` must be clean
-- **All providers use real HTTP calls** — no mock implementations
-- **Leviath owns all compaction** — never delegate to provider APIs (no OpenAI Responses API)
-- **SlidingWindow is sacred** — never evicted, never shrunk
 
 ## Pre-built Agents
 
-Three agents ship with Leviath in the `agents/` directory:
+Three agents ship in `agents/`:
 
-### Coder
-Multi-stage coding agent: `analyze → implement → review` (review is interactive). Architecture is pinned, files are temporary, implementation history compacts automatically.
+- **Coder** — `analyze → implement → review` (interactive review). Architecture pinned, files temporary, implementation auto-compacts.
+- **Reviewer** — `scan → deep_review → report`. Guidelines pinned, findings temporary.
+- **Researcher** — `gather → analyze → summarize`. Proves Leviath is domain-agnostic. Findings compact automatically.
 
-### Reviewer
-Code review agent: `scan → deep_review → report`. Guidelines and diff are pinned, findings are temporary, analysis slides.
-
-### Researcher
-Research assistant: `gather → analyze → summarize`. Non-coding agent that proves Leviath is domain-agnostic. Findings compact into history automatically.
-
-Copy any of these to start customizing:
 ```bash
-cp -r agents/coder my-custom-coder
-# Edit my-custom-coder/agent.leviath to your needs
-lev run my-custom-coder/ --task "Build a REST API"
+cp -r agents/coder my-coder
+lev run my-coder/ --task "Build a REST API"
 ```
 
-## Roadmap
+## Development
 
-### v1
-- `lev serve` — HTTP/gRPC API for external orchestrators
-- Gas City / Solar City integration
-- Additional providers (Google, Azure)
-- Agent marketplace
+```bash
+cargo build && cargo test    # 93 tests
+cargo clippy                 # Zero warnings
+```
 
-### v2
-- Agent eval framework
-- Package registry web UI
-- Web UI for context visualization
-- Agent-built context structures (self-organizing)
+**Git worktrees** for parallel development:
+
+```bash
+git worktree add ../leviath-feat-x feat/x
+cd ../leviath-feat-x
+cargo build                  # Own target/, no interference
+
+# Version-specific installs
+cargo install --path crates/leviath-cli --root ~/.local/leviath-feat-x
+```
 
 ## License
 
 MIT OR Apache-2.0
 
-## Links
-
-- **Website:** [leviath.dev](https://leviath.dev)
-- **Repository:** [github.com/GEMISIS/leviath](https://github.com/GEMISIS/leviath)
+**Website:** [leviath.dev](https://leviath.dev) · **Repository:** [github.com/GEMISIS/leviath](https://github.com/GEMISIS/leviath)
