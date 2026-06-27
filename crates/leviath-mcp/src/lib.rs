@@ -4,11 +4,12 @@
 //!
 //! MCP enables agents to discover and use tools from external providers,
 //! standardizing tool interfaces across different implementations.
+//! Uses JSON-RPC 2.0 over stdin/stdout to communicate with tool servers.
 
 pub mod client;
 pub mod discovery;
 pub mod execution;
 
-pub use client::MCPClient;
-pub use discovery::ToolDiscovery;
-pub use execution::ToolExecutor;
+pub use client::{MCPClient, ServerCapabilities, ToolResult, ToolResultContent, ToolsCapability};
+pub use discovery::{MCPServerConfig, ToolDiscovery, ToolMetadata};
+pub use execution::{ExecutionResult, ToolExecutor};

@@ -14,3 +14,7 @@ toml = { workspace = true }
 thiserror = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }
+flate2 = { workspace = true }
+tar = { workspace = true }
+reqwest = { workspace = true }
+dirs = { workspace = true }

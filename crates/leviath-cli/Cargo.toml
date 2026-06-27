@@ -16,6 +16,7 @@ leviath-runtime = { workspace = true }
 leviath-providers = { workspace = true }
 leviath-mcp = { workspace = true }
 leviath-package = { workspace = true }
+leviath-scripting = { workspace = true }
 clap = { workspace = true }
 tokio = { workspace = true }
 serde = { workspace = true }
@@ -24,4 +25,5 @@ toml = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
+rhai = { workspace = true }
 dirs = "6.0.0"

@@ -38,8 +38,57 @@ impl PackageManifest {
 
     /// Validate the manifest.
     pub fn validate(&self) -> anyhow::Result<()> {
-        // TODO: Implement validation
-        self.blueprint.validate()
-            .map_err(|e| anyhow::anyhow!("Blueprint validation failed: {}", e))
+        // Validate package name: non-empty, alphanumeric + hyphens, max 64 chars
+        if self.package.name.is_empty() {
+            anyhow::bail!("Package name cannot be empty");
+        }
+        if self.package.name.len() > 64 {
+            anyhow::bail!("Package name cannot exceed 64 characters");
+        }
+        if !self
+            .package
+            .name
+            .chars()
+            .all(|c| c.is_alphanumeric() || c == '-')
+        {
+            anyhow::bail!(
+                "Package name must contain only alphanumeric characters and hyphens"
+            );
+        }
+
+        // Validate version: must be valid semver (X.Y.Z)
+        let version_parts: Vec<&str> = self.package.version.split('.').collect();
+        if version_parts.len() != 3
+            || !version_parts
+                .iter()
+                .all(|p| !p.is_empty() && p.chars().all(|c| c.is_ascii_digit()))
+        {
+            anyhow::bail!(
+                "Version '{}' is not valid semver (expected X.Y.Z)",
+                self.package.version
+            );
+        }
+
+        // Validate description: non-empty
+        if self.package.description.is_empty() {
+            anyhow::bail!("Package description cannot be empty");
+        }
+
+        // Validate authors: at least one entry
+        if self.package.authors.is_empty() {
+            anyhow::bail!("Package must have at least one author");
+        }
+
+        // Validate license: non-empty
+        if self.package.license.is_empty() {
+            anyhow::bail!("Package license cannot be empty");
+        }
+
+        // Validate blueprint
+        self.blueprint
+            .validate()
+            .map_err(|e| anyhow::anyhow!("Blueprint validation failed: {}", e))?;
+
+        Ok(())
     }
 }

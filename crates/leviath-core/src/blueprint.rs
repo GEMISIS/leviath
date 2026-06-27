@@ -301,8 +301,17 @@ pub struct ContextTransform {
 
 impl ContextTransform {
     /// Validate that this transform references valid regions.
-    fn validate(&self, _layout: &ContextLayout) -> Result<(), String> {
-        // TODO: Validate that source and target regions exist
+    fn validate(&self, layout: &ContextLayout) -> Result<(), String> {
+        for mapping in &self.mappings {
+            // We can only validate target regions against the current layout
+            // (source regions belong to a different blueprint)
+            if layout.get_region(&mapping.to_region).is_none() {
+                return Err(format!(
+                    "Transform target region '{}' not found in layout",
+                    mapping.to_region
+                ));
+            }
+        }
         Ok(())
     }
 }

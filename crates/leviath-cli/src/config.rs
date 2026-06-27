@@ -1,5 +1,6 @@
 //! CLI configuration management.
 
+use leviath_mcp::MCPServerConfig;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
@@ -17,6 +18,19 @@ pub struct Config {
 
     /// Package registries
     pub registries: Vec<String>,
+
+    /// OpenRouter API key
+    pub openrouter_api_key: Option<String>,
+
+    /// Ollama base URL (default http://localhost:11434)
+    pub ollama_base_url: Option<String>,
+
+    /// MCP server configurations
+    #[serde(default)]
+    pub mcp_servers: Vec<MCPServerConfig>,
+
+    /// Default model override
+    pub default_model: Option<String>,
 }
 
 /// Provider configuration.
@@ -39,20 +53,59 @@ impl Default for Config {
             },
             agent_paths: Vec::new(),
             registries: vec!["https://leviath.dev/registry".to_string()],
+            openrouter_api_key: None,
+            ollama_base_url: None,
+            mcp_servers: Vec::new(),
+            default_model: None,
         }
     }
 }
 
 impl Config {
-    /// Load configuration from the default location.
+    /// Load configuration from the default location (~/.leviath/config.toml).
     pub fn load() -> anyhow::Result<Self> {
-        // TODO: Implement config loading from ~/.leviath/config.toml
-        Ok(Self::default())
+        let path = Self::config_path();
+
+        if !path.exists() {
+            tracing::debug!("No config file found at {}, using defaults", path.display());
+            return Ok(Self::default());
+        }
+
+        let content = std::fs::read_to_string(&path)
+            .map_err(|e| anyhow::anyhow!("Failed to read config from '{}': {}", path.display(), e))?;
+
+        let config: Self = toml::from_str(&content)
+            .map_err(|e| anyhow::anyhow!("Failed to parse config: {}", e))?;
+
+        tracing::debug!("Loaded config from {}", path.display());
+        Ok(config)
     }
 
     /// Save configuration to the default location.
     pub fn save(&self) -> anyhow::Result<()> {
-        // TODO: Implement config saving
+        let path = Self::config_path();
+
+        // Create parent directory if needed
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| anyhow::anyhow!("Failed to create config directory: {}", e))?;
+        }
+
+        let content = toml::to_string_pretty(self)
+            .map_err(|e| anyhow::anyhow!("Failed to serialize config: {}", e))?;
+
+        std::fs::write(&path, content)
+            .map_err(|e| anyhow::anyhow!("Failed to write config to '{}': {}", path.display(), e))?;
+
+        tracing::debug!("Saved config to {}", path.display());
         Ok(())
+    }
+
+    /// Get the path to the config file.
+    pub fn config_path() -> PathBuf {
+        dirs::home_dir()
+            .unwrap_or_default()
+            .join(".leviath")
+            .join("config.toml")
     }
 }

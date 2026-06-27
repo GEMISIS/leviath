@@ -69,6 +69,31 @@ conversation = {{ kind = "sliding_window", max_items = 20, max_tokens = 15000 }}
 files = {{ kind = "temporary", max_tokens = 30000 }}
 scratch = {{ kind = "clearable", max_tokens = 10000 }}
 "#, name = name),
+        "research" => format!(r#"[agent]
+name = "{name}"
+version = "0.1.0"
+description = "A research assistant agent"
+
+[stages.gather]
+mode = "autonomous"
+model = {{ provider = "anthropic", model = "claude-sonnet-4-5" }}
+
+[stages.analyze]
+mode = "autonomous"
+model = {{ provider = "anthropic", model = "claude-sonnet-4-5" }}
+
+[stages.synthesize]
+mode = "autonomous"
+model = {{ provider = "anthropic", model = "claude-opus-4" }}
+
+[context.regions]
+objective = {{ kind = "pinned", max_tokens = 2000 }}
+sources = {{ kind = "temporary", max_tokens = 40000 }}
+findings = {{ kind = "compacting", threshold_tokens = 8000, max_tokens = 15000 }}
+findings_history = {{ kind = "compact_history", source_region = "findings", max_tokens = 10000 }}
+conversation = {{ kind = "sliding_window", max_items = 15, max_tokens = 12000 }}
+scratch = {{ kind = "clearable", max_tokens = 8000 }}
+"#, name = name),
         _ => format!(r#"[agent]
 name = "{name}"
 version = "0.1.0"

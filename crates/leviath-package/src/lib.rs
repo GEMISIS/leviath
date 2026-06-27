@@ -11,6 +11,6 @@ pub mod manifest;
 pub mod registry;
 
 pub use bundler::AgentBundler;
-pub use installer::AgentInstaller;
+pub use installer::{AgentInstaller, InstalledAgent};
 pub use manifest::PackageManifest;
-pub use registry::PackageRegistry;
+pub use registry::{PackageInfo, PackageRegistry};
