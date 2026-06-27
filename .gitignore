@@ -21,3 +21,7 @@ Thumbs.db
 # Leviath specific
 .leviath/
 *.leviath-bundle
+
+# Environment specific stuff
+.env
+
