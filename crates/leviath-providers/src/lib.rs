@@ -6,6 +6,8 @@
 //! - Message construction from context regions
 //! - Token counting
 //! - Tool calling
+//! - Streaming
+//! - Rate limiting
 //! - Provider-specific features (caching, etc.)
 
 pub mod anthropic;
@@ -13,12 +15,15 @@ pub mod ollama;
 pub mod openai;
 pub mod openrouter;
 pub mod provider;
+pub mod rate_limit;
 pub mod tokenizer;
 
 pub use provider::{
     Provider, InferenceRequest, InferenceResponse, Message, Tool, ToolCall,
-    TokenUsage, FinishReason, ProviderError, Result,
+    TokenUsage, FinishReason, ProviderError, Result, StreamChunk, ToolCallDelta,
+    ProviderConfig, RateLimitConfig,
 };
+pub use rate_limit::RateLimiter;
 pub use anthropic::AnthropicProvider;
 pub use ollama::OllamaProvider;
 pub use openai::OpenAIProvider;

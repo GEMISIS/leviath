@@ -8,6 +8,7 @@ authors.workspace = true
 
 [dependencies]
 leviath-core = { workspace = true }
+leviath-providers = { workspace = true }
 bevy_ecs = { workspace = true }
 tokio = { workspace = true }
 serde = { workspace = true }

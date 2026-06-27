@@ -12,7 +12,7 @@ pub mod pool;
 pub mod scheduler;
 pub mod systems;
 
-pub use engine::AgentEngine;
+pub use engine::{AgentEngine, ProviderRegistry};
 pub use components::{AgentState, ContextWindow, TaskAssignment, InferenceResult};
 pub use pool::AgentPool;
 pub use scheduler::TaskScheduler;

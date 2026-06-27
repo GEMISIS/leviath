@@ -1,7 +1,9 @@
 //! Provider trait and common types.
 
 use async_trait::async_trait;
+use futures_core::Stream;
 use serde::{Deserialize, Serialize};
+use std::pin::Pin;
 use thiserror::Error;
 
 /// Result type for provider operations.
@@ -138,11 +140,94 @@ pub struct ToolCall {
     pub arguments: serde_json::Value,
 }
 
+/// A chunk from a streaming inference response.
+#[derive(Debug, Clone)]
+pub struct StreamChunk {
+    /// Text delta
+    pub delta: String,
+
+    /// Partial tool call updates
+    pub tool_calls: Vec<ToolCallDelta>,
+
+    /// Token usage (usually only on final chunk)
+    pub tokens: Option<TokenUsage>,
+
+    /// Finish reason (only on final chunk)
+    pub finish_reason: Option<FinishReason>,
+}
+
+/// A partial tool call update from streaming.
+#[derive(Debug, Clone)]
+pub struct ToolCallDelta {
+    /// Index of the tool call being built
+    pub index: usize,
+
+    /// Tool call ID (sent on first delta for this index)
+    pub id: Option<String>,
+
+    /// Tool name (sent on first delta for this index)
+    pub name: Option<String>,
+
+    /// Partial arguments JSON string
+    pub arguments_delta: String,
+}
+
+/// Configuration for a provider instance.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProviderConfig {
+    /// API key for authentication
+    pub api_key: String,
+
+    /// Optional custom base URL
+    pub base_url: Option<String>,
+
+    /// Optional rate limit configuration
+    pub rate_limit: Option<RateLimitConfig>,
+}
+
+/// Rate limit configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RateLimitConfig {
+    /// Maximum requests per minute
+    pub requests_per_minute: u32,
+
+    /// Maximum tokens per minute
+    pub tokens_per_minute: u32,
+}
+
 /// Trait for LLM providers.
 #[async_trait]
 pub trait Provider: Send + Sync {
     /// Execute inference with the given request.
     async fn infer(&self, request: InferenceRequest) -> Result<InferenceResponse>;
+
+    /// Execute streaming inference with the given request.
+    ///
+    /// Returns a stream of chunks that can be consumed incrementally.
+    /// Default implementation collects the full response from `infer()`.
+    async fn infer_stream(
+        &self,
+        request: InferenceRequest,
+    ) -> Result<Pin<Box<dyn Stream<Item = Result<StreamChunk>> + Send>>> {
+        let response = self.infer(request).await?;
+        let chunk = StreamChunk {
+            delta: response.content,
+            tool_calls: response
+                .tool_calls
+                .iter()
+                .enumerate()
+                .map(|(i, tc)| ToolCallDelta {
+                    index: i,
+                    id: Some(tc.id.clone()),
+                    name: Some(tc.name.clone()),
+                    arguments_delta: tc.arguments.to_string(),
+                })
+                .collect(),
+            tokens: Some(response.tokens_used),
+            finish_reason: Some(response.finish_reason),
+        };
+        Ok(Box::pin(stream_once::once(Ok(chunk))))
+    }
 
     /// Count tokens in the given text for this provider's models.
     fn count_tokens(&self, text: &str, model: &str) -> usize;
@@ -153,3 +238,27 @@ pub trait Provider: Send + Sync {
     /// Get the provider name.
     fn name(&self) -> &str;
 }
+
+// Helper module for single-item streams
+mod stream_once {
+    use futures_core::Stream;
+    use std::pin::Pin;
+    use std::task::{Context, Poll};
+
+    pub struct Once<T> {
+        item: Option<T>,
+    }
+
+    impl<T: Unpin> Stream for Once<T> {
+        type Item = T;
+
+        fn poll_next(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+            Poll::Ready(self.item.take())
+        }
+    }
+
+    pub fn once<T>(item: T) -> Once<T> {
+        Once { item: Some(item) }
+    }
+}
+

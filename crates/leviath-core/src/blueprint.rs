@@ -6,6 +6,7 @@
 //! shared, installed, and versioned.
 
 use crate::layout::ContextLayout;
+use crate::lifecycle::CompactionConfig;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -37,6 +38,9 @@ pub struct Blueprint {
     /// Version of this blueprint
     pub version: String,
 
+    /// Configuration for LLM-based compaction
+    pub compaction_config: Option<CompactionConfig>,
+
     /// Additional metadata
     pub metadata: HashMap<String, serde_json::Value>,
 }
@@ -57,6 +61,7 @@ impl Blueprint {
             tools: Vec::new(),
             transforms: Vec::new(),
             version: "0.1.0".to_string(),
+            compaction_config: None,
             metadata: HashMap::new(),
         }
     }
