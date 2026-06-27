@@ -5,6 +5,7 @@ members = [
     "crates/leviath-runtime",
     "crates/leviath-providers",
     "crates/leviath-mcp",
+    "crates/leviath-scripting",
     "crates/leviath-package",
     "crates/leviath-cli",
 ]
@@ -12,7 +13,7 @@ members = [
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
-license = "MIT OR Apache-2.0"
+license = "MIT"
 authors = ["Gerald McAlister <gemisis@gmail.com>"]
 
 [workspace.dependencies]
@@ -21,6 +22,7 @@ leviath-core = { path = "crates/leviath-core" }
 leviath-runtime = { path = "crates/leviath-runtime" }
 leviath-providers = { path = "crates/leviath-providers" }
 leviath-mcp = { path = "crates/leviath-mcp" }
+leviath-scripting = { path = "crates/leviath-scripting" }
 leviath-package = { path = "crates/leviath-package" }
 
 # External dependencies
@@ -36,3 +38,7 @@ thiserror = "2.0"
 toml = "0.8"
 anyhow = "1.0"
 chrono = "0.4"
+rhai = { version = "1.20", features = ["sync"] }
+tiktoken-rs = "0.5"
+async-trait = "0.1"
+futures = "0.3"

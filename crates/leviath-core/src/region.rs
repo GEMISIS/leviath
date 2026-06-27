@@ -40,15 +40,33 @@ pub enum RegionKind {
     /// tool execution results or temporary computations.
     Temporary,
 
-    /// Compacts (summarizes) when threshold is hit, but never fully evicted.
+    /// Compacts (summarizes) when threshold is hit, then cleared.
     ///
-    /// Retains compressed form of historical context. When token count exceeds
-    /// the threshold, the region's content is summarized to reduce token usage
-    /// while preserving essential information. The summarized version remains
-    /// in the context indefinitely.
+    /// When token count exceeds the threshold, the region's content is summarized
+    /// and moved to a paired CompactHistory region, then the original Compacting
+    /// region is completely cleared, giving fresh capacity.
     Compacting {
         /// Token count that triggers compaction
         threshold_tokens: usize,
+    },
+
+    /// Wiped entirely in one shot when space is needed. All-or-nothing eviction.
+    ///
+    /// Unlike Temporary (which evicts oldest entries one at a time), Clearable
+    /// regions are dumped completely and immediately when eviction is needed.
+    /// Use for scratch space or temporary working data where partial results
+    /// are useless.
+    Clearable,
+
+    /// Receives summaries from paired Compacting regions, never evicted.
+    ///
+    /// When a Compacting region hits its threshold and summarizes, the summary
+    /// moves here. CompactHistory regions hold compressed knowledge indefinitely
+    /// and are never evicted. Can also support sliding window behavior (oldest
+    /// summaries drop off) and re-compaction (combine multiple summaries).
+    CompactHistory {
+        /// Name of the source Compacting region
+        source_region: String,
     },
 }
 
@@ -95,6 +113,98 @@ impl Region {
         self.schema = Some(schema);
         self
     }
+
+    /// Add an entry to this region.
+    ///
+    /// Validates content against schema if present, checks token budget,
+    /// and adds the entry to the region.
+    pub fn add_entry(&mut self, content: String, tokens: usize) -> crate::error::Result<()> {
+        // Validate against schema if present
+        if let Some(schema) = &self.schema {
+            schema.validate(&content)?;
+        }
+
+        // Check token budget
+        if self.current_tokens + tokens > self.max_tokens {
+            return Err(crate::error::Error::TokenBudgetExceeded {
+                used: self.current_tokens + tokens,
+                max: self.max_tokens,
+            });
+        }
+
+        // Add entry
+        self.content.push(RegionEntry {
+            content,
+            tokens,
+            timestamp: chrono::Utc::now().timestamp(),
+            metadata: None,
+        });
+        self.current_tokens += tokens;
+
+        Ok(())
+    }
+
+    /// Add an entry with metadata.
+    pub fn add_entry_with_metadata(
+        &mut self,
+        content: String,
+        tokens: usize,
+        metadata: serde_json::Value,
+    ) -> crate::error::Result<()> {
+        // Validate against schema if present
+        if let Some(schema) = &self.schema {
+            schema.validate(&content)?;
+        }
+
+        // Check token budget
+        if self.current_tokens + tokens > self.max_tokens {
+            return Err(crate::error::Error::TokenBudgetExceeded {
+                used: self.current_tokens + tokens,
+                max: self.max_tokens,
+            });
+        }
+
+        // Add entry
+        self.content.push(RegionEntry {
+            content,
+            tokens,
+            timestamp: chrono::Utc::now().timestamp(),
+            metadata: Some(metadata),
+        });
+        self.current_tokens += tokens;
+
+        Ok(())
+    }
+
+    /// Clear all content from this region.
+    pub fn clear(&mut self) {
+        self.content.clear();
+        self.current_tokens = 0;
+    }
+
+    /// Remove the oldest entry (for Temporary regions).
+    pub fn remove_oldest(&mut self) -> Option<RegionEntry> {
+        if let Some(entry) = self.content.first() {
+            self.current_tokens -= entry.tokens;
+            Some(self.content.remove(0))
+        } else {
+            None
+        }
+    }
+
+    /// Get the number of entries in this region.
+    pub fn entry_count(&self) -> usize {
+        self.content.len()
+    }
+
+    /// Check if region needs compaction (for Compacting regions).
+    pub fn needs_compaction(&self) -> bool {
+        if let RegionKind::Compacting { threshold_tokens } = self.kind {
+            self.current_tokens > threshold_tokens
+        } else {
+            false
+        }
+    }
 }
 
 /// A single entry within a region.
@@ -124,13 +234,83 @@ pub struct RegionEntry {
 pub struct RegionSchema {
     /// Expected content format
     pub format: ContentFormat,
+
+    /// Optional custom validation script (Rhai)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub custom_script: Option<String>,
 }
 
 impl Clone for RegionSchema {
     fn clone(&self) -> Self {
         Self {
             format: self.format.clone(),
+            custom_script: self.custom_script.clone(),
         }
+    }
+}
+
+impl RegionSchema {
+    /// Create a new schema with the specified format.
+    pub fn new(format: ContentFormat) -> Self {
+        Self {
+            format,
+            custom_script: None,
+        }
+    }
+
+    /// Add a custom validation script.
+    pub fn with_custom_script(mut self, script: String) -> Self {
+        self.custom_script = Some(script);
+        self
+    }
+
+    /// Validate content against this schema.
+    pub fn validate(&self, content: &str) -> crate::error::Result<()> {
+        match &self.format {
+            ContentFormat::Json => {
+                serde_json::from_str::<serde_json::Value>(content).map_err(|e| {
+                    crate::error::Error::ValidationFailed(format!("Invalid JSON: {}", e))
+                })?;
+            }
+            ContentFormat::Mermaid => {
+                // Basic mermaid syntax validation
+                if !content.contains("graph")
+                    && !content.contains("sequenceDiagram")
+                    && !content.contains("classDiagram")
+                    && !content.contains("stateDiagram")
+                    && !content.contains("erDiagram")
+                    && !content.contains("journey")
+                    && !content.contains("gantt")
+                    && !content.contains("pie")
+                    && !content.contains("flowchart")
+                {
+                    return Err(crate::error::Error::ValidationFailed(
+                        "Mermaid diagrams must contain a valid diagram type (graph, sequenceDiagram, etc.)".to_string()
+                    ));
+                }
+            }
+            ContentFormat::Code { .. } => {
+                // Basic code validation - just check it's not empty
+                if content.trim().is_empty() {
+                    return Err(crate::error::Error::ValidationFailed(
+                        "Code cannot be empty".to_string(),
+                    ));
+                }
+            }
+            ContentFormat::Markdown => {
+                // Markdown is very permissive, just check it's not empty
+                if content.trim().is_empty() {
+                    return Err(crate::error::Error::ValidationFailed(
+                        "Markdown content cannot be empty".to_string(),
+                    ));
+                }
+            }
+            ContentFormat::Text | ContentFormat::Custom { .. } => {
+                // Text has no restrictions, Custom is handled by scripting layer
+            }
+        }
+
+        Ok(())
     }
 }
 

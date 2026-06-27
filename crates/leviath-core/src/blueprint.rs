@@ -98,6 +98,35 @@ impl Blueprint {
     }
 }
 
+/// Interaction mode for a stage.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum StageMode {
+    /// Runs without user input, fully autonomous
+    Autonomous,
+
+    /// Requires user input before starting
+    Interactive,
+
+    /// Can receive input at defined points during execution
+    InteractivePoints {
+        /// Points where user input can be requested
+        points: Vec<InteractionPoint>,
+    },
+}
+
+/// A point where a stage can request user input.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InteractionPoint {
+    /// Unique name for this interaction point
+    pub name: String,
+
+    /// Prompt to show the user
+    pub prompt: String,
+
+    /// Whether input is required (vs optional)
+    pub required: bool,
+}
+
 /// A single execution stage in an agent's workflow.
 ///
 /// Stages allow an agent to use different models or configurations for
@@ -105,6 +134,10 @@ impl Blueprint {
 /// - Analyze stage: fast model for understanding requirements
 /// - Implement stage: powerful model for code generation
 /// - Review stage: critique model for checking quality
+///
+/// Each stage can have its own context layout (memory structure), allowing
+/// different stages to have different region configurations optimized for
+/// their specific needs.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Stage {
     /// Name of this stage
@@ -122,8 +155,22 @@ pub struct Stage {
     /// Maximum iterations for this stage
     pub max_iterations: Option<usize>,
 
+    /// Interaction mode (autonomous or interactive)
+    #[serde(default)]
+    pub mode: StageMode,
+
+    /// Optional stage-specific context layout
+    /// If None, uses the blueprint's global layout
+    pub context_layout: Option<ContextLayout>,
+
     /// Custom configuration for this stage
     pub config: HashMap<String, serde_json::Value>,
+}
+
+impl Default for StageMode {
+    fn default() -> Self {
+        Self::Autonomous
+    }
 }
 
 impl Stage {
@@ -135,6 +182,8 @@ impl Stage {
             model,
             available_tools: Vec::new(),
             max_iterations: None,
+            mode: StageMode::Autonomous,
+            context_layout: None,
             config: HashMap::new(),
         }
     }
@@ -145,11 +194,35 @@ impl Stage {
         self
     }
 
+    /// Set the interaction mode for this stage.
+    pub fn with_mode(mut self, mode: StageMode) -> Self {
+        self.mode = mode;
+        self
+    }
+
+    /// Set a stage-specific context layout.
+    pub fn with_context_layout(mut self, layout: ContextLayout) -> Self {
+        self.context_layout = Some(layout);
+        self
+    }
+
+    /// Set the description for this stage.
+    pub fn with_description(mut self, description: String) -> Self {
+        self.description = Some(description);
+        self
+    }
+
     /// Validate that this stage is well-formed.
     fn validate(&self) -> Result<(), String> {
         if self.name.is_empty() {
             return Err("Stage name cannot be empty".to_string());
         }
+
+        // Validate stage-specific context layout if present
+        if let Some(layout) = &self.context_layout {
+            layout.validate()?;
+        }
+
         Ok(())
     }
 }

@@ -1,14 +1,15 @@
 [package]
-name = "leviath-core"
-description = "Core types and traits for Leviath: context regions, memory layouts, blueprints, and lifecycle policies"
+name = "leviath-scripting"
+description = "Rhai scripting integration for Leviath: custom validators, transforms, and dynamic logic"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 authors.workspace = true
 
 [dependencies]
+leviath-core = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
-chrono = { workspace = true }
+rhai = { workspace = true }

@@ -16,4 +16,3 @@ pub mod tokenizer;
 pub use provider::{Provider, InferenceRequest, InferenceResponse};
 pub use anthropic::AnthropicProvider;
 pub use openai::OpenAIProvider;
-pub use tokenizer::TokenCounter;
