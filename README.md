@@ -4,6 +4,22 @@
 
 Leviath gives LLM agents structured, tiered memory instead of flat conversation arrays. Inspired by hardware memory architectures — think CPU cache hierarchies, not chat logs — it provides explicit control over what stays in context, what gets summarized, and what gets evicted when memory fills up.
 
+## Quickstart
+
+```bash
+# Install the CLI
+cargo install --path crates/leviath-cli
+
+# Set an API key (pick your provider)
+export ANTHROPIC_API_KEY="sk-ant-..."   # or OPENAI_API_KEY, OPENROUTER_API_KEY
+
+# Create an agent and run it
+lev init my-agent && cd my-agent
+lev run --task "Explain how CPU cache hierarchies work"
+```
+
+That's it. Your agent is defined in `agent.leviath` — edit it to change models, add stages, or configure memory regions. No Rust code needed.
+
 ## The Problem
 
 Every LLM agent framework manages context the same way: a flat array of messages with uniform compaction when it gets too long. This is like running a computer with one big memory pool that gets randomly wiped when full.
