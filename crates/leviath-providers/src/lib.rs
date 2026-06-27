@@ -9,10 +9,17 @@
 //! - Provider-specific features (caching, etc.)
 
 pub mod anthropic;
+pub mod ollama;
 pub mod openai;
+pub mod openrouter;
 pub mod provider;
 pub mod tokenizer;
 
-pub use provider::{Provider, InferenceRequest, InferenceResponse};
+pub use provider::{
+    Provider, InferenceRequest, InferenceResponse, Message, Tool, ToolCall,
+    TokenUsage, FinishReason, ProviderError, Result,
+};
 pub use anthropic::AnthropicProvider;
+pub use ollama::OllamaProvider;
 pub use openai::OpenAIProvider;
+pub use openrouter::OpenRouterProvider;

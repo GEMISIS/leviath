@@ -45,16 +45,39 @@ impl OpenAIProvider {
 #[async_trait]
 impl Provider for OpenAIProvider {
     async fn infer(&self, request: InferenceRequest) -> Result<InferenceResponse> {
-        // TODO: Implement actual API call
-        tracing::debug!(model = %request.model, "Calling OpenAI API");
+        tracing::debug!(model = %request.model, "Calling OpenAI API (mock mode)");
         
-        // Placeholder response
-        Err(ProviderError::Other("Not implemented".to_string()))
+        // Mock response for testing the pipeline
+        use crate::provider::{TokenUsage, FinishReason};
+        
+        let prompt_tokens = request.messages.iter()
+            .map(|m| self.count_tokens(&m.content, &request.model))
+            .sum();
+        
+        let response_content = format!(
+            "Mock OpenAI {} response for: {}",
+            request.model,
+            request.messages.last()
+                .map(|m| m.content.chars().take(50).collect::<String>())
+                .unwrap_or_default()
+        );
+        
+        let completion_tokens = self.count_tokens(&response_content, &request.model);
+        
+        Ok(InferenceResponse {
+            content: response_content,
+            tool_calls: Vec::new(),
+            tokens_used: TokenUsage {
+                prompt_tokens,
+                completion_tokens,
+                total_tokens: prompt_tokens + completion_tokens,
+            },
+            finish_reason: FinishReason::Complete,
+        })
     }
 
-    fn count_tokens(&self, text: &str, model: &str) -> usize {
-        // TODO: Use tiktoken for accurate counting
-        // For now, rough estimate
+    fn count_tokens(&self, text: &str, _model: &str) -> usize {
+        // OpenAI: ~4 chars per token (use tiktoken for accuracy in production)
         text.len() / 4
     }
 
