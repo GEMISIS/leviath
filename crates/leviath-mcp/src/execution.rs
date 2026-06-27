@@ -82,6 +82,28 @@ impl ToolExecutor {
         Ok(Self::map_result(tool_result))
     }
 
+    /// Execute a tool only if it is in the allowed list.
+    ///
+    /// Returns an error if the tool is not in the allowed_tools list.
+    pub async fn execute_filtered(
+        &mut self,
+        tool_name: &str,
+        arguments: Value,
+        allowed_tools: &[String],
+    ) -> anyhow::Result<ExecutionResult> {
+        if !allowed_tools.iter().any(|t| t == tool_name) {
+            return Ok(ExecutionResult {
+                success: false,
+                data: Value::Null,
+                text: format!(
+                    "Tool '{}' is not allowed in the current stage. Allowed tools: {:?}",
+                    tool_name, allowed_tools
+                ),
+            });
+        }
+        self.execute(tool_name, arguments).await
+    }
+
     /// Shutdown all connected MCP clients.
     pub async fn shutdown_all(&mut self) -> anyhow::Result<()> {
         tracing::info!("Shutting down all MCP clients");
@@ -136,5 +158,30 @@ impl ToolExecutor {
 impl Default for ToolExecutor {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_execute_filtered_rejects_disallowed_tool() {
+        let mut executor = ToolExecutor::new();
+        let allowed = vec!["read_file".to_string(), "write_file".to_string()];
+
+        let result = executor
+            .execute_filtered("delete_file", serde_json::json!({}), &allowed)
+            .await
+            .unwrap();
+
+        assert!(!result.success);
+        assert!(result.text.contains("not allowed"));
+    }
+
+    #[test]
+    fn test_tool_executor_creation() {
+        let executor = ToolExecutor::new();
+        assert_eq!(executor.server_count(), 0);
     }
 }

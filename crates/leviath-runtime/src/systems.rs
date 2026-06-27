@@ -6,7 +6,7 @@
 //! - Tool execution: running tools and updating context with results
 
 use bevy_ecs::prelude::*;
-use crate::components::{AgentState, AgentStatus, ContextWindow, TaskAssignment};
+use crate::components::{AgentState, AgentStatus, ContextWindow, MessageInbox, TaskAssignment};
 
 /// System that manages context window state.
 ///
@@ -134,7 +134,36 @@ pub fn pool_management_system(
                 tracing::error!(agent_id = %state.agent_id, error = %message, "Agent error");
                 commands.entity(entity).despawn();
             }
+            crate::components::AgentStatus::Cancelled => {
+                tracing::info!(agent_id = %state.agent_id, "Agent cancelled, recycling");
+                commands.entity(entity).despawn();
+            }
             _ => {}
+        }
+    }
+}
+
+/// System that delivers messages from agent inboxes to context windows.
+///
+/// Checks each agent's MessageInbox, adds messages to their context windows,
+/// and clears the inbox.
+pub fn message_delivery_system(
+    mut query: Query<(&AgentState, &mut MessageInbox, &mut ContextWindow)>,
+) {
+    for (state, mut inbox, mut window) in query.iter_mut() {
+        let messages = inbox.drain_all();
+        for msg in messages {
+            let region_name = msg.target_region.as_deref().unwrap_or("conversation");
+            let tokens = msg.content.len() / 4 + 1;
+            let formatted = format!("[Message]: {}", msg.content);
+            if let Err(e) = window.add_to_region(region_name, formatted, tokens) {
+                tracing::warn!(
+                    agent_id = %state.agent_id,
+                    region = region_name,
+                    error = %e,
+                    "Failed to deliver message to context window"
+                );
+            }
         }
     }
 }

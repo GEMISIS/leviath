@@ -1,9 +1,15 @@
 //! `lev test` - Run agent tests
 
 use clap::Args;
+use leviath_core::{Region, RegionKind};
+use leviath_runtime::{AgentEngine, AgentPool, ProviderRegistry};
 use serde::Deserialize;
 use std::fs;
 use std::path::Path;
+use std::sync::Arc;
+
+use super::run::parse_manifest_public;
+use crate::config::Config;
 
 #[derive(Args)]
 pub struct TestArgs {
@@ -14,6 +20,10 @@ pub struct TestArgs {
     /// Test filter pattern
     #[arg(short, long)]
     pub filter: Option<String>,
+
+    /// Validate test structure without running agents (no API calls)
+    #[arg(long)]
+    pub dry_run: bool,
 }
 
 /// A test case loaded from a TOML test file.
@@ -61,6 +71,52 @@ pub async fn execute(args: TestArgs) -> anyhow::Result<()> {
         return Ok(());
     }
 
+    if args.dry_run {
+        println!("Dry run mode: validating test structure only (no API calls)\n");
+    }
+
+    // Parse blueprint and set up providers (only if not dry_run)
+    let manifest_content = fs::read_to_string(&manifest_path)?;
+    let blueprint = parse_manifest_public(&manifest_content)?;
+
+    let registry = if !args.dry_run {
+        let config = Config::load()?;
+        let mut reg = ProviderRegistry::new();
+
+        if let Some(ref key) = config.providers.anthropic_api_key {
+            reg.register(
+                "anthropic".to_string(),
+                Arc::new(leviath_providers::AnthropicProvider::new(key.clone())),
+            );
+        }
+        if let Some(ref key) = config.providers.openai_api_key {
+            reg.register(
+                "openai".to_string(),
+                Arc::new(leviath_providers::OpenAIProvider::new(key.clone())),
+            );
+        }
+        if let Some(ref key) = config.openrouter_api_key {
+            reg.register(
+                "openrouter".to_string(),
+                Arc::new(leviath_providers::OpenRouterProvider::new(key.clone())),
+            );
+        }
+        let ollama_url = config
+            .ollama_base_url
+            .as_deref()
+            .unwrap_or("http://localhost:11434");
+        reg.register(
+            "ollama".to_string(),
+            Arc::new(leviath_providers::OllamaProvider::with_base_url(
+                ollama_url.to_string(),
+            )),
+        );
+
+        Some(reg)
+    } else {
+        None
+    };
+
     let mut total = 0;
     let mut passed = 0;
     let mut failed = 0;
@@ -93,17 +149,39 @@ pub async fn execute(args: TestArgs) -> anyhow::Result<()> {
 
                 total += 1;
 
-                // For now, validate the test structure (real execution requires API keys)
-                let test_valid = validate_test_case(test_case);
-
-                if test_valid {
-                    passed += 1;
-                    println!("  PASS: {}", test_case.name);
+                if args.dry_run {
+                    // Dry-run: validate structure only
+                    let test_valid = validate_test_case(test_case);
+                    if test_valid {
+                        passed += 1;
+                        println!("  PASS (dry-run): {}", test_case.name);
+                    } else {
+                        failed += 1;
+                        let msg = format!("{}: test case validation failed", test_case.name);
+                        println!("  FAIL (dry-run): {}", msg);
+                        failures.push(msg);
+                    }
                 } else {
-                    failed += 1;
-                    let msg = format!("{}: test case validation failed", test_case.name);
-                    println!("  FAIL: {}", msg);
-                    failures.push(msg);
+                    // Real run: execute inference and check assertions
+                    let registry = registry.as_ref().expect("registry should exist in non-dry-run");
+                    match run_test_case(&blueprint, registry, test_case).await {
+                        Ok(true) => {
+                            passed += 1;
+                            println!("  PASS: {}", test_case.name);
+                        }
+                        Ok(false) => {
+                            failed += 1;
+                            let msg = format!("{}: assertions failed", test_case.name);
+                            println!("  FAIL: {}", msg);
+                            failures.push(msg);
+                        }
+                        Err(e) => {
+                            failed += 1;
+                            let msg = format!("{}: {}", test_case.name, e);
+                            println!("  FAIL: {}", msg);
+                            failures.push(msg);
+                        }
+                    }
                 }
             }
         }
@@ -136,7 +214,6 @@ pub async fn execute(args: TestArgs) -> anyhow::Result<()> {
 
             match engine.execute(&script, &mut scope) {
                 Ok(result) => {
-                    // If the script returns a bool, use it as pass/fail
                     if let Ok(success) = result.as_bool() {
                         if success {
                             passed += 1;
@@ -148,7 +225,6 @@ pub async fn execute(args: TestArgs) -> anyhow::Result<()> {
                             failures.push(msg);
                         }
                     } else {
-                        // Non-bool result counts as pass (script didn't error)
                         passed += 1;
                         println!("  PASS: {} (returned: {})", file_name, result);
                     }
@@ -185,6 +261,118 @@ pub async fn execute(args: TestArgs) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Run a single test case by spawning an agent and running one inference call.
+async fn run_test_case(
+    blueprint: &leviath_core::Blueprint,
+    registry: &ProviderRegistry,
+    test: &TestCase,
+) -> anyhow::Result<bool> {
+    // Create engine with providers
+    let mut engine = AgentEngine::with_providers(registry.clone());
+
+    // Create agent pool and spawn agent
+    let mut pool = AgentPool::new(blueprint.clone());
+    let agent_id = pool.spawn_agent(engine.world_mut());
+    let entity = pool
+        .get_agent(&agent_id)
+        .ok_or_else(|| anyhow::anyhow!("Failed to get spawned agent entity"))?;
+
+    // Initialize context window regions from blueprint layout
+    if let Some(mut window) = engine
+        .world_mut()
+        .get_mut::<leviath_runtime::ContextWindow>(entity)
+    {
+        for region_def in &blueprint.context_layout.regions {
+            let region = Region::new(
+                region_def.name.clone(),
+                region_def.kind.clone(),
+                region_def.max_tokens,
+            );
+            window.add_region(region);
+        }
+
+        // Add tool_results region if not present
+        if window.get_region("tool_results").is_none() {
+            let tool_region = Region::new(
+                "tool_results".to_string(),
+                RegionKind::Temporary,
+                5000,
+            );
+            window.add_region(tool_region);
+        }
+
+        // Add test input to the first pinned/system region
+        let system_region_name = blueprint
+            .context_layout
+            .regions
+            .iter()
+            .find(|r| matches!(r.kind, RegionKind::Pinned))
+            .map(|r| r.name.clone());
+
+        if let Some(region_name) = system_region_name {
+            let task_tokens = test.input.len() / 4 + 1;
+            let _ = window.add_to_region(&region_name, test.input.clone(), task_tokens);
+        }
+    }
+
+    // Get model config from the first stage
+    let stage = blueprint
+        .stages
+        .first()
+        .ok_or_else(|| anyhow::anyhow!("Blueprint has no stages"))?;
+
+    let provider_name = &stage.model.provider;
+    let model_name = &stage.model.model;
+
+    // Check if provider is available
+    if !engine.providers().has(provider_name) {
+        anyhow::bail!(
+            "Provider '{}' is not configured. Set API key in ~/.leviath/config.toml",
+            provider_name
+        );
+    }
+
+    // Run a single inference call (not the full loop)
+    let response = engine
+        .run_inference(entity, provider_name, model_name, Vec::new())
+        .await
+        .map_err(|e| anyhow::anyhow!("Inference failed: {}", e))?;
+
+    // Check assertions
+    let mut all_passed = true;
+
+    if let Some(ref expected) = test.expect_contains {
+        let content_lower = response.content.to_lowercase();
+        let expected_lower = expected.to_lowercase();
+        if !content_lower.contains(&expected_lower) {
+            println!(
+                "    expect_contains failed: response does not contain '{}'",
+                expected
+            );
+            println!("    response: {}", truncate_str(&response.content, 200));
+            all_passed = false;
+        }
+    }
+
+    if let Some(ref expected_tool) = test.expect_tool_call {
+        let has_tool = response
+            .tool_calls
+            .iter()
+            .any(|tc| tc.name == *expected_tool);
+        if !has_tool {
+            println!(
+                "    expect_tool_call failed: no tool call to '{}'",
+                expected_tool
+            );
+            let tool_names: Vec<&str> = response.tool_calls.iter().map(|tc| tc.name.as_str()).collect();
+            println!("    actual tool calls: {:?}", tool_names);
+            all_passed = false;
+        }
+    }
+
+    Ok(all_passed)
+}
+
 /// Validate a test case structure (checks that it's well-formed).
 fn validate_test_case(test: &TestCase) -> bool {
     if test.name.is_empty() {
@@ -198,4 +386,12 @@ fn validate_test_case(test: &TestCase) -> bool {
         return false;
     }
     true
+}
+
+fn truncate_str(s: &str, max: usize) -> String {
+    if s.len() <= max {
+        s.to_string()
+    } else {
+        format!("{}...", &s[..max])
+    }
 }

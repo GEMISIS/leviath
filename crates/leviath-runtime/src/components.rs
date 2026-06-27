@@ -3,6 +3,8 @@
 use bevy_ecs::prelude::*;
 use leviath_core::Region;
 use serde::{Deserialize, Serialize};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 /// Agent execution state component.
 ///
@@ -40,6 +42,9 @@ pub enum AgentStatus {
 
     /// Agent encountered an error
     Error { message: String },
+
+    /// Agent was cancelled by the user or system
+    Cancelled,
 }
 
 /// Context window component storing the agent's memory regions.
@@ -269,6 +274,87 @@ pub struct ToolCall {
     pub arguments: serde_json::Value,
 }
 
+/// Cancellation token for interrupting running agents.
+///
+/// Thread-safe flag that can be checked during inference loops
+/// to allow early termination of agent execution.
+#[derive(Component, Debug, Clone)]
+pub struct CancellationToken {
+    cancelled: Arc<AtomicBool>,
+}
+
+impl CancellationToken {
+    /// Create a new cancellation token (not cancelled).
+    pub fn new() -> Self {
+        Self {
+            cancelled: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    /// Signal cancellation.
+    pub fn cancel(&self) {
+        self.cancelled.store(true, Ordering::SeqCst);
+    }
+
+    /// Check if cancellation has been requested.
+    pub fn is_cancelled(&self) -> bool {
+        self.cancelled.load(Ordering::SeqCst)
+    }
+}
+
+impl Default for CancellationToken {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// A message that can be sent to a running agent.
+#[derive(Debug, Clone)]
+pub struct AgentMessage {
+    /// Target agent ID
+    pub agent_id: String,
+    /// Message content
+    pub content: String,
+    /// Which region to add the message to (default: "conversation")
+    pub target_region: Option<String>,
+    /// Priority (higher = processed sooner)
+    pub priority: i32,
+}
+
+/// Inbox component for receiving messages sent to a running agent.
+#[derive(Component, Debug, Clone)]
+pub struct MessageInbox {
+    /// Pending messages waiting to be processed
+    pub messages: Vec<AgentMessage>,
+}
+
+impl MessageInbox {
+    /// Create a new empty inbox.
+    pub fn new() -> Self {
+        Self {
+            messages: Vec::new(),
+        }
+    }
+
+    /// Add a message to the inbox.
+    pub fn push(&mut self, msg: AgentMessage) {
+        self.messages.push(msg);
+        // Sort by priority descending so highest priority is first
+        self.messages.sort_by(|a, b| b.priority.cmp(&a.priority));
+    }
+
+    /// Drain all messages from the inbox.
+    pub fn drain_all(&mut self) -> Vec<AgentMessage> {
+        std::mem::take(&mut self.messages)
+    }
+}
+
+impl Default for MessageInbox {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -416,5 +502,79 @@ mod tests {
         assert!(prompt.contains("## Region: conversation"));
         assert!(prompt.contains("User: Hello"));
         assert!(prompt.contains("Assistant: Hi there!"));
+    }
+
+    #[test]
+    fn test_cancellation_token() {
+        let token = CancellationToken::new();
+        assert!(!token.is_cancelled());
+
+        token.cancel();
+        assert!(token.is_cancelled());
+    }
+
+    #[test]
+    fn test_cancellation_token_clone() {
+        let token = CancellationToken::new();
+        let clone = token.clone();
+
+        token.cancel();
+        assert!(clone.is_cancelled(), "Clone should share atomic state");
+    }
+
+    #[test]
+    fn test_message_inbox() {
+        let mut inbox = MessageInbox::new();
+        assert!(inbox.messages.is_empty());
+
+        inbox.push(AgentMessage {
+            agent_id: "agent-1".to_string(),
+            content: "hello".to_string(),
+            target_region: None,
+            priority: 0,
+        });
+        assert_eq!(inbox.messages.len(), 1);
+
+        let drained = inbox.drain_all();
+        assert_eq!(drained.len(), 1);
+        assert!(inbox.messages.is_empty());
+    }
+
+    #[test]
+    fn test_message_inbox_priority_ordering() {
+        let mut inbox = MessageInbox::new();
+
+        inbox.push(AgentMessage {
+            agent_id: "a".to_string(),
+            content: "low".to_string(),
+            target_region: None,
+            priority: 1,
+        });
+        inbox.push(AgentMessage {
+            agent_id: "a".to_string(),
+            content: "high".to_string(),
+            target_region: None,
+            priority: 10,
+        });
+        inbox.push(AgentMessage {
+            agent_id: "a".to_string(),
+            content: "medium".to_string(),
+            target_region: None,
+            priority: 5,
+        });
+
+        let msgs = inbox.drain_all();
+        assert_eq!(msgs[0].content, "high");
+        assert_eq!(msgs[1].content, "medium");
+        assert_eq!(msgs[2].content, "low");
+    }
+
+    #[test]
+    fn test_agent_status_cancelled() {
+        let status = AgentStatus::Cancelled;
+        match status {
+            AgentStatus::Cancelled => {} // OK
+            _ => panic!("Expected Cancelled"),
+        }
     }
 }

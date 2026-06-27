@@ -5,7 +5,7 @@
 
 use bevy_ecs::prelude::*;
 use leviath_core::Blueprint;
-use crate::components::{AgentState, AgentStatus, ContextWindow};
+use crate::components::{AgentState, AgentStatus, CancellationToken, ContextWindow, MessageInbox};
 use std::collections::HashMap;
 
 /// Manager for a pool of agents.
@@ -55,7 +55,9 @@ impl AgentPool {
         };
 
         // Spawn entity with components
-        let entity = world.spawn((agent_state, context_window)).id();
+        let cancellation_token = CancellationToken::new();
+        let message_inbox = MessageInbox::new();
+        let entity = world.spawn((agent_state, context_window, cancellation_token, message_inbox)).id();
         
         self.active_agents.insert(agent_id.clone(), entity);
         tracing::info!(agent_id = %agent_id, "Spawned new agent");

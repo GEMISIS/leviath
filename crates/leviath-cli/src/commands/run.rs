@@ -1,7 +1,7 @@
 //! `lev run` - Run an agent
 
 use clap::Args;
-use leviath_core::blueprint::ModelConfig;
+use leviath_core::blueprint::{ModelConfig, ToolResultRouting};
 use leviath_core::{Blueprint, ContextLayout, Region, RegionKind, Stage};
 use leviath_core::layout::RegionDefinition;
 use leviath_runtime::{AgentEngine, AgentPool, ProviderRegistry};
@@ -152,29 +152,125 @@ pub async fn execute(args: RunArgs) -> anyhow::Result<()> {
     println!("Provider: {}, Model: {}", provider_name, model_name);
     println!("Running inference...\n");
 
+    // Check if this stage is interactive
+    let is_interactive = matches!(stage.mode, leviath_core::blueprint::StageMode::Interactive);
+
+    // Build tool filter from stage's available_tools
+    let tool_filter: Option<Vec<String>> = if stage.available_tools.is_empty() {
+        None
+    } else {
+        Some(stage.available_tools.clone())
+    };
+    let tool_filter_ref = tool_filter.as_deref();
+
+    // Build tool result routing config
+    let routing_config = stage.tool_result_routing.as_ref().map(|r| {
+        leviath_runtime::ToolResultRoutingConfig {
+            default_region: r.default_region.clone(),
+            tool_overrides: r.tool_overrides.clone(),
+            persist: r.persist,
+            max_result_tokens: r.max_result_tokens,
+        }
+    });
+    let routing_ref = routing_config.as_ref();
+
     // Run the inference loop
     let max_iterations = stage.max_iterations.unwrap_or(10);
-    let response = engine
-        .run_inference_loop(
-            entity,
-            provider_name,
-            model_name,
-            Vec::new(), // No tools for now
-            max_iterations,
-            |_tool_calls| async { Vec::new() },
-        )
-        .await;
 
-    match response {
-        Ok(resp) => {
-            println!("{}", resp.content);
-            println!(
-                "\n[Tokens used: {} input, {} output]",
-                resp.tokens_used.prompt_tokens, resp.tokens_used.completion_tokens
-            );
+    if is_interactive {
+        // Interactive mode: run inference, show response, prompt for input, repeat
+        let mut iteration = 0;
+        loop {
+            if iteration >= max_iterations {
+                println!("\n[Max iterations reached]");
+                break;
+            }
+
+            let response = engine
+                .run_inference_filtered(
+                    entity,
+                    provider_name,
+                    model_name,
+                    Vec::new(),
+                    tool_filter_ref,
+                )
+                .await;
+
+            match response {
+                Ok(resp) => {
+                    println!("\nAssistant: {}", resp.content);
+                    println!(
+                        "[Tokens: {} input, {} output]",
+                        resp.tokens_used.prompt_tokens, resp.tokens_used.completion_tokens
+                    );
+
+                    // Add response to context
+                    if let Some(mut window) = engine.world_mut().get_mut::<leviath_runtime::ContextWindow>(entity) {
+                        let tokens = resp.content.len() / 4 + 1;
+                        let _ = window.add_to_region(
+                            "conversation",
+                            format!("Assistant: {}", resp.content),
+                            tokens,
+                        );
+                    }
+
+                    // Prompt for user input
+                    print!("\nYou: ");
+                    use std::io::Write;
+                    std::io::stdout().flush().ok();
+
+                    let mut input = String::new();
+                    std::io::stdin().read_line(&mut input)?;
+                    let input = input.trim().to_string();
+
+                    if input.is_empty() || input == "/quit" || input == "/exit" {
+                        println!("\n[Session ended]");
+                        break;
+                    }
+
+                    // Add user input to context
+                    if let Some(mut window) = engine.world_mut().get_mut::<leviath_runtime::ContextWindow>(entity) {
+                        let tokens = input.len() / 4 + 1;
+                        let _ = window.add_to_region(
+                            "conversation",
+                            format!("User: {}", input),
+                            tokens,
+                        );
+                    }
+                }
+                Err(e) => {
+                    println!("Inference error: {}", e);
+                    break;
+                }
+            }
+            iteration += 1;
         }
-        Err(e) => {
-            println!("Inference error: {}", e);
+    } else {
+        // Autonomous mode: run the full inference loop
+        let response = engine
+            .run_inference_loop_filtered(
+                entity,
+                provider_name,
+                model_name,
+                Vec::new(),
+                max_iterations,
+                tool_filter_ref,
+                routing_ref,
+                &mut |_tool_calls| async { Vec::new() },
+            )
+            .await;
+
+        match response {
+            Ok(resp) => {
+                println!("{}", resp.content);
+                println!(
+                    "\n[Tokens used: {} input, {} output]",
+                    resp.tokens_used.prompt_tokens, resp.tokens_used.completion_tokens
+                );
+            }
+            Err(e) => {
+                println!("Inference error: {}", e);
+            }
         }
     }
 
@@ -273,6 +369,38 @@ fn parse_manifest(content: &str) -> anyhow::Result<Blueprint> {
             // Parse max_iterations
             if let Some(max_iter) = stage_value.get("max_iterations").and_then(|v| v.as_integer()) {
                 stage.max_iterations = Some(max_iter as usize);
+            }
+
+            // Parse available_tools
+            if let Some(tools_arr) = stage_value.get("available_tools").and_then(|v| v.as_array()) {
+                stage.available_tools = tools_arr
+                    .iter()
+                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                    .collect();
+            }
+
+            // Parse tool_routing
+            if let Some(routing_table) = stage_value.get("tool_routing").and_then(|v| v.as_table()) {
+                let mut routing = ToolResultRouting::default();
+
+                if let Some(dr) = routing_table.get("default_region").and_then(|v| v.as_str()) {
+                    routing.default_region = dr.to_string();
+                }
+                if let Some(p) = routing_table.get("persist").and_then(|v| v.as_bool()) {
+                    routing.persist = p;
+                }
+                if let Some(mt) = routing_table.get("max_result_tokens").and_then(|v| v.as_integer()) {
+                    routing.max_result_tokens = Some(mt as usize);
+                }
+                if let Some(overrides_table) = routing_table.get("overrides").and_then(|v| v.as_table()) {
+                    for (tool_name, region_val) in overrides_table {
+                        if let Some(region_name) = region_val.as_str() {
+                            routing.tool_overrides.insert(tool_name.clone(), region_name.to_string());
+                        }
+                    }
+                }
+
+                stage.tool_result_routing = Some(routing);
             }
 
             stages.push(stage);

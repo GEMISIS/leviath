@@ -6,9 +6,13 @@ use leviath_providers::{
 };
 use std::collections::HashMap;
 use std::sync::Arc;
+use tokio::sync::mpsc;
 use tracing::info;
 
-use crate::components::{AgentState, ContextWindow, InferenceResult};
+use crate::components::{
+    AgentMessage, AgentState, AgentStatus, CancellationToken, ContextWindow, InferenceResult,
+    MessageInbox,
+};
 use crate::systems;
 
 /// Registry of LLM providers, keyed by provider name.
@@ -68,6 +72,12 @@ pub struct AgentEngine {
 
     /// Provider registry for looking up LLM providers
     provider_registry: ProviderRegistry,
+
+    /// Sender side of the message channel for sending messages to agents
+    message_tx: mpsc::UnboundedSender<AgentMessage>,
+
+    /// Receiver side of the message channel
+    message_rx: mpsc::UnboundedReceiver<AgentMessage>,
 }
 
 impl AgentEngine {
@@ -85,10 +95,14 @@ impl AgentEngine {
             systems::pool_management_system,
         ));
 
+        let (message_tx, message_rx) = mpsc::unbounded_channel();
+
         Self {
             world,
             schedule,
             provider_registry: ProviderRegistry::new(),
+            message_tx,
+            message_rx,
         }
     }
 
@@ -106,10 +120,14 @@ impl AgentEngine {
             systems::pool_management_system,
         ));
 
+        let (message_tx, message_rx) = mpsc::unbounded_channel();
+
         Self {
             world,
             schedule,
             provider_registry,
+            message_tx,
+            message_rx,
         }
     }
 
@@ -140,6 +158,97 @@ impl AgentEngine {
         &mut self.provider_registry
     }
 
+    /// Send a message to a running agent via the channel.
+    pub fn send_message(&self, msg: AgentMessage) -> std::result::Result<(), ProviderError> {
+        self.message_tx.send(msg).map_err(|e| {
+            ProviderError::Other(format!("Failed to send message: {}", e))
+        })
+    }
+
+    /// Get a clone of the message sender for external use.
+    pub fn get_message_sender(&self) -> mpsc::UnboundedSender<AgentMessage> {
+        self.message_tx.clone()
+    }
+
+    /// Process pending messages from the channel, delivering them to agent inboxes.
+    pub fn process_messages(&mut self) {
+        let mut messages = Vec::new();
+        while let Ok(msg) = self.message_rx.try_recv() {
+            messages.push(msg);
+        }
+
+        for msg in messages {
+            // Find the agent entity by ID
+            let mut found = false;
+            let mut query = self.world.query::<(&AgentState, &mut MessageInbox)>();
+            for (state, mut inbox) in query.iter_mut(&mut self.world) {
+                if state.agent_id == msg.agent_id {
+                    inbox.push(msg.clone());
+                    found = true;
+                    break;
+                }
+            }
+            if !found {
+                tracing::warn!(agent_id = %msg.agent_id, "Message target agent not found");
+            }
+        }
+
+        // Deliver messages from inboxes to context windows
+        self.deliver_inbox_messages();
+    }
+
+    /// Deliver messages from agent inboxes into their context windows.
+    fn deliver_inbox_messages(&mut self) {
+        let mut deliveries: Vec<(Entity, Vec<AgentMessage>)> = Vec::new();
+
+        let mut query = self.world.query::<(Entity, &mut MessageInbox)>();
+        for (entity, mut inbox) in query.iter_mut(&mut self.world) {
+            let msgs = inbox.drain_all();
+            if !msgs.is_empty() {
+                deliveries.push((entity, msgs));
+            }
+        }
+
+        for (entity, msgs) in deliveries {
+            if let Some(mut window) = self.world.get_mut::<ContextWindow>(entity) {
+                for msg in msgs {
+                    let region_name = msg.target_region.as_deref().unwrap_or("conversation");
+                    let tokens = msg.content.len() / 4 + 1;
+                    let _ = window.add_to_region(
+                        region_name,
+                        format!("[Message]: {}", msg.content),
+                        tokens,
+                    );
+                }
+            }
+        }
+    }
+
+    /// Cancel a running agent by setting its cancellation token and status.
+    pub fn cancel_agent(&mut self, agent_id: &str) -> std::result::Result<(), ProviderError> {
+        let mut found = false;
+
+        let mut query = self.world.query::<(&mut AgentState, &CancellationToken)>();
+        for (mut state, token) in query.iter_mut(&mut self.world) {
+            if state.agent_id == agent_id {
+                token.cancel();
+                state.status = AgentStatus::Cancelled;
+                tracing::info!(agent_id = %agent_id, "Agent cancelled");
+                found = true;
+                break;
+            }
+        }
+
+        if found {
+            Ok(())
+        } else {
+            Err(ProviderError::Other(format!(
+                "Agent '{}' not found",
+                agent_id
+            )))
+        }
+    }
+
     /// Run inference for a specific agent.
     ///
     /// This is the core inference loop:
@@ -149,12 +258,28 @@ impl AgentEngine {
     /// 4. Parse tool calls from the response
     /// 5. Add response to conversation region
     /// 6. Return the response for the caller to handle tool execution
+    ///
+    /// If `tool_filter` is provided, only tools whose names appear in the
+    /// filter list will be included in the request.
     pub async fn run_inference(
         &mut self,
         entity: Entity,
         provider_name: &str,
         model: &str,
         tools: Vec<Tool>,
+    ) -> std::result::Result<InferenceResponse, ProviderError> {
+        self.run_inference_filtered(entity, provider_name, model, tools, None)
+            .await
+    }
+
+    /// Run inference with an optional tool name filter.
+    pub async fn run_inference_filtered(
+        &mut self,
+        entity: Entity,
+        provider_name: &str,
+        model: &str,
+        tools: Vec<Tool>,
+        tool_filter: Option<&[String]>,
     ) -> std::result::Result<InferenceResponse, ProviderError> {
         let provider = self
             .provider_registry
@@ -177,6 +302,20 @@ impl AgentEngine {
             (prompt, max_tokens)
         };
 
+        // Apply tool filter if provided
+        let filtered_tools = if let Some(filter) = tool_filter {
+            if filter.is_empty() {
+                tools // Empty filter = include all
+            } else {
+                tools
+                    .into_iter()
+                    .filter(|t| filter.iter().any(|f| f == &t.name))
+                    .collect()
+            }
+        } else {
+            tools // None = include all
+        };
+
         let request = InferenceRequest {
             messages: vec![Message {
                 role: "user".to_string(),
@@ -185,7 +324,7 @@ impl AgentEngine {
             model: model.to_string(),
             max_tokens,
             temperature: 0.7,
-            tools,
+            tools: filtered_tools,
             extra: serde_json::Value::Null,
         };
 
@@ -224,6 +363,9 @@ impl AgentEngine {
     /// 2. If the LLM returns tool calls, execute them (via callback)
     /// 3. Add tool results to context
     /// 4. Repeat until no tool calls or max iterations reached
+    ///
+    /// Checks the agent's CancellationToken between iterations and returns
+    /// early if cancelled.
     pub async fn run_inference_loop<F, Fut>(
         &mut self,
         entity: Entity,
@@ -239,13 +381,63 @@ impl AgentEngine {
             Output = Vec<(String, String)>, // Vec<(tool_call_id, result)>
         >,
     {
+        self.run_inference_loop_filtered(
+            entity,
+            provider_name,
+            model,
+            tools,
+            max_iterations,
+            None,
+            None,
+            &mut tool_executor,
+        )
+        .await
+    }
+
+    /// Run the full inference loop with optional tool filtering and tool result routing.
+    ///
+    /// `tool_filter`: if Some, only tools matching these names are included.
+    /// `tool_result_routing`: if Some, routes tool results to configured regions.
+    pub async fn run_inference_loop_filtered<F, Fut>(
+        &mut self,
+        entity: Entity,
+        provider_name: &str,
+        model: &str,
+        tools: Vec<Tool>,
+        max_iterations: usize,
+        tool_filter: Option<&[String]>,
+        tool_result_routing: Option<&ToolResultRoutingConfig>,
+        tool_executor: &mut F,
+    ) -> std::result::Result<InferenceResponse, ProviderError>
+    where
+        F: FnMut(Vec<leviath_providers::ToolCall>) -> Fut,
+        Fut: std::future::Future<
+            Output = Vec<(String, String)>, // Vec<(tool_call_id, result)>
+        >,
+    {
         let mut last_response = None;
 
         for iteration in 0..max_iterations {
+            // Check cancellation token before each iteration
+            if let Some(token) = self.world.get::<CancellationToken>(entity) {
+                if token.is_cancelled() {
+                    tracing::info!(iteration, "Inference loop cancelled");
+                    if let Some(mut state) = self.world.get_mut::<AgentState>(entity) {
+                        state.status = AgentStatus::Cancelled;
+                    }
+                    return last_response.ok_or_else(|| {
+                        ProviderError::Other("Agent cancelled before producing a response".to_string())
+                    });
+                }
+            }
+
+            // Process any pending messages before inference
+            self.process_messages();
+
             tracing::debug!(iteration, "Inference loop iteration");
 
             let response = self
-                .run_inference(entity, provider_name, model, tools.clone())
+                .run_inference_filtered(entity, provider_name, model, tools.clone(), tool_filter)
                 .await?;
 
             // Check if we're done (no tool calls)
@@ -271,14 +463,53 @@ impl AgentEngine {
                     response_tokens,
                 );
 
-                // Add tool results
+                // Route tool results based on routing config
                 for (tool_call_id, result) in &tool_results {
-                    let result_tokens = result.len() / 4;
-                    let _ = window.add_to_region(
-                        "tool_results",
-                        format!("[Tool {}]: {}", tool_call_id, result),
-                        result_tokens,
-                    );
+                    let mut result_text = result.clone();
+
+                    // Apply max_result_tokens truncation if configured
+                    if let Some(routing) = tool_result_routing {
+                        if let Some(max_tokens) = routing.max_result_tokens {
+                            let max_chars = max_tokens * 4; // approximate
+                            if result_text.len() > max_chars {
+                                result_text.truncate(max_chars);
+                                result_text.push_str("\n[...truncated]");
+                            }
+                        }
+                    }
+
+                    let result_tokens = result_text.len() / 4 + 1;
+                    let formatted = format!("[Tool {}]: {}", tool_call_id, result_text);
+
+                    // Determine target region
+                    let target_region = if let Some(routing) = tool_result_routing {
+                        // Check per-tool overrides first
+                        if let Some(override_region) = routing.tool_overrides.get(tool_call_id) {
+                            override_region.as_str()
+                        } else {
+                            routing.default_region.as_str()
+                        }
+                    } else {
+                        "tool_results"
+                    };
+
+                    // If persist is false in routing, add to a clearable region instead
+                    let actual_region = if let Some(routing) = tool_result_routing {
+                        if !routing.persist {
+                            // Try clearable scratch region, fall back to target
+                            if window.get_region("scratch").is_some() {
+                                "scratch"
+                            } else {
+                                target_region
+                            }
+                        } else {
+                            target_region
+                        }
+                    } else {
+                        target_region
+                    };
+
+                    let _ = window.add_to_region(actual_region, formatted, result_tokens);
                 }
             }
 
@@ -397,6 +628,30 @@ impl AgentEngine {
     }
 }
 
+/// Configuration for routing tool results to specific context window regions.
+#[derive(Debug, Clone)]
+pub struct ToolResultRoutingConfig {
+    /// Default region for tool results (default: "tool_results")
+    pub default_region: String,
+    /// Per-tool overrides: tool_name → region_name
+    pub tool_overrides: HashMap<String, String>,
+    /// Whether to keep tool results (true) or discard after use (false)
+    pub persist: bool,
+    /// Max tokens per tool result (truncate if larger)
+    pub max_result_tokens: Option<usize>,
+}
+
+impl Default for ToolResultRoutingConfig {
+    fn default() -> Self {
+        Self {
+            default_region: "tool_results".to_string(),
+            tool_overrides: HashMap::new(),
+            persist: true,
+            max_result_tokens: None,
+        }
+    }
+}
+
 impl Default for AgentEngine {
     fn default() -> Self {
         Self::new()
@@ -445,5 +700,50 @@ mod tests {
         let mut engine = AgentEngine::new();
         // Should not panic with no entities
         engine.tick();
+    }
+
+    #[test]
+    fn test_message_sender() {
+        let engine = AgentEngine::new();
+        let sender = engine.get_message_sender();
+        // Should be able to send a message (will be queued)
+        let msg = crate::components::AgentMessage {
+            agent_id: "test-1".to_string(),
+            content: "hello".to_string(),
+            target_region: None,
+            priority: 0,
+        };
+        assert!(sender.send(msg).is_ok());
+    }
+
+    #[test]
+    fn test_process_messages_no_agents() {
+        let mut engine = AgentEngine::new();
+        // Send a message
+        let msg = crate::components::AgentMessage {
+            agent_id: "nonexistent".to_string(),
+            content: "hello".to_string(),
+            target_region: None,
+            priority: 0,
+        };
+        engine.send_message(msg).unwrap();
+        // Should not panic even with no matching agents
+        engine.process_messages();
+    }
+
+    #[test]
+    fn test_cancel_nonexistent_agent() {
+        let mut engine = AgentEngine::new();
+        let result = engine.cancel_agent("nonexistent");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_tool_result_routing_config_default() {
+        let config = ToolResultRoutingConfig::default();
+        assert_eq!(config.default_region, "tool_results");
+        assert!(config.persist);
+        assert!(config.max_result_tokens.is_none());
+        assert!(config.tool_overrides.is_empty());
     }
 }

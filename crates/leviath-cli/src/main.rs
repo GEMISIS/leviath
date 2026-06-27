@@ -42,6 +42,12 @@ enum Commands {
     
     /// Inspect and debug context windows
     Context(commands::context::ContextArgs),
+
+    /// Bundle an agent project for distribution
+    Pack(commands::pack::PackArgs),
+
+    /// Interactive agent dashboard
+    Dashboard(commands::dashboard::DashboardArgs),
 }
 
 #[tokio::main]
@@ -65,5 +71,7 @@ async fn main() -> anyhow::Result<()> {
         Commands::Install(args) => commands::install::execute(args).await,
         Commands::Test(args) => commands::test::execute(args).await,
         Commands::Context(args) => commands::context::execute(args).await,
+        Commands::Pack(args) => commands::pack::execute(args).await,
+        Commands::Dashboard(args) => commands::dashboard::execute(args).await,
     }
 }
