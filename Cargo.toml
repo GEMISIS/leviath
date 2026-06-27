@@ -1,0 +1,38 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/leviath-core",
+    "crates/leviath-runtime",
+    "crates/leviath-providers",
+    "crates/leviath-mcp",
+    "crates/leviath-package",
+    "crates/leviath-cli",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+authors = ["Gerald McAlister <gemisis@gmail.com>"]
+
+[workspace.dependencies]
+# Core crates
+leviath-core = { path = "crates/leviath-core" }
+leviath-runtime = { path = "crates/leviath-runtime" }
+leviath-providers = { path = "crates/leviath-providers" }
+leviath-mcp = { path = "crates/leviath-mcp" }
+leviath-package = { path = "crates/leviath-package" }
+
+# External dependencies
+bevy_ecs = "0.15"
+tokio = { version = "1.41", features = ["full"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+clap = { version = "4.5", features = ["derive"] }
+reqwest = { version = "0.12", features = ["json"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+thiserror = "2.0"
+toml = "0.8"
+anyhow = "1.0"
+chrono = "0.4"

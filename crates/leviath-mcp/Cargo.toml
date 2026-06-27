@@ -1,0 +1,16 @@
+[package]
+name = "leviath-mcp"
+description = "Model Context Protocol (MCP) tool integration for Leviath"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+leviath-core = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }

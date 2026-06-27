@@ -1,0 +1,16 @@
+[package]
+name = "leviath-package"
+description = "Agent packaging, sharing, and installation for Leviath"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+leviath-core = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+toml = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
