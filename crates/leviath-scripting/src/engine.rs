@@ -85,4 +85,99 @@ mod tests {
         assert!(result.is_ok());
         assert!(result.unwrap());
     }
+
+    #[test]
+    fn test_string_operations() {
+        let engine = ScriptEngine::new();
+        
+        // Test starts_with
+        let script = r#"content.starts_with("Hello")"#;
+        assert!(engine.validate(script, "Hello, world!").unwrap());
+        
+        // Test ends_with
+        let script = r#"content.ends_with("!")"#;
+        assert!(engine.validate(script, "Hello, world!").unwrap());
+        
+        // Test trim
+        let script = r#"content.trim() == "hello""#;
+        assert!(engine.validate(script, "  hello  ").unwrap());
+    }
+
+    #[test]
+    fn test_json_validation() {
+        let engine = ScriptEngine::new();
+        let script = r#"is_json(content)"#;
+        
+        assert!(engine.validate(script, r#"{"key": "value"}"#).unwrap());
+        assert!(!engine.validate(script, "not json").unwrap());
+    }
+
+    #[test]
+    fn test_mermaid_validation() {
+        let engine = ScriptEngine::new();
+        let script = r#"is_mermaid(content)"#;
+        
+        assert!(engine.validate(script, "graph TD\n  A --> B").unwrap());
+        assert!(engine.validate(script, "sequenceDiagram\n  Alice->>Bob: Hello").unwrap());
+        assert!(!engine.validate(script, "just text").unwrap());
+    }
+
+    #[test]
+    fn test_token_counting() {
+        let engine = ScriptEngine::new();
+        let script = r#"count_tokens(content) > 10"#;
+        
+        let long_text = "a".repeat(50);
+        assert!(engine.validate(script, &long_text).unwrap());
+        assert!(!engine.validate(script, "short").unwrap());
+    }
+
+    #[test]
+    fn test_split_join() {
+        let engine = ScriptEngine::new();
+        let script = r#"
+            let parts = content.split(",");
+            parts.len() == 3 && join(parts, "|") != ""
+        "#;
+        assert!(engine.validate(script, "a,b,c").unwrap());
+    }
+
+    #[test]
+    fn test_extract_modified() {
+        let engine = ScriptEngine::new();
+        let script = r#"
+            let modified = extract_modified(content);
+            modified.len() > 0
+        "#;
+        let content = "file1.txt\nmodified: file2.txt\nfile3.txt";
+        assert!(engine.validate(script, content).unwrap());
+    }
+
+    #[test]
+    fn test_summarize() {
+        let engine = ScriptEngine::new();
+        let script = r#"
+            let summary = summarize(content, 10);
+            summary.len() <= 50
+        "#;
+        let long_text = "a".repeat(1000);
+        assert!(engine.validate(script, &long_text).unwrap());
+    }
+
+    #[test]
+    fn test_sandbox_limits() {
+        let engine = ScriptEngine::new();
+        // Test operation limit by creating an infinite loop
+        let script = r#"
+            let x = 0;
+            loop {
+                x = x + 1;
+                if x > 200000 { break; }
+            }
+            true
+        "#;
+        // Should fail due to operation limit
+        let result = engine.validate(script, "test");
+        assert!(result.is_err());
+    }
 }
