@@ -338,6 +338,6 @@ cargo install --path crates/leviath-cli --root ~/.local/leviath-feat-x
 
 ## License
 
-MIT OR Apache-2.0
+MIT
 
 **Website:** [leviath.dev](https://leviath.dev) · **Repository:** [github.com/GEMISIS/leviath](https://github.com/GEMISIS/leviath)
