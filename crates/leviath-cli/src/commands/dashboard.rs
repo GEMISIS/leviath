@@ -337,11 +337,23 @@ impl Dashboard {
                     let d = if input.is_empty() { "(end)".to_string() } else { truncate(&input, 40) };
                     (InteractionResponse::text(&r.id, &input), d)
                 }
-                InteractionKind::MultipleChoice | InteractionKind::ToolApproval => {
+                InteractionKind::MultipleChoice => {
                     let idx = self.choice_selected;
                     let label = r.options.get(idx).cloned().unwrap_or_else(|| idx.to_string());
                     let d = truncate(&label, 40);
                     (InteractionResponse::choice(&r.id, idx), d)
+                }
+                InteractionKind::ToolApproval => {
+                    // Options: 0 = Allow once, 1 = Allow for this session, 2 = Deny
+                    let idx = self.choice_selected;
+                    let label = r.options.get(idx).cloned().unwrap_or_else(|| idx.to_string());
+                    let d = truncate(&label, 40);
+                    let (approved, scope) = match idx {
+                        0 => (true, ApprovalScope::Once),
+                        1 => (true, ApprovalScope::Session),
+                        _ => (false, ApprovalScope::Once),
+                    };
+                    (InteractionResponse::approval(&r.id, approved, scope), d)
                 }
                 InteractionKind::Confirm => {
                     let approved = self.choice_selected == 0;
