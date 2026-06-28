@@ -81,6 +81,9 @@ pub struct DashboardAgent {
     pub waiting_prompt: Option<String>,
     /// Full structured interaction request (populated for WaitingInput agents)
     pub pending_request: Option<interaction::InteractionRequest>,
+    /// The request_id we most recently submitted a response for, used to suppress
+    /// re-showing the same prompt before the worker has consumed the response.
+    pub last_answered_request_id: Option<String>,
     /// Live context window snapshot from context.json (background workers only)
     pub context_snapshot: Option<runstate::ContextSnapshot>,
     /// The ECS entity for this agent (dummy sentinel for run-state agents)
@@ -207,15 +210,23 @@ impl Dashboard {
                 agent.status = status;
                 agent.workdir = run.workdir.clone();
                 agent.context_snapshot = runstate::read_context_snapshot(&run.run_id);
-                // Only update waiting_prompt/pending_request when we have one; clear when no longer waiting
                 if matches!(run.status, RunStatus::WaitingInput) {
                     if waiting_prompt.is_some() {
-                        agent.waiting_prompt = waiting_prompt;
-                        agent.pending_request = pending_request;
+                        let pending_id = pending_request.as_ref().map(|r| r.id.as_str()).unwrap_or("");
+                        // Suppress re-showing a request we already answered but the worker
+                        // hasn't consumed yet — avoids the user accidentally submitting twice
+                        let already_answered = agent.last_answered_request_id.as_deref()
+                            .map(|a| !a.is_empty() && a == pending_id)
+                            .unwrap_or(false);
+                        if !already_answered {
+                            agent.waiting_prompt = waiting_prompt;
+                            agent.pending_request = pending_request;
+                        }
                     }
                 } else {
                     agent.waiting_prompt = None;
                     agent.pending_request = None;
+                    agent.last_answered_request_id = None;
                 }
             } else {
                 self.agents.push(DashboardAgent {
@@ -228,6 +239,7 @@ impl Dashboard {
                     iteration: run.iteration,
                     waiting_prompt,
                     pending_request,
+                    last_answered_request_id: None,
                     context_snapshot: runstate::read_context_snapshot(&run.run_id),
                     entity: dummy,
                     is_run_state: true,
@@ -359,7 +371,11 @@ impl Dashboard {
         self.input_buffer.clear();
         self.choice_selected = 0;
 
+        // Record which request we just answered so sync_from_run_state doesn't
+        // re-show the same pending.json before the worker has consumed our response.
+        let answered_id = resp.request_id.clone();
         if let Some(a) = self.agents.get_mut(self.selected) {
+            a.last_answered_request_id = if answered_id.is_empty() { None } else { Some(answered_id) };
             a.waiting_prompt = None;
             a.pending_request = None;
             a.status = AgentDisplayStatus::Active;

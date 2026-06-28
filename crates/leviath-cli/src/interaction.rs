@@ -287,6 +287,10 @@ pub fn request_interaction(
         std::thread::sleep(Duration::from_millis(100));
 
         if let Some(resp) = take_response(run_id) {
+            if !resp.request_id.is_empty() && resp.request_id != req.id {
+                // Stale response for a different request — discard and keep waiting.
+                continue;
+            }
             // Clean up and resume
             clear_interaction(run_id);
             meta.status = RunStatus::Running;
@@ -328,6 +332,10 @@ pub async fn request_interaction_async(
         tokio::time::sleep(Duration::from_millis(100)).await;
 
         if let Some(resp) = take_response(run_id) {
+            if !resp.request_id.is_empty() && resp.request_id != req.id {
+                // Stale response for a different request — discard and keep waiting.
+                continue;
+            }
             clear_interaction(run_id);
             meta.status = RunStatus::Running;
             meta.touch();
@@ -407,6 +415,10 @@ pub async fn request_tool_approval_background(
         tokio::time::sleep(Duration::from_millis(100)).await;
 
         if let Some(resp) = take_response(run_id) {
+            if !resp.request_id.is_empty() && resp.request_id != req.id {
+                // Stale response for a different request — discard and keep waiting.
+                continue;
+            }
             clear_interaction(run_id);
             // Restore Running status
             if let Ok(mut meta) = crate::runstate::read_meta(run_id) {
