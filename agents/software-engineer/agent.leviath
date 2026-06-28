@@ -1,5 +1,5 @@
 [agent]
-name = "default"
+name = "software-engineer"
 version = "0.1.0"
 description = "Plan-then-implement agent — mirrors the Claude Code plan→approve→code→review workflow"
 

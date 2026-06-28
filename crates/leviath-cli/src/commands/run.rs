@@ -550,6 +550,18 @@ async fn run_worker_inner(args: &WorkerArgs, meta: &mut RunMeta) -> anyhow::Resu
     }
 
     let prov_registry = build_provider_registry(&config);
+
+    // Generate a human-readable title from the task prompt (best-effort).
+    if config.title.enabled && meta.title.is_none() {
+        let fallback = args.model.as_deref();
+        meta.title = generate_title(&args.task, &config, &prov_registry, fallback).await;
+        if let Some(ref t) = meta.title {
+            println!("Title: {}", t);
+        }
+        meta.touch();
+        let _ = runstate::write_meta(meta);
+    }
+
     let mut engine = AgentEngine::with_providers(prov_registry);
 
     let mut pool = AgentPool::new(blueprint.clone());
@@ -1393,6 +1405,83 @@ async fn stream_inference(
 }
 
 // ─── Shared helpers ───────────────────────────────────────────────────────────
+
+/// Return the cheapest fast model for a given provider, used for title generation.
+fn default_title_model(provider: &str) -> &'static str {
+    match provider {
+        "anthropic" | "claude-code" => "claude-haiku-4-5-20251001",
+        "openai" => "gpt-4o-mini",
+        "openrouter" => "anthropic/claude-haiku-4-5",
+        // For Ollama and unknown providers, fall through to the caller's
+        // logic which will prefer config.default_model or the run model.
+        _ => "",
+    }
+}
+
+/// Attempt to generate a short title from the task prompt using a cheap model.
+///
+/// Best-effort: any failure is logged and silently ignored — a missing title
+/// must never prevent the run from starting.  Token usage from this call is
+/// intentionally excluded from the run's prompt/completion accumulators.
+async fn generate_title(
+    task: &str,
+    config: &Config,
+    registry: &leviath_runtime::ProviderRegistry,
+    fallback_model: Option<&str>,
+) -> Option<String> {
+    let provider_name = config
+        .title
+        .provider
+        .as_deref()
+        .unwrap_or(&config.default_provider);
+
+    let provider = registry.get(provider_name)?;
+
+    let model = config
+        .title
+        .model
+        .as_deref()
+        .map(|s| s.to_string())
+        .or_else(|| {
+            let m = default_title_model(provider_name);
+            if m.is_empty() {
+                fallback_model.map(|s| s.to_string())
+            } else {
+                Some(m.to_string())
+            }
+        })?;
+
+    let request = leviath_providers::InferenceRequest {
+        messages: vec![
+            leviath_providers::Message {
+                role: "system".to_string(),
+                content: "Write a terse 3-6 word title summarising the task. \
+                          No quotes, no punctuation at the end, no markdown."
+                    .to_string(),
+            },
+            leviath_providers::Message {
+                role: "user".to_string(),
+                content: task.to_string(),
+            },
+        ],
+        model,
+        max_tokens: 20,
+        temperature: 0.0,
+        tools: vec![],
+        extra: serde_json::Value::Null,
+    };
+
+    match provider.infer(request).await {
+        Ok(resp) => {
+            let title = resp.content.trim().lines().next()?.trim().to_string();
+            if title.is_empty() { None } else { Some(title) }
+        }
+        Err(e) => {
+            println!("Warning: title generation failed ({})", e);
+            None
+        }
+    }
+}
 
 /// Build a ProviderRegistry from Config.
 pub fn build_provider_registry(config: &Config) -> ProviderRegistry {

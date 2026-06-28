@@ -22,6 +22,47 @@ pub enum ToolPolicy {
     Deny,
 }
 
+/// Configuration for auto-generating a short title from the task prompt.
+///
+/// The title is generated once, at worker startup, by a cheap/fast model.
+/// Set `enabled = false` in `[title]` to disable title generation entirely.
+///
+/// Example config:
+/// ```toml
+/// [title]
+/// enabled = true
+/// provider = "anthropic"
+/// model = "claude-haiku-4-5-20251001"
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TitleConfig {
+    /// Whether to generate titles at all (default: true).
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+
+    /// Provider to use for title generation.
+    /// Defaults to the global `default_provider` when absent.
+    pub provider: Option<String>,
+
+    /// Model to use for title generation.
+    /// Defaults to a cheap fast model for the resolved provider when absent.
+    pub model: Option<String>,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+impl Default for TitleConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            provider: None,
+            model: None,
+        }
+    }
+}
+
 /// CLI configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
@@ -62,6 +103,13 @@ pub struct Config {
     /// stage, launch flags) take precedence over these.
     #[serde(default)]
     pub tool_permissions: HashMap<String, ToolPolicy>,
+
+    /// Title-generation configuration.
+    ///
+    /// Controls whether a short human-readable title is auto-generated from
+    /// the task prompt at worker startup.
+    #[serde(default)]
+    pub title: TitleConfig,
 }
 
 /// Provider configuration.
@@ -90,6 +138,7 @@ impl Default for Config {
             default_model: None,
             model_capabilities: HashMap::new(),
             tool_permissions: HashMap::new(),
+            title: TitleConfig::default(),
         }
     }
 }

@@ -10,8 +10,8 @@ pub struct CreateArgs {
     #[arg(value_name = "NAME")]
     pub name: String,
 
-    /// Starting template (default, coding, research)
-    #[arg(short, long, default_value = "default")]
+    /// Starting template (software-engineer, coder, researcher)
+    #[arg(short, long, default_value = "software-engineer")]
     pub template: String,
 }
 
@@ -50,7 +50,7 @@ pub async fn execute(args: CreateArgs) -> anyhow::Result<()> {
 
 fn create_manifest(name: &str, template: &str) -> String {
     match template {
-        "coding" => format!(
+        "coder" => format!(
 r#"[agent]
 name = "{name}"
 version = "0.1.0"
@@ -85,7 +85,7 @@ scratch      = {{ kind = "clearable",       max_tokens = 10000 }}
             name = name
         ),
 
-        "research" => format!(
+        "researcher" => format!(
 r#"[agent]
 name = "{name}"
 version = "0.1.0"

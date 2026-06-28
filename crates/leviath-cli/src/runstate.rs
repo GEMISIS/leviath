@@ -3,6 +3,9 @@
 //! Each run lives under ~/.leviath/runs/<run-id>/ with:
 //! - `meta.json`: run metadata, updated atomically (tmp + rename)
 //! - `output.log`: append-only log of all agent output
+//!
+//! The dashboard's activity log is persisted separately at:
+//! - `~/.leviath/dashboard.log` — never cleared, appended across sessions
 
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -62,6 +65,9 @@ pub struct RunMeta {
     /// Unix timestamp (seconds)
     pub updated_at: i64,
     pub error: Option<String>,
+    /// Short human-readable title generated from the task prompt (None until generated).
+    #[serde(default)]
+    pub title: Option<String>,
 }
 
 impl RunMeta {
@@ -93,6 +99,7 @@ impl RunMeta {
             started_at: now,
             updated_at: now,
             error: None,
+            title: None,
         }
     }
 
@@ -155,6 +162,33 @@ pub fn runs_dir() -> PathBuf {
 /// Directory for a specific run.
 pub fn run_dir(run_id: &str) -> PathBuf {
     runs_dir().join(run_id)
+}
+
+/// Path to the persistent dashboard activity log (~/.leviath/dashboard.log).
+pub fn dashboard_log_path() -> PathBuf {
+    dirs::home_dir()
+        .unwrap_or_default()
+        .join(".leviath")
+        .join("dashboard.log")
+}
+
+/// Append a timestamped line to the persistent dashboard activity log.
+/// Silently ignores I/O errors — the dashboard log is best-effort.
+pub fn append_dashboard_log(msg: &str) {
+    use std::io::Write;
+    let path = dashboard_log_path();
+    // Ensure the parent directory exists (first-run case).
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+    {
+        let timestamp = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
+        let _ = writeln!(file, "{} {}", timestamp, msg);
+    }
 }
 
 /// Generate a unique run ID: "<agent_name>-<timestamp>-<suffix>".
@@ -225,39 +259,27 @@ pub fn list_runs() -> Vec<RunMeta> {
     runs
 }
 
-/// Append a line to the run's output log.
-#[allow(dead_code)]
-pub fn append_log(run_id: &str, msg: &str) -> anyhow::Result<()> {
-    use std::io::Write;
-    let path = run_dir(run_id).join("output.log");
-    let mut file = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&path)?;
-    writeln!(file, "{}", msg)?;
-    Ok(())
-}
-
-/// Read the last `max_bytes` of the output log (or the whole file if smaller).
-pub fn tail_log(run_id: &str, max_bytes: u64) -> String {
-    let path = run_dir(run_id).join("output.log");
+/// Read the last `max_bytes` of any file on disk, returning UTF-8 text.
+/// If the file is smaller than `max_bytes` the whole file is returned.
+/// Partial UTF-8 at the truncation boundary is handled by skipping to the
+/// first newline.  Returns an empty string on any I/O error.
+pub fn tail_file(path: &std::path::Path, max_bytes: u64) -> String {
     if !path.exists() {
         return String::new();
     }
 
-    let metadata = match std::fs::metadata(&path) {
+    let metadata = match std::fs::metadata(path) {
         Ok(m) => m,
         Err(_) => return String::new(),
     };
 
     let file_size = metadata.len();
     if file_size <= max_bytes {
-        return std::fs::read_to_string(&path).unwrap_or_default();
+        return std::fs::read_to_string(path).unwrap_or_default();
     }
 
-    // Read the last max_bytes
     use std::io::{Read, Seek, SeekFrom};
-    let mut file = match std::fs::File::open(&path) {
+    let mut file = match std::fs::File::open(path) {
         Ok(f) => f,
         Err(_) => return String::new(),
     };
@@ -270,10 +292,15 @@ pub fn tail_log(run_id: &str, max_bytes: u64) -> String {
     let mut buf = Vec::new();
     let _ = file.read_to_end(&mut buf);
 
-    // Find first newline to avoid partial line at start
+    // Skip to the first newline so we don't emit a partial line at the start.
     if let Some(nl) = buf.iter().position(|&b| b == b'\n') {
         String::from_utf8_lossy(&buf[nl + 1..]).to_string()
     } else {
         String::from_utf8_lossy(&buf).to_string()
     }
+}
+
+/// Read the last `max_bytes` of a run's output log.
+pub fn tail_log(run_id: &str, max_bytes: u64) -> String {
+    tail_file(&run_dir(run_id).join("output.log"), max_bytes)
 }

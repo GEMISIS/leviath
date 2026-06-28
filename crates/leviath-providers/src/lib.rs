@@ -23,6 +23,7 @@ pub use provider::{
     Provider, InferenceRequest, InferenceResponse, Message, Tool, ToolCall,
     TokenUsage, FinishReason, ProviderError, Result, StreamChunk, ToolCallDelta,
     ProviderConfig, RateLimitConfig, ModelCapabilities, ModelInfo,
+    parse_openai_finish_reason, check_http_response,
 };
 pub use rate_limit::RateLimiter;
 pub use anthropic::AnthropicProvider;

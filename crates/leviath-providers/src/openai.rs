@@ -1,9 +1,12 @@
 //! OpenAI provider implementation.
 
 use crate::provider::{
-    FinishReason, InferenceRequest, InferenceResponse, ModelCapabilities, ModelInfo, Provider,
+    check_http_response, parse_openai_finish_reason,
+    InferenceRequest, InferenceResponse, ModelCapabilities, ModelInfo, Provider,
     ProviderConfig, ProviderError, Result, StreamChunk, TokenUsage, ToolCall, ToolCallDelta,
 };
+#[cfg(test)]
+use crate::provider::FinishReason;
 use crate::rate_limit::RateLimiter;
 use async_trait::async_trait;
 use futures_core::Stream;
@@ -191,16 +194,6 @@ impl OpenAIProvider {
         body
     }
 
-    /// Parse a finish_reason string into a FinishReason.
-    fn parse_finish_reason(reason: &str) -> FinishReason {
-        match reason {
-            "stop" => FinishReason::Complete,
-            "tool_calls" => FinishReason::ToolCall,
-            "length" => FinishReason::TokenLimit,
-            _ => FinishReason::Complete,
-        }
-    }
-
     /// Parse the API response body.
     fn parse_response(&self, body: &serde_json::Value) -> Result<InferenceResponse> {
         let choice = body
@@ -272,7 +265,7 @@ impl OpenAIProvider {
                 completion_tokens,
                 total_tokens: prompt_tokens + completion_tokens,
             },
-            finish_reason: Self::parse_finish_reason(finish_reason),
+            finish_reason: parse_openai_finish_reason(finish_reason),
         })
     }
 }
@@ -298,30 +291,7 @@ impl Provider for OpenAIProvider {
             .await
             .map_err(|e| ProviderError::RequestFailed(e.to_string()))?;
 
-        let status = response.status();
-
-        if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
-            let retry_after = response
-                .headers()
-                .get("retry-after")
-                .and_then(|v| v.to_str().ok())
-                .and_then(|v| v.parse::<u64>().ok());
-            if let Some(limiter) = &self.rate_limiter {
-                limiter.handle_rate_limit(retry_after).await;
-            }
-            return Err(ProviderError::RateLimitExceeded);
-        }
-
-        if !status.is_success() {
-            let error_body = response
-                .text()
-                .await
-                .unwrap_or_else(|_| "unknown error".to_string());
-            return Err(ProviderError::ApiError(format!(
-                "HTTP {}: {}",
-                status, error_body
-            )));
-        }
+        let response = check_http_response(response, self.rate_limiter.as_ref()).await?;
 
         if let Some(limiter) = &self.rate_limiter {
             limiter.reset_backoff().await;
@@ -367,29 +337,7 @@ impl Provider for OpenAIProvider {
             .await
             .map_err(|e| ProviderError::RequestFailed(e.to_string()))?;
 
-        let status = response.status();
-        if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
-            let retry_after = response
-                .headers()
-                .get("retry-after")
-                .and_then(|v| v.to_str().ok())
-                .and_then(|v| v.parse::<u64>().ok());
-            if let Some(limiter) = &self.rate_limiter {
-                limiter.handle_rate_limit(retry_after).await;
-            }
-            return Err(ProviderError::RateLimitExceeded);
-        }
-
-        if !status.is_success() {
-            let error_body = response
-                .text()
-                .await
-                .unwrap_or_else(|_| "unknown error".to_string());
-            return Err(ProviderError::ApiError(format!(
-                "HTTP {}: {}",
-                status, error_body
-            )));
-        }
+        let response = check_http_response(response, self.rate_limiter.as_ref()).await?;
 
         if let Some(limiter) = &self.rate_limiter {
             limiter.reset_backoff().await;
@@ -611,7 +559,7 @@ fn parse_openai_sse_event(buffer: &mut String) -> Option<Option<StreamChunk>> {
             let finish_reason = choice
                 .get("finish_reason")
                 .and_then(|v| v.as_str())
-                .map(OpenAIProvider::parse_finish_reason);
+                .map(parse_openai_finish_reason);
 
             // Check for usage in the chunk
             let tokens = json.get("usage").map(|usage| {

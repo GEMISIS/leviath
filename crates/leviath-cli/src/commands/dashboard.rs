@@ -79,7 +79,12 @@ pub struct DashboardAgent {
     pub agent_path: String,
     pub stage: String,
     pub status: AgentDisplayStatus,
-    pub tokens: (usize, usize),
+    /// Cumulative prompt (input) tokens for background runs.
+    pub tokens_in: usize,
+    /// Cumulative completion (output) tokens for background runs.
+    pub tokens_out: usize,
+    /// Context-window occupancy for in-process agents: (current, max).
+    pub context_tokens: (usize, usize),
     pub iteration: usize,
     pub waiting_prompt: Option<String>,
     /// Full structured interaction request (populated for WaitingInput agents)
@@ -97,8 +102,10 @@ pub struct DashboardAgent {
     pub pid: u32,
     /// Working directory the agent ran in
     pub workdir: String,
-    /// Original task
+    /// Original task prompt
     pub task: String,
+    /// Auto-generated short title (None until the worker generates it).
+    pub title: Option<String>,
     /// Original model override
     #[allow(dead_code)]
     pub model: Option<String>,
@@ -159,10 +166,15 @@ impl Dashboard {
         let (event_tx, event_rx) = mpsc::unbounded_channel();
         let mut table_state = TableState::default();
         table_state.select(Some(0));
+
+        // Seed the in-memory log buffer from the tail of the persistent log so
+        // the panel shows recent history immediately on launch (not a blank panel).
+        let log = Self::load_log_seed();
+
         Self {
             agents: Vec::new(),
             selected: 0,
-            log: Vec::new(),
+            log,
             input_buffer: String::new(),
             input_mode: false,
             detail_view: false,
@@ -177,12 +189,37 @@ impl Dashboard {
         }
     }
 
+    /// Read the last 32 KB of dashboard.log and convert each line into a
+    /// `LogEntry` for the initial in-memory buffer.
+    fn load_log_seed() -> Vec<LogEntry> {
+        let tail = runstate::tail_file(&runstate::dashboard_log_path(), 32_768);
+        let mut entries = Vec::new();
+        for line in tail.lines() {
+            // Lines are written as "YYYY-MM-DD HH:MM:SS <message>"
+            // Split off the first two space-separated tokens as the timestamp.
+            let mut parts = line.splitn(3, ' ');
+            let date = parts.next().unwrap_or("");
+            let time = parts.next().unwrap_or("");
+            let message = parts.next().unwrap_or(line).to_string();
+            if message.is_empty() {
+                continue;
+            }
+            // In the panel we show only the time portion for compactness.
+            let timestamp = if time.is_empty() { date.to_string() } else { time.to_string() };
+            entries.push(LogEntry { timestamp, message });
+        }
+        entries
+    }
+
     fn add_log(&mut self, msg: String) {
-        let timestamp = chrono::Local::now().format("%H:%M:%S").to_string();
-        self.log.push(LogEntry { timestamp, message: msg });
-        if self.log.len() > 50 {
+        let now = chrono::Local::now();
+        let timestamp = now.format("%H:%M:%S").to_string();
+        self.log.push(LogEntry { timestamp, message: msg.clone() });
+        if self.log.len() > 200 {
             self.log.remove(0);
         }
+        // Persist to the append-only dashboard log.
+        runstate::append_dashboard_log(&msg);
     }
 
     /// Sync agent list from on-disk run-state dir (background workers).
@@ -210,7 +247,9 @@ impl Dashboard {
             if let Some(agent) = self.agents.iter_mut().find(|a| a.id == run.run_id) {
                 agent.stage = run.current_stage.clone();
                 agent.iteration = run.iteration;
-                agent.tokens = (run.prompt_tokens + run.completion_tokens, 0);
+                agent.tokens_in = run.prompt_tokens;
+                agent.tokens_out = run.completion_tokens;
+                agent.title = run.title.clone();
                 agent.pid = run.pid;
                 agent.status = status;
                 agent.workdir = run.workdir.clone();
@@ -240,7 +279,9 @@ impl Dashboard {
                     agent_path: run.agent_path.clone(),
                     stage: run.current_stage.clone(),
                     status,
-                    tokens: (run.prompt_tokens + run.completion_tokens, 0),
+                    tokens_in: run.prompt_tokens,
+                    tokens_out: run.completion_tokens,
+                    context_tokens: (0, 0),
                     iteration: run.iteration,
                     waiting_prompt,
                     pending_request,
@@ -251,6 +292,7 @@ impl Dashboard {
                     pid: run.pid,
                     workdir: run.workdir.clone(),
                     task: run.task.clone(),
+                    title: run.title.clone(),
                     model: run.model.clone(),
                 });
             }
@@ -280,7 +322,7 @@ impl Dashboard {
                 }
             }
             if let Some(window) = engine.world().get::<ContextWindow>(agent.entity) {
-                agent.tokens = (window.current_tokens, window.max_tokens);
+                agent.context_tokens = (window.current_tokens, window.max_tokens);
             }
         }
     }
@@ -507,17 +549,13 @@ impl Dashboard {
                         self.submit_input();
                     }
                     KeyCode::Up => {
-                        if !matches!(kind, Some(InteractionKind::FreeText) | None) {
-                            if self.choice_selected > 0 {
-                                self.choice_selected -= 1;
-                            }
+                        if !matches!(kind, Some(InteractionKind::FreeText) | None) && self.choice_selected > 0 {
+                            self.choice_selected -= 1;
                         }
                     }
                     KeyCode::Down => {
-                        if !matches!(kind, Some(InteractionKind::FreeText) | None) && options_len > 0 {
-                            if self.choice_selected < options_len - 1 {
-                                self.choice_selected += 1;
-                            }
+                        if !matches!(kind, Some(InteractionKind::FreeText) | None) && options_len > 0 && self.choice_selected < options_len - 1 {
+                            self.choice_selected += 1;
                         }
                     }
                     KeyCode::Char(c) if matches!(kind, Some(InteractionKind::FreeText) | None) => {
@@ -718,6 +756,7 @@ impl Dashboard {
     fn draw_agent_table(&mut self, frame: &mut Frame, area: Rect) {
         let header = Row::new(vec![
             Cell::from("ID"),
+            Cell::from("Title"),
             Cell::from("Blueprint"),
             Cell::from("Stage"),
             Cell::from("Status"),
@@ -749,13 +788,34 @@ impl Dashboard {
                             .join("/")
                     }
                 };
-                let tok_str = if agent.tokens.1 > 0 {
-                    format!("{}/{}", format_tokens(agent.tokens.0), format_tokens(agent.tokens.1))
+                // Title: use generated title if available, else truncate the task.
+                let title_str = agent
+                    .title
+                    .as_deref()
+                    .map(|t| truncate(t, 28))
+                    .unwrap_or_else(|| truncate(&agent.task, 28));
+                // Tokens: show "in↑/out↓" for background runs, "used/max" for in-process.
+                let tok_str = if agent.is_run_state {
+                    if agent.tokens_in == 0 && agent.tokens_out == 0 {
+                        "—".to_string()
+                    } else {
+                        format!(
+                            "{}↑ {}↓",
+                            format_tokens(agent.tokens_in),
+                            format_tokens(agent.tokens_out)
+                        )
+                    }
                 } else {
-                    format_tokens(agent.tokens.0)
+                    let (cur, max) = agent.context_tokens;
+                    if max > 0 {
+                        format!("{}/{}", format_tokens(cur), format_tokens(max))
+                    } else {
+                        format_tokens(cur)
+                    }
                 };
                 Row::new(vec![
                     Cell::from(agent.id.clone()),
+                    Cell::from(title_str),
                     Cell::from(agent.blueprint_name.clone()),
                     Cell::from(agent.stage.clone()),
                     Cell::from(agent.status.to_string()).style(Style::default().fg(status_color)),
@@ -768,12 +828,13 @@ impl Dashboard {
         let table = Table::new(
             rows,
             [
-                Constraint::Percentage(22),
-                Constraint::Percentage(14),
-                Constraint::Percentage(14),
-                Constraint::Percentage(20),
-                Constraint::Percentage(12),
                 Constraint::Percentage(18),
+                Constraint::Percentage(20),
+                Constraint::Percentage(10),
+                Constraint::Percentage(10),
+                Constraint::Percentage(16),
+                Constraint::Percentage(12),
+                Constraint::Percentage(14),
             ],
         )
         .header(header)
@@ -805,7 +866,14 @@ impl Dashboard {
             && !matches!(agent.status, AgentDisplayStatus::Cancelled);
 
         // ── Layout heights ──────────────────────────────────────────────────
-        let info_height: u16 = if agent.task.is_empty() { 6 } else { 7 };
+        // Base: id/status, blueprint/stage, location, tokens, border rows = 6.
+        // +1 for title line, +1 for task line (each shown when present).
+        let info_height: u16 = {
+            let mut h: u16 = 6;
+            if agent.title.is_some() { h += 1; }
+            if !agent.task.is_empty() { h += 1; }
+            h
+        };
         let has_context = agent.context_snapshot.is_some();
         let context_height: u16 = if has_context {
             let n = agent.context_snapshot.as_ref().map(|s| s.regions.len()).unwrap_or(0) as u16;
@@ -895,15 +963,37 @@ impl Dashboard {
                 ]),
                 Line::from(vec![
                     Span::styled("Tokens:   ", Style::default().fg(Color::DarkGray)),
-                    Span::raw(if agent.tokens.1 > 0 {
-                        format!("{} used / {} max", format_tokens(agent.tokens.0), format_tokens(agent.tokens.1))
+                    Span::raw(if agent.is_run_state {
+                        let total = agent.tokens_in + agent.tokens_out;
+                        if total == 0 {
+                            "—".to_string()
+                        } else {
+                            format!(
+                                "{} in / {} out ({} total)",
+                                agent.tokens_in,
+                                agent.tokens_out,
+                                total,
+                            )
+                        }
                     } else {
-                        format!("{} used", format_tokens(agent.tokens.0))
+                        let (cur, max) = agent.context_tokens;
+                        if max > 0 {
+                            format!("{} used / {} max", format_tokens(cur), format_tokens(max))
+                        } else {
+                            format!("{} used", format_tokens(cur))
+                        }
                     }),
                     Span::styled("  Iter: ", Style::default().fg(Color::DarkGray)),
                     Span::raw(agent.iteration.to_string()),
                 ]),
             ];
+            // Show the generated title if available.
+            if let Some(ref title) = agent.title {
+                info_lines.push(Line::from(vec![
+                    Span::styled("Title:    ", Style::default().fg(Color::DarkGray)),
+                    Span::raw(title.clone()),
+                ]));
+            }
             if !agent.task.is_empty() {
                 info_lines.push(Line::from(vec![
                     Span::styled("Task:     ", Style::default().fg(Color::DarkGray)),

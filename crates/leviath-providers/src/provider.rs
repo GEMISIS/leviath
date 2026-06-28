@@ -301,6 +301,58 @@ pub trait Provider: Send + Sync {
     }
 }
 
+// ─── Shared provider helpers ─────────────────────────────────────────────────
+
+/// Map an OpenAI-style `finish_reason` string to a `FinishReason`.
+///
+/// Used by both the OpenAI and OpenRouter providers which share the same
+/// Chat Completions API response schema.
+pub fn parse_openai_finish_reason(reason: &str) -> FinishReason {
+    match reason {
+        "stop" => FinishReason::Complete,
+        "tool_calls" => FinishReason::ToolCall,
+        "length" => FinishReason::TokenLimit,
+        _ => FinishReason::Complete,
+    }
+}
+
+/// Check an HTTP response for errors and return it on success.
+///
+/// - On 429 (rate limit): notifies the optional rate limiter and returns `RateLimitExceeded`.
+/// - On any other non-2xx: reads the body and returns `ApiError`.
+/// - On 2xx: returns `Ok(response)` so the caller can read the body.
+///
+/// Pass the full `reqwest::Response`; it is returned back on success.
+pub async fn check_http_response(
+    response: reqwest::Response,
+    limiter: Option<&crate::rate_limit::RateLimiter>,
+) -> Result<reqwest::Response> {
+    let status = response.status();
+    if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+        // Extract retry-after *before* consuming the response body.
+        let retry_after = response
+            .headers()
+            .get("retry-after")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.parse::<u64>().ok());
+        if let Some(l) = limiter {
+            l.handle_rate_limit(retry_after).await;
+        }
+        return Err(ProviderError::RateLimitExceeded);
+    }
+    if !status.is_success() {
+        let error_body = response
+            .text()
+            .await
+            .unwrap_or_else(|_| "unknown error".to_string());
+        return Err(ProviderError::ApiError(format!(
+            "HTTP {}: {}",
+            status, error_body
+        )));
+    }
+    Ok(response)
+}
+
 // Helper module for single-item streams
 mod stream_once {
     use futures_core::Stream;

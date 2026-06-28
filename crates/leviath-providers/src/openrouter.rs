@@ -5,7 +5,8 @@
 
 use crate::openai::OpenAiSseStream;
 use crate::provider::{
-    FinishReason, InferenceRequest, InferenceResponse, ModelCapabilities, ModelInfo, Provider,
+    check_http_response, parse_openai_finish_reason,
+    InferenceRequest, InferenceResponse, ModelCapabilities, ModelInfo, Provider,
     ProviderConfig, ProviderError, Result, StreamChunk, TokenUsage, ToolCall,
 };
 use crate::rate_limit::RateLimiter;
@@ -183,13 +184,6 @@ impl OpenRouterProvider {
             .and_then(|v| v.as_str())
             .unwrap_or("stop");
 
-        let fr = match finish_reason {
-            "stop" => FinishReason::Complete,
-            "tool_calls" => FinishReason::ToolCall,
-            "length" => FinishReason::TokenLimit,
-            _ => FinishReason::Complete,
-        };
-
         Ok(InferenceResponse {
             content,
             tool_calls,
@@ -198,7 +192,7 @@ impl OpenRouterProvider {
                 completion_tokens,
                 total_tokens: prompt_tokens + completion_tokens,
             },
-            finish_reason: fr,
+            finish_reason: parse_openai_finish_reason(finish_reason),
         })
     }
 }
@@ -225,30 +219,7 @@ impl Provider for OpenRouterProvider {
             .await
             .map_err(|e| ProviderError::RequestFailed(e.to_string()))?;
 
-        let status = response.status();
-
-        if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
-            let retry_after = response
-                .headers()
-                .get("retry-after")
-                .and_then(|v| v.to_str().ok())
-                .and_then(|v| v.parse::<u64>().ok());
-            if let Some(limiter) = &self.rate_limiter {
-                limiter.handle_rate_limit(retry_after).await;
-            }
-            return Err(ProviderError::RateLimitExceeded);
-        }
-
-        if !status.is_success() {
-            let error_body = response
-                .text()
-                .await
-                .unwrap_or_else(|_| "unknown error".to_string());
-            return Err(ProviderError::ApiError(format!(
-                "HTTP {}: {}",
-                status, error_body
-            )));
-        }
+        let response = check_http_response(response, self.rate_limiter.as_ref()).await?;
 
         if let Some(limiter) = &self.rate_limiter {
             limiter.reset_backoff().await;
@@ -294,29 +265,7 @@ impl Provider for OpenRouterProvider {
             .await
             .map_err(|e| ProviderError::RequestFailed(e.to_string()))?;
 
-        let status = response.status();
-        if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
-            let retry_after = response
-                .headers()
-                .get("retry-after")
-                .and_then(|v| v.to_str().ok())
-                .and_then(|v| v.parse::<u64>().ok());
-            if let Some(limiter) = &self.rate_limiter {
-                limiter.handle_rate_limit(retry_after).await;
-            }
-            return Err(ProviderError::RateLimitExceeded);
-        }
-
-        if !status.is_success() {
-            let error_body = response
-                .text()
-                .await
-                .unwrap_or_else(|_| "unknown error".to_string());
-            return Err(ProviderError::ApiError(format!(
-                "HTTP {}: {}",
-                status, error_body
-            )));
-        }
+        let response = check_http_response(response, self.rate_limiter.as_ref()).await?;
 
         if let Some(limiter) = &self.rate_limiter {
             limiter.reset_backoff().await;

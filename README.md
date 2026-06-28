@@ -33,14 +33,15 @@ lev run agents/researcher --task "Compare spiking neural networks vs transformer
 Managing multiple agents at once:
 
 ```bash
-# Launch the interactive dashboard
-lev dashboard agents/coder --task "Refactor the auth module"
+# Spawn an agent in the background, then open the interactive dashboard
+lev run agents/coder --task "Refactor the auth module"
+lev dashboard
 
 # Inside the dashboard:
-#   [n] to spawn more agents
 #   [↑↓] to select an agent
-#   [Enter] to respond when an agent is waiting for input
-#   [c] to cancel, [k] to kill, [q] to quit
+#   [Enter] to open the detail view
+#   [i] to respond when an agent is waiting for input
+#   [c] to cancel, [k] to kill, [d] to delete, [q] to quit
 ```
 
 Your agent is defined in `agent.leviath` — edit it to change models, add stages, or configure memory regions. No Rust code needed.
@@ -242,9 +243,9 @@ required = true
 
 | Command | Description |
 |---|---|
-| `lev init <name>` | Create agent project (`--template default\|coding\|research`) |
-| `lev run [path] --task <task>` | Run an agent (`--model` to override) |
-| `lev dashboard [path] --task <task>` | TUI for managing multiple concurrent agents |
+| `lev create <name>` | Create agent project (`--template software-engineer\|coder\|researcher`) |
+| `lev run [path] --task <task>` | Run an agent in the background (`--model` to override) |
+| `lev dashboard` | TUI for managing all running and completed agents |
 | `lev pack [path]` | Bundle for distribution → `.leviath-bundle` |
 | `lev install <package>` | Install from bundle or registry |
 | `lev spawn <name>` | Spawn from installed blueprint (`--count N`) |
@@ -348,11 +349,12 @@ graph TB
 
 ## Pre-built Agents
 
-Three agents ship in `agents/`:
+Four agents ship in `agents/`:
 
-- **Coder** — `analyze → implement → review` (interactive review). Architecture pinned, files temporary, implementation auto-compacts.
-- **Reviewer** — `scan → deep_review → report`. Guidelines pinned, findings temporary.
-- **Researcher** — `gather → analyze → summarize`. Proves Leviath is domain-agnostic. Findings compact automatically.
+- **software-engineer** — `plan → implement → review` (plan requires approval). The default `lev create` template. Full Claude Code–style workflow.
+- **coder** — `analyze → implement → review` (interactive review). Architecture pinned, files temporary, implementation auto-compacts.
+- **reviewer** — `scan → deep_review → report`. Guidelines pinned, findings temporary.
+- **researcher** — `gather → analyze → summarize`. Findings compact automatically.
 
 ```bash
 cp -r agents/coder my-coder
@@ -362,7 +364,7 @@ lev run my-coder/ --task "Build a REST API"
 ## Development
 
 ```bash
-cargo build && cargo test    # 93 tests
+cargo build && cargo test    # 155 tests
 cargo clippy                 # Zero warnings
 ```
 
