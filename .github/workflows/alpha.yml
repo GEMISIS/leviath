@@ -1,0 +1,128 @@
+name: Alpha (Nightly)
+
+on:
+  schedule:
+    # Every day at 2am PST (9am UTC)
+    - cron: '0 9 * * *'
+  workflow_dispatch: # Manual trigger
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: "-D warnings"
+
+jobs:
+  # Re-run all CI gates before building alpha
+  gate:
+    name: Gate (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: true
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Build
+        run: cargo build --all-targets
+      - name: Test
+        run: cargo test
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+  build:
+    name: Build (${{ matrix.target }})
+    needs: gate
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            artifact: lev-linux-x86_64
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            artifact: lev-darwin-arm64
+          - target: x86_64-apple-darwin
+            os: macos-latest
+            artifact: lev-darwin-x86_64
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-${{ matrix.target }}
+      - name: Build release binary
+        run: cargo build --release --bin lev --target ${{ matrix.target }}
+      - name: Rename binary
+        run: cp target/${{ matrix.target }}/release/lev ${{ matrix.artifact }}
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: ${{ matrix.artifact }}
+
+  release:
+    name: Publish Alpha
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Get commit info
+        id: info
+        run: |
+          echo "sha_short=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
+          echo "date=$(date -u +%Y%m%d)" >> $GITHUB_OUTPUT
+          echo "sha_full=$(git rev-parse HEAD)" >> $GITHUB_OUTPUT
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts/
+
+      - name: Prepare release files
+        run: |
+          mkdir -p release/
+          for dir in artifacts/*/; do
+            name=$(basename "$dir")
+            cp "$dir/$name" "release/$name"
+            chmod +x "release/$name"
+          done
+          # Write the commit SHA for downstream promotion
+          echo "${{ steps.info.outputs.sha_full }}" > release/COMMIT_SHA
+
+      - name: Create/update alpha tag
+        run: |
+          git tag -f alpha
+          git push -f origin alpha
+
+      - name: Publish alpha release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: alpha
+          name: "Alpha · ${{ steps.info.outputs.date }} · ${{ steps.info.outputs.sha_short }}"
+          body: |
+            **Nightly alpha build** from `main` at ${{ steps.info.outputs.sha_full }}
+
+            Built: ${{ steps.info.outputs.date }}
+            Commit: ${{ steps.info.outputs.sha_short }}
+
+            ⚠️ This is an alpha build. Use at your own risk.
+
+            ### Install
+            ```bash
+            # Download for your platform, then:
+            chmod +x lev-*
+            sudo mv lev-* /usr/local/bin/lev
+            ```
+          prerelease: true
+          files: release/*
+          # TODO: Update homebrew alpha tap once created

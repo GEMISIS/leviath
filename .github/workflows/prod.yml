@@ -1,0 +1,158 @@
+name: Prod (Weekly Thursday)
+
+on:
+  schedule:
+    # Every Thursday at 9am PST (4pm UTC)
+    - cron: '0 16 * * 4'
+  workflow_dispatch: # Manual trigger
+
+permissions:
+  contents: write
+
+jobs:
+  check-beta:
+    name: Check Beta Exists
+    runs-on: ubuntu-latest
+    outputs:
+      sha: ${{ steps.beta.outputs.sha }}
+      sha_short: ${{ steps.beta.outputs.sha_short }}
+      skip: ${{ steps.beta.outputs.skip }}
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Get beta release info
+        id: beta
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # Get the beta release
+          beta_info=$(gh release view beta --json tagName 2>/dev/null || echo "")
+          if [ -z "$beta_info" ]; then
+            echo "No beta release found. Skipping prod deployment."
+            echo "skip=true" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          # Get commit SHA
+          gh release download beta --pattern "COMMIT_SHA" --dir /tmp/beta/ 2>/dev/null || true
+          if [ -f /tmp/beta/COMMIT_SHA ]; then
+            sha=$(cat /tmp/beta/COMMIT_SHA)
+            echo "sha=$sha" >> $GITHUB_OUTPUT
+            echo "sha_short=${sha:0:7}" >> $GITHUB_OUTPUT
+          else
+            echo "No COMMIT_SHA in beta release. Skipping."
+            echo "skip=true" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          # Check if this SHA was already released as prod
+          current_prod_sha=""
+          gh release download latest --pattern "COMMIT_SHA" --dir /tmp/prod/ 2>/dev/null || true
+          if [ -f /tmp/prod/COMMIT_SHA ]; then
+            current_prod_sha=$(cat /tmp/prod/COMMIT_SHA)
+          fi
+
+          if [ "$sha" = "$current_prod_sha" ]; then
+            echo "Beta SHA matches current prod. Nothing new to deploy."
+            echo "skip=true" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          echo "skip=false" >> $GITHUB_OUTPUT
+          echo "date=$(date -u +%Y%m%d)" >> $GITHUB_OUTPUT
+
+      - name: Get version from Cargo.toml
+        id: version
+        if: steps.beta.outputs.skip != 'true'
+        run: |
+          version=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')
+          echo "version=$version" >> $GITHUB_OUTPUT
+
+  approve:
+    name: Awaiting Approval
+    needs: check-beta
+    if: needs.check-beta.outputs.skip != 'true'
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - name: Approval received
+        run: echo "Prod deployment approved for ${{ needs.check-beta.outputs.sha_short }}"
+
+  # Auto-cancel if not approved by 6pm PST (1am UTC Friday)
+  # GitHub environment protection rules handle the timeout —
+  # set "Required reviewers" and a wait timer on the 'production' environment.
+
+  deploy:
+    name: Deploy to Prod
+    needs: [check-beta, approve]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Download beta binaries
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p release/
+          gh release download beta --dir release/
+          ls -la release/
+
+      - name: Create version tag
+        run: |
+          VERSION="v${{ needs.check-beta.outputs.version }}"
+          # If tag exists, append date
+          if git rev-parse "$VERSION" >/dev/null 2>&1; then
+            VERSION="${VERSION}+$(date -u +%Y%m%d)"
+          fi
+          git tag -f "$VERSION" ${{ needs.check-beta.outputs.sha }}
+          git push -f origin "$VERSION"
+          echo "VERSION=$VERSION" >> $GITHUB_ENV
+
+      - name: Create/update latest tag
+        run: |
+          git tag -f latest ${{ needs.check-beta.outputs.sha }}
+          git push -f origin latest
+
+      - name: Publish prod release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: latest
+          name: "Leviath ${{ env.VERSION }}"
+          body: |
+            **Stable release** promoted from beta.
+
+            Source commit: ${{ needs.check-beta.outputs.sha }}
+            Version: ${{ env.VERSION }}
+
+            ### Install
+
+            **Homebrew** (coming soon):
+            ```bash
+            brew install gemisis/tap/leviath
+            ```
+
+            **Binary download:**
+            ```bash
+            # macOS (Apple Silicon)
+            curl -sL <release-url>/lev-darwin-arm64 -o lev && chmod +x lev && sudo mv lev /usr/local/bin/
+
+            # macOS (Intel)
+            curl -sL <release-url>/lev-darwin-x86_64 -o lev && chmod +x lev && sudo mv lev /usr/local/bin/
+
+            # Linux (x86_64)
+            curl -sL <release-url>/lev-linux-x86_64 -o lev && chmod +x lev && sudo mv lev /usr/local/bin/
+            ```
+
+            **From source:**
+            ```bash
+            cargo install --git https://github.com/GEMISIS/leviath.git --tag ${{ env.VERSION }} --bin lev
+            ```
+          prerelease: false
+          make_latest: true
+          files: release/*
+          # TODO: Update homebrew stable tap once created

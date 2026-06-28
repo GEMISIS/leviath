@@ -1,0 +1,86 @@
+name: Beta (Weekly Monday)
+
+on:
+  schedule:
+    # Every Monday at 9am PST (4pm UTC)
+    - cron: '0 16 * * 1'
+  workflow_dispatch: # Manual trigger
+
+permissions:
+  contents: write
+
+jobs:
+  promote:
+    name: Promote Alpha → Beta
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Get alpha release info
+        id: alpha
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # Get the alpha release
+          alpha_info=$(gh release view alpha --json tagName,assets,body 2>/dev/null || echo "")
+          if [ -z "$alpha_info" ]; then
+            echo "No alpha release found. Skipping beta promotion."
+            echo "skip=true" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          # Extract the commit SHA from the alpha release assets
+          gh release download alpha --pattern "COMMIT_SHA" --dir /tmp/alpha/ 2>/dev/null || true
+          if [ -f /tmp/alpha/COMMIT_SHA ]; then
+            sha=$(cat /tmp/alpha/COMMIT_SHA)
+            echo "sha=$sha" >> $GITHUB_OUTPUT
+            echo "sha_short=${sha:0:7}" >> $GITHUB_OUTPUT
+          else
+            echo "No COMMIT_SHA in alpha release. Skipping."
+            echo "skip=true" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          echo "date=$(date -u +%Y%m%d)" >> $GITHUB_OUTPUT
+          echo "skip=false" >> $GITHUB_OUTPUT
+
+      - name: Download alpha binaries
+        if: steps.alpha.outputs.skip != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p release/
+          gh release download alpha --dir release/
+          ls -la release/
+
+      - name: Create/update beta tag
+        if: steps.alpha.outputs.skip != 'true'
+        run: |
+          git tag -f beta ${{ steps.alpha.outputs.sha }}
+          git push -f origin beta
+
+      - name: Publish beta release
+        if: steps.alpha.outputs.skip != 'true'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: beta
+          name: "Beta · ${{ steps.alpha.outputs.date }} · ${{ steps.alpha.outputs.sha_short }}"
+          body: |
+            **Weekly beta build** promoted from alpha.
+
+            Source commit: ${{ steps.alpha.outputs.sha }}
+            Promoted: ${{ steps.alpha.outputs.date }}
+
+            This build has passed nightly alpha testing. It will be promoted to
+            prod on Thursday if approved.
+
+            ### Install
+            ```bash
+            chmod +x lev-*
+            sudo mv lev-* /usr/local/bin/lev
+            ```
+          prerelease: true
+          files: release/*
+          # TODO: Update homebrew beta tap once created

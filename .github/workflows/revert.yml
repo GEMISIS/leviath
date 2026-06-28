@@ -1,0 +1,94 @@
+name: Revert Prod
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version tag to revert to (e.g., v0.1.0). Leave empty to revert to previous release.'
+        required: false
+        type: string
+      reason:
+        description: 'Reason for revert'
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  revert:
+    name: Revert Prod
+    runs-on: ubuntu-latest
+    environment: production  # Requires same approval as prod deploy
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Determine revert target
+        id: target
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [ -n "${{ inputs.version }}" ]; then
+            # Revert to specific version
+            TARGET_TAG="${{ inputs.version }}"
+            echo "Reverting to specified version: $TARGET_TAG"
+          else
+            # Find the previous prod release (not alpha/beta/latest)
+            # List releases, skip current latest, find first non-prerelease
+            PREV_TAG=$(gh release list --limit 20 | grep -v "Pre-release" | grep -v "^Latest" | head -1 | awk '{print $1}' || echo "")
+            if [ -z "$PREV_TAG" ]; then
+              echo "ERROR: No previous release found to revert to."
+              exit 1
+            fi
+            TARGET_TAG="$PREV_TAG"
+            echo "Reverting to previous release: $TARGET_TAG"
+          fi
+
+          echo "tag=$TARGET_TAG" >> $GITHUB_OUTPUT
+
+          # Verify the tag exists
+          if ! git rev-parse "$TARGET_TAG" >/dev/null 2>&1; then
+            echo "ERROR: Tag '$TARGET_TAG' does not exist."
+            exit 1
+          fi
+
+          sha=$(git rev-parse "$TARGET_TAG")
+          echo "sha=$sha" >> $GITHUB_OUTPUT
+          echo "sha_short=${sha:0:7}" >> $GITHUB_OUTPUT
+
+      - name: Download release binaries
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p release/
+          gh release download ${{ steps.target.outputs.tag }} --dir release/ 2>/dev/null || {
+            echo "ERROR: Could not download binaries for ${{ steps.target.outputs.tag }}"
+            exit 1
+          }
+          ls -la release/
+
+      - name: Update latest tag
+        run: |
+          git tag -f latest ${{ steps.target.outputs.sha }}
+          git push -f origin latest
+
+      - name: Publish reverted release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: latest
+          name: "Leviath ${{ steps.target.outputs.tag }} (reverted)"
+          body: |
+            **⚠️ REVERTED** to ${{ steps.target.outputs.tag }}
+
+            Reason: ${{ inputs.reason }}
+
+            Source commit: ${{ steps.target.outputs.sha }}
+            Reverted from: previous latest
+
+            This is a rollback. The previous prod release had issues.
+          prerelease: false
+          make_latest: true
+          files: release/*
+          # TODO: Update homebrew stable tap to reverted version once created
