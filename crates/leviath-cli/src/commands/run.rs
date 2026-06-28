@@ -158,16 +158,14 @@ pub async fn execute(args: RunArgs) -> anyhow::Result<()> {
 
         if count == 1 {
             println!("Started run: {}", run_id);
-            println!("  lev ps                — check all runs");
-            println!("  lev logs {}  — stream output", &run_id[..run_id.len().min(24)]);
-            println!("  lev dashboard         — view in TUI dashboard");
+            println!("  lev dashboard  — monitor in TUI dashboard");
         } else {
             println!("  [{}/{}] Started run: {}", i + 1, count, run_id);
         }
     }
 
     if count > 1 {
-        println!("Spawned {} runs. Use `lev ps` or `lev dashboard` to monitor.", count);
+        println!("Spawned {} runs. Use `lev dashboard` to monitor.", count);
     }
 
     Ok(())
@@ -893,6 +891,15 @@ where
                 response.tokens_used.prompt_tokens, response.tokens_used.completion_tokens
             );
 
+            // Update meta token counts so the dashboard shows them before the
+            // next interaction point (before they go to WaitingInput).
+            if let Some(ref mut m) = meta_holder {
+                m.prompt_tokens += response.tokens_used.prompt_tokens;
+                m.completion_tokens += response.tokens_used.completion_tokens;
+                m.touch();
+                let _ = runstate::write_meta(m);
+            }
+
             if let Some(mut window) = engine.world_mut().get_mut::<ContextWindow>(entity) {
                 let tokens = response.content.len() / 4 + 1;
                 let _ = window.add_to_region(
@@ -926,6 +933,13 @@ where
                 "\n[Tokens: {} in, {} out]",
                 response.tokens_used.prompt_tokens, response.tokens_used.completion_tokens
             );
+
+            if let Some(ref mut m) = meta_holder {
+                m.prompt_tokens += response.tokens_used.prompt_tokens;
+                m.completion_tokens += response.tokens_used.completion_tokens;
+                m.touch();
+                let _ = runstate::write_meta(m);
+            }
 
             if let Some(mut window) = engine.world_mut().get_mut::<ContextWindow>(entity) {
                 let tokens = response.content.len() / 4 + 1;
@@ -1094,6 +1108,13 @@ where
             if let Ok(resp) = response {
                 if !resp.content.is_empty() {
                     println!("{}", resp.content);
+                }
+                // Update token counts in meta so the dashboard shows them before WaitingInput
+                if let Some(ref mut m) = meta_holder {
+                    m.prompt_tokens += resp.tokens_used.prompt_tokens;
+                    m.completion_tokens += resp.tokens_used.completion_tokens;
+                    m.touch();
+                    let _ = runstate::write_meta(m);
                 }
             }
             remaining_iterations = remaining_iterations.saturating_sub(iters);

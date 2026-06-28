@@ -226,7 +226,6 @@ pub fn write_request(run_id: &str, req: &InteractionRequest) -> anyhow::Result<(
 }
 
 /// Read the current interaction request for a run (used by the dashboard).
-#[allow(dead_code)]
 pub fn read_request(run_id: &str) -> Option<InteractionRequest> {
     let path = pending_path(run_id);
     let json = std::fs::read_to_string(&path).ok()?;
@@ -234,7 +233,6 @@ pub fn read_request(run_id: &str) -> Option<InteractionRequest> {
 }
 
 /// Write an interaction response to disk (called by the dashboard / `lev respond`).
-#[allow(dead_code)]
 pub fn write_response(run_id: &str, resp: &InteractionResponse) -> anyhow::Result<()> {
     let path = response_path(run_id);
     let tmp = path.with_extension("json.tmp");

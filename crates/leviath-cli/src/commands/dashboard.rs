@@ -13,7 +13,7 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Cell, Clear, Paragraph, Row, Table, TableState, Wrap},
+    widgets::{Block, Borders, Cell, Paragraph, Row, Table, TableState, Wrap},
     Frame, Terminal,
 };
 use std::io::stdout;
@@ -23,6 +23,7 @@ use tokio::sync::{mpsc, Mutex};
 
 use super::run::build_provider_registry;
 use crate::config::Config;
+use crate::interaction;
 use crate::runstate::{self, RunStatus};
 
 #[derive(Args)]
@@ -78,6 +79,8 @@ pub struct DashboardAgent {
     pub tokens: (usize, usize),
     pub iteration: usize,
     pub waiting_prompt: Option<String>,
+    /// Full structured interaction request (populated for WaitingInput agents)
+    pub pending_request: Option<interaction::InteractionRequest>,
     /// The ECS entity for this agent (dummy sentinel for run-state agents)
     pub entity: bevy_ecs::prelude::Entity,
     /// True when tracked via on-disk run-state (background worker process)
@@ -135,9 +138,12 @@ struct Dashboard {
     cmd_tx: mpsc::UnboundedSender<EngineCommand>,
     table_state: TableState,
     should_quit: bool,
-    confirm_quit: bool,
     /// True when the delete-agent confirmation popup is open
     confirm_delete: bool,
+    /// Scroll offset for detail view log: 0 = bottom (auto-scroll), >0 = scrolled up
+    detail_scroll: usize,
+    /// Selected option index for MultipleChoice/ToolApproval/Confirm input
+    choice_selected: usize,
 }
 
 impl Dashboard {
@@ -157,8 +163,9 @@ impl Dashboard {
             cmd_tx,
             table_state,
             should_quit: false,
-            confirm_quit: false,
             confirm_delete: false,
+            detail_scroll: 0,
+            choice_selected: 0,
         }
     }
 
@@ -182,6 +189,14 @@ impl Dashboard {
                 RunStatus::Error => AgentDisplayStatus::Error(run.error.clone().unwrap_or_default()),
                 RunStatus::Cancelled => AgentDisplayStatus::Cancelled,
             };
+            // For WaitingInput agents, read the pending interaction from disk once
+            let (waiting_prompt, pending_request) = if matches!(run.status, RunStatus::WaitingInput) {
+                let req = interaction::read_request(&run.run_id);
+                (req.as_ref().map(|r| r.prompt.clone()), req)
+            } else {
+                (None, None)
+            };
+
             if let Some(agent) = self.agents.iter_mut().find(|a| a.id == run.run_id) {
                 agent.stage = run.current_stage.clone();
                 agent.iteration = run.iteration;
@@ -189,6 +204,16 @@ impl Dashboard {
                 agent.pid = run.pid;
                 agent.status = status;
                 agent.workdir = run.workdir.clone();
+                // Only update waiting_prompt/pending_request when we have one; clear when no longer waiting
+                if matches!(run.status, RunStatus::WaitingInput) {
+                    if waiting_prompt.is_some() {
+                        agent.waiting_prompt = waiting_prompt;
+                        agent.pending_request = pending_request;
+                    }
+                } else {
+                    agent.waiting_prompt = None;
+                    agent.pending_request = None;
+                }
             } else {
                 self.agents.push(DashboardAgent {
                     id: run.run_id.clone(),
@@ -198,7 +223,8 @@ impl Dashboard {
                     status,
                     tokens: (run.prompt_tokens + run.completion_tokens, 0),
                     iteration: run.iteration,
-                    waiting_prompt: None,
+                    waiting_prompt,
+                    pending_request,
                     entity: dummy,
                     is_run_state: true,
                     pid: run.pid,
@@ -274,6 +300,74 @@ impl Dashboard {
         }
     }
 
+    fn submit_input(&mut self) {
+        use interaction::{ApprovalScope, InteractionKind, InteractionResponse};
+
+        let (agent_id, is_run_state, req) = match self.agents.get(self.selected) {
+            Some(a) => (a.id.clone(), a.is_run_state, a.pending_request.clone()),
+            None => return,
+        };
+
+        let (resp, display) = match &req {
+            Some(r) => match r.kind {
+                InteractionKind::FreeText => {
+                    let input = self.input_buffer.trim().to_string();
+                    if input.is_empty() { return; }
+                    let d = truncate(&input, 40);
+                    (InteractionResponse::text(&r.id, &input), d)
+                }
+                InteractionKind::MultipleChoice | InteractionKind::ToolApproval => {
+                    let idx = self.choice_selected;
+                    let label = r.options.get(idx).cloned().unwrap_or_else(|| idx.to_string());
+                    let d = truncate(&label, 40);
+                    (InteractionResponse::choice(&r.id, idx), d)
+                }
+                InteractionKind::Confirm => {
+                    let approved = self.choice_selected == 0;
+                    let label = if approved { "Yes" } else { "No" };
+                    (InteractionResponse::approval(&r.id, approved, ApprovalScope::Once), label.to_string())
+                }
+            },
+            None => {
+                let input = self.input_buffer.trim().to_string();
+                if input.is_empty() { return; }
+                let d = truncate(&input, 40);
+                (InteractionResponse {
+                    request_id: String::new(),
+                    value: Some(input),
+                    choice_index: None,
+                    approved: None,
+                    scope: None,
+                }, d)
+            }
+        };
+
+        self.input_mode = false;
+        self.input_buffer.clear();
+        self.choice_selected = 0;
+
+        if let Some(a) = self.agents.get_mut(self.selected) {
+            a.waiting_prompt = None;
+            a.pending_request = None;
+            a.status = AgentDisplayStatus::Active;
+        }
+
+        if is_run_state {
+            match interaction::write_response(&agent_id, &resp) {
+                Ok(()) => self.add_log(format!("Sent: {}", display)),
+                Err(e) => self.add_log(format!("Failed to send response: {}", e)),
+            }
+        } else {
+            let input_text = resp.value
+                .or_else(|| resp.choice_index.map(|i| i.to_string()))
+                .unwrap_or_default();
+            let _ = self.cmd_tx.send(EngineCommand::SendInput {
+                agent_id: agent_id.clone(),
+                input: input_text,
+            });
+            self.add_log(format!("Sent: {}", display));
+        }
+    }
 
     fn process_events(&mut self) {
         while let Ok(event) = self.event_rx.try_recv() {
@@ -300,8 +394,8 @@ impl Dashboard {
                     self.add_log(format!("{}: Tool {}({})", agent_id, tool, truncate(&args, 40)));
                 }
                 AgentEvent::InferenceComplete { agent_id, content, tokens_used, tokens_prompt } => {
-                    if let Some(agent) = self.agents.iter_mut().find(|a| a.id == agent_id) {
-                        agent.iteration += 1;
+                    if let Some(_agent) = self.agents.iter_mut().find(|a| a.id == agent_id) {
+                        _agent.iteration += 1;
                     }
                     self.add_log(format!(
                         "{}: Inference done ({}tok in, {}tok out) {}",
@@ -345,83 +439,147 @@ impl Dashboard {
             return;
         }
 
-        if self.confirm_quit {
-            match key {
-                KeyCode::Char('y') | KeyCode::Char('Y') => {
-                    self.should_quit = true;
-                }
-                _ => {
-                    self.confirm_quit = false;
-                }
-            }
-            return;
-        }
-
-        // Input mode (responding to a waiting agent)
-        if self.input_mode {
-            match key {
-                KeyCode::Esc => {
-                    self.input_mode = false;
-                    self.input_buffer.clear();
-                }
-                KeyCode::Enter => {
-                    let input = self.input_buffer.clone();
-                    self.input_buffer.clear();
-                    self.input_mode = false;
-                    if !input.is_empty() {
-                        if let Some(agent) = self.agents.get_mut(self.selected) {
-                            let agent_id = agent.id.clone();
-                            agent.waiting_prompt = None;
-                            agent.status = AgentDisplayStatus::Active;
-                            let _ = self.cmd_tx.send(EngineCommand::SendInput {
-                                agent_id: agent_id.clone(),
-                                input: input.clone(),
-                            });
-                            self.add_log(format!("Sent to {}: {}", agent_id, truncate(&input, 40)));
-                        }
-                    }
-                }
-                KeyCode::Backspace => {
-                    self.input_buffer.pop();
-                }
-                KeyCode::Char(c) => {
-                    self.input_buffer.push(c);
-                }
-                _ => {}
-            }
-            return;
-        }
-
-        // Detail view — Esc closes it, Enter toggles respond if waiting
+        // ── Detail view ─────────────────────────────────────────────────────
         if self.detail_view {
-            match key {
-                KeyCode::Esc | KeyCode::Enter => {
-                    if key == KeyCode::Enter {
-                        if let Some(agent) = self.agents.get(self.selected) {
-                            if agent.waiting_prompt.is_some() {
-                                self.input_mode = true;
-                                return;
+            if self.input_mode {
+                use interaction::InteractionKind;
+                let kind = self.agents.get(self.selected)
+                    .and_then(|a| a.pending_request.as_ref())
+                    .map(|r| r.kind.clone());
+                let options_len = self.agents.get(self.selected)
+                    .and_then(|a| a.pending_request.as_ref())
+                    .map(|r| r.options.len())
+                    .unwrap_or(0);
+
+                match key {
+                    KeyCode::Esc => {
+                        self.input_mode = false;
+                        self.input_buffer.clear();
+                        self.choice_selected = 0;
+                    }
+                    KeyCode::Enter => {
+                        self.submit_input();
+                    }
+                    KeyCode::Up => {
+                        if !matches!(kind, Some(InteractionKind::FreeText) | None) {
+                            if self.choice_selected > 0 {
+                                self.choice_selected -= 1;
                             }
                         }
                     }
+                    KeyCode::Down => {
+                        if !matches!(kind, Some(InteractionKind::FreeText) | None) && options_len > 0 {
+                            if self.choice_selected < options_len - 1 {
+                                self.choice_selected += 1;
+                            }
+                        }
+                    }
+                    KeyCode::Char(c) if matches!(kind, Some(InteractionKind::FreeText) | None) => {
+                        self.input_buffer.push(c);
+                    }
+                    KeyCode::Backspace if matches!(kind, Some(InteractionKind::FreeText) | None) => {
+                        self.input_buffer.pop();
+                    }
+                    _ => {}
+                }
+                return;
+            }
+
+            // Detail view — not in input mode
+            match key {
+                KeyCode::Esc => {
                     self.detail_view = false;
+                    self.detail_scroll = 0;
+                }
+                KeyCode::Char('i') => {
+                    let can_respond = self.agents.get(self.selected).map(|a| {
+                        (a.waiting_prompt.is_some() || a.pending_request.is_some())
+                            && !matches!(a.status, AgentDisplayStatus::Cancelled)
+                    }).unwrap_or(false);
+                    if can_respond {
+                        self.input_mode = true;
+                        self.choice_selected = 0;
+                        self.input_buffer.clear();
+                    }
+                }
+                KeyCode::Up => {
+                    self.detail_scroll = self.detail_scroll.saturating_add(1);
+                }
+                KeyCode::Down => {
+                    self.detail_scroll = self.detail_scroll.saturating_sub(1);
+                }
+                KeyCode::Char('b') => {
+                    self.detail_scroll = usize::MAX;
+                }
+                KeyCode::Char('e') => {
+                    self.detail_scroll = 0;
+                }
+                KeyCode::Char('c') => {
+                    if let Some(agent) = self.agents.get(self.selected) {
+                        if matches!(agent.status, AgentDisplayStatus::Active | AgentDisplayStatus::Waiting) {
+                            let agent_id = agent.id.clone();
+                            let pid = agent.pid;
+                            let is_run_state = agent.is_run_state;
+                            let was_waiting = matches!(agent.status, AgentDisplayStatus::Waiting);
+                            if is_run_state {
+                                #[cfg(unix)]
+                                if pid > 0 {
+                                    unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM); }
+                                }
+                                if was_waiting {
+                                    interaction::clear_interaction(&agent_id);
+                                }
+                            } else {
+                                let _ = self.cmd_tx.send(EngineCommand::CancelAgent { agent_id: agent_id.clone() });
+                            }
+                            if let Some(a) = self.agents.get_mut(self.selected) {
+                                a.status = AgentDisplayStatus::Cancelled;
+                                a.waiting_prompt = None;
+                                a.pending_request = None;
+                            }
+                            self.input_mode = false;
+                            self.input_buffer.clear();
+                            self.add_log(format!("{}: Cancel requested", agent_id));
+                        }
+                    }
+                }
+                KeyCode::Char('k') => {
+                    if let Some(agent) = self.agents.get(self.selected) {
+                        let agent_id = agent.id.clone();
+                        let pid = agent.pid;
+                        let is_run_state = agent.is_run_state;
+                        let was_waiting = matches!(agent.status, AgentDisplayStatus::Waiting);
+                        if is_run_state {
+                            #[cfg(unix)]
+                            if pid > 0 {
+                                unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM); }
+                            }
+                            if was_waiting {
+                                interaction::clear_interaction(&agent_id);
+                            }
+                        } else {
+                            let _ = self.cmd_tx.send(EngineCommand::CancelAgent { agent_id: agent_id.clone() });
+                        }
+                        if let Some(a) = self.agents.get_mut(self.selected) {
+                            a.status = AgentDisplayStatus::Cancelled;
+                            a.waiting_prompt = None;
+                            a.pending_request = None;
+                        }
+                        self.input_mode = false;
+                        self.input_buffer.clear();
+                        self.add_log(format!("{}: Killed", agent_id));
+                    }
                 }
                 _ => {}
             }
             return;
         }
 
+        // ── Main agent list ──────────────────────────────────────────────────
         match key {
             KeyCode::Char('q') => {
-                let has_active = self.agents.iter().any(|a| {
-                    matches!(a.status, AgentDisplayStatus::Active | AgentDisplayStatus::Waiting)
-                });
-                if has_active {
-                    self.confirm_quit = true;
-                    self.add_log("Press 'y' to confirm quit with running agents".to_string());
-                } else {
-                    self.should_quit = true;
-                }
+                // Background workers are detached (setsid) and survive dashboard exit — no warning needed
+                self.should_quit = true;
             }
             KeyCode::Up => {
                 if !self.agents.is_empty() && self.selected > 0 {
@@ -436,14 +594,9 @@ impl Dashboard {
                 }
             }
             KeyCode::Enter => {
-                if let Some(agent) = self.agents.get(self.selected) {
-                    if agent.waiting_prompt.is_some() {
-                        // Open input mode directly for waiting agents
-                        self.input_mode = true;
-                    } else {
-                        // Toggle the full-screen detail view
-                        self.detail_view = true;
-                    }
+                if !self.agents.is_empty() {
+                    self.detail_view = true;
+                    self.detail_scroll = 0;
                 }
             }
             KeyCode::Char('d') => {
@@ -468,8 +621,13 @@ impl Dashboard {
                             if agent.pid > 0 {
                                 unsafe { libc::kill(agent.pid as libc::pid_t, libc::SIGTERM); }
                             }
+                            if matches!(agent.status, AgentDisplayStatus::Waiting) {
+                                interaction::clear_interaction(&agent_id);
+                            }
                             if let Some(a) = self.agents.get_mut(self.selected) {
                                 a.status = AgentDisplayStatus::Cancelled;
+                                a.waiting_prompt = None;
+                                a.pending_request = None;
                             }
                         } else {
                             let _ = self.cmd_tx.send(EngineCommand::CancelAgent { agent_id: agent_id.clone() });
@@ -486,11 +644,16 @@ impl Dashboard {
                         if agent.pid > 0 {
                             unsafe { libc::kill(agent.pid as libc::pid_t, libc::SIGTERM); }
                         }
+                        if matches!(agent.status, AgentDisplayStatus::Waiting) {
+                            interaction::clear_interaction(&agent_id);
+                        }
                     } else {
                         let _ = self.cmd_tx.send(EngineCommand::CancelAgent { agent_id: agent_id.clone() });
                     }
                     if let Some(a) = self.agents.get_mut(self.selected) {
                         a.status = AgentDisplayStatus::Cancelled;
+                        a.waiting_prompt = None;
+                        a.pending_request = None;
                     }
                     self.add_log(format!("{}: Killed", agent_id));
                 }
@@ -524,10 +687,6 @@ impl Dashboard {
         self.draw_agent_table(frame, chunks[0]);
         self.draw_log_panel(frame, chunks[1]);
         self.draw_help_bar(frame, chunks[2]);
-
-        if self.confirm_quit {
-            self.draw_quit_confirm(frame);
-        }
     }
 
     fn draw_agent_table(&mut self, frame: &mut Frame, area: Rect) {
@@ -547,13 +706,11 @@ impl Dashboard {
             .iter()
             .map(|agent| {
                 let status_color = agent.status.color();
-                // Show where the agent is running: abbreviated workdir
                 let where_str = {
                     let wd = &agent.workdir;
                     if wd.is_empty() {
                         "—".to_string()
                     } else {
-                        // Show last 2 path components for brevity
                         std::path::Path::new(wd)
                             .components()
                             .rev()
@@ -600,21 +757,72 @@ impl Dashboard {
         frame.render_stateful_widget(table, area, &mut self.table_state);
     }
 
-    fn draw_detail_panel(&self, frame: &mut Frame, area: Rect) {
-        let detail_text = if let Some(agent) = self.agents.get(self.selected) {
-            let mut lines = vec![
-                // Header: ID + status
+    fn draw_detail_panel(&mut self, frame: &mut Frame, area: Rect) {
+        use interaction::InteractionKind;
+
+        let agent = match self.agents.get(self.selected) {
+            Some(a) => a.clone(),
+            None => {
+                let msg = Paragraph::new("No agent selected.")
+                    .block(Block::default().borders(Borders::ALL).title(" Detail "));
+                frame.render_widget(msg, area);
+                return;
+            }
+        };
+
+        let is_waiting = matches!(agent.status, AgentDisplayStatus::Waiting);
+        let pending_req = agent.pending_request.clone();
+        let kind = pending_req.as_ref().map(|r| r.kind.clone());
+        let options: Vec<String> = pending_req.as_ref().map(|r| r.options.clone()).unwrap_or_default();
+        let has_prompt = is_waiting
+            && (pending_req.is_some() || agent.waiting_prompt.is_some())
+            && !matches!(agent.status, AgentDisplayStatus::Cancelled);
+
+        // ── Layout heights ──────────────────────────────────────────────────
+        let info_height: u16 = if agent.task.is_empty() { 6 } else { 7 };
+        let prompt_height: u16 = if has_prompt || (self.input_mode && is_waiting) {
+            let n = options.len() as u16;
+            if self.input_mode {
+                match &kind {
+                    Some(InteractionKind::FreeText) | None => 5,
+                    _ => (n + 4).min(14),
+                }
+            } else {
+                match &kind {
+                    Some(InteractionKind::FreeText) | None => 6,
+                    _ => (n + 5).min(14),
+                }
+            }
+        } else {
+            0
+        };
+
+        // ── Split area ──────────────────────────────────────────────────────
+        let (info_area, log_area, prompt_area_opt) = if prompt_height > 0 {
+            let chunks = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([
+                    Constraint::Length(info_height),
+                    Constraint::Min(3),
+                    Constraint::Length(prompt_height),
+                ])
+                .split(area);
+            (chunks[0], chunks[1], Some(chunks[2]))
+        } else {
+            let chunks = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([Constraint::Length(info_height), Constraint::Min(3)])
+                .split(area);
+            (chunks[0], chunks[1], None)
+        };
+
+        // ── Info block ──────────────────────────────────────────────────────
+        {
+            let mut info_lines = vec![
                 Line::from(vec![
-                    Span::styled(
-                        format!("[{}] ", agent.id),
-                        Style::default().add_modifier(Modifier::BOLD),
-                    ),
-                    Span::styled(
-                        agent.status.to_string(),
-                        Style::default().fg(agent.status.color()),
-                    ),
+                    Span::styled(format!("[{}]  ", agent.id), Style::default().add_modifier(Modifier::BOLD)),
+                    Span::styled(agent.status.to_string(), Style::default().fg(agent.status.color())),
                 ]),
-                // Blueprint + workdir
                 Line::from(vec![
                     Span::styled("Blueprint: ", Style::default().fg(Color::DarkGray)),
                     Span::raw(agent.blueprint_name.clone()),
@@ -636,75 +844,136 @@ impl Dashboard {
                     Span::raw(agent.iteration.to_string()),
                 ]),
             ];
-
-            // Task summary
             if !agent.task.is_empty() {
-                lines.push(Line::from(vec![
+                info_lines.push(Line::from(vec![
                     Span::styled("Task:     ", Style::default().fg(Color::DarkGray)),
-                    Span::raw(truncate(&agent.task, 80)),
+                    Span::raw(truncate(&agent.task, 120)),
                 ]));
             }
+            let info_widget = Paragraph::new(info_lines)
+                .block(Block::default().borders(Borders::ALL).title(" Agent "))
+                .wrap(Wrap { trim: true });
+            frame.render_widget(info_widget, info_area);
+        }
 
-            lines.push(Line::from(""));
+        // ── Output / log block (scrollable) ────────────────────────────────
+        {
+            let inner_h = log_area.height.saturating_sub(2) as usize;
 
-            // Show recent log output for background runs
-            // In detail_view, use more of the available height
-            if agent.is_run_state {
-                let tail_bytes = if self.detail_view { 16384 } else { 2048 };
-                let max_lines = area.height.saturating_sub(10) as usize;
-                let log_tail = runstate::tail_log(&agent.id, tail_bytes);
-                let recent: Vec<&str> = log_tail.lines()
-                    .rev()
-                    .take(max_lines)
-                    .collect::<Vec<_>>()
-                    .into_iter()
-                    .rev()
-                    .collect();
-                for line in recent {
-                    lines.push(Line::from(Span::styled(
-                        line.to_string(),
-                        Style::default().fg(Color::DarkGray),
-                    )));
-                }
+            let log_content = if agent.is_run_state {
+                runstate::tail_log(&agent.id, 131_072)
+            } else {
+                String::new()
+            };
+
+            let all_lines: Vec<&str> = log_content.lines().collect();
+            let total = all_lines.len();
+
+            // Clamp scroll to valid range
+            let max_scroll = total.saturating_sub(inner_h);
+            if self.detail_scroll > max_scroll {
+                self.detail_scroll = max_scroll;
             }
 
-            // Waiting prompt (shows below log)
-            if let Some(ref prompt) = agent.waiting_prompt {
+            let start = total.saturating_sub(inner_h + self.detail_scroll);
+            let end = (start + inner_h).min(total);
+
+            let visible: Vec<Line> = all_lines[start..end]
+                .iter()
+                .map(|l| Line::from(Span::styled(l.to_string(), Style::default().fg(Color::Gray))))
+                .collect();
+
+            let log_title = if total > inner_h {
+                let pct = if max_scroll == 0 { 100usize } else {
+                    100 - self.detail_scroll * 100 / max_scroll
+                };
+                format!(" Output  {}%  ({}/{})", pct, end, total)
+            } else {
+                " Output ".to_string()
+            };
+
+            let log_widget = Paragraph::new(visible)
+                .block(Block::default().borders(Borders::ALL).title(log_title));
+            frame.render_widget(log_widget, log_area);
+        }
+
+        // ── Prompt / input block ────────────────────────────────────────────
+        if let Some(prompt_area) = prompt_area_opt {
+            let (title, prompt_lines): (&str, Vec<Line>) = if self.input_mode {
+                let mut lines: Vec<Line> = vec![];
+                match &kind {
+                    Some(InteractionKind::FreeText) | None => {
+                        lines.push(Line::from(vec![
+                            Span::styled("> ", Style::default().fg(Color::Green)),
+                            Span::raw(self.input_buffer.clone()),
+                            Span::styled("█", Style::default().fg(Color::Green)),
+                        ]));
+                        lines.push(Line::from(""));
+                        lines.push(Line::from(Span::styled(
+                            "[Enter] send  [Esc] cancel",
+                            Style::default().fg(Color::DarkGray),
+                        )));
+                    }
+                    _ => {
+                        for (i, opt) in options.iter().enumerate() {
+                            let sel = i == self.choice_selected;
+                            let prefix = if sel { "> " } else { "  " };
+                            let label = match &kind {
+                                Some(InteractionKind::Confirm) => {
+                                    format!("{}{}) {}", prefix, if i == 0 { "y" } else { "n" }, opt)
+                                }
+                                _ => format!("{}[{}] {}", prefix, i + 1, opt),
+                            };
+                            let style = if sel {
+                                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+                            } else {
+                                Style::default()
+                            };
+                            lines.push(Line::from(Span::styled(label, style)));
+                        }
+                        lines.push(Line::from(""));
+                        lines.push(Line::from(Span::styled(
+                            "[↑↓] select  [Enter] confirm  [Esc] cancel",
+                            Style::default().fg(Color::DarkGray),
+                        )));
+                    }
+                }
+                (" Response ", lines)
+            } else {
+                let mut lines: Vec<Line> = vec![];
+                let prompt_text = pending_req.as_ref()
+                    .map(|r| r.prompt.as_str())
+                    .or(agent.waiting_prompt.as_deref())
+                    .unwrap_or("Waiting for input");
+                lines.push(Line::from(Span::styled(
+                    prompt_text.to_string(),
+                    Style::default().fg(Color::Yellow),
+                )));
+                if !options.is_empty() {
+                    lines.push(Line::from(""));
+                    for (i, opt) in options.iter().enumerate() {
+                        let label = match &kind {
+                            Some(InteractionKind::Confirm) => {
+                                format!("  {}) {}", if i == 0 { "y" } else { "n" }, opt)
+                            }
+                            _ => format!("  [{}] {}", i + 1, opt),
+                        };
+                        lines.push(Line::from(label));
+                    }
+                }
                 lines.push(Line::from(""));
                 lines.push(Line::from(Span::styled(
-                    format!("⚡ {}", prompt),
-                    Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+                    "[i] respond  [c/k] cancel/kill",
+                    Style::default().fg(Color::DarkGray),
                 )));
-            }
+                (" Input Required ", lines)
+            };
 
-            // Input widget when responding
-            if self.input_mode {
-                lines.push(Line::from(""));
-                lines.push(Line::from(vec![
-                    Span::styled("> ", Style::default().fg(Color::Green)),
-                    Span::raw(&self.input_buffer),
-                    Span::styled("█", Style::default().fg(Color::Green)),
-                ]));
-            }
-
-            lines
-        } else {
-            vec![Line::from("No agents selected. Press 'n' to add one.")]
-        };
-
-        let title = if self.confirm_delete {
-            " ⚠ CONFIRM DELETE (y/n) "
-        } else if self.detail_view {
-            " Detail  [Esc] back "
-        } else {
-            " Detail "
-        };
-
-        let detail = Paragraph::new(detail_text)
-            .block(Block::default().borders(Borders::ALL).title(title))
-            .wrap(Wrap { trim: true });
-
-        frame.render_widget(detail, area);
+            let prompt_widget = Paragraph::new(prompt_lines)
+                .block(Block::default().borders(Borders::ALL).title(title))
+                .wrap(Wrap { trim: true });
+            frame.render_widget(prompt_widget, prompt_area);
+        }
     }
 
     fn draw_log_panel(&self, frame: &mut Frame, area: Rect) {
@@ -732,27 +1001,65 @@ impl Dashboard {
     }
 
     fn draw_help_bar(&self, frame: &mut Frame, area: Rect) {
+        use interaction::InteractionKind;
+
         let help = if self.confirm_delete {
             Line::from(vec![
                 Span::styled("[y]", Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
                 Span::raw(" confirm delete  "),
-                Span::styled("[any other key]", Style::default().add_modifier(Modifier::BOLD)),
+                Span::styled("[any key]", Style::default().add_modifier(Modifier::BOLD)),
                 Span::raw(" cancel"),
             ])
-        } else if self.input_mode {
-            Line::from(vec![
-                Span::styled("[Esc]", Style::default().add_modifier(Modifier::BOLD)),
-                Span::raw(" cancel  "),
-                Span::styled("[Enter]", Style::default().add_modifier(Modifier::BOLD)),
-                Span::raw(" send"),
-            ])
+        } else if self.detail_view && self.input_mode {
+            let kind = self.agents.get(self.selected)
+                .and_then(|a| a.pending_request.as_ref())
+                .map(|r| r.kind.clone());
+            match kind {
+                Some(InteractionKind::FreeText) | None => Line::from(vec![
+                    Span::styled("[Enter]", Style::default().add_modifier(Modifier::BOLD)),
+                    Span::raw(" send  "),
+                    Span::styled("[Esc]", Style::default().add_modifier(Modifier::BOLD)),
+                    Span::raw(" cancel"),
+                ]),
+                _ => Line::from(vec![
+                    Span::styled("[↑↓]", Style::default().add_modifier(Modifier::BOLD)),
+                    Span::raw(" select  "),
+                    Span::styled("[Enter]", Style::default().add_modifier(Modifier::BOLD)),
+                    Span::raw(" confirm  "),
+                    Span::styled("[Esc]", Style::default().add_modifier(Modifier::BOLD)),
+                    Span::raw(" cancel"),
+                ]),
+            }
         } else if self.detail_view {
-            Line::from(vec![
-                Span::styled("[Esc]", Style::default().add_modifier(Modifier::BOLD)),
-                Span::raw(" back  "),
-                Span::styled("[Enter]", Style::default().add_modifier(Modifier::BOLD)),
-                Span::raw(" respond (if waiting)"),
-            ])
+            let can_respond = self.agents.get(self.selected).map(|a| {
+                (a.waiting_prompt.is_some() || a.pending_request.is_some())
+                    && !matches!(a.status, AgentDisplayStatus::Cancelled)
+            }).unwrap_or(false);
+            if can_respond {
+                Line::from(vec![
+                    Span::styled("[↑↓]", Style::default().add_modifier(Modifier::BOLD)),
+                    Span::raw(" scroll  "),
+                    Span::styled("[b/e]", Style::default().add_modifier(Modifier::BOLD)),
+                    Span::raw(" beg/end  "),
+                    Span::styled("[i]", Style::default().add_modifier(Modifier::BOLD)),
+                    Span::raw(" respond  "),
+                    Span::styled("[c/k]", Style::default().add_modifier(Modifier::BOLD)),
+                    Span::raw(" cancel/kill  "),
+                    Span::styled("[Esc]", Style::default().add_modifier(Modifier::BOLD)),
+                    Span::raw(" back"),
+                ])
+            } else {
+                Line::from(vec![
+                    Span::styled("[↑↓]", Style::default().add_modifier(Modifier::BOLD)),
+                    Span::raw(" scroll  "),
+                    Span::styled("[b/e]", Style::default().add_modifier(Modifier::BOLD)),
+                    Span::raw(" beg/end  "),
+                    Span::styled("[c/k]", Style::default().add_modifier(Modifier::BOLD)),
+                    Span::raw(" cancel/kill  "),
+                    Span::styled("[Esc]", Style::default().add_modifier(Modifier::BOLD)),
+                    Span::raw(" back"),
+                ])
+            }
         } else {
             Line::from(vec![
                 Span::styled("[↑↓]", Style::default().add_modifier(Modifier::BOLD)),
@@ -772,30 +1079,6 @@ impl Dashboard {
 
         let help_widget = Paragraph::new(help);
         frame.render_widget(help_widget, area);
-    }
-
-    fn draw_quit_confirm(&self, frame: &mut Frame) {
-        let area = frame.area();
-        let popup_area = Rect {
-            x: area.width / 4,
-            y: area.height / 2 - 2,
-            width: area.width / 2,
-            height: 4,
-        };
-
-        let popup = Paragraph::new(vec![
-            Line::from(""),
-            Line::from("Agents still running. Quit? (y/n)"),
-        ])
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(" Confirm Quit ")
-                .style(Style::default().fg(Color::Red)),
-        );
-
-        frame.render_widget(Clear, popup_area);
-        frame.render_widget(popup, popup_area);
     }
 }
 
