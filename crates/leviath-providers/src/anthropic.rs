@@ -76,7 +76,7 @@ impl AnthropicProvider {
                 supports_tools: true,
                 supports_system_prompt: true,
                 max_context_tokens: 1_000_000,
-                max_output_tokens: 131_072,
+                max_output_tokens: 128_000,
             };
         }
         // Opus 4.8 / 4.7 — 1M context, 128K output, no temperature
@@ -87,7 +87,7 @@ impl AnthropicProvider {
                 supports_tools: true,
                 supports_system_prompt: true,
                 max_context_tokens: 1_000_000,
-                max_output_tokens: 131_072,
+                max_output_tokens: 128_000,
             };
         }
         // Opus 4.6 — 1M context, 128K output, temperature supported
@@ -98,10 +98,10 @@ impl AnthropicProvider {
                 supports_tools: true,
                 supports_system_prompt: true,
                 max_context_tokens: 1_000_000,
-                max_output_tokens: 131_072,
+                max_output_tokens: 128_000,
             };
         }
-        // Sonnet 4.6 — 1M context, 64K output, temperature supported
+        // Sonnet 4.6 — 1M context, 128K output, temperature supported
         if model.contains("claude-sonnet-4-6") {
             return ModelCapabilities {
                 supports_temperature: true,
@@ -109,7 +109,7 @@ impl AnthropicProvider {
                 supports_tools: true,
                 supports_system_prompt: true,
                 max_context_tokens: 1_000_000,
-                max_output_tokens: 65_536,
+                max_output_tokens: 128_000,
             };
         }
         // Haiku 4.5 — 200K context, 64K output, temperature supported

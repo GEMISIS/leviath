@@ -334,27 +334,164 @@ impl Provider for OpenRouterProvider {
     }
 
     fn capabilities(&self, model: &str) -> ModelCapabilities {
-        // Check per-model overrides first
         if let Some(overrides) = self.capability_overrides.get(model) {
             return overrides.clone();
         }
-
-        // Models that do not accept the temperature parameter
-        let no_temperature = model.contains("claude-opus-4-8")
+        // ── Google Gemini ─────────────────────────────────────────────────────
+        if model.starts_with("google/gemini") {
+            return ModelCapabilities {
+                supports_temperature: true,
+                supports_streaming: true,
+                supports_tools: true,
+                supports_system_prompt: true,
+                max_context_tokens: 1_048_576,
+                max_output_tokens: 65_536,
+            };
+        }
+        // ── Meta Llama 4 Scout — 10M context ─────────────────────────────────
+        if model.contains("llama-4-scout") {
+            return ModelCapabilities {
+                supports_temperature: true,
+                supports_streaming: true,
+                supports_tools: true,
+                supports_system_prompt: true,
+                max_context_tokens: 10_000_000,
+                max_output_tokens: 32_768,
+            };
+        }
+        // ── Meta Llama 4 (Maverick + others) — 1M context ────────────────────
+        if model.starts_with("meta-llama/llama-4") {
+            return ModelCapabilities {
+                supports_temperature: true,
+                supports_streaming: true,
+                supports_tools: true,
+                supports_system_prompt: true,
+                max_context_tokens: 1_048_576,
+                max_output_tokens: 32_768,
+            };
+        }
+        // ── DeepSeek R1 — reasoning-only, no tools, no temperature ───────────
+        if model.contains("deepseek-r1") {
+            return ModelCapabilities {
+                supports_temperature: false,
+                supports_streaming: true,
+                supports_tools: false,
+                supports_system_prompt: true,
+                max_context_tokens: 163_840,
+                max_output_tokens: 32_768,
+            };
+        }
+        // ── DeepSeek V4 Pro — 1M context, 384K output ────────────────────────
+        if model.contains("deepseek-v4-pro") {
+            return ModelCapabilities {
+                supports_temperature: true,
+                supports_streaming: true,
+                supports_tools: true,
+                supports_system_prompt: true,
+                max_context_tokens: 1_048_576,
+                max_output_tokens: 393_216,
+            };
+        }
+        // ── DeepSeek V4 Flash / V3.x ─────────────────────────────────────────
+        if model.starts_with("deepseek/deepseek-v") {
+            return ModelCapabilities {
+                supports_temperature: true,
+                supports_streaming: true,
+                supports_tools: true,
+                supports_system_prompt: true,
+                max_context_tokens: 1_048_576,
+                max_output_tokens: 65_536,
+            };
+        }
+        // ── Mistral Large ─────────────────────────────────────────────────────
+        if model.contains("mistral-large") {
+            return ModelCapabilities {
+                supports_temperature: true,
+                supports_streaming: true,
+                supports_tools: true,
+                supports_system_prompt: true,
+                max_context_tokens: 262_144,
+                max_output_tokens: 32_768,
+            };
+        }
+        // ── Mistral Medium / Small ────────────────────────────────────────────
+        if model.starts_with("mistralai/") {
+            return ModelCapabilities {
+                supports_temperature: true,
+                supports_streaming: true,
+                supports_tools: true,
+                supports_system_prompt: true,
+                max_context_tokens: 131_072,
+                max_output_tokens: 32_768,
+            };
+        }
+        // ── Qwen 3.6+ / Qwen3 Coder — 1M context ────────────────────────────
+        if model.contains("qwen3.6") || model.contains("qwen3-coder") {
+            return ModelCapabilities {
+                supports_temperature: true,
+                supports_streaming: true,
+                supports_tools: true,
+                supports_system_prompt: true,
+                max_context_tokens: 1_048_576,
+                max_output_tokens: 65_536,
+            };
+        }
+        // ── Qwen3 general ─────────────────────────────────────────────────────
+        if model.starts_with("qwen/") {
+            return ModelCapabilities {
+                supports_temperature: true,
+                supports_streaming: true,
+                supports_tools: true,
+                supports_system_prompt: true,
+                max_context_tokens: 131_072,
+                max_output_tokens: 32_768,
+            };
+        }
+        // ── Anthropic models via OpenRouter — inherit direct-provider flags ───
+        let anthropic_no_temp = model.contains("claude-opus-4-8")
             || model.contains("claude-opus-4-7")
             || model.contains("claude-fable-5")
-            || model.contains("claude-mythos-5")
-            || model.starts_with("openai/o1")
-            || model.starts_with("openai/o3")
-            || model.starts_with("openai/o4");
-
+            || model.contains("claude-mythos-5");
+        if model.starts_with("anthropic/") {
+            return ModelCapabilities {
+                supports_temperature: !anthropic_no_temp,
+                supports_streaming: true,
+                supports_tools: true,
+                supports_system_prompt: true,
+                max_context_tokens: 1_000_000,
+                max_output_tokens: 128_000,
+            };
+        }
+        // ── OpenAI o-series via OpenRouter — no temperature ───────────────────
+        if model.starts_with("openai/o") {
+            return ModelCapabilities {
+                supports_temperature: false,
+                supports_streaming: true,
+                supports_tools: true,
+                supports_system_prompt: true,
+                max_context_tokens: 200_000,
+                max_output_tokens: 100_000,
+            };
+        }
+        // ── OpenAI GPT-5.x via OpenRouter ────────────────────────────────────
+        if model.starts_with("openai/gpt-5") {
+            return ModelCapabilities {
+                supports_temperature: true,
+                supports_streaming: true,
+                supports_tools: true,
+                supports_system_prompt: true,
+                max_context_tokens: 1_050_000,
+                max_output_tokens: 128_000,
+            };
+        }
+        // ── Conservative fallback for unknown OpenRouter models ───────────────
         ModelCapabilities {
-            supports_temperature: !no_temperature,
+            supports_temperature: true,
             supports_streaming: true,
             supports_tools: true,
             supports_system_prompt: true,
             max_context_tokens: 128_000,
-            max_output_tokens: 8192,
+            max_output_tokens: 8_192,
         }
     }
 

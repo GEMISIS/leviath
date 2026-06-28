@@ -69,8 +69,14 @@ struct BuiltinEntry {
 /// specified.  Remote results override these values for identical model IDs.
 fn builtin_table() -> Vec<BuiltinEntry> {
     macro_rules! entry {
+        // Short form — tools defaults to true
         ($provider:expr, $id:expr, $name:expr,
          temp=$t:expr, ctx=$ctx:expr, out=$out:expr) => {
+            entry!($provider, $id, $name, temp=$t, tools=true, ctx=$ctx, out=$out)
+        };
+        // Full form — explicit tools flag
+        ($provider:expr, $id:expr, $name:expr,
+         temp=$t:expr, tools=$to:expr, ctx=$ctx:expr, out=$out:expr) => {
             BuiltinEntry {
                 provider: $provider,
                 model_id: $id,
@@ -78,7 +84,7 @@ fn builtin_table() -> Vec<BuiltinEntry> {
                 caps: ModelCapabilities {
                     supports_temperature: $t,
                     supports_streaming: true,
-                    supports_tools: true,
+                    supports_tools: $to,
                     supports_system_prompt: true,
                     max_context_tokens: $ctx,
                     max_output_tokens: $out,
@@ -89,67 +95,73 @@ fn builtin_table() -> Vec<BuiltinEntry> {
 
     vec![
         // ── Anthropic ──────────────────────────────────────────────────────────
-        // Fable 5 — top tier, no temperature, 1M context, 128K output
         entry!("anthropic", "claude-fable-5",            "Claude Fable 5",
-               temp=false, ctx=1_000_000, out=131_072),
-        // Opus 4.8 / 4.7 — no temperature, 1M context, 128K output
+               temp=false, ctx=1_000_000, out=128_000),
         entry!("anthropic", "claude-opus-4-8",           "Claude Opus 4.8",
-               temp=false, ctx=1_000_000, out=131_072),
+               temp=false, ctx=1_000_000, out=128_000),
         entry!("anthropic", "claude-opus-4-7",           "Claude Opus 4.7",
-               temp=false, ctx=1_000_000, out=131_072),
-        // Opus 4.6 — temperature supported, 1M context, 128K output
+               temp=false, ctx=1_000_000, out=128_000),
         entry!("anthropic", "claude-opus-4-6",           "Claude Opus 4.6",
-               temp=true,  ctx=1_000_000, out=131_072),
-        // Sonnet 4.6 — temperature supported, 1M context, 64K output
+               temp=true,  ctx=1_000_000, out=128_000),
         entry!("anthropic", "claude-sonnet-4-6",         "Claude Sonnet 4.6",
-               temp=true,  ctx=1_000_000, out=65_536),
-        // Haiku 4.5 — temperature supported, 200K context, 64K output
+               temp=true,  ctx=1_000_000, out=128_000),
         entry!("anthropic", "claude-haiku-4-5-20251001", "Claude Haiku 4.5",
                temp=true,  ctx=200_000,   out=65_536),
-        // Claude 3.5 — temperature supported, 200K context
-        entry!("anthropic", "claude-3-5-sonnet-20241022", "Claude 3.5 Sonnet",
-               temp=true,  ctx=200_000, out=8_192),
-        entry!("anthropic", "claude-3-5-haiku-20241022",  "Claude 3.5 Haiku",
-               temp=true,  ctx=200_000, out=8_192),
 
         // ── OpenAI ─────────────────────────────────────────────────────────────
-        // GPT-5.5 — current flagship (released April 2026), 1M+ context
+        // GPT-5.5 — flagship (Apr 2026), 1M+ context
         entry!("openai", "gpt-5.5",      "GPT-5.5",
                temp=true, ctx=1_050_000, out=128_000),
         entry!("openai", "gpt-5.4",      "GPT-5.4",
                temp=true, ctx=1_050_000, out=128_000),
-        // GPT-5 family — 400K context, 128K output
         entry!("openai", "gpt-5.4-mini", "GPT-5.4 Mini",
-               temp=true, ctx=400_000, out=128_000),
+               temp=true, ctx=400_000,   out=128_000),
         entry!("openai", "gpt-5.4-nano", "GPT-5.4 Nano",
-               temp=true, ctx=400_000, out=128_000),
-        entry!("openai", "gpt-5-mini",   "GPT-5 Mini",
-               temp=true, ctx=400_000, out=128_000),
-        // GPT-4.1 family — 1M context
-        entry!("openai", "gpt-4.1",      "GPT-4.1",
-               temp=true, ctx=1_047_576, out=32_768),
-        entry!("openai", "gpt-4.1-mini", "GPT-4.1 Mini",
-               temp=true, ctx=1_047_576, out=32_768),
-        entry!("openai", "gpt-4.1-nano", "GPT-4.1 Nano",
-               temp=true, ctx=1_047_576, out=32_768),
-        // GPT-4o family — 128K context
-        entry!("openai", "gpt-4o",       "GPT-4o",
-               temp=true, ctx=128_000, out=16_384),
-        entry!("openai", "gpt-4o-mini",  "GPT-4o Mini",
-               temp=true, ctx=128_000, out=16_384),
-        // o-series reasoning — no temperature
-        entry!("openai", "o4-mini", "o4-mini",
-               temp=false, ctx=200_000, out=100_000),
-        entry!("openai", "o3-pro",  "o3-pro",
-               temp=false, ctx=200_000, out=100_000),
-        entry!("openai", "o3",      "o3",
-               temp=false, ctx=200_000, out=100_000),
-        entry!("openai", "o3-mini", "o3-mini",
-               temp=false, ctx=200_000, out=100_000),
-        entry!("openai", "o1",      "o1",
-               temp=false, ctx=200_000, out=100_000),
-        entry!("openai", "o1-mini", "o1-mini",
-               temp=false, ctx=128_000, out=65_536),
+               temp=true, ctx=400_000,   out=128_000),
+
+        // ── OpenRouter: Google Gemini ──────────────────────────────────────────
+        entry!("openrouter", "google/gemini-3.5-flash",      "Gemini 3.5 Flash",
+               temp=true, ctx=1_048_576, out=65_536),
+        entry!("openrouter", "google/gemini-2.5-pro",        "Gemini 2.5 Pro",
+               temp=true, ctx=1_048_576, out=65_536),
+        entry!("openrouter", "google/gemini-2.5-flash",      "Gemini 2.5 Flash",
+               temp=true, ctx=1_048_576, out=65_536),
+        entry!("openrouter", "google/gemini-2.5-flash-lite", "Gemini 2.5 Flash Lite",
+               temp=true, ctx=1_048_576, out=65_536),
+
+        // ── OpenRouter: Meta Llama 4 ───────────────────────────────────────────
+        entry!("openrouter", "meta-llama/llama-4-maverick", "Llama 4 Maverick",
+               temp=true, ctx=1_048_576,  out=32_768),
+        entry!("openrouter", "meta-llama/llama-4-scout",    "Llama 4 Scout",
+               temp=true, ctx=10_000_000, out=32_768),
+
+        // ── OpenRouter: DeepSeek ───────────────────────────────────────────────
+        entry!("openrouter", "deepseek/deepseek-v4-pro",   "DeepSeek V4 Pro",
+               temp=true, ctx=1_048_576, out=393_216),
+        entry!("openrouter", "deepseek/deepseek-v4-flash",  "DeepSeek V4 Flash",
+               temp=true, ctx=1_048_576, out=65_536),
+        entry!("openrouter", "deepseek/deepseek-v3.2",      "DeepSeek V3.2",
+               temp=true, ctx=131_072,   out=65_536),
+        entry!("openrouter", "deepseek/deepseek-r1-0528",   "DeepSeek R1 (0528)",
+               temp=false, tools=false,  ctx=163_840, out=32_768),
+        entry!("openrouter", "deepseek/deepseek-r1",        "DeepSeek R1",
+               temp=false, tools=false,  ctx=163_840, out=16_384),
+
+        // ── OpenRouter: Mistral ────────────────────────────────────────────────
+        entry!("openrouter", "mistralai/mistral-large-2512", "Mistral Large 3",
+               temp=true, ctx=262_144, out=32_768),
+        entry!("openrouter", "mistralai/mistral-medium-3-5", "Mistral Medium 3.5",
+               temp=true, ctx=256_000, out=32_768),
+        entry!("openrouter", "mistralai/mistral-small-2603", "Mistral Small 4",
+               temp=true, ctx=128_000, out=32_768),
+
+        // ── OpenRouter: Qwen (Alibaba) ─────────────────────────────────────────
+        entry!("openrouter", "qwen/qwen3.6-plus",  "Qwen 3.6 Plus",
+               temp=true, ctx=1_048_576, out=65_536),
+        entry!("openrouter", "qwen/qwen3-max",     "Qwen3 Max",
+               temp=true, ctx=131_072,   out=32_768),
+        entry!("openrouter", "qwen/qwen3-coder",   "Qwen3 Coder 480B",
+               temp=true, ctx=1_048_576, out=262_144),
     ]
 }
 
