@@ -28,6 +28,7 @@ use tokio::sync::{mpsc, Mutex};
 use super::run::build_provider_registry;
 use crate::config::Config;
 use crate::interaction;
+use crate::render;
 use crate::runstate::{self, RunStatus, StageRecord, StageRunStatus};
 
 // ─── Theme palette ────────────────────────────────────────────────────────────
@@ -225,6 +226,8 @@ struct Dashboard {
     toasts: Vec<Toast>,
     /// True when the help overlay (?) is shown
     show_help: bool,
+    /// Scroll offset within the review body pane (present_for_review).
+    review_scroll: usize,
 }
 
 impl Dashboard {
@@ -257,6 +260,7 @@ impl Dashboard {
             tick_count: 0,
             toasts: Vec::new(),
             show_help: false,
+            review_scroll: 0,
         }
     }
 
@@ -742,12 +746,14 @@ impl Dashboard {
                 KeyCode::Esc => {
                     self.detail_view = false;
                     self.detail_scroll = 0;
+                    self.review_scroll = 0;
                 }
                 // Stage tab navigation
                 KeyCode::Left => {
                     if self.selected_stage > 0 {
                         self.selected_stage -= 1;
                         self.detail_scroll = 0;
+                        self.review_scroll = 0;
                         self.stage_content_mode = StageContentMode::Output;
                     }
                 }
@@ -758,6 +764,7 @@ impl Dashboard {
                     if self.selected_stage < max_stage {
                         self.selected_stage += 1;
                         self.detail_scroll = 0;
+                        self.review_scroll = 0;
                         self.stage_content_mode = StageContentMode::Output;
                     }
                 }
@@ -770,6 +777,7 @@ impl Dashboard {
                     if idx <= max_stage {
                         self.selected_stage = idx;
                         self.detail_scroll = 0;
+                        self.review_scroll = 0;
                         self.stage_content_mode = StageContentMode::Output;
                     }
                 }
@@ -790,22 +798,61 @@ impl Dashboard {
                     }
                 }
                 KeyCode::Up => {
-                    self.detail_scroll = self.detail_scroll.saturating_add(1);
+                    // When a review body is present, Up scrolls the review document
+                    let has_review = self.agents.get(self.selected)
+                        .and_then(|a| a.pending_request.as_ref())
+                        .and_then(|r| r.body.as_deref())
+                        .map(|b| !b.is_empty())
+                        .unwrap_or(false);
+                    if has_review {
+                        self.review_scroll = self.review_scroll.saturating_add(1);
+                    } else {
+                        self.detail_scroll = self.detail_scroll.saturating_add(1);
+                    }
                 }
                 KeyCode::Down => {
-                    self.detail_scroll = self.detail_scroll.saturating_sub(1);
+                    let has_review = self.agents.get(self.selected)
+                        .and_then(|a| a.pending_request.as_ref())
+                        .and_then(|r| r.body.as_deref())
+                        .map(|b| !b.is_empty())
+                        .unwrap_or(false);
+                    if has_review {
+                        self.review_scroll = self.review_scroll.saturating_sub(1);
+                    } else {
+                        self.detail_scroll = self.detail_scroll.saturating_sub(1);
+                    }
                 }
                 KeyCode::PageUp => {
-                    self.detail_scroll = self.detail_scroll.saturating_add(10);
+                    let has_review = self.agents.get(self.selected)
+                        .and_then(|a| a.pending_request.as_ref())
+                        .and_then(|r| r.body.as_deref())
+                        .map(|b| !b.is_empty())
+                        .unwrap_or(false);
+                    if has_review {
+                        self.review_scroll = self.review_scroll.saturating_add(10);
+                    } else {
+                        self.detail_scroll = self.detail_scroll.saturating_add(10);
+                    }
                 }
                 KeyCode::PageDown => {
-                    self.detail_scroll = self.detail_scroll.saturating_sub(10);
+                    let has_review = self.agents.get(self.selected)
+                        .and_then(|a| a.pending_request.as_ref())
+                        .and_then(|r| r.body.as_deref())
+                        .map(|b| !b.is_empty())
+                        .unwrap_or(false);
+                    if has_review {
+                        self.review_scroll = self.review_scroll.saturating_sub(10);
+                    } else {
+                        self.detail_scroll = self.detail_scroll.saturating_sub(10);
+                    }
                 }
                 KeyCode::Char('b') => {
                     self.detail_scroll = usize::MAX;
+                    self.review_scroll = usize::MAX;
                 }
                 KeyCode::Char('e') => {
                     self.detail_scroll = 0;
+                    self.review_scroll = 0;
                 }
                 KeyCode::Char('?') => {
                     self.show_help = true;
@@ -1261,6 +1308,28 @@ impl Dashboard {
         let header_h: u16 = 1;   // compact breadcrumb line
         let tabs_h: u16 = 3;     // tabs row in a block (border top + tab line + border bottom)
         let context_h: u16 = if agent.context_snapshot.is_some() || !agent.stages.is_empty() { 3 } else { 0 };
+
+        // Review body: shown when the pending interaction carries markdown for review
+        let review_body = if !self.input_mode && has_prompt {
+            pending_req.as_ref().and_then(|r| r.body.as_deref())
+        } else {
+            None
+        };
+        // Pre-render the markdown so we know how many lines it produces
+        let review_lines: Vec<Line<'static>> = if let Some(body) = review_body {
+            let w = area.width.saturating_sub(4);
+            render::markdown_to_text(body, w).lines
+        } else {
+            Vec::new()
+        };
+        let review_h: u16 = if review_lines.is_empty() {
+            0
+        } else {
+            // Allocate up to 40% of the panel height, minimum 8 lines + 2 border
+            let max_review = (area.height as usize * 2 / 5).max(10).min(24);
+            (review_lines.len() + 2).min(max_review) as u16
+        };
+
         let prompt_height: u16 = if has_prompt || (self.input_mode && is_waiting && self.selected_stage_can_respond()) {
             let n = options.len() as u16;
             if self.input_mode {
@@ -1286,6 +1355,9 @@ impl Dashboard {
             constraints.push(Constraint::Length(context_h));
         }
         constraints.push(Constraint::Min(4)); // content pane
+        if review_h > 0 {
+            constraints.push(Constraint::Length(review_h));
+        }
         if prompt_height > 0 {
             constraints.push(Constraint::Length(prompt_height));
         }
@@ -1506,33 +1578,16 @@ impl Dashboard {
                 String::new()
             };
 
-            // Render lines with color-coding for logs
-            let all_lines: Vec<&str> = content.lines().collect();
-            let total = all_lines.len();
-            let max_scroll = total.saturating_sub(inner_h);
-            if self.detail_scroll > max_scroll {
-                self.detail_scroll = max_scroll;
-            }
-            let start = total.saturating_sub(inner_h + self.detail_scroll);
-            let end = (start + inner_h).min(total);
-
-            let visible: Vec<Line> = if total == 0 {
-                let stage_name = agent.stages.get(self.selected_stage)
-                    .map(|s| s.name.as_str())
-                    .unwrap_or("this stage");
-                vec![Line::from(Span::styled(
-                    format!(" No {} yet for {}.", if is_output { "output" } else { "logs" }, stage_name),
-                    Style::default().fg(C_DIM),
-                ))]
-            } else if is_output {
-                all_lines[start..end]
-                    .iter()
-                    .map(|l| Line::from(Span::styled(format!(" {}", l), Style::default().fg(C_WHITE))))
-                    .collect()
-            } else {
+            // Render content: markdown for Output, color-coded for Logs
+            let render_width = content_area.width.saturating_sub(2);
+            let all_lines: Vec<Line> = if is_output && !content.is_empty() {
+                // Run agent output through the markdown renderer — degrades cleanly
+                // for plain text while making markdown-formatted output beautiful.
+                let rendered = render::markdown_to_text(&content, render_width);
+                rendered.lines
+            } else if !is_output {
                 // Logs: color-code prefixes
-                all_lines[start..end]
-                    .iter()
+                content.lines()
                     .map(|l| {
                         let (color, prefix_end) = if l.starts_with("[tool]") {
                             (C_ACCENT, 6)
@@ -1555,11 +1610,33 @@ impl Dashboard {
                         }
                     })
                     .collect()
+            } else {
+                Vec::new()
             };
 
-            // Tool count badge for logs tab
-            let tool_count = if !is_output && total > 0 {
-                let tc = all_lines.iter().filter(|l| l.starts_with("[tool]")).count();
+            let total = all_lines.len();
+            let max_scroll = total.saturating_sub(inner_h);
+            if self.detail_scroll > max_scroll {
+                self.detail_scroll = max_scroll;
+            }
+            let start = total.saturating_sub(inner_h + self.detail_scroll);
+            let end = (start + inner_h).min(total);
+
+            let visible: Vec<Line> = if total == 0 {
+                let stage_name = agent.stages.get(self.selected_stage)
+                    .map(|s| s.name.as_str())
+                    .unwrap_or("this stage");
+                vec![Line::from(Span::styled(
+                    format!(" No {} yet for {}.", if is_output { "output" } else { "logs" }, stage_name),
+                    Style::default().fg(C_DIM),
+                ))]
+            } else {
+                all_lines[start..end].to_vec()
+            };
+
+            // Tool count badge for logs tab (count from raw content, not rendered Lines)
+            let tool_count = if !is_output && !content.is_empty() {
+                let tc = content.lines().filter(|l| l.starts_with("[tool]")).count();
                 if tc > 0 { format!(" · {} tools", tc) } else { String::new() }
             } else { String::new() };
 
@@ -1600,6 +1677,60 @@ impl Dashboard {
                     scrollbar,
                     content_area.inner(Margin { vertical: 1, horizontal: 0 }),
                     &mut sb_state,
+                );
+            }
+        }
+
+        // ── Review body pane (present_for_review) ────────────────────────────
+        if review_h > 0 {
+            let review_area = chunks[chunk_idx]; chunk_idx += 1;
+            let inner_h = review_area.height.saturating_sub(2) as usize;
+
+            // Clamp scroll
+            let max_rv_scroll = review_lines.len().saturating_sub(inner_h);
+            if self.review_scroll > max_rv_scroll {
+                self.review_scroll = max_rv_scroll;
+            }
+            let rv_start = review_lines.len().saturating_sub(inner_h + self.review_scroll);
+            let rv_end = (rv_start + inner_h).min(review_lines.len());
+            let visible_review: Vec<Line> = review_lines[rv_start..rv_end].to_vec();
+
+            let rv_title = if let Some(req) = &pending_req {
+                format!(" {} ", truncate(&req.prompt, 50))
+            } else {
+                " Review ".to_string()
+            };
+            let rv_scroll_info = if review_lines.len() > inner_h {
+                let pct = if max_rv_scroll == 0 { 100usize } else {
+                    100 - self.review_scroll.min(max_rv_scroll) * 100 / max_rv_scroll
+                };
+                format!(" {}% ", pct)
+            } else {
+                String::new()
+            };
+            let review_widget = Paragraph::new(visible_review)
+                .block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .border_type(BorderType::Rounded)
+                        .border_style(Style::default().fg(C_WARN))
+                        .title(Span::styled(&rv_title, Style::default().fg(C_WARN).add_modifier(Modifier::BOLD)))
+                        .title_bottom(Span::styled(rv_scroll_info, Style::default().fg(C_DIM))),
+                )
+                .wrap(Wrap { trim: false });
+            frame.render_widget(review_widget, review_area);
+
+            // Scrollbar for review body
+            if review_lines.len() > inner_h {
+                let rv_scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
+                    .begin_symbol(Some("↑"))
+                    .end_symbol(Some("↓"));
+                let mut rv_sb = ScrollbarState::new(max_rv_scroll)
+                    .position(max_rv_scroll.saturating_sub(self.review_scroll));
+                frame.render_stateful_widget(
+                    rv_scrollbar,
+                    review_area.inner(Margin { vertical: 1, horizontal: 0 }),
+                    &mut rv_sb,
                 );
             }
         }

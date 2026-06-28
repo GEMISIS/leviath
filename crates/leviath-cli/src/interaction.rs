@@ -40,6 +40,17 @@ pub enum InteractionKind {
     ToolApproval,
 }
 
+/// Format of an optional rich body attached to an interaction request.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum BodyFormat {
+    /// Plain text body (no special rendering).
+    #[default]
+    Plain,
+    /// Markdown body — rendered via the dashboard's markdown renderer.
+    Markdown,
+}
+
 /// A pending interaction request written by the worker.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InteractionRequest {
@@ -61,6 +72,12 @@ pub struct InteractionRequest {
     pub required: bool,
     /// Stage name that triggered this request.
     pub stage_name: String,
+    /// Optional rich body (markdown document, plan, etc.) for the user to review.
+    #[serde(default)]
+    pub body: Option<String>,
+    /// Format of the body content.
+    #[serde(default)]
+    pub body_format: BodyFormat,
 }
 
 fn default_true() -> bool {
@@ -79,6 +96,30 @@ impl InteractionRequest {
             tool_arguments: None,
             required,
             stage_name: stage.into(),
+            body: None,
+            body_format: BodyFormat::Plain,
+        }
+    }
+
+    /// Create a "present for review" request: pauses the run and shows a rich
+    /// markdown document to the user before accepting feedback.
+    pub fn review(
+        id: impl Into<String>,
+        title: impl Into<String>,
+        markdown: impl Into<String>,
+        stage: impl Into<String>,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            kind: InteractionKind::FreeText,
+            prompt: title.into(),
+            options: vec![],
+            tool_name: None,
+            tool_arguments: None,
+            required: true,
+            stage_name: stage.into(),
+            body: Some(markdown.into()),
+            body_format: BodyFormat::Markdown,
         }
     }
 
@@ -98,6 +139,8 @@ impl InteractionRequest {
             tool_arguments: None,
             required: true,
             stage_name: stage.into(),
+            body: None,
+            body_format: BodyFormat::Plain,
         }
     }
 
@@ -112,6 +155,8 @@ impl InteractionRequest {
             tool_arguments: None,
             required: true,
             stage_name: stage.into(),
+            body: None,
+            body_format: BodyFormat::Plain,
         }
     }
 
@@ -137,6 +182,8 @@ impl InteractionRequest {
             tool_arguments: Some(arguments),
             required: true,
             stage_name: stage.into(),
+            body: None,
+            body_format: BodyFormat::Plain,
         }
     }
 }
@@ -450,6 +497,41 @@ pub async fn request_tool_approval_background(
                 let _ = write_meta(&meta);
             }
             return (false, ApprovalScope::Once);
+        }
+    }
+}
+
+/// Background helper for `present_for_review` — writes the request, sets
+/// status to `WaitingInput`, then polls until the user responds.
+///
+/// Returns the `InteractionResponse`; never times out (review can take a while).
+pub async fn request_interaction_bg_review(
+    run_id: &str,
+    req: InteractionRequest,
+) -> InteractionResponse {
+    // Write request and flip status
+    let _ = write_request(run_id, &req);
+    if let Ok(mut meta) = crate::runstate::read_meta(run_id) {
+        meta.status = RunStatus::WaitingInput;
+        meta.touch();
+        let _ = write_meta(&meta);
+    }
+
+    loop {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        if let Some(resp) = take_response(run_id) {
+            if !resp.request_id.is_empty() && resp.request_id != req.id {
+                // Stale response — keep waiting
+                continue;
+            }
+            clear_interaction(run_id);
+            // Restore Running status
+            if let Ok(mut meta) = crate::runstate::read_meta(run_id) {
+                meta.status = RunStatus::Running;
+                meta.touch();
+                let _ = write_meta(&meta);
+            }
+            return resp;
         }
     }
 }

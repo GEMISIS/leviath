@@ -777,6 +777,8 @@ async fn run_worker_inner(args: &WorkerArgs, meta: &mut RunMeta) -> anyhow::Resu
     // Shared mutable stage index so the executor closure can log tool activity
     // to the correct per-stage log file.
     let current_stage_idx: CurrentStageIdx = Arc::new(Mutex::new(0usize));
+    // Shared current stage name for present_for_review interactions.
+    let current_stage_name: Arc<Mutex<String>> = Arc::new(Mutex::new(String::new()));
 
     let builtins = tool_registry.builtins.clone();
     let mcp = tool_registry.mcp.clone();
@@ -787,6 +789,7 @@ async fn run_worker_inner(args: &WorkerArgs, meta: &mut RunMeta) -> anyhow::Resu
     let exec_global_perms = global_perms.clone();
     let exec_run_id = run_id_arc.clone();
     let exec_stage_idx = current_stage_idx.clone();
+    let exec_stage_name = current_stage_name.clone();
     let mut exec = move |calls: Vec<leviath_providers::ToolCall>| {
         let builtins = builtins.clone();
         let mcp = mcp.clone();
@@ -798,10 +801,68 @@ async fn run_worker_inner(args: &WorkerArgs, meta: &mut RunMeta) -> anyhow::Resu
         let global_pm = exec_global_perms.clone();
         let run_id = exec_run_id.clone();
         let stage_idx_arc = exec_stage_idx.clone();
+        let stage_name_arc = exec_stage_name.clone();
         async move {
             let stage_idx = *stage_idx_arc.lock().await;
+            let stage_name = stage_name_arc.lock().await.clone();
             let mut out: Vec<(String, String)> = Vec::new();
             for tc in calls {
+                // ── present_for_review: special built-in that raises an interaction ──
+                if tc.name == "present_for_review" {
+                    let title = tc.arguments.get("title")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("Review")
+                        .to_string();
+                    let markdown = tc.arguments.get("markdown")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+
+                    // Persist the review artifact under stages/<idx>/reviews/
+                    let review_dir = runstate::stage_dir(&run_id, stage_idx).join("reviews");
+                    let _ = std::fs::create_dir_all(&review_dir);
+                    let artifact_path = review_dir.join(format!("review-{}.md", tc.id));
+                    let _ = std::fs::write(&artifact_path, &markdown);
+
+                    // Also write to stage output so it's visible in the Output tab after review
+                    record_stage_output(
+                        &run_id,
+                        stage_idx,
+                        &format!("---\n## {}\n\n{}\n---", title, markdown),
+                    );
+
+                    // Log the event
+                    record_stage_log(
+                        &run_id,
+                        stage_idx,
+                        &format!("[tool] present_for_review → waiting for user review: {}", title),
+                    );
+
+                    // Build the interaction request with markdown body
+                    let req = crate::interaction::InteractionRequest::review(
+                        format!("review-{}", tc.id),
+                        &title,
+                        &markdown,
+                        &stage_name,
+                    );
+
+                    // Write request and wait for response
+                    let resp = crate::interaction::request_interaction_bg_review(
+                        &run_id,
+                        req,
+                    ).await;
+
+                    let user_feedback = crate::interaction::response_as_text(&resp);
+                    let result = if user_feedback.trim().is_empty() {
+                        "User reviewed the document and acknowledged.".to_string()
+                    } else {
+                        format!("User feedback: {}", user_feedback)
+                    };
+                    record_stage_log(&run_id, stage_idx, &format!("[tool] present_for_review → done"));
+                    out.push((tc.id.clone(), result));
+                    continue;
+                }
+
                 let is_builtin = builtin_names.contains(&tc.name);
                 let session_has = session_al.lock().await.contains(&tc.name);
                 let policy = if session_has {
@@ -906,7 +967,7 @@ async fn run_worker_inner(args: &WorkerArgs, meta: &mut RunMeta) -> anyhow::Resu
         let provider_name = &stage.model.provider;
         let model_name = args.model.as_deref().unwrap_or(&stage.model.model);
 
-        // Update current stage permissions + index for the executor closure
+        // Update current stage permissions + index + name for the executor closure
         {
             let mut sp = current_stage_perms.lock().await;
             *sp = stage.tool_permissions.clone();
@@ -914,6 +975,10 @@ async fn run_worker_inner(args: &WorkerArgs, meta: &mut RunMeta) -> anyhow::Resu
         {
             let mut si = current_stage_idx.lock().await;
             *si = stage_idx;
+        }
+        {
+            let mut sn = current_stage_name.lock().await;
+            *sn = stage.name.clone();
         }
 
         if !engine.providers().has(provider_name) {

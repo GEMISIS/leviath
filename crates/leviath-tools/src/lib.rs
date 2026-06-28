@@ -118,6 +118,24 @@ impl BuiltinTools {
                     "required": ["command"]
                 }),
             },
+            Tool {
+                name: "present_for_review".to_string(),
+                description: "Present a document, plan, or report to the user for review. The agent run will pause and the dashboard will display the document prominently. Use this when you want the user to read and approve something before you continue — for example, a technical design, an implementation plan, or a summary report. The user can provide feedback or simply acknowledge to continue.".to_string(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "title": {
+                            "type": "string",
+                            "description": "Short title for the review prompt shown to the user (e.g. 'Implementation Plan Ready for Review')"
+                        },
+                        "markdown": {
+                            "type": "string",
+                            "description": "The markdown document to present to the user. Supports headings, lists, code blocks, and mermaid diagrams."
+                        }
+                    },
+                    "required": ["title", "markdown"]
+                }),
+            },
         ]
     }
 
@@ -130,6 +148,7 @@ impl BuiltinTools {
             "list_dir".to_string(),
             "shell".to_string(),
             "bash".to_string(), // Alias for backward compatibility
+            "present_for_review".to_string(),
         ]
     }
 

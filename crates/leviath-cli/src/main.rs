@@ -6,6 +6,7 @@ use tracing::info;
 mod commands;
 mod config;
 mod interaction;
+mod render;
 mod runstate;
 mod tools;
 

@@ -36,3 +36,4 @@ futures = { workspace = true }
 dotenvy = { workspace = true }
 leviath-tools = { workspace = true }
 libc = "0.2"
+pulldown-cmark = { workspace = true }
