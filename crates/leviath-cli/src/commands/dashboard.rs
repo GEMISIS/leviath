@@ -81,6 +81,8 @@ pub struct DashboardAgent {
     pub waiting_prompt: Option<String>,
     /// Full structured interaction request (populated for WaitingInput agents)
     pub pending_request: Option<interaction::InteractionRequest>,
+    /// Live context window snapshot from context.json (background workers only)
+    pub context_snapshot: Option<runstate::ContextSnapshot>,
     /// The ECS entity for this agent (dummy sentinel for run-state agents)
     pub entity: bevy_ecs::prelude::Entity,
     /// True when tracked via on-disk run-state (background worker process)
@@ -204,6 +206,7 @@ impl Dashboard {
                 agent.pid = run.pid;
                 agent.status = status;
                 agent.workdir = run.workdir.clone();
+                agent.context_snapshot = runstate::read_context_snapshot(&run.run_id);
                 // Only update waiting_prompt/pending_request when we have one; clear when no longer waiting
                 if matches!(run.status, RunStatus::WaitingInput) {
                     if waiting_prompt.is_some() {
@@ -225,6 +228,7 @@ impl Dashboard {
                     iteration: run.iteration,
                     waiting_prompt,
                     pending_request,
+                    context_snapshot: runstate::read_context_snapshot(&run.run_id),
                     entity: dummy,
                     is_run_state: true,
                     pid: run.pid,
@@ -311,9 +315,14 @@ impl Dashboard {
         let (resp, display) = match &req {
             Some(r) => match r.kind {
                 InteractionKind::FreeText => {
-                    let input = self.input_buffer.trim().to_string();
-                    if input.is_empty() { return; }
-                    let d = truncate(&input, 40);
+                    let raw = self.input_buffer.trim().to_string();
+                    // /quit and /exit are treated as empty (end-of-session signal)
+                    let input = if raw == "/quit" || raw == "/exit" {
+                        String::new()
+                    } else {
+                        raw
+                    };
+                    let d = if input.is_empty() { "(end)".to_string() } else { truncate(&input, 40) };
                     (InteractionResponse::text(&r.id, &input), d)
                 }
                 InteractionKind::MultipleChoice | InteractionKind::ToolApproval => {
@@ -329,9 +338,13 @@ impl Dashboard {
                 }
             },
             None => {
-                let input = self.input_buffer.trim().to_string();
-                if input.is_empty() { return; }
-                let d = truncate(&input, 40);
+                let raw = self.input_buffer.trim().to_string();
+                let input = if raw == "/quit" || raw == "/exit" {
+                    String::new()
+                } else {
+                    raw
+                };
+                let d = if input.is_empty() { "(end)".to_string() } else { truncate(&input, 40) };
                 (InteractionResponse {
                     request_id: String::new(),
                     value: Some(input),
@@ -514,7 +527,7 @@ impl Dashboard {
                 KeyCode::Char('e') => {
                     self.detail_scroll = 0;
                 }
-                KeyCode::Char('c') => {
+                KeyCode::Char('k') => {
                     if let Some(agent) = self.agents.get(self.selected) {
                         if matches!(agent.status, AgentDisplayStatus::Active | AgentDisplayStatus::Waiting) {
                             let agent_id = agent.id.clone();
@@ -526,6 +539,7 @@ impl Dashboard {
                                 if pid > 0 {
                                     unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM); }
                                 }
+                                kill_write_cancelled(&agent_id);
                                 if was_waiting {
                                     interaction::clear_interaction(&agent_id);
                                 }
@@ -539,35 +553,8 @@ impl Dashboard {
                             }
                             self.input_mode = false;
                             self.input_buffer.clear();
-                            self.add_log(format!("{}: Cancel requested", agent_id));
+                            self.add_log(format!("{}: Killed", agent_id));
                         }
-                    }
-                }
-                KeyCode::Char('k') => {
-                    if let Some(agent) = self.agents.get(self.selected) {
-                        let agent_id = agent.id.clone();
-                        let pid = agent.pid;
-                        let is_run_state = agent.is_run_state;
-                        let was_waiting = matches!(agent.status, AgentDisplayStatus::Waiting);
-                        if is_run_state {
-                            #[cfg(unix)]
-                            if pid > 0 {
-                                unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM); }
-                            }
-                            if was_waiting {
-                                interaction::clear_interaction(&agent_id);
-                            }
-                        } else {
-                            let _ = self.cmd_tx.send(EngineCommand::CancelAgent { agent_id: agent_id.clone() });
-                        }
-                        if let Some(a) = self.agents.get_mut(self.selected) {
-                            a.status = AgentDisplayStatus::Cancelled;
-                            a.waiting_prompt = None;
-                            a.pending_request = None;
-                        }
-                        self.input_mode = false;
-                        self.input_buffer.clear();
-                        self.add_log(format!("{}: Killed", agent_id));
                     }
                 }
                 _ => {}
@@ -620,6 +607,7 @@ impl Dashboard {
                             if agent.pid > 0 {
                                 unsafe { libc::kill(agent.pid as libc::pid_t, libc::SIGTERM); }
                             }
+                            kill_write_cancelled(&agent_id);
                             if matches!(agent.status, AgentDisplayStatus::Waiting) {
                                 interaction::clear_interaction(&agent_id);
                             }
@@ -637,24 +625,27 @@ impl Dashboard {
             }
             KeyCode::Char('k') => {
                 if let Some(agent) = self.agents.get(self.selected) {
-                    let agent_id = agent.id.clone();
-                    if agent.is_run_state {
-                        #[cfg(unix)]
-                        if agent.pid > 0 {
-                            unsafe { libc::kill(agent.pid as libc::pid_t, libc::SIGTERM); }
+                    if matches!(agent.status, AgentDisplayStatus::Active | AgentDisplayStatus::Waiting) {
+                        let agent_id = agent.id.clone();
+                        if agent.is_run_state {
+                            #[cfg(unix)]
+                            if agent.pid > 0 {
+                                unsafe { libc::kill(agent.pid as libc::pid_t, libc::SIGTERM); }
+                            }
+                            kill_write_cancelled(&agent_id);
+                            if matches!(agent.status, AgentDisplayStatus::Waiting) {
+                                interaction::clear_interaction(&agent_id);
+                            }
+                        } else {
+                            let _ = self.cmd_tx.send(EngineCommand::CancelAgent { agent_id: agent_id.clone() });
                         }
-                        if matches!(agent.status, AgentDisplayStatus::Waiting) {
-                            interaction::clear_interaction(&agent_id);
+                        if let Some(a) = self.agents.get_mut(self.selected) {
+                            a.status = AgentDisplayStatus::Cancelled;
+                            a.waiting_prompt = None;
+                            a.pending_request = None;
                         }
-                    } else {
-                        let _ = self.cmd_tx.send(EngineCommand::CancelAgent { agent_id: agent_id.clone() });
+                        self.add_log(format!("{}: Killed", agent_id));
                     }
-                    if let Some(a) = self.agents.get_mut(self.selected) {
-                        a.status = AgentDisplayStatus::Cancelled;
-                        a.waiting_prompt = None;
-                        a.pending_request = None;
-                    }
-                    self.add_log(format!("{}: Killed", agent_id));
                 }
             }
             _ => {}
@@ -779,11 +770,18 @@ impl Dashboard {
 
         // ── Layout heights ──────────────────────────────────────────────────
         let info_height: u16 = if agent.task.is_empty() { 6 } else { 7 };
+        let has_context = agent.context_snapshot.is_some();
+        let context_height: u16 = if has_context {
+            let n = agent.context_snapshot.as_ref().map(|s| s.regions.len()).unwrap_or(0) as u16;
+            (n + 4).min(12)
+        } else {
+            0
+        };
         let prompt_height: u16 = if has_prompt || (self.input_mode && is_waiting) {
             let n = options.len() as u16;
             if self.input_mode {
                 match &kind {
-                    Some(InteractionKind::FreeText) | None => 5,
+                    Some(InteractionKind::FreeText) | None => 7,
                     _ => (n + 4).min(14),
                 }
             } else {
@@ -797,22 +795,49 @@ impl Dashboard {
         };
 
         // ── Split area ──────────────────────────────────────────────────────
-        let (info_area, log_area, prompt_area_opt) = if prompt_height > 0 {
-            let chunks = Layout::default()
-                .direction(Direction::Vertical)
-                .constraints([
-                    Constraint::Length(info_height),
-                    Constraint::Min(3),
-                    Constraint::Length(prompt_height),
-                ])
-                .split(area);
-            (chunks[0], chunks[1], Some(chunks[2]))
-        } else {
-            let chunks = Layout::default()
-                .direction(Direction::Vertical)
-                .constraints([Constraint::Length(info_height), Constraint::Min(3)])
-                .split(area);
-            (chunks[0], chunks[1], None)
+        // 4-branch match: (has_context, has_prompt)
+        let (info_area, context_area_opt, log_area, prompt_area_opt) = match (has_context, prompt_height > 0) {
+            (true, true) => {
+                let chunks = Layout::default()
+                    .direction(Direction::Vertical)
+                    .constraints([
+                        Constraint::Length(info_height),
+                        Constraint::Length(context_height),
+                        Constraint::Min(3),
+                        Constraint::Length(prompt_height),
+                    ])
+                    .split(area);
+                (chunks[0], Some(chunks[1]), chunks[2], Some(chunks[3]))
+            }
+            (true, false) => {
+                let chunks = Layout::default()
+                    .direction(Direction::Vertical)
+                    .constraints([
+                        Constraint::Length(info_height),
+                        Constraint::Length(context_height),
+                        Constraint::Min(3),
+                    ])
+                    .split(area);
+                (chunks[0], Some(chunks[1]), chunks[2], None)
+            }
+            (false, true) => {
+                let chunks = Layout::default()
+                    .direction(Direction::Vertical)
+                    .constraints([
+                        Constraint::Length(info_height),
+                        Constraint::Min(3),
+                        Constraint::Length(prompt_height),
+                    ])
+                    .split(area);
+                (chunks[0], None, chunks[1], Some(chunks[2]))
+            }
+            (false, false) => {
+                let chunks = Layout::default()
+                    .direction(Direction::Vertical)
+                    .constraints([Constraint::Length(info_height), Constraint::Min(3)])
+                    .split(area);
+                (chunks[0], None, chunks[1], None)
+            }
         };
 
         // ── Info block ──────────────────────────────────────────────────────
@@ -853,6 +878,52 @@ impl Dashboard {
                 .block(Block::default().borders(Borders::ALL).title(" Agent "))
                 .wrap(Wrap { trim: true });
             frame.render_widget(info_widget, info_area);
+        }
+
+        // ── Context window pane ─────────────────────────────────────────────
+        if let Some(ctx_area) = context_area_opt {
+            if let Some(snap) = &agent.context_snapshot {
+                let inner_w = ctx_area.width.saturating_sub(4) as usize;
+                let mut ctx_lines: Vec<Line> = vec![];
+
+                // Header: stage name + total usage bar
+                let total_pct = if snap.max_tokens > 0 {
+                    (snap.total_tokens * 100 / snap.max_tokens).min(100)
+                } else { 0 };
+                let bar_w = inner_w.saturating_sub(30).max(4);
+                let filled = bar_w * total_pct / 100;
+                let bar: String = format!("{}{}", "█".repeat(filled), "░".repeat(bar_w - filled));
+                let bar_color = if total_pct >= 90 { Color::Red } else if total_pct >= 70 { Color::Yellow } else { Color::Green };
+                ctx_lines.push(Line::from(vec![
+                    Span::styled(format!("  {:<14}", snap.stage_name), Style::default().fg(Color::White)),
+                    Span::styled(bar, Style::default().fg(bar_color)),
+                    Span::styled(format!(" {:>5}/{}", format_tokens(snap.total_tokens), format_tokens(snap.max_tokens)), Style::default().fg(Color::DarkGray)),
+                ]));
+                ctx_lines.push(Line::from(""));
+
+                // Per-region rows
+                for r in &snap.regions {
+                    let pct = if r.max_tokens > 0 { (r.current_tokens * 100 / r.max_tokens).min(100) } else { 0 };
+                    let seg_w = bar_w.saturating_sub(2).max(2);
+                    let seg_fill = if r.max_tokens > 0 { seg_w * r.current_tokens / r.max_tokens } else { 0 };
+                    let seg: String = format!("{}{}", "▪".repeat(seg_fill), "·".repeat(seg_w - seg_fill));
+                    let kind_color = match r.kind.as_str() {
+                        "pinned" => Color::Cyan,
+                        "sliding" => Color::Blue,
+                        "compacting" | "history" => Color::Magenta,
+                        _ => Color::DarkGray,
+                    };
+                    ctx_lines.push(Line::from(vec![
+                        Span::styled(format!("  {:<14}", truncate(&r.name, 14)), Style::default().fg(Color::Gray)),
+                        Span::styled(seg, Style::default().fg(kind_color)),
+                        Span::styled(format!(" {:>3}%  {}", pct, truncate(&r.kind, 9)), Style::default().fg(Color::DarkGray)),
+                    ]));
+                }
+
+                let ctx_widget = Paragraph::new(ctx_lines)
+                    .block(Block::default().borders(Borders::ALL).title(" Context "));
+                frame.render_widget(ctx_widget, ctx_area);
+            }
         }
 
         // ── Output / log block (scrollable) ────────────────────────────────
@@ -898,18 +969,34 @@ impl Dashboard {
 
         // ── Prompt / input block ────────────────────────────────────────────
         if let Some(prompt_area) = prompt_area_opt {
+            let required = pending_req.as_ref().map(|r| r.required).unwrap_or(true);
             let (title, prompt_lines): (&str, Vec<Line>) = if self.input_mode {
                 let mut lines: Vec<Line> = vec![];
                 match &kind {
                     Some(InteractionKind::FreeText) | None => {
+                        // Show the prompt question above the input cursor
+                        let prompt_text = pending_req.as_ref()
+                            .map(|r| r.prompt.as_str())
+                            .or(agent.waiting_prompt.as_deref())
+                            .unwrap_or("Enter response:");
+                        lines.push(Line::from(Span::styled(
+                            prompt_text.to_string(),
+                            Style::default().fg(Color::Yellow),
+                        )));
+                        lines.push(Line::from(""));
                         lines.push(Line::from(vec![
                             Span::styled("> ", Style::default().fg(Color::Green)),
                             Span::raw(self.input_buffer.clone()),
                             Span::styled("█", Style::default().fg(Color::Green)),
                         ]));
                         lines.push(Line::from(""));
+                        let hint = if !required {
+                            "[Enter] send  [empty or /quit to end]  [Esc] cancel"
+                        } else {
+                            "[Enter] send  [Esc] cancel"
+                        };
                         lines.push(Line::from(Span::styled(
-                            "[Enter] send  [Esc] cancel",
+                            hint,
                             Style::default().fg(Color::DarkGray),
                         )));
                     }
@@ -962,7 +1049,7 @@ impl Dashboard {
                 }
                 lines.push(Line::from(""));
                 lines.push(Line::from(Span::styled(
-                    "[i] respond  [c/k] cancel/kill",
+                    "[i] respond  [k] kill",
                     Style::default().fg(Color::DarkGray),
                 )));
                 (" Input Required ", lines)
@@ -1030,54 +1117,67 @@ impl Dashboard {
                 ]),
             }
         } else if self.detail_view {
-            let can_respond = self.agents.get(self.selected).map(|a| {
+            let agent = self.agents.get(self.selected);
+            let can_respond = agent.map(|a| {
                 (a.waiting_prompt.is_some() || a.pending_request.is_some())
                     && !matches!(a.status, AgentDisplayStatus::Cancelled)
             }).unwrap_or(false);
+            let can_kill = agent.map(|a| {
+                matches!(a.status, AgentDisplayStatus::Active | AgentDisplayStatus::Waiting)
+            }).unwrap_or(false);
+            let mut spans = vec![
+                Span::styled("[↑↓]", Style::default().add_modifier(Modifier::BOLD)),
+                Span::raw(" scroll  "),
+                Span::styled("[b/e]", Style::default().add_modifier(Modifier::BOLD)),
+                Span::raw(" begin/end  "),
+            ];
             if can_respond {
-                Line::from(vec![
-                    Span::styled("[↑↓]", Style::default().add_modifier(Modifier::BOLD)),
-                    Span::raw(" scroll  "),
-                    Span::styled("[b/e]", Style::default().add_modifier(Modifier::BOLD)),
-                    Span::raw(" begin/end  "),
-                    Span::styled("[i]", Style::default().add_modifier(Modifier::BOLD)),
-                    Span::raw(" respond  "),
-                    Span::styled("[c/k]", Style::default().add_modifier(Modifier::BOLD)),
-                    Span::raw(" cancel/kill  "),
-                    Span::styled("[Esc]", Style::default().add_modifier(Modifier::BOLD)),
-                    Span::raw(" back"),
-                ])
-            } else {
-                Line::from(vec![
-                    Span::styled("[↑↓]", Style::default().add_modifier(Modifier::BOLD)),
-                    Span::raw(" scroll  "),
-                    Span::styled("[b/e]", Style::default().add_modifier(Modifier::BOLD)),
-                    Span::raw(" begin/end  "),
-                    Span::styled("[c/k]", Style::default().add_modifier(Modifier::BOLD)),
-                    Span::raw(" cancel/kill  "),
-                    Span::styled("[Esc]", Style::default().add_modifier(Modifier::BOLD)),
-                    Span::raw(" back"),
-                ])
+                spans.push(Span::styled("[i]", Style::default().add_modifier(Modifier::BOLD)));
+                spans.push(Span::raw(" respond  "));
             }
+            if can_kill {
+                spans.push(Span::styled("[k]", Style::default().add_modifier(Modifier::BOLD)));
+                spans.push(Span::raw(" kill  "));
+            }
+            spans.push(Span::styled("[Esc]", Style::default().add_modifier(Modifier::BOLD)));
+            spans.push(Span::raw(" back"));
+            Line::from(spans)
         } else {
-            Line::from(vec![
+            let agent = self.agents.get(self.selected);
+            let can_kill = agent.map(|a| {
+                matches!(a.status, AgentDisplayStatus::Active | AgentDisplayStatus::Waiting)
+            }).unwrap_or(false);
+            let mut spans = vec![
                 Span::styled("[↑↓]", Style::default().add_modifier(Modifier::BOLD)),
                 Span::raw(" select  "),
                 Span::styled("[Enter]", Style::default().add_modifier(Modifier::BOLD)),
                 Span::raw(" detail  "),
                 Span::styled("[d]", Style::default().add_modifier(Modifier::BOLD)),
                 Span::raw(" delete  "),
-                Span::styled("[c]", Style::default().add_modifier(Modifier::BOLD)),
-                Span::raw(" cancel  "),
-                Span::styled("[k]", Style::default().add_modifier(Modifier::BOLD)),
-                Span::raw(" kill  "),
-                Span::styled("[Esc]", Style::default().add_modifier(Modifier::BOLD)),
-                Span::raw(" quit"),
-            ])
+            ];
+            if can_kill {
+                spans.push(Span::styled("[c]", Style::default().add_modifier(Modifier::BOLD)));
+                spans.push(Span::raw(" cancel  "));
+                spans.push(Span::styled("[k]", Style::default().add_modifier(Modifier::BOLD)));
+                spans.push(Span::raw(" kill  "));
+            }
+            spans.push(Span::styled("[Esc]", Style::default().add_modifier(Modifier::BOLD)));
+            spans.push(Span::raw(" quit"));
+            Line::from(spans)
         };
 
         let help_widget = Paragraph::new(help);
         frame.render_widget(help_widget, area);
+    }
+}
+
+/// After SIGTERMing a background worker, immediately write Cancelled to meta.json
+/// so the next sync tick doesn't revert the status.
+fn kill_write_cancelled(run_id: &str) {
+    if let Ok(mut meta) = runstate::read_meta(run_id) {
+        meta.status = runstate::RunStatus::Cancelled;
+        meta.touch();
+        let _ = runstate::write_meta(&meta);
     }
 }
 

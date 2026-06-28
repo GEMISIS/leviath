@@ -97,6 +97,42 @@ impl RunMeta {
     }
 }
 
+/// Per-region token snapshot written by the background worker after each inference.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RegionSnapshot {
+    pub name: String,
+    /// Stringified kind: "pinned", "temporary", "clearable", "sliding", "compacting", "history"
+    pub kind: String,
+    pub current_tokens: usize,
+    pub max_tokens: usize,
+}
+
+/// Snapshot of the full context window, written to `context.json` alongside `meta.json`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ContextSnapshot {
+    pub stage_name: String,
+    pub total_tokens: usize,
+    pub max_tokens: usize,
+    pub regions: Vec<RegionSnapshot>,
+}
+
+/// Atomically write a context snapshot for the run.
+pub fn write_context_snapshot(run_id: &str, snap: &ContextSnapshot) -> anyhow::Result<()> {
+    let path = run_dir(run_id).join("context.json");
+    let tmp = path.with_extension("json.tmp");
+    let json = serde_json::to_string_pretty(snap)?;
+    std::fs::write(&tmp, &json)?;
+    std::fs::rename(&tmp, &path)?;
+    Ok(())
+}
+
+/// Read the context snapshot for a run, if present.
+pub fn read_context_snapshot(run_id: &str) -> Option<ContextSnapshot> {
+    let path = run_dir(run_id).join("context.json");
+    let json = std::fs::read_to_string(&path).ok()?;
+    serde_json::from_str(&json).ok()
+}
+
 fn now_secs() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)

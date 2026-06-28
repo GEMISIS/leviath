@@ -803,6 +803,7 @@ async fn run_worker_inner(args: &WorkerArgs, meta: &mut RunMeta) -> anyhow::Resu
         }
         meta.touch();
         let _ = runstate::write_meta(meta);
+        write_context_snapshot_if_bg(&engine, entity, &stage.name, &Some(args.run_id.clone()));
 
         if stage_idx + 1 < num_stages {
             let next_name = &blueprint.stages[stage_idx + 1].name;
@@ -1793,4 +1794,39 @@ fn parse_manifest(content: &str) -> anyhow::Result<Blueprint> {
     }
 
     Ok(blueprint)
+}
+
+/// Snapshot the current context window to `context.json` for the background dashboard.
+/// No-op when running in foreground mode (run_id is None).
+fn write_context_snapshot_if_bg(
+    engine: &AgentEngine,
+    entity: bevy_ecs::prelude::Entity,
+    stage_name: &str,
+    run_id: &Option<String>,
+) {
+    let Some(ref rid) = run_id else { return };
+    let Some(window) = engine.world().get::<ContextWindow>(entity) else { return };
+    use leviath_core::RegionKind;
+    let regions = window.regions.iter().map(|r| {
+        runstate::RegionSnapshot {
+            name: r.name.clone(),
+            kind: match &r.kind {
+                RegionKind::Pinned => "pinned",
+                RegionKind::Temporary => "temporary",
+                RegionKind::Clearable => "clearable",
+                RegionKind::SlidingWindow { .. } => "sliding",
+                RegionKind::Compacting { .. } => "compacting",
+                RegionKind::CompactHistory { .. } => "history",
+            }.to_string(),
+            current_tokens: r.current_tokens,
+            max_tokens: r.max_tokens,
+        }
+    }).collect();
+    let snap = runstate::ContextSnapshot {
+        stage_name: stage_name.to_string(),
+        total_tokens: window.current_tokens,
+        max_tokens: window.max_tokens,
+        regions,
+    };
+    let _ = runstate::write_context_snapshot(rid, &snap);
 }
