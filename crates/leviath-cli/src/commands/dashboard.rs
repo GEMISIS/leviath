@@ -228,6 +228,13 @@ struct Dashboard {
     show_help: bool,
     /// Scroll offset within the review body pane (present_for_review).
     review_scroll: usize,
+    // ── Search ────────────────────────────────────────────────────────────────
+    /// True when the user is typing a search query (entered with `/`).
+    search_mode: bool,
+    /// Current search query (empty = no active search).
+    search_query: String,
+    /// Index into the matched-lines list of the currently highlighted match.
+    search_match_idx: usize,
 }
 
 impl Dashboard {
@@ -261,6 +268,9 @@ impl Dashboard {
             toasts: Vec::new(),
             show_help: false,
             review_scroll: 0,
+            search_mode: false,
+            search_query: String::new(),
+            search_match_idx: 0,
         }
     }
 
@@ -741,12 +751,41 @@ impl Dashboard {
                 return;
             }
 
+            // Search mode: intercept all keys for query editing
+            if self.search_mode {
+                match key {
+                    KeyCode::Esc | KeyCode::Enter => {
+                        if key == KeyCode::Esc {
+                            self.search_query.clear();
+                            self.search_match_idx = 0;
+                        }
+                        self.search_mode = false;
+                    }
+                    KeyCode::Backspace => {
+                        self.search_query.pop();
+                        self.search_match_idx = 0;
+                    }
+                    KeyCode::Char(c) => {
+                        self.search_query.push(c);
+                        self.search_match_idx = 0;
+                    }
+                    _ => {}
+                }
+                return;
+            }
+
             // Detail view — not in input mode
             match key {
                 KeyCode::Esc => {
-                    self.detail_view = false;
-                    self.detail_scroll = 0;
-                    self.review_scroll = 0;
+                    if !self.search_query.is_empty() {
+                        // First Esc clears the search; second exits detail view
+                        self.search_query.clear();
+                        self.search_match_idx = 0;
+                    } else {
+                        self.detail_view = false;
+                        self.detail_scroll = 0;
+                        self.review_scroll = 0;
+                    }
                 }
                 // Stage tab navigation
                 KeyCode::Left => {
@@ -856,6 +895,43 @@ impl Dashboard {
                 }
                 KeyCode::Char('?') => {
                     self.show_help = true;
+                }
+                // Search: `/` enters search mode; `n`/`N` step through matches
+                KeyCode::Char('/') => {
+                    self.search_mode = true;
+                    self.search_query.clear();
+                    self.search_match_idx = 0;
+                }
+                KeyCode::Char('n') => {
+                    if !self.search_query.is_empty() {
+                        self.search_match_idx = self.search_match_idx.saturating_add(1);
+                        // Clamp is done during render; we set a large value so the
+                        // render pass will clamp it to the last match.
+                    }
+                }
+                KeyCode::Char('N') => {
+                    if !self.search_query.is_empty() {
+                        self.search_match_idx = self.search_match_idx.saturating_sub(1);
+                    }
+                }
+                // Yank: `y` copies the current stage output to clipboard via OSC52
+                KeyCode::Char('y') => {
+                    if let Some(agent) = self.agents.get(self.selected) {
+                        if agent.is_run_state {
+                            let is_output = self.stage_content_mode == StageContentMode::Output;
+                            let content = if is_output {
+                                runstate::tail_stage_output(&agent.id, self.selected_stage, 524_288)
+                            } else {
+                                runstate::tail_stage_log(&agent.id, self.selected_stage, 524_288)
+                            };
+                            osc52_yank(&content);
+                            self.add_log(format!(
+                                "Yanked {} to clipboard ({} bytes)",
+                                if is_output { "output" } else { "logs" },
+                                content.len()
+                            ));
+                        }
+                    }
                 }
                 KeyCode::Char('k') => {
                     if let Some(agent) = self.agents.get(self.selected) {
@@ -1077,8 +1153,8 @@ impl Dashboard {
 
     fn draw_help_overlay(&self, frame: &mut Frame) {
         let area = frame.area();
-        let w: u16 = 60.min(area.width.saturating_sub(4));
-        let h: u16 = 26.min(area.height.saturating_sub(4));
+        let w: u16 = 62.min(area.width.saturating_sub(4));
+        let h: u16 = 32.min(area.height.saturating_sub(4));
         let x = (area.width.saturating_sub(w)) / 2;
         let y = (area.height.saturating_sub(h)) / 2;
         let popup = Rect { x, y, width: w, height: h };
@@ -1087,7 +1163,7 @@ impl Dashboard {
         let lines: Vec<Line> = vec![
             Line::from(Span::styled("  Main list", Style::default().fg(C_ACCENT).add_modifier(Modifier::BOLD))),
             Line::from(""),
-            Line::from(vec![Span::styled("  ↑/↓      ", Style::default().fg(C_WHITE).add_modifier(Modifier::BOLD)), Span::raw("Select agent")]),
+            Line::from(vec![Span::styled("  ↑/↓      ", Style::default().fg(C_WHITE).add_modifier(Modifier::BOLD)), Span::raw("Select agent (sorted: active first)")]),
             Line::from(vec![Span::styled("  Enter    ", Style::default().fg(C_WHITE).add_modifier(Modifier::BOLD)), Span::raw("Open detail view")]),
             Line::from(vec![Span::styled("  d        ", Style::default().fg(C_WHITE).add_modifier(Modifier::BOLD)), Span::raw("Delete run (permanent)")]),
             Line::from(vec![Span::styled("  c / k    ", Style::default().fg(C_WHITE).add_modifier(Modifier::BOLD)), Span::raw("Cancel / Kill agent")]),
@@ -1097,13 +1173,16 @@ impl Dashboard {
             Line::from(""),
             Line::from(vec![Span::styled("  ←/→      ", Style::default().fg(C_WHITE).add_modifier(Modifier::BOLD)), Span::raw("Switch stage tab")]),
             Line::from(vec![Span::styled("  1-9      ", Style::default().fg(C_WHITE).add_modifier(Modifier::BOLD)), Span::raw("Jump to stage by number")]),
-            Line::from(vec![Span::styled("  ↑/↓      ", Style::default().fg(C_WHITE).add_modifier(Modifier::BOLD)), Span::raw("Scroll output")]),
+            Line::from(vec![Span::styled("  ↑/↓      ", Style::default().fg(C_WHITE).add_modifier(Modifier::BOLD)), Span::raw("Scroll output (review doc when shown)")]),
             Line::from(vec![Span::styled("  PgUp/Dn  ", Style::default().fg(C_WHITE).add_modifier(Modifier::BOLD)), Span::raw("Scroll 10 lines")]),
             Line::from(vec![Span::styled("  b / e    ", Style::default().fg(C_WHITE).add_modifier(Modifier::BOLD)), Span::raw("Jump to begin / end")]),
             Line::from(vec![Span::styled("  l / o    ", Style::default().fg(C_WHITE).add_modifier(Modifier::BOLD)), Span::raw("Toggle Logs / Output")]),
+            Line::from(vec![Span::styled("  /        ", Style::default().fg(C_WHITE).add_modifier(Modifier::BOLD)), Span::raw("Search output/logs")]),
+            Line::from(vec![Span::styled("  n / N    ", Style::default().fg(C_WHITE).add_modifier(Modifier::BOLD)), Span::raw("Next / previous search match")]),
+            Line::from(vec![Span::styled("  y        ", Style::default().fg(C_WHITE).add_modifier(Modifier::BOLD)), Span::raw("Yank output/logs to clipboard (OSC52)")]),
             Line::from(vec![Span::styled("  i        ", Style::default().fg(C_WHITE).add_modifier(Modifier::BOLD)), Span::raw("Respond (when input needed)")]),
             Line::from(vec![Span::styled("  k        ", Style::default().fg(C_WHITE).add_modifier(Modifier::BOLD)), Span::raw("Kill agent")]),
-            Line::from(vec![Span::styled("  Esc      ", Style::default().fg(C_WHITE).add_modifier(Modifier::BOLD)), Span::raw("Back to list")]),
+            Line::from(vec![Span::styled("  Esc      ", Style::default().fg(C_WHITE).add_modifier(Modifier::BOLD)), Span::raw("Clear search / back to list")]),
             Line::from(""),
             Line::from(Span::styled("  Any key to dismiss", Style::default().fg(C_DIM))),
         ];
@@ -1162,35 +1241,39 @@ impl Dashboard {
             Cell::from(Span::styled("Stage", Style::default().add_modifier(Modifier::BOLD))),
             Cell::from(Span::styled("Status", Style::default().add_modifier(Modifier::BOLD))),
             Cell::from(Span::styled("Tokens", Style::default().add_modifier(Modifier::BOLD))),
-            Cell::from(Span::styled("Where", Style::default().add_modifier(Modifier::BOLD))),
+            Cell::from(Span::styled("Started", Style::default().add_modifier(Modifier::BOLD))),
         ])
         .style(Style::default().fg(C_MUTED))
         .height(1);
 
         let spinner_frame = SPINNER[(self.tick_count as usize) % SPINNER.len()];
 
-        let rows: Vec<Row> = self
-            .agents
+        // Sort agents: Active/Waiting first, then Complete/CompleteInteractive,
+        // then Error, then Cancelled/Idle — within each group, newest first.
+        let status_priority = |s: &AgentDisplayStatus| -> u8 {
+            match s {
+                AgentDisplayStatus::Active => 0,
+                AgentDisplayStatus::Waiting => 1,
+                AgentDisplayStatus::CompleteInteractive => 2,
+                AgentDisplayStatus::Complete => 3,
+                AgentDisplayStatus::Error(_) => 4,
+                AgentDisplayStatus::Idle => 5,
+                AgentDisplayStatus::Cancelled => 6,
+            }
+        };
+        let mut sorted_indices: Vec<usize> = (0..self.agents.len()).collect();
+        sorted_indices.sort_by(|&a, &b| {
+            let pa = status_priority(&self.agents[a].status);
+            let pb = status_priority(&self.agents[b].status);
+            pa.cmp(&pb).then(self.agents[b].started_at.cmp(&self.agents[a].started_at))
+        });
+
+        let rows: Vec<Row> = sorted_indices
             .iter()
-            .map(|agent| {
+            .map(|&idx| {
+                let agent = &self.agents[idx];
                 let status_color = agent.status.color();
-                let where_str = {
-                    let wd = &agent.workdir;
-                    if wd.is_empty() {
-                        "—".to_string()
-                    } else {
-                        std::path::Path::new(wd)
-                            .components()
-                            .rev()
-                            .take(2)
-                            .collect::<Vec<_>>()
-                            .into_iter()
-                            .rev()
-                            .map(|c| c.as_os_str().to_string_lossy().to_string())
-                            .collect::<Vec<_>>()
-                            .join("/")
-                    }
-                };
+                let started_str = relative_time(agent.started_at);
                 let title_str = agent
                     .title
                     .as_deref()
@@ -1228,7 +1311,7 @@ impl Dashboard {
                     Cell::from(stage_str),
                     Cell::from(status_str).style(Style::default().fg(status_color)),
                     Cell::from(tok_str),
-                    Cell::from(where_str),
+                    Cell::from(started_str).style(Style::default().fg(C_DIM)),
                 ])
             })
             .collect();
@@ -1326,7 +1409,7 @@ impl Dashboard {
             0
         } else {
             // Allocate up to 40% of the panel height, minimum 8 lines + 2 border
-            let max_review = (area.height as usize * 2 / 5).max(10).min(24);
+            let max_review = (area.height as usize * 2 / 5).clamp(10, 24);
             (review_lines.len() + 2).min(max_review) as u16
         };
 
@@ -1441,14 +1524,32 @@ impl Dashboard {
                 }).collect()
             } else {
                 agent.stages.iter().enumerate().map(|(i, s)| {
+                    // Compute stage duration string
+                    let dur_str = match (s.started_at, s.ended_at) {
+                        (Some(start), Some(end)) => {
+                            let secs = (end - start).max(0) as u64;
+                            if secs < 60 { format!(" {}s", secs) }
+                            else { format!(" {}m{}s", secs / 60, secs % 60) }
+                        }
+                        (Some(start), None) if s.status == StageRunStatus::Active => {
+                            // Show live elapsed for the active stage
+                            elapsed_str(start)
+                                .chars().next()
+                                .map(|_| format!(" {}", elapsed_str(start)))
+                                .unwrap_or_default()
+                        }
+                        _ => String::new(),
+                    };
+
                     let (glyph, glyph_style) = match &s.status {
                         StageRunStatus::Pending => (GLYPH_PENDING, Style::default().fg(C_DIM)),
                         StageRunStatus::Active => {
                             let spin = SPINNER[(self.tick_count as usize) % SPINNER.len()];
                             return Line::from(vec![
                                 Span::styled(format!("{} ", spin), Style::default().fg(C_ACTIVE)),
-                                Span::styled(truncate(&s.name, 12), Style::default().fg(C_WHITE).add_modifier(Modifier::BOLD)),
+                                Span::styled(truncate(&s.name, 10), Style::default().fg(C_WHITE).add_modifier(Modifier::BOLD)),
                                 Span::styled("*", Style::default().fg(C_WARN)),
+                                Span::styled(dur_str, Style::default().fg(C_DIM)),
                             ]);
                         }
                         StageRunStatus::WaitingInput => (GLYPH_WAITING, Style::default().fg(C_WARN)),
@@ -1464,7 +1565,8 @@ impl Dashboard {
                     };
                     Line::from(vec![
                         Span::styled(format!("{} ", glyph), glyph_style),
-                        Span::styled(truncate(&s.name, 12), label_style),
+                        Span::styled(truncate(&s.name, 10), label_style),
+                        Span::styled(dur_str, Style::default().fg(C_DIM)),
                     ])
                 }).collect()
             };
@@ -1615,6 +1717,27 @@ impl Dashboard {
             };
 
             let total = all_lines.len();
+
+            // ── Search: compute match indices + navigate ──────────────────────
+            let query_lc = self.search_query.to_lowercase();
+            let match_indices: Vec<usize> = if query_lc.is_empty() {
+                Vec::new()
+            } else {
+                all_lines.iter().enumerate().filter_map(|(i, line)| {
+                    let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+                    if text.to_lowercase().contains(&query_lc) { Some(i) } else { None }
+                }).collect()
+            };
+
+            // Clamp search_match_idx to valid range and jump to current match
+            if !match_indices.is_empty() {
+                self.search_match_idx = self.search_match_idx.min(match_indices.len() - 1);
+                let match_line = match_indices[self.search_match_idx];
+                // Center the current match in the viewport
+                let center_scroll = total.saturating_sub(match_line + inner_h / 2);
+                self.detail_scroll = center_scroll;
+            }
+
             let max_scroll = total.saturating_sub(inner_h);
             if self.detail_scroll > max_scroll {
                 self.detail_scroll = max_scroll;
@@ -1631,7 +1754,26 @@ impl Dashboard {
                     Style::default().fg(C_DIM),
                 ))]
             } else {
-                all_lines[start..end].to_vec()
+                // Apply search highlighting
+                let current_match_line = match_indices.get(self.search_match_idx).copied();
+                all_lines[start..end].iter().enumerate().map(|(rel_idx, line)| {
+                    let abs_idx = start + rel_idx;
+                    let is_current_match = current_match_line == Some(abs_idx);
+                    let is_any_match = !query_lc.is_empty() && match_indices.contains(&abs_idx);
+                    if is_current_match {
+                        // Current match: bright yellow background
+                        Line::from(line.spans.iter().map(|s| {
+                            Span::styled(s.content.clone(), Style::default().fg(Color::Black).bg(Color::Yellow).add_modifier(Modifier::BOLD))
+                        }).collect::<Vec<_>>())
+                    } else if is_any_match {
+                        // Other matches: dim yellow background
+                        Line::from(line.spans.iter().map(|s| {
+                            Span::styled(s.content.clone(), Style::default().fg(C_WHITE).bg(Color::Rgb(80, 60, 0)))
+                        }).collect::<Vec<_>>())
+                    } else {
+                        line.clone()
+                    }
+                }).collect()
             };
 
             // Tool count badge for logs tab (count from raw content, not rendered Lines)
@@ -1640,10 +1782,23 @@ impl Dashboard {
                 if tc > 0 { format!(" · {} tools", tc) } else { String::new() }
             } else { String::new() };
 
-            let mode_label = if is_output {
-                format!(" Output  [l] logs{} ", tool_count)
+            // Search indicator in the title
+            let search_indicator = if !query_lc.is_empty() {
+                if match_indices.is_empty() {
+                    format!(" 🔍/{}/  0 matches", self.search_query)
+                } else {
+                    format!(" /{}/  {}/{}", self.search_query, self.search_match_idx + 1, match_indices.len())
+                }
+            } else if self.search_mode {
+                format!(" /{}▌", self.search_query)
             } else {
-                format!(" Logs  [o] output{} ", tool_count)
+                String::new()
+            };
+
+            let mode_label = if is_output {
+                format!(" Output  [l] logs{}{} ", tool_count, search_indicator)
+            } else {
+                format!(" Logs  [o] output{}{} ", tool_count, search_indicator)
             };
             let scroll_info = if total > inner_h {
                 let pct = if max_scroll == 0 { 100usize } else {
@@ -1900,6 +2055,32 @@ impl Dashboard {
                     Span::raw(" cancel"),
                 ]),
             }
+        } else if self.detail_view && self.search_mode {
+            Line::from(vec![
+                Span::styled(" Search: /", Style::default().fg(C_ACCENT)),
+                Span::raw(self.search_query.clone()),
+                Span::styled("▌", Style::default().fg(C_ACCENT)),
+                Span::raw("  "),
+                Span::styled("[Enter]", Style::default().fg(C_ACCENT).add_modifier(Modifier::BOLD)),
+                Span::raw(" confirm  "),
+                Span::styled("[Esc]", Style::default().add_modifier(Modifier::BOLD)),
+                Span::raw(" cancel"),
+            ])
+        } else if self.detail_view && !self.search_query.is_empty() {
+            Line::from(vec![
+                Span::styled(format!(" /{}/", self.search_query), Style::default().fg(C_ACCENT)),
+                Span::raw("  "),
+                Span::styled("[n]", Style::default().fg(C_ACCENT).add_modifier(Modifier::BOLD)),
+                Span::raw(" next  "),
+                Span::styled("[N]", Style::default().add_modifier(Modifier::BOLD)),
+                Span::raw(" prev  "),
+                Span::styled("[Esc]", Style::default().add_modifier(Modifier::BOLD)),
+                Span::raw(" clear search  "),
+                Span::styled("[y]", Style::default().add_modifier(Modifier::BOLD)),
+                Span::raw(" yank  "),
+                Span::styled("[?]", Style::default().fg(C_DIM).add_modifier(Modifier::BOLD)),
+                Span::raw(" help"),
+            ])
         } else if self.detail_view {
             let can_respond = self.selected_stage_can_respond();
             let can_kill = self.agents.get(self.selected).map(|a| {
@@ -1910,8 +2091,12 @@ impl Dashboard {
                 Span::raw(" stage  "),
                 Span::styled("[↑/↓]", Style::default().add_modifier(Modifier::BOLD)),
                 Span::raw(" scroll  "),
+                Span::styled("[/]", Style::default().add_modifier(Modifier::BOLD)),
+                Span::raw(" search  "),
+                Span::styled("[y]", Style::default().add_modifier(Modifier::BOLD)),
+                Span::raw(" yank  "),
                 Span::styled("[l/o]", Style::default().add_modifier(Modifier::BOLD)),
-                Span::raw(" logs/output  "),
+                Span::raw(" logs/out  "),
             ];
             if can_respond {
                 spans.push(Span::styled("[i]", Style::default().fg(C_WARN).add_modifier(Modifier::BOLD)));
@@ -1958,6 +2143,79 @@ impl Dashboard {
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
+
+/// Yank `text` to the system clipboard via the OSC52 terminal escape sequence.
+///
+/// Works over SSH and in most modern terminal emulators (iTerm2, kitty, WezTerm,
+/// Windows Terminal, Alacritty, etc.).  Silently no-ops if the write fails.
+fn osc52_yank(text: &str) {
+    use std::io::Write;
+    // Base64-encode the content
+    let encoded = {
+        use std::fmt::Write as FmtWrite;
+        let bytes = text.as_bytes();
+        let mut out = String::with_capacity((bytes.len() * 4 / 3) + 8);
+        const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        let mut i = 0;
+        while i + 3 <= bytes.len() {
+            let b0 = bytes[i] as usize;
+            let b1 = bytes[i + 1] as usize;
+            let b2 = bytes[i + 2] as usize;
+            let _ = FmtWrite::write_char(&mut out, TABLE[b0 >> 2] as char);
+            let _ = FmtWrite::write_char(&mut out, TABLE[((b0 & 3) << 4) | (b1 >> 4)] as char);
+            let _ = FmtWrite::write_char(&mut out, TABLE[((b1 & 0xf) << 2) | (b2 >> 6)] as char);
+            let _ = FmtWrite::write_char(&mut out, TABLE[b2 & 0x3f] as char);
+            i += 3;
+        }
+        let rem = bytes.len() - i;
+        if rem == 1 {
+            let b0 = bytes[i] as usize;
+            let _ = FmtWrite::write_char(&mut out, TABLE[b0 >> 2] as char);
+            let _ = FmtWrite::write_char(&mut out, TABLE[(b0 & 3) << 4] as char);
+            out.push_str("==");
+        } else if rem == 2 {
+            let b0 = bytes[i] as usize;
+            let b1 = bytes[i + 1] as usize;
+            let _ = FmtWrite::write_char(&mut out, TABLE[b0 >> 2] as char);
+            let _ = FmtWrite::write_char(&mut out, TABLE[((b0 & 3) << 4) | (b1 >> 4)] as char);
+            let _ = FmtWrite::write_char(&mut out, TABLE[(b1 & 0xf) << 2] as char);
+            out.push('=');
+        }
+        out
+    };
+    // Write OSC52 sequence to stdout; the terminal intercepts it and
+    // writes the content to the clipboard.
+    let osc = format!("\x1b]52;c;{}\x07", encoded);
+    let mut stdout = std::io::stdout();
+    let _ = stdout.write_all(osc.as_bytes());
+    let _ = stdout.flush();
+}
+
+/// Format a Unix timestamp as a relative time string ("just now", "2m ago", "1h ago").
+fn relative_time(ts: i64) -> String {
+    if ts == 0 { return "—".to_string(); }
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let secs = (now - ts).max(0) as u64;
+    if secs < 10 {
+        "just now".to_string()
+    } else if secs < 60 {
+        format!("{}s ago", secs)
+    } else if secs < 3600 {
+        let m = secs / 60;
+        format!("{}m ago", m)
+    } else if secs < 86400 {
+        let h = secs / 3600;
+        let m = (secs % 3600) / 60;
+        if m == 0 { format!("{}h ago", h) } else { format!("{}h{}m ago", h, m) }
+    } else {
+        let d = secs / 86400;
+        format!("{}d ago", d)
+    }
+}
 
 /// After SIGTERMing a background worker, immediately write Cancelled to meta.json
 /// so the next sync tick doesn't revert the status.

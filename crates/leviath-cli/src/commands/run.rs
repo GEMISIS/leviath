@@ -858,7 +858,7 @@ async fn run_worker_inner(args: &WorkerArgs, meta: &mut RunMeta) -> anyhow::Resu
                     } else {
                         format!("User feedback: {}", user_feedback)
                     };
-                    record_stage_log(&run_id, stage_idx, &format!("[tool] present_for_review → done"));
+                    record_stage_log(&run_id, stage_idx, "[tool] present_for_review → done");
                     out.push((tc.id.clone(), result));
                     continue;
                 }
