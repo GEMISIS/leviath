@@ -58,6 +58,101 @@ impl OllamaProvider {
         }
     }
 
+    /// Return built-in capability defaults for a model based on its name pattern.
+    fn builtin_capabilities(&self, model: &str) -> ModelCapabilities {
+        // Llama 3.x — tool-capable, 128K context
+        if model.contains("llama3") || model.contains("llama-3") {
+            ModelCapabilities {
+                supports_temperature: true,
+                supports_streaming: true,
+                supports_tools: true,
+                supports_system_prompt: true,
+                max_context_tokens: 131_072,
+                max_output_tokens: 8192,
+            }
+        // Qwen 2.5 / 3 — tool-capable, 128K context
+        } else if model.contains("qwen2.5") || model.contains("qwen3") || model.contains("qwen2") {
+            ModelCapabilities {
+                supports_temperature: true,
+                supports_streaming: true,
+                supports_tools: true,
+                supports_system_prompt: true,
+                max_context_tokens: 131_072,
+                max_output_tokens: 8192,
+            }
+        // Mistral / Mixtral — tool-capable
+        } else if model.contains("mistral") || model.contains("mixtral") {
+            ModelCapabilities {
+                supports_temperature: true,
+                supports_streaming: true,
+                supports_tools: true,
+                supports_system_prompt: true,
+                max_context_tokens: 32_768,
+                max_output_tokens: 4096,
+            }
+        // Phi-4 — tool-capable, 128K context
+        } else if model.contains("phi-4") || model.contains("phi4") {
+            ModelCapabilities {
+                supports_temperature: true,
+                supports_streaming: true,
+                supports_tools: true,
+                supports_system_prompt: true,
+                max_context_tokens: 131_072,
+                max_output_tokens: 8192,
+            }
+        // DeepSeek R1 — reasoning, no tool calls
+        } else if model.contains("deepseek-r1") {
+            ModelCapabilities {
+                supports_temperature: true,
+                supports_streaming: true,
+                supports_tools: false,
+                supports_system_prompt: true,
+                max_context_tokens: 131_072,
+                max_output_tokens: 8192,
+            }
+        // DeepSeek general — tool-capable
+        } else if model.contains("deepseek") {
+            ModelCapabilities {
+                supports_temperature: true,
+                supports_streaming: true,
+                supports_tools: true,
+                supports_system_prompt: true,
+                max_context_tokens: 131_072,
+                max_output_tokens: 8192,
+            }
+        // Gemma — no tool support
+        } else if model.contains("gemma") {
+            ModelCapabilities {
+                supports_temperature: true,
+                supports_streaming: true,
+                supports_tools: false,
+                supports_system_prompt: true,
+                max_context_tokens: 131_072,
+                max_output_tokens: 8192,
+            }
+        // CodeLlama — no tool support
+        } else if model.contains("codellama") {
+            ModelCapabilities {
+                supports_temperature: true,
+                supports_streaming: true,
+                supports_tools: false,
+                supports_system_prompt: true,
+                max_context_tokens: 16_384,
+                max_output_tokens: 4096,
+            }
+        } else {
+            // Conservative fallback for unknown local models
+            ModelCapabilities {
+                supports_temperature: true,
+                supports_streaming: true,
+                supports_tools: false,
+                supports_system_prompt: true,
+                max_context_tokens: 8192,
+                max_output_tokens: 4096,
+            }
+        }
+    }
+
     /// Build request body for the Ollama API.
     fn build_request_body(&self, request: &InferenceRequest) -> serde_json::Value {
         let messages: Vec<serde_json::Value> = request
@@ -247,8 +342,8 @@ impl Provider for OllamaProvider {
         text.len() / 4
     }
 
-    fn max_context_tokens(&self, _model: &str) -> usize {
-        4096
+    fn max_context_tokens(&self, model: &str) -> usize {
+        self.capabilities(model).max_context_tokens
     }
 
     fn name(&self) -> &str {
@@ -259,14 +354,7 @@ impl Provider for OllamaProvider {
         if let Some(overridden) = self.capability_overrides.get(model) {
             return overridden.clone();
         }
-        ModelCapabilities {
-            supports_temperature: true,
-            supports_streaming: true,
-            supports_tools: false,
-            supports_system_prompt: true,
-            max_context_tokens: 8192,
-            max_output_tokens: 4096,
-        }
+        self.builtin_capabilities(model)
     }
 
     async fn list_models(&self) -> Result<Vec<ModelInfo>> {

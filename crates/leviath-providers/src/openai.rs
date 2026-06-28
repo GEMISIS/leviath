@@ -68,14 +68,35 @@ impl OpenAIProvider {
 
     /// Return built-in capability defaults for a model.
     fn builtin_capabilities(&self, model: &str) -> ModelCapabilities {
-        if model.starts_with("o1") || model.starts_with("o3") {
+        // GPT-4.1 family — 1M context window (must check before generic gpt-4)
+        if model.starts_with("gpt-4.1") {
+            ModelCapabilities {
+                supports_temperature: true,
+                supports_streaming: true,
+                supports_tools: true,
+                supports_system_prompt: true,
+                max_context_tokens: 1_047_576,
+                max_output_tokens: 32_768,
+            }
+        // o-mini reasoning models — smaller context/output
+        } else if model.starts_with("o1-mini") || model.starts_with("o3-mini") {
+            ModelCapabilities {
+                supports_temperature: false,
+                supports_streaming: true,
+                supports_tools: true,
+                supports_system_prompt: true,
+                max_context_tokens: 128_000,
+                max_output_tokens: 65_536,
+            }
+        // o-series reasoning models (o1, o3, o4) — no temperature
+        } else if model.starts_with("o1") || model.starts_with("o3") || model.starts_with("o4") {
             ModelCapabilities {
                 supports_temperature: false,
                 supports_streaming: true,
                 supports_tools: true,
                 supports_system_prompt: true,
                 max_context_tokens: 200_000,
-                max_output_tokens: 32_768,
+                max_output_tokens: 100_000,
             }
         } else if model.starts_with("gpt-4o") {
             ModelCapabilities {
@@ -365,12 +386,7 @@ impl Provider for OpenAIProvider {
     }
 
     fn max_context_tokens(&self, model: &str) -> usize {
-        match model {
-            m if m.starts_with("gpt-4") => 128_000,
-            m if m.starts_with("gpt-3.5") => 16_384,
-            m if m.starts_with("o1") || m.starts_with("o3") || m.starts_with("o4") => 200_000,
-            _ => 128_000,
-        }
+        self.capabilities(model).max_context_tokens
     }
 
     fn name(&self) -> &str {
@@ -707,7 +723,34 @@ mod tests {
         assert!(!caps.supports_temperature);
         assert!(caps.supports_streaming);
         assert_eq!(caps.max_context_tokens, 200_000);
+        assert_eq!(caps.max_output_tokens, 100_000);
+    }
+
+    #[test]
+    fn test_builtin_capabilities_o1_mini() {
+        let provider = OpenAIProvider::new("test-key".to_string());
+        let caps = provider.builtin_capabilities("o1-mini");
+        assert!(!caps.supports_temperature);
+        assert_eq!(caps.max_context_tokens, 128_000);
+        assert_eq!(caps.max_output_tokens, 65_536);
+    }
+
+    #[test]
+    fn test_builtin_capabilities_gpt41() {
+        let provider = OpenAIProvider::new("test-key".to_string());
+        let caps = provider.builtin_capabilities("gpt-4.1");
+        assert!(caps.supports_temperature);
+        assert_eq!(caps.max_context_tokens, 1_047_576);
         assert_eq!(caps.max_output_tokens, 32_768);
+    }
+
+    #[test]
+    fn test_builtin_capabilities_o4_mini() {
+        let provider = OpenAIProvider::new("test-key".to_string());
+        let caps = provider.builtin_capabilities("o4-mini");
+        assert!(!caps.supports_temperature);
+        assert_eq!(caps.max_context_tokens, 200_000);
+        assert_eq!(caps.max_output_tokens, 100_000);
     }
 
     #[test]

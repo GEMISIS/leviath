@@ -68,77 +68,74 @@ struct BuiltinEntry {
 /// This is used when the provider API is not reachable or `--remote` is not
 /// specified.  Remote results override these values for identical model IDs.
 fn builtin_table() -> Vec<BuiltinEntry> {
-    // Helper closures keep the table compact.
-    let claude4 = |model_id, display_name| BuiltinEntry {
-        provider: "anthropic",
-        model_id,
-        display_name,
-        caps: ModelCapabilities {
-            supports_temperature: false,
-            supports_streaming: true,
-            supports_tools: true,
-            supports_system_prompt: true,
-            max_context_tokens: 200_000,
-            max_output_tokens: 32_768,
-        },
-    };
-
-    let claude3 = |model_id, display_name| BuiltinEntry {
-        provider: "anthropic",
-        model_id,
-        display_name,
-        caps: ModelCapabilities {
-            supports_temperature: true,
-            supports_streaming: true,
-            supports_tools: true,
-            supports_system_prompt: true,
-            max_context_tokens: 200_000,
-            max_output_tokens: 8_192,
-        },
-    };
-
-    let gpt4o = |model_id, display_name| BuiltinEntry {
-        provider: "openai",
-        model_id,
-        display_name,
-        caps: ModelCapabilities {
-            supports_temperature: true,
-            supports_streaming: true,
-            supports_tools: true,
-            supports_system_prompt: true,
-            max_context_tokens: 128_000,
-            max_output_tokens: 16_384,
-        },
-    };
-
-    let o_series = |model_id, display_name| BuiltinEntry {
-        provider: "openai",
-        model_id,
-        display_name,
-        caps: ModelCapabilities {
-            supports_temperature: false,
-            supports_streaming: true,
-            supports_tools: true,
-            supports_system_prompt: true,
-            max_context_tokens: 200_000,
-            max_output_tokens: 32_768,
-        },
-    };
+    macro_rules! entry {
+        ($provider:expr, $id:expr, $name:expr,
+         temp=$t:expr, ctx=$ctx:expr, out=$out:expr) => {
+            BuiltinEntry {
+                provider: $provider,
+                model_id: $id,
+                display_name: $name,
+                caps: ModelCapabilities {
+                    supports_temperature: $t,
+                    supports_streaming: true,
+                    supports_tools: true,
+                    supports_system_prompt: true,
+                    max_context_tokens: $ctx,
+                    max_output_tokens: $out,
+                },
+            }
+        };
+    }
 
     vec![
-        // Anthropic — Claude 4.x (no temperature)
-        claude4("claude-opus-4-8",              "Claude Opus 4.8"),
-        claude4("claude-sonnet-4-6",            "Claude Sonnet 4.6"),
-        claude4("claude-haiku-4-5-20251001",    "Claude Haiku 4.5"),
-        // Anthropic — Claude 3.x (has temperature)
-        claude3("claude-3-5-sonnet-20241022",   "Claude 3.5 Sonnet"),
-        claude3("claude-3-5-haiku-20241022",    "Claude 3.5 Haiku"),
-        // OpenAI — GPT-4o family (has temperature)
-        gpt4o("gpt-4o",      "GPT-4o"),
-        gpt4o("gpt-4o-mini", "GPT-4o Mini"),
-        // OpenAI — o-series (no temperature)
-        o_series("o1",      "o1"),
-        o_series("o3-mini", "o3-mini"),
+        // ── Anthropic ──────────────────────────────────────────────────────────
+        // Fable 5 — top tier, no temperature, 1M context, 128K output
+        entry!("anthropic", "claude-fable-5",            "Claude Fable 5",
+               temp=false, ctx=1_000_000, out=131_072),
+        // Opus 4.8 / 4.7 — no temperature, 1M context, 128K output
+        entry!("anthropic", "claude-opus-4-8",           "Claude Opus 4.8",
+               temp=false, ctx=1_000_000, out=131_072),
+        entry!("anthropic", "claude-opus-4-7",           "Claude Opus 4.7",
+               temp=false, ctx=1_000_000, out=131_072),
+        // Opus 4.6 — temperature supported, 1M context, 128K output
+        entry!("anthropic", "claude-opus-4-6",           "Claude Opus 4.6",
+               temp=true,  ctx=1_000_000, out=131_072),
+        // Sonnet 4.6 — temperature supported, 1M context, 64K output
+        entry!("anthropic", "claude-sonnet-4-6",         "Claude Sonnet 4.6",
+               temp=true,  ctx=1_000_000, out=65_536),
+        // Haiku 4.5 — temperature supported, 200K context, 64K output
+        entry!("anthropic", "claude-haiku-4-5-20251001", "Claude Haiku 4.5",
+               temp=true,  ctx=200_000,   out=65_536),
+        // Claude 3.5 — temperature supported, 200K context
+        entry!("anthropic", "claude-3-5-sonnet-20241022", "Claude 3.5 Sonnet",
+               temp=true,  ctx=200_000, out=8_192),
+        entry!("anthropic", "claude-3-5-haiku-20241022",  "Claude 3.5 Haiku",
+               temp=true,  ctx=200_000, out=8_192),
+
+        // ── OpenAI ─────────────────────────────────────────────────────────────
+        // GPT-4.1 family — 1M context
+        entry!("openai", "gpt-4.1",      "GPT-4.1",
+               temp=true, ctx=1_047_576, out=32_768),
+        entry!("openai", "gpt-4.1-mini", "GPT-4.1 Mini",
+               temp=true, ctx=1_047_576, out=32_768),
+        entry!("openai", "gpt-4.1-nano", "GPT-4.1 Nano",
+               temp=true, ctx=1_047_576, out=32_768),
+        // GPT-4o family — 128K context
+        entry!("openai", "gpt-4o",       "GPT-4o",
+               temp=true, ctx=128_000, out=16_384),
+        entry!("openai", "gpt-4o-mini",  "GPT-4o Mini",
+               temp=true, ctx=128_000, out=16_384),
+        // o-series reasoning — no temperature
+        entry!("openai", "o4-mini", "o4-mini",
+               temp=false, ctx=200_000, out=100_000),
+        entry!("openai", "o3",      "o3",
+               temp=false, ctx=200_000, out=100_000),
+        entry!("openai", "o3-mini", "o3-mini",
+               temp=false, ctx=128_000, out=65_536),
+        entry!("openai", "o1",      "o1",
+               temp=false, ctx=200_000, out=100_000),
+        entry!("openai", "o1-mini", "o1-mini",
+               temp=false, ctx=128_000, out=65_536),
     ]
 }
 
@@ -330,9 +327,11 @@ fn bool_icon(b: bool) -> &'static str {
     if b { "✓" } else { "✗" }
 }
 
-/// Format a raw token count as a human-friendly string (e.g. 200K, 128K, 8K).
+/// Format a raw token count as a human-friendly string (e.g. 1M, 200K, 128K, 8K).
 fn fmt_tokens(n: usize) -> String {
-    if n >= 1_000 {
+    if n >= 1_000_000 {
+        format!("{}M", n / 1_000_000)
+    } else if n >= 1_000 {
         format!("{}K", n / 1_000)
     } else {
         n.to_string()

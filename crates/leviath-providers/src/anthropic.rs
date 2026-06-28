@@ -68,30 +68,87 @@ impl AnthropicProvider {
 
     /// Return built-in capabilities for a model based on its name pattern.
     fn builtin_capabilities(&self, model: &str) -> ModelCapabilities {
-        if model.contains("claude-opus-4")
-            || model.contains("claude-sonnet-4")
-            || model.contains("claude-haiku-4")
-        {
-            ModelCapabilities {
+        // Fable 5 / Mythos 5 — top-tier, 1M context, 128K output, no temperature
+        if model.contains("claude-fable-5") || model.contains("claude-mythos-5") {
+            return ModelCapabilities {
                 supports_temperature: false,
                 supports_streaming: true,
                 supports_tools: true,
                 supports_system_prompt: true,
+                max_context_tokens: 1_000_000,
+                max_output_tokens: 131_072,
+            };
+        }
+        // Opus 4.8 / 4.7 — 1M context, 128K output, no temperature
+        if model.contains("claude-opus-4-8") || model.contains("claude-opus-4-7") {
+            return ModelCapabilities {
+                supports_temperature: false,
+                supports_streaming: true,
+                supports_tools: true,
+                supports_system_prompt: true,
+                max_context_tokens: 1_000_000,
+                max_output_tokens: 131_072,
+            };
+        }
+        // Opus 4.6 — 1M context, 128K output, temperature supported
+        if model.contains("claude-opus-4-6") {
+            return ModelCapabilities {
+                supports_temperature: true,
+                supports_streaming: true,
+                supports_tools: true,
+                supports_system_prompt: true,
+                max_context_tokens: 1_000_000,
+                max_output_tokens: 131_072,
+            };
+        }
+        // Sonnet 4.6 — 1M context, 64K output, temperature supported
+        if model.contains("claude-sonnet-4-6") {
+            return ModelCapabilities {
+                supports_temperature: true,
+                supports_streaming: true,
+                supports_tools: true,
+                supports_system_prompt: true,
+                max_context_tokens: 1_000_000,
+                max_output_tokens: 65_536,
+            };
+        }
+        // Haiku 4.5 — 200K context, 64K output, temperature supported
+        if model.contains("claude-haiku-4-5") {
+            return ModelCapabilities {
+                supports_temperature: true,
+                supports_streaming: true,
+                supports_tools: true,
+                supports_system_prompt: true,
                 max_context_tokens: 200_000,
+                max_output_tokens: 65_536,
+            };
+        }
+        // Generic Claude 4.x fallback (e.g. older 4.5 snapshots)
+        if model.contains("claude-opus-4")
+            || model.contains("claude-sonnet-4")
+            || model.contains("claude-haiku-4")
+        {
+            return ModelCapabilities {
+                supports_temperature: false,
+                supports_streaming: true,
+                supports_tools: true,
+                supports_system_prompt: true,
+                max_context_tokens: 1_000_000,
                 max_output_tokens: 32_768,
-            }
-        } else if model.contains("claude-3-5") || model.contains("claude-3") {
-            ModelCapabilities {
+            };
+        }
+        // Claude 3.5 and Claude 3
+        if model.contains("claude-3-5") || model.contains("claude-3") {
+            return ModelCapabilities {
                 supports_temperature: true,
                 supports_streaming: true,
                 supports_tools: true,
                 supports_system_prompt: true,
                 max_context_tokens: 200_000,
                 max_output_tokens: 8192,
-            }
-        } else {
-            ModelCapabilities::default()
+            };
         }
+        ModelCapabilities::default()
     }
 
     /// Build the request body for the Anthropic API.
@@ -370,15 +427,7 @@ impl Provider for AnthropicProvider {
     }
 
     fn max_context_tokens(&self, model: &str) -> usize {
-        match model {
-            m if m.contains("claude-3-5-sonnet") => 200_000,
-            m if m.contains("claude-3-opus") => 200_000,
-            m if m.contains("claude-3-sonnet") => 200_000,
-            m if m.contains("claude-3-haiku") => 200_000,
-            m if m.contains("claude-sonnet-4") => 200_000,
-            m if m.contains("claude-opus-4") => 200_000,
-            _ => 200_000,
-        }
+        self.capabilities(model).max_context_tokens
     }
 
     fn name(&self) -> &str {
@@ -689,7 +738,7 @@ mod tests {
                     content: "Hello".to_string(),
                 },
             ],
-            model: "claude-sonnet-4-20250514".to_string(),
+            model: "claude-sonnet-4-6".to_string(),
             max_tokens: 1024,
             temperature: 0.7,
             tools: vec![],
@@ -697,7 +746,7 @@ mod tests {
         };
 
         let body = provider.build_request_body(&request);
-        assert_eq!(body["model"], "claude-sonnet-4-20250514");
+        assert_eq!(body["model"], "claude-sonnet-4-6");
         assert_eq!(body["system"], "You are helpful.");
         assert_eq!(body["messages"].as_array().unwrap().len(), 1);
     }
@@ -748,13 +797,43 @@ mod tests {
     }
 
     #[test]
-    fn test_builtin_capabilities_claude4() {
+    fn test_builtin_capabilities_opus48() {
         let provider = AnthropicProvider::new("test-key".to_string());
-        let caps = provider.builtin_capabilities("claude-sonnet-4-20250514");
+        let caps = provider.builtin_capabilities("claude-opus-4-8");
         assert!(!caps.supports_temperature);
         assert!(caps.supports_streaming);
         assert!(caps.supports_tools);
-        assert_eq!(caps.max_output_tokens, 32_768);
+        assert_eq!(caps.max_context_tokens, 1_000_000);
+        assert_eq!(caps.max_output_tokens, 131_072);
+    }
+
+    #[test]
+    fn test_builtin_capabilities_sonnet46() {
+        let provider = AnthropicProvider::new("test-key".to_string());
+        let caps = provider.builtin_capabilities("claude-sonnet-4-6");
+        assert!(caps.supports_temperature);
+        assert!(caps.supports_streaming);
+        assert!(caps.supports_tools);
+        assert_eq!(caps.max_context_tokens, 1_000_000);
+        assert_eq!(caps.max_output_tokens, 65_536);
+    }
+
+    #[test]
+    fn test_builtin_capabilities_haiku45() {
+        let provider = AnthropicProvider::new("test-key".to_string());
+        let caps = provider.builtin_capabilities("claude-haiku-4-5-20251001");
+        assert!(caps.supports_temperature);
+        assert_eq!(caps.max_context_tokens, 200_000);
+        assert_eq!(caps.max_output_tokens, 65_536);
+    }
+
+    #[test]
+    fn test_builtin_capabilities_fable5() {
+        let provider = AnthropicProvider::new("test-key".to_string());
+        let caps = provider.builtin_capabilities("claude-fable-5");
+        assert!(!caps.supports_temperature);
+        assert_eq!(caps.max_context_tokens, 1_000_000);
+        assert_eq!(caps.max_output_tokens, 131_072);
     }
 
     #[test]
@@ -769,20 +848,20 @@ mod tests {
     fn test_capability_overrides() {
         let mut overrides = HashMap::new();
         overrides.insert(
-            "claude-sonnet-4-20250514".to_string(),
+            "claude-sonnet-4-6".to_string(),
             ModelCapabilities {
-                supports_temperature: true,
+                supports_temperature: false,
                 supports_streaming: true,
                 supports_tools: true,
                 supports_system_prompt: true,
-                max_context_tokens: 200_000,
-                max_output_tokens: 16_384,
+                max_context_tokens: 1_000_000,
+                max_output_tokens: 32_768,
             },
         );
         let provider = AnthropicProvider::with_overrides("test-key".to_string(), overrides);
-        let caps = provider.capabilities("claude-sonnet-4-20250514");
-        // Override should take precedence over built-in (which would be false)
-        assert!(caps.supports_temperature);
-        assert_eq!(caps.max_output_tokens, 16_384);
+        let caps = provider.capabilities("claude-sonnet-4-6");
+        // Override should take precedence over built-in
+        assert!(!caps.supports_temperature);
+        assert_eq!(caps.max_output_tokens, 32_768);
     }
 }

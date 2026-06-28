@@ -339,13 +339,17 @@ impl Provider for OpenRouterProvider {
             return overrides.clone();
         }
 
-        // Default capabilities for all OpenRouter models (pass-through aggregator)
-        let supports_temperature = !model.starts_with("anthropic/claude-opus-4")
-            && !model.starts_with("anthropic/claude-sonnet-4")
-            && !model.starts_with("anthropic/claude-haiku-4");
+        // Models that do not accept the temperature parameter
+        let no_temperature = model.contains("claude-opus-4-8")
+            || model.contains("claude-opus-4-7")
+            || model.contains("claude-fable-5")
+            || model.contains("claude-mythos-5")
+            || model.starts_with("openai/o1")
+            || model.starts_with("openai/o3")
+            || model.starts_with("openai/o4");
 
         ModelCapabilities {
-            supports_temperature,
+            supports_temperature: !no_temperature,
             supports_streaming: true,
             supports_tools: true,
             supports_system_prompt: true,
