@@ -25,41 +25,32 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Initialize a new agent project
-    Init(commands::init::InitArgs),
-    
+    /// Create a new agent blueprint
+    Create(commands::create::CreateArgs),
+
+    /// Configure API keys and defaults
+    Setup(commands::setup::SetupArgs),
+
     /// Run an agent
     Run(commands::run::RunArgs),
 
-    /// List available agents and blueprints
+    /// List available and installed blueprints
     List(commands::list::ListArgs),
 
-    /// Install an agent package
+    /// Install a blueprint
     Install(commands::install::InstallArgs),
 
-    /// Remove an installed agent
+    /// Remove an installed blueprint
     Uninstall(commands::uninstall::UninstallArgs),
-    
-    /// Run agent tests
-    Test(commands::test::TestArgs),
-    
-    /// Inspect and debug context windows
-    Context(commands::context::ContextArgs),
 
-    /// Bundle an agent project for distribution
+    /// Run blueprint tests
+    Test(commands::test::TestArgs),
+
+    /// Bundle a blueprint for distribution
     Pack(commands::pack::PackArgs),
 
     /// Interactive agent dashboard
     Dashboard(commands::dashboard::DashboardArgs),
-
-    /// List background agent runs
-    Ps(commands::ps::PsArgs),
-
-    /// Stream output from a background run
-    Logs(commands::logs::LogsArgs),
-
-    /// Stop a background run
-    Stop(commands::stop::StopArgs),
 
     /// List and inspect available models
     Models(commands::models::ModelsArgs),
@@ -83,18 +74,15 @@ async fn main() -> anyhow::Result<()> {
 
     // Dispatch commands
     match cli.command {
-        Commands::Init(args) => commands::init::execute(args).await,
+        Commands::Create(args) => commands::create::execute(args).await,
+        Commands::Setup(args) => commands::setup::execute(args).await,
         Commands::Run(args) => commands::run::execute(args).await,
         Commands::List(args) => commands::list::execute(args).await,
         Commands::Install(args) => commands::install::execute(args).await,
         Commands::Uninstall(args) => commands::uninstall::execute(args).await,
         Commands::Test(args) => commands::test::execute(args).await,
-        Commands::Context(args) => commands::context::execute(args).await,
         Commands::Pack(args) => commands::pack::execute(args).await,
         Commands::Dashboard(args) => commands::dashboard::execute(args).await,
-        Commands::Ps(args) => commands::ps::execute(args).await,
-        Commands::Logs(args) => commands::logs::execute(args).await,
-        Commands::Stop(args) => commands::stop::execute(args).await,
         Commands::Models(args) => commands::models::execute(args).await,
         Commands::RunWorker(args) => commands::run::execute_worker(args).await,
     }
