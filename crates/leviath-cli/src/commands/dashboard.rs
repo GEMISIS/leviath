@@ -354,12 +354,29 @@ impl Dashboard {
             let stages = runstate::read_stages_index(&run.run_id);
 
             if let Some(agent) = self.agents.iter_mut().find(|a| a.id == run.run_id) {
-                let prev_status_was_waiting = matches!(agent.status, AgentDisplayStatus::Waiting);
+                let prev_status_was_active = matches!(agent.status, AgentDisplayStatus::Active | AgentDisplayStatus::Waiting);
                 let now_needs_input = needs_input;
 
-                // Toast when an agent transitions to WaitingInput
-                if !prev_status_was_waiting && matches!(status, AgentDisplayStatus::Waiting) {
-                    // (toast added below after we push to agents vector, here just note it)
+                // Toast on terminal state transitions
+                let name = agent.title.clone()
+                    .unwrap_or_else(|| truncate(&agent.blueprint_name, 20));
+                if prev_status_was_active {
+                    if let AgentDisplayStatus::Error(msg) = &status {
+                        let preview = if msg.is_empty() { String::new() } else {
+                            format!(": {}", truncate(msg, 40))
+                        };
+                        self.toasts.push(Toast {
+                            message: format!("Agent '{}' failed{}", name, preview),
+                            remaining_ticks: 50,
+                            level: ToastLevel::Error,
+                        });
+                    } else if matches!(status, AgentDisplayStatus::Complete | AgentDisplayStatus::CompleteInteractive) {
+                        self.toasts.push(Toast {
+                            message: format!("Agent '{}' completed", name),
+                            remaining_ticks: 35,
+                            level: ToastLevel::Info,
+                        });
+                    }
                 }
 
                 agent.stage = run.current_stage.clone();
@@ -1715,6 +1732,30 @@ impl Dashboard {
             } else {
                 Vec::new()
             };
+
+            // ── Error / Cancelled banner ─────────────────────────────────────
+            let mut all_lines = all_lines;
+            match &agent.status {
+                AgentDisplayStatus::Error(msg) if !msg.is_empty() => {
+                    all_lines.push(Line::from(vec![
+                        Span::styled(" ✗ Error  ", Style::default().fg(Color::Black).bg(C_ERROR).add_modifier(Modifier::BOLD)),
+                        Span::styled(format!(" {}", msg), Style::default().fg(C_ERROR)),
+                    ]));
+                }
+                AgentDisplayStatus::Error(_) => {
+                    all_lines.push(Line::from(Span::styled(
+                        " ✗ Agent terminated with an error.",
+                        Style::default().fg(C_ERROR),
+                    )));
+                }
+                AgentDisplayStatus::Cancelled => {
+                    all_lines.push(Line::from(Span::styled(
+                        " ⊘ Run was cancelled.",
+                        Style::default().fg(C_DIM),
+                    )));
+                }
+                _ => {}
+            }
 
             let total = all_lines.len();
 
