@@ -235,6 +235,13 @@ struct Dashboard {
     search_query: String,
     /// Index into the matched-lines list of the currently highlighted match.
     search_match_idx: usize,
+    // ── Main list filter ──────────────────────────────────────────────────────
+    /// True when the user is typing a filter query in the main agent list.
+    list_search_mode: bool,
+    /// Current filter query for the main list.
+    list_search_query: String,
+    /// Sorted + filtered indices into self.agents (drives both display and selection).
+    display_indices: Vec<usize>,
 }
 
 impl Dashboard {
@@ -271,6 +278,9 @@ impl Dashboard {
             search_mode: false,
             search_query: String::new(),
             search_match_idx: 0,
+            list_search_mode: false,
+            list_search_query: String::new(),
+            display_indices: Vec::new(),
         }
     }
 
@@ -294,6 +304,72 @@ impl Dashboard {
             entries.push(LogEntry { timestamp, message });
         }
         entries
+    }
+
+    /// Recompute display_indices: sorted by status priority then recency, filtered by list_search_query.
+    fn update_display_indices(&mut self) {
+        let query = self.list_search_query.to_lowercase();
+        let status_priority = |s: &AgentDisplayStatus| -> u8 {
+            match s {
+                AgentDisplayStatus::Active => 0,
+                AgentDisplayStatus::Waiting => 1,
+                AgentDisplayStatus::CompleteInteractive => 2,
+                AgentDisplayStatus::Complete => 3,
+                AgentDisplayStatus::Error(_) => 4,
+                AgentDisplayStatus::Idle => 5,
+                AgentDisplayStatus::Cancelled => 6,
+            }
+        };
+        let mut indices: Vec<usize> = (0..self.agents.len())
+            .filter(|&i| {
+                if query.is_empty() { return true; }
+                let a = &self.agents[i];
+                a.blueprint_name.to_lowercase().contains(&query)
+                    || a.title.as_deref().unwrap_or("").to_lowercase().contains(&query)
+                    || a.task.to_lowercase().contains(&query)
+                    || a.status.to_string().to_lowercase().contains(&query)
+            })
+            .collect();
+        indices.sort_by(|&a, &b| {
+            let pa = status_priority(&self.agents[a].status);
+            let pb = status_priority(&self.agents[b].status);
+            pa.cmp(&pb)
+                .then(self.agents[b].started_at.cmp(&self.agents[a].started_at))
+        });
+        // Preserve selection: try to keep the same agent highlighted after recompute
+        let prev_id = self.display_indices.get(self.selected)
+            .and_then(|&i| self.agents.get(i))
+            .map(|a| a.id.clone());
+        self.display_indices = indices;
+        if let Some(id) = prev_id {
+            if let Some(pos) = self.display_indices.iter().position(|&i| {
+                self.agents.get(i).map(|a| a.id == id).unwrap_or(false)
+            }) {
+                self.selected = pos;
+            } else {
+                self.selected = 0;
+            }
+        }
+        if self.display_indices.is_empty() {
+            self.selected = 0;
+            self.table_state.select(None);
+        } else {
+            self.selected = self.selected.min(self.display_indices.len() - 1);
+            self.table_state.select(Some(self.selected));
+        }
+    }
+
+    fn selected_agent(&self) -> Option<&DashboardAgent> {
+        self.display_indices.get(self.selected).and_then(|&i| self.agents.get(i))
+    }
+
+    fn selected_agent_mut(&mut self) -> Option<&mut DashboardAgent> {
+        let idx = self.display_indices.get(self.selected).copied()?;
+        self.agents.get_mut(idx)
+    }
+
+    fn selected_agent_raw_idx(&self) -> Option<usize> {
+        self.display_indices.get(self.selected).copied()
     }
 
     fn add_log(&mut self, msg: String) {
@@ -465,6 +541,7 @@ impl Dashboard {
                 });
             }
         }
+        self.update_display_indices();
     }
 
     /// Sync agent state from the ECS world (in-process agents only).
@@ -493,48 +570,47 @@ impl Dashboard {
                 agent.context_tokens = (window.current_tokens, window.max_tokens);
             }
         }
+        self.update_display_indices();
     }
 
     /// Kill + delete all on-disk state for the selected agent.
     fn delete_selected_agent(&mut self) {
-        if let Some(agent) = self.agents.get(self.selected) {
-            if !agent.is_run_state {
-                self.add_log("Can only delete background run-state agents".to_string());
-                return;
-            }
-            let id = agent.id.clone();
-            let pid = agent.pid;
-
-            // Kill the worker process first if it is still running
-            #[cfg(unix)]
-            if pid > 0 {
-                unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM); }
-            }
-
-            // Remove run directory
-            let run_dir = runstate::run_dir(&id);
-            if let Err(e) = std::fs::remove_dir_all(&run_dir) {
-                self.add_log(format!("Delete failed: {}", e));
-            } else {
-                self.add_log(format!("Deleted run {}", id));
-            }
-            // Remove saved context state if present
-            if let Some(home) = dirs::home_dir() {
-                let state_dir = home.join(".leviath").join("state").join(&id);
-                let _ = std::fs::remove_dir_all(state_dir);
-            }
-            self.agents.remove(self.selected);
-            if self.selected > 0 && self.selected >= self.agents.len() {
-                self.selected = self.agents.len().saturating_sub(1);
-            }
-            self.table_state.select(Some(self.selected));
+        let (id, pid, is_run_state) = match self.selected_agent() {
+            Some(a) => (a.id.clone(), a.pid, a.is_run_state),
+            None => return,
+        };
+        if !is_run_state {
+            self.add_log("Can only delete background run-state agents".to_string());
+            return;
         }
+        // Kill the worker process first if it is still running
+        #[cfg(unix)]
+        if pid > 0 {
+            unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM); }
+        }
+        // Remove run directory
+        let run_dir = runstate::run_dir(&id);
+        if let Err(e) = std::fs::remove_dir_all(&run_dir) {
+            self.add_log(format!("Delete failed: {}", e));
+        } else {
+            self.add_log(format!("Deleted run {}", id));
+        }
+        // Remove saved context state if present
+        if let Some(home) = dirs::home_dir() {
+            let state_dir = home.join(".leviath").join("state").join(&id);
+            let _ = std::fs::remove_dir_all(state_dir);
+        }
+        // Remove agent from self.agents using the raw index
+        if let Some(raw_idx) = self.selected_agent_raw_idx() {
+            self.agents.remove(raw_idx);
+        }
+        self.update_display_indices();
     }
 
     fn submit_input(&mut self) {
         use interaction::{ApprovalScope, InteractionKind, InteractionResponse};
 
-        let (agent_id, is_run_state, req) = match self.agents.get(self.selected) {
+        let (agent_id, is_run_state, req) = match self.selected_agent() {
             Some(a) => (a.id.clone(), a.is_run_state, a.pending_request.clone()),
             None => return,
         };
@@ -597,7 +673,7 @@ impl Dashboard {
         self.choice_selected = 0;
 
         let answered_id = resp.request_id.clone();
-        if let Some(a) = self.agents.get_mut(self.selected) {
+        if let Some(a) = self.selected_agent_mut() {
             a.last_answered_request_id = if answered_id.is_empty() { None } else { Some(answered_id) };
             a.waiting_prompt = None;
             a.pending_request = None;
@@ -677,7 +753,7 @@ impl Dashboard {
 
     /// True if the currently selected stage tab is the one actively accepting input.
     fn selected_stage_can_respond(&self) -> bool {
-        let agent = match self.agents.get(self.selected) {
+        let agent = match self.selected_agent() {
             Some(a) => a,
             None => return false,
         };
@@ -730,10 +806,10 @@ impl Dashboard {
         if self.detail_view {
             if self.input_mode {
                 use interaction::InteractionKind;
-                let kind = self.agents.get(self.selected)
+                let kind = self.selected_agent()
                     .and_then(|a| a.pending_request.as_ref())
                     .map(|r| r.kind.clone());
-                let options_len = self.agents.get(self.selected)
+                let options_len = self.selected_agent()
                     .and_then(|a| a.pending_request.as_ref())
                     .map(|r| r.options.len())
                     .unwrap_or(0);
@@ -817,7 +893,7 @@ impl Dashboard {
                     }
                 }
                 KeyCode::Right => {
-                    let max_stage = self.agents.get(self.selected)
+                    let max_stage = self.selected_agent()
                         .map(|a| a.num_stages.saturating_sub(1))
                         .unwrap_or(0);
                     if self.selected_stage < max_stage {
@@ -833,7 +909,7 @@ impl Dashboard {
                 // Number keys 1-9: jump to stage tab
                 KeyCode::Char(c @ '1'..='9') => {
                     let idx = (c as usize) - ('1' as usize);
-                    let max_stage = self.agents.get(self.selected)
+                    let max_stage = self.selected_agent()
                         .map(|a| a.num_stages.saturating_sub(1))
                         .unwrap_or(0);
                     if idx <= max_stage {
@@ -864,7 +940,7 @@ impl Dashboard {
                 }
                 KeyCode::Up => {
                     // When a review body is present, Up scrolls the review document
-                    let has_review = self.agents.get(self.selected)
+                    let has_review = self.selected_agent()
                         .and_then(|a| a.pending_request.as_ref())
                         .and_then(|r| r.body.as_deref())
                         .map(|b| !b.is_empty())
@@ -876,7 +952,7 @@ impl Dashboard {
                     }
                 }
                 KeyCode::Down => {
-                    let has_review = self.agents.get(self.selected)
+                    let has_review = self.selected_agent()
                         .and_then(|a| a.pending_request.as_ref())
                         .and_then(|r| r.body.as_deref())
                         .map(|b| !b.is_empty())
@@ -888,7 +964,7 @@ impl Dashboard {
                     }
                 }
                 KeyCode::PageUp => {
-                    let has_review = self.agents.get(self.selected)
+                    let has_review = self.selected_agent()
                         .and_then(|a| a.pending_request.as_ref())
                         .and_then(|r| r.body.as_deref())
                         .map(|b| !b.is_empty())
@@ -900,7 +976,7 @@ impl Dashboard {
                     }
                 }
                 KeyCode::PageDown => {
-                    let has_review = self.agents.get(self.selected)
+                    let has_review = self.selected_agent()
                         .and_then(|a| a.pending_request.as_ref())
                         .and_then(|r| r.body.as_deref())
                         .map(|b| !b.is_empty())
@@ -942,7 +1018,7 @@ impl Dashboard {
                 }
                 // Yank: `y` copies the current stage output to clipboard via OSC52
                 KeyCode::Char('y') => {
-                    if let Some(agent) = self.agents.get(self.selected) {
+                    if let Some(agent) = self.selected_agent() {
                         if agent.is_run_state {
                             let is_output = self.stage_content_mode == StageContentMode::Output;
                             let content = if is_output {
@@ -960,7 +1036,7 @@ impl Dashboard {
                     }
                 }
                 KeyCode::Char('k') => {
-                    if let Some(agent) = self.agents.get(self.selected) {
+                    if let Some(agent) = self.selected_agent() {
                         if matches!(agent.status, AgentDisplayStatus::Active | AgentDisplayStatus::Waiting) {
                             let agent_id = agent.id.clone();
                             let pid = agent.pid;
@@ -978,7 +1054,7 @@ impl Dashboard {
                             } else {
                                 let _ = self.cmd_tx.send(EngineCommand::CancelAgent { agent_id: agent_id.clone() });
                             }
-                            if let Some(a) = self.agents.get_mut(self.selected) {
+                            if let Some(a) = self.selected_agent_mut() {
                                 a.status = AgentDisplayStatus::Cancelled;
                                 a.waiting_prompt = None;
                                 a.pending_request = None;
@@ -995,40 +1071,81 @@ impl Dashboard {
         }
 
         // ── Main agent list ──────────────────────────────────────────────────
+        // ── Main list filter mode: intercept all keys for query editing ─────────
+        if self.list_search_mode {
+            match key {
+                KeyCode::Esc => {
+                    self.list_search_mode = false;
+                    self.list_search_query.clear();
+                    self.selected = 0;
+                    self.update_display_indices();
+                }
+                KeyCode::Enter => {
+                    self.list_search_mode = false;
+                }
+                KeyCode::Backspace => {
+                    self.list_search_query.pop();
+                    self.selected = 0;
+                    self.update_display_indices();
+                }
+                KeyCode::Char(c) => {
+                    self.list_search_query.push(c);
+                    self.selected = 0;
+                    self.update_display_indices();
+                }
+                _ => {}
+            }
+            return;
+        }
+
         match key {
             KeyCode::Esc => {
-                self.should_quit = true;
+                if !self.list_search_query.is_empty() {
+                    // First Esc clears the filter; second exits (quit)
+                    self.list_search_query.clear();
+                    self.selected = 0;
+                    self.update_display_indices();
+                } else {
+                    self.should_quit = true;
+                }
             }
             KeyCode::Up => {
-                if !self.agents.is_empty() && self.selected > 0 {
+                if !self.display_indices.is_empty() && self.selected > 0 {
                     self.selected -= 1;
                     self.table_state.select(Some(self.selected));
                 }
             }
             KeyCode::Down => {
-                if !self.agents.is_empty() && self.selected < self.agents.len() - 1 {
+                if !self.display_indices.is_empty() && self.selected < self.display_indices.len() - 1 {
                     self.selected += 1;
                     self.table_state.select(Some(self.selected));
                 }
             }
             KeyCode::Enter => {
-                if !self.agents.is_empty() {
+                if !self.display_indices.is_empty() {
                     self.detail_view = true;
                     self.detail_scroll = 0;
                     // Default to the currently active stage when opening detail view
-                    self.selected_stage = self.agents.get(self.selected)
+                    self.selected_stage = self.selected_agent()
                         .map(|a| a.stage_index)
                         .unwrap_or(0);
                     self.stage_content_mode = StageContentMode::Output;
                 }
             }
+            KeyCode::Char('/') => {
+                self.list_search_mode = true;
+                self.list_search_query.clear();
+                self.selected = 0;
+                self.update_display_indices();
+            }
             KeyCode::Char('d') => {
-                if let Some(agent) = self.agents.get(self.selected) {
-                    if agent.is_run_state {
+                let info = self.selected_agent().map(|a| (a.id.clone(), a.is_run_state));
+                if let Some((id, is_run_state)) = info {
+                    if is_run_state {
                         self.confirm_delete = true;
                         self.add_log(format!(
                             "Delete run '{}'? This kills the process and is PERMANENT. (y/n)",
-                            agent.id
+                            id
                         ));
                     } else {
                         self.add_log("Only background runs can be deleted from the dashboard".to_string());
@@ -1036,7 +1153,7 @@ impl Dashboard {
                 }
             }
             KeyCode::Char('c') => {
-                if let Some(agent) = self.agents.get(self.selected) {
+                if let Some(agent) = self.selected_agent() {
                     if matches!(agent.status, AgentDisplayStatus::Active | AgentDisplayStatus::Waiting) {
                         let agent_id = agent.id.clone();
                         if agent.is_run_state {
@@ -1048,7 +1165,7 @@ impl Dashboard {
                             if matches!(agent.status, AgentDisplayStatus::Waiting) {
                                 interaction::clear_interaction(&agent_id);
                             }
-                            if let Some(a) = self.agents.get_mut(self.selected) {
+                            if let Some(a) = self.selected_agent_mut() {
                                 a.status = AgentDisplayStatus::Cancelled;
                                 a.waiting_prompt = None;
                                 a.pending_request = None;
@@ -1061,7 +1178,7 @@ impl Dashboard {
                 }
             }
             KeyCode::Char('k') => {
-                if let Some(agent) = self.agents.get(self.selected) {
+                if let Some(agent) = self.selected_agent() {
                     if matches!(agent.status, AgentDisplayStatus::Active | AgentDisplayStatus::Waiting) {
                         let agent_id = agent.id.clone();
                         if agent.is_run_state {
@@ -1076,7 +1193,7 @@ impl Dashboard {
                         } else {
                             let _ = self.cmd_tx.send(EngineCommand::CancelAgent { agent_id: agent_id.clone() });
                         }
-                        if let Some(a) = self.agents.get_mut(self.selected) {
+                        if let Some(a) = self.selected_agent_mut() {
                             a.status = AgentDisplayStatus::Cancelled;
                             a.waiting_prompt = None;
                             a.pending_request = None;
@@ -1180,7 +1297,7 @@ impl Dashboard {
     fn draw_help_overlay(&self, frame: &mut Frame) {
         let area = frame.area();
         let w: u16 = 62.min(area.width.saturating_sub(4));
-        let h: u16 = 32.min(area.height.saturating_sub(4));
+        let h: u16 = 34.min(area.height.saturating_sub(4));
         let x = (area.width.saturating_sub(w)) / 2;
         let y = (area.height.saturating_sub(h)) / 2;
         let popup = Rect { x, y, width: w, height: h };
@@ -1191,9 +1308,10 @@ impl Dashboard {
             Line::from(""),
             Line::from(vec![Span::styled("  ↑/↓      ", Style::default().fg(C_WHITE).add_modifier(Modifier::BOLD)), Span::raw("Select agent (sorted: active first)")]),
             Line::from(vec![Span::styled("  Enter    ", Style::default().fg(C_WHITE).add_modifier(Modifier::BOLD)), Span::raw("Open detail view")]),
+            Line::from(vec![Span::styled("  /        ", Style::default().fg(C_WHITE).add_modifier(Modifier::BOLD)), Span::raw("Filter agents by name/status")]),
             Line::from(vec![Span::styled("  d        ", Style::default().fg(C_WHITE).add_modifier(Modifier::BOLD)), Span::raw("Delete run (permanent)")]),
             Line::from(vec![Span::styled("  c / k    ", Style::default().fg(C_WHITE).add_modifier(Modifier::BOLD)), Span::raw("Cancel / Kill agent")]),
-            Line::from(vec![Span::styled("  Esc      ", Style::default().fg(C_WHITE).add_modifier(Modifier::BOLD)), Span::raw("Quit")]),
+            Line::from(vec![Span::styled("  Esc      ", Style::default().fg(C_WHITE).add_modifier(Modifier::BOLD)), Span::raw("Clear filter / Quit")]),
             Line::from(""),
             Line::from(Span::styled("  Detail view", Style::default().fg(C_ACCENT).add_modifier(Modifier::BOLD))),
             Line::from(""),
@@ -1234,7 +1352,7 @@ impl Dashboard {
         let popup = Rect { x, y, width: w, height: h };
         frame.render_widget(Clear, popup);
 
-        let agent_id = self.agents.get(self.selected).map(|a| a.id.as_str()).unwrap_or("?");
+        let agent_id = self.selected_agent().map(|a| a.id.as_str()).unwrap_or("?");
         let lines = vec![
             Line::from(""),
             Line::from(Span::styled(
@@ -1274,27 +1392,8 @@ impl Dashboard {
 
         let spinner_frame = SPINNER[(self.tick_count as usize) % SPINNER.len()];
 
-        // Sort agents: Active/Waiting first, then Complete/CompleteInteractive,
-        // then Error, then Cancelled/Idle — within each group, newest first.
-        let status_priority = |s: &AgentDisplayStatus| -> u8 {
-            match s {
-                AgentDisplayStatus::Active => 0,
-                AgentDisplayStatus::Waiting => 1,
-                AgentDisplayStatus::CompleteInteractive => 2,
-                AgentDisplayStatus::Complete => 3,
-                AgentDisplayStatus::Error(_) => 4,
-                AgentDisplayStatus::Idle => 5,
-                AgentDisplayStatus::Cancelled => 6,
-            }
-        };
-        let mut sorted_indices: Vec<usize> = (0..self.agents.len()).collect();
-        sorted_indices.sort_by(|&a, &b| {
-            let pa = status_priority(&self.agents[a].status);
-            let pb = status_priority(&self.agents[b].status);
-            pa.cmp(&pb).then(self.agents[b].started_at.cmp(&self.agents[a].started_at))
-        });
-
-        let rows: Vec<Row> = sorted_indices
+        // display_indices is kept up-to-date by update_display_indices() (called each sync tick).
+        let rows: Vec<Row> = self.display_indices
             .iter()
             .map(|&idx| {
                 let agent = &self.agents[idx];
@@ -1342,17 +1441,27 @@ impl Dashboard {
             })
             .collect();
 
-        let empty_state_msg = if self.agents.is_empty() {
-            Some("  No agents running. Use `lev run <agent> --task \"...\"` to start one.")
+        let empty_state_msg: Option<String> = if self.agents.is_empty() {
+            Some("  No agents running. Use `lev run <agent>` to start one.".to_string())
+        } else if self.display_indices.is_empty() {
+            Some(format!("  No agents match \"{}\".", self.list_search_query))
         } else {
             None
+        };
+
+        let list_title = if !self.list_search_query.is_empty() {
+            format!(" Agents  /{}/  {}/{} ", self.list_search_query, self.display_indices.len(), self.agents.len())
+        } else if self.list_search_mode {
+            format!(" Agents  /{}▌ ", self.list_search_query)
+        } else {
+            " Agents ".to_string()
         };
 
         let block = Block::default()
             .borders(Borders::ALL)
             .border_type(BorderType::Rounded)
             .border_style(Style::default().fg(C_BORDER))
-            .title(Span::styled(" Agents ", Style::default().fg(C_ACCENT).add_modifier(Modifier::BOLD)));
+            .title(Span::styled(list_title, Style::default().fg(C_ACCENT).add_modifier(Modifier::BOLD)));
 
         if let Some(msg) = empty_state_msg {
             let widget = Paragraph::new(Line::from(Span::styled(msg, Style::default().fg(C_DIM))))
@@ -1386,7 +1495,7 @@ impl Dashboard {
     fn draw_detail_panel(&mut self, frame: &mut Frame, area: Rect) {
         use interaction::InteractionKind;
 
-        let agent = match self.agents.get(self.selected) {
+        let agent = match self.selected_agent() {
             Some(a) => a.clone(),
             None => {
                 let msg = Paragraph::new("No agent selected.")
@@ -2086,7 +2195,7 @@ impl Dashboard {
                 Span::raw(" cancel"),
             ])
         } else if self.detail_view && self.input_mode {
-            let kind = self.agents.get(self.selected)
+            let kind = self.selected_agent()
                 .and_then(|a| a.pending_request.as_ref())
                 .map(|r| r.kind.clone());
             match kind {
@@ -2133,7 +2242,7 @@ impl Dashboard {
             ])
         } else if self.detail_view {
             let can_respond = self.selected_stage_can_respond();
-            let can_kill = self.agents.get(self.selected).map(|a| {
+            let can_kill = self.selected_agent().map(|a| {
                 matches!(a.status, AgentDisplayStatus::Active | AgentDisplayStatus::Waiting)
             }).unwrap_or(false);
             let mut spans = vec![
@@ -2161,8 +2270,31 @@ impl Dashboard {
             spans.push(Span::styled("[Esc]", Style::default().add_modifier(Modifier::BOLD)));
             spans.push(Span::raw(" back"));
             Line::from(spans)
+        } else if self.list_search_mode {
+            Line::from(vec![
+                Span::styled(" Filter: /", Style::default().fg(C_ACCENT)),
+                Span::raw(self.list_search_query.clone()),
+                Span::styled("▌", Style::default().fg(C_ACCENT)),
+                Span::raw("  "),
+                Span::styled("[Enter]", Style::default().fg(C_ACCENT).add_modifier(Modifier::BOLD)),
+                Span::raw(" confirm  "),
+                Span::styled("[Esc]", Style::default().add_modifier(Modifier::BOLD)),
+                Span::raw(" clear"),
+            ])
+        } else if !self.list_search_query.is_empty() {
+            Line::from(vec![
+                Span::styled(format!(" /{}/  {}/{} ", self.list_search_query, self.display_indices.len(), self.agents.len()), Style::default().fg(C_ACCENT)),
+                Span::styled("[/]", Style::default().add_modifier(Modifier::BOLD)),
+                Span::raw(" refine  "),
+                Span::styled("[Esc]", Style::default().add_modifier(Modifier::BOLD)),
+                Span::raw(" clear  "),
+                Span::styled("[Enter]", Style::default().fg(C_ACCENT).add_modifier(Modifier::BOLD)),
+                Span::raw(" detail  "),
+                Span::styled("[?]", Style::default().fg(C_DIM).add_modifier(Modifier::BOLD)),
+                Span::raw(" help"),
+            ])
         } else {
-            let can_kill = self.agents.get(self.selected).map(|a| {
+            let can_kill = self.selected_agent().map(|a| {
                 matches!(a.status, AgentDisplayStatus::Active | AgentDisplayStatus::Waiting)
             }).unwrap_or(false);
             let mut spans = vec![
@@ -2170,6 +2302,8 @@ impl Dashboard {
                 Span::raw(" select  "),
                 Span::styled("[Enter]", Style::default().fg(C_ACCENT).add_modifier(Modifier::BOLD)),
                 Span::raw(" detail  "),
+                Span::styled("[/]", Style::default().fg(C_ACCENT).add_modifier(Modifier::BOLD)),
+                Span::raw(" filter  "),
                 Span::styled("[d]", Style::default().add_modifier(Modifier::BOLD)),
                 Span::raw(" delete  "),
             ];
