@@ -214,6 +214,9 @@ async fn run_foreground(args: RunArgs) -> anyhow::Result<()> {
             println!("  [providers]");
             println!("  anthropic_api_key = \"sk-ant-...\"");
             println!("\nOr set the ANTHROPIC_API_KEY environment variable.");
+            println!("\nOr use Claude Code (no API key needed):");
+            println!("  [stages.main]");
+            println!("  model = {{ provider = \"claude-code\", model = \"claude-sonnet-4-5\" }}");
             return Ok(());
         }
 
@@ -225,6 +228,13 @@ async fn run_foreground(args: RunArgs) -> anyhow::Result<()> {
             provider_name,
             model_name,
         );
+
+        if provider_name == "claude-code" {
+            println!("⚠️  This stage uses the claude-code provider.");
+            println!("   Tool routing, per-stage filtering, and prompt caching are not available.");
+            println!("   For full features, use provider = \"anthropic\" with an API key.");
+            println!();
+        }
 
         if let Some(ref stage_layout) = stage.context_layout {
             swap_context_layout(&mut engine, entity, stage_layout);
@@ -442,6 +452,13 @@ async fn run_worker_inner(args: &WorkerArgs, meta: &mut RunMeta) -> anyhow::Resu
             provider_name,
             model_name,
         );
+
+        if provider_name == "claude-code" {
+            println!("⚠️  This stage uses the claude-code provider.");
+            println!("   Tool routing, per-stage filtering, and prompt caching are not available.");
+            println!("   For full features, use provider = \"anthropic\" with an API key.");
+            println!();
+        }
 
         meta.current_stage = stage.name.clone();
         meta.stage_index = stage_idx;
@@ -1007,6 +1024,12 @@ pub fn build_provider_registry(config: &Config) -> ProviderRegistry {
             ollama_url.to_string(),
             config.model_capabilities.clone(),
         )),
+    );
+
+    // Claude Code provider (no API key needed - uses claude CLI subscription)
+    registry.register(
+        "claude-code".to_string(),
+        Arc::new(leviath_providers::ClaudeCodeProvider::new()),
     );
 
     registry

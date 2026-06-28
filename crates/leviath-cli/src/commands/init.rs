@@ -61,7 +61,10 @@ pub async fn execute(args: InitArgs) -> anyhow::Result<()> {
 
 fn create_manifest(name: &str, template: &str) -> String {
     match template {
-        "coding" => format!(r#"[agent]
+        "coding" => format!(r#"# Use "claude-code" as provider to use your Claude Code subscription (no API key needed)
+# Note: claude-code has limitations — see README for details
+
+[agent]
 name = "{name}"
 version = "0.1.0"
 description = "A coding assistant agent"
@@ -81,7 +84,10 @@ conversation = {{ kind = "sliding_window", max_items = 20, max_tokens = 15000 }}
 files = {{ kind = "temporary", max_tokens = 30000 }}
 scratch = {{ kind = "clearable", max_tokens = 10000 }}
 "#, name = name),
-        "research" => format!(r#"[agent]
+        "research" => format!(r#"# Use "claude-code" as provider to use your Claude Code subscription (no API key needed)
+# Note: claude-code has limitations — see README for details
+
+[agent]
 name = "{name}"
 version = "0.1.0"
 description = "A research assistant agent"
@@ -106,7 +112,10 @@ findings_history = {{ kind = "compact_history", source_region = "findings", max_
 conversation = {{ kind = "sliding_window", max_items = 15, max_tokens = 12000 }}
 scratch = {{ kind = "clearable", max_tokens = 8000 }}
 "#, name = name),
-        _ => format!(r#"[agent]
+        _ => format!(r#"# Use "claude-code" as provider to use your Claude Code subscription (no API key needed)
+# Note: claude-code has limitations — see README for details
+
+[agent]
 name = "{name}"
 version = "0.1.0"
 description = "A simple agent"

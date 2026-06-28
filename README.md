@@ -47,6 +47,28 @@ Your agent is defined in `agent.leviath` — edit it to change models, add stage
 
 **API Key Priority:** `~/.leviath/config.toml` (chmod 600) > `.env` in project dir (gitignored) > environment variables (stripped from MCP child processes).
 
+### Using Claude Code (No API Key)
+
+If you have a Claude Code subscription, you can use Leviath without any API keys:
+
+```toml
+[stages.main]
+model = { provider = "claude-code", model = "claude-sonnet-4-5" }
+```
+
+```bash
+lev init my-agent && cd my-agent
+# Edit agent.leviath to use provider = "claude-code"
+lev run --task "Your task here"
+```
+
+> **Limitations:** The claude-code provider shells out to the `claude` CLI for each inference call. Compared to direct API providers:
+> - **No prompt caching** — each call starts fresh (~100-200ms overhead)
+> - **Tool execution is handled by Claude Code**, not Leviath — tool result routing and per-stage filtering don't apply
+> - **Not ideal for many concurrent agents** — each agent spawns separate CLI processes
+> - **Best for:** Single-agent workflows, prototyping, users who want to try Leviath without API costs
+> - **For full features:** Use `provider = "anthropic"` with an API key
+
 ## The Problem
 
 Every LLM agent framework manages context the same way: a flat array of messages with uniform compaction when it gets too long. This is like running a computer with one big memory pool that gets randomly wiped when full.
@@ -122,6 +144,7 @@ flowchart TB
         O[OpenAI]
         OR[OpenRouter]
         OL[Ollama]
+        CC[Claude Code]
     end
 
     subgraph Tools["MCP Tools"]
@@ -307,7 +330,7 @@ graph TB
     subgraph Engine
         Runtime["leviath-runtime<br>bevy_ecs engine"]
         Runtime --> Core["leviath-core<br>regions, layouts, blueprints"]
-        Runtime --> Providers["leviath-providers<br>Anthropic, OpenAI,<br>OpenRouter, Ollama"]
+        Runtime --> Providers["leviath-providers<br>Anthropic, OpenAI,<br>OpenRouter, Ollama, Claude Code"]
         Runtime --> MCP["leviath-mcp<br>MCP tools (JSON-RPC)"]
     end
 

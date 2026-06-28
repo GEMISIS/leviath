@@ -804,7 +804,7 @@ mod tests {
         assert!(caps.supports_streaming);
         assert!(caps.supports_tools);
         assert_eq!(caps.max_context_tokens, 1_000_000);
-        assert_eq!(caps.max_output_tokens, 131_072);
+        assert_eq!(caps.max_output_tokens, 128_000);
     }
 
     #[test]
@@ -815,7 +815,7 @@ mod tests {
         assert!(caps.supports_streaming);
         assert!(caps.supports_tools);
         assert_eq!(caps.max_context_tokens, 1_000_000);
-        assert_eq!(caps.max_output_tokens, 65_536);
+        assert_eq!(caps.max_output_tokens, 128_000);
     }
 
     #[test]
@@ -833,7 +833,7 @@ mod tests {
         let caps = provider.builtin_capabilities("claude-fable-5");
         assert!(!caps.supports_temperature);
         assert_eq!(caps.max_context_tokens, 1_000_000);
-        assert_eq!(caps.max_output_tokens, 131_072);
+        assert_eq!(caps.max_output_tokens, 128_000);
     }
 
     #[test]

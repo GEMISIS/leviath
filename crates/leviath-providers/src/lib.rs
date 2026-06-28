@@ -11,6 +11,7 @@
 //! - Provider-specific features (caching, etc.)
 
 pub mod anthropic;
+pub mod claude_code;
 pub mod ollama;
 pub mod openai;
 pub mod openrouter;
@@ -25,6 +26,7 @@ pub use provider::{
 };
 pub use rate_limit::RateLimiter;
 pub use anthropic::AnthropicProvider;
+pub use claude_code::ClaudeCodeProvider;
 pub use ollama::OllamaProvider;
 pub use openai::OpenAIProvider;
 pub use openrouter::OpenRouterProvider;
