@@ -13,8 +13,166 @@ use tokio_stream::StreamExt;
 use tokio::sync::Mutex;
 
 use crate::config::{Config, ToolPolicy};
-use crate::runstate::{self, RunMeta, RunStatus};
+use crate::runstate::{self, RunMeta, RunStatus, StageRecord, StageRunStatus};
 use crate::tools::{resolve_policy, ToolRegistry};
+
+// ─── Editor / task resolution ─────────────────────────────────────────────────
+
+/// Resolve the task string from a CLI argument.
+///
+/// - `Some(s)` where `s` is an existing file path → read file contents.
+/// - `Some(s)` otherwise → use `s` as a literal prompt.
+/// - `None` when stdin is not a TTY → error.
+/// - `None` when stdin is a TTY → launch the user's editor on a temp prompt file.
+fn resolve_task(arg: &Option<String>, agent_name: &str, description: Option<&str>) -> anyhow::Result<String> {
+    match arg {
+        Some(s) => {
+            let p = std::path::Path::new(s);
+            if p.is_file() {
+                let content = std::fs::read_to_string(p)
+                    .map_err(|e| anyhow::anyhow!("Failed to read task file '{}': {}", s, e))?;
+                let trimmed = content.trim().to_string();
+                if trimmed.is_empty() {
+                    anyhow::bail!("Task file '{}' is empty.", s);
+                }
+                return Ok(trimmed);
+            }
+            Ok(s.clone())
+        }
+        None => {
+            use std::io::IsTerminal;
+            if !std::io::stdin().is_terminal() {
+                anyhow::bail!(
+                    "No task provided. Pass --task \"<prompt>\" or --task <file>.\n\
+                     (stdin is not a TTY, so the interactive editor cannot be used)"
+                );
+            }
+
+            // Build a commented template file for the editor
+            let mut template = format!(
+                "# Task for agent: {}\n",
+                agent_name
+            );
+            if let Some(desc) = description {
+                if !desc.is_empty() {
+                    template.push_str(&format!("# {}\n", desc));
+                }
+            }
+            template.push_str("#\n# Describe your task below. Lines starting with '#' are ignored.\n\n");
+
+            // Write to a temp file
+            let tmp_path = std::env::temp_dir().join(format!("lev-task-{}.txt", std::process::id()));
+            std::fs::write(&tmp_path, &template)
+                .map_err(|e| anyhow::anyhow!("Failed to create task temp file: {}", e))?;
+
+            // Launch the editor (exits only when the user closes it)
+            let result = launch_editor(&tmp_path);
+            let content = std::fs::read_to_string(&tmp_path).unwrap_or_default();
+            let _ = std::fs::remove_file(&tmp_path);
+            result?;
+
+            // Strip comment lines and trim
+            let task: String = content
+                .lines()
+                .filter(|l| !l.trim_start().starts_with('#'))
+                .collect::<Vec<_>>()
+                .join("\n")
+                .trim()
+                .to_string();
+
+            if task.is_empty() {
+                anyhow::bail!("Aborting run: empty task.");
+            }
+            Ok(task)
+        }
+    }
+}
+
+/// Launch the user's preferred editor on `path` and wait for it to exit.
+///
+/// Editor resolution order: $VISUAL → $EDITOR → platform default.
+/// Platform defaults: Unix tries `vim` then `nano`; Windows uses `notepad`.
+fn launch_editor(path: &std::path::Path) -> anyhow::Result<()> {
+    use std::process::Command;
+
+    // Resolve editor candidates in priority order
+    let mut candidates: Vec<String> = Vec::new();
+    if let Ok(v) = std::env::var("VISUAL") {
+        if !v.is_empty() { candidates.push(v); }
+    }
+    if let Ok(e) = std::env::var("EDITOR") {
+        if !e.is_empty() { candidates.push(e); }
+    }
+
+    #[cfg(unix)]
+    {
+        candidates.push("vim".to_string());
+        candidates.push("nano".to_string());
+        candidates.push("vi".to_string());
+    }
+    #[cfg(windows)]
+    {
+        candidates.push("notepad".to_string());
+    }
+    // Final fallback
+    if candidates.is_empty() {
+        candidates.push("nano".to_string());
+    }
+
+    let path_str = path.to_string_lossy();
+
+    for editor in &candidates {
+        // Handle editor strings that may include flags (e.g. "code --wait")
+        let parts: Vec<&str> = editor.split_whitespace().collect();
+        if parts.is_empty() { continue; }
+
+        let mut cmd = Command::new(parts[0]);
+        for arg in &parts[1..] {
+            cmd.arg(arg);
+        }
+        cmd.arg(path_str.as_ref());
+
+        match cmd.status() {
+            Ok(status) => {
+                if status.success() || status.code().is_some() {
+                    // Exited (even non-zero means the user closed it — treat as OK)
+                    return Ok(());
+                }
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                // Try next candidate
+                continue;
+            }
+            Err(e) => {
+                return Err(anyhow::anyhow!("Failed to launch editor '{}': {}", editor, e));
+            }
+        }
+    }
+
+    anyhow::bail!(
+        "No editor found. Set $VISUAL or $EDITOR, or install vim/nano/notepad."
+    )
+}
+
+// ─── Per-stage recorder ───────────────────────────────────────────────────────
+
+/// Tracks the current stage index for tool-activity logging from the executor closure.
+///
+/// The executor closure is `move` and captures an `Arc<Mutex<usize>>` that is
+/// updated by the stage loop before each stage runs. This lets the closure write
+/// tool activity to the correct per-stage log without needing to restructure the
+/// entire executor.
+type CurrentStageIdx = Arc<Mutex<usize>>;
+
+/// Write a line to the per-stage readable output (agent responses).
+fn record_stage_output(run_id: &str, idx: usize, text: &str) {
+    runstate::append_stage_output(run_id, idx, text);
+}
+
+/// Write a line to the per-stage operational/tool log.
+fn record_stage_log(run_id: &str, idx: usize, text: &str) {
+    runstate::append_stage_log(run_id, idx, text);
+}
 
 #[derive(Args)]
 pub struct RunArgs {
@@ -22,9 +180,10 @@ pub struct RunArgs {
     #[arg(value_name = "PATH")]
     pub path: Option<String>,
 
-    /// Task prompt
+    /// Task prompt, or path to a file containing the task.
+    /// Omit to open an interactive editor (requires a TTY).
     #[arg(short, long)]
-    pub task: String,
+    pub task: Option<String>,
 
     /// Model override
     #[arg(short, long)]
@@ -107,6 +266,10 @@ pub async fn execute(args: RunArgs) -> anyhow::Result<()> {
         .map_err(|e| anyhow::anyhow!("Failed to read manifest: {}", e))?;
     let blueprint = parse_manifest(&manifest_content)?;
 
+    // Resolve the task once (may launch an interactive editor) before spawning workers.
+    let description = Some(blueprint.description.as_str());
+    let task = resolve_task(&args.task, &blueprint.name, description)?;
+
     let workdir = std::env::current_dir()?;
     let count = args.count.max(1);
 
@@ -121,7 +284,7 @@ pub async fn execute(args: RunArgs) -> anyhow::Result<()> {
                 .unwrap_or(Path::new("."))
                 .to_string_lossy()
                 .to_string(),
-            args.task.clone(),
+            task.clone(),
             args.model.clone(),
             workdir.to_string_lossy().to_string(),
             blueprint.stages.len(),
@@ -143,7 +306,7 @@ pub async fn execute(args: RunArgs) -> anyhow::Result<()> {
         cmd.arg("__run-worker")
             .arg(manifest_path.to_string_lossy().as_ref())
             .arg("--task")
-            .arg(&args.task)
+            .arg(&task)
             .arg("--run-id")
             .arg(&run_id);
 
@@ -202,7 +365,6 @@ pub async fn execute(args: RunArgs) -> anyhow::Result<()> {
 /// Run an agent in the foreground (inline, blocking) — the original behavior.
 async fn run_foreground(args: RunArgs) -> anyhow::Result<()> {
     let path = args.path.unwrap_or_else(|| ".".to_string());
-    tracing::info!(path = %path, task = %args.task, "Running agent (foreground)");
 
     let manifest_path = find_manifest(&path)?;
     println!("Loading agent from: {}", manifest_path.display());
@@ -211,8 +373,13 @@ async fn run_foreground(args: RunArgs) -> anyhow::Result<()> {
         .map_err(|e| anyhow::anyhow!("Failed to read manifest: {}", e))?;
     let blueprint = parse_manifest(&manifest_content)?;
 
+    let description = Some(blueprint.description.as_str());
+    let task = resolve_task(&args.task, &blueprint.name, description)?;
+
+    tracing::info!(path = %path, task = %task, "Running agent (foreground)");
+
     println!("Agent: {} v{}", blueprint.name, blueprint.version);
-    println!("Task: {}", args.task);
+    println!("Task: {}", task);
 
     let config = Config::load()?;
     for warning in config.validate_keys() {
@@ -229,7 +396,7 @@ async fn run_foreground(args: RunArgs) -> anyhow::Result<()> {
         .ok_or_else(|| anyhow::anyhow!("Failed to get spawned agent entity"))?;
 
     let workdir = std::env::current_dir()?;
-    initialize_context_window(&mut engine, entity, &blueprint, &args.task);
+    initialize_context_window(&mut engine, entity, &blueprint, &task);
 
     let tool_registry = Arc::new(ToolRegistry::build(workdir, &config).await);
 
@@ -607,6 +774,9 @@ async fn run_worker_inner(args: &WorkerArgs, meta: &mut RunMeta) -> anyhow::Resu
     }
     let launch_overrides_arc: Arc<std::collections::HashMap<String, ToolPolicy>> = Arc::new(launch_overrides);
     let run_id_arc = Arc::new(args.run_id.clone());
+    // Shared mutable stage index so the executor closure can log tool activity
+    // to the correct per-stage log file.
+    let current_stage_idx: CurrentStageIdx = Arc::new(Mutex::new(0usize));
 
     let builtins = tool_registry.builtins.clone();
     let mcp = tool_registry.mcp.clone();
@@ -616,6 +786,7 @@ async fn run_worker_inner(args: &WorkerArgs, meta: &mut RunMeta) -> anyhow::Resu
     let exec_agent_perms = agent_perms_arc.clone();
     let exec_global_perms = global_perms.clone();
     let exec_run_id = run_id_arc.clone();
+    let exec_stage_idx = current_stage_idx.clone();
     let mut exec = move |calls: Vec<leviath_providers::ToolCall>| {
         let builtins = builtins.clone();
         let mcp = mcp.clone();
@@ -626,7 +797,9 @@ async fn run_worker_inner(args: &WorkerArgs, meta: &mut RunMeta) -> anyhow::Resu
         let agent_pm = exec_agent_perms.clone();
         let global_pm = exec_global_perms.clone();
         let run_id = exec_run_id.clone();
+        let stage_idx_arc = exec_stage_idx.clone();
         async move {
+            let stage_idx = *stage_idx_arc.lock().await;
             let mut out: Vec<(String, String)> = Vec::new();
             for tc in calls {
                 let is_builtin = builtin_names.contains(&tc.name);
@@ -647,7 +820,9 @@ async fn run_worker_inner(args: &WorkerArgs, meta: &mut RunMeta) -> anyhow::Resu
 
                 let res = match policy {
                     ToolPolicy::Deny => {
-                        format!("[denied] Tool '{}' is not permitted.", tc.name)
+                        let msg = format!("[denied] Tool '{}' is not permitted.", tc.name);
+                        record_stage_log(&run_id, stage_idx, &format!("[tool] {} → denied", tc.name));
+                        msg
                     }
                     ToolPolicy::Ask => {
                         use crate::interaction::{
@@ -663,7 +838,7 @@ async fn run_worker_inner(args: &WorkerArgs, meta: &mut RunMeta) -> anyhow::Resu
                             if scope == ApprovalScope::Session {
                                 session_al.lock().await.insert(tc.name.clone());
                             }
-                            if is_builtin {
+                            let result = if is_builtin {
                                 builtins.execute(&tc.name, tc.arguments.clone()).await
                             } else {
                                 let mut mcp_lock = mcp.lock().await;
@@ -672,13 +847,21 @@ async fn run_worker_inner(args: &WorkerArgs, meta: &mut RunMeta) -> anyhow::Resu
                                     Ok(r) => format!("[error] {}", r.text),
                                     Err(e) => format!("[error] tool error: {}", e),
                                 }
-                            }
+                            };
+                            let short_result = if result.len() > 120 {
+                                format!("{}…", &result[..120])
+                            } else {
+                                result.clone()
+                            };
+                            record_stage_log(&run_id, stage_idx, &format!("[tool] {} → {}", tc.name, short_result));
+                            result
                         } else {
+                            record_stage_log(&run_id, stage_idx, &format!("[tool] {} → declined by user", tc.name));
                             format!("[denied] User declined tool call '{}'.", tc.name)
                         }
                     }
                     ToolPolicy::Allow => {
-                        if is_builtin {
+                        let result = if is_builtin {
                             builtins.execute(&tc.name, tc.arguments.clone()).await
                         } else {
                             let mut mcp_lock = mcp.lock().await;
@@ -687,7 +870,14 @@ async fn run_worker_inner(args: &WorkerArgs, meta: &mut RunMeta) -> anyhow::Resu
                                 Ok(r) => format!("[error] {}", r.text),
                                 Err(e) => format!("[error] tool error: {}", e),
                             }
-                        }
+                        };
+                        let short_result = if result.len() > 120 {
+                            format!("{}…", &result[..120])
+                        } else {
+                            result.clone()
+                        };
+                        record_stage_log(&run_id, stage_idx, &format!("[tool] {} → {}", tc.name, short_result));
+                        result
                     }
                 };
                 out.push((tc.id.clone(), res));
@@ -702,20 +892,41 @@ async fn run_worker_inner(args: &WorkerArgs, meta: &mut RunMeta) -> anyhow::Resu
     meta.num_stages = blueprint.stages.len();
     let _ = runstate::write_meta(meta);
 
+    // Initialize the stages index (all Pending) so the dashboard can show stages
+    // before any stage starts running.
+    {
+        let initial_stages: Vec<StageRecord> = blueprint.stages.iter().enumerate()
+            .map(|(i, s)| StageRecord::new(s.name.clone(), i))
+            .collect();
+        let _ = runstate::write_stages_index(&args.run_id, &initial_stages);
+    }
+
     let num_stages = blueprint.stages.len();
     for (stage_idx, stage) in blueprint.stages.iter().enumerate() {
         let provider_name = &stage.model.provider;
         let model_name = args.model.as_deref().unwrap_or(&stage.model.model);
 
-        // Update current stage permissions for the executor closure
+        // Update current stage permissions + index for the executor closure
         {
             let mut sp = current_stage_perms.lock().await;
             *sp = stage.tool_permissions.clone();
+        }
+        {
+            let mut si = current_stage_idx.lock().await;
+            *si = stage_idx;
         }
 
         if !engine.providers().has(provider_name) {
             let msg = format!("Provider '{}' is not configured", provider_name);
             println!("\n{}", msg);
+            record_stage_log(&args.run_id, stage_idx, &format!("[error] {}", msg));
+            {
+                let mut stages = runstate::read_stages_index(&args.run_id);
+                if let Some(r) = stages.get_mut(stage_idx) {
+                    r.status = StageRunStatus::Error;
+                }
+                let _ = runstate::write_stages_index(&args.run_id, &stages);
+            }
             meta.status = RunStatus::Error;
             meta.error = Some(msg);
             meta.touch();
@@ -723,20 +934,35 @@ async fn run_worker_inner(args: &WorkerArgs, meta: &mut RunMeta) -> anyhow::Resu
             return Ok(());
         }
 
-        println!(
-            "\n--- Stage {}/{}: {} ({}:{}) ---",
+        let stage_header = format!(
+            "Stage {}/{}: {} ({}:{})",
             stage_idx + 1,
             num_stages,
             stage.name,
             provider_name,
             model_name,
         );
+        println!("\n--- {} ---", stage_header);
+        record_stage_log(&args.run_id, stage_idx, &format!("--- {} ---", stage_header));
 
         if provider_name == "claude-code" {
-            println!("⚠️  This stage uses the claude-code provider.");
-            println!("   Tool routing, per-stage filtering, and prompt caching are not available.");
-            println!("   For full features, use provider = \"anthropic\" with an API key.");
-            println!();
+            let warn = "⚠️  Using claude-code provider: tool routing, per-stage filtering, and prompt caching are not available.";
+            println!("{}", warn);
+            record_stage_log(&args.run_id, stage_idx, warn);
+        }
+
+        // Mark stage as active and update stages.json
+        let stage_started_at = {
+            use std::time::{SystemTime, UNIX_EPOCH};
+            SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0)
+        };
+        {
+            let mut stages = runstate::read_stages_index(&args.run_id);
+            if let Some(r) = stages.get_mut(stage_idx) {
+                r.status = StageRunStatus::Active;
+                r.started_at = Some(stage_started_at);
+            }
+            let _ = runstate::write_stages_index(&args.run_id, &stages);
         }
 
         meta.current_stage = stage.name.clone();
@@ -832,14 +1058,25 @@ async fn run_worker_inner(args: &WorkerArgs, meta: &mut RunMeta) -> anyhow::Resu
             }
         };
 
+        let stage_ended_at = {
+            use std::time::{SystemTime, UNIX_EPOCH};
+            SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0)
+        };
+
         match stage_result {
             Ok(resp_opt) => {
                 if let Some(resp) = resp_opt {
+                    // Route the readable agent response to both stdout (legacy) and per-stage output
                     println!("{}", resp.content);
-                    println!(
-                        "\n[Tokens: {} in, {} out]",
+                    record_stage_output(&args.run_id, stage_idx, &resp.content);
+
+                    let token_line = format!(
+                        "[Tokens: {} in, {} out]",
                         resp.tokens_used.prompt_tokens, resp.tokens_used.completion_tokens
                     );
+                    println!("\n{}", token_line);
+                    record_stage_log(&args.run_id, stage_idx, &token_line);
+
                     meta.prompt_tokens += resp.tokens_used.prompt_tokens;
                     meta.completion_tokens += resp.tokens_used.completion_tokens;
 
@@ -855,10 +1092,31 @@ async fn run_worker_inner(args: &WorkerArgs, meta: &mut RunMeta) -> anyhow::Resu
                         }
                     }
                 }
+                // Mark stage complete
+                {
+                    let mut stages = runstate::read_stages_index(&args.run_id);
+                    if let Some(r) = stages.get_mut(stage_idx) {
+                        r.status = StageRunStatus::Complete;
+                        r.ended_at = Some(stage_ended_at);
+                        r.prompt_tokens = meta.prompt_tokens;
+                        r.completion_tokens = meta.completion_tokens;
+                    }
+                    let _ = runstate::write_stages_index(&args.run_id, &stages);
+                }
             }
             Err(e) => {
                 let msg = format!("Stage '{}' inference error: {}", stage.name, e);
                 println!("{}", msg);
+                record_stage_log(&args.run_id, stage_idx, &format!("[error] {}", msg));
+                // Mark stage error
+                {
+                    let mut stages = runstate::read_stages_index(&args.run_id);
+                    if let Some(r) = stages.get_mut(stage_idx) {
+                        r.status = StageRunStatus::Error;
+                        r.ended_at = Some(stage_ended_at);
+                    }
+                    let _ = runstate::write_stages_index(&args.run_id, &stages);
+                }
                 meta.status = RunStatus::Error;
                 meta.error = Some(msg);
                 meta.touch();
@@ -872,22 +1130,32 @@ async fn run_worker_inner(args: &WorkerArgs, meta: &mut RunMeta) -> anyhow::Resu
         }
         meta.touch();
         let _ = runstate::write_meta(meta);
+        // Write context snapshot to both legacy path and per-stage path
         write_context_snapshot_if_bg(&engine, entity, &stage.name, &Some(args.run_id.clone()));
+        if let Some(snap) = build_context_snapshot(&engine, entity, &stage.name) {
+            let _ = runstate::write_stage_context(&args.run_id, stage_idx, &snap);
+        }
 
         if stage_idx + 1 < num_stages {
             let next_name = &blueprint.stages[stage_idx + 1].name;
+            let marker = format!(
+                "[Stage complete: {}, transitioning to: {}]",
+                stage.name, next_name
+            );
+            record_stage_log(&args.run_id, stage_idx, &marker);
             if let Some(mut window) = engine.world_mut().get_mut::<ContextWindow>(entity) {
-                let marker = format!(
-                    "[Stage complete: {}, transitioning to: {}]",
-                    stage.name, next_name
-                );
                 let tokens = marker.len() / 4 + 1;
                 let _ = window.add_to_region("conversation", marker, tokens);
             }
         }
     }
 
-    println!("\n[All stages complete]");
+    let done_msg = "[All stages complete]";
+    println!("\n{}", done_msg);
+    // Log the completion message to the last stage's log
+    if num_stages > 0 {
+        record_stage_log(&args.run_id, num_stages - 1, done_msg);
+    }
     tool_registry.shutdown().await;
     Ok(())
 }
@@ -1951,7 +2219,17 @@ fn write_context_snapshot_if_bg(
     run_id: &Option<String>,
 ) {
     let Some(ref rid) = run_id else { return };
-    let Some(window) = engine.world().get::<ContextWindow>(entity) else { return };
+    let Some(snap) = build_context_snapshot(engine, entity, stage_name) else { return };
+    let _ = runstate::write_context_snapshot(rid, &snap);
+}
+
+/// Build a ContextSnapshot from the current engine state (reused by legacy and per-stage writes).
+fn build_context_snapshot(
+    engine: &AgentEngine,
+    entity: bevy_ecs::prelude::Entity,
+    stage_name: &str,
+) -> Option<runstate::ContextSnapshot> {
+    let window = engine.world().get::<ContextWindow>(entity)?;
     use leviath_core::RegionKind;
     let regions = window.regions.iter().map(|r| {
         runstate::RegionSnapshot {
@@ -1968,11 +2246,10 @@ fn write_context_snapshot_if_bg(
             max_tokens: r.max_tokens,
         }
     }).collect();
-    let snap = runstate::ContextSnapshot {
+    Some(runstate::ContextSnapshot {
         stage_name: stage_name.to_string(),
         total_tokens: window.current_tokens,
         max_tokens: window.max_tokens,
         regions,
-    };
-    let _ = runstate::write_context_snapshot(rid, &snap);
+    })
 }

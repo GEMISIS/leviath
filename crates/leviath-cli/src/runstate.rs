@@ -1,8 +1,12 @@
 //! On-disk run state for background agent executions.
 //!
 //! Each run lives under ~/.leviath/runs/<run-id>/ with:
-//! - `meta.json`: run metadata, updated atomically (tmp + rename)
-//! - `output.log`: append-only log of all agent output
+//! - `meta.json`    — run metadata, updated atomically (tmp + rename)
+//! - `output.log`  — append-only combined worker stdout (legacy/fallback)
+//! - `stages.json` — index of per-stage records
+//! - `stages/<idx>/output.log` — readable agent output for that stage
+//! - `stages/<idx>/logs.log`   — operational events + tool activity
+//! - `stages/<idx>/context.json` — context snapshot for that stage
 //!
 //! The dashboard's activity log is persisted separately at:
 //! - `~/.leviath/dashboard.log` — never cleared, appended across sessions
@@ -303,4 +307,136 @@ pub fn tail_file(path: &std::path::Path, max_bytes: u64) -> String {
 /// Read the last `max_bytes` of a run's output log.
 pub fn tail_log(run_id: &str, max_bytes: u64) -> String {
     tail_file(&run_dir(run_id).join("output.log"), max_bytes)
+}
+
+// ─── Per-stage persistence ────────────────────────────────────────────────────
+
+/// Status of an individual stage within a run.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum StageRunStatus {
+    Pending,
+    Active,
+    WaitingInput,
+    Complete,
+    Error,
+}
+
+impl std::fmt::Display for StageRunStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            StageRunStatus::Pending => write!(f, "Pending"),
+            StageRunStatus::Active => write!(f, "Active"),
+            StageRunStatus::WaitingInput => write!(f, "WaitingInput"),
+            StageRunStatus::Complete => write!(f, "Complete"),
+            StageRunStatus::Error => write!(f, "Error"),
+        }
+    }
+}
+
+/// Metadata record for a single stage within a run.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StageRecord {
+    pub name: String,
+    pub index: usize,
+    pub status: StageRunStatus,
+    pub prompt_tokens: usize,
+    pub completion_tokens: usize,
+    /// Unix timestamp (seconds); None until the stage starts.
+    pub started_at: Option<i64>,
+    /// Unix timestamp (seconds); None until the stage ends.
+    pub ended_at: Option<i64>,
+}
+
+impl StageRecord {
+    pub fn new(name: String, index: usize) -> Self {
+        Self {
+            name,
+            index,
+            status: StageRunStatus::Pending,
+            prompt_tokens: 0,
+            completion_tokens: 0,
+            started_at: None,
+            ended_at: None,
+        }
+    }
+}
+
+/// Directory for per-stage files within a run.
+pub fn stage_dir(run_id: &str, stage_idx: usize) -> PathBuf {
+    run_dir(run_id).join("stages").join(stage_idx.to_string())
+}
+
+/// Atomically write the stages index for a run.
+pub fn write_stages_index(run_id: &str, stages: &[StageRecord]) -> anyhow::Result<()> {
+    let path = run_dir(run_id).join("stages.json");
+    let tmp = path.with_extension("json.tmp");
+    let json = serde_json::to_string_pretty(stages)?;
+    std::fs::write(&tmp, &json)?;
+    std::fs::rename(&tmp, &path)?;
+    Ok(())
+}
+
+/// Read the stages index for a run, or return an empty vec on any error.
+pub fn read_stages_index(run_id: &str) -> Vec<StageRecord> {
+    let path = run_dir(run_id).join("stages.json");
+    let json = match std::fs::read_to_string(&path) {
+        Ok(j) => j,
+        Err(_) => return Vec::new(),
+    };
+    serde_json::from_str(&json).unwrap_or_default()
+}
+
+/// Ensure the per-stage directory exists (called before first write).
+fn ensure_stage_dir(run_id: &str, stage_idx: usize) {
+    let dir = stage_dir(run_id, stage_idx);
+    let _ = std::fs::create_dir_all(&dir);
+}
+
+/// Append a line of readable agent output to the per-stage output log.
+pub fn append_stage_output(run_id: &str, stage_idx: usize, text: &str) {
+    use std::io::Write;
+    ensure_stage_dir(run_id, stage_idx);
+    let path = stage_dir(run_id, stage_idx).join("output.log");
+    if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+        let _ = writeln!(file, "{}", text);
+    }
+}
+
+/// Append a line of operational/tool-activity log to the per-stage logs file.
+pub fn append_stage_log(run_id: &str, stage_idx: usize, text: &str) {
+    use std::io::Write;
+    ensure_stage_dir(run_id, stage_idx);
+    let path = stage_dir(run_id, stage_idx).join("logs.log");
+    if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+        let _ = writeln!(file, "{}", text);
+    }
+}
+
+/// Atomically write a context snapshot for a specific stage.
+pub fn write_stage_context(run_id: &str, stage_idx: usize, snap: &ContextSnapshot) -> anyhow::Result<()> {
+    ensure_stage_dir(run_id, stage_idx);
+    let path = stage_dir(run_id, stage_idx).join("context.json");
+    let tmp = path.with_extension("json.tmp");
+    let json = serde_json::to_string_pretty(snap)?;
+    std::fs::write(&tmp, &json)?;
+    std::fs::rename(&tmp, &path)?;
+    Ok(())
+}
+
+/// Read the context snapshot for a specific stage, if present.
+pub fn read_stage_context(run_id: &str, stage_idx: usize) -> Option<ContextSnapshot> {
+    let path = stage_dir(run_id, stage_idx).join("context.json");
+    let json = std::fs::read_to_string(&path).ok()?;
+    serde_json::from_str(&json).ok()
+}
+
+/// Read the last `max_bytes` of the readable output log for a specific stage.
+pub fn tail_stage_output(run_id: &str, stage_idx: usize, max_bytes: u64) -> String {
+    tail_file(&stage_dir(run_id, stage_idx).join("output.log"), max_bytes)
+}
+
+/// Read the last `max_bytes` of the operational log for a specific stage.
+pub fn tail_stage_log(run_id: &str, stage_idx: usize, max_bytes: u64) -> String {
+    tail_file(&stage_dir(run_id, stage_idx).join("logs.log"), max_bytes)
 }
