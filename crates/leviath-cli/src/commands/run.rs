@@ -433,6 +433,9 @@ async fn run_foreground(args: RunArgs) -> anyhow::Result<()> {
     let agent_perms_arc = Arc::new(agent_perms);
     let global_perms = config.tool_permissions.clone();
 
+    // Current stage name for present_for_review interactions (updated per stage below)
+    let current_stage_name: Arc<Mutex<String>> = Arc::new(Mutex::new(String::new()));
+
     // Build executor closure (Arcs cloned once here, then again per call)
     let builtins = tool_registry.builtins.clone();
     let mcp = tool_registry.mcp.clone();
@@ -440,6 +443,7 @@ async fn run_foreground(args: RunArgs) -> anyhow::Result<()> {
     let launch_overrides_arc = Arc::new(launch_overrides);
     let exec_session_allows = session_allows.clone();
     let exec_stage_perms = current_stage_perms.clone();
+    let exec_stage_name = current_stage_name.clone();
     let exec_agent_perms = agent_perms_arc.clone();
     let exec_global_perms = Arc::new(global_perms);
     let mut exec = move |calls: Vec<leviath_providers::ToolCall>| {
@@ -449,11 +453,48 @@ async fn run_foreground(args: RunArgs) -> anyhow::Result<()> {
         let launch_ov = launch_overrides_arc.clone();
         let session_al = exec_session_allows.clone();
         let stage_pm = exec_stage_perms.clone();
+        let stage_nm = exec_stage_name.clone();
         let agent_pm = exec_agent_perms.clone();
         let global_pm = exec_global_perms.clone();
         async move {
             let mut out: Vec<(String, String)> = Vec::new();
             for tc in calls {
+                // ── present_for_review: print document to stdout, ask for feedback ──
+                if tc.name == "present_for_review" {
+                    let title = tc.arguments.get("title")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("Review")
+                        .to_string();
+                    let markdown = tc.arguments.get("markdown")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    let stage_name = stage_nm.lock().await.clone();
+
+                    println!("\n{}", "─".repeat(60));
+                    println!("  {}", title);
+                    println!("{}", "─".repeat(60));
+                    println!("{}", markdown);
+                    println!("{}", "─".repeat(60));
+
+                    use crate::interaction::{InteractionRequest, request_interaction_stdin, response_as_text};
+                    let req = InteractionRequest::review(
+                        format!("fg-review-{}", tc.id),
+                        &title,
+                        &markdown,
+                        &stage_name,
+                    );
+                    let resp = request_interaction_stdin(&req);
+                    let user_feedback = response_as_text(&resp);
+                    let result = if user_feedback.trim().is_empty() {
+                        "User reviewed the document and acknowledged.".to_string()
+                    } else {
+                        format!("User feedback: {}", user_feedback)
+                    };
+                    out.push((tc.id.clone(), result));
+                    continue;
+                }
+
                 let is_builtin = builtin_names.contains(&tc.name);
                 let session_has = session_al.lock().await.contains(&tc.name);
                 let policy = if session_has {
@@ -529,10 +570,14 @@ async fn run_foreground(args: RunArgs) -> anyhow::Result<()> {
         let provider_name = &stage.model.provider;
         let model_name = args.model.as_deref().unwrap_or(&stage.model.model);
 
-        // Update current stage permissions for the executor closure
+        // Update current stage permissions and name for the executor closure
         {
             let mut sp = current_stage_perms.lock().await;
             *sp = stage.tool_permissions.clone();
+        }
+        {
+            let mut sn = current_stage_name.lock().await;
+            *sn = stage.name.clone();
         }
 
         if !engine.providers().has(provider_name) {
