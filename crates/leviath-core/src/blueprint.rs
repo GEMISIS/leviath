@@ -120,6 +120,19 @@ pub enum StageMode {
     },
 }
 
+/// Style of interaction at an interaction point.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum InteractionStyle {
+    /// Free-form text answer (default).
+    #[default]
+    FreeText,
+    /// User picks one option from a list.
+    MultipleChoice,
+    /// Simple yes/no confirmation.
+    Confirm,
+}
+
 /// A point where a stage can request user input.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InteractionPoint {
@@ -131,6 +144,14 @@ pub struct InteractionPoint {
 
     /// Whether input is required (vs optional)
     pub required: bool,
+
+    /// Style of interaction (free text, multiple choice, confirm)
+    #[serde(default)]
+    pub style: InteractionStyle,
+
+    /// Options for MultipleChoice style
+    #[serde(default)]
+    pub options: Vec<String>,
 }
 
 /// Configuration for routing tool results to specific context window regions.
@@ -198,6 +219,12 @@ pub struct Stage {
 
     /// Optional routing configuration for tool results
     pub tool_result_routing: Option<ToolResultRouting>,
+
+    /// Per-tool permission overrides for this stage.
+    /// Keys: tool name. Values: "allow" | "ask" | "deny".
+    /// Narrower than agent-level, wider than launch flags.
+    #[serde(default)]
+    pub tool_permissions: HashMap<String, String>,
 }
 
 impl Stage {
@@ -213,6 +240,7 @@ impl Stage {
             context_layout: None,
             config: HashMap::new(),
             tool_result_routing: None,
+            tool_permissions: HashMap::new(),
         }
     }
 

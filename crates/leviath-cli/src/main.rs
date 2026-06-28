@@ -5,6 +5,7 @@ use tracing::info;
 
 mod commands;
 mod config;
+mod interaction;
 mod runstate;
 mod tools;
 
@@ -29,15 +30,15 @@ enum Commands {
     
     /// Run an agent
     Run(commands::run::RunArgs),
-    
-    /// Spawn an agent from a blueprint
-    Spawn(commands::spawn::SpawnArgs),
-    
+
     /// List available agents and blueprints
     List(commands::list::ListArgs),
-    
+
     /// Install an agent package
     Install(commands::install::InstallArgs),
+
+    /// Remove an installed agent
+    Uninstall(commands::uninstall::UninstallArgs),
     
     /// Run agent tests
     Test(commands::test::TestArgs),
@@ -84,9 +85,9 @@ async fn main() -> anyhow::Result<()> {
     match cli.command {
         Commands::Init(args) => commands::init::execute(args).await,
         Commands::Run(args) => commands::run::execute(args).await,
-        Commands::Spawn(args) => commands::spawn::execute(args).await,
         Commands::List(args) => commands::list::execute(args).await,
         Commands::Install(args) => commands::install::execute(args).await,
+        Commands::Uninstall(args) => commands::uninstall::execute(args).await,
         Commands::Test(args) => commands::test::execute(args).await,
         Commands::Context(args) => commands::context::execute(args).await,
         Commands::Pack(args) => commands::pack::execute(args).await,

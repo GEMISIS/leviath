@@ -78,6 +78,8 @@ impl AgentDisplayStatus {
 pub struct DashboardAgent {
     pub id: String,
     pub blueprint_name: String,
+    /// Path to the agent manifest directory (blueprint source)
+    pub agent_path: String,
     pub stage: String,
     pub status: AgentDisplayStatus,
     pub tokens: (usize, usize),
@@ -89,6 +91,12 @@ pub struct DashboardAgent {
     pub is_run_state: bool,
     /// PID of worker process (0 for in-process agents)
     pub pid: u32,
+    /// Working directory the agent ran in
+    pub workdir: String,
+    /// Original task
+    pub task: String,
+    /// Original model override
+    pub model: Option<String>,
 }
 
 /// Event from an agent back to the dashboard.
@@ -134,6 +142,8 @@ struct Dashboard {
     table_state: TableState,
     should_quit: bool,
     confirm_quit: bool,
+    /// True when the delete-agent confirmation popup is open
+    confirm_delete: bool,
 }
 
 /// Tracks the state of inline new-agent creation.
@@ -162,6 +172,7 @@ impl Dashboard {
             table_state,
             should_quit: false,
             confirm_quit: false,
+            confirm_delete: false,
         }
     }
 
@@ -191,10 +202,12 @@ impl Dashboard {
                 agent.tokens = (run.prompt_tokens + run.completion_tokens, 0);
                 agent.pid = run.pid;
                 agent.status = status;
+                agent.workdir = run.workdir.clone();
             } else {
                 self.agents.push(DashboardAgent {
                     id: run.run_id.clone(),
                     blueprint_name: run.agent_name.clone(),
+                    agent_path: run.agent_path.clone(),
                     stage: run.current_stage.clone(),
                     status,
                     tokens: (run.prompt_tokens + run.completion_tokens, 0),
@@ -203,6 +216,9 @@ impl Dashboard {
                     entity: dummy,
                     is_run_state: true,
                     pid: run.pid,
+                    workdir: run.workdir.clone(),
+                    task: run.task.clone(),
+                    model: run.model.clone(),
                 });
             }
         }
@@ -232,6 +248,70 @@ impl Dashboard {
             }
             if let Some(window) = engine.world().get::<ContextWindow>(agent.entity) {
                 agent.tokens = (window.current_tokens, window.max_tokens);
+            }
+        }
+    }
+
+    /// Delete all on-disk state for the selected agent (run dir + optional saved context).
+    fn delete_selected_agent(&mut self) {
+        if let Some(agent) = self.agents.get(self.selected) {
+            if !agent.is_run_state {
+                self.add_log("Can only delete background run-state agents".to_string());
+                return;
+            }
+            let id = agent.id.clone();
+            // Remove run directory
+            let run_dir = runstate::run_dir(&id);
+            if let Err(e) = std::fs::remove_dir_all(&run_dir) {
+                self.add_log(format!("Delete failed: {}", e));
+            } else {
+                self.add_log(format!("Deleted run {}", id));
+            }
+            // Remove saved context state if present
+            if let Some(home) = dirs::home_dir() {
+                let state_dir = home.join(".leviath").join("state").join(&id);
+                let _ = std::fs::remove_dir_all(state_dir);
+            }
+            self.agents.remove(self.selected);
+            if self.selected > 0 && self.selected >= self.agents.len() {
+                self.selected = self.agents.len().saturating_sub(1);
+            }
+            self.table_state.select(Some(self.selected));
+        }
+    }
+
+    /// Re-trigger the selected agent by spawning a new background run with the same config.
+    fn retrigger_selected_agent(&mut self) {
+        if let Some(agent) = self.agents.get(self.selected).cloned() {
+            if agent.agent_path.is_empty() {
+                self.add_log("Cannot re-trigger: no agent path stored".to_string());
+                return;
+            }
+            let task = agent.task.clone();
+            let path = agent.agent_path.clone();
+            let model = agent.model.clone();
+            let workdir = agent.workdir.clone();
+
+            let exe = match std::env::current_exe() {
+                Ok(e) => e,
+                Err(e) => {
+                    self.add_log(format!("Error locating executable: {}", e));
+                    return;
+                }
+            };
+
+            let mut cmd = std::process::Command::new(&exe);
+            cmd.arg("run").arg(&path).arg("--task").arg(&task);
+            if let Some(ref m) = model {
+                cmd.arg("--model").arg(m);
+            }
+            if !workdir.is_empty() {
+                cmd.current_dir(&workdir);
+            }
+
+            match cmd.spawn() {
+                Ok(_) => self.add_log(format!("Re-triggered: {} — {}", agent.blueprint_name, truncate(&task, 50))),
+                Err(e) => self.add_log(format!("Re-trigger failed: {}", e)),
             }
         }
     }
@@ -321,6 +401,21 @@ impl Dashboard {
     }
 
     fn handle_key(&mut self, key: KeyCode) {
+        // Delete confirmation popup has highest priority
+        if self.confirm_delete {
+            match key {
+                KeyCode::Char('y') | KeyCode::Char('Y') => {
+                    self.confirm_delete = false;
+                    self.delete_selected_agent();
+                }
+                _ => {
+                    self.confirm_delete = false;
+                    self.add_log("Delete cancelled".to_string());
+                }
+            }
+            return;
+        }
+
         if self.confirm_quit {
             match key {
                 KeyCode::Char('y') | KeyCode::Char('Y') => {
@@ -435,11 +530,32 @@ impl Dashboard {
                 }
             }
             KeyCode::Enter => {
+                // Enter opens the respond widget for waiting agents,
+                // otherwise opens the detail/log view (already shown in detail panel).
                 if let Some(agent) = self.agents.get(self.selected) {
                     if agent.waiting_prompt.is_some() {
                         self.input_mode = true;
+                    } else {
+                        // Scroll detail log — for now just emit the agent ID to log
+                        self.add_log(format!("Detail: {}", agent.id));
                     }
                 }
+            }
+            KeyCode::Char('d') => {
+                if let Some(agent) = self.agents.get(self.selected) {
+                    if agent.is_run_state {
+                        self.confirm_delete = true;
+                        self.add_log(format!(
+                            "Delete run '{}'? This is PERMANENT and cannot be undone. (y/n)",
+                            agent.id
+                        ));
+                    } else {
+                        self.add_log("Only background runs can be deleted from the dashboard".to_string());
+                    }
+                }
+            }
+            KeyCode::Char('r') => {
+                self.retrigger_selected_agent();
             }
             KeyCode::Char('c') => {
                 if let Some(agent) = self.agents.get(self.selected) {
@@ -510,10 +626,11 @@ impl Dashboard {
     fn draw_agent_table(&mut self, frame: &mut Frame, area: Rect) {
         let header = Row::new(vec![
             Cell::from("ID"),
+            Cell::from("Blueprint"),
             Cell::from("Stage"),
             Cell::from("Status"),
             Cell::from("Tokens"),
-            Cell::from("Iter"),
+            Cell::from("Where"),
         ])
         .style(Style::default().add_modifier(Modifier::BOLD))
         .height(1);
@@ -523,12 +640,37 @@ impl Dashboard {
             .iter()
             .map(|agent| {
                 let status_color = agent.status.color();
+                // Show where the agent is running: abbreviated workdir
+                let where_str = {
+                    let wd = &agent.workdir;
+                    if wd.is_empty() {
+                        "—".to_string()
+                    } else {
+                        // Show last 2 path components for brevity
+                        std::path::Path::new(wd)
+                            .components()
+                            .rev()
+                            .take(2)
+                            .collect::<Vec<_>>()
+                            .into_iter()
+                            .rev()
+                            .map(|c| c.as_os_str().to_string_lossy().to_string())
+                            .collect::<Vec<_>>()
+                            .join("/")
+                    }
+                };
+                let tok_str = if agent.tokens.1 > 0 {
+                    format!("{}/{}", format_tokens(agent.tokens.0), format_tokens(agent.tokens.1))
+                } else {
+                    format_tokens(agent.tokens.0)
+                };
                 Row::new(vec![
                     Cell::from(agent.id.clone()),
+                    Cell::from(agent.blueprint_name.clone()),
                     Cell::from(agent.stage.clone()),
                     Cell::from(agent.status.to_string()).style(Style::default().fg(status_color)),
-                    Cell::from(format!("{}k/{}k", agent.tokens.0 / 1000, agent.tokens.1 / 1000)),
-                    Cell::from(agent.iteration.to_string()),
+                    Cell::from(tok_str),
+                    Cell::from(where_str),
                 ])
             })
             .collect();
@@ -536,11 +678,12 @@ impl Dashboard {
         let table = Table::new(
             rows,
             [
-                Constraint::Percentage(25),
+                Constraint::Percentage(22),
+                Constraint::Percentage(14),
+                Constraint::Percentage(14),
                 Constraint::Percentage(20),
-                Constraint::Percentage(20),
-                Constraint::Percentage(20),
-                Constraint::Percentage(15),
+                Constraint::Percentage(12),
+                Constraint::Percentage(18),
             ],
         )
         .header(header)
@@ -571,21 +714,61 @@ impl Dashboard {
             ]
         } else if let Some(agent) = self.agents.get(self.selected) {
             let mut lines = vec![
+                // Header: ID + status
                 Line::from(vec![
                     Span::styled(
                         format!("[{}] ", agent.id),
                         Style::default().add_modifier(Modifier::BOLD),
                     ),
-                    Span::raw(format!(
-                        "Blueprint: {} | Stage: {}",
-                        agent.blueprint_name, agent.stage
-                    )),
+                    Span::styled(
+                        agent.status.to_string(),
+                        Style::default().fg(agent.status.color()),
+                    ),
+                ]),
+                // Blueprint + workdir
+                Line::from(vec![
+                    Span::styled("Blueprint: ", Style::default().fg(Color::DarkGray)),
+                    Span::raw(agent.blueprint_name.clone()),
+                    Span::styled("  Stage: ", Style::default().fg(Color::DarkGray)),
+                    Span::raw(agent.stage.clone()),
+                ]),
+                Line::from(vec![
+                    Span::styled("Location: ", Style::default().fg(Color::DarkGray)),
+                    Span::raw(if agent.workdir.is_empty() { "—".to_string() } else { agent.workdir.clone() }),
+                ]),
+                Line::from(vec![
+                    Span::styled("Tokens:   ", Style::default().fg(Color::DarkGray)),
+                    Span::raw(if agent.tokens.1 > 0 {
+                        format!("{} used / {} max", format_tokens(agent.tokens.0), format_tokens(agent.tokens.1))
+                    } else {
+                        format!("{} used", format_tokens(agent.tokens.0))
+                    }),
+                    Span::styled("  Iter: ", Style::default().fg(Color::DarkGray)),
+                    Span::raw(agent.iteration.to_string()),
                 ]),
             ];
 
+            // Task summary
+            if !agent.task.is_empty() {
+                lines.push(Line::from(vec![
+                    Span::styled("Task:     ", Style::default().fg(Color::DarkGray)),
+                    Span::raw(truncate(&agent.task, 80)),
+                ]));
+            }
+
+            lines.push(Line::from(""));
+
+            // Show recent log output for background runs
             if agent.is_run_state {
                 let log_tail = runstate::tail_log(&agent.id, 2048);
-                for line in log_tail.lines().rev().take(4).collect::<Vec<_>>().into_iter().rev() {
+                let recent: Vec<&str> = log_tail.lines()
+                    .rev()
+                    .take((area.height.saturating_sub(10)) as usize)
+                    .collect::<Vec<_>>()
+                    .into_iter()
+                    .rev()
+                    .collect();
+                for line in recent {
                     lines.push(Line::from(Span::styled(
                         line.to_string(),
                         Style::default().fg(Color::DarkGray),
@@ -593,14 +776,16 @@ impl Dashboard {
                 }
             }
 
+            // Waiting prompt (shows below log)
             if let Some(ref prompt) = agent.waiting_prompt {
                 lines.push(Line::from(""));
                 lines.push(Line::from(Span::styled(
-                    prompt.clone(),
-                    Style::default().fg(Color::Yellow),
+                    format!("⚡ {}", prompt),
+                    Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
                 )));
             }
 
+            // Input widget when responding
             if self.input_mode {
                 lines.push(Line::from(""));
                 lines.push(Line::from(vec![
@@ -615,8 +800,14 @@ impl Dashboard {
             vec![Line::from("No agents selected. Press 'n' to add one.")]
         };
 
+        let title = if self.confirm_delete {
+            " ⚠ CONFIRM DELETE (y/n) "
+        } else {
+            " Detail "
+        };
+
         let detail = Paragraph::new(detail_text)
-            .block(Block::default().borders(Borders::ALL).title(" Agent Detail "))
+            .block(Block::default().borders(Borders::ALL).title(title))
             .wrap(Wrap { trim: true });
 
         frame.render_widget(detail, area);
@@ -647,27 +838,38 @@ impl Dashboard {
     }
 
     fn draw_help_bar(&self, frame: &mut Frame, area: Rect) {
-        let help = if self.input_mode || self.new_agent_mode != NewAgentInputMode::None {
+        let help = if self.confirm_delete {
+            Line::from(vec![
+                Span::styled("[y]", Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
+                Span::raw(" confirm delete  "),
+                Span::styled("[n/Esc]", Style::default().add_modifier(Modifier::BOLD)),
+                Span::raw(" cancel"),
+            ])
+        } else if self.input_mode || self.new_agent_mode != NewAgentInputMode::None {
             Line::from(vec![
                 Span::styled("[Esc]", Style::default().add_modifier(Modifier::BOLD)),
-                Span::raw("cancel  "),
+                Span::raw(" cancel  "),
                 Span::styled("[Enter]", Style::default().add_modifier(Modifier::BOLD)),
-                Span::raw("send"),
+                Span::raw(" send"),
             ])
         } else {
             Line::from(vec![
-                Span::styled("[q]", Style::default().add_modifier(Modifier::BOLD)),
-                Span::raw("uit  "),
-                Span::styled("[Enter]", Style::default().add_modifier(Modifier::BOLD)),
-                Span::raw("respond  "),
                 Span::styled("[↑↓]", Style::default().add_modifier(Modifier::BOLD)),
-                Span::raw("select  "),
-                Span::styled("[c]", Style::default().add_modifier(Modifier::BOLD)),
-                Span::raw("ancel  "),
-                Span::styled("[k]", Style::default().add_modifier(Modifier::BOLD)),
-                Span::raw("ill  "),
+                Span::raw(" select  "),
+                Span::styled("[Enter]", Style::default().add_modifier(Modifier::BOLD)),
+                Span::raw(" details/respond  "),
                 Span::styled("[n]", Style::default().add_modifier(Modifier::BOLD)),
-                Span::raw("ew"),
+                Span::raw(" new  "),
+                Span::styled("[r]", Style::default().add_modifier(Modifier::BOLD)),
+                Span::raw(" re-run  "),
+                Span::styled("[d]", Style::default().add_modifier(Modifier::BOLD)),
+                Span::raw(" delete  "),
+                Span::styled("[c]", Style::default().add_modifier(Modifier::BOLD)),
+                Span::raw(" cancel  "),
+                Span::styled("[k]", Style::default().add_modifier(Modifier::BOLD)),
+                Span::raw(" kill  "),
+                Span::styled("[q]", Style::default().add_modifier(Modifier::BOLD)),
+                Span::raw(" quit"),
             ])
         };
 
@@ -705,6 +907,17 @@ fn truncate(s: &str, max: usize) -> String {
         s.to_string()
     } else {
         format!("{}...", &s[..max])
+    }
+}
+
+/// Format a token count in compact style: ≥1000 → "21k", else raw.
+fn format_tokens(n: usize) -> String {
+    if n >= 1_000_000 {
+        format!("{}M", n / 1_000_000)
+    } else if n >= 1_000 {
+        format!("{}k", n / 1_000)
+    } else {
+        n.to_string()
     }
 }
 

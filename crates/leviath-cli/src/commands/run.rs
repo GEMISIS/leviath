@@ -10,13 +10,15 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio_stream::StreamExt;
 
-use crate::config::Config;
+use tokio::sync::Mutex;
+
+use crate::config::{Config, ToolPolicy};
 use crate::runstate::{self, RunMeta, RunStatus};
-use crate::tools::ToolRegistry;
+use crate::tools::{resolve_policy, ToolRegistry};
 
 #[derive(Args)]
 pub struct RunArgs {
-    /// Path to agent project or agent.leviath
+    /// Path to agent project or agent.leviath (or installed agent name)
     #[arg(value_name = "PATH")]
     pub path: Option<String>,
 
@@ -31,6 +33,26 @@ pub struct RunArgs {
     /// Run in the foreground (inline, blocking) instead of the default background mode
     #[arg(short = 'f', long)]
     pub foreground: bool,
+
+    /// Allow all tool calls without prompting for this run (same as --allow '*')
+    #[arg(long)]
+    pub yolo: bool,
+
+    /// Allow specific tools without prompting (comma-separated, e.g. "read_file,bash")
+    #[arg(long, value_delimiter = ',')]
+    pub allow: Vec<String>,
+
+    /// Require approval for specific tools even if they would be auto-allowed (comma-separated)
+    #[arg(long, value_delimiter = ',')]
+    pub ask: Vec<String>,
+
+    /// Deny specific tools entirely for this run (comma-separated)
+    #[arg(long, value_delimiter = ',')]
+    pub deny: Vec<String>,
+
+    /// Number of background instances to spawn (default: 1)
+    #[arg(short = 'n', long, default_value = "1")]
+    pub count: usize,
 }
 
 /// Arguments for the hidden `__run-worker` subcommand.
@@ -55,11 +77,14 @@ pub struct WorkerArgs {
 
 pub async fn execute(args: RunArgs) -> anyhow::Result<()> {
     if args.foreground {
+        if args.count > 1 {
+            anyhow::bail!("--count is not supported with --foreground");
+        }
         return run_foreground(args).await;
     }
 
-    // Background mode: create run state, spawn detached worker process
-    let path = args.path.unwrap_or_else(|| ".".to_string());
+    // Background mode: create run state, spawn detached worker process(es)
+    let path = args.path.as_deref().unwrap_or(".").to_string();
     let manifest_path = find_manifest(&path)?;
 
     let manifest_content = std::fs::read_to_string(&manifest_path)
@@ -67,71 +92,83 @@ pub async fn execute(args: RunArgs) -> anyhow::Result<()> {
     let blueprint = parse_manifest(&manifest_content)?;
 
     let workdir = std::env::current_dir()?;
-    let run_id = runstate::new_run_id(&blueprint.name);
+    let count = args.count.max(1);
 
-    let meta = RunMeta::new(
-        run_id.clone(),
-        blueprint.name.clone(),
-        manifest_path
-            .parent()
-            .unwrap_or(Path::new("."))
-            .to_string_lossy()
-            .to_string(),
-        args.task.clone(),
-        args.model.clone(),
-        workdir.to_string_lossy().to_string(),
-        blueprint.stages.len(),
-    );
-    runstate::create_run(&meta)?;
+    for i in 0..count {
+        let run_id = runstate::new_run_id(&blueprint.name);
 
-    // Redirect the worker's stdout + stderr to the run's output.log
-    let log_path = runstate::run_dir(&run_id).join("output.log");
-    let log_file = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&log_path)?;
-    let log_file2 = log_file.try_clone()?;
+        let meta = RunMeta::new(
+            run_id.clone(),
+            blueprint.name.clone(),
+            manifest_path
+                .parent()
+                .unwrap_or(Path::new("."))
+                .to_string_lossy()
+                .to_string(),
+            args.task.clone(),
+            args.model.clone(),
+            workdir.to_string_lossy().to_string(),
+            blueprint.stages.len(),
+        );
+        runstate::create_run(&meta)?;
 
-    let exe = std::env::current_exe()
-        .map_err(|e| anyhow::anyhow!("Failed to locate current executable: {}", e))?;
+        // Redirect the worker's stdout + stderr to the run's output.log
+        let log_path = runstate::run_dir(&run_id).join("output.log");
+        let log_file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&log_path)?;
+        let log_file2 = log_file.try_clone()?;
 
-    let mut cmd = std::process::Command::new(&exe);
-    cmd.arg("__run-worker")
-        .arg(manifest_path.to_string_lossy().as_ref())
-        .arg("--task")
-        .arg(&args.task)
-        .arg("--run-id")
-        .arg(&run_id);
+        let exe = std::env::current_exe()
+            .map_err(|e| anyhow::anyhow!("Failed to locate current executable: {}", e))?;
 
-    if let Some(ref model) = args.model {
-        cmd.arg("--model").arg(model);
-    }
+        let mut cmd = std::process::Command::new(&exe);
+        cmd.arg("__run-worker")
+            .arg(manifest_path.to_string_lossy().as_ref())
+            .arg("--task")
+            .arg(&args.task)
+            .arg("--run-id")
+            .arg(&run_id);
 
-    cmd.current_dir(&workdir)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::from(log_file))
-        .stderr(std::process::Stdio::from(log_file2));
+        if let Some(ref model) = args.model {
+            cmd.arg("--model").arg(model);
+        }
 
-    // On Unix: setsid() detaches the worker into its own session so it
-    // survives the spawning terminal being closed.
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt;
-        unsafe {
-            cmd.pre_exec(|| {
-                libc::setsid();
-                Ok(())
-            });
+        cmd.current_dir(&workdir)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::from(log_file))
+            .stderr(std::process::Stdio::from(log_file2));
+
+        // On Unix: setsid() detaches the worker into its own session so it
+        // survives the spawning terminal being closed.
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            unsafe {
+                cmd.pre_exec(|| {
+                    libc::setsid();
+                    Ok(())
+                });
+            }
+        }
+
+        cmd.spawn()
+            .map_err(|e| anyhow::anyhow!("Failed to spawn worker process: {}", e))?;
+
+        if count == 1 {
+            println!("Started run: {}", run_id);
+            println!("  lev ps                — check all runs");
+            println!("  lev logs {}  — stream output", &run_id[..run_id.len().min(24)]);
+            println!("  lev dashboard         — view in TUI dashboard");
+        } else {
+            println!("  [{}/{}] Started run: {}", i + 1, count, run_id);
         }
     }
 
-    cmd.spawn()
-        .map_err(|e| anyhow::anyhow!("Failed to spawn worker process: {}", e))?;
-
-    println!("Started run: {}", run_id);
-    println!("  lev ps                — check all runs");
-    println!("  lev logs {}  — stream output", &run_id[..run_id.len().min(24)]);
-    println!("  lev dashboard         — view in TUI dashboard");
+    if count > 1 {
+        println!("Spawned {} runs. Use `lev ps` or `lev dashboard` to monitor.", count);
+    }
 
     Ok(())
 }
@@ -170,25 +207,112 @@ async fn run_foreground(args: RunArgs) -> anyhow::Result<()> {
 
     let tool_registry = Arc::new(ToolRegistry::build(workdir, &config).await);
 
+    // Build launch-level tool policy overrides from CLI flags
+    let mut launch_overrides: std::collections::HashMap<String, ToolPolicy> = std::collections::HashMap::new();
+    if args.yolo {
+        launch_overrides.insert("*".to_string(), ToolPolicy::Allow);
+    }
+    for t in &args.allow {
+        launch_overrides.insert(t.clone(), ToolPolicy::Allow);
+    }
+    for t in &args.ask {
+        launch_overrides.insert(t.clone(), ToolPolicy::Ask);
+    }
+    for t in &args.deny {
+        launch_overrides.insert(t.clone(), ToolPolicy::Deny);
+    }
+
+    // Session-level tool allows (populated when user chooses "Allow for this session")
+    let session_allows: Arc<Mutex<std::collections::HashSet<String>>> =
+        Arc::new(Mutex::new(std::collections::HashSet::new()));
+    // Current stage's permissions (updated per stage below)
+    let current_stage_perms: Arc<Mutex<std::collections::HashMap<String, String>>> =
+        Arc::new(Mutex::new(std::collections::HashMap::new()));
+    // Agent-level permissions (static across stages, from blueprint)
+    let agent_perms_arc: Arc<std::collections::HashMap<String, String>> =
+        Arc::new(std::collections::HashMap::new()); // populated from blueprint if present
+    let global_perms = config.tool_permissions.clone();
+
     // Build executor closure (Arcs cloned once here, then again per call)
     let builtins = tool_registry.builtins.clone();
     let mcp = tool_registry.mcp.clone();
     let builtin_names = tool_registry.builtin_names.clone();
+    let launch_overrides_arc = Arc::new(launch_overrides);
+    let exec_session_allows = session_allows.clone();
+    let exec_stage_perms = current_stage_perms.clone();
+    let exec_agent_perms = agent_perms_arc.clone();
+    let exec_global_perms = Arc::new(global_perms);
     let mut exec = move |calls: Vec<leviath_providers::ToolCall>| {
         let builtins = builtins.clone();
         let mcp = mcp.clone();
         let builtin_names = builtin_names.clone();
+        let launch_ov = launch_overrides_arc.clone();
+        let session_al = exec_session_allows.clone();
+        let stage_pm = exec_stage_perms.clone();
+        let agent_pm = exec_agent_perms.clone();
+        let global_pm = exec_global_perms.clone();
         async move {
             let mut out: Vec<(String, String)> = Vec::new();
             for tc in calls {
-                let res = if builtin_names.contains(&tc.name) {
-                    builtins.execute(&tc.name, tc.arguments.clone()).await
+                let is_builtin = builtin_names.contains(&tc.name);
+                let session_has = session_al.lock().await.contains(&tc.name);
+                let policy = if session_has {
+                    ToolPolicy::Allow
                 } else {
-                    let mut mcp_lock = mcp.lock().await;
-                    match mcp_lock.execute(&tc.name, tc.arguments.clone()).await {
-                        Ok(r) if r.success => r.text,
-                        Ok(r) => format!("[error] {}", r.text),
-                        Err(e) => format!("[error] tool error: {}", e),
+                    let stage_pm_snap = stage_pm.lock().await.clone();
+                    resolve_policy(
+                        &tc.name,
+                        is_builtin,
+                        &launch_ov,
+                        &stage_pm_snap,
+                        &agent_pm,
+                        &global_pm,
+                    )
+                };
+
+                let res = match policy {
+                    ToolPolicy::Deny => {
+                        format!("[denied] Tool '{}' is not permitted for this run.", tc.name)
+                    }
+                    ToolPolicy::Ask => {
+                        // Foreground: ask via stdin
+                        use crate::interaction::{InteractionRequest, request_interaction_stdin, response_approved, ApprovalScope};
+                        let req = InteractionRequest::tool_approval(
+                            format!("fg-{}", tc.id),
+                            &tc.name,
+                            tc.arguments.clone(),
+                            "tool-call",
+                        );
+                        let resp = request_interaction_stdin(&req);
+                        if response_approved(&resp) {
+                            if resp.scope == Some(ApprovalScope::Session) {
+                                session_al.lock().await.insert(tc.name.clone());
+                            }
+                            if is_builtin {
+                                builtins.execute(&tc.name, tc.arguments.clone()).await
+                            } else {
+                                let mut mcp_lock = mcp.lock().await;
+                                match mcp_lock.execute(&tc.name, tc.arguments.clone()).await {
+                                    Ok(r) if r.success => r.text,
+                                    Ok(r) => format!("[error] {}", r.text),
+                                    Err(e) => format!("[error] tool error: {}", e),
+                                }
+                            }
+                        } else {
+                            format!("[denied] User declined tool call '{}'.", tc.name)
+                        }
+                    }
+                    ToolPolicy::Allow => {
+                        if is_builtin {
+                            builtins.execute(&tc.name, tc.arguments.clone()).await
+                        } else {
+                            let mut mcp_lock = mcp.lock().await;
+                            match mcp_lock.execute(&tc.name, tc.arguments.clone()).await {
+                                Ok(r) if r.success => r.text,
+                                Ok(r) => format!("[error] {}", r.text),
+                                Err(e) => format!("[error] tool error: {}", e),
+                            }
+                        }
                     }
                 };
                 out.push((tc.id.clone(), res));
@@ -204,6 +328,12 @@ async fn run_foreground(args: RunArgs) -> anyhow::Result<()> {
     for (stage_idx, stage) in blueprint.stages.iter().enumerate() {
         let provider_name = &stage.model.provider;
         let model_name = args.model.as_deref().unwrap_or(&stage.model.model);
+
+        // Update current stage permissions for the executor closure
+        {
+            let mut sp = current_stage_perms.lock().await;
+            *sp = stage.tool_permissions.clone();
+        }
 
         if !engine.providers().has(provider_name) {
             println!(
@@ -278,6 +408,8 @@ async fn run_foreground(args: RunArgs) -> anyhow::Result<()> {
                     model_name,
                     max_iterations,
                     &effective_tools,
+                    None, // foreground — use stdin
+                    &stage.name,
                     &mut exec,
                 )
                 .await?;
@@ -293,6 +425,7 @@ async fn run_foreground(args: RunArgs) -> anyhow::Result<()> {
                     routing_ref,
                     compaction_ref,
                     points,
+                    None, // foreground — use stdin
                     &mut exec,
                 )
                 .await?;
@@ -397,24 +530,97 @@ async fn run_worker_inner(args: &WorkerArgs, meta: &mut RunMeta) -> anyhow::Resu
 
     let tool_registry = Arc::new(ToolRegistry::build(workdir, &config).await);
 
+    // Global tool policy + session-level allows
+    let global_perms = Arc::new(config.tool_permissions.clone());
+    let session_allows: Arc<Mutex<std::collections::HashSet<String>>> =
+        Arc::new(Mutex::new(std::collections::HashSet::new()));
+    let current_stage_perms: Arc<Mutex<std::collections::HashMap<String, String>>> =
+        Arc::new(Mutex::new(std::collections::HashMap::new()));
+    let agent_perms_arc: Arc<std::collections::HashMap<String, String>> = Arc::new(std::collections::HashMap::new());
+    // Background workers have no launch overrides (those come from the CLI at run time)
+    let launch_overrides_arc: Arc<std::collections::HashMap<String, ToolPolicy>> = Arc::new(std::collections::HashMap::new());
+    let run_id_arc = Arc::new(args.run_id.clone());
+
     let builtins = tool_registry.builtins.clone();
     let mcp = tool_registry.mcp.clone();
     let builtin_names = tool_registry.builtin_names.clone();
+    let exec_session_allows = session_allows.clone();
+    let exec_stage_perms = current_stage_perms.clone();
+    let exec_agent_perms = agent_perms_arc.clone();
+    let exec_global_perms = global_perms.clone();
+    let exec_run_id = run_id_arc.clone();
     let mut exec = move |calls: Vec<leviath_providers::ToolCall>| {
         let builtins = builtins.clone();
         let mcp = mcp.clone();
         let builtin_names = builtin_names.clone();
+        let launch_ov = launch_overrides_arc.clone();
+        let session_al = exec_session_allows.clone();
+        let stage_pm = exec_stage_perms.clone();
+        let agent_pm = exec_agent_perms.clone();
+        let global_pm = exec_global_perms.clone();
+        let run_id = exec_run_id.clone();
         async move {
             let mut out: Vec<(String, String)> = Vec::new();
             for tc in calls {
-                let res = if builtin_names.contains(&tc.name) {
-                    builtins.execute(&tc.name, tc.arguments.clone()).await
+                let is_builtin = builtin_names.contains(&tc.name);
+                let session_has = session_al.lock().await.contains(&tc.name);
+                let policy = if session_has {
+                    ToolPolicy::Allow
                 } else {
-                    let mut mcp_lock = mcp.lock().await;
-                    match mcp_lock.execute(&tc.name, tc.arguments.clone()).await {
-                        Ok(r) if r.success => r.text,
-                        Ok(r) => format!("[error] {}", r.text),
-                        Err(e) => format!("[error] tool error: {}", e),
+                    let stage_pm_snap = stage_pm.lock().await.clone();
+                    resolve_policy(
+                        &tc.name,
+                        is_builtin,
+                        &launch_ov,
+                        &stage_pm_snap,
+                        &agent_pm,
+                        &global_pm,
+                    )
+                };
+
+                let res = match policy {
+                    ToolPolicy::Deny => {
+                        format!("[denied] Tool '{}' is not permitted.", tc.name)
+                    }
+                    ToolPolicy::Ask => {
+                        use crate::interaction::{
+                            request_tool_approval_background, ApprovalScope,
+                        };
+                        let (approved, scope) = request_tool_approval_background(
+                            &run_id,
+                            &tc.name,
+                            &tc.arguments,
+                            "tool-call",
+                        ).await;
+                        if approved {
+                            if scope == ApprovalScope::Session {
+                                session_al.lock().await.insert(tc.name.clone());
+                            }
+                            if is_builtin {
+                                builtins.execute(&tc.name, tc.arguments.clone()).await
+                            } else {
+                                let mut mcp_lock = mcp.lock().await;
+                                match mcp_lock.execute(&tc.name, tc.arguments.clone()).await {
+                                    Ok(r) if r.success => r.text,
+                                    Ok(r) => format!("[error] {}", r.text),
+                                    Err(e) => format!("[error] tool error: {}", e),
+                                }
+                            }
+                        } else {
+                            format!("[denied] User declined tool call '{}'.", tc.name)
+                        }
+                    }
+                    ToolPolicy::Allow => {
+                        if is_builtin {
+                            builtins.execute(&tc.name, tc.arguments.clone()).await
+                        } else {
+                            let mut mcp_lock = mcp.lock().await;
+                            match mcp_lock.execute(&tc.name, tc.arguments.clone()).await {
+                                Ok(r) if r.success => r.text,
+                                Ok(r) => format!("[error] {}", r.text),
+                                Err(e) => format!("[error] tool error: {}", e),
+                            }
+                        }
                     }
                 };
                 out.push((tc.id.clone(), res));
@@ -433,6 +639,12 @@ async fn run_worker_inner(args: &WorkerArgs, meta: &mut RunMeta) -> anyhow::Resu
     for (stage_idx, stage) in blueprint.stages.iter().enumerate() {
         let provider_name = &stage.model.provider;
         let model_name = args.model.as_deref().unwrap_or(&stage.model.model);
+
+        // Update current stage permissions for the executor closure
+        {
+            let mut sp = current_stage_perms.lock().await;
+            *sp = stage.tool_permissions.clone();
+        }
 
         if !engine.providers().has(provider_name) {
             let msg = format!("Provider '{}' is not configured", provider_name);
@@ -499,41 +711,81 @@ async fn run_worker_inner(args: &WorkerArgs, meta: &mut RunMeta) -> anyhow::Resu
         let routing_ref = routing_config.as_ref();
         let max_iterations = stage.max_iterations.unwrap_or(20);
 
-        // Workers run all stages autonomously (headless — no stdin).
-        // Interactive stages behave like autonomous in the background.
-        let response = engine
-            .run_inference_loop_filtered(
-                entity,
-                provider_name,
-                model_name,
-                effective_tools,
-                max_iterations,
-                None,
-                routing_ref,
-                compaction_ref,
-                &mut exec,
-            )
-            .await;
+        // Workers now support interactive stage modes via the file-based IPC channel.
+        let stage_result: anyhow::Result<Option<leviath_providers::InferenceResponse>> = match &stage.mode {
+            StageMode::Interactive => {
+                run_interactive_stage(
+                    &mut engine,
+                    entity,
+                    provider_name,
+                    model_name,
+                    max_iterations,
+                    &effective_tools,
+                    Some((&args.run_id, meta)),
+                    &stage.name,
+                    &mut exec,
+                )
+                .await
+                .map(|_| None)
+            }
+            StageMode::InteractivePoints { points } => {
+                let pts = points.clone();
+                run_interactive_points_stage(
+                    &mut engine,
+                    entity,
+                    provider_name,
+                    model_name,
+                    max_iterations,
+                    &effective_tools,
+                    routing_ref,
+                    compaction_ref,
+                    &pts,
+                    Some((&args.run_id, meta)),
+                    &mut exec,
+                )
+                .await
+                .map(|_| None)
+            }
+            StageMode::Autonomous => {
+                engine
+                    .run_inference_loop_filtered(
+                        entity,
+                        provider_name,
+                        model_name,
+                        effective_tools,
+                        max_iterations,
+                        None,
+                        routing_ref,
+                        compaction_ref,
+                        &mut exec,
+                    )
+                    .await
+                    .map(Some)
+                    .map_err(|e| anyhow::anyhow!("{}", e))
+            }
+        };
 
-        match response {
-            Ok(resp) => {
-                println!("{}", resp.content);
-                println!(
-                    "\n[Tokens: {} in, {} out]",
-                    resp.tokens_used.prompt_tokens, resp.tokens_used.completion_tokens
-                );
-                meta.prompt_tokens += resp.tokens_used.prompt_tokens;
-                meta.completion_tokens += resp.tokens_used.completion_tokens;
+        match stage_result {
+            Ok(resp_opt) => {
+                if let Some(resp) = resp_opt {
+                    println!("{}", resp.content);
+                    println!(
+                        "\n[Tokens: {} in, {} out]",
+                        resp.tokens_used.prompt_tokens, resp.tokens_used.completion_tokens
+                    );
+                    meta.prompt_tokens += resp.tokens_used.prompt_tokens;
+                    meta.completion_tokens += resp.tokens_used.completion_tokens;
 
-                // Carry the final response forward so the next stage sees the previous stage's output
-                if !resp.content.is_empty() {
-                    if let Some(mut window) = engine.world_mut().get_mut::<ContextWindow>(entity) {
-                        let tokens = resp.content.len() / 4 + 1;
-                        let _ = window.add_to_region(
-                            "conversation",
-                            format!("Assistant ({}): {}", stage.name, resp.content),
-                            tokens,
-                        );
+                    // Carry the final response forward so the next stage sees the previous stage's output
+                    if !resp.content.is_empty() {
+                        if let Some(mut window) = engine.world_mut().get_mut::<ContextWindow>(entity) {
+                            let tokens = resp.content.len() / 4 + 1;
+                            let _ = window.add_to_region(
+                                "conversation",
+                                format!("Assistant ({}): {}", stage.name, resp.content),
+                                tokens,
+                            );
+                        }
                     }
                 }
             }
@@ -574,8 +826,11 @@ async fn run_worker_inner(args: &WorkerArgs, meta: &mut RunMeta) -> anyhow::Resu
 
 // ─── Stage runners ───────────────────────────────────────────────────────────
 
-/// Run an interactive (conversational) stage.
-/// If the stage has tools, uses the inference loop; otherwise streams.
+/// Run an interactive stage.
+///
+/// `run_context`: if `Some((run_id, meta))`, interaction is handled via the
+/// file-based IPC channel (background worker). If `None`, stdin is used
+/// (foreground).
 #[allow(clippy::too_many_arguments)]
 async fn run_interactive_stage<F, Fut>(
     engine: &mut AgentEngine,
@@ -584,14 +839,30 @@ async fn run_interactive_stage<F, Fut>(
     model_name: &str,
     max_iterations: usize,
     tools: &[leviath_providers::Tool],
+    run_context: Option<(&str, &mut RunMeta)>,
+    stage_name: &str,
     executor: &mut F,
 ) -> anyhow::Result<()>
 where
     F: FnMut(Vec<leviath_providers::ToolCall>) -> Fut,
     Fut: std::future::Future<Output = Vec<(String, String)>>,
 {
+    use crate::interaction::{
+        InteractionRequest, make_interaction_id, request_interaction_async, response_as_text,
+    };
+
     let has_tools = !tools.is_empty();
     let mut turn = 0;
+
+    // We need to hold the run_id separately since we consume run_context's meta
+    // across iterations. Decouple them to avoid borrow issues.
+    let (run_id_owned, meta_opt): (Option<String>, Option<&mut RunMeta>) = match run_context {
+        Some((rid, m)) => (Some(rid.to_string()), Some(m)),
+        None => (None, None),
+    };
+
+    // We need meta across loop iterations — box it optionally.
+    let mut meta_holder = meta_opt;
 
     loop {
         if turn >= max_iterations {
@@ -666,13 +937,27 @@ where
             }
         }
 
-        print!("\nYou: ");
-        use std::io::Write;
-        std::io::stdout().flush().ok();
+        // Build and dispatch the input request
+        let req = InteractionRequest::free_text(
+            make_interaction_id(0, turn),
+            "Your response (leave empty or /quit to end):",
+            stage_name,
+            false, // not required — empty ends the loop
+        );
 
-        let mut input = String::new();
-        std::io::stdin().read_line(&mut input)?;
-        let input = input.trim().to_string();
+        let input = if let (Some(run_id), Some(ref mut meta)) = (&run_id_owned, &mut meta_holder) {
+            let resp = request_interaction_async(run_id, meta, req, None).await?;
+            response_as_text(&resp)
+        } else {
+            crate::interaction::request_interaction_stdin(&req);
+            // For stdin, we need to actually read in the FreeText path
+            use std::io::Write;
+            print!("\nYou: ");
+            std::io::stdout().flush().ok();
+            let mut buf = String::new();
+            std::io::stdin().read_line(&mut buf)?;
+            buf.trim().to_string()
+        };
 
         if input.is_empty() || input == "/quit" || input == "/exit" {
             println!("\n[Session ended]");
@@ -737,6 +1022,10 @@ where
 }
 
 /// Run an InteractivePoints stage: autonomous iterations with pauses at each interaction point.
+///
+/// `run_context`: if `Some((run_id, meta))`, interaction is handled via the
+/// file-based IPC channel (background worker). If `None`, stdin is used
+/// (foreground).
 #[allow(clippy::too_many_arguments)]
 async fn run_interactive_points_stage<F, Fut>(
     engine: &mut AgentEngine,
@@ -748,12 +1037,19 @@ async fn run_interactive_points_stage<F, Fut>(
     routing: Option<&leviath_runtime::ToolResultRoutingConfig>,
     compaction_config: Option<&CompactionConfig>,
     points: &[leviath_core::blueprint::InteractionPoint],
+    run_context: Option<(&str, &mut RunMeta)>,
     executor: &mut F,
 ) -> anyhow::Result<()>
 where
     F: FnMut(Vec<leviath_providers::ToolCall>) -> Fut,
     Fut: std::future::Future<Output = Vec<(String, String)>>,
 {
+    use crate::interaction::{
+        InteractionRequest, make_interaction_id,
+        request_interaction_async, request_interaction_stdin,
+        response_as_choice, response_as_text,
+    };
+
     if points.is_empty() {
         return run_autonomous_stage(
             engine,
@@ -769,11 +1065,16 @@ where
         .await;
     }
 
+    let (run_id_owned, mut meta_holder): (Option<String>, Option<&mut RunMeta>) = match run_context {
+        Some((rid, m)) => (Some(rid.to_string()), Some(m)),
+        None => (None, None),
+    };
+
     let segments = points.len() + 1;
     let iterations_per_segment = max_iterations / segments;
     let mut remaining_iterations = max_iterations;
 
-    for point in points {
+    for (pt_idx, point) in points.iter().enumerate() {
         let iters = iterations_per_segment.min(remaining_iterations);
         if iters > 0 {
             let response = engine
@@ -798,39 +1099,58 @@ where
             remaining_iterations = remaining_iterations.saturating_sub(iters);
         }
 
-        println!("\n[Interaction Point: {}]", point.name);
-        println!("{}", point.prompt);
+        // Build the interaction request with the right style / options
+        let req_id = make_interaction_id(pt_idx, 0);
+        let bp_style = &point.style;
+        let ipc_req = match bp_style {
+            leviath_core::blueprint::InteractionStyle::MultipleChoice => {
+                InteractionRequest::multiple_choice(
+                    req_id,
+                    &point.prompt,
+                    point.options.clone(),
+                    &point.name,
+                )
+            }
+            leviath_core::blueprint::InteractionStyle::Confirm => {
+                InteractionRequest::confirm(req_id, &point.prompt, &point.name)
+            }
+            leviath_core::blueprint::InteractionStyle::FreeText => {
+                InteractionRequest::free_text(req_id, &point.prompt, &point.name, point.required)
+            }
+        };
 
-        if point.required {
-            print!("\n> ");
-            use std::io::Write;
-            std::io::stdout().flush().ok();
-
-            let mut input = String::new();
-            std::io::stdin().read_line(&mut input)?;
-            let input = input.trim().to_string();
-
-            if let Some(mut window) = engine.world_mut().get_mut::<ContextWindow>(entity) {
-                let tokens = input.len() / 4 + 1;
-                let content = format!("User [{}]: {}", point.name, input);
-                let _ = window.add_to_region("conversation", content, tokens);
+        // Dispatch via file IPC or stdin
+        let user_text = if let (Some(run_id), Some(ref mut meta)) = (&run_id_owned, &mut meta_holder) {
+            let resp = request_interaction_async(run_id, meta, ipc_req.clone(), None).await?;
+            match bp_style {
+                leviath_core::blueprint::InteractionStyle::MultipleChoice
+                | leviath_core::blueprint::InteractionStyle::Confirm => {
+                    // Resolve choice index → option string
+                    response_as_choice(&resp, &ipc_req.options)
+                        .cloned()
+                        .unwrap_or_else(|| response_as_text(&resp))
+                }
+                leviath_core::blueprint::InteractionStyle::FreeText => response_as_text(&resp),
             }
         } else {
-            println!("(Press Enter to skip or type a response)");
-            print!("\n> ");
-            use std::io::Write;
-            std::io::stdout().flush().ok();
-
-            let mut input = String::new();
-            std::io::stdin().read_line(&mut input)?;
-            let input = input.trim().to_string();
-
-            if !input.is_empty() {
-                if let Some(mut window) = engine.world_mut().get_mut::<ContextWindow>(entity) {
-                    let tokens = input.len() / 4 + 1;
-                    let content = format!("User [{}]: {}", point.name, input);
-                    let _ = window.add_to_region("conversation", content, tokens);
+            // Foreground (stdin) path — `request_interaction_stdin` prints and reads
+            let resp = request_interaction_stdin(&ipc_req);
+            match bp_style {
+                leviath_core::blueprint::InteractionStyle::MultipleChoice
+                | leviath_core::blueprint::InteractionStyle::Confirm => {
+                    response_as_choice(&resp, &ipc_req.options)
+                        .cloned()
+                        .unwrap_or_else(|| response_as_text(&resp))
                 }
+                leviath_core::blueprint::InteractionStyle::FreeText => response_as_text(&resp),
+            }
+        };
+
+        if !user_text.is_empty() {
+            if let Some(mut window) = engine.world_mut().get_mut::<ContextWindow>(entity) {
+                let tokens = user_text.len() / 4 + 1;
+                let content = format!("User [{}]: {}", point.name, user_text);
+                let _ = window.add_to_region("conversation", content, tokens);
             }
         }
     }
@@ -906,11 +1226,17 @@ async fn stream_inference(
         tools
     };
 
+    // Respect each model's temperature support (e.g. claude-opus-4-8 deprecates it).
+    let temperature = if provider.capabilities(model_name).supports_temperature {
+        0.7
+    } else {
+        0.0
+    };
     let request = leviath_providers::InferenceRequest {
         messages,
         model: model_name.to_string(),
         max_tokens,
-        temperature: 0.7,
+        temperature,
         tools: filtered_tools,
         extra: serde_json::Value::Null,
     };
@@ -1114,27 +1440,44 @@ fn swap_context_layout(
 }
 
 fn find_manifest(path: &str) -> anyhow::Result<PathBuf> {
-    let path = Path::new(path);
+    let p = Path::new(path);
 
-    if path.is_file() && path.file_name() == Some(std::ffi::OsStr::new("agent.leviath")) {
-        return Ok(path.to_path_buf());
+    // 1. Explicit agent.leviath file
+    if p.is_file() && p.file_name() == Some(std::ffi::OsStr::new("agent.leviath")) {
+        return Ok(p.to_path_buf());
     }
 
-    if path.is_dir() {
-        let manifest = path.join("agent.leviath");
+    // 2. Directory with agent.leviath inside
+    if p.is_dir() {
+        let manifest = p.join("agent.leviath");
         if manifest.exists() {
             return Ok(manifest);
         }
     }
 
+    // 3. Installed agent by name: ~/.leviath/agents/<name>/agent.leviath
+    if let Some(home) = dirs::home_dir() {
+        let installed = home
+            .join(".leviath")
+            .join("agents")
+            .join(path)
+            .join("agent.leviath");
+        if installed.exists() {
+            return Ok(installed);
+        }
+    }
+
+    // 4. agent.leviath in current directory (for `lev run` with no path)
     let current_manifest = PathBuf::from("agent.leviath");
     if current_manifest.exists() {
         return Ok(current_manifest);
     }
 
     anyhow::bail!(
-        "Could not find agent.leviath in {} or current directory",
-        path.display()
+        "Could not find agent manifest for '{}'. \
+        Pass a path to a directory containing agent.leviath, \
+        or an installed agent name (see `lev list`).",
+        path
     )
 }
 
@@ -1210,10 +1553,28 @@ fn parse_manifest(content: &str) -> anyhow::Result<Blueprint> {
                                     .to_string();
                                 let pt_required =
                                     pt.get("required").and_then(|v| v.as_bool()).unwrap_or(true);
+                                let pt_style = match pt.get("style").and_then(|v| v.as_str()) {
+                                    Some("multiple_choice") => leviath_core::blueprint::InteractionStyle::MultipleChoice,
+                                    Some("confirm") => leviath_core::blueprint::InteractionStyle::Confirm,
+                                    _ => leviath_core::blueprint::InteractionStyle::FreeText,
+                                };
+                                // Accept either "options" or "choices" key
+                                let pt_options: Vec<String> = pt
+                                    .get("options")
+                                    .or_else(|| pt.get("choices"))
+                                    .and_then(|v| v.as_array())
+                                    .map(|arr| {
+                                        arr.iter()
+                                            .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                                            .collect()
+                                    })
+                                    .unwrap_or_default();
                                 points.push(leviath_core::blueprint::InteractionPoint {
                                     name: pt_name,
                                     prompt: pt_prompt,
                                     required: pt_required,
+                                    style: pt_style,
+                                    options: pt_options,
                                 });
                             }
                         }
@@ -1275,6 +1636,15 @@ fn parse_manifest(content: &str) -> anyhow::Result<Blueprint> {
                 }
 
                 stage.tool_result_routing = Some(routing);
+            }
+
+            // Parse per-stage tool permissions: [stages.<name>.tool_permissions]
+            if let Some(tp_table) = stage_value.get("tool_permissions").and_then(|v| v.as_table()) {
+                for (tool_name, policy_val) in tp_table {
+                    if let Some(policy_str) = policy_val.as_str() {
+                        stage.tool_permissions.insert(tool_name.clone(), policy_str.to_string());
+                    }
+                }
             }
 
             stages.push(stage);
@@ -1388,6 +1758,17 @@ fn parse_manifest(content: &str) -> anyhow::Result<Blueprint> {
         }
 
         blueprint.compaction_config = Some(cc);
+    }
+
+    // Parse agent-level tool permissions: [tool_permissions]
+    if let Some(tp_table) = parsed.get("tool_permissions").and_then(|v| v.as_table()) {
+        for (tool_name, policy_val) in tp_table {
+            if let Some(policy_str) = policy_val.as_str() {
+                blueprint
+                    .metadata
+                    .insert(format!("tool_perm:{}", tool_name), serde_json::Value::String(policy_str.to_string()));
+            }
+        }
     }
 
     Ok(blueprint)

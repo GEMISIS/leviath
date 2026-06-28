@@ -20,8 +20,8 @@ pub async fn execute(args: PsArgs) -> anyhow::Result<()> {
 
     // Header
     println!(
-        "{:<40} {:<15} {:<20} {:<12} {:>6} {:>10} {}",
-        "RUN ID", "AGENT", "STAGE", "STATUS", "ITER", "TOKENS", "STARTED"
+        "{:<40} {:<15} {:<20} {:<12} {:>6} {:>10} STARTED",
+        "RUN ID", "AGENT", "STAGE", "STATUS", "ITER", "TOKENS"
     );
     println!("{}", "-".repeat(120));
 

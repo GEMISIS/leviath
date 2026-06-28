@@ -321,11 +321,17 @@ impl AgentEngine {
             tools // None = include all
         };
 
+        // Respect each model's temperature support (e.g. claude-opus-4-8 deprecates it).
+        let temperature = if provider.capabilities(model).supports_temperature {
+            0.7
+        } else {
+            0.0
+        };
         let request = InferenceRequest {
             messages,
             model: model.to_string(),
             max_tokens,
-            temperature: 0.7,
+            temperature,
             tools: filtered_tools,
             extra: serde_json::Value::Null,
         };

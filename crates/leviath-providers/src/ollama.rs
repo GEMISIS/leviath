@@ -60,18 +60,13 @@ impl OllamaProvider {
 
     /// Return built-in capability defaults for a model based on its name pattern.
     fn builtin_capabilities(&self, model: &str) -> ModelCapabilities {
-        // Llama 3.x — tool-capable, 128K context
-        if model.contains("llama3") || model.contains("llama-3") {
-            ModelCapabilities {
-                supports_temperature: true,
-                supports_streaming: true,
-                supports_tools: true,
-                supports_system_prompt: true,
-                max_context_tokens: 131_072,
-                max_output_tokens: 8192,
-            }
-        // Qwen 2.5 / 3 — tool-capable, 128K context
-        } else if model.contains("qwen2.5") || model.contains("qwen3") || model.contains("qwen2") {
+        // Llama 3.x and Qwen 2.x/3 — tool-capable, 128K context
+        if model.contains("llama3")
+            || model.contains("llama-3")
+            || model.contains("qwen2.5")
+            || model.contains("qwen3")
+            || model.contains("qwen2")
+        {
             ModelCapabilities {
                 supports_temperature: true,
                 supports_streaming: true,
@@ -166,13 +161,21 @@ impl OllamaProvider {
             })
             .collect();
 
+        let caps = self.capabilities(&request.model);
+        let options = if caps.supports_temperature {
+            serde_json::json!({
+                "temperature": request.temperature,
+                "num_predict": request.max_tokens,
+            })
+        } else {
+            serde_json::json!({
+                "num_predict": request.max_tokens,
+            })
+        };
         let mut body = serde_json::json!({
             "model": request.model,
             "messages": messages,
-            "options": {
-                "temperature": request.temperature,
-                "num_predict": request.max_tokens,
-            }
+            "options": options,
         });
 
         // Add tools if present (Ollama supports tool calling for some models)

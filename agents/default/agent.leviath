@@ -1,0 +1,123 @@
+[agent]
+name = "default"
+version = "0.1.0"
+description = "Plan-then-implement agent — mirrors the Claude Code plan→approve→code→review workflow"
+
+# Global tool permissions for this agent: write tools require approval by default.
+# Use `lev run default --yolo` to skip all approvals, or `--allow bash` for selective override.
+[tool_permissions]
+read_file = "allow"
+list_dir  = "allow"
+write_file = "ask"
+edit_file  = "ask"
+bash       = "ask"
+
+# ─── Stage 1: Plan ───────────────────────────────────────────────────────────
+# Read-only exploration culminating in a structured plan.
+# The user is shown the plan and must approve, request revisions, or add detail.
+
+[stages.plan]
+mode = "interactive_points"
+model = { provider = "anthropic", model = "claude-sonnet-4-6" }
+description = "Explore the codebase and produce a step-by-step implementation plan"
+available_tools = ["read_file", "list_dir"]
+max_iterations = 20
+system_prompt = """
+You are the planning stage of a code assistant.
+
+Your job:
+1. Explore the codebase to understand relevant structure (list_dir, read_file).
+2. Think through the implementation approach.
+3. Produce a concise, numbered plan:
+   - Files to create or modify
+   - What each change does
+   - Key decisions and trade-offs
+
+Be specific — the implement stage will execute exactly what you write here.
+End with:
+
+## Plan
+<numbered list of steps>
+
+## Files
+<list of files to create/modify>
+"""
+
+[stages.plan.tool_permissions]
+read_file = "allow"
+list_dir  = "allow"
+
+[[stages.plan.interaction_points]]
+name     = "plan_approval"
+prompt   = "Review the plan above. What would you like to do?"
+required = true
+style    = "multiple_choice"
+options  = ["Approve — proceed to implementation", "Revise — I'll describe changes", "Add detail — expand a section", "Abort — cancel this run"]
+
+# ─── Stage 2: Implement ──────────────────────────────────────────────────────
+# Executes the approved plan. Write/edit/bash require tool-approval unless
+# the user passes --yolo or stage-level overrides.
+
+[stages.implement]
+mode = "autonomous"
+model = { provider = "anthropic", model = "claude-sonnet-4-6" }
+description = "Write code according to the approved plan"
+available_tools = ["write_file", "read_file", "edit_file", "list_dir", "bash"]
+max_iterations = 50
+system_prompt = """
+You are the implementation stage. The plan has been approved by the user.
+Execute the plan step by step:
+- Use write_file to create new files.
+- Use edit_file to modify existing files.
+- Use bash to run tests or verify the build after writing.
+
+Work methodically through each plan step. After completing all steps, provide a concise
+summary of what was created/modified and whether tests passed.
+"""
+
+# ─── Stage 3: Review ─────────────────────────────────────────────────────────
+# Human-in-the-loop review. Interactive so the human can ask for changes.
+
+[stages.review]
+mode = "interactive"
+model = { provider = "anthropic", model = "claude-opus-4-8" }
+description = "Review the implementation and discuss with the user"
+available_tools = ["read_file", "list_dir"]
+max_iterations = 15
+system_prompt = """
+You are the review stage. The implementation is complete.
+Read the files that were created or modified and provide a quality review:
+- Correctness: does it match the plan and the original task?
+- Edge cases: what inputs or conditions could cause failures?
+- Code quality: clarity, naming, error handling.
+- Security: any obvious vulnerabilities?
+
+End with one of:
+  APPROVED — no significant issues
+  NEEDS CHANGES — <list specific required changes>
+
+After the verdict, remain in interactive mode so the user can ask follow-up questions
+or request specific fixes before they commit the code.
+"""
+
+[stages.review.tool_permissions]
+read_file = "allow"
+list_dir  = "allow"
+
+# ─── Compaction ──────────────────────────────────────────────────────────────
+
+[compaction]
+provider = "anthropic"
+model    = "claude-sonnet-4-6"
+
+# ─── Context layout ──────────────────────────────────────────────────────────
+
+[context.regions]
+architecture    = { kind = "pinned",          max_tokens = 4000 }
+task            = { kind = "pinned",          max_tokens = 2000 }
+plan            = { kind = "pinned",          max_tokens = 6000 }
+codebase        = { kind = "temporary",       max_tokens = 30000 }
+conversation    = { kind = "sliding_window",  max_items = 20, max_tokens = 15000 }
+implementation  = { kind = "compacting",      threshold_tokens = 25000, max_tokens = 40000 }
+history         = { kind = "compact_history", source_region = "implementation", max_tokens = 8000 }
+scratch         = { kind = "clearable",       max_tokens = 10000 }

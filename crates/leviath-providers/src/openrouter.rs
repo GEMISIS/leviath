@@ -83,12 +83,21 @@ impl OpenRouterProvider {
             })
             .collect();
 
-        let mut body = serde_json::json!({
-            "model": request.model,
-            "max_tokens": request.max_tokens,
-            "temperature": request.temperature,
-            "messages": messages,
-        });
+        let caps = self.capabilities(&request.model);
+        let mut body = if caps.supports_temperature {
+            serde_json::json!({
+                "model": request.model,
+                "max_tokens": request.max_tokens,
+                "temperature": request.temperature,
+                "messages": messages,
+            })
+        } else {
+            serde_json::json!({
+                "model": request.model,
+                "max_tokens": request.max_tokens,
+                "messages": messages,
+            })
+        };
 
         if !request.tools.is_empty() {
             let tools: Vec<serde_json::Value> = request

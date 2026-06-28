@@ -10,6 +10,6 @@ pub mod models;
 pub mod pack;
 pub mod ps;
 pub mod run;
-pub mod spawn;
 pub mod stop;
 pub mod test;
+pub mod uninstall;

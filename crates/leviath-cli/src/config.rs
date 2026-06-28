@@ -6,6 +6,22 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
 
+/// Whether a tool call should execute automatically or require user approval.
+///
+/// The effective policy for a tool is resolved by narrowest scope first:
+/// launch-flag > stage > agent > global config > built-in default.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolPolicy {
+    /// Execute without prompting.
+    Allow,
+    /// Ask the user before each call (or once per session with `allow_session`).
+    #[default]
+    Ask,
+    /// Never execute — return a denied error to the model.
+    Deny,
+}
+
 /// CLI configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
@@ -38,6 +54,14 @@ pub struct Config {
     /// Takes precedence over the provider's built-in capability table.
     #[serde(default)]
     pub model_capabilities: HashMap<String, ModelCapabilities>,
+
+    /// Global tool permission overrides.
+    ///
+    /// Keys are tool names (e.g. `"bash"`, `"write_file"`).  Values override
+    /// the built-in Claude Code-style defaults.  Narrower scopes (agent,
+    /// stage, launch flags) take precedence over these.
+    #[serde(default)]
+    pub tool_permissions: HashMap<String, ToolPolicy>,
 }
 
 /// Provider configuration.
@@ -65,6 +89,7 @@ impl Default for Config {
             mcp_servers: Vec::new(),
             default_model: None,
             model_capabilities: HashMap::new(),
+            tool_permissions: HashMap::new(),
         }
     }
 }
