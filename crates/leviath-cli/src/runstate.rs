@@ -304,7 +304,8 @@ pub fn tail_file(path: &std::path::Path, max_bytes: u64) -> String {
     }
 }
 
-/// Read the last `max_bytes` of a run's output log.
+/// Read the last `max_bytes` of a run's combined output log (legacy).
+#[allow(dead_code)]
 pub fn tail_log(run_id: &str, max_bytes: u64) -> String {
     tail_file(&run_dir(run_id).join("output.log"), max_bytes)
 }

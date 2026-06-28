@@ -2,7 +2,7 @@
 
 use clap::Args;
 use crossterm::{
-    event::{self, Event, KeyCode, KeyEventKind},
+    event::{self, Event, KeyCode, KeyEventKind, MouseEvent, MouseEventKind},
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
     ExecutableCommand,
 };
@@ -10,10 +10,14 @@ use leviath_runtime::{
     AgentEngine, AgentState, AgentStatus, ContextWindow,
 };
 use ratatui::{
-    layout::{Constraint, Direction, Layout, Rect},
+    layout::{Constraint, Direction, Layout, Rect, Margin},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Cell, Paragraph, Row, Table, TableState, Wrap},
+    widgets::{
+        Block, Borders, BorderType, Cell, Clear, Padding,
+        Paragraph, Row, Scrollbar, ScrollbarOrientation, ScrollbarState,
+        Table, TableState, Tabs, Wrap,
+    },
     Frame, Terminal,
 };
 use std::io::stdout;
@@ -24,10 +28,40 @@ use tokio::sync::{mpsc, Mutex};
 use super::run::build_provider_registry;
 use crate::config::Config;
 use crate::interaction;
-use crate::runstate::{self, RunStatus};
+use crate::runstate::{self, RunStatus, StageRecord, StageRunStatus};
+
+// ─── Theme palette ────────────────────────────────────────────────────────────
+
+const C_ACCENT: Color = Color::Cyan;
+const C_SUCCESS: Color = Color::Green;
+const C_WARN: Color = Color::Yellow;
+const C_ERROR: Color = Color::Red;
+const C_DIM: Color = Color::DarkGray;
+const C_MUTED: Color = Color::Gray;
+const C_WHITE: Color = Color::White;
+const C_ACTIVE: Color = Color::Cyan;
+const C_BORDER: Color = Color::DarkGray;
+const C_BORDER_FOCUS: Color = Color::Cyan;
+
+// Stage status glyphs
+const GLYPH_PENDING: &str = "○";
+const GLYPH_ACTIVE: &str = "●";
+const GLYPH_WAITING: &str = "⏸";
+const GLYPH_COMPLETE: &str = "✓";
+const GLYPH_ERROR: &str = "✗";
+
+// Spinner frames driven by tick_count
+const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
 #[derive(Args)]
 pub struct DashboardArgs {}
+
+/// Whether the detail content pane shows Output or Logs.
+#[derive(Debug, Clone, PartialEq)]
+enum StageContentMode {
+    Output,
+    Logs,
+}
 
 /// Display status for agents in the dashboard.
 #[derive(Debug, Clone)]
@@ -45,12 +79,12 @@ pub enum AgentDisplayStatus {
 impl std::fmt::Display for AgentDisplayStatus {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Active => write!(f, "●ACTIVE"),
-            Self::Waiting => write!(f, "◆WAITING"),
-            Self::Complete => write!(f, "✓COMPLETE"),
-            Self::CompleteInteractive => write!(f, "✓COMPLETE"),
-            Self::Error(msg) => write!(f, "✗ERROR: {}", msg),
-            Self::Idle => write!(f, "○IDLE"),
+            Self::Active => write!(f, "{}ACTIVE", GLYPH_ACTIVE),
+            Self::Waiting => write!(f, "{}WAITING", GLYPH_WAITING),
+            Self::Complete => write!(f, "{}COMPLETE", GLYPH_COMPLETE),
+            Self::CompleteInteractive => write!(f, "{}COMPLETE", GLYPH_COMPLETE),
+            Self::Error(msg) => write!(f, "{}ERROR: {}", GLYPH_ERROR, msg),
+            Self::Idle => write!(f, "{}IDLE", GLYPH_PENDING),
             Self::Cancelled => write!(f, "⊘CANCEL"),
         }
     }
@@ -59,12 +93,12 @@ impl std::fmt::Display for AgentDisplayStatus {
 impl AgentDisplayStatus {
     fn color(&self) -> Color {
         match self {
-            Self::Active => Color::Green,
-            Self::Waiting => Color::Yellow,
-            Self::Complete | Self::CompleteInteractive => Color::Cyan,
-            Self::Error(_) => Color::Red,
-            Self::Idle => Color::Gray,
-            Self::Cancelled => Color::DarkGray,
+            Self::Active => C_ACTIVE,
+            Self::Waiting => C_WARN,
+            Self::Complete | Self::CompleteInteractive => C_SUCCESS,
+            Self::Error(_) => C_ERROR,
+            Self::Idle => C_DIM,
+            Self::Cancelled => C_DIM,
         }
     }
 }
@@ -78,6 +112,8 @@ pub struct DashboardAgent {
     #[allow(dead_code)]
     pub agent_path: String,
     pub stage: String,
+    pub stage_index: usize,
+    pub num_stages: usize,
     pub status: AgentDisplayStatus,
     /// Cumulative prompt (input) tokens for background runs.
     pub tokens_in: usize,
@@ -94,6 +130,8 @@ pub struct DashboardAgent {
     pub last_answered_request_id: Option<String>,
     /// Live context window snapshot from context.json (background workers only)
     pub context_snapshot: Option<runstate::ContextSnapshot>,
+    /// Per-stage records from stages.json
+    pub stages: Vec<StageRecord>,
     /// The ECS entity for this agent (dummy sentinel for run-state agents)
     pub entity: bevy_ecs::prelude::Entity,
     /// True when tracked via on-disk run-state (background worker process)
@@ -109,6 +147,8 @@ pub struct DashboardAgent {
     /// Original model override
     #[allow(dead_code)]
     pub model: Option<String>,
+    /// Unix timestamp when the run started (for elapsed display)
+    pub started_at: i64,
 }
 
 /// Event from an agent back to the dashboard.
@@ -139,6 +179,22 @@ enum EngineCommand {
     SendInput { agent_id: String, input: String },
 }
 
+/// Toast notification shown as an overlay.
+#[derive(Debug, Clone)]
+struct Toast {
+    message: String,
+    remaining_ticks: u32,
+    level: ToastLevel,
+}
+
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+enum ToastLevel {
+    Info,
+    Warning,
+    Error,
+}
+
 /// The interactive dashboard state.
 struct Dashboard {
     agents: Vec<DashboardAgent>,
@@ -155,10 +211,20 @@ struct Dashboard {
     should_quit: bool,
     /// True when the delete-agent confirmation popup is open
     confirm_delete: bool,
-    /// Scroll offset for detail view log: 0 = bottom (auto-scroll), >0 = scrolled up
+    /// Scroll offset for detail view content: 0 = bottom (auto-scroll), >0 = scrolled up
     detail_scroll: usize,
     /// Selected option index for MultipleChoice/ToolApproval/Confirm input
     choice_selected: usize,
+    /// Which stage tab is currently focused in the detail view
+    selected_stage: usize,
+    /// Whether the content pane shows Output or Logs
+    stage_content_mode: StageContentMode,
+    /// Monotonic tick counter for animations (spinner, toast timeouts)
+    tick_count: u64,
+    /// Active toast notifications
+    toasts: Vec<Toast>,
+    /// True when the help overlay (?) is shown
+    show_help: bool,
 }
 
 impl Dashboard {
@@ -186,6 +252,11 @@ impl Dashboard {
             confirm_delete: false,
             detail_scroll: 0,
             choice_selected: 0,
+            selected_stage: 0,
+            stage_content_mode: StageContentMode::Output,
+            tick_count: 0,
+            toasts: Vec::new(),
+            show_help: false,
         }
     }
 
@@ -222,6 +293,26 @@ impl Dashboard {
         runstate::append_dashboard_log(&msg);
     }
 
+    #[allow(dead_code)]
+    fn push_toast(&mut self, msg: impl Into<String>, level: ToastLevel) {
+        // 25 ticks ≈ 2.5 seconds at 100ms/tick
+        self.toasts.push(Toast {
+            message: msg.into(),
+            remaining_ticks: 25,
+            level,
+        });
+        if self.toasts.len() > 4 {
+            self.toasts.remove(0);
+        }
+    }
+
+    fn tick_toasts(&mut self) {
+        self.toasts.retain_mut(|t| {
+            if t.remaining_ticks > 0 { t.remaining_ticks -= 1; }
+            t.remaining_ticks > 0
+        });
+    }
+
     /// Sync agent list from on-disk run-state dir (background workers).
     fn sync_from_run_state(&mut self) {
         let runs = runstate::list_runs();
@@ -235,6 +326,7 @@ impl Dashboard {
                 RunStatus::Error => AgentDisplayStatus::Error(run.error.clone().unwrap_or_default()),
                 RunStatus::Cancelled => AgentDisplayStatus::Cancelled,
             };
+
             // For WaitingInput and CompleteInteractive agents, read the pending interaction from disk once
             let needs_input = matches!(run.status, RunStatus::WaitingInput | RunStatus::CompleteInteractive);
             let (waiting_prompt, pending_request) = if needs_input {
@@ -244,8 +336,21 @@ impl Dashboard {
                 (None, None)
             };
 
+            // Read stages index
+            let stages = runstate::read_stages_index(&run.run_id);
+
             if let Some(agent) = self.agents.iter_mut().find(|a| a.id == run.run_id) {
+                let prev_status_was_waiting = matches!(agent.status, AgentDisplayStatus::Waiting);
+                let now_needs_input = needs_input;
+
+                // Toast when an agent transitions to WaitingInput
+                if !prev_status_was_waiting && matches!(status, AgentDisplayStatus::Waiting) {
+                    // (toast added below after we push to agents vector, here just note it)
+                }
+
                 agent.stage = run.current_stage.clone();
+                agent.stage_index = run.stage_index;
+                agent.num_stages = run.num_stages;
                 agent.iteration = run.iteration;
                 agent.tokens_in = run.prompt_tokens;
                 agent.tokens_out = run.completion_tokens;
@@ -254,15 +359,25 @@ impl Dashboard {
                 agent.status = status;
                 agent.workdir = run.workdir.clone();
                 agent.context_snapshot = runstate::read_context_snapshot(&run.run_id);
-                if needs_input {
+                agent.stages = stages;
+
+                if now_needs_input {
                     if waiting_prompt.is_some() {
                         let pending_id = pending_request.as_ref().map(|r| r.id.as_str()).unwrap_or("");
-                        // Suppress re-showing a request we already answered but the worker
-                        // hasn't consumed yet — avoids the user accidentally submitting twice
                         let already_answered = agent.last_answered_request_id.as_deref()
                             .map(|a| !a.is_empty() && a == pending_id)
                             .unwrap_or(false);
                         if !already_answered {
+                            if agent.waiting_prompt.is_none() && waiting_prompt.is_some() {
+                                // Newly needs input — toast
+                                let name = agent.title.clone()
+                                    .unwrap_or_else(|| truncate(&agent.blueprint_name, 20));
+                                self.toasts.push(Toast {
+                                    message: format!("Agent '{}' needs input", name),
+                                    remaining_ticks: 35,
+                                    level: ToastLevel::Warning,
+                                });
+                            }
                             agent.waiting_prompt = waiting_prompt;
                             agent.pending_request = pending_request;
                         }
@@ -273,11 +388,31 @@ impl Dashboard {
                     agent.last_answered_request_id = None;
                 }
             } else {
+                // New agent — check if it needs input right away
+                if needs_input && waiting_prompt.is_some() {
+                    let name = run.title.clone().unwrap_or_else(|| truncate(&run.agent_name, 20));
+                    self.toasts.push(Toast {
+                        message: format!("Agent '{}' needs input", name),
+                        remaining_ticks: 35,
+                        level: ToastLevel::Warning,
+                    });
+                }
+                // Check for completion toast for new entries we haven't seen before
+                if matches!(run.status, RunStatus::Complete | RunStatus::CompleteInteractive) {
+                    let name = run.title.clone().unwrap_or_else(|| truncate(&run.agent_name, 20));
+                    self.toasts.push(Toast {
+                        message: format!("Agent '{}' completed", name),
+                        remaining_ticks: 35,
+                        level: ToastLevel::Info,
+                    });
+                }
                 self.agents.push(DashboardAgent {
                     id: run.run_id.clone(),
                     blueprint_name: run.agent_name.clone(),
                     agent_path: run.agent_path.clone(),
                     stage: run.current_stage.clone(),
+                    stage_index: run.stage_index,
+                    num_stages: run.num_stages,
                     status,
                     tokens_in: run.prompt_tokens,
                     tokens_out: run.completion_tokens,
@@ -287,6 +422,7 @@ impl Dashboard {
                     pending_request,
                     last_answered_request_id: None,
                     context_snapshot: runstate::read_context_snapshot(&run.run_id),
+                    stages,
                     entity: dummy,
                     is_run_state: true,
                     pid: run.pid,
@@ -294,6 +430,7 @@ impl Dashboard {
                     task: run.task.clone(),
                     title: run.title.clone(),
                     model: run.model.clone(),
+                    started_at: run.started_at,
                 });
             }
         }
@@ -375,7 +512,6 @@ impl Dashboard {
             Some(r) => match r.kind {
                 InteractionKind::FreeText => {
                     let raw = self.input_buffer.trim().to_string();
-                    // /quit and /exit are treated as empty (end-of-session signal)
                     let input = if raw == "/quit" || raw == "/exit" {
                         String::new()
                     } else {
@@ -391,7 +527,6 @@ impl Dashboard {
                     (InteractionResponse::choice(&r.id, idx), d)
                 }
                 InteractionKind::ToolApproval => {
-                    // Options: 0 = Allow once, 1 = Allow for this session, 2 = Deny
                     let idx = self.choice_selected;
                     let label = r.options.get(idx).cloned().unwrap_or_else(|| idx.to_string());
                     let d = truncate(&label, 40);
@@ -430,8 +565,6 @@ impl Dashboard {
         self.input_buffer.clear();
         self.choice_selected = 0;
 
-        // Record which request we just answered so sync_from_run_state doesn't
-        // re-show the same pending.json before the worker has consumed our response.
         let answered_id = resp.request_id.clone();
         if let Some(a) = self.agents.get_mut(self.selected) {
             a.last_answered_request_id = if answered_id.is_empty() { None } else { Some(answered_id) };
@@ -511,7 +644,42 @@ impl Dashboard {
         }
     }
 
+    /// True if the currently selected stage tab is the one actively accepting input.
+    fn selected_stage_can_respond(&self) -> bool {
+        let agent = match self.agents.get(self.selected) {
+            Some(a) => a,
+            None => return false,
+        };
+        if matches!(agent.status, AgentDisplayStatus::Cancelled) {
+            return false;
+        }
+        // Check if there's actually a prompt to respond to
+        if agent.waiting_prompt.is_none() && agent.pending_request.is_none() {
+            return false;
+        }
+        // Gate on the selected stage matching the stage currently requiring input.
+        // Use pending_request.stage_name if available, otherwise fall back to current stage_index.
+        let input_stage_idx = if let Some(req) = &agent.pending_request {
+            if !req.stage_name.is_empty() {
+                // Find stage by name
+                agent.stages.iter().position(|s| s.name == req.stage_name)
+                    .unwrap_or(agent.stage_index)
+            } else {
+                agent.stage_index
+            }
+        } else {
+            agent.stage_index
+        };
+        self.selected_stage == input_stage_idx
+    }
+
     fn handle_key(&mut self, key: KeyCode) {
+        // Help overlay takes priority
+        if self.show_help {
+            self.show_help = false;
+            return;
+        }
+
         // Delete confirmation popup has highest priority
         if self.confirm_delete {
             match key {
@@ -575,12 +743,47 @@ impl Dashboard {
                     self.detail_view = false;
                     self.detail_scroll = 0;
                 }
+                // Stage tab navigation
+                KeyCode::Left => {
+                    if self.selected_stage > 0 {
+                        self.selected_stage -= 1;
+                        self.detail_scroll = 0;
+                        self.stage_content_mode = StageContentMode::Output;
+                    }
+                }
+                KeyCode::Right => {
+                    let max_stage = self.agents.get(self.selected)
+                        .map(|a| a.num_stages.saturating_sub(1))
+                        .unwrap_or(0);
+                    if self.selected_stage < max_stage {
+                        self.selected_stage += 1;
+                        self.detail_scroll = 0;
+                        self.stage_content_mode = StageContentMode::Output;
+                    }
+                }
+                // Number keys 1-9: jump to stage tab
+                KeyCode::Char(c @ '1'..='9') => {
+                    let idx = (c as usize) - ('1' as usize);
+                    let max_stage = self.agents.get(self.selected)
+                        .map(|a| a.num_stages.saturating_sub(1))
+                        .unwrap_or(0);
+                    if idx <= max_stage {
+                        self.selected_stage = idx;
+                        self.detail_scroll = 0;
+                        self.stage_content_mode = StageContentMode::Output;
+                    }
+                }
+                // Content mode toggle
+                KeyCode::Char('l') => {
+                    self.stage_content_mode = StageContentMode::Logs;
+                    self.detail_scroll = 0;
+                }
+                KeyCode::Char('o') => {
+                    self.stage_content_mode = StageContentMode::Output;
+                    self.detail_scroll = 0;
+                }
                 KeyCode::Char('i') => {
-                    let can_respond = self.agents.get(self.selected).map(|a| {
-                        (a.waiting_prompt.is_some() || a.pending_request.is_some())
-                            && !matches!(a.status, AgentDisplayStatus::Cancelled)
-                    }).unwrap_or(false);
-                    if can_respond {
+                    if self.selected_stage_can_respond() {
                         self.input_mode = true;
                         self.choice_selected = 0;
                         self.input_buffer.clear();
@@ -592,15 +795,23 @@ impl Dashboard {
                 KeyCode::Down => {
                     self.detail_scroll = self.detail_scroll.saturating_sub(1);
                 }
+                KeyCode::PageUp => {
+                    self.detail_scroll = self.detail_scroll.saturating_add(10);
+                }
+                KeyCode::PageDown => {
+                    self.detail_scroll = self.detail_scroll.saturating_sub(10);
+                }
                 KeyCode::Char('b') => {
                     self.detail_scroll = usize::MAX;
                 }
                 KeyCode::Char('e') => {
                     self.detail_scroll = 0;
                 }
+                KeyCode::Char('?') => {
+                    self.show_help = true;
+                }
                 KeyCode::Char('k') => {
                     if let Some(agent) = self.agents.get(self.selected) {
-                        // CompleteInteractive agents are done — no kill allowed
                         if matches!(agent.status, AgentDisplayStatus::Active | AgentDisplayStatus::Waiting) {
                             let agent_id = agent.id.clone();
                             let pid = agent.pid;
@@ -655,6 +866,11 @@ impl Dashboard {
                 if !self.agents.is_empty() {
                     self.detail_view = true;
                     self.detail_scroll = 0;
+                    // Default to the currently active stage when opening detail view
+                    self.selected_stage = self.agents.get(self.selected)
+                        .map(|a| a.stage_index)
+                        .unwrap_or(0);
+                    self.stage_content_mode = StageContentMode::Output;
                 }
             }
             KeyCode::Char('d') => {
@@ -672,7 +888,6 @@ impl Dashboard {
             }
             KeyCode::Char('c') => {
                 if let Some(agent) = self.agents.get(self.selected) {
-                    // CompleteInteractive agents are done — no cancel allowed
                     if matches!(agent.status, AgentDisplayStatus::Active | AgentDisplayStatus::Waiting) {
                         let agent_id = agent.id.clone();
                         if agent.is_run_state {
@@ -698,7 +913,6 @@ impl Dashboard {
             }
             KeyCode::Char('k') => {
                 if let Some(agent) = self.agents.get(self.selected) {
-                    // CompleteInteractive agents are done — no kill allowed
                     if matches!(agent.status, AgentDisplayStatus::Active | AgentDisplayStatus::Waiting) {
                         let agent_id = agent.id.clone();
                         if agent.is_run_state {
@@ -722,49 +936,191 @@ impl Dashboard {
                     }
                 }
             }
+            KeyCode::Char('?') => {
+                self.show_help = true;
+            }
             _ => {}
+        }
+    }
+
+    fn handle_mouse(&mut self, event: MouseEvent) {
+        // Mouse support: scroll wheel in detail view
+        if self.detail_view && !self.input_mode {
+            match event.kind {
+                MouseEventKind::ScrollUp => {
+                    self.detail_scroll = self.detail_scroll.saturating_add(3);
+                }
+                MouseEventKind::ScrollDown => {
+                    self.detail_scroll = self.detail_scroll.saturating_sub(3);
+                }
+                _ => {}
+            }
         }
     }
 
     fn draw(&mut self, frame: &mut Frame) {
         if self.detail_view {
-            // Full-screen detail view
             let chunks = Layout::default()
                 .direction(Direction::Vertical)
                 .constraints([Constraint::Min(1), Constraint::Length(1)])
                 .split(frame.area());
             self.draw_detail_panel(frame, chunks[0]);
             self.draw_help_bar(frame, chunks[1]);
-            return;
+        } else {
+            // Normal layout: agent table + log panel + help bar
+            let chunks = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([
+                    Constraint::Percentage(55),
+                    Constraint::Percentage(44),
+                    Constraint::Length(1),
+                ])
+                .split(frame.area());
+            self.draw_agent_table(frame, chunks[0]);
+            self.draw_log_panel(frame, chunks[1]);
+            self.draw_help_bar(frame, chunks[2]);
         }
 
-        // Normal layout: agent table + log panel + help bar
-        let chunks = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Percentage(55),
-                Constraint::Percentage(44),
-                Constraint::Length(1),
-            ])
-            .split(frame.area());
+        // Render toasts (top-right overlay)
+        self.draw_toasts(frame);
 
-        self.draw_agent_table(frame, chunks[0]);
-        self.draw_log_panel(frame, chunks[1]);
-        self.draw_help_bar(frame, chunks[2]);
+        // Help overlay
+        if self.show_help {
+            self.draw_help_overlay(frame);
+        }
+
+        // Delete confirmation popup
+        if self.confirm_delete {
+            self.draw_confirm_popup(frame);
+        }
+    }
+
+    fn draw_toasts(&self, frame: &mut Frame) {
+        if self.toasts.is_empty() { return; }
+        let area = frame.area();
+        let toast_w: u16 = 40;
+        let toast_h: u16 = self.toasts.len() as u16;
+        let x = area.width.saturating_sub(toast_w + 1);
+        let y: u16 = 1;
+        let toast_area = Rect { x, y, width: toast_w, height: toast_h };
+        frame.render_widget(Clear, toast_area);
+        for (i, toast) in self.toasts.iter().enumerate() {
+            let color = match toast.level {
+                ToastLevel::Info => C_SUCCESS,
+                ToastLevel::Warning => C_WARN,
+                ToastLevel::Error => C_ERROR,
+            };
+            let icon = match toast.level {
+                ToastLevel::Info => "✓",
+                ToastLevel::Warning => "⏸",
+                ToastLevel::Error => "✗",
+            };
+            let msg = truncate(&toast.message, (toast_w - 4) as usize);
+            let line = Line::from(vec![
+                Span::styled(format!(" {} ", icon), Style::default().fg(color).add_modifier(Modifier::BOLD)),
+                Span::styled(msg, Style::default().fg(C_WHITE)),
+            ]);
+            let row = Rect { x, y: y + i as u16, width: toast_w, height: 1 };
+            frame.render_widget(
+                Paragraph::new(line).style(Style::default().bg(Color::Rgb(30, 30, 30))),
+                row,
+            );
+        }
+    }
+
+    fn draw_help_overlay(&self, frame: &mut Frame) {
+        let area = frame.area();
+        let w: u16 = 60.min(area.width.saturating_sub(4));
+        let h: u16 = 26.min(area.height.saturating_sub(4));
+        let x = (area.width.saturating_sub(w)) / 2;
+        let y = (area.height.saturating_sub(h)) / 2;
+        let popup = Rect { x, y, width: w, height: h };
+        frame.render_widget(Clear, popup);
+
+        let lines: Vec<Line> = vec![
+            Line::from(Span::styled("  Main list", Style::default().fg(C_ACCENT).add_modifier(Modifier::BOLD))),
+            Line::from(""),
+            Line::from(vec![Span::styled("  ↑/↓      ", Style::default().fg(C_WHITE).add_modifier(Modifier::BOLD)), Span::raw("Select agent")]),
+            Line::from(vec![Span::styled("  Enter    ", Style::default().fg(C_WHITE).add_modifier(Modifier::BOLD)), Span::raw("Open detail view")]),
+            Line::from(vec![Span::styled("  d        ", Style::default().fg(C_WHITE).add_modifier(Modifier::BOLD)), Span::raw("Delete run (permanent)")]),
+            Line::from(vec![Span::styled("  c / k    ", Style::default().fg(C_WHITE).add_modifier(Modifier::BOLD)), Span::raw("Cancel / Kill agent")]),
+            Line::from(vec![Span::styled("  Esc      ", Style::default().fg(C_WHITE).add_modifier(Modifier::BOLD)), Span::raw("Quit")]),
+            Line::from(""),
+            Line::from(Span::styled("  Detail view", Style::default().fg(C_ACCENT).add_modifier(Modifier::BOLD))),
+            Line::from(""),
+            Line::from(vec![Span::styled("  ←/→      ", Style::default().fg(C_WHITE).add_modifier(Modifier::BOLD)), Span::raw("Switch stage tab")]),
+            Line::from(vec![Span::styled("  1-9      ", Style::default().fg(C_WHITE).add_modifier(Modifier::BOLD)), Span::raw("Jump to stage by number")]),
+            Line::from(vec![Span::styled("  ↑/↓      ", Style::default().fg(C_WHITE).add_modifier(Modifier::BOLD)), Span::raw("Scroll output")]),
+            Line::from(vec![Span::styled("  PgUp/Dn  ", Style::default().fg(C_WHITE).add_modifier(Modifier::BOLD)), Span::raw("Scroll 10 lines")]),
+            Line::from(vec![Span::styled("  b / e    ", Style::default().fg(C_WHITE).add_modifier(Modifier::BOLD)), Span::raw("Jump to begin / end")]),
+            Line::from(vec![Span::styled("  l / o    ", Style::default().fg(C_WHITE).add_modifier(Modifier::BOLD)), Span::raw("Toggle Logs / Output")]),
+            Line::from(vec![Span::styled("  i        ", Style::default().fg(C_WHITE).add_modifier(Modifier::BOLD)), Span::raw("Respond (when input needed)")]),
+            Line::from(vec![Span::styled("  k        ", Style::default().fg(C_WHITE).add_modifier(Modifier::BOLD)), Span::raw("Kill agent")]),
+            Line::from(vec![Span::styled("  Esc      ", Style::default().fg(C_WHITE).add_modifier(Modifier::BOLD)), Span::raw("Back to list")]),
+            Line::from(""),
+            Line::from(Span::styled("  Any key to dismiss", Style::default().fg(C_DIM))),
+        ];
+
+        let widget = Paragraph::new(lines)
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_type(BorderType::Rounded)
+                    .border_style(Style::default().fg(C_ACCENT))
+                    .title(Span::styled(" Help  ? ", Style::default().fg(C_ACCENT).add_modifier(Modifier::BOLD)))
+                    .padding(Padding::uniform(0)),
+            );
+        frame.render_widget(widget, popup);
+    }
+
+    fn draw_confirm_popup(&self, frame: &mut Frame) {
+        let area = frame.area();
+        let w: u16 = 56.min(area.width.saturating_sub(4));
+        let h: u16 = 5;
+        let x = (area.width.saturating_sub(w)) / 2;
+        let y = (area.height.saturating_sub(h)) / 2;
+        let popup = Rect { x, y, width: w, height: h };
+        frame.render_widget(Clear, popup);
+
+        let agent_id = self.agents.get(self.selected).map(|a| a.id.as_str()).unwrap_or("?");
+        let lines = vec![
+            Line::from(""),
+            Line::from(Span::styled(
+                format!("  Delete run '{}'?  This is permanent.", truncate(agent_id, 24)),
+                Style::default().fg(C_WARN),
+            )),
+            Line::from(""),
+            Line::from(vec![
+                Span::styled("  [y]", Style::default().fg(C_ERROR).add_modifier(Modifier::BOLD)),
+                Span::raw(" confirm  "),
+                Span::styled("[any key]", Style::default().add_modifier(Modifier::BOLD)),
+                Span::raw(" cancel"),
+            ]),
+        ];
+        let widget = Paragraph::new(lines)
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_type(BorderType::Rounded)
+                    .border_style(Style::default().fg(C_ERROR))
+                    .title(Span::styled(" Confirm Delete ", Style::default().fg(C_ERROR).add_modifier(Modifier::BOLD))),
+            );
+        frame.render_widget(widget, popup);
     }
 
     fn draw_agent_table(&mut self, frame: &mut Frame, area: Rect) {
         let header = Row::new(vec![
-            Cell::from("ID"),
-            Cell::from("Title"),
-            Cell::from("Blueprint"),
-            Cell::from("Stage"),
-            Cell::from("Status"),
-            Cell::from("Tokens"),
-            Cell::from("Where"),
+            Cell::from(Span::styled("Title / ID", Style::default().add_modifier(Modifier::BOLD))),
+            Cell::from(Span::styled("Agent", Style::default().add_modifier(Modifier::BOLD))),
+            Cell::from(Span::styled("Stage", Style::default().add_modifier(Modifier::BOLD))),
+            Cell::from(Span::styled("Status", Style::default().add_modifier(Modifier::BOLD))),
+            Cell::from(Span::styled("Tokens", Style::default().add_modifier(Modifier::BOLD))),
+            Cell::from(Span::styled("Where", Style::default().add_modifier(Modifier::BOLD))),
         ])
-        .style(Style::default().add_modifier(Modifier::BOLD))
+        .style(Style::default().fg(C_MUTED))
         .height(1);
+
+        let spinner_frame = SPINNER[(self.tick_count as usize) % SPINNER.len()];
 
         let rows: Vec<Row> = self
             .agents
@@ -788,22 +1144,16 @@ impl Dashboard {
                             .join("/")
                     }
                 };
-                // Title: use generated title if available, else truncate the task.
                 let title_str = agent
                     .title
                     .as_deref()
-                    .map(|t| truncate(t, 28))
-                    .unwrap_or_else(|| truncate(&agent.task, 28));
-                // Tokens: show "in↑/out↓" for background runs, "used/max" for in-process.
+                    .map(|t| truncate(t, 26))
+                    .unwrap_or_else(|| truncate(&agent.task, 26));
                 let tok_str = if agent.is_run_state {
                     if agent.tokens_in == 0 && agent.tokens_out == 0 {
                         "—".to_string()
                     } else {
-                        format!(
-                            "{}↑ {}↓",
-                            format_tokens(agent.tokens_in),
-                            format_tokens(agent.tokens_out)
-                        )
+                        format!("{}↑ {}↓", format_tokens(agent.tokens_in), format_tokens(agent.tokens_out))
                     }
                 } else {
                     let (cur, max) = agent.context_tokens;
@@ -813,33 +1163,66 @@ impl Dashboard {
                         format_tokens(cur)
                     }
                 };
+                // Stage progress: "plan 2/3"
+                let stage_str = if agent.num_stages > 1 {
+                    format!("{} {}/{}", truncate(&agent.stage, 10), agent.stage_index + 1, agent.num_stages)
+                } else {
+                    truncate(&agent.stage, 14)
+                };
+                // Status with spinner for active
+                let status_str = if matches!(agent.status, AgentDisplayStatus::Active) {
+                    format!("{} ACTIVE", spinner_frame)
+                } else {
+                    agent.status.to_string()
+                };
                 Row::new(vec![
-                    Cell::from(agent.id.clone()),
                     Cell::from(title_str),
                     Cell::from(agent.blueprint_name.clone()),
-                    Cell::from(agent.stage.clone()),
-                    Cell::from(agent.status.to_string()).style(Style::default().fg(status_color)),
+                    Cell::from(stage_str),
+                    Cell::from(status_str).style(Style::default().fg(status_color)),
                     Cell::from(tok_str),
                     Cell::from(where_str),
                 ])
             })
             .collect();
 
+        let empty_state_msg = if self.agents.is_empty() {
+            Some("  No agents running. Use `lev run <agent> --task \"...\"` to start one.")
+        } else {
+            None
+        };
+
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
+            .border_style(Style::default().fg(C_BORDER))
+            .title(Span::styled(" Agents ", Style::default().fg(C_ACCENT).add_modifier(Modifier::BOLD)));
+
+        if let Some(msg) = empty_state_msg {
+            let widget = Paragraph::new(Line::from(Span::styled(msg, Style::default().fg(C_DIM))))
+                .block(block);
+            frame.render_widget(widget, area);
+            return;
+        }
+
         let table = Table::new(
             rows,
             [
-                Constraint::Percentage(18),
-                Constraint::Percentage(20),
-                Constraint::Percentage(10),
-                Constraint::Percentage(10),
-                Constraint::Percentage(16),
+                Constraint::Percentage(22),
                 Constraint::Percentage(12),
                 Constraint::Percentage(14),
+                Constraint::Percentage(18),
+                Constraint::Percentage(14),
+                Constraint::Percentage(20),
             ],
         )
         .header(header)
-        .block(Block::default().borders(Borders::ALL).title(" Agents "))
-        .row_highlight_style(Style::default().add_modifier(Modifier::REVERSED));
+        .block(block)
+        .row_highlight_style(
+            Style::default()
+                .add_modifier(Modifier::REVERSED)
+                .fg(C_WHITE),
+        );
 
         frame.render_stateful_widget(table, area, &mut self.table_state);
     }
@@ -857,31 +1240,28 @@ impl Dashboard {
             }
         };
 
+        // Clamp selected_stage to valid range
+        let max_tab = agent.num_stages.saturating_sub(1);
+        if self.selected_stage > max_tab {
+            self.selected_stage = max_tab;
+        }
+
+        // ── Layout: header + tabs + context bar + content + [input] ──────────
         let is_waiting = matches!(agent.status, AgentDisplayStatus::Waiting | AgentDisplayStatus::CompleteInteractive);
         let pending_req = agent.pending_request.clone();
         let kind = pending_req.as_ref().map(|r| r.kind.clone());
         let options: Vec<String> = pending_req.as_ref().map(|r| r.options.clone()).unwrap_or_default();
+
+        // Only show input pane on the tab that can actually respond
         let has_prompt = is_waiting
             && (pending_req.is_some() || agent.waiting_prompt.is_some())
-            && !matches!(agent.status, AgentDisplayStatus::Cancelled);
+            && !matches!(agent.status, AgentDisplayStatus::Cancelled)
+            && self.selected_stage_can_respond();
 
-        // ── Layout heights ──────────────────────────────────────────────────
-        // Base: id/status, blueprint/stage, location, tokens, border rows = 6.
-        // +1 for title line, +1 for task line (each shown when present).
-        let info_height: u16 = {
-            let mut h: u16 = 6;
-            if agent.title.is_some() { h += 1; }
-            if !agent.task.is_empty() { h += 1; }
-            h
-        };
-        let has_context = agent.context_snapshot.is_some();
-        let context_height: u16 = if has_context {
-            let n = agent.context_snapshot.as_ref().map(|s| s.regions.len()).unwrap_or(0) as u16;
-            (n + 4).min(12)
-        } else {
-            0
-        };
-        let prompt_height: u16 = if has_prompt || (self.input_mode && is_waiting) {
+        let header_h: u16 = 1;   // compact breadcrumb line
+        let tabs_h: u16 = 3;     // tabs row in a block (border top + tab line + border bottom)
+        let context_h: u16 = if agent.context_snapshot.is_some() || !agent.stages.is_empty() { 3 } else { 0 };
+        let prompt_height: u16 = if has_prompt || (self.input_mode && is_waiting && self.selected_stage_can_respond()) {
             let n = options.len() as u16;
             if self.input_mode {
                 match &kind {
@@ -898,238 +1278,366 @@ impl Dashboard {
             0
         };
 
-        // ── Split area ──────────────────────────────────────────────────────
-        // 4-branch match: (has_context, has_prompt)
-        let (info_area, context_area_opt, log_area, prompt_area_opt) = match (has_context, prompt_height > 0) {
-            (true, true) => {
-                let chunks = Layout::default()
-                    .direction(Direction::Vertical)
-                    .constraints([
-                        Constraint::Length(info_height),
-                        Constraint::Length(context_height),
-                        Constraint::Min(3),
-                        Constraint::Length(prompt_height),
-                    ])
-                    .split(area);
-                (chunks[0], Some(chunks[1]), chunks[2], Some(chunks[3]))
-            }
-            (true, false) => {
-                let chunks = Layout::default()
-                    .direction(Direction::Vertical)
-                    .constraints([
-                        Constraint::Length(info_height),
-                        Constraint::Length(context_height),
-                        Constraint::Min(3),
-                    ])
-                    .split(area);
-                (chunks[0], Some(chunks[1]), chunks[2], None)
-            }
-            (false, true) => {
-                let chunks = Layout::default()
-                    .direction(Direction::Vertical)
-                    .constraints([
-                        Constraint::Length(info_height),
-                        Constraint::Min(3),
-                        Constraint::Length(prompt_height),
-                    ])
-                    .split(area);
-                (chunks[0], None, chunks[1], Some(chunks[2]))
-            }
-            (false, false) => {
-                let chunks = Layout::default()
-                    .direction(Direction::Vertical)
-                    .constraints([Constraint::Length(info_height), Constraint::Min(3)])
-                    .split(area);
-                (chunks[0], None, chunks[1], None)
-            }
-        };
-
-        // ── Info block ──────────────────────────────────────────────────────
-        {
-            let mut info_lines = vec![
-                Line::from(vec![
-                    Span::styled(format!("[{}]  ", agent.id), Style::default().add_modifier(Modifier::BOLD)),
-                    Span::styled(agent.status.to_string(), Style::default().fg(agent.status.color())),
-                ]),
-                Line::from(vec![
-                    Span::styled("Blueprint: ", Style::default().fg(Color::DarkGray)),
-                    Span::raw(agent.blueprint_name.clone()),
-                    Span::styled("  Stage: ", Style::default().fg(Color::DarkGray)),
-                    Span::raw(agent.stage.clone()),
-                ]),
-                Line::from(vec![
-                    Span::styled("Location: ", Style::default().fg(Color::DarkGray)),
-                    Span::raw(if agent.workdir.is_empty() { "—".to_string() } else { agent.workdir.clone() }),
-                ]),
-                Line::from(vec![
-                    Span::styled("Tokens:   ", Style::default().fg(Color::DarkGray)),
-                    Span::raw(if agent.is_run_state {
-                        let total = agent.tokens_in + agent.tokens_out;
-                        if total == 0 {
-                            "—".to_string()
-                        } else {
-                            format!(
-                                "{} in / {} out ({} total)",
-                                agent.tokens_in,
-                                agent.tokens_out,
-                                total,
-                            )
-                        }
-                    } else {
-                        let (cur, max) = agent.context_tokens;
-                        if max > 0 {
-                            format!("{} used / {} max", format_tokens(cur), format_tokens(max))
-                        } else {
-                            format!("{} used", format_tokens(cur))
-                        }
-                    }),
-                    Span::styled("  Iter: ", Style::default().fg(Color::DarkGray)),
-                    Span::raw(agent.iteration.to_string()),
-                ]),
-            ];
-            // Show the generated title if available.
-            if let Some(ref title) = agent.title {
-                info_lines.push(Line::from(vec![
-                    Span::styled("Title:    ", Style::default().fg(Color::DarkGray)),
-                    Span::raw(title.clone()),
-                ]));
-            }
-            if !agent.task.is_empty() {
-                info_lines.push(Line::from(vec![
-                    Span::styled("Task:     ", Style::default().fg(Color::DarkGray)),
-                    Span::raw(truncate(&agent.task, 120)),
-                ]));
-            }
-            let info_widget = Paragraph::new(info_lines)
-                .block(Block::default().borders(Borders::ALL).title(" Agent "))
-                .wrap(Wrap { trim: true });
-            frame.render_widget(info_widget, info_area);
+        let mut constraints = vec![
+            Constraint::Length(header_h),
+            Constraint::Length(tabs_h),
+        ];
+        if context_h > 0 {
+            constraints.push(Constraint::Length(context_h));
+        }
+        constraints.push(Constraint::Min(4)); // content pane
+        if prompt_height > 0 {
+            constraints.push(Constraint::Length(prompt_height));
         }
 
-        // ── Context window pane ─────────────────────────────────────────────
-        if let Some(ctx_area) = context_area_opt {
-            if let Some(snap) = &agent.context_snapshot {
-                let inner_w = ctx_area.width.saturating_sub(4) as usize;
-                let mut ctx_lines: Vec<Line> = vec![];
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints(constraints)
+            .split(area);
 
-                // Header: stage name + total usage bar
+        let mut chunk_idx = 0;
+
+        // ── Header breadcrumb ─────────────────────────────────────────────────
+        {
+            let hdr_area = chunks[chunk_idx]; chunk_idx += 1;
+            let elapsed = elapsed_str(agent.started_at);
+            let status_color = agent.status.color();
+            let spinner_frame = SPINNER[(self.tick_count as usize) % SPINNER.len()];
+            let status_span = match &agent.status {
+                AgentDisplayStatus::Active => Span::styled(
+                    format!("{} {} ", spinner_frame, agent.status),
+                    Style::default().fg(status_color).add_modifier(Modifier::BOLD),
+                ),
+                _ => Span::styled(
+                    format!("{} ", agent.status),
+                    Style::default().fg(status_color).add_modifier(Modifier::BOLD),
+                ),
+            };
+            let title_text = agent.title.as_deref().unwrap_or(&agent.blueprint_name);
+            let hdr_line = Line::from(vec![
+                Span::styled(format!(" {} ", truncate(title_text, 28)), Style::default().fg(C_WHITE).add_modifier(Modifier::BOLD)),
+                Span::styled("· ", Style::default().fg(C_DIM)),
+                status_span,
+                Span::styled("· ", Style::default().fg(C_DIM)),
+                Span::styled(format!("{}↑", format_tokens(agent.tokens_in)), Style::default().fg(C_DIM)),
+                Span::styled(format!(" {}↓", format_tokens(agent.tokens_out)), Style::default().fg(C_DIM)),
+                Span::styled(format!(" · {} ", elapsed), Style::default().fg(C_DIM)),
+            ]);
+            frame.render_widget(Paragraph::new(hdr_line).style(Style::default().bg(Color::Rgb(20, 20, 30))), hdr_area);
+        }
+
+        // ── Stage tabs ─────────────────────────────────────────────────────────
+        {
+            let tabs_area = chunks[chunk_idx]; chunk_idx += 1;
+
+            // Build tab titles with status glyphs
+            let tab_titles: Vec<Line> = if agent.stages.is_empty() {
+                // Fallback: synthesize stage names from RunMeta info
+                (0..agent.num_stages.max(1)).map(|i| {
+                    let glyph = if i < agent.stage_index {
+                        Span::styled(format!("{} ", GLYPH_COMPLETE), Style::default().fg(C_SUCCESS))
+                    } else if i == agent.stage_index {
+                        match &agent.status {
+                            AgentDisplayStatus::Active => Span::styled(
+                                format!("{} ", SPINNER[(self.tick_count as usize) % SPINNER.len()]),
+                                Style::default().fg(C_ACTIVE),
+                            ),
+                            AgentDisplayStatus::Waiting => Span::styled(format!("{} ", GLYPH_WAITING), Style::default().fg(C_WARN)),
+                            AgentDisplayStatus::Error(_) => Span::styled(format!("{} ", GLYPH_ERROR), Style::default().fg(C_ERROR)),
+                            _ => Span::styled(format!("{} ", GLYPH_COMPLETE), Style::default().fg(C_SUCCESS)),
+                        }
+                    } else {
+                        Span::styled(format!("{} ", GLYPH_PENDING), Style::default().fg(C_DIM))
+                    };
+                    let stage_label = if i == agent.stage_index {
+                        truncate(&agent.stage, 12)
+                    } else {
+                        format!("stage {}", i + 1)
+                    };
+                    let label_span = if i == agent.stage_index {
+                        Span::styled(stage_label, Style::default().fg(C_WHITE).add_modifier(Modifier::BOLD))
+                    } else {
+                        Span::styled(stage_label, Style::default().fg(C_MUTED))
+                    };
+                    // Live stage marker
+                    let live_marker = if i == agent.stage_index && !matches!(agent.status, AgentDisplayStatus::Complete | AgentDisplayStatus::CompleteInteractive | AgentDisplayStatus::Cancelled | AgentDisplayStatus::Error(_)) {
+                        Span::styled("*", Style::default().fg(C_WARN))
+                    } else {
+                        Span::raw("")
+                    };
+                    Line::from(vec![glyph, label_span, live_marker])
+                }).collect()
+            } else {
+                agent.stages.iter().enumerate().map(|(i, s)| {
+                    let (glyph, glyph_style) = match &s.status {
+                        StageRunStatus::Pending => (GLYPH_PENDING, Style::default().fg(C_DIM)),
+                        StageRunStatus::Active => {
+                            let spin = SPINNER[(self.tick_count as usize) % SPINNER.len()];
+                            return Line::from(vec![
+                                Span::styled(format!("{} ", spin), Style::default().fg(C_ACTIVE)),
+                                Span::styled(truncate(&s.name, 12), Style::default().fg(C_WHITE).add_modifier(Modifier::BOLD)),
+                                Span::styled("*", Style::default().fg(C_WARN)),
+                            ]);
+                        }
+                        StageRunStatus::WaitingInput => (GLYPH_WAITING, Style::default().fg(C_WARN)),
+                        StageRunStatus::Complete => (GLYPH_COMPLETE, Style::default().fg(C_SUCCESS)),
+                        StageRunStatus::Error => (GLYPH_ERROR, Style::default().fg(C_ERROR)),
+                    };
+                    let is_live = i == agent.stage_index
+                        && !matches!(agent.status, AgentDisplayStatus::Complete | AgentDisplayStatus::CompleteInteractive | AgentDisplayStatus::Cancelled | AgentDisplayStatus::Error(_));
+                    let label_style = if is_live {
+                        Style::default().fg(C_WHITE).add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default().fg(C_MUTED)
+                    };
+                    Line::from(vec![
+                        Span::styled(format!("{} ", glyph), glyph_style),
+                        Span::styled(truncate(&s.name, 12), label_style),
+                    ])
+                }).collect()
+            };
+
+            let tabs_count = tab_titles.len().max(1);
+            let selected_tab = self.selected_stage.min(tabs_count - 1);
+
+            let tab_nav = if tabs_count > 1 {
+                format!(" ←/→ to switch  stage {}/{}", selected_tab + 1, tabs_count)
+            } else {
+                " stage 1/1".to_string()
+            };
+
+            let tabs_widget = Tabs::new(tab_titles)
+                .block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .border_type(BorderType::Rounded)
+                        .border_style(Style::default().fg(C_BORDER_FOCUS))
+                        .title(Span::styled(
+                            format!(" Stages{}", tab_nav),
+                            Style::default().fg(C_DIM),
+                        )),
+                )
+                .select(selected_tab)
+                .highlight_style(
+                    Style::default()
+                        .fg(C_ACCENT)
+                        .add_modifier(Modifier::BOLD | Modifier::REVERSED),
+                )
+                .divider(Span::styled(" │ ", Style::default().fg(C_DIM)));
+
+            frame.render_widget(tabs_widget, tabs_area);
+        }
+
+        // ── Context bar for selected stage ────────────────────────────────────
+        if context_h > 0 {
+            let ctx_area = chunks[chunk_idx]; chunk_idx += 1;
+            // Use per-stage context if available, else fall back to global snapshot
+            let snap_opt = if agent.is_run_state {
+                runstate::read_stage_context(&agent.id, self.selected_stage)
+                    .or_else(|| agent.context_snapshot.clone())
+            } else {
+                agent.context_snapshot.clone()
+            };
+
+            if let Some(snap) = snap_opt {
+                let inner_w = ctx_area.width.saturating_sub(4) as usize;
                 let total_pct = if snap.max_tokens > 0 {
                     (snap.total_tokens * 100 / snap.max_tokens).min(100)
                 } else { 0 };
-                let bar_w = inner_w.saturating_sub(30).max(4);
+                let bar_color = if total_pct >= 90 { C_ERROR } else if total_pct >= 70 { C_WARN } else { C_SUCCESS };
+
+                // Build compact mini region line
+                let bar_w = inner_w.saturating_sub(28).max(8);
                 let filled = bar_w * total_pct / 100;
-                let bar: String = format!("{}{}", "█".repeat(filled), "░".repeat(bar_w - filled));
-                let bar_color = if total_pct >= 90 { Color::Red } else if total_pct >= 70 { Color::Yellow } else { Color::Green };
-                ctx_lines.push(Line::from(vec![
-                    Span::styled(format!("  {:<14}", snap.stage_name), Style::default().fg(Color::White)),
-                    Span::styled(bar, Style::default().fg(bar_color)),
-                    Span::styled(format!(" {:>5}/{}", format_tokens(snap.total_tokens), format_tokens(snap.max_tokens)), Style::default().fg(Color::DarkGray)),
-                ]));
-                ctx_lines.push(Line::from(""));
+                let bar = format!("{}{}", "█".repeat(filled), "░".repeat(bar_w - filled));
 
-                // Per-region rows
-                for r in &snap.regions {
-                    let pct = if r.max_tokens > 0 { (r.current_tokens * 100 / r.max_tokens).min(100) } else { 0 };
-                    let seg_w = bar_w.saturating_sub(2).max(2);
-                    let seg_fill = if r.max_tokens > 0 { seg_w * r.current_tokens / r.max_tokens } else { 0 };
-                    let seg: String = format!("{}{}", "▪".repeat(seg_fill), "·".repeat(seg_w - seg_fill));
-                    let kind_color = match r.kind.as_str() {
-                        "pinned" => Color::Cyan,
-                        "sliding" => Color::Blue,
-                        "compacting" | "history" => Color::Magenta,
-                        _ => Color::DarkGray,
+                // Region dots
+                let regions_str: String = snap.regions.iter().take(5).map(|r| {
+                    let kind_char = match r.kind.as_str() {
+                        "pinned" => "P",
+                        "sliding" => "S",
+                        "compacting" | "history" => "H",
+                        _ => "·",
                     };
-                    ctx_lines.push(Line::from(vec![
-                        Span::styled(format!("  {:<14}", truncate(&r.name, 14)), Style::default().fg(Color::Gray)),
-                        Span::styled(seg, Style::default().fg(kind_color)),
-                        Span::styled(format!(" {:>3}%  {}", pct, truncate(&r.kind, 9)), Style::default().fg(Color::DarkGray)),
-                    ]));
-                }
+                    kind_char
+                }).collect::<Vec<_>>().join(" ");
 
-                let ctx_widget = Paragraph::new(ctx_lines)
-                    .block(Block::default().borders(Borders::ALL).title(" Context "));
-                frame.render_widget(ctx_widget, ctx_area);
+                let ctx_line = Line::from(vec![
+                    Span::styled(" ctx ", Style::default().fg(C_DIM)),
+                    Span::styled(bar, Style::default().fg(bar_color)),
+                    Span::styled(
+                        format!(" {:>3}%  {}/{}", total_pct, format_tokens(snap.total_tokens), format_tokens(snap.max_tokens)),
+                        Style::default().fg(C_DIM),
+                    ),
+                    Span::styled(format!("  [{}]", regions_str), Style::default().fg(C_DIM)),
+                ]);
+
+                frame.render_widget(
+                    Paragraph::new(ctx_line)
+                        .block(Block::default().borders(Borders::LEFT | Borders::RIGHT)
+                            .border_style(Style::default().fg(C_BORDER))),
+                    ctx_area,
+                );
+            } else {
+                // No context yet for this stage
+                let empty = Paragraph::new(Line::from(Span::styled(
+                    " ctx  —  no context snapshot yet",
+                    Style::default().fg(C_DIM),
+                )));
+                frame.render_widget(empty, ctx_area);
             }
         }
 
-        // ── Output / log block (scrollable) ────────────────────────────────
+        // ── Content pane (Output or Logs) ─────────────────────────────────────
         {
-            let inner_h = log_area.height.saturating_sub(2) as usize;
+            let content_area = chunks[chunk_idx]; chunk_idx += 1;
+            let inner_h = content_area.height.saturating_sub(2) as usize;
 
-            let log_content = if agent.is_run_state {
-                runstate::tail_log(&agent.id, 131_072)
+            let is_output = self.stage_content_mode == StageContentMode::Output;
+
+            // Read per-stage content
+            let content = if agent.is_run_state {
+                if is_output {
+                    runstate::tail_stage_output(&agent.id, self.selected_stage, 131_072)
+                } else {
+                    runstate::tail_stage_log(&agent.id, self.selected_stage, 131_072)
+                }
             } else {
                 String::new()
             };
 
-            let all_lines: Vec<&str> = log_content.lines().collect();
+            // Render lines with color-coding for logs
+            let all_lines: Vec<&str> = content.lines().collect();
             let total = all_lines.len();
-
-            // Clamp scroll to valid range
             let max_scroll = total.saturating_sub(inner_h);
             if self.detail_scroll > max_scroll {
                 self.detail_scroll = max_scroll;
             }
-
             let start = total.saturating_sub(inner_h + self.detail_scroll);
             let end = (start + inner_h).min(total);
 
-            let visible: Vec<Line> = all_lines[start..end]
-                .iter()
-                .map(|l| Line::from(Span::styled(l.to_string(), Style::default().fg(Color::Gray))))
-                .collect();
-
-            let log_title = if total > inner_h {
-                let pct = if max_scroll == 0 { 100usize } else {
-                    100 - self.detail_scroll * 100 / max_scroll
-                };
-                format!(" Output  {}%  ({}/{})", pct, end, total)
+            let visible: Vec<Line> = if total == 0 {
+                let stage_name = agent.stages.get(self.selected_stage)
+                    .map(|s| s.name.as_str())
+                    .unwrap_or("this stage");
+                vec![Line::from(Span::styled(
+                    format!(" No {} yet for {}.", if is_output { "output" } else { "logs" }, stage_name),
+                    Style::default().fg(C_DIM),
+                ))]
+            } else if is_output {
+                all_lines[start..end]
+                    .iter()
+                    .map(|l| Line::from(Span::styled(format!(" {}", l), Style::default().fg(C_WHITE))))
+                    .collect()
             } else {
-                " Output ".to_string()
+                // Logs: color-code prefixes
+                all_lines[start..end]
+                    .iter()
+                    .map(|l| {
+                        let (color, prefix_end) = if l.starts_with("[tool]") {
+                            (C_ACCENT, 6)
+                        } else if l.starts_with("[error]") {
+                            (C_ERROR, 7)
+                        } else if l.starts_with("[denied]") {
+                            (C_WARN, 8)
+                        } else if l.starts_with("---") || l.starts_with("[All") {
+                            (C_DIM, 0)
+                        } else {
+                            (C_MUTED, 0)
+                        };
+                        if prefix_end > 0 && l.len() > prefix_end {
+                            Line::from(vec![
+                                Span::styled(format!(" {}", &l[..prefix_end]), Style::default().fg(color).add_modifier(Modifier::BOLD)),
+                                Span::styled(l[prefix_end..].to_string(), Style::default().fg(C_MUTED)),
+                            ])
+                        } else {
+                            Line::from(Span::styled(format!(" {}", l), Style::default().fg(color)))
+                        }
+                    })
+                    .collect()
             };
 
-            let log_widget = Paragraph::new(visible)
-                .block(Block::default().borders(Borders::ALL).title(log_title));
-            frame.render_widget(log_widget, log_area);
+            // Tool count badge for logs tab
+            let tool_count = if !is_output && total > 0 {
+                let tc = all_lines.iter().filter(|l| l.starts_with("[tool]")).count();
+                if tc > 0 { format!(" · {} tools", tc) } else { String::new() }
+            } else { String::new() };
+
+            let mode_label = if is_output {
+                format!(" Output  [l] logs{} ", tool_count)
+            } else {
+                format!(" Logs  [o] output{} ", tool_count)
+            };
+            let scroll_info = if total > inner_h {
+                let pct = if max_scroll == 0 { 100usize } else {
+                    100 - self.detail_scroll.min(max_scroll) * 100 / max_scroll
+                };
+                format!(" {}% ({}/{}) ", pct, end, total)
+            } else {
+                String::new()
+            };
+
+            let content_block = Block::default()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
+                .border_style(Style::default().fg(C_BORDER_FOCUS))
+                .title(Span::styled(mode_label, Style::default().fg(C_ACCENT)))
+                .title_bottom(Span::styled(scroll_info, Style::default().fg(C_DIM)));
+
+            let content_widget = Paragraph::new(visible)
+                .block(content_block)
+                .wrap(Wrap { trim: false });
+            frame.render_widget(content_widget, content_area);
+
+            // Scrollbar
+            if total > inner_h {
+                let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
+                    .begin_symbol(Some("↑"))
+                    .end_symbol(Some("↓"));
+                let mut sb_state = ScrollbarState::new(max_scroll)
+                    .position(max_scroll.saturating_sub(self.detail_scroll));
+                frame.render_stateful_widget(
+                    scrollbar,
+                    content_area.inner(Margin { vertical: 1, horizontal: 0 }),
+                    &mut sb_state,
+                );
+            }
         }
 
-        // ── Prompt / input block ────────────────────────────────────────────
-        if let Some(prompt_area) = prompt_area_opt {
+        // ── Input / prompt pane ───────────────────────────────────────────────
+        if prompt_height > 0 {
+            let prompt_area = chunks[chunk_idx];
             let required = pending_req.as_ref().map(|r| r.required).unwrap_or(true);
             let (title, prompt_lines): (&str, Vec<Line>) = if self.input_mode {
                 let mut lines: Vec<Line> = vec![];
                 match &kind {
                     Some(InteractionKind::FreeText) | None => {
-                        // Show the prompt question above the input cursor
                         let prompt_text = pending_req.as_ref()
                             .map(|r| r.prompt.as_str())
                             .or(agent.waiting_prompt.as_deref())
                             .unwrap_or("Enter response:");
                         lines.push(Line::from(Span::styled(
-                            prompt_text.to_string(),
-                            Style::default().fg(Color::Yellow),
+                            format!(" {}", prompt_text),
+                            Style::default().fg(C_WARN),
                         )));
                         lines.push(Line::from(""));
                         lines.push(Line::from(vec![
-                            Span::styled("> ", Style::default().fg(Color::Green)),
+                            Span::styled(" > ", Style::default().fg(C_SUCCESS)),
                             Span::raw(self.input_buffer.clone()),
-                            Span::styled("█", Style::default().fg(Color::Green)),
+                            Span::styled("█", Style::default().fg(C_SUCCESS)),
                         ]));
                         lines.push(Line::from(""));
                         let hint = if !required {
-                            "[Enter] send  [empty or /quit to end]  [Esc] cancel"
+                            " [Enter] send  [empty or /quit to end]  [Esc] cancel"
                         } else {
-                            "[Enter] send  [Esc] cancel"
+                            " [Enter] send  [Esc] cancel"
                         };
-                        lines.push(Line::from(Span::styled(
-                            hint,
-                            Style::default().fg(Color::DarkGray),
-                        )));
+                        lines.push(Line::from(Span::styled(hint, Style::default().fg(C_DIM))));
                     }
                     _ => {
                         for (i, opt) in options.iter().enumerate() {
                             let sel = i == self.choice_selected;
-                            let prefix = if sel { "> " } else { "  " };
+                            let prefix = if sel { " > " } else { "   " };
                             let label = match &kind {
                                 Some(InteractionKind::Confirm) => {
                                     format!("{}{}) {}", prefix, if i == 0 { "y" } else { "n" }, opt)
@@ -1137,16 +1645,16 @@ impl Dashboard {
                                 _ => format!("{}[{}] {}", prefix, i + 1, opt),
                             };
                             let style = if sel {
-                                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)
+                                Style::default().fg(C_WARN).add_modifier(Modifier::BOLD)
                             } else {
-                                Style::default()
+                                Style::default().fg(C_MUTED)
                             };
                             lines.push(Line::from(Span::styled(label, style)));
                         }
                         lines.push(Line::from(""));
                         lines.push(Line::from(Span::styled(
-                            "[↑↓] select  [Enter] confirm  [Esc] cancel",
-                            Style::default().fg(Color::DarkGray),
+                            " [↑↓] select  [Enter] confirm  [Esc] cancel",
+                            Style::default().fg(C_DIM),
                         )));
                     }
                 }
@@ -1158,28 +1666,28 @@ impl Dashboard {
                     .or(agent.waiting_prompt.as_deref())
                     .unwrap_or("Waiting for input");
                 lines.push(Line::from(Span::styled(
-                    prompt_text.to_string(),
-                    Style::default().fg(Color::Yellow),
+                    format!(" {}", prompt_text),
+                    Style::default().fg(C_WARN),
                 )));
                 if !options.is_empty() {
                     lines.push(Line::from(""));
                     for (i, opt) in options.iter().enumerate() {
                         let label = match &kind {
                             Some(InteractionKind::Confirm) => {
-                                format!("  {}) {}", if i == 0 { "y" } else { "n" }, opt)
+                                format!("   {}) {}", if i == 0 { "y" } else { "n" }, opt)
                             }
-                            _ => format!("  [{}] {}", i + 1, opt),
+                            _ => format!("   [{}] {}", i + 1, opt),
                         };
-                        lines.push(Line::from(label));
+                        lines.push(Line::from(Span::styled(label, Style::default().fg(C_MUTED))));
                     }
                 }
                 lines.push(Line::from(""));
                 let hint = if matches!(agent.status, AgentDisplayStatus::CompleteInteractive) {
-                    "[i] respond"
+                    " [i] respond"
                 } else {
-                    "[i] respond  [k] kill"
+                    " [i] respond  [k] kill"
                 };
-                lines.push(Line::from(Span::styled(hint, Style::default().fg(Color::DarkGray))));
+                lines.push(Line::from(Span::styled(hint, Style::default().fg(C_DIM))));
                 let title = if matches!(agent.status, AgentDisplayStatus::CompleteInteractive) {
                     " Input Allowed "
                 } else {
@@ -1188,8 +1696,15 @@ impl Dashboard {
                 (title, lines)
             };
 
+            let prompt_color = if self.input_mode { C_SUCCESS } else { C_WARN };
             let prompt_widget = Paragraph::new(prompt_lines)
-                .block(Block::default().borders(Borders::ALL).title(title))
+                .block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .border_type(BorderType::Rounded)
+                        .border_style(Style::default().fg(prompt_color))
+                        .title(Span::styled(title, Style::default().fg(prompt_color).add_modifier(Modifier::BOLD))),
+                )
                 .wrap(Wrap { trim: true });
             frame.render_widget(prompt_widget, prompt_area);
         }
@@ -1205,17 +1720,22 @@ impl Dashboard {
             .map(|entry| {
                 Line::from(vec![
                     Span::styled(
-                        format!("{} ", entry.timestamp),
-                        Style::default().fg(Color::DarkGray),
+                        format!(" {} ", entry.timestamp),
+                        Style::default().fg(C_DIM),
                     ),
-                    Span::raw(&entry.message),
+                    Span::styled(&entry.message, Style::default().fg(C_MUTED)),
                 ])
             })
             .collect();
 
         let log = Paragraph::new(log_lines)
-            .block(Block::default().borders(Borders::ALL).title(" Log "));
-
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_type(BorderType::Rounded)
+                    .border_style(Style::default().fg(C_BORDER))
+                    .title(Span::styled(" Log ", Style::default().fg(C_DIM))),
+            );
         frame.render_widget(log, area);
     }
 
@@ -1224,7 +1744,7 @@ impl Dashboard {
 
         let help = if self.confirm_delete {
             Line::from(vec![
-                Span::styled("[y]", Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
+                Span::styled("[y]", Style::default().fg(C_ERROR).add_modifier(Modifier::BOLD)),
                 Span::raw(" confirm delete  "),
                 Span::styled("[any key]", Style::default().add_modifier(Modifier::BOLD)),
                 Span::raw(" cancel"),
@@ -1235,57 +1755,54 @@ impl Dashboard {
                 .map(|r| r.kind.clone());
             match kind {
                 Some(InteractionKind::FreeText) | None => Line::from(vec![
-                    Span::styled("[Enter]", Style::default().add_modifier(Modifier::BOLD)),
+                    Span::styled("[Enter]", Style::default().fg(C_ACCENT).add_modifier(Modifier::BOLD)),
                     Span::raw(" send  "),
                     Span::styled("[Esc]", Style::default().add_modifier(Modifier::BOLD)),
                     Span::raw(" cancel"),
                 ]),
                 _ => Line::from(vec![
-                    Span::styled("[↑↓]", Style::default().add_modifier(Modifier::BOLD)),
+                    Span::styled("[↑↓]", Style::default().fg(C_ACCENT).add_modifier(Modifier::BOLD)),
                     Span::raw(" select  "),
-                    Span::styled("[Enter]", Style::default().add_modifier(Modifier::BOLD)),
+                    Span::styled("[Enter]", Style::default().fg(C_ACCENT).add_modifier(Modifier::BOLD)),
                     Span::raw(" confirm  "),
                     Span::styled("[Esc]", Style::default().add_modifier(Modifier::BOLD)),
                     Span::raw(" cancel"),
                 ]),
             }
         } else if self.detail_view {
-            let agent = self.agents.get(self.selected);
-            let can_respond = agent.map(|a| {
-                (a.waiting_prompt.is_some() || a.pending_request.is_some())
-                    && !matches!(a.status, AgentDisplayStatus::Cancelled)
-            }).unwrap_or(false);
-            let can_kill = agent.map(|a| {
-                // CompleteInteractive = work is done, don't offer kill
+            let can_respond = self.selected_stage_can_respond();
+            let can_kill = self.agents.get(self.selected).map(|a| {
                 matches!(a.status, AgentDisplayStatus::Active | AgentDisplayStatus::Waiting)
             }).unwrap_or(false);
             let mut spans = vec![
-                Span::styled("[↑↓]", Style::default().add_modifier(Modifier::BOLD)),
+                Span::styled("[←/→]", Style::default().fg(C_ACCENT).add_modifier(Modifier::BOLD)),
+                Span::raw(" stage  "),
+                Span::styled("[↑/↓]", Style::default().add_modifier(Modifier::BOLD)),
                 Span::raw(" scroll  "),
-                Span::styled("[b/e]", Style::default().add_modifier(Modifier::BOLD)),
-                Span::raw(" begin/end  "),
+                Span::styled("[l/o]", Style::default().add_modifier(Modifier::BOLD)),
+                Span::raw(" logs/output  "),
             ];
             if can_respond {
-                spans.push(Span::styled("[i]", Style::default().add_modifier(Modifier::BOLD)));
+                spans.push(Span::styled("[i]", Style::default().fg(C_WARN).add_modifier(Modifier::BOLD)));
                 spans.push(Span::raw(" respond  "));
             }
             if can_kill {
-                spans.push(Span::styled("[k]", Style::default().add_modifier(Modifier::BOLD)));
+                spans.push(Span::styled("[k]", Style::default().fg(C_ERROR).add_modifier(Modifier::BOLD)));
                 spans.push(Span::raw(" kill  "));
             }
+            spans.push(Span::styled("[?]", Style::default().fg(C_DIM).add_modifier(Modifier::BOLD)));
+            spans.push(Span::raw(" help  "));
             spans.push(Span::styled("[Esc]", Style::default().add_modifier(Modifier::BOLD)));
             spans.push(Span::raw(" back"));
             Line::from(spans)
         } else {
-            let agent = self.agents.get(self.selected);
-            let can_kill = agent.map(|a| {
-                // CompleteInteractive = work is done, don't offer kill
+            let can_kill = self.agents.get(self.selected).map(|a| {
                 matches!(a.status, AgentDisplayStatus::Active | AgentDisplayStatus::Waiting)
             }).unwrap_or(false);
             let mut spans = vec![
-                Span::styled("[↑↓]", Style::default().add_modifier(Modifier::BOLD)),
+                Span::styled("[↑↓]", Style::default().fg(C_ACCENT).add_modifier(Modifier::BOLD)),
                 Span::raw(" select  "),
-                Span::styled("[Enter]", Style::default().add_modifier(Modifier::BOLD)),
+                Span::styled("[Enter]", Style::default().fg(C_ACCENT).add_modifier(Modifier::BOLD)),
                 Span::raw(" detail  "),
                 Span::styled("[d]", Style::default().add_modifier(Modifier::BOLD)),
                 Span::raw(" delete  "),
@@ -1293,18 +1810,23 @@ impl Dashboard {
             if can_kill {
                 spans.push(Span::styled("[c]", Style::default().add_modifier(Modifier::BOLD)));
                 spans.push(Span::raw(" cancel  "));
-                spans.push(Span::styled("[k]", Style::default().add_modifier(Modifier::BOLD)));
+                spans.push(Span::styled("[k]", Style::default().fg(C_ERROR).add_modifier(Modifier::BOLD)));
                 spans.push(Span::raw(" kill  "));
             }
+            spans.push(Span::styled("[?]", Style::default().fg(C_DIM).add_modifier(Modifier::BOLD)));
+            spans.push(Span::raw(" help  "));
             spans.push(Span::styled("[Esc]", Style::default().add_modifier(Modifier::BOLD)));
             spans.push(Span::raw(" quit"));
             Line::from(spans)
         };
 
-        let help_widget = Paragraph::new(help);
+        let help_widget = Paragraph::new(help)
+            .style(Style::default().bg(Color::Rgb(20, 20, 30)));
         frame.render_widget(help_widget, area);
     }
 }
+
+// ─── Helpers ─────────────────────────────────────────────────────────────────
 
 /// After SIGTERMing a background worker, immediately write Cancelled to meta.json
 /// so the next sync tick doesn't revert the status.
@@ -1317,10 +1839,11 @@ fn kill_write_cancelled(run_id: &str) {
 }
 
 fn truncate(s: &str, max: usize) -> String {
+    let s = s.trim();
     if s.len() <= max {
         s.to_string()
     } else {
-        format!("{}...", &s[..max])
+        format!("{}…", &s[..max])
     }
 }
 
@@ -1332,6 +1855,24 @@ fn format_tokens(n: usize) -> String {
         format!("{}k", n / 1_000)
     } else {
         n.to_string()
+    }
+}
+
+/// Format elapsed seconds as a human-readable duration string.
+fn elapsed_str(started_at: i64) -> String {
+    if started_at == 0 { return "—".to_string(); }
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let secs = (now - started_at).max(0) as u64;
+    if secs < 60 {
+        format!("{}s", secs)
+    } else if secs < 3600 {
+        format!("{}m{}s", secs / 60, secs % 60)
+    } else {
+        format!("{}h{}m", secs / 3600, (secs % 3600) / 60)
     }
 }
 
@@ -1382,11 +1923,12 @@ pub async fn execute(_args: DashboardArgs) -> anyhow::Result<()> {
     // Start engine background loop
     tokio::spawn(engine_background_loop(engine.clone(), cmd_rx, bg_event_tx));
 
-    dashboard.add_log("Dashboard started. Use `lev run <blueprint> --task \"...\"` to start agents.".to_string());
+    dashboard.add_log("Dashboard started. Use `lev run <agent>` to start an agent.".to_string());
 
-    // Enter TUI mode
+    // Enter TUI mode with mouse support
     enable_raw_mode()?;
     stdout().execute(EnterAlternateScreen)?;
+    crossterm::execute!(stdout(), crossterm::event::EnableMouseCapture)?;
 
     let backend = ratatui::backend::CrosstermBackend::new(stdout());
     let mut terminal = Terminal::new(backend)?;
@@ -1394,6 +1936,9 @@ pub async fn execute(_args: DashboardArgs) -> anyhow::Result<()> {
     let tick_rate = Duration::from_millis(100);
 
     loop {
+        dashboard.tick_count += 1;
+        dashboard.tick_toasts();
+
         // Process agent events
         dashboard.process_events();
 
@@ -1410,10 +1955,17 @@ pub async fn execute(_args: DashboardArgs) -> anyhow::Result<()> {
 
         // Handle input
         if event::poll(tick_rate)? {
-            if let Event::Key(key) = event::read()? {
-                if key.kind == KeyEventKind::Press {
+            match event::read()? {
+                Event::Key(key) if key.kind == KeyEventKind::Press => {
                     dashboard.handle_key(key.code);
                 }
+                Event::Mouse(mouse) => {
+                    dashboard.handle_mouse(mouse);
+                }
+                Event::Resize(_, _) => {
+                    // Terminal will redraw automatically on next tick
+                }
+                _ => {}
             }
         }
 
@@ -1423,6 +1975,7 @@ pub async fn execute(_args: DashboardArgs) -> anyhow::Result<()> {
     }
 
     // Restore terminal
+    crossterm::execute!(stdout(), crossterm::event::DisableMouseCapture)?;
     disable_raw_mode()?;
     stdout().execute(LeaveAlternateScreen)?;
 
