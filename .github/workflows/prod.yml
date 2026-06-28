@@ -146,6 +146,8 @@ jobs:
 
             # Linux (x86_64)
             curl -sL <release-url>/lev-linux-x86_64 -o lev && chmod +x lev && sudo mv lev /usr/local/bin/
+
+            # Windows (x86_64) — download lev-windows-x86_64.exe and add to PATH
             ```
 
             **From source:**

@@ -105,8 +105,8 @@ impl BuiltinTools {
                 }),
             },
             Tool {
-                name: "bash".to_string(),
-                description: "Execute a shell command in the working directory. Use this for build commands, running tests, installing dependencies, or other shell operations. Has a 60-second timeout.".to_string(),
+                name: "shell".to_string(),
+                description: "Execute a shell command in the working directory. Uses the system shell (bash/zsh on Unix, cmd on Windows). Use this for build commands, running tests, installing dependencies, or other shell operations. Has a 60-second timeout.".to_string(),
                 parameters: json!({
                     "type": "object",
                     "properties": {
@@ -128,7 +128,8 @@ impl BuiltinTools {
             "write_file".to_string(),
             "edit_file".to_string(),
             "list_dir".to_string(),
-            "bash".to_string(),
+            "shell".to_string(),
+            "bash".to_string(), // Alias for backward compatibility
         ]
     }
 
@@ -139,7 +140,7 @@ impl BuiltinTools {
             "write_file" => self.write_file(&args).await,
             "edit_file" => self.edit_file(&args).await,
             "list_dir" => self.list_dir(&args).await,
-            "bash" => self.bash(&args).await,
+            "shell" | "bash" => self.shell(&args).await,
             _ => format!("[error] Unknown built-in tool: {}", name),
         }
     }
@@ -298,23 +299,59 @@ impl BuiltinTools {
         }
     }
 
-    async fn bash(&self, args: &Value) -> String {
+    /// Detect the best available shell on the system.
+    ///
+    /// Priority:
+    /// - Windows: cmd.exe (always available)
+    /// - Unix: $SHELL env var (user's preferred shell) → bash → zsh → sh
+    fn detect_shell() -> (&'static str, &'static str) {
+        #[cfg(windows)]
+        {
+            ("cmd.exe", "/C")
+        }
+
+        #[cfg(not(windows))]
+        {
+            // Check user's preferred shell first
+            if let Ok(shell) = std::env::var("SHELL") {
+                if shell.ends_with("/zsh") || shell.ends_with("/bash") || shell.ends_with("/sh") {
+                    // Leak the string so we can return a static ref — this only runs once per detect
+                    // and the shell path lives for the process lifetime anyway
+                    let shell: &'static str = Box::leak(shell.into_boxed_str());
+                    return (shell, "-c");
+                }
+            }
+
+            // Fallback: try common shells in order
+            for shell in &["/bin/bash", "/usr/bin/bash", "/bin/zsh", "/usr/bin/zsh", "/bin/sh"] {
+                if std::path::Path::new(shell).exists() {
+                    return (shell, "-c");
+                }
+            }
+
+            // Last resort
+            ("sh", "-c")
+        }
+    }
+
+    async fn shell(&self, args: &Value) -> String {
         let command = match args.get("command").and_then(|v| v.as_str()) {
             Some(c) => c,
             None => return "[error] missing 'command' argument".to_string(),
         };
 
         let workdir = self.ctx.workdir.clone();
+        let (shell, flag) = Self::detect_shell();
 
-        let run = Command::new("bash")
-            .arg("-c")
+        let run = Command::new(shell)
+            .arg(flag)
             .arg(command)
             .current_dir(&workdir)
             .output();
 
         match timeout(Duration::from_secs(60), run).await {
             Err(_) => format!("[timed out] Command exceeded 60s: {}", command),
-            Ok(Err(e)) => format!("[error] Failed to spawn command: {}", e),
+            Ok(Err(e)) => format!("[error] Failed to spawn shell '{}': {}", shell, e),
             Ok(Ok(output)) => {
                 let stdout = String::from_utf8_lossy(&output.stdout);
                 let stderr = String::from_utf8_lossy(&output.stderr);
