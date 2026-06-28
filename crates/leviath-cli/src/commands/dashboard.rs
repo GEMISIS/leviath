@@ -811,6 +811,9 @@ impl Dashboard {
                         self.detail_scroll = 0;
                         self.review_scroll = 0;
                         self.stage_content_mode = StageContentMode::Output;
+                        self.search_mode = false;
+                        self.search_query.clear();
+                        self.search_match_idx = 0;
                     }
                 }
                 KeyCode::Right => {
@@ -822,6 +825,9 @@ impl Dashboard {
                         self.detail_scroll = 0;
                         self.review_scroll = 0;
                         self.stage_content_mode = StageContentMode::Output;
+                        self.search_mode = false;
+                        self.search_query.clear();
+                        self.search_match_idx = 0;
                     }
                 }
                 // Number keys 1-9: jump to stage tab
@@ -835,6 +841,9 @@ impl Dashboard {
                         self.detail_scroll = 0;
                         self.review_scroll = 0;
                         self.stage_content_mode = StageContentMode::Output;
+                        self.search_mode = false;
+                        self.search_query.clear();
+                        self.search_match_idx = 0;
                     }
                 }
                 // Content mode toggle
