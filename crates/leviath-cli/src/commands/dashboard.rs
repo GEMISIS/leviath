@@ -1084,11 +1084,18 @@ impl Dashboard {
                     }
                 }
                 lines.push(Line::from(""));
-                lines.push(Line::from(Span::styled(
-                    "[i] respond  [k] kill",
-                    Style::default().fg(Color::DarkGray),
-                )));
-                (" Input Required ", lines)
+                let hint = if matches!(agent.status, AgentDisplayStatus::CompleteInteractive) {
+                    "[i] respond"
+                } else {
+                    "[i] respond  [k] kill"
+                };
+                lines.push(Line::from(Span::styled(hint, Style::default().fg(Color::DarkGray))));
+                let title = if matches!(agent.status, AgentDisplayStatus::CompleteInteractive) {
+                    " Input Allowed "
+                } else {
+                    " Input Required "
+                };
+                (title, lines)
             };
 
             let prompt_widget = Paragraph::new(prompt_lines)
