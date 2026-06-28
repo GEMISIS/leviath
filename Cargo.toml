@@ -37,7 +37,7 @@ reqwest = { version = "0.12", features = ["json", "stream"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 thiserror = "2.0"
-toml = "0.8"
+toml = { version = "0.8", features = ["preserve_order"] }
 anyhow = "1.0"
 chrono = "0.4"
 rhai = { version = "1.20", features = ["sync"] }

@@ -73,6 +73,22 @@ pub struct WorkerArgs {
     /// Model override
     #[arg(short, long)]
     pub model: Option<String>,
+
+    /// Allow all tool calls without prompting
+    #[arg(long, default_value_t = false)]
+    pub yolo: bool,
+
+    /// Tools to auto-allow (comma-separated)
+    #[arg(long, value_delimiter = ',')]
+    pub allow: Vec<String>,
+
+    /// Tools to always ask about (comma-separated)
+    #[arg(long, value_delimiter = ',')]
+    pub ask: Vec<String>,
+
+    /// Tools to deny entirely (comma-separated)
+    #[arg(long, value_delimiter = ',')]
+    pub deny: Vec<String>,
 }
 
 pub async fn execute(args: RunArgs) -> anyhow::Result<()> {
@@ -133,6 +149,18 @@ pub async fn execute(args: RunArgs) -> anyhow::Result<()> {
 
         if let Some(ref model) = args.model {
             cmd.arg("--model").arg(model);
+        }
+        if args.yolo {
+            cmd.arg("--yolo");
+        }
+        for t in &args.allow {
+            cmd.arg("--allow").arg(t);
+        }
+        for t in &args.ask {
+            cmd.arg("--ask").arg(t);
+        }
+        for t in &args.deny {
+            cmd.arg("--deny").arg(t);
         }
 
         cmd.current_dir(&workdir)
@@ -226,9 +254,16 @@ async fn run_foreground(args: RunArgs) -> anyhow::Result<()> {
     // Current stage's permissions (updated per stage below)
     let current_stage_perms: Arc<Mutex<std::collections::HashMap<String, String>>> =
         Arc::new(Mutex::new(std::collections::HashMap::new()));
-    // Agent-level permissions (static across stages, from blueprint)
-    let agent_perms_arc: Arc<std::collections::HashMap<String, String>> =
-        Arc::new(std::collections::HashMap::new()); // populated from blueprint if present
+    // Agent-level permissions from the blueprint's [tool_permissions] section
+    let agent_perms: std::collections::HashMap<String, String> = blueprint
+        .metadata
+        .iter()
+        .filter_map(|(k, v)| {
+            k.strip_prefix("tool_perm:")
+                .and_then(|tool| v.as_str().map(|p| (tool.to_string(), p.to_string())))
+        })
+        .collect();
+    let agent_perms_arc = Arc::new(agent_perms);
     let global_perms = config.tool_permissions.clone();
 
     // Build executor closure (Arcs cloned once here, then again per call)
@@ -534,9 +569,31 @@ async fn run_worker_inner(args: &WorkerArgs, meta: &mut RunMeta) -> anyhow::Resu
         Arc::new(Mutex::new(std::collections::HashSet::new()));
     let current_stage_perms: Arc<Mutex<std::collections::HashMap<String, String>>> =
         Arc::new(Mutex::new(std::collections::HashMap::new()));
-    let agent_perms_arc: Arc<std::collections::HashMap<String, String>> = Arc::new(std::collections::HashMap::new());
-    // Background workers have no launch overrides (those come from the CLI at run time)
-    let launch_overrides_arc: Arc<std::collections::HashMap<String, ToolPolicy>> = Arc::new(std::collections::HashMap::new());
+    // Agent-level permissions from the blueprint's [tool_permissions] section
+    let agent_perms: std::collections::HashMap<String, String> = blueprint
+        .metadata
+        .iter()
+        .filter_map(|(k, v)| {
+            k.strip_prefix("tool_perm:")
+                .and_then(|tool| v.as_str().map(|p| (tool.to_string(), p.to_string())))
+        })
+        .collect();
+    let agent_perms_arc = Arc::new(agent_perms);
+    // Launch overrides forwarded from the CLI flags
+    let mut launch_overrides: std::collections::HashMap<String, ToolPolicy> = std::collections::HashMap::new();
+    if args.yolo {
+        launch_overrides.insert("*".to_string(), ToolPolicy::Allow);
+    }
+    for t in &args.allow {
+        launch_overrides.insert(t.clone(), ToolPolicy::Allow);
+    }
+    for t in &args.ask {
+        launch_overrides.insert(t.clone(), ToolPolicy::Ask);
+    }
+    for t in &args.deny {
+        launch_overrides.insert(t.clone(), ToolPolicy::Deny);
+    }
+    let launch_overrides_arc: Arc<std::collections::HashMap<String, ToolPolicy>> = Arc::new(launch_overrides);
     let run_id_arc = Arc::new(args.run_id.clone());
 
     let builtins = tool_registry.builtins.clone();
