@@ -577,8 +577,7 @@ impl Dashboard {
 
         // ── Main agent list ──────────────────────────────────────────────────
         match key {
-            KeyCode::Char('q') => {
-                // Background workers are detached (setsid) and survive dashboard exit — no warning needed
+            KeyCode::Esc => {
                 self.should_quit = true;
             }
             KeyCode::Up => {
@@ -1040,7 +1039,7 @@ impl Dashboard {
                     Span::styled("[↑↓]", Style::default().add_modifier(Modifier::BOLD)),
                     Span::raw(" scroll  "),
                     Span::styled("[b/e]", Style::default().add_modifier(Modifier::BOLD)),
-                    Span::raw(" beg/end  "),
+                    Span::raw(" begin/end  "),
                     Span::styled("[i]", Style::default().add_modifier(Modifier::BOLD)),
                     Span::raw(" respond  "),
                     Span::styled("[c/k]", Style::default().add_modifier(Modifier::BOLD)),
@@ -1053,7 +1052,7 @@ impl Dashboard {
                     Span::styled("[↑↓]", Style::default().add_modifier(Modifier::BOLD)),
                     Span::raw(" scroll  "),
                     Span::styled("[b/e]", Style::default().add_modifier(Modifier::BOLD)),
-                    Span::raw(" beg/end  "),
+                    Span::raw(" begin/end  "),
                     Span::styled("[c/k]", Style::default().add_modifier(Modifier::BOLD)),
                     Span::raw(" cancel/kill  "),
                     Span::styled("[Esc]", Style::default().add_modifier(Modifier::BOLD)),
@@ -1072,7 +1071,7 @@ impl Dashboard {
                 Span::raw(" cancel  "),
                 Span::styled("[k]", Style::default().add_modifier(Modifier::BOLD)),
                 Span::raw(" kill  "),
-                Span::styled("[q]", Style::default().add_modifier(Modifier::BOLD)),
+                Span::styled("[Esc]", Style::default().add_modifier(Modifier::BOLD)),
                 Span::raw(" quit"),
             ])
         };
