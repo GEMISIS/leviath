@@ -68,8 +68,28 @@ impl OpenAIProvider {
 
     /// Return built-in capability defaults for a model.
     fn builtin_capabilities(&self, model: &str) -> ModelCapabilities {
-        // GPT-4.1 family — 1M context window (must check before generic gpt-4)
-        if model.starts_with("gpt-4.1") {
+        // GPT-5.5 — flagship, 1M+ context, 128K output (check before generic gpt-5)
+        if model.starts_with("gpt-5.5") {
+            ModelCapabilities {
+                supports_temperature: true,
+                supports_streaming: true,
+                supports_tools: true,
+                supports_system_prompt: true,
+                max_context_tokens: 1_050_000,
+                max_output_tokens: 128_000,
+            }
+        // GPT-5.x family (5.4, 5.4-mini, 5.4-nano, 5-mini) — 400K context, 128K output
+        } else if model.starts_with("gpt-5") {
+            ModelCapabilities {
+                supports_temperature: true,
+                supports_streaming: true,
+                supports_tools: true,
+                supports_system_prompt: true,
+                max_context_tokens: 400_000,
+                max_output_tokens: 128_000,
+            }
+        // GPT-4.1 family — 1M context (must check before generic gpt-4)
+        } else if model.starts_with("gpt-4.1") {
             ModelCapabilities {
                 supports_temperature: true,
                 supports_streaming: true,
@@ -78,8 +98,8 @@ impl OpenAIProvider {
                 max_context_tokens: 1_047_576,
                 max_output_tokens: 32_768,
             }
-        // o-mini reasoning models — smaller context/output
-        } else if model.starts_with("o1-mini") || model.starts_with("o3-mini") {
+        // o1-mini — smaller context than o3-mini
+        } else if model.starts_with("o1-mini") {
             ModelCapabilities {
                 supports_temperature: false,
                 supports_streaming: true,
@@ -88,7 +108,7 @@ impl OpenAIProvider {
                 max_context_tokens: 128_000,
                 max_output_tokens: 65_536,
             }
-        // o-series reasoning models (o1, o3, o4) — no temperature
+        // o-series reasoning models (o1, o3, o4) — no temperature, 200K context
         } else if model.starts_with("o1") || model.starts_with("o3") || model.starts_with("o4") {
             ModelCapabilities {
                 supports_temperature: false,

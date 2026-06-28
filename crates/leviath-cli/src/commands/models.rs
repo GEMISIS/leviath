@@ -113,6 +113,18 @@ fn builtin_table() -> Vec<BuiltinEntry> {
                temp=true,  ctx=200_000, out=8_192),
 
         // ── OpenAI ─────────────────────────────────────────────────────────────
+        // GPT-5.5 — current flagship (released April 2026), 1M+ context
+        entry!("openai", "gpt-5.5",      "GPT-5.5",
+               temp=true, ctx=1_050_000, out=128_000),
+        entry!("openai", "gpt-5.4",      "GPT-5.4",
+               temp=true, ctx=1_050_000, out=128_000),
+        // GPT-5 family — 400K context, 128K output
+        entry!("openai", "gpt-5.4-mini", "GPT-5.4 Mini",
+               temp=true, ctx=400_000, out=128_000),
+        entry!("openai", "gpt-5.4-nano", "GPT-5.4 Nano",
+               temp=true, ctx=400_000, out=128_000),
+        entry!("openai", "gpt-5-mini",   "GPT-5 Mini",
+               temp=true, ctx=400_000, out=128_000),
         // GPT-4.1 family — 1M context
         entry!("openai", "gpt-4.1",      "GPT-4.1",
                temp=true, ctx=1_047_576, out=32_768),
@@ -128,10 +140,12 @@ fn builtin_table() -> Vec<BuiltinEntry> {
         // o-series reasoning — no temperature
         entry!("openai", "o4-mini", "o4-mini",
                temp=false, ctx=200_000, out=100_000),
+        entry!("openai", "o3-pro",  "o3-pro",
+               temp=false, ctx=200_000, out=100_000),
         entry!("openai", "o3",      "o3",
                temp=false, ctx=200_000, out=100_000),
         entry!("openai", "o3-mini", "o3-mini",
-               temp=false, ctx=128_000, out=65_536),
+               temp=false, ctx=200_000, out=100_000),
         entry!("openai", "o1",      "o1",
                temp=false, ctx=200_000, out=100_000),
         entry!("openai", "o1-mini", "o1-mini",
