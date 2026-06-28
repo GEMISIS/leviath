@@ -35,6 +35,8 @@ pub enum AgentDisplayStatus {
     Active,
     Waiting,
     Complete,
+    /// All required work done; still accepting optional follow-up input.
+    CompleteInteractive,
     Error(String),
     Idle,
     Cancelled,
@@ -46,6 +48,7 @@ impl std::fmt::Display for AgentDisplayStatus {
             Self::Active => write!(f, "●ACTIVE"),
             Self::Waiting => write!(f, "◆WAITING"),
             Self::Complete => write!(f, "✓COMPLETE"),
+            Self::CompleteInteractive => write!(f, "✓COMPLETE"),
             Self::Error(msg) => write!(f, "✗ERROR: {}", msg),
             Self::Idle => write!(f, "○IDLE"),
             Self::Cancelled => write!(f, "⊘CANCEL"),
@@ -58,7 +61,7 @@ impl AgentDisplayStatus {
         match self {
             Self::Active => Color::Green,
             Self::Waiting => Color::Yellow,
-            Self::Complete => Color::Cyan,
+            Self::Complete | Self::CompleteInteractive => Color::Cyan,
             Self::Error(_) => Color::Red,
             Self::Idle => Color::Gray,
             Self::Cancelled => Color::DarkGray,
@@ -191,11 +194,13 @@ impl Dashboard {
                 RunStatus::Starting | RunStatus::Running => AgentDisplayStatus::Active,
                 RunStatus::WaitingInput => AgentDisplayStatus::Waiting,
                 RunStatus::Complete => AgentDisplayStatus::Complete,
+                RunStatus::CompleteInteractive => AgentDisplayStatus::CompleteInteractive,
                 RunStatus::Error => AgentDisplayStatus::Error(run.error.clone().unwrap_or_default()),
                 RunStatus::Cancelled => AgentDisplayStatus::Cancelled,
             };
-            // For WaitingInput agents, read the pending interaction from disk once
-            let (waiting_prompt, pending_request) = if matches!(run.status, RunStatus::WaitingInput) {
+            // For WaitingInput and CompleteInteractive agents, read the pending interaction from disk once
+            let needs_input = matches!(run.status, RunStatus::WaitingInput | RunStatus::CompleteInteractive);
+            let (waiting_prompt, pending_request) = if needs_input {
                 let req = interaction::read_request(&run.run_id);
                 (req.as_ref().map(|r| r.prompt.clone()), req)
             } else {
@@ -210,7 +215,7 @@ impl Dashboard {
                 agent.status = status;
                 agent.workdir = run.workdir.clone();
                 agent.context_snapshot = runstate::read_context_snapshot(&run.run_id);
-                if matches!(run.status, RunStatus::WaitingInput) {
+                if needs_input {
                     if waiting_prompt.is_some() {
                         let pending_id = pending_request.as_ref().map(|r| r.id.as_str()).unwrap_or("");
                         // Suppress re-showing a request we already answered but the worker
@@ -557,6 +562,7 @@ impl Dashboard {
                 }
                 KeyCode::Char('k') => {
                     if let Some(agent) = self.agents.get(self.selected) {
+                        // CompleteInteractive agents are done — no kill allowed
                         if matches!(agent.status, AgentDisplayStatus::Active | AgentDisplayStatus::Waiting) {
                             let agent_id = agent.id.clone();
                             let pid = agent.pid;
@@ -628,6 +634,7 @@ impl Dashboard {
             }
             KeyCode::Char('c') => {
                 if let Some(agent) = self.agents.get(self.selected) {
+                    // CompleteInteractive agents are done — no cancel allowed
                     if matches!(agent.status, AgentDisplayStatus::Active | AgentDisplayStatus::Waiting) {
                         let agent_id = agent.id.clone();
                         if agent.is_run_state {
@@ -653,6 +660,7 @@ impl Dashboard {
             }
             KeyCode::Char('k') => {
                 if let Some(agent) = self.agents.get(self.selected) {
+                    // CompleteInteractive agents are done — no kill allowed
                     if matches!(agent.status, AgentDisplayStatus::Active | AgentDisplayStatus::Waiting) {
                         let agent_id = agent.id.clone();
                         if agent.is_run_state {
@@ -788,7 +796,7 @@ impl Dashboard {
             }
         };
 
-        let is_waiting = matches!(agent.status, AgentDisplayStatus::Waiting);
+        let is_waiting = matches!(agent.status, AgentDisplayStatus::Waiting | AgentDisplayStatus::CompleteInteractive);
         let pending_req = agent.pending_request.clone();
         let kind = pending_req.as_ref().map(|r| r.kind.clone());
         let options: Vec<String> = pending_req.as_ref().map(|r| r.options.clone()).unwrap_or_default();
@@ -1151,6 +1159,7 @@ impl Dashboard {
                     && !matches!(a.status, AgentDisplayStatus::Cancelled)
             }).unwrap_or(false);
             let can_kill = agent.map(|a| {
+                // CompleteInteractive = work is done, don't offer kill
                 matches!(a.status, AgentDisplayStatus::Active | AgentDisplayStatus::Waiting)
             }).unwrap_or(false);
             let mut spans = vec![
@@ -1173,6 +1182,7 @@ impl Dashboard {
         } else {
             let agent = self.agents.get(self.selected);
             let can_kill = agent.map(|a| {
+                // CompleteInteractive = work is done, don't offer kill
                 matches!(a.status, AgentDisplayStatus::Active | AgentDisplayStatus::Waiting)
             }).unwrap_or(false);
             let mut spans = vec![

@@ -277,7 +277,11 @@ pub fn request_interaction(
 ) -> anyhow::Result<InteractionResponse> {
     // Write request, flip status
     write_request(run_id, &req)?;
-    meta.status = RunStatus::WaitingInput;
+    meta.status = if req.required {
+        RunStatus::WaitingInput
+    } else {
+        RunStatus::CompleteInteractive
+    };
     meta.touch();
     write_meta(meta)?;
 
@@ -322,7 +326,13 @@ pub async fn request_interaction_async(
     timeout: Option<Duration>,
 ) -> anyhow::Result<InteractionResponse> {
     write_request(run_id, &req)?;
-    meta.status = RunStatus::WaitingInput;
+    // Optional interactions (required: false) indicate post-completion follow-up;
+    // show as CompleteInteractive so the dashboard doesn't offer a kill button.
+    meta.status = if req.required {
+        RunStatus::WaitingInput
+    } else {
+        RunStatus::CompleteInteractive
+    };
     meta.touch();
     write_meta(meta)?;
 

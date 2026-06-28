@@ -16,6 +16,9 @@ pub enum RunStatus {
     Running,
     WaitingInput,
     Complete,
+    /// All required stages done; agent still accepts optional follow-up input.
+    /// Shown as "Complete" in the dashboard — no kill option, input still enabled.
+    CompleteInteractive,
     Error,
     Cancelled,
 }
@@ -27,6 +30,7 @@ impl std::fmt::Display for RunStatus {
             RunStatus::Running => write!(f, "Running"),
             RunStatus::WaitingInput => write!(f, "WaitingInput"),
             RunStatus::Complete => write!(f, "Complete"),
+            RunStatus::CompleteInteractive => write!(f, "CompleteInteractive"),
             RunStatus::Error => write!(f, "Error"),
             RunStatus::Cancelled => write!(f, "Cancelled"),
         }
