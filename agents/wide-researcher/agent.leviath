@@ -1,0 +1,80 @@
+[agent]
+name = "wide-researcher"
+version = "0.1.0"
+description = "Broad multi-topic survey — cast a wide net, compare approaches, surface what's interesting"
+entry_stage = "survey"
+
+[stages.survey]
+mode = "autonomous"
+model = { provider = "anthropic", model = "claude-sonnet-4-6" }
+description = "Survey the landscape across multiple sub-topics"
+available_tools = ["read_file", "bash"]
+max_iterations = 30
+max_revisits = 2
+system_prompt = """
+You are conducting a broad survey across a topic area. Your goal is to map the landscape:
+- What are the major approaches/schools of thought?
+- Who are the key players/projects/companies?
+- What's the current state of the art?
+- What's actively being worked on vs mature vs abandoned?
+
+Cast a wide net. Breadth over depth. Note interesting threads worth pulling on later.
+"""
+
+[stages.survey.transitions.compare]
+hint = "Landscape mapped — ready to compare approaches"
+
+[stages.compare]
+mode = "autonomous"
+model = { provider = "anthropic", model = "claude-opus-4-6" }
+description = "Compare and contrast findings across sub-topics"
+available_tools = ["read_file"]
+max_iterations = 15
+transition_prompt = "Have you covered enough ground to write a useful summary, or are there areas worth surveying further?"
+system_prompt = """
+Compare what you found across the landscape:
+- What patterns emerge across different approaches?
+- Where do approaches converge or diverge?
+- What tradeoffs does each approach make?
+- What's overhyped vs underappreciated?
+- What would you recommend investigating further?
+
+Organize by theme, not by source. Help the reader see the shape of the field.
+"""
+
+[stages.compare.transitions.survey]
+hint = "Gaps in coverage — need to survey additional areas"
+transform = "compact"
+
+[stages.compare.transitions.summarize]
+hint = "Comparison complete"
+transform = "compact"
+
+[stages.summarize]
+mode = "autonomous"
+model = { provider = "anthropic", model = "claude-sonnet-4-6" }
+description = "Produce a landscape overview with recommendations"
+available_tools = ["write_file"]
+max_iterations = 10
+system_prompt = """
+Write a landscape overview based on your survey. Include:
+- Overview of the space (what is this field about)
+- Major categories/approaches with brief descriptions
+- Comparison matrix (approaches vs key criteria)
+- Notable projects or implementations worth watching
+- Trends and trajectory (where is this heading)
+- Recommendations (what to look at first depending on goals)
+
+Write concisely. The reader wants to understand the lay of the land quickly.
+"""
+
+[compaction]
+provider = "anthropic"
+model = "claude-sonnet-4-6"
+
+[context.regions]
+query = { kind = "pinned", max_tokens = 1000 }
+landscape = { kind = "temporary", max_tokens = 50000 }
+comparisons = { kind = "compacting", threshold_tokens = 25000, max_tokens = 35000 }
+comparison_history = { kind = "compact_history", source_region = "comparisons", max_tokens = 10000 }
+scratch = { kind = "clearable", max_tokens = 5000 }

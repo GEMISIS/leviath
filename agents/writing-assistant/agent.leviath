@@ -1,0 +1,108 @@
+[agent]
+name = "writing-assistant"
+version = "0.1.0"
+description = "Research-backed writing — from topic to polished draft with self-editing"
+entry_stage = "research"
+
+[stages.research]
+mode = "autonomous"
+model = { provider = "anthropic", model = "claude-sonnet-4-6" }
+description = "Research the topic and gather supporting material"
+available_tools = ["read_file", "bash"]
+max_iterations = 20
+max_revisits = 2
+system_prompt = """
+You are researching a topic to prepare for writing. Gather:
+- Key facts, data points, and statistics
+- Expert opinions and notable quotes
+- Existing coverage (what's already been written about this)
+- Counterarguments and alternative perspectives
+
+Organize your findings by theme. Note which points are well-supported
+vs speculative. Flag anything that needs verification.
+"""
+
+[stages.research.transitions.outline]
+hint = "Enough material to structure the piece"
+
+[stages.outline]
+mode = "interactive"
+model = { provider = "anthropic", model = "claude-sonnet-4-6" }
+description = "Create and refine an outline with user input"
+max_iterations = 15
+system_prompt = """
+Based on your research, propose an outline for the piece. Include:
+- Thesis / main argument
+- Section structure with key points per section
+- Where specific evidence or examples will go
+- Estimated length
+
+Present the outline and ask for feedback. Iterate based on the user's direction.
+"""
+
+[stages.outline.transitions.draft]
+hint = "Outline approved"
+
+[stages.draft]
+mode = "autonomous"
+model = { provider = "anthropic", model = "claude-opus-4-6" }
+description = "Write the full draft"
+available_tools = ["write_file"]
+max_iterations = 25
+max_revisits = 2
+system_prompt = """
+Write the full draft based on the approved outline. Guidelines:
+- Strong opening that hooks the reader
+- Each section flows logically to the next
+- Claims backed by evidence from your research
+- Concrete examples over abstract statements
+- Clear, direct prose — no filler or hedging
+- Strong conclusion that ties back to the thesis
+
+Write the complete piece. Don't leave placeholders or TODO markers.
+"""
+
+[stages.draft.transitions.edit]
+hint = "Draft complete"
+transform = "compact"
+
+[stages.edit]
+mode = "autonomous"
+model = { provider = "anthropic", model = "claude-opus-4-6" }
+description = "Self-edit for clarity, accuracy, and flow"
+available_tools = ["read_file", "write_file"]
+max_iterations = 15
+max_revisits = 2
+transition_prompt = """
+Review your edits. Is the piece ready for the reader, or does it need another pass?
+Be honest — if it's good, ship it. Don't over-polish.
+"""
+system_prompt = """
+Edit the draft with fresh eyes. Check for:
+1. **Accuracy** — are all claims supported? Any overstatements?
+2. **Clarity** — can every sentence be understood on first read?
+3. **Flow** — does each paragraph lead naturally to the next?
+4. **Concision** — cut anything that doesn't earn its place
+5. **Voice** — is the tone consistent and appropriate for the audience?
+6. **Opening/closing** — do they land?
+
+Make the edits directly. Write the improved version to the output file.
+"""
+
+[stages.edit.transitions.draft]
+hint = "Structural issues found — needs significant rewriting"
+transform = "compact"
+
+# edit with no other always-transitions = terminal when satisfied
+
+[compaction]
+provider = "anthropic"
+model = "claude-sonnet-4-6"
+
+[context.regions]
+task = { kind = "pinned", max_tokens = 2000 }
+research = { kind = "temporary", max_tokens = 40000 }
+outline = { kind = "pinned", max_tokens = 3000 }
+draft = { kind = "compacting", threshold_tokens = 35000, max_tokens = 50000 }
+draft_history = { kind = "compact_history", source_region = "draft", max_tokens = 10000 }
+scratch = { kind = "clearable", max_tokens = 5000 }

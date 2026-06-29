@@ -1,0 +1,88 @@
+[agent]
+name = "deep-researcher"
+version = "0.1.0"
+description = "Thorough investigation of a single topic — follows citations, reads sources, produces a structured report"
+entry_stage = "gather"
+
+[stages.gather]
+mode = "autonomous"
+model = { provider = "anthropic", model = "claude-sonnet-4-6" }
+description = "Gather primary sources and key references on the topic"
+available_tools = ["read_file", "bash"]
+max_iterations = 30
+max_revisits = 3
+system_prompt = """
+You are researching a topic in depth. Your goal is to find primary sources, key papers,
+official documentation, and authoritative references. Use bash to run curl/wget for web
+sources or read_file for local documents.
+
+For each source found:
+- Note the author/organization and date
+- Extract key claims with direct quotes
+- Note any citations worth following
+
+Be thorough. Follow citation chains. Prefer primary sources over summaries.
+"""
+
+[stages.gather.transitions.analyze]
+hint = "Enough sources gathered for meaningful analysis"
+
+[stages.analyze]
+mode = "autonomous"
+model = { provider = "anthropic", model = "claude-opus-4-6" }
+description = "Analyze findings, identify patterns, and synthesize insights"
+available_tools = ["read_file"]
+max_iterations = 20
+max_revisits = 2
+transition_prompt = """
+You've analyzed the gathered material. Do you have enough evidence to write a
+comprehensive report, or do you need to gather more sources on specific sub-topics?
+"""
+system_prompt = """
+You are analyzing research findings. Your job:
+1. Identify key themes and patterns across sources
+2. Note areas of consensus and disagreement
+3. Evaluate source quality and potential biases
+4. Identify gaps — what questions remain unanswered?
+5. Form preliminary conclusions supported by evidence
+
+Be rigorous. Distinguish between well-supported claims and speculation.
+"""
+
+[stages.analyze.transitions.gather]
+hint = "Gaps identified — need more sources on specific sub-topics"
+transform = "compact"
+
+[stages.analyze.transitions.synthesize]
+hint = "Analysis complete — ready to write the report"
+transform = "compact"
+
+[stages.synthesize]
+mode = "autonomous"
+model = { provider = "anthropic", model = "claude-opus-4-6" }
+description = "Produce a structured research report with citations"
+available_tools = ["write_file"]
+max_iterations = 15
+system_prompt = """
+Write a structured research report based on your analysis. Include:
+- Executive summary (key findings in 3-5 sentences)
+- Background and context
+- Methodology (what sources were consulted)
+- Findings organized by theme
+- Analysis and implications
+- Open questions and areas for further research
+- References with links/citations
+
+Write for a technical audience. Be precise. Cite specific sources for claims.
+"""
+
+[compaction]
+provider = "anthropic"
+model = "claude-sonnet-4-6"
+
+[context.regions]
+query = { kind = "pinned", max_tokens = 1500 }
+sources = { kind = "temporary", max_tokens = 50000 }
+analysis = { kind = "compacting", threshold_tokens = 30000, max_tokens = 40000 }
+analysis_history = { kind = "compact_history", source_region = "analysis", max_tokens = 15000 }
+scratch = { kind = "clearable", max_tokens = 5000 }

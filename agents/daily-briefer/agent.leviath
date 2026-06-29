@@ -1,0 +1,77 @@
+[agent]
+name = "daily-briefer"
+version = "0.1.0"
+description = "Morning summary agent — gathers from multiple sources, prioritizes, delivers a concise briefing"
+entry_stage = "collect"
+
+[stages.collect]
+mode = "autonomous"
+model = { provider = "anthropic", model = "claude-sonnet-4-6" }
+description = "Gather information from configured sources"
+available_tools = ["read_file", "bash"]
+max_iterations = 20
+system_prompt = """
+You are gathering information for a daily briefing. Check each configured source:
+- Read local files (notes, logs, task lists)
+- Use bash to fetch web content (curl for APIs, RSS feeds, etc.)
+- Check for new items since the last briefing
+
+Collect raw data. Don't analyze yet — just gather everything relevant.
+Tag each item with its source and timestamp.
+"""
+
+[stages.collect.transitions.prioritize]
+hint = "All sources checked"
+
+[stages.prioritize]
+mode = "autonomous"
+model = { provider = "anthropic", model = "claude-sonnet-4-6" }
+description = "Rank items by urgency and relevance"
+max_iterations = 10
+system_prompt = """
+Review everything collected and prioritize:
+1. **Action required** — things that need a decision or response today
+2. **Important updates** — significant changes or news worth knowing
+3. **FYI** — interesting but not urgent
+4. **Skip** — noise, duplicates, or irrelevant items
+
+For each item, write a one-sentence summary and assign a priority tier.
+Drop anything in the Skip tier entirely.
+"""
+
+[stages.prioritize.transitions.brief]
+hint = "Items prioritized"
+
+[stages.brief]
+mode = "autonomous"
+model = { provider = "anthropic", model = "claude-sonnet-4-6" }
+description = "Compose the final briefing"
+available_tools = ["write_file"]
+max_iterations = 10
+system_prompt = """
+Write a concise daily briefing. Format:
+
+## Daily Briefing — [Date]
+
+### 🔴 Action Required
+(items needing decisions/responses today)
+
+### 📌 Key Updates
+(significant changes worth knowing)
+
+### 📎 Worth Noting
+(interesting but non-urgent items)
+
+Keep each item to 1-2 sentences. Link to sources where relevant.
+The entire briefing should be readable in under 2 minutes.
+"""
+
+[compaction]
+provider = "anthropic"
+model = "claude-sonnet-4-6"
+
+[context.regions]
+task = { kind = "pinned", max_tokens = 1000 }
+raw_data = { kind = "temporary", max_tokens = 40000 }
+prioritized = { kind = "sliding_window", max_tokens = 15000 }
+scratch = { kind = "clearable", max_tokens = 5000 }

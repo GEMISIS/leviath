@@ -156,14 +156,18 @@ Transitions support conditions (`always`, `error`, `max_iterations`), context tr
 
 ## Pre-built Agents
 
-Four agents ship out of the box:
+Eight agents ship out of the box:
 
 | Agent | Stages | Best For |
 |-------|--------|----------|
 | **software-engineer** | plan ⇄ implement ⇄ review | Full coding workflow with graph transitions (default) |
 | **coder** | analyze → implement ⇄ review | Focused implementation with review loop |
 | **reviewer** | scan → deep_review → report | Code review and audit with error handling |
-| **researcher** | gather ⇄ analyze → summarize | Research with iterative gathering |
+| **deep-researcher** | gather ⇄ analyze → synthesize | Thorough single-topic investigation |
+| **wide-researcher** | survey ⇄ compare → summarize | Broad multi-topic landscape survey |
+| **researcher** | gather ⇄ analyze → summarize | General-purpose research |
+| **daily-briefer** | collect → prioritize → brief | Morning summaries from multiple sources |
+| **writing-assistant** | research → outline → draft ⇄ edit | Blog posts, reports, documentation |
 
 ## Dashboard
 
@@ -173,11 +177,21 @@ Four agents ship out of the box:
 
 ## API Server
 
-`lev serve` exposes a REST + WebSocket API — build your own UI, integrate from any language, or orchestrate agents from a custom harness. Webhook callbacks, custom metadata, real-time event streaming. No SDK required, just HTTP.
+`lev serve` exposes a REST + WebSocket API. Integrate from Python, TypeScript, Go, or anything that speaks HTTP — no SDK required.
 
 ```bash
 lev serve --port 3000
 ```
+
+**Agents** — `POST /api/agents` (spawn), `GET /api/agents` (list), `GET /api/agents/:id` (status), `DELETE /api/agents/:id` (kill), `GET /api/agents/:id/context` (context snapshot), `GET /api/agents/tree` (full hierarchy)
+
+**Interaction** — `GET /api/agents/:id/interaction` (pending questions), `POST /api/agents/:id/interaction` (submit response), `POST /api/agents/:id/message` (inject message)
+
+**Blueprints** — Full CRUD at `/api/blueprints` + `POST /api/blueprints/validate`
+
+**Real-time** — `ws://localhost:3000/ws` for global events, `ws://localhost:3000/ws/agents/:id` for per-agent streaming. Events: stage transitions, tool calls, context updates, completions.
+
+**Webhooks** — Pass `webhook_url` when spawning an agent to get a POST callback on completion with the full result payload.
 
 [Full API reference →](https://leviath.dev/docs/api)
 
