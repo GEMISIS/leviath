@@ -12,20 +12,9 @@
 
 ---
 
-Most agent tools give LLMs a flat message array and hope for the best. Leviath gives them structure — **structured memory** so agents don't forget what they're building, **multi-stage workflows** so each phase uses the right model and tools, and an **ECS engine** so you can run dozens of agents without your machine catching fire.
+Most agent tools give LLMs a flat message array and hope for the best. Leviath gives them structure — structured memory, multi-stage workflows, and an ECS engine — so agents stay coherent on long tasks, use the right model for each phase, and don't melt your machine when you run a dozen at once.
 
 Define an agent in TOML. Run it. Watch it actually remember what it read 50 tool calls ago.
-
-```
-┌─────────────────────── Context Window ───────────────────────┐
-│ 🔒 Pinned           │ Architecture, objectives │ NEVER evicted │
-│ 📜 SlidingWindow     │ Recent conversation      │ NEVER reduced │
-│ 📦 Compacting        │ Implementation history   │ LLM-summarized│
-│ 📎 Temporary         │ File contents            │ Oldest first  │
-│ 🧹 Clearable         │ Scratch/tool output      │ Wiped first   │
-│ 🗂️ CompactHistory    │ Stored summaries         │ Accumulates   │
-└──────────────────────────────────────────────────────────────┘
-```
 
 ## Quick Start
 
@@ -54,15 +43,28 @@ lev run agents/researcher --task "Compare spiking neural networks vs transformer
 
 No Rust code needed — agents are defined in a single TOML file.
 
-## What Else Is Different
+## Features
 
-**🎮 ECS Agent Runtime** — Leviath runs agents as entities in a [bevy_ecs](https://bevyengine.org/) world, not as separate OS processes. Spin up 50 agents and they share one process with game-engine-style scheduling. Other tools spawn a process per agent — 50 Claude Code instances means 50 node processes fighting for your CPU and RAM.
+### 🧠 Structured Context Memory
 
-**🗣️ Sub-Agents That Talk to Users** — Other tools have sub-agents (Claude Code, Codex), but they're fire-and-forget: do work, return a summary. In Leviath, a sub-agent at any depth can independently pause and ask the user a question through the dashboard — no routing through the parent. The human stays in the loop at every level.
+Every other agent framework manages context as a flat message array that gets randomly truncated when full. Leviath replaces this with **typed memory regions**, each with its own lifecycle — inspired by CPU cache hierarchies, not chat logs.
 
-**🔀 Multi-Stage Agents** — Each stage gets its own model, tool permissions, context layout, and interaction mode. Use Sonnet for analysis (fast/cheap), Sonnet for implementation (workhorse), Opus for review (catches what Sonnet missed). Per-stage context layouts mean your review stage doesn't inherit the implementation stage's scratch data.
+```
+┌─────────────────────── Context Window ───────────────────────┐
+│ 🔒 Pinned           │ Architecture, objectives │ NEVER evicted │
+│ 📜 SlidingWindow     │ Recent conversation      │ NEVER reduced │
+│ 📦 Compacting        │ Implementation history   │ LLM-summarized│
+│ 📎 Temporary         │ File contents            │ Oldest first  │
+│ 🧹 Clearable         │ Scratch/tool output      │ Wiped first   │
+│ 🗂️ CompactHistory    │ Stored summaries         │ Accumulates   │
+└──────────────────────────────────────────────────────────────┘
+```
 
-## Why Leviath?
+When context fills up, eviction follows a **deterministic cascade** — not random truncation:
+
+**Clearable** → **Temporary** → **Compacting** → **Error**
+
+Pinned and SlidingWindow regions are **never** touched. Your agent's core understanding survives no matter how many tool calls it makes.
 
 <table>
 <tr>
@@ -100,23 +102,34 @@ No Rust code needed — agents are defined in a single TOML file.
 </tr>
 </table>
 
-When context fills up, eviction follows a deterministic cascade:
-
-**Clearable** (wipe scratch) → **Temporary** (evict oldest files) → **Compacting** (LLM-summarize to history) → **Error** (nothing left to free)
-
-Pinned and SlidingWindow regions are **never** touched. Your agent's core understanding survives.
-
-## How It Works
-
-### Define an Agent
+You control where every piece of information lands — and what happens to it when memory gets tight:
 
 ```toml
-# agent.leviath
-[agent]
-name = "my-agent"
-version = "0.1.0"
+# Context regions — the memory architecture
+[context.regions]
+architecture = { kind = "pinned", max_tokens = 4000 }
+codebase     = { kind = "temporary", max_tokens = 30000 }
+conversation = { kind = "sliding_window", max_items = 15, max_tokens = 15000 }
+impl_history = { kind = "compacting", threshold_tokens = 8000, max_tokens = 15000 }
+history      = { kind = "compact_history", source_region = "impl_history", max_tokens = 10000 }
+scratch      = { kind = "clearable", max_tokens = 10000 }
 
-# Stages execute sequentially, each with its own model and tools
+# Route tool results to specific regions
+[stages.implement.tool_routing]
+default_region = "scratch"
+max_result_tokens = 5000
+
+[stages.implement.tool_routing.overrides]
+read_file = "codebase"    # File contents → temporary (evicts oldest)
+search = "codebase"       # Search results → same region
+bash = "scratch"          # Shell output → clearable (wipes first)
+```
+
+### 🔀 Multi-Stage Workflows
+
+Each stage of an agent gets its own model, tool permissions, context layout, and interaction mode. Use a fast model for analysis, a powerful one for implementation, and a different one for review — each seeing only the context it needs.
+
+```toml
 [stages.analyze]
 mode = "autonomous"
 model = { provider = "anthropic", model = "claude-sonnet-4-5" }
@@ -130,55 +143,9 @@ available_tools = ["read_file", "write_file", "edit_file", "bash"]
 [stages.review]
 mode = "interactive"  # Pauses for user approval
 model = { provider = "anthropic", model = "claude-opus-4" }
-
-# Context regions — the memory architecture
-[context.regions]
-architecture = { kind = "pinned", max_tokens = 4000 }
-codebase     = { kind = "temporary", max_tokens = 30000 }
-conversation = { kind = "sliding_window", max_items = 15, max_tokens = 15000 }
-impl_history = { kind = "compacting", threshold_tokens = 8000, max_tokens = 15000 }
-history      = { kind = "compact_history", source_region = "impl_history", max_tokens = 10000 }
-scratch      = { kind = "clearable", max_tokens = 10000 }
 ```
 
-### Route Tool Results
-
-Control where tool outputs land in memory:
-
-```toml
-[stages.implement.tool_routing]
-default_region = "scratch"
-max_result_tokens = 5000
-
-[stages.implement.tool_routing.overrides]
-read_file = "codebase"    # File contents → temporary region (evicts oldest)
-search = "codebase"       # Search results → same region
-bash = "scratch"          # Shell output → clearable (wipes first)
-```
-
-### Spawn Sub-Agents
-
-Agents can spawn child agents with different blueprints:
-
-```toml
-[agent]
-max_child_depth = 3  # How deep the sub-agent tree can go
-
-[stages.analyze]
-requires_children = true  # Don't advance until children complete
-available_tools = ["spawn_agent", "check_agent", "wait_for_agent", "send_to_agent", "kill_agent"]
-```
-
-Sub-agents are just agents — they get their own context window, their own stages, and appear in the dashboard tree:
-
-```
-● coder-01          ACTIVE    implement   iter 12
-  ├─ researcher-01  COMPLETE
-  ├─ researcher-02  ACTIVE    analyze     iter 3
-  └─ researcher-03  ◆WAITING              (input needed)
-```
-
-## Stage Modes
+Stages support three interaction modes:
 
 | Mode | Behavior |
 |------|----------|
@@ -196,25 +163,37 @@ prompt = "Here's the proposed design. Approve or suggest changes:"
 required = true
 ```
 
-## CLI Reference
+### 🎮 ECS Agent Engine
 
-| Command | Description |
-|---------|-------------|
-| `lev create <name>` | Create agent project (`--template software-engineer\|coder\|researcher`) |
-| `lev run [path] --task "..."` | Run agent in background (`--model`, `--yolo`, `--max-depth`) |
-| `lev dash` | TUI dashboard for managing all agents |
-| `lev serve` | REST + WebSocket API server (`--port`, `--host`) |
-| `lev pack [path]` | Bundle agent for distribution |
-| `lev add <bundle>` | Install agent from bundle |
-| `lev remove <name>` | Uninstall agent |
-| `lev list` | List installed agents |
-| `lev test [path]` | Run agent tests (`--dry-run`) |
-| `lev setup` | Configure API keys and providers |
-| `lev models` | List available models |
+Leviath runs agents as entities in a [bevy_ecs](https://bevyengine.org/) world — the same Entity Component System architecture used by game engines. Agents are entities. Context windows, state, and message inboxes are components. Inference, eviction, and lifecycle management are systems that run in a game-loop tick.
+
+This means 50 agents share one process with engine-style scheduling, instead of 50 separate OS processes fighting for CPU and RAM.
+
+### 🧬 Sub-Agents
+
+Agents can spawn child agents with different blueprints. Sub-agents are just agents — they get their own context window, their own stages, and their own entry in the dashboard.
+
+What makes Leviath's sub-agents different: a sub-agent at any depth can **independently pause and ask the user a question** through the dashboard. No routing through the parent, no fire-and-forget. The human stays in the loop at every level.
+
+```toml
+[agent]
+max_child_depth = 3  # How deep the sub-agent tree can go
+
+[stages.analyze]
+requires_children = true  # Don't advance until children complete
+available_tools = ["spawn_agent", "check_agent", "wait_for_agent", "send_to_agent", "kill_agent"]
+```
+
+```
+● coder-01          ACTIVE    implement   iter 12
+  ├─ researcher-01  COMPLETE
+  ├─ researcher-02  ACTIVE    analyze     iter 3
+  └─ researcher-03  ◆WAITING              (input needed)
+```
 
 ## Dashboard
 
-`lev dash` provides a full terminal UI for managing concurrent agents:
+`lev dash` — a full terminal UI for managing concurrent agents:
 
 ```
 ┌─ Agents ─────────────────────────────────────────────────────┐
@@ -233,35 +212,29 @@ required = true
  [↑↓]select  [Enter]respond  [c]ancel  [k]ill  [d]elete  [q]uit
 ```
 
-Features: stage tabs, context window visualization, markdown rendering, search/filter, clipboard yank, mouse support.
+Stage tabs, context window visualization, markdown rendering, search/filter, clipboard yank, mouse support.
 
 ## API Server
 
-`lev serve` exposes a REST + WebSocket API for programmatic control:
+`lev serve` exposes a REST + WebSocket API for programmatic control — build your own UI, integrate with other tools, or orchestrate agents from a harness like Solar City.
 
 ```bash
 lev serve --port 3000
 ```
 
-**REST endpoints:**
-
 | Method | Path | Description |
 |--------|------|-------------|
-| `GET` | `/api/blueprints` | List available blueprints |
-| `POST` | `/api/blueprints` | Create new blueprint |
-| `POST` | `/api/blueprints/validate` | Validate manifest |
 | `POST` | `/api/agents` | Spawn agent (with metadata, webhook callback) |
 | `GET` | `/api/agents` | List agents (filter by status) |
 | `GET` | `/api/agents/tree` | Agent hierarchy with cumulative tokens |
 | `GET` | `/api/agents/:id/context` | Context window snapshot |
-| `GET` | `/api/agents/:id/result` | Final output of completed agent |
 | `DELETE` | `/api/agents/:id` | Kill agent (cascades to children) |
-
-**WebSocket:** Connect to `/ws` for real-time events (status changes, context updates, logs, interaction prompts).
-
-Spawn with a webhook to get notified on completion:
+| `GET/POST` | `/api/blueprints` | List, create, validate blueprints |
+| `GET/POST` | `/api/agents/:id/interaction` | Handle agent input requests |
+| `WS` | `/ws` | Real-time event stream |
 
 ```bash
+# Spawn an agent with a completion webhook
 curl -X POST http://localhost:3000/api/agents \
   -H "Content-Type: application/json" \
   -d '{
@@ -271,6 +244,22 @@ curl -X POST http://localhost:3000/api/agents \
     "metadata": { "project_id": "abc123" }
   }'
 ```
+
+## CLI Reference
+
+| Command | Description |
+|---------|-------------|
+| `lev create <name>` | Create agent project (`--template software-engineer\|coder\|researcher`) |
+| `lev run [path] --task "..."` | Run agent in background (`--model`, `--yolo`, `--max-depth`) |
+| `lev dash` | TUI dashboard for managing all agents |
+| `lev serve` | REST + WebSocket API server (`--port`, `--host`) |
+| `lev pack [path]` | Bundle agent for distribution |
+| `lev add <bundle>` | Install agent from bundle |
+| `lev remove <name>` | Uninstall agent |
+| `lev list` | List installed agents |
+| `lev test [path]` | Run agent tests (`--dry-run`) |
+| `lev setup` | Configure API keys and providers |
+| `lev models` | List available models |
 
 ## Providers
 
@@ -284,14 +273,16 @@ curl -X POST http://localhost:3000/api/agents \
 
 **Key priority:** `~/.leviath/config.toml` (chmod 600) > `.env` in project dir > environment variables.
 
-### Using Claude Code (No API Key)
+<details>
+<summary><strong>Using Claude Code (no API key needed)</strong></summary>
 
 ```toml
 [stages.main]
 model = { provider = "claude-code", model = "claude-sonnet-4-5" }
 ```
 
-> Claude Code shells out to the `claude` CLI — no prompt caching, tool execution handled by Claude Code, not ideal for many concurrent agents. Best for prototyping without API costs.
+Claude Code shells out to the `claude` CLI — no prompt caching, tool execution handled by Claude Code, not ideal for many concurrent agents. Best for prototyping without API costs.
+</details>
 
 ## Pre-built Agents
 
@@ -306,24 +297,14 @@ model = { provider = "claude-code", model = "claude-sonnet-4-5" }
 lev run agents/coder --task "Refactor the auth module"
 ```
 
-## Testing
-
-```toml
-# tests/basic.toml
-[[test]]
-name = "greeting"
-input = "Say hello"
-expect_contains = "hello"
-```
+## Testing & Packaging
 
 ```bash
+# Test your agent
 lev test                  # Run all (requires API key)
 lev test --dry-run        # Validate structure only
-```
 
-## Packaging
-
-```bash
+# Package for distribution
 lev pack                  # → my-agent-0.1.0.leviath-bundle
 lev add agent.leviath-bundle
 ```
@@ -340,23 +321,16 @@ leviath-cli          CLI binary (lev)
 └── leviath-package        Bundling and registry
 ```
 
-8 crates, ~18K lines Rust, 185+ tests.
+8 crates · ~18K lines Rust · 185+ tests · zero clippy warnings
 
-## Development
+## Contributing
 
 ```bash
 git clone https://github.com/GEMISIS/leviath.git
 cd leviath
 cargo build
-cargo test --workspace     # All tests
+cargo test --workspace
 cargo clippy --workspace   # Zero warnings policy
-```
-
-**Git worktrees** for parallel development:
-
-```bash
-git worktree add ../leviath-feat-x feat/x
-cd ../leviath-feat-x && cargo build  # Own target dir, no interference
 ```
 
 ## License
