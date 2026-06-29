@@ -5,8 +5,10 @@
 //! - Inference: calling LLM providers with context
 //! - Tool execution: running tools and updating context with results
 
+use crate::components::{
+    AgentState, AgentStatus, ContextWindow, MessageInbox, NeedsCompaction, TaskAssignment,
+};
 use bevy_ecs::prelude::*;
-use crate::components::{AgentState, AgentStatus, ContextWindow, MessageInbox, NeedsCompaction, TaskAssignment};
 
 /// System that manages context window state.
 ///
@@ -68,9 +70,7 @@ pub fn context_management_system(
 /// Constructs prompts from context windows and calls LLM providers.
 /// Note: Actual provider calls happen asynchronously via the engine's
 /// `run_inference` method. This system prepares agents for inference.
-pub fn inference_system(
-    mut query: Query<(&mut AgentState, &ContextWindow, &TaskAssignment)>,
-) {
+pub fn inference_system(mut query: Query<(&mut AgentState, &ContextWindow, &TaskAssignment)>) {
     for (mut state, window, task) in query.iter_mut() {
         if !matches!(state.status, AgentStatus::Active) {
             continue;
@@ -151,10 +151,7 @@ pub fn eviction_system(
 /// System that manages the agent pool.
 ///
 /// Recycles completed agents, spawns new agents as needed.
-pub fn pool_management_system(
-    mut commands: Commands,
-    query: Query<(Entity, &AgentState)>,
-) {
+pub fn pool_management_system(mut commands: Commands, query: Query<(Entity, &AgentState)>) {
     for (entity, state) in query.iter() {
         match &state.status {
             crate::components::AgentStatus::Complete => {

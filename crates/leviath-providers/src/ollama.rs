@@ -202,9 +202,9 @@ impl OllamaProvider {
 
     /// Parse non-streaming response from Ollama.
     fn parse_response(&self, body: &serde_json::Value) -> Result<InferenceResponse> {
-        let message = body.get("message").ok_or_else(|| {
-            ProviderError::InvalidResponse("No message in response".to_string())
-        })?;
+        let message = body
+            .get("message")
+            .ok_or_else(|| ProviderError::InvalidResponse("No message in response".to_string()))?;
 
         let content = message
             .get("content")
@@ -233,10 +233,7 @@ impl OllamaProvider {
             }
         }
 
-        let eval_count = body
-            .get("eval_count")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(0) as usize;
+        let eval_count = body.get("eval_count").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
         let prompt_eval_count = body
             .get("prompt_eval_count")
             .and_then(|v| v.as_u64())
@@ -453,17 +450,14 @@ where
                 let json: serde_json::Value = match serde_json::from_str(line) {
                     Ok(j) => j,
                     Err(e) => {
-                        return std::task::Poll::Ready(Some(Err(
-                            ProviderError::InvalidResponse(e.to_string()),
-                        )));
+                        return std::task::Poll::Ready(Some(Err(ProviderError::InvalidResponse(
+                            e.to_string(),
+                        ))));
                     }
                 };
 
                 // Check for done flag
-                let done = json
-                    .get("done")
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(false);
+                let done = json.get("done").and_then(|v| v.as_bool()).unwrap_or(false);
 
                 let message = json.get("message");
                 let content = message
@@ -473,10 +467,8 @@ where
                     .to_string();
 
                 if done {
-                    let eval_count = json
-                        .get("eval_count")
-                        .and_then(|v| v.as_u64())
-                        .unwrap_or(0) as usize;
+                    let eval_count =
+                        json.get("eval_count").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
                     let prompt_eval_count = json
                         .get("prompt_eval_count")
                         .and_then(|v| v.as_u64())

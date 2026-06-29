@@ -186,7 +186,14 @@ mod policy_tests {
     fn test_resolve_policy_launch_override_wins() {
         let mut launch = HashMap::new();
         launch.insert("bash".to_string(), ToolPolicy::Allow);
-        let policy = resolve_policy("bash", true, &launch, &HashMap::new(), &HashMap::new(), &HashMap::new());
+        let policy = resolve_policy(
+            "bash",
+            true,
+            &launch,
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+        );
         assert_eq!(policy, ToolPolicy::Allow);
     }
 
@@ -194,7 +201,14 @@ mod policy_tests {
     fn test_resolve_policy_yolo_wins() {
         let mut launch = HashMap::new();
         launch.insert("*".to_string(), ToolPolicy::Allow);
-        let policy = resolve_policy("bash", true, &launch, &HashMap::new(), &HashMap::new(), &HashMap::new());
+        let policy = resolve_policy(
+            "bash",
+            true,
+            &launch,
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+        );
         assert_eq!(policy, ToolPolicy::Allow);
     }
 
@@ -204,13 +218,27 @@ mod policy_tests {
         stage.insert("bash".to_string(), "allow".to_string());
         let mut global = HashMap::new();
         global.insert("bash".to_string(), ToolPolicy::Deny);
-        let policy = resolve_policy("bash", true, &HashMap::new(), &stage, &HashMap::new(), &global);
+        let policy = resolve_policy(
+            "bash",
+            true,
+            &HashMap::new(),
+            &stage,
+            &HashMap::new(),
+            &global,
+        );
         assert_eq!(policy, ToolPolicy::Allow);
     }
 
     #[test]
     fn test_resolve_policy_falls_through_to_default() {
-        let policy = resolve_policy("bash", true, &HashMap::new(), &HashMap::new(), &HashMap::new(), &HashMap::new());
+        let policy = resolve_policy(
+            "bash",
+            true,
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+            &HashMap::new(),
+        );
         assert_eq!(policy, ToolPolicy::Ask);
     }
 }

@@ -426,9 +426,15 @@ mod tests {
             50000,
         );
 
-        region.add_entry_with_metadata("a".to_string(), 10, serde_json::json!({"idx": 1})).unwrap();
-        region.add_entry_with_metadata("b".to_string(), 20, serde_json::json!({"idx": 2})).unwrap();
-        region.add_entry_with_metadata("c".to_string(), 30, serde_json::json!({"idx": 3})).unwrap();
+        region
+            .add_entry_with_metadata("a".to_string(), 10, serde_json::json!({"idx": 1}))
+            .unwrap();
+        region
+            .add_entry_with_metadata("b".to_string(), 20, serde_json::json!({"idx": 2}))
+            .unwrap();
+        region
+            .add_entry_with_metadata("c".to_string(), 30, serde_json::json!({"idx": 3}))
+            .unwrap();
 
         assert_eq!(region.entry_count(), 2);
         assert_eq!(region.content[0].content, "b");

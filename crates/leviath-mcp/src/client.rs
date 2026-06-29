@@ -46,10 +46,7 @@ pub enum ToolResultContent {
     Image { data: String, mime_type: String },
     /// Resource content
     #[serde(rename = "resource")]
-    Resource {
-        uri: String,
-        text: Option<String>,
-    },
+    Resource { uri: String, text: Option<String> },
 }
 
 /// Client for communicating with MCP tool providers via JSON-RPC 2.0 over stdin/stdout.
@@ -132,16 +129,18 @@ impl MCPClient {
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::null());
 
-        let mut child = cmd.spawn().map_err(|e| {
-            anyhow::anyhow!("Failed to spawn MCP server '{}': {}", command, e)
-        })?;
+        let mut child = cmd
+            .spawn()
+            .map_err(|e| anyhow::anyhow!("Failed to spawn MCP server '{}': {}", command, e))?;
 
-        let stdin = child.stdin.take().ok_or_else(|| {
-            anyhow::anyhow!("Failed to capture stdin of MCP server")
-        })?;
-        let stdout = child.stdout.take().ok_or_else(|| {
-            anyhow::anyhow!("Failed to capture stdout of MCP server")
-        })?;
+        let stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| anyhow::anyhow!("Failed to capture stdin of MCP server"))?;
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| anyhow::anyhow!("Failed to capture stdout of MCP server"))?;
 
         Ok(Self {
             child,
@@ -188,7 +187,9 @@ impl MCPClient {
     pub async fn list_tools(&mut self) -> anyhow::Result<Vec<ToolMetadata>> {
         tracing::debug!("Listing MCP tools");
 
-        let result = self.send_request("tools/list", serde_json::json!({})).await?;
+        let result = self
+            .send_request("tools/list", serde_json::json!({}))
+            .await?;
 
         let tools_value = result.get("tools").cloned().unwrap_or(Value::Array(vec![]));
         let tools: Vec<ToolMetadata> = serde_json::from_value(tools_value)
@@ -200,11 +201,7 @@ impl MCPClient {
     }
 
     /// Call a tool on the server.
-    pub async fn call_tool(
-        &mut self,
-        name: &str,
-        arguments: Value,
-    ) -> anyhow::Result<ToolResult> {
+    pub async fn call_tool(&mut self, name: &str, arguments: Value) -> anyhow::Result<ToolResult> {
         tracing::debug!(tool = %name, "Calling MCP tool");
 
         let params = serde_json::json!({
@@ -225,7 +222,9 @@ impl MCPClient {
         tracing::info!("Shutting down MCP server");
 
         // Try to send a cancellation, but don't fail if the process is already gone
-        let _ = self.send_notification("notifications/cancelled", serde_json::json!({})).await;
+        let _ = self
+            .send_notification("notifications/cancelled", serde_json::json!({}))
+            .await;
         let _ = self.child.kill().await;
 
         Ok(())

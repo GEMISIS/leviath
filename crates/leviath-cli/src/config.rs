@@ -158,8 +158,9 @@ impl Config {
             tracing::debug!("No config file found at {}, using defaults", path.display());
             Self::default()
         } else {
-            let content = std::fs::read_to_string(&path)
-                .map_err(|e| anyhow::anyhow!("Failed to read config from '{}': {}", path.display(), e))?;
+            let content = std::fs::read_to_string(&path).map_err(|e| {
+                anyhow::anyhow!("Failed to read config from '{}': {}", path.display(), e)
+            })?;
 
             let c: Self = toml::from_str(&content)
                 .map_err(|e| anyhow::anyhow!("Failed to parse config: {}", e))?;
@@ -202,8 +203,9 @@ impl Config {
         let content = toml::to_string_pretty(self)
             .map_err(|e| anyhow::anyhow!("Failed to serialize config: {}", e))?;
 
-        std::fs::write(&path, content)
-            .map_err(|e| anyhow::anyhow!("Failed to write config to '{}': {}", path.display(), e))?;
+        std::fs::write(&path, content).map_err(|e| {
+            anyhow::anyhow!("Failed to write config to '{}': {}", path.display(), e)
+        })?;
 
         // Set restrictive permissions on the config file
         set_file_permissions(&path);

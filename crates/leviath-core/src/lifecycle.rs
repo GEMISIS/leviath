@@ -139,7 +139,7 @@ impl CompactionConfig {
         self.system_prompt.as_deref().unwrap_or(
             "You are a context compaction assistant. Your job is to summarize content \
              concisely while preserving all key information, decisions, and actionable items. \
-             Never lose critical details."
+             Never lose critical details.",
         )
     }
 

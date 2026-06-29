@@ -51,9 +51,7 @@ impl PackageManifest {
             .chars()
             .all(|c| c.is_alphanumeric() || c == '-')
         {
-            anyhow::bail!(
-                "Package name must contain only alphanumeric characters and hyphens"
-            );
+            anyhow::bail!("Package name must contain only alphanumeric characters and hyphens");
         }
 
         // Validate version: must be valid semver (X.Y.Z)

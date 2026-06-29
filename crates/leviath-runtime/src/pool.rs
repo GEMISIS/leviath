@@ -3,9 +3,9 @@
 //! The pool manages a collection of agent instances, recycling completed agents
 //! and spawning new ones as needed. Agents are auto-numbered and tracked.
 
+use crate::components::{AgentState, AgentStatus, CancellationToken, ContextWindow, MessageInbox};
 use bevy_ecs::prelude::*;
 use leviath_core::Blueprint;
-use crate::components::{AgentState, AgentStatus, CancellationToken, ContextWindow, MessageInbox};
 use std::collections::HashMap;
 
 /// Manager for a pool of agents.
@@ -40,14 +40,15 @@ impl AgentPool {
         self.next_id += 1;
 
         // Create context window from blueprint layout
-        let context_window = ContextWindow::new(
-            self.blueprint.context_layout.total_budget_tokens
-        );
+        let context_window = ContextWindow::new(self.blueprint.context_layout.total_budget_tokens);
 
         // Create agent state
         let agent_state = AgentState {
             agent_id: agent_id.clone(),
-            current_stage: self.blueprint.stages.first()
+            current_stage: self
+                .blueprint
+                .stages
+                .first()
                 .map(|s| s.name.clone())
                 .unwrap_or_else(|| "default".to_string()),
             iteration: 0,
@@ -57,8 +58,15 @@ impl AgentPool {
         // Spawn entity with components
         let cancellation_token = CancellationToken::new();
         let message_inbox = MessageInbox::new();
-        let entity = world.spawn((agent_state, context_window, cancellation_token, message_inbox)).id();
-        
+        let entity = world
+            .spawn((
+                agent_state,
+                context_window,
+                cancellation_token,
+                message_inbox,
+            ))
+            .id();
+
         self.active_agents.insert(agent_id.clone(), entity);
         tracing::info!(agent_id = %agent_id, "Spawned new agent");
 
@@ -89,17 +97,22 @@ impl AgentPool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use leviath_core::{Blueprint, Stage, ContextLayout, layout::RegionDefinition, region::RegionKind};
     use leviath_core::blueprint::ModelConfig;
+    use leviath_core::{
+        layout::RegionDefinition, region::RegionKind, Blueprint, ContextLayout, Stage,
+    };
 
     fn create_test_blueprint() -> Blueprint {
-        let regions = vec![
-            RegionDefinition::new("test".to_string(), RegionKind::Pinned, 5000),
-        ];
+        let regions = vec![RegionDefinition::new(
+            "test".to_string(),
+            RegionKind::Pinned,
+            5000,
+        )];
         let layout = ContextLayout::new(regions, 10000);
-        let stages = vec![
-            Stage::new("test".to_string(), ModelConfig::new("anthropic".to_string(), "claude-sonnet-4".to_string())),
-        ];
+        let stages = vec![Stage::new(
+            "test".to_string(),
+            ModelConfig::new("anthropic".to_string(), "claude-sonnet-4".to_string()),
+        )];
         Blueprint::new("test-agent".to_string(), "Test".to_string(), stages, layout)
     }
 

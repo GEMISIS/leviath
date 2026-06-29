@@ -106,7 +106,12 @@ impl ContextWindow {
     }
 
     /// Add content to a specific region.
-    pub fn add_to_region(&mut self, region_name: &str, content: String, tokens: usize) -> leviath_core::Result<()> {
+    pub fn add_to_region(
+        &mut self,
+        region_name: &str,
+        content: String,
+        tokens: usize,
+    ) -> leviath_core::Result<()> {
         if let Some(region) = self.get_region_mut(region_name) {
             region.add_entry(content, tokens)?;
             self.current_tokens = self.calculate_tokens();
@@ -138,9 +143,10 @@ impl ContextWindow {
         let initial_tokens = self.current_tokens;
 
         // Check if we have any evictable regions
-        let has_evictable = self.regions.iter().any(|r| {
-            matches!(r.kind, RegionKind::Clearable | RegionKind::Temporary)
-        });
+        let has_evictable = self
+            .regions
+            .iter()
+            .any(|r| matches!(r.kind, RegionKind::Clearable | RegionKind::Temporary));
 
         if !has_evictable {
             tracing::warn!(
@@ -216,8 +222,15 @@ impl ContextWindow {
         // Phase 5: Pinned and CompactHistory regions are NEVER touched
 
         // Check for pinned regions over budget
-        let pinned_tokens: usize = self.regions.iter()
-            .filter(|r| matches!(r.kind, RegionKind::Pinned | RegionKind::CompactHistory { .. }))
+        let pinned_tokens: usize = self
+            .regions
+            .iter()
+            .filter(|r| {
+                matches!(
+                    r.kind,
+                    RegionKind::Pinned | RegionKind::CompactHistory { .. }
+                )
+            })
             .map(|r| r.current_tokens)
             .sum();
 
@@ -251,9 +264,11 @@ impl ContextWindow {
             }
 
             match &region.kind {
-                leviath_core::RegionKind::Pinned | leviath_core::RegionKind::CompactHistory { .. } => {
+                leviath_core::RegionKind::Pinned
+                | leviath_core::RegionKind::CompactHistory { .. } => {
                     // System-level content
-                    let content = region.content
+                    let content = region
+                        .content
                         .iter()
                         .map(|e| e.content.as_str())
                         .collect::<Vec<_>>()
@@ -263,7 +278,8 @@ impl ContextWindow {
                         content,
                     });
                 }
-                leviath_core::RegionKind::SlidingWindow { .. } | leviath_core::RegionKind::Compacting { .. } => {
+                leviath_core::RegionKind::SlidingWindow { .. }
+                | leviath_core::RegionKind::Compacting { .. } => {
                     // Conversation-style: parse each entry by prefix
                     for entry in &region.content {
                         let trimmed = entry.content.trim();
@@ -287,7 +303,8 @@ impl ContextWindow {
                 }
                 leviath_core::RegionKind::Temporary => {
                     // Tool results or temporary data
-                    let content = region.content
+                    let content = region
+                        .content
                         .iter()
                         .map(|e| e.content.as_str())
                         .collect::<Vec<_>>()
@@ -298,7 +315,8 @@ impl ContextWindow {
                     });
                 }
                 leviath_core::RegionKind::Clearable => {
-                    let content = region.content
+                    let content = region
+                        .content
                         .iter()
                         .map(|e| e.content.as_str())
                         .collect::<Vec<_>>()
@@ -448,7 +466,8 @@ impl MessageInbox {
     pub fn push(&mut self, msg: AgentMessage) {
         self.messages.push(msg);
         // Sort by priority descending so highest priority is first
-        self.messages.sort_by(|a, b| b.priority.cmp(&a.priority));
+        self.messages
+            .sort_by_key(|m| std::cmp::Reverse(m.priority));
     }
 
     /// Drain all messages from the inbox.
@@ -480,7 +499,7 @@ mod tests {
         let mut window = ContextWindow::new(10000);
         window.current_tokens = 9500;
         assert!(window.needs_eviction(0.9));
-        
+
         window.current_tokens = 5000;
         assert!(!window.needs_eviction(0.9));
     }
@@ -497,8 +516,12 @@ mod tests {
     fn test_clearable_eviction() {
         let mut window = ContextWindow::new(10000);
         let mut region = Region::new("scratch".to_string(), RegionKind::Clearable, 5000);
-        region.add_entry("test content 1".to_string(), 1000).unwrap();
-        region.add_entry("test content 2".to_string(), 1000).unwrap();
+        region
+            .add_entry("test content 1".to_string(), 1000)
+            .unwrap();
+        region
+            .add_entry("test content 2".to_string(), 1000)
+            .unwrap();
         window.add_region(region);
 
         assert_eq!(window.current_tokens, 2000);
@@ -515,7 +538,9 @@ mod tests {
         let mut window = ContextWindow::new(10000);
         let mut region = Region::new("temp".to_string(), RegionKind::Temporary, 5000);
         region.add_entry("old content".to_string(), 1000).unwrap();
-        region.add_entry("middle content".to_string(), 1000).unwrap();
+        region
+            .add_entry("middle content".to_string(), 1000)
+            .unwrap();
         region.add_entry("new content".to_string(), 1000).unwrap();
         window.add_region(region);
 
@@ -535,60 +560,78 @@ mod tests {
     #[test]
     fn test_sliding_window_never_reduced() {
         let mut window = ContextWindow::new(10000);
-        let mut region = Region::new("conversation".to_string(), RegionKind::SlidingWindow { max_items: 5 }, 5000);
+        let mut region = Region::new(
+            "conversation".to_string(),
+            RegionKind::SlidingWindow { max_items: 5 },
+            5000,
+        );
         region.add_entry("msg 1".to_string(), 1000).unwrap();
         region.add_entry("msg 2".to_string(), 1000).unwrap();
         region.add_entry("msg 3".to_string(), 1000).unwrap();
         window.add_region(region);
-        
+
         let initial_count = window.get_region("conversation").unwrap().content.len();
-        
+
         // Try to evict - should not touch SlidingWindow
         window.try_evict(1000).ok();
-        
+
         let after_count = window.get_region("conversation").unwrap().content.len();
-        assert_eq!(initial_count, after_count, "SlidingWindow should never be reduced during eviction");
+        assert_eq!(
+            initial_count, after_count,
+            "SlidingWindow should never be reduced during eviction"
+        );
     }
 
     #[test]
     fn test_pinned_never_touched() {
         let mut window = ContextWindow::new(10000);
         let mut region = Region::new("architecture".to_string(), RegionKind::Pinned, 3000);
-        region.add_entry("architecture diagram".to_string(), 2000).unwrap();
+        region
+            .add_entry("architecture diagram".to_string(), 2000)
+            .unwrap();
         window.add_region(region);
-        
+
         let initial_tokens = window.get_region("architecture").unwrap().current_tokens;
-        
+
         // Try to evict - should not touch Pinned
         window.try_evict(1000).ok();
-        
+
         let after_tokens = window.get_region("architecture").unwrap().current_tokens;
-        assert_eq!(initial_tokens, after_tokens, "Pinned region should never be evicted");
+        assert_eq!(
+            initial_tokens, after_tokens,
+            "Pinned region should never be evicted"
+        );
     }
 
     #[test]
     fn test_eviction_cascade_order() {
         let mut window = ContextWindow::new(10000);
-        
+
         // Add Clearable region
         let mut clearable = Region::new("scratch".to_string(), RegionKind::Clearable, 2000);
-        clearable.add_entry("scratch data".to_string(), 1000).unwrap();
+        clearable
+            .add_entry("scratch data".to_string(), 1000)
+            .unwrap();
         window.add_region(clearable);
-        
+
         // Add Temporary region
         let mut temporary = Region::new("temp".to_string(), RegionKind::Temporary, 3000);
-        temporary.add_entry("temp data 1".to_string(), 1000).unwrap();
-        temporary.add_entry("temp data 2".to_string(), 1000).unwrap();
+        temporary
+            .add_entry("temp data 1".to_string(), 1000)
+            .unwrap();
+        temporary
+            .add_entry("temp data 2".to_string(), 1000)
+            .unwrap();
         window.add_region(temporary);
-        
+
         assert_eq!(window.current_tokens, 3000);
-        
+
         // Evict with small target - should clear Clearable first
         window.try_evict(500).unwrap();
-        
+
         // Clearable should be empty
         assert_eq!(window.get_region("scratch").unwrap().current_tokens, 0);
-        
+
         // Temporary should still have content
         assert!(window.get_region("temp").unwrap().current_tokens > 0);
     }
@@ -598,12 +641,16 @@ mod tests {
         let mut window = ContextWindow::new(10000);
 
         let mut region1 = Region::new("system".to_string(), RegionKind::Pinned, 1000);
-        region1.add_entry("You are a helpful assistant.".to_string(), 100).unwrap();
+        region1
+            .add_entry("You are a helpful assistant.".to_string(), 100)
+            .unwrap();
         window.add_region(region1);
 
         let mut region2 = Region::new("conversation".to_string(), RegionKind::Temporary, 2000);
         region2.add_entry("User: Hello".to_string(), 50).unwrap();
-        region2.add_entry("Assistant: Hi there!".to_string(), 50).unwrap();
+        region2
+            .add_entry("Assistant: Hi there!".to_string(), 50)
+            .unwrap();
         window.add_region(region2);
 
         let prompt = window.assemble_prompt();
@@ -617,12 +664,19 @@ mod tests {
         let mut window = ContextWindow::new(10000);
 
         let mut system = Region::new("system".to_string(), RegionKind::Pinned, 1000);
-        system.add_entry("You are a helpful assistant.".to_string(), 100).unwrap();
+        system
+            .add_entry("You are a helpful assistant.".to_string(), 100)
+            .unwrap();
         window.add_region(system);
 
-        let mut conv = Region::new("conversation".to_string(), RegionKind::SlidingWindow { max_items: 10 }, 5000);
+        let mut conv = Region::new(
+            "conversation".to_string(),
+            RegionKind::SlidingWindow { max_items: 10 },
+            5000,
+        );
         conv.add_entry("User: Hello".to_string(), 50).unwrap();
-        conv.add_entry("Assistant: Hi there!".to_string(), 50).unwrap();
+        conv.add_entry("Assistant: Hi there!".to_string(), 50)
+            .unwrap();
         window.add_region(conv);
 
         let msgs = window.assemble_messages();
@@ -706,10 +760,14 @@ mod tests {
         // Add a compacting region that's over threshold
         let mut compacting = Region::new(
             "impl".to_string(),
-            RegionKind::Compacting { threshold_tokens: 500 },
+            RegionKind::Compacting {
+                threshold_tokens: 500,
+            },
             900,
         );
-        compacting.add_entry("lots of content".to_string(), 600).unwrap();
+        compacting
+            .add_entry("lots of content".to_string(), 600)
+            .unwrap();
         window.add_region(compacting);
 
         assert_eq!(window.current_tokens, 600);
@@ -727,7 +785,9 @@ mod tests {
         // Fill with compacting region content above threshold
         let mut compacting = Region::new(
             "analysis".to_string(),
-            RegionKind::Compacting { threshold_tokens: 800 },
+            RegionKind::Compacting {
+                threshold_tokens: 800,
+            },
             1100,
         );
         compacting.add_entry("data 1".to_string(), 500).unwrap();

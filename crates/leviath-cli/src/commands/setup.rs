@@ -80,10 +80,7 @@ pub async fn execute(args: SetupArgs) -> anyhow::Result<()> {
     // Ollama URL
     let default_ollama = "http://localhost:11434";
     let current_ollama = config.ollama_base_url.as_deref().unwrap_or(default_ollama);
-    let ollama_input = prompt_plain(
-        "Ollama base URL",
-        current_ollama,
-    )?;
+    let ollama_input = prompt_plain("Ollama base URL", current_ollama)?;
     config.ollama_base_url = if ollama_input == default_ollama {
         None // store None so the default takes effect
     } else if ollama_input.is_empty() {
@@ -93,7 +90,10 @@ pub async fn execute(args: SetupArgs) -> anyhow::Result<()> {
     };
 
     // Default model
-    let current_model = config.default_model.as_deref().unwrap_or("(provider default)");
+    let current_model = config
+        .default_model
+        .as_deref()
+        .unwrap_or("(provider default)");
     let model_input = prompt_plain("Default model override", current_model)?;
     config.default_model = if model_input.is_empty() || model_input == "(provider default)" {
         config.default_model.clone()

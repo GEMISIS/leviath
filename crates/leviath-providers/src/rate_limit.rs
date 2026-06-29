@@ -93,7 +93,10 @@ impl RateLimiter {
             let wait = (oldest + window).saturating_duration_since(now) + Duration::from_millis(50);
 
             drop(state);
-            tracing::debug!(wait_ms = wait.as_millis(), "Rate limiter: waiting for RPM capacity");
+            tracing::debug!(
+                wait_ms = wait.as_millis(),
+                "Rate limiter: waiting for RPM capacity"
+            );
             tokio::time::sleep(wait).await;
         }
     }
@@ -138,7 +141,10 @@ impl RateLimiter {
         };
 
         drop(state);
-        tracing::warn!(wait_secs = wait.as_secs(), "Rate limited (429), backing off");
+        tracing::warn!(
+            wait_secs = wait.as_secs(),
+            "Rate limited (429), backing off"
+        );
         tokio::time::sleep(wait).await;
     }
 

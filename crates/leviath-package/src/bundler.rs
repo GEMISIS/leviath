@@ -48,16 +48,16 @@ impl AgentBundler {
         tracing::info!(path = %project_path.display(), "Bundling agent");
 
         if !project_path.is_dir() {
-            anyhow::bail!("Project path '{}' is not a directory", project_path.display());
+            anyhow::bail!(
+                "Project path '{}' is not a directory",
+                project_path.display()
+            );
         }
 
         // Verify agent.leviath exists
         let manifest_path = project_path.join("agent.leviath");
         if !manifest_path.exists() {
-            anyhow::bail!(
-                "No agent.leviath found in '{}'",
-                project_path.display()
-            );
+            anyhow::bail!("No agent.leviath found in '{}'", project_path.display());
         }
 
         let mut buf = Vec::new();
@@ -68,16 +68,15 @@ impl AgentBundler {
             // Walk the project directory and add files
             self.add_directory_to_tar(&mut tar, project_path, project_path)?;
 
-            let encoder = tar.into_inner()
+            let encoder = tar
+                .into_inner()
                 .map_err(|e| anyhow::anyhow!("Failed to finalize tar archive: {}", e))?;
-            encoder.finish()
+            encoder
+                .finish()
                 .map_err(|e| anyhow::anyhow!("Failed to finalize gzip: {}", e))?;
         }
 
-        tracing::info!(
-            size_bytes = buf.len(),
-            "Bundle created"
-        );
+        tracing::info!(size_bytes = buf.len(), "Bundle created");
 
         Ok(buf)
     }
@@ -91,8 +90,9 @@ impl AgentBundler {
         let data = self.bundle(&project_path)?;
         let output = output_path.as_ref().to_path_buf();
 
-        fs::write(&output, &data)
-            .map_err(|e| anyhow::anyhow!("Failed to write bundle to '{}': {}", output.display(), e))?;
+        fs::write(&output, &data).map_err(|e| {
+            anyhow::anyhow!("Failed to write bundle to '{}': {}", output.display(), e)
+        })?;
 
         tracing::info!(
             path = %output.display(),
@@ -144,14 +144,9 @@ impl AgentBundler {
             if path.is_dir() {
                 self.add_directory_to_tar(tar, &path, base)?;
             } else if path.is_file() {
-                tar.append_path_with_name(&path, relative)
-                    .map_err(|e| {
-                        anyhow::anyhow!(
-                            "Failed to add '{}' to bundle: {}",
-                            relative.display(),
-                            e
-                        )
-                    })?;
+                tar.append_path_with_name(&path, relative).map_err(|e| {
+                    anyhow::anyhow!("Failed to add '{}' to bundle: {}", relative.display(), e)
+                })?;
             }
         }
         Ok(())

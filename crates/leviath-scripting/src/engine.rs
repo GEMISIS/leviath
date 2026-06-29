@@ -1,7 +1,7 @@
 //! Rhai script engine with Leviath integration.
 
-use rhai::{Engine, Scope};
 use crate::{Error, Result};
+use rhai::{Engine, Scope};
 
 /// Sandboxed Rhai engine for executing custom validators, transforms, and logic.
 pub struct ScriptEngine {
@@ -89,15 +89,15 @@ mod tests {
     #[test]
     fn test_string_operations() {
         let engine = ScriptEngine::new();
-        
+
         // Test starts_with
         let script = r#"content.starts_with("Hello")"#;
         assert!(engine.validate(script, "Hello, world!").unwrap());
-        
+
         // Test ends_with
         let script = r#"content.ends_with("!")"#;
         assert!(engine.validate(script, "Hello, world!").unwrap());
-        
+
         // Test trim
         let script = r#"content.trim() == "hello""#;
         assert!(engine.validate(script, "  hello  ").unwrap());
@@ -107,7 +107,7 @@ mod tests {
     fn test_json_validation() {
         let engine = ScriptEngine::new();
         let script = r#"is_json(content)"#;
-        
+
         assert!(engine.validate(script, r#"{"key": "value"}"#).unwrap());
         assert!(!engine.validate(script, "not json").unwrap());
     }
@@ -116,9 +116,11 @@ mod tests {
     fn test_mermaid_validation() {
         let engine = ScriptEngine::new();
         let script = r#"is_mermaid(content)"#;
-        
+
         assert!(engine.validate(script, "graph TD\n  A --> B").unwrap());
-        assert!(engine.validate(script, "sequenceDiagram\n  Alice->>Bob: Hello").unwrap());
+        assert!(engine
+            .validate(script, "sequenceDiagram\n  Alice->>Bob: Hello")
+            .unwrap());
         assert!(!engine.validate(script, "just text").unwrap());
     }
 
@@ -126,7 +128,7 @@ mod tests {
     fn test_token_counting() {
         let engine = ScriptEngine::new();
         let script = r#"count_tokens(content) > 10"#;
-        
+
         let long_text = "a".repeat(50);
         assert!(engine.validate(script, &long_text).unwrap());
         assert!(!engine.validate(script, "short").unwrap());

@@ -43,8 +43,9 @@ impl AgentInstaller {
         let package_path = package_path.as_ref();
         tracing::info!(path = %package_path.display(), "Installing agent from package");
 
-        let data = fs::read(package_path)
-            .map_err(|e| anyhow::anyhow!("Failed to read package '{}': {}", package_path.display(), e))?;
+        let data = fs::read(package_path).map_err(|e| {
+            anyhow::anyhow!("Failed to read package '{}': {}", package_path.display(), e)
+        })?;
 
         // Derive name from filename (strip .leviath-bundle extension)
         let name = package_path
@@ -63,22 +64,28 @@ impl AgentInstaller {
         let agent_dir = self.install_dir.join(name);
 
         // Create installation directory
-        fs::create_dir_all(&agent_dir)
-            .map_err(|e| anyhow::anyhow!("Failed to create install directory '{}': {}", agent_dir.display(), e))?;
+        fs::create_dir_all(&agent_dir).map_err(|e| {
+            anyhow::anyhow!(
+                "Failed to create install directory '{}': {}",
+                agent_dir.display(),
+                e
+            )
+        })?;
 
         // Extract tar.gz archive
         let decoder = GzDecoder::new(data);
         let mut archive = tar::Archive::new(decoder);
 
-        archive.unpack(&agent_dir)
+        archive
+            .unpack(&agent_dir)
             .map_err(|e| anyhow::anyhow!("Failed to extract package: {}", e))?;
 
         // Read agent.leviath to get metadata
         let manifest_path = agent_dir.join("agent.leviath");
         let (version, description) = if manifest_path.exists() {
-            let content = fs::read_to_string(&manifest_path)
-                .unwrap_or_default();
-            let parsed: toml::Value = toml::from_str(&content).unwrap_or(toml::Value::Table(toml::map::Map::new()));
+            let content = fs::read_to_string(&manifest_path).unwrap_or_default();
+            let parsed: toml::Value =
+                toml::from_str(&content).unwrap_or(toml::Value::Table(toml::map::Map::new()));
             let version = parsed
                 .get("agent")
                 .and_then(|a| a.get("version"))
@@ -191,8 +198,8 @@ impl AgentInstaller {
         }
 
         let content = fs::read_to_string(&manifest_path).unwrap_or_default();
-        let parsed: toml::Value = toml::from_str(&content)
-            .unwrap_or(toml::Value::Table(toml::map::Map::new()));
+        let parsed: toml::Value =
+            toml::from_str(&content).unwrap_or(toml::Value::Table(toml::map::Map::new()));
 
         let version = parsed
             .get("agent")

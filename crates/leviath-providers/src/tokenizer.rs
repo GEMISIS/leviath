@@ -9,7 +9,11 @@ use tiktoken_rs::get_bpe_from_model;
 ///
 /// Uses tiktoken for OpenAI/GPT models, approximate counting for others.
 pub fn count_tokens(text: &str, model: &str) -> usize {
-    if model.starts_with("gpt-") || model.starts_with("o1-") || model.starts_with("o3-") || model.starts_with("o4-") {
+    if model.starts_with("gpt-")
+        || model.starts_with("o1-")
+        || model.starts_with("o3-")
+        || model.starts_with("o4-")
+    {
         count_tokens_tiktoken(text, model)
     } else if model.starts_with("claude-") {
         // Anthropic: ~3.5 chars per token (no official Rust tokenizer)
@@ -48,7 +52,10 @@ pub fn approximate_count(text: &str) -> usize {
 
 /// Get maximum context tokens for a model.
 pub fn max_context_tokens(model: &str) -> usize {
-    if model.contains("claude-opus-4") || model.contains("claude-sonnet-4") || model.contains("claude-3") {
+    if model.contains("claude-opus-4")
+        || model.contains("claude-sonnet-4")
+        || model.contains("claude-3")
+    {
         200_000
     } else if model.starts_with("gpt-4") {
         128_000

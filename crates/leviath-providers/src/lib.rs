@@ -19,15 +19,14 @@ pub mod provider;
 pub mod rate_limit;
 pub mod tokenizer;
 
-pub use provider::{
-    Provider, InferenceRequest, InferenceResponse, Message, Tool, ToolCall,
-    TokenUsage, FinishReason, ProviderError, Result, StreamChunk, ToolCallDelta,
-    ProviderConfig, RateLimitConfig, ModelCapabilities, ModelInfo,
-    parse_openai_finish_reason, check_http_response,
-};
-pub use rate_limit::RateLimiter;
 pub use anthropic::AnthropicProvider;
 pub use claude_code::ClaudeCodeProvider;
 pub use ollama::OllamaProvider;
 pub use openai::OpenAIProvider;
 pub use openrouter::OpenRouterProvider;
+pub use provider::{
+    check_http_response, parse_openai_finish_reason, FinishReason, InferenceRequest,
+    InferenceResponse, Message, ModelCapabilities, ModelInfo, Provider, ProviderConfig,
+    ProviderError, RateLimitConfig, Result, StreamChunk, TokenUsage, Tool, ToolCall, ToolCallDelta,
+};
+pub use rate_limit::RateLimiter;

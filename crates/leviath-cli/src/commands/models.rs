@@ -3,8 +3,8 @@
 use clap::{Args, Subcommand};
 use leviath_providers::{ModelCapabilities, ModelInfo};
 
-use crate::config::Config;
 use super::run::build_provider_registry;
+use crate::config::Config;
 
 // ─── CLI types ────────────────────────────────────────────────────────────────
 
@@ -72,7 +72,15 @@ fn builtin_table() -> Vec<BuiltinEntry> {
         // Short form — tools defaults to true
         ($provider:expr, $id:expr, $name:expr,
          temp=$t:expr, ctx=$ctx:expr, out=$out:expr) => {
-            entry!($provider, $id, $name, temp=$t, tools=true, ctx=$ctx, out=$out)
+            entry!(
+                $provider,
+                $id,
+                $name,
+                temp = $t,
+                tools = true,
+                ctx = $ctx,
+                out = $out
+            )
         };
         // Full form — explicit tools flag
         ($provider:expr, $id:expr, $name:expr,
@@ -95,73 +103,231 @@ fn builtin_table() -> Vec<BuiltinEntry> {
 
     vec![
         // ── Anthropic ──────────────────────────────────────────────────────────
-        entry!("anthropic", "claude-fable-5",            "Claude Fable 5",
-               temp=false, ctx=1_000_000, out=128_000),
-        entry!("anthropic", "claude-opus-4-8",           "Claude Opus 4.8",
-               temp=false, ctx=1_000_000, out=128_000),
-        entry!("anthropic", "claude-opus-4-7",           "Claude Opus 4.7",
-               temp=false, ctx=1_000_000, out=128_000),
-        entry!("anthropic", "claude-opus-4-6",           "Claude Opus 4.6",
-               temp=true,  ctx=1_000_000, out=128_000),
-        entry!("anthropic", "claude-sonnet-4-6",         "Claude Sonnet 4.6",
-               temp=true,  ctx=1_000_000, out=128_000),
-        entry!("anthropic", "claude-haiku-4-5-20251001", "Claude Haiku 4.5",
-               temp=true,  ctx=200_000,   out=65_536),
-
+        entry!(
+            "anthropic",
+            "claude-fable-5",
+            "Claude Fable 5",
+            temp = false,
+            ctx = 1_000_000,
+            out = 128_000
+        ),
+        entry!(
+            "anthropic",
+            "claude-opus-4-8",
+            "Claude Opus 4.8",
+            temp = false,
+            ctx = 1_000_000,
+            out = 128_000
+        ),
+        entry!(
+            "anthropic",
+            "claude-opus-4-7",
+            "Claude Opus 4.7",
+            temp = false,
+            ctx = 1_000_000,
+            out = 128_000
+        ),
+        entry!(
+            "anthropic",
+            "claude-opus-4-6",
+            "Claude Opus 4.6",
+            temp = true,
+            ctx = 1_000_000,
+            out = 128_000
+        ),
+        entry!(
+            "anthropic",
+            "claude-sonnet-4-6",
+            "Claude Sonnet 4.6",
+            temp = true,
+            ctx = 1_000_000,
+            out = 128_000
+        ),
+        entry!(
+            "anthropic",
+            "claude-haiku-4-5-20251001",
+            "Claude Haiku 4.5",
+            temp = true,
+            ctx = 200_000,
+            out = 65_536
+        ),
         // ── OpenAI ─────────────────────────────────────────────────────────────
         // GPT-5.5 — flagship (Apr 2026), 1M+ context
-        entry!("openai", "gpt-5.5",      "GPT-5.5",
-               temp=true, ctx=1_050_000, out=128_000),
-        entry!("openai", "gpt-5.4",      "GPT-5.4",
-               temp=true, ctx=1_050_000, out=128_000),
-        entry!("openai", "gpt-5.4-mini", "GPT-5.4 Mini",
-               temp=true, ctx=400_000,   out=128_000),
-        entry!("openai", "gpt-5.4-nano", "GPT-5.4 Nano",
-               temp=true, ctx=400_000,   out=128_000),
-
+        entry!(
+            "openai",
+            "gpt-5.5",
+            "GPT-5.5",
+            temp = true,
+            ctx = 1_050_000,
+            out = 128_000
+        ),
+        entry!(
+            "openai",
+            "gpt-5.4",
+            "GPT-5.4",
+            temp = true,
+            ctx = 1_050_000,
+            out = 128_000
+        ),
+        entry!(
+            "openai",
+            "gpt-5.4-mini",
+            "GPT-5.4 Mini",
+            temp = true,
+            ctx = 400_000,
+            out = 128_000
+        ),
+        entry!(
+            "openai",
+            "gpt-5.4-nano",
+            "GPT-5.4 Nano",
+            temp = true,
+            ctx = 400_000,
+            out = 128_000
+        ),
         // ── OpenRouter: Google Gemini ──────────────────────────────────────────
-        entry!("openrouter", "google/gemini-3.5-flash",      "Gemini 3.5 Flash",
-               temp=true, ctx=1_048_576, out=65_536),
-        entry!("openrouter", "google/gemini-2.5-pro",        "Gemini 2.5 Pro",
-               temp=true, ctx=1_048_576, out=65_536),
-        entry!("openrouter", "google/gemini-2.5-flash",      "Gemini 2.5 Flash",
-               temp=true, ctx=1_048_576, out=65_536),
-        entry!("openrouter", "google/gemini-2.5-flash-lite", "Gemini 2.5 Flash Lite",
-               temp=true, ctx=1_048_576, out=65_536),
-
+        entry!(
+            "openrouter",
+            "google/gemini-3.5-flash",
+            "Gemini 3.5 Flash",
+            temp = true,
+            ctx = 1_048_576,
+            out = 65_536
+        ),
+        entry!(
+            "openrouter",
+            "google/gemini-2.5-pro",
+            "Gemini 2.5 Pro",
+            temp = true,
+            ctx = 1_048_576,
+            out = 65_536
+        ),
+        entry!(
+            "openrouter",
+            "google/gemini-2.5-flash",
+            "Gemini 2.5 Flash",
+            temp = true,
+            ctx = 1_048_576,
+            out = 65_536
+        ),
+        entry!(
+            "openrouter",
+            "google/gemini-2.5-flash-lite",
+            "Gemini 2.5 Flash Lite",
+            temp = true,
+            ctx = 1_048_576,
+            out = 65_536
+        ),
         // ── OpenRouter: Meta Llama 4 ───────────────────────────────────────────
-        entry!("openrouter", "meta-llama/llama-4-maverick", "Llama 4 Maverick",
-               temp=true, ctx=1_048_576,  out=32_768),
-        entry!("openrouter", "meta-llama/llama-4-scout",    "Llama 4 Scout",
-               temp=true, ctx=10_000_000, out=32_768),
-
+        entry!(
+            "openrouter",
+            "meta-llama/llama-4-maverick",
+            "Llama 4 Maverick",
+            temp = true,
+            ctx = 1_048_576,
+            out = 32_768
+        ),
+        entry!(
+            "openrouter",
+            "meta-llama/llama-4-scout",
+            "Llama 4 Scout",
+            temp = true,
+            ctx = 10_000_000,
+            out = 32_768
+        ),
         // ── OpenRouter: DeepSeek ───────────────────────────────────────────────
-        entry!("openrouter", "deepseek/deepseek-v4-pro",   "DeepSeek V4 Pro",
-               temp=true, ctx=1_048_576, out=393_216),
-        entry!("openrouter", "deepseek/deepseek-v4-flash",  "DeepSeek V4 Flash",
-               temp=true, ctx=1_048_576, out=65_536),
-        entry!("openrouter", "deepseek/deepseek-v3.2",      "DeepSeek V3.2",
-               temp=true, ctx=131_072,   out=65_536),
-        entry!("openrouter", "deepseek/deepseek-r1-0528",   "DeepSeek R1 (0528)",
-               temp=false, tools=false,  ctx=163_840, out=32_768),
-        entry!("openrouter", "deepseek/deepseek-r1",        "DeepSeek R1",
-               temp=false, tools=false,  ctx=163_840, out=16_384),
-
+        entry!(
+            "openrouter",
+            "deepseek/deepseek-v4-pro",
+            "DeepSeek V4 Pro",
+            temp = true,
+            ctx = 1_048_576,
+            out = 393_216
+        ),
+        entry!(
+            "openrouter",
+            "deepseek/deepseek-v4-flash",
+            "DeepSeek V4 Flash",
+            temp = true,
+            ctx = 1_048_576,
+            out = 65_536
+        ),
+        entry!(
+            "openrouter",
+            "deepseek/deepseek-v3.2",
+            "DeepSeek V3.2",
+            temp = true,
+            ctx = 131_072,
+            out = 65_536
+        ),
+        entry!(
+            "openrouter",
+            "deepseek/deepseek-r1-0528",
+            "DeepSeek R1 (0528)",
+            temp = false,
+            tools = false,
+            ctx = 163_840,
+            out = 32_768
+        ),
+        entry!(
+            "openrouter",
+            "deepseek/deepseek-r1",
+            "DeepSeek R1",
+            temp = false,
+            tools = false,
+            ctx = 163_840,
+            out = 16_384
+        ),
         // ── OpenRouter: Mistral ────────────────────────────────────────────────
-        entry!("openrouter", "mistralai/mistral-large-2512", "Mistral Large 3",
-               temp=true, ctx=262_144, out=32_768),
-        entry!("openrouter", "mistralai/mistral-medium-3-5", "Mistral Medium 3.5",
-               temp=true, ctx=256_000, out=32_768),
-        entry!("openrouter", "mistralai/mistral-small-2603", "Mistral Small 4",
-               temp=true, ctx=128_000, out=32_768),
-
+        entry!(
+            "openrouter",
+            "mistralai/mistral-large-2512",
+            "Mistral Large 3",
+            temp = true,
+            ctx = 262_144,
+            out = 32_768
+        ),
+        entry!(
+            "openrouter",
+            "mistralai/mistral-medium-3-5",
+            "Mistral Medium 3.5",
+            temp = true,
+            ctx = 256_000,
+            out = 32_768
+        ),
+        entry!(
+            "openrouter",
+            "mistralai/mistral-small-2603",
+            "Mistral Small 4",
+            temp = true,
+            ctx = 128_000,
+            out = 32_768
+        ),
         // ── OpenRouter: Qwen (Alibaba) ─────────────────────────────────────────
-        entry!("openrouter", "qwen/qwen3.6-plus",  "Qwen 3.6 Plus",
-               temp=true, ctx=1_048_576, out=65_536),
-        entry!("openrouter", "qwen/qwen3-max",     "Qwen3 Max",
-               temp=true, ctx=131_072,   out=32_768),
-        entry!("openrouter", "qwen/qwen3-coder",   "Qwen3 Coder 480B",
-               temp=true, ctx=1_048_576, out=262_144),
+        entry!(
+            "openrouter",
+            "qwen/qwen3.6-plus",
+            "Qwen 3.6 Plus",
+            temp = true,
+            ctx = 1_048_576,
+            out = 65_536
+        ),
+        entry!(
+            "openrouter",
+            "qwen/qwen3-max",
+            "Qwen3 Max",
+            temp = true,
+            ctx = 131_072,
+            out = 32_768
+        ),
+        entry!(
+            "openrouter",
+            "qwen/qwen3-coder",
+            "Qwen3 Coder 480B",
+            temp = true,
+            ctx = 1_048_576,
+            out = 262_144
+        ),
     ]
 }
 
@@ -208,7 +374,10 @@ async fn list(args: ListArgs) -> anyhow::Result<()> {
                         }
                     }
                     Err(e) => {
-                        eprintln!("Warning: could not fetch models from '{}': {}", provider_name, e);
+                        eprintln!(
+                            "Warning: could not fetch models from '{}': {}",
+                            provider_name, e
+                        );
                     }
                 }
             }
@@ -252,10 +421,10 @@ async fn list(args: ListArgs) -> anyhow::Result<()> {
             entry.provider.clone()
         };
 
-        let temp  = bool_icon(entry.capabilities.supports_temperature);
+        let temp = bool_icon(entry.capabilities.supports_temperature);
         let tools = bool_icon(entry.capabilities.supports_tools);
-        let ctx   = fmt_tokens(entry.capabilities.max_context_tokens);
-        let out   = fmt_tokens(entry.capabilities.max_output_tokens);
+        let ctx = fmt_tokens(entry.capabilities.max_context_tokens);
+        let out = fmt_tokens(entry.capabilities.max_output_tokens);
 
         println!(
             "{:<12} {:<40} {:<6} {:<7} {:<8} {:<8}",
@@ -263,7 +432,10 @@ async fn list(args: ListArgs) -> anyhow::Result<()> {
         );
     }
 
-    if overridden.iter().any(|id| entries.iter().any(|e| &e.id == id)) {
+    if overridden
+        .iter()
+        .any(|id| entries.iter().any(|e| &e.id == id))
+    {
         println!("\n* = capabilities overridden via [model_capabilities] in config");
     }
 
@@ -289,7 +461,13 @@ async fn show(args: ShowArgs) -> anyhow::Result<()> {
     // 2. Check built-in table.
     let builtin = builtin_table();
     if let Some(entry) = builtin.iter().find(|e| e.model_id == model_id) {
-        print_model_detail(model_id, Some(entry.display_name), entry.provider, &entry.caps, false);
+        print_model_detail(
+            model_id,
+            Some(entry.display_name),
+            entry.provider,
+            &entry.caps,
+            false,
+        );
         return Ok(());
     }
 
@@ -350,7 +528,11 @@ async fn show(args: ShowArgs) -> anyhow::Result<()> {
 // ─── Display helpers ──────────────────────────────────────────────────────────
 
 fn bool_icon(b: bool) -> &'static str {
-    if b { "✓" } else { "✗" }
+    if b {
+        "✓"
+    } else {
+        "✗"
+    }
 }
 
 /// Format a raw token count as a human-friendly string (e.g. 1M, 200K, 128K, 8K).
@@ -386,7 +568,18 @@ fn print_model_detail(
     println!("  Temperature:    {}", bool_icon(caps.supports_temperature));
     println!("  Streaming:      {}", bool_icon(caps.supports_streaming));
     println!("  Tool calling:   {}", bool_icon(caps.supports_tools));
-    println!("  System prompt:  {}", bool_icon(caps.supports_system_prompt));
-    println!("  Context window: {} tokens ({})", caps.max_context_tokens, fmt_tokens(caps.max_context_tokens));
-    println!("  Max output:     {} tokens ({})", caps.max_output_tokens, fmt_tokens(caps.max_output_tokens));
+    println!(
+        "  System prompt:  {}",
+        bool_icon(caps.supports_system_prompt)
+    );
+    println!(
+        "  Context window: {} tokens ({})",
+        caps.max_context_tokens,
+        fmt_tokens(caps.max_context_tokens)
+    );
+    println!(
+        "  Max output:     {} tokens ({})",
+        caps.max_output_tokens,
+        fmt_tokens(caps.max_output_tokens)
+    );
 }

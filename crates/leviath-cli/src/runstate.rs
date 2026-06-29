@@ -411,7 +411,11 @@ pub fn append_stage_output(run_id: &str, stage_idx: usize, text: &str) {
     use std::io::Write;
     ensure_stage_dir(run_id, stage_idx);
     let path = stage_dir(run_id, stage_idx).join("output.log");
-    if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+    {
         let _ = writeln!(file, "{}", text);
     }
 }
@@ -421,13 +425,21 @@ pub fn append_stage_log(run_id: &str, stage_idx: usize, text: &str) {
     use std::io::Write;
     ensure_stage_dir(run_id, stage_idx);
     let path = stage_dir(run_id, stage_idx).join("logs.log");
-    if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+    {
         let _ = writeln!(file, "{}", text);
     }
 }
 
 /// Atomically write a context snapshot for a specific stage.
-pub fn write_stage_context(run_id: &str, stage_idx: usize, snap: &ContextSnapshot) -> anyhow::Result<()> {
+pub fn write_stage_context(
+    run_id: &str,
+    stage_idx: usize,
+    snap: &ContextSnapshot,
+) -> anyhow::Result<()> {
     ensure_stage_dir(run_id, stage_idx);
     let path = stage_dir(run_id, stage_idx).join("context.json");
     let tmp = path.with_extension("json.tmp");

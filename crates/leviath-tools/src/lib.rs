@@ -229,12 +229,19 @@ impl BuiltinTools {
 
         if let Some(parent) = path.parent() {
             if let Err(e) = std::fs::create_dir_all(parent) {
-                return format!("[error] Failed to create directories for '{}': {}", path_str, e);
+                return format!(
+                    "[error] Failed to create directories for '{}': {}",
+                    path_str, e
+                );
             }
         }
 
         match std::fs::write(&path, content) {
-            Ok(()) => format!("Successfully wrote {} bytes to '{}'", content.len(), path_str),
+            Ok(()) => format!(
+                "Successfully wrote {} bytes to '{}'",
+                content.len(),
+                path_str
+            ),
             Err(e) => format!("[error] Failed to write '{}': {}", path_str, e),
         }
     }
@@ -265,7 +272,10 @@ impl BuiltinTools {
 
         let count = content.matches(old_str).count();
         match count {
-            0 => format!("[error] String not found in '{}'. Ensure old_str matches the file exactly.", path_str),
+            0 => format!(
+                "[error] String not found in '{}'. Ensure old_str matches the file exactly.",
+                path_str
+            ),
             1 => {
                 let new_content = content.replacen(old_str, new_str, 1);
                 match std::fs::write(&path, &new_content) {
@@ -281,10 +291,7 @@ impl BuiltinTools {
     }
 
     async fn list_dir(&self, args: &Value) -> String {
-        let path_str = args
-            .get("path")
-            .and_then(|v| v.as_str())
-            .unwrap_or(".");
+        let path_str = args.get("path").and_then(|v| v.as_str()).unwrap_or(".");
 
         let path = match self.resolve(path_str) {
             Ok(p) => p,
@@ -342,7 +349,13 @@ impl BuiltinTools {
             }
 
             // Fallback: try common shells in order
-            for shell in &["/bin/bash", "/usr/bin/bash", "/bin/zsh", "/usr/bin/zsh", "/bin/sh"] {
+            for shell in &[
+                "/bin/bash",
+                "/usr/bin/bash",
+                "/bin/zsh",
+                "/usr/bin/zsh",
+                "/bin/sh",
+            ] {
                 if std::path::Path::new(shell).exists() {
                     return (shell, "-c");
                 }

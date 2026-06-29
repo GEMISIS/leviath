@@ -266,7 +266,10 @@ pin_project_lite::pin_project! {
 impl Stream for ClaudeCodeStream {
     type Item = Result<StreamChunk>;
 
-    fn poll_next(self: Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> Poll<Option<Self::Item>> {
+    fn poll_next(
+        self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> Poll<Option<Self::Item>> {
         let this = self.project();
         let lines = this.lines;
 
@@ -282,9 +285,9 @@ impl Stream for ClaudeCodeStream {
                 }
             }
             Poll::Ready(Ok(None)) => Poll::Ready(None),
-            Poll::Ready(Err(e)) => Poll::Ready(Some(Err(ProviderError::RequestFailed(
-                format!("Failed to read Claude Code output: {e}"),
-            )))),
+            Poll::Ready(Err(e)) => Poll::Ready(Some(Err(ProviderError::RequestFailed(format!(
+                "Failed to read Claude Code output: {e}"
+            ))))),
             Poll::Pending => Poll::Pending,
         }
     }
@@ -328,17 +331,17 @@ impl Provider for ClaudeCodeProvider {
         })?;
 
         // 5-minute timeout
-        let output =
-            tokio::time::timeout(std::time::Duration::from_secs(300), child.wait_with_output())
-                .await
-                .map_err(|_| {
-                    ProviderError::RequestFailed(
-                        "Claude Code process timed out after 5 minutes".to_string(),
-                    )
-                })?
-                .map_err(|e| {
-                    ProviderError::RequestFailed(format!("Claude Code process failed: {e}"))
-                })?;
+        let output = tokio::time::timeout(
+            std::time::Duration::from_secs(300),
+            child.wait_with_output(),
+        )
+        .await
+        .map_err(|_| {
+            ProviderError::RequestFailed(
+                "Claude Code process timed out after 5 minutes".to_string(),
+            )
+        })?
+        .map_err(|e| ProviderError::RequestFailed(format!("Claude Code process failed: {e}")))?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);

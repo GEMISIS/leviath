@@ -43,7 +43,10 @@ pub async fn execute(args: CreateArgs) -> anyhow::Result<()> {
     println!("\nNext steps:");
     println!("  cd {}", args.name);
     println!("  lev run . --task \"Your task here\"");
-    println!("  lev install . && lev run {} --task \"Your task here\"", args.name);
+    println!(
+        "  lev add . && lev run {} --task \"Your task here\"",
+        args.name
+    );
 
     Ok(())
 }
@@ -51,7 +54,7 @@ pub async fn execute(args: CreateArgs) -> anyhow::Result<()> {
 fn create_manifest(name: &str, template: &str) -> String {
     match template {
         "coder" => format!(
-r#"[agent]
+            r#"[agent]
 name = "{name}"
 version = "0.1.0"
 description = "A coding assistant blueprint"
@@ -86,7 +89,7 @@ scratch      = {{ kind = "clearable",       max_tokens = 10000 }}
         ),
 
         "researcher" => format!(
-r#"[agent]
+            r#"[agent]
 name = "{name}"
 version = "0.1.0"
 description = "A research assistant blueprint"
@@ -116,7 +119,7 @@ scratch      = {{ kind = "clearable",       max_tokens = 8000 }}
         ),
 
         _ => format!(
-r#"[agent]
+            r#"[agent]
 name = "{name}"
 version = "0.1.0"
 description = "A simple agent blueprint"

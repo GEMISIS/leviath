@@ -50,10 +50,7 @@ impl PackageRegistry {
             .map_err(|e| anyhow::anyhow!("Failed to search registry: {}", e))?;
 
         if !response.status().is_success() {
-            anyhow::bail!(
-                "Registry search failed with status {}",
-                response.status()
-            );
+            anyhow::bail!("Registry search failed with status {}", response.status());
         }
 
         let packages: Vec<PackageInfo> = response
@@ -68,10 +65,7 @@ impl PackageRegistry {
     pub async fn download(&self, name: &str, version: &str) -> anyhow::Result<Vec<u8>> {
         tracing::info!(name = %name, version = %version, registry = %self.url, "Downloading package");
 
-        let url = format!(
-            "{}/api/v1/packages/{}/{}/download",
-            self.url, name, version
-        );
+        let url = format!("{}/api/v1/packages/{}/{}/download", self.url, name, version);
         let response = self
             .client
             .get(&url)
@@ -80,10 +74,7 @@ impl PackageRegistry {
             .map_err(|e| anyhow::anyhow!("Failed to download package: {}", e))?;
 
         if !response.status().is_success() {
-            anyhow::bail!(
-                "Package download failed with status {}",
-                response.status()
-            );
+            anyhow::bail!("Package download failed with status {}", response.status());
         }
 
         let bytes = response
@@ -139,11 +130,7 @@ impl PackageRegistry {
         if !response.status().is_success() {
             let status = response.status();
             let body = response.text().await.unwrap_or_default();
-            anyhow::bail!(
-                "Package publish failed with status {}: {}",
-                status,
-                body
-            );
+            anyhow::bail!("Package publish failed with status {}: {}", status, body);
         }
 
         tracing::info!("Package published successfully");

@@ -400,37 +400,46 @@ pub enum ContentTransform {
 mod tests {
     use super::*;
     use crate::layout::ContextLayout;
-    use crate::region::RegionKind;
     use crate::layout::RegionDefinition;
+    use crate::region::RegionKind;
 
     #[test]
     fn test_blueprint_creation() {
-        let regions = vec![
-            RegionDefinition::new("test".to_string(), RegionKind::Pinned, 5000),
-        ];
+        let regions = vec![RegionDefinition::new(
+            "test".to_string(),
+            RegionKind::Pinned,
+            5000,
+        )];
         let layout = ContextLayout::new(regions, 10000);
-        
-        let stages = vec![
-            Stage::new("analyze".to_string(), ModelConfig::new("anthropic".to_string(), "claude-sonnet-4".to_string())),
-        ];
-        
+
+        let stages = vec![Stage::new(
+            "analyze".to_string(),
+            ModelConfig::new("anthropic".to_string(), "claude-sonnet-4".to_string()),
+        )];
+
         let blueprint = Blueprint::new(
             "test-agent".to_string(),
             "A test agent".to_string(),
             stages,
             layout,
         );
-        
+
         assert_eq!(blueprint.name, "test-agent");
         assert_eq!(blueprint.stages.len(), 1);
     }
 
     #[test]
     fn test_stage_validation() {
-        let stage = Stage::new("test".to_string(), ModelConfig::new("anthropic".to_string(), "claude-sonnet-4".to_string()));
+        let stage = Stage::new(
+            "test".to_string(),
+            ModelConfig::new("anthropic".to_string(), "claude-sonnet-4".to_string()),
+        );
         assert!(stage.validate().is_ok());
 
-        let empty_stage = Stage::new("".to_string(), ModelConfig::new("anthropic".to_string(), "claude-sonnet-4".to_string()));
+        let empty_stage = Stage::new(
+            "".to_string(),
+            ModelConfig::new("anthropic".to_string(), "claude-sonnet-4".to_string()),
+        );
         assert!(empty_stage.validate().is_err());
     }
 
@@ -446,8 +455,12 @@ mod tests {
     #[test]
     fn test_tool_result_routing_with_overrides() {
         let mut routing = ToolResultRouting::default();
-        routing.tool_overrides.insert("read_file".to_string(), "codebase".to_string());
-        routing.tool_overrides.insert("search".to_string(), "findings".to_string());
+        routing
+            .tool_overrides
+            .insert("read_file".to_string(), "codebase".to_string());
+        routing
+            .tool_overrides
+            .insert("search".to_string(), "findings".to_string());
         routing.max_result_tokens = Some(5000);
         routing.persist = false;
 

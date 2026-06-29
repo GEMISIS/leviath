@@ -17,7 +17,7 @@ fn test_sliding_window_configuration() {
     let region = Region::new(
         "conversation".to_string(),
         RegionKind::SlidingWindow { max_items: 10 },
-        8000
+        8000,
     );
 
     match region.kind {
@@ -40,8 +40,10 @@ fn test_temporary_region_properties() {
 fn test_compacting_region_threshold() {
     let region = Region::new(
         "historical".to_string(),
-        RegionKind::Compacting { threshold_tokens: 8000 },
-        12000
+        RegionKind::Compacting {
+            threshold_tokens: 8000,
+        },
+        12000,
     );
 
     match region.kind {
@@ -58,7 +60,9 @@ fn test_eviction_cascade_temporary_then_compacting() {
 
     // Add a Clearable region
     let mut clearable = Region::new("scratch".to_string(), RegionKind::Clearable, 3000);
-    clearable.add_entry("scratch data".to_string(), 1500).unwrap();
+    clearable
+        .add_entry("scratch data".to_string(), 1500)
+        .unwrap();
     window.add_region(clearable);
 
     // Add a Temporary region
@@ -92,7 +96,7 @@ fn test_eviction_cascade_temporary_then_compacting() {
 
 #[test]
 fn test_schema_validation_json() {
-    use leviath_core::region::{RegionSchema, ContentFormat};
+    use leviath_core::region::{ContentFormat, RegionSchema};
 
     let schema = RegionSchema::new(ContentFormat::Json);
 
@@ -105,13 +109,15 @@ fn test_schema_validation_json() {
 
 #[test]
 fn test_schema_validation_mermaid() {
-    use leviath_core::region::{RegionSchema, ContentFormat};
+    use leviath_core::region::{ContentFormat, RegionSchema};
 
     let schema = RegionSchema::new(ContentFormat::Mermaid);
 
     // Valid mermaid should pass
     assert!(schema.validate("graph TD\n  A --> B").is_ok());
-    assert!(schema.validate("sequenceDiagram\n  Alice->>Bob: Hello").is_ok());
+    assert!(schema
+        .validate("sequenceDiagram\n  Alice->>Bob: Hello")
+        .is_ok());
 
     // Invalid mermaid should fail
     assert!(schema.validate("just plain text").is_err());
@@ -164,7 +170,9 @@ fn test_region_content_management() {
 fn test_compacting_region_needs_compaction() {
     let mut region = Region::new(
         "findings".to_string(),
-        RegionKind::Compacting { threshold_tokens: 500 },
+        RegionKind::Compacting {
+            threshold_tokens: 500,
+        },
         2000,
     );
 
@@ -188,11 +196,15 @@ fn test_context_window_add_to_region() {
     window.add_region(region);
 
     // Add content to existing region
-    assert!(window.add_to_region("system", "Hello".to_string(), 10).is_ok());
+    assert!(window
+        .add_to_region("system", "Hello".to_string(), 10)
+        .is_ok());
     assert_eq!(window.current_tokens, 10);
 
     // Add content to non-existent region should fail
-    assert!(window.add_to_region("nonexistent", "test".to_string(), 5).is_err());
+    assert!(window
+        .add_to_region("nonexistent", "test".to_string(), 5)
+        .is_err());
 }
 
 #[test]
@@ -203,11 +215,17 @@ fn test_eviction_result_needs_compaction_when_compacting_full() {
     // Add a compacting region over its threshold
     let mut compacting = Region::new(
         "analysis".to_string(),
-        RegionKind::Compacting { threshold_tokens: 1000 },
+        RegionKind::Compacting {
+            threshold_tokens: 1000,
+        },
         1400,
     );
-    compacting.add_entry("data block 1".to_string(), 600).unwrap();
-    compacting.add_entry("data block 2".to_string(), 600).unwrap();
+    compacting
+        .add_entry("data block 1".to_string(), 600)
+        .unwrap();
+    compacting
+        .add_entry("data block 2".to_string(), 600)
+        .unwrap();
     window.add_region(compacting);
 
     assert_eq!(window.current_tokens, 1200);
@@ -225,13 +243,17 @@ fn test_eviction_clears_then_identifies_compaction() {
 
     // Add clearable region
     let mut clearable = Region::new("scratch".to_string(), RegionKind::Clearable, 1000);
-    clearable.add_entry("scratch stuff".to_string(), 400).unwrap();
+    clearable
+        .add_entry("scratch stuff".to_string(), 400)
+        .unwrap();
     window.add_region(clearable);
 
     // Add compacting region over threshold
     let mut compacting = Region::new(
         "impl".to_string(),
-        RegionKind::Compacting { threshold_tokens: 800 },
+        RegionKind::Compacting {
+            threshold_tokens: 800,
+        },
         1200,
     );
     compacting.add_entry("impl data".to_string(), 900).unwrap();

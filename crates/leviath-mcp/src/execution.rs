@@ -49,9 +49,7 @@ impl ToolExecutor {
         let server_name = self
             .clients
             .iter()
-            .find(|(_, client)| {
-                client.cached_tools().iter().any(|t| t.name == tool_name)
-            })
+            .find(|(_, client)| client.cached_tools().iter().any(|t| t.name == tool_name))
             .map(|(name, _)| name.clone());
 
         let server_name = server_name.ok_or_else(|| {
@@ -74,9 +72,10 @@ impl ToolExecutor {
     ) -> anyhow::Result<ExecutionResult> {
         tracing::info!(server = %server_name, tool = %tool_name, "Executing tool on server");
 
-        let client = self.clients.get_mut(server_name).ok_or_else(|| {
-            anyhow::anyhow!("MCP server '{}' not found", server_name)
-        })?;
+        let client = self
+            .clients
+            .get_mut(server_name)
+            .ok_or_else(|| anyhow::anyhow!("MCP server '{}' not found", server_name))?;
 
         let tool_result = client.call_tool(tool_name, arguments).await?;
         Ok(Self::map_result(tool_result))

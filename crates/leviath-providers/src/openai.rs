@@ -1,12 +1,12 @@
 //! OpenAI provider implementation.
 
-use crate::provider::{
-    check_http_response, parse_openai_finish_reason,
-    InferenceRequest, InferenceResponse, ModelCapabilities, ModelInfo, Provider,
-    ProviderConfig, ProviderError, Result, StreamChunk, TokenUsage, ToolCall, ToolCallDelta,
-};
 #[cfg(test)]
 use crate::provider::FinishReason;
+use crate::provider::{
+    check_http_response, parse_openai_finish_reason, InferenceRequest, InferenceResponse,
+    ModelCapabilities, ModelInfo, Provider, ProviderConfig, ProviderError, Result, StreamChunk,
+    TokenUsage, ToolCall, ToolCallDelta,
+};
 use crate::rate_limit::RateLimiter;
 use async_trait::async_trait;
 use futures_core::Stream;
@@ -202,9 +202,9 @@ impl OpenAIProvider {
             .and_then(|c| c.first())
             .ok_or_else(|| ProviderError::InvalidResponse("No choices in response".to_string()))?;
 
-        let message = choice.get("message").ok_or_else(|| {
-            ProviderError::InvalidResponse("No message in choice".to_string())
-        })?;
+        let message = choice
+            .get("message")
+            .ok_or_else(|| ProviderError::InvalidResponse("No message in choice".to_string()))?;
 
         let content = message
             .get("content")
@@ -230,10 +230,8 @@ impl OpenAIProvider {
                     .get("arguments")
                     .and_then(|v| v.as_str())
                     .unwrap_or("{}");
-                let arguments: serde_json::Value =
-                    serde_json::from_str(arguments_str).unwrap_or(serde_json::Value::Object(
-                        serde_json::Map::new(),
-                    ));
+                let arguments: serde_json::Value = serde_json::from_str(arguments_str)
+                    .unwrap_or(serde_json::Value::Object(serde_json::Map::new()));
                 tool_calls.push(ToolCall {
                     id,
                     name,
@@ -305,9 +303,7 @@ impl Provider for OpenAIProvider {
         let result = self.parse_response(&response_body)?;
 
         if let Some(limiter) = &self.rate_limiter {
-            limiter
-                .record_tokens(result.tokens_used.total_tokens)
-                .await;
+            limiter.record_tokens(result.tokens_used.total_tokens).await;
         }
 
         Ok(result)
@@ -398,7 +394,9 @@ impl Provider for OpenAIProvider {
         let models = body
             .get("data")
             .and_then(|d| d.as_array())
-            .ok_or_else(|| ProviderError::InvalidResponse("No data field in models response".to_string()))?
+            .ok_or_else(|| {
+                ProviderError::InvalidResponse("No data field in models response".to_string())
+            })?
             .iter()
             .filter_map(|item| {
                 let id = item.get("id")?.as_str()?.to_string();

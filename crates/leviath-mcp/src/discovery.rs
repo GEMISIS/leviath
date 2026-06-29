@@ -87,7 +87,10 @@ impl ToolDiscovery {
 
     /// Return all discovered tools across all servers.
     pub fn all_tools(&self) -> Vec<&ToolMetadata> {
-        self.servers.values().flat_map(|tools| tools.iter()).collect()
+        self.servers
+            .values()
+            .flat_map(|tools| tools.iter())
+            .collect()
     }
 
     /// Find a tool by name, returning the server name and tool metadata.

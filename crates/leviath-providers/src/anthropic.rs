@@ -2,7 +2,7 @@
 
 use crate::provider::{
     FinishReason, InferenceRequest, InferenceResponse, ModelCapabilities, ModelInfo, Provider,
-    ProviderConfig, ProviderError, Result, StreamChunk, ToolCallDelta, TokenUsage, ToolCall,
+    ProviderConfig, ProviderError, Result, StreamChunk, TokenUsage, ToolCall, ToolCallDelta,
 };
 use crate::rate_limit::RateLimiter;
 use async_trait::async_trait;
@@ -355,9 +355,7 @@ impl Provider for AnthropicProvider {
         let result = self.parse_response(&response_body)?;
 
         if let Some(limiter) = &self.rate_limiter {
-            limiter
-                .record_tokens(result.tokens_used.total_tokens)
-                .await;
+            limiter.record_tokens(result.tokens_used.total_tokens).await;
         }
 
         Ok(result)
@@ -469,10 +467,9 @@ impl Provider for AnthropicProvider {
             .await
             .map_err(|e| ProviderError::RequestFailed(e.to_string()))?;
 
-        let data = body
-            .get("data")
-            .and_then(|d| d.as_array())
-            .ok_or_else(|| ProviderError::RequestFailed("missing 'data' field in /models response".to_string()))?;
+        let data = body.get("data").and_then(|d| d.as_array()).ok_or_else(|| {
+            ProviderError::RequestFailed("missing 'data' field in /models response".to_string())
+        })?;
 
         let models = data
             .iter()
@@ -619,11 +616,7 @@ fn parse_sse_event(buffer: &mut String, tool_index: &mut usize) -> Option<Stream
         }
         "content_block_start" => {
             let content_block = json.get("content_block")?;
-            if content_block
-                .get("type")
-                .and_then(|t| t.as_str())
-                == Some("tool_use")
-            {
+            if content_block.get("type").and_then(|t| t.as_str()) == Some("tool_use") {
                 let id = content_block
                     .get("id")
                     .and_then(|v| v.as_str())
@@ -677,9 +670,7 @@ fn parse_sse_event(buffer: &mut String, tool_index: &mut usize) -> Option<Stream
         }
         "message_start" => {
             // Extract input token count from message_start
-            let usage = json
-                .get("message")
-                .and_then(|m| m.get("usage"));
+            let usage = json.get("message").and_then(|m| m.get("usage"));
             let input_tokens = usage
                 .and_then(|u| u.get("input_tokens"))
                 .and_then(|v| v.as_u64())

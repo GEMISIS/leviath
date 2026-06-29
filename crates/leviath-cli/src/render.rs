@@ -17,9 +17,7 @@
 //! Plain text that contains no markdown degrades cleanly — it just renders as
 //! white text.
 
-use pulldown_cmark::{
-    CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd,
-};
+use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 use ratatui::{
     style::{Color, Modifier, Style},
     text::{Line, Span, Text},
@@ -145,9 +143,15 @@ impl Renderer {
     fn push_inline(&mut self, mut new_style: InlineStyle) {
         // Inherit accumulated modifiers from parent
         if let Some(parent) = self.inline_stack.last() {
-            if parent.bold { new_style.bold = true; }
-            if parent.italic { new_style.italic = true; }
-            if parent.strikethrough { new_style.strikethrough = true; }
+            if parent.bold {
+                new_style.bold = true;
+            }
+            if parent.italic {
+                new_style.italic = true;
+            }
+            if parent.strikethrough {
+                new_style.strikethrough = true;
+            }
         }
         self.inline_stack.push(new_style);
         self.sync_inline();
@@ -162,7 +166,8 @@ impl Renderer {
     fn emit_text(&mut self, text: &str) {
         let style = self.inline.to_ratatui_style();
         // Preserve leading space so words don't jam together
-        self.current_spans.push(Span::styled(text.to_owned(), style));
+        self.current_spans
+            .push(Span::styled(text.to_owned(), style));
     }
 
     /// Render a complete code block (fenced or mermaid).
@@ -174,7 +179,10 @@ impl Renderer {
         if is_mermaid {
             // ── Mermaid fallback ─────────────────────────────────────────────
             self.push_line(Line::from(vec![
-                Span::styled("  ◇ ", Style::default().fg(C_ACCENT).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    "  ◇ ",
+                    Style::default().fg(C_ACCENT).add_modifier(Modifier::BOLD),
+                ),
                 Span::styled("mermaid diagram", Style::default().fg(C_ACCENT)),
                 Span::styled(" — source", Style::default().fg(C_DIM)),
             ]));
@@ -197,7 +205,10 @@ impl Renderer {
             };
             self.push_line(Line::from(vec![
                 Span::styled("  ╭─ ", Style::default().fg(C_DIM)),
-                Span::styled(lang_label, Style::default().fg(C_MUTED).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    lang_label,
+                    Style::default().fg(C_MUTED).add_modifier(Modifier::BOLD),
+                ),
                 Span::styled(" ─", Style::default().fg(C_DIM)),
             ]));
             for code_line in &content {
@@ -232,17 +243,22 @@ impl Renderer {
                     }
                     // Visual decorators — convey depth without # text (terminal can't vary font size)
                     let (color, prefix, bold) = match level {
-                        HeadingLevel::H1 => (C_ACCENT,  "▌ ",  true),
-                        HeadingLevel::H2 => (C_ACCENT,  "▎ ",  true),
-                        HeadingLevel::H3 => (C_SUCCESS, "  ",   true),
-                        HeadingLevel::H4 => (C_MUTED,   "   ",  false),
-                        HeadingLevel::H5 => (C_DIM,     "    ", false),
-                        HeadingLevel::H6 => (C_DIM,     "     ",false),
+                        HeadingLevel::H1 => (C_ACCENT, "▌ ", true),
+                        HeadingLevel::H2 => (C_ACCENT, "▎ ", true),
+                        HeadingLevel::H3 => (C_SUCCESS, "  ", true),
+                        HeadingLevel::H4 => (C_MUTED, "   ", false),
+                        HeadingLevel::H5 => (C_DIM, "    ", false),
+                        HeadingLevel::H6 => (C_DIM, "     ", false),
                     };
                     let mut sty = Style::default().fg(color);
-                    if bold { sty = sty.add_modifier(Modifier::BOLD); }
+                    if bold {
+                        sty = sty.add_modifier(Modifier::BOLD);
+                    }
                     self.current_spans.push(Span::styled(prefix, sty));
-                    self.push_inline(InlineStyle { bold, ..Default::default() });
+                    self.push_inline(InlineStyle {
+                        bold,
+                        ..Default::default()
+                    });
                 }
                 Event::End(TagEnd::Heading(level)) => {
                     self.pop_inline();
@@ -265,11 +281,11 @@ impl Renderer {
                 }
 
                 Event::Start(Tag::BlockQuote(_)) => {
-                    self.push_inline(InlineStyle { ..Default::default() });
-                    self.current_spans.push(Span::styled(
-                        "│ ",
-                        Style::default().fg(C_DIM),
-                    ));
+                    self.push_inline(InlineStyle {
+                        ..Default::default()
+                    });
+                    self.current_spans
+                        .push(Span::styled("│ ", Style::default().fg(C_DIM)));
                 }
                 Event::End(TagEnd::BlockQuote(_)) => {
                     self.pop_inline();
@@ -318,7 +334,11 @@ impl Renderer {
                     self.code_lang = match kind {
                         CodeBlockKind::Fenced(lang) => {
                             let s = lang.into_string();
-                            if s.is_empty() { None } else { Some(s) }
+                            if s.is_empty() {
+                                None
+                            } else {
+                                Some(s)
+                            }
                         }
                         CodeBlockKind::Indented => None,
                     };
@@ -332,28 +352,40 @@ impl Renderer {
                 }
 
                 Event::Start(Tag::Strong) => {
-                    self.push_inline(InlineStyle { bold: true, ..Default::default() });
+                    self.push_inline(InlineStyle {
+                        bold: true,
+                        ..Default::default()
+                    });
                 }
                 Event::End(TagEnd::Strong) => {
                     self.pop_inline();
                 }
 
                 Event::Start(Tag::Emphasis) => {
-                    self.push_inline(InlineStyle { italic: true, ..Default::default() });
+                    self.push_inline(InlineStyle {
+                        italic: true,
+                        ..Default::default()
+                    });
                 }
                 Event::End(TagEnd::Emphasis) => {
                     self.pop_inline();
                 }
 
                 Event::Start(Tag::Strikethrough) => {
-                    self.push_inline(InlineStyle { strikethrough: true, ..Default::default() });
+                    self.push_inline(InlineStyle {
+                        strikethrough: true,
+                        ..Default::default()
+                    });
                 }
                 Event::End(TagEnd::Strikethrough) => {
                     self.pop_inline();
                 }
 
                 Event::Start(Tag::Link { dest_url, .. }) => {
-                    self.push_inline(InlineStyle { link: true, ..Default::default() });
+                    self.push_inline(InlineStyle {
+                        link: true,
+                        ..Default::default()
+                    });
                     // Show the URL as a dim suffix after the link text
                     let url = dest_url.into_string();
                     if !url.is_empty() {
@@ -362,7 +394,8 @@ impl Renderer {
                         // a placeholder and let the text events fill in link text.
                         // We push the URL as a trailing span at End(Link).
                         // Use a little indirection: push the open bracket.
-                        self.current_spans.push(Span::styled("[", Style::default().fg(C_DIM)));
+                        self.current_spans
+                            .push(Span::styled("[", Style::default().fg(C_DIM)));
                         // Stash URL in a "pending link url" field would be ideal.
                         // For simplicity, store it as a special span at end.
                         // We'll capture the URL by pushing it immediately at End.
@@ -372,7 +405,8 @@ impl Renderer {
                 }
                 Event::End(TagEnd::Link) => {
                     self.pop_inline();
-                    self.current_spans.push(Span::styled("]", Style::default().fg(C_DIM)));
+                    self.current_spans
+                        .push(Span::styled("]", Style::default().fg(C_DIM)));
                 }
 
                 // ── Inline events ────────────────────────────────────────────
@@ -405,9 +439,7 @@ impl Renderer {
                     // Inline code span
                     self.current_spans.push(Span::styled(
                         text.into_string(),
-                        Style::default()
-                            .fg(Color::Rgb(200, 160, 100))
-                            .bg(C_CODE_BG),
+                        Style::default().fg(Color::Rgb(200, 160, 100)).bg(C_CODE_BG),
                     ));
                 }
 
@@ -454,7 +486,9 @@ mod tests {
         let text = markdown_to_text("Hello, world!", 80);
         assert!(!text.lines.is_empty());
         // The content should contain our text somewhere
-        let all: String = text.lines.iter()
+        let all: String = text
+            .lines
+            .iter()
             .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
             .collect();
         assert!(all.contains("Hello, world!"), "got: {}", all);
@@ -463,7 +497,9 @@ mod tests {
     #[test]
     fn heading_produces_lines() {
         let text = markdown_to_text("# My Heading\n\nSome paragraph.", 80);
-        let all: String = text.lines.iter()
+        let all: String = text
+            .lines
+            .iter()
             .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
             .collect::<String>();
         assert!(all.contains("My Heading"), "got: {}", all);
@@ -474,30 +510,44 @@ mod tests {
     fn code_block_renders_with_border() {
         let md = "```rust\nfn main() {}\n```";
         let text = markdown_to_text(md, 80);
-        let all: String = text.lines.iter()
+        let all: String = text
+            .lines
+            .iter()
             .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
             .collect::<String>();
         assert!(all.contains("fn main() {}"), "got: {}", all);
         // Should have a border glyph
-        assert!(all.contains("╭") || all.contains("│"), "no border found in: {}", all);
+        assert!(
+            all.contains("╭") || all.contains("│"),
+            "no border found in: {}",
+            all
+        );
     }
 
     #[test]
     fn mermaid_block_shows_hint() {
         let md = "```mermaid\ngraph LR\n  A --> B\n```";
         let text = markdown_to_text(md, 80);
-        let all: String = text.lines.iter()
+        let all: String = text
+            .lines
+            .iter()
             .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
             .collect::<String>();
         assert!(all.contains("mermaid"), "got: {}", all);
-        assert!(all.contains("mmdc") || all.contains("Install"), "got: {}", all);
+        assert!(
+            all.contains("mmdc") || all.contains("Install"),
+            "got: {}",
+            all
+        );
     }
 
     #[test]
     fn list_renders_bullets() {
         let md = "- item one\n- item two";
         let text = markdown_to_text(md, 80);
-        let all: String = text.lines.iter()
+        let all: String = text
+            .lines
+            .iter()
             .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
             .collect::<String>();
         assert!(all.contains("item one"), "got: {}", all);

@@ -165,9 +165,9 @@ impl AgentEngine {
 
     /// Send a message to a running agent via the channel.
     pub fn send_message(&self, msg: AgentMessage) -> std::result::Result<(), ProviderError> {
-        self.message_tx.send(msg).map_err(|e| {
-            ProviderError::Other(format!("Failed to send message: {}", e))
-        })
+        self.message_tx
+            .send(msg)
+            .map_err(|e| ProviderError::Other(format!("Failed to send message: {}", e)))
     }
 
     /// Get a clone of the message sender for external use.
@@ -439,7 +439,9 @@ impl AgentEngine {
                         state.status = AgentStatus::Cancelled;
                     }
                     return last_response.ok_or_else(|| {
-                        ProviderError::Other("Agent cancelled before producing a response".to_string())
+                        ProviderError::Other(
+                            "Agent cancelled before producing a response".to_string(),
+                        )
                     });
                 }
             }
@@ -496,7 +498,8 @@ impl AgentEngine {
                     let formatted = format!("[Tool {}]: {}", tool_call_id, result_text);
 
                     // Find the tool name for this tool_call_id to use for routing lookup
-                    let tool_name = tool_calls_snapshot.iter()
+                    let tool_name = tool_calls_snapshot
+                        .iter()
                         .find(|tc| tc.id == *tool_call_id)
                         .map(|tc| tc.name.as_str())
                         .unwrap_or("");
@@ -537,7 +540,11 @@ impl AgentEngine {
             if let Some(cc) = compaction_config {
                 match self.evict_and_compact(entity, cc).await {
                     Ok(freed) if freed > 0 => {
-                        tracing::info!(iteration, tokens_freed = freed, "Auto-eviction during inference loop");
+                        tracing::info!(
+                            iteration,
+                            tokens_freed = freed,
+                            "Auto-eviction during inference loop"
+                        );
                     }
                     Err(e) => {
                         tracing::warn!(iteration, error = %e, "Auto-eviction/compaction failed during inference loop");
@@ -550,8 +557,7 @@ impl AgentEngine {
         }
 
         tracing::warn!(max_iterations, "Inference loop hit max iterations");
-        last_response
-            .ok_or_else(|| ProviderError::Other("No response generated".to_string()))
+        last_response.ok_or_else(|| ProviderError::Other("No response generated".to_string()))
     }
 
     /// Check if the context window needs eviction, evict what can be evicted
@@ -620,11 +626,9 @@ impl AgentEngine {
                 .get::<ContextWindow>(entity)
                 .ok_or_else(|| ProviderError::Other("Entity has no ContextWindow".to_string()))?;
 
-            let region = window
-                .get_region(region_name)
-                .ok_or_else(|| {
-                    ProviderError::Other(format!("Region '{}' not found", region_name))
-                })?;
+            let region = window.get_region(region_name).ok_or_else(|| {
+                ProviderError::Other(format!("Region '{}' not found", region_name))
+            })?;
 
             let content: String = region
                 .content
@@ -690,10 +694,7 @@ impl AgentEngine {
             window.current_tokens = window.calculate_tokens();
         }
 
-        tracing::info!(
-            region = region_name,
-            "Compaction complete"
-        );
+        tracing::info!(region = region_name, "Compaction complete");
 
         Ok(())
     }

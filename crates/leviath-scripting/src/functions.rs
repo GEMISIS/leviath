@@ -17,9 +17,7 @@ pub fn register_functions(engine: &mut Engine) {
         text.ends_with(pattern)
     });
 
-    engine.register_fn("trim", |text: &str| -> String {
-        text.trim().to_string()
-    });
+    engine.register_fn("trim", |text: &str| -> String { text.trim().to_string() });
 
     engine.register_fn("join", |arr: rhai::Array, separator: &str| -> String {
         arr.iter()
@@ -45,7 +43,7 @@ pub fn register_functions(engine: &mut Engine) {
     });
 
     engine.register_fn("is_mermaid", |text: &str| -> bool {
-        text.contains("graph") 
+        text.contains("graph")
             || text.contains("sequenceDiagram")
             || text.contains("classDiagram")
             || text.contains("stateDiagram")
@@ -58,9 +56,7 @@ pub fn register_functions(engine: &mut Engine) {
         text.contains("##") || text.contains("**") || text.contains("```") || !text.is_empty()
     });
 
-    engine.register_fn("is_empty", |text: &str| -> bool {
-        text.trim().is_empty()
-    });
+    engine.register_fn("is_empty", |text: &str| -> bool { text.trim().is_empty() });
 
     // Summarization placeholder (requires LLM provider, not available in scripting layer)
     // Users should implement this at the application level
@@ -78,7 +74,8 @@ pub fn register_functions(engine: &mut Engine) {
     // This is a placeholder - real implementation would parse structured data
     engine.register_fn("extract_modified", |content: &str| -> rhai::Array {
         // Look for lines starting with common markers
-        content.lines()
+        content
+            .lines()
             .filter(|line| {
                 line.starts_with("modified:")
                     || line.starts_with("changed:")

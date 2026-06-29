@@ -12,10 +12,10 @@ pub mod pool;
 pub mod scheduler;
 pub mod systems;
 
-pub use engine::{AgentEngine, ProviderRegistry, ToolResultRoutingConfig};
 pub use components::{
     AgentMessage, AgentState, AgentStatus, CancellationToken, ContextWindow, EvictionResult,
     InferenceResult, MessageInbox, NeedsCompaction, TaskAssignment,
 };
+pub use engine::{AgentEngine, ProviderRegistry, ToolResultRoutingConfig};
 pub use pool::AgentPool;
 pub use scheduler::TaskScheduler;

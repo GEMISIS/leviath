@@ -163,7 +163,9 @@ pub async fn execute(args: TestArgs) -> anyhow::Result<()> {
                     }
                 } else {
                     // Real run: execute inference and check assertions
-                    let registry = registry.as_ref().expect("registry should exist in non-dry-run");
+                    let registry = registry
+                        .as_ref()
+                        .expect("registry should exist in non-dry-run");
                     match run_test_case(&blueprint, registry, test_case).await {
                         Ok(true) => {
                             passed += 1;
@@ -241,10 +243,7 @@ pub async fn execute(args: TestArgs) -> anyhow::Result<()> {
 
     // Report results
     println!("\n--- Results ---");
-    println!(
-        "{} passed, {} failed, {} total",
-        passed, failed, total
-    );
+    println!("{} passed, {} failed, {} total", passed, failed, total);
 
     if !failures.is_empty() {
         println!("\nFailures:");
@@ -293,11 +292,7 @@ async fn run_test_case(
 
         // Add tool_results region if not present
         if window.get_region("tool_results").is_none() {
-            let tool_region = Region::new(
-                "tool_results".to_string(),
-                RegionKind::Temporary,
-                5000,
-            );
+            let tool_region = Region::new("tool_results".to_string(), RegionKind::Temporary, 5000);
             window.add_region(tool_region);
         }
 
@@ -364,7 +359,11 @@ async fn run_test_case(
                 "    expect_tool_call failed: no tool call to '{}'",
                 expected_tool
             );
-            let tool_names: Vec<&str> = response.tool_calls.iter().map(|tc| tc.name.as_str()).collect();
+            let tool_names: Vec<&str> = response
+                .tool_calls
+                .iter()
+                .map(|tc| tc.name.as_str())
+                .collect();
             println!("    actual tool calls: {:?}", tool_names);
             all_passed = false;
         }

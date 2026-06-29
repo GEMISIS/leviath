@@ -70,7 +70,10 @@ impl ContextLayout {
         // Check that eviction_order regions exist
         for name in &self.eviction_order {
             if !names.contains(name.as_str()) {
-                return Err(format!("Eviction order references unknown region: {}", name));
+                return Err(format!(
+                    "Eviction order references unknown region: {}",
+                    name
+                ));
             }
         }
 
@@ -158,12 +161,14 @@ mod tests {
 
     #[test]
     fn test_layout_validation() {
-        let regions = vec![
-            RegionDefinition::new("test".to_string(), RegionKind::Pinned, 5000),
-        ];
-        let layout = ContextLayout::new(regions, 10000)
-            .with_eviction_order(vec!["test".to_string()]);
-        
+        let regions = vec![RegionDefinition::new(
+            "test".to_string(),
+            RegionKind::Pinned,
+            5000,
+        )];
+        let layout =
+            ContextLayout::new(regions, 10000).with_eviction_order(vec!["test".to_string()]);
+
         assert!(layout.validate().is_ok());
     }
 
@@ -174,7 +179,7 @@ mod tests {
             RegionDefinition::new("test".to_string(), RegionKind::Temporary, 3000),
         ];
         let layout = ContextLayout::new(regions, 10000);
-        
+
         assert!(layout.validate().is_err());
     }
 }

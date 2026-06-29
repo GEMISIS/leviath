@@ -86,7 +86,12 @@ fn default_true() -> bool {
 
 impl InteractionRequest {
     /// Create a new free-text request.
-    pub fn free_text(id: impl Into<String>, prompt: impl Into<String>, stage: impl Into<String>, required: bool) -> Self {
+    pub fn free_text(
+        id: impl Into<String>,
+        prompt: impl Into<String>,
+        stage: impl Into<String>,
+        required: bool,
+    ) -> Self {
         Self {
             id: id.into(),
             kind: InteractionKind::FreeText,
@@ -145,7 +150,11 @@ impl InteractionRequest {
     }
 
     /// Create a new confirm request.
-    pub fn confirm(id: impl Into<String>, prompt: impl Into<String>, stage: impl Into<String>) -> Self {
+    pub fn confirm(
+        id: impl Into<String>,
+        prompt: impl Into<String>,
+        stage: impl Into<String>,
+    ) -> Self {
         Self {
             id: id.into(),
             kind: InteractionKind::Confirm,
@@ -418,7 +427,10 @@ pub fn response_as_text(resp: &InteractionResponse) -> String {
 }
 
 /// Resolve a `MultipleChoice` response to the chosen option string.
-pub fn response_as_choice<'a>(resp: &InteractionResponse, options: &'a [String]) -> Option<&'a String> {
+pub fn response_as_choice<'a>(
+    resp: &InteractionResponse,
+    options: &'a [String],
+) -> Option<&'a String> {
     resp.choice_index.and_then(|i| options.get(i))
 }
 
@@ -446,7 +458,9 @@ pub async fn request_tool_approval_background(
     let req = InteractionRequest::tool_approval(
         make_interaction_id(
             // use a hash of tool name to get a stable-ish id within a stage
-            tool_name.bytes().fold(0usize, |a, b| a.wrapping_add(b as usize)),
+            tool_name
+                .bytes()
+                .fold(0usize, |a, b| a.wrapping_add(b as usize)),
             0,
         ),
         tool_name,
@@ -580,29 +594,30 @@ pub fn request_interaction_stdin(req: &InteractionRequest) -> InteractionRespons
             }
         }
 
-        InteractionKind::Confirm => {
-            loop {
-                print!("{} [y/n]: ", req.prompt);
-                io::stdout().flush().ok();
-                let mut input = String::new();
-                io::stdin().read_line(&mut input).ok();
-                match input.trim().to_lowercase().as_str() {
-                    "y" | "yes" => {
-                        return InteractionResponse::approval(&req.id, true, ApprovalScope::Once);
-                    }
-                    "n" | "no" => {
-                        return InteractionResponse::approval(&req.id, false, ApprovalScope::Once);
-                    }
-                    _ => println!("Please enter y or n."),
+        InteractionKind::Confirm => loop {
+            print!("{} [y/n]: ", req.prompt);
+            io::stdout().flush().ok();
+            let mut input = String::new();
+            io::stdin().read_line(&mut input).ok();
+            match input.trim().to_lowercase().as_str() {
+                "y" | "yes" => {
+                    return InteractionResponse::approval(&req.id, true, ApprovalScope::Once);
                 }
+                "n" | "no" => {
+                    return InteractionResponse::approval(&req.id, false, ApprovalScope::Once);
+                }
+                _ => println!("Please enter y or n."),
             }
-        }
+        },
 
         InteractionKind::ToolApproval => {
             if let Some(ref tool) = req.tool_name {
                 println!("Tool call: `{}`", tool);
                 if let Some(ref args) = req.tool_arguments {
-                    println!("Arguments: {}", serde_json::to_string_pretty(args).unwrap_or_default());
+                    println!(
+                        "Arguments: {}",
+                        serde_json::to_string_pretty(args).unwrap_or_default()
+                    );
                 }
             }
             println!("{}", req.prompt);
@@ -619,7 +634,11 @@ pub fn request_interaction_stdin(req: &InteractionRequest) -> InteractionRespons
                         return InteractionResponse::approval(&req.id, true, ApprovalScope::Once);
                     }
                     "2" => {
-                        return InteractionResponse::approval(&req.id, true, ApprovalScope::Session);
+                        return InteractionResponse::approval(
+                            &req.id,
+                            true,
+                            ApprovalScope::Session,
+                        );
                     }
                     "3" => {
                         return InteractionResponse::approval(&req.id, false, ApprovalScope::Once);
@@ -650,7 +669,12 @@ mod tests {
         assert_eq!(r.kind, InteractionKind::MultipleChoice);
         assert_eq!(r.options.len(), 2);
 
-        let r = InteractionRequest::tool_approval("id3", "bash", serde_json::json!({"cmd": "ls"}), "impl");
+        let r = InteractionRequest::tool_approval(
+            "id3",
+            "bash",
+            serde_json::json!({"cmd": "ls"}),
+            "impl",
+        );
         assert_eq!(r.kind, InteractionKind::ToolApproval);
         assert_eq!(r.options.len(), 3);
     }
@@ -672,7 +696,13 @@ mod tests {
     fn test_response_as_text() {
         let r = InteractionResponse::text("id", "answer");
         assert_eq!(response_as_text(&r), "answer");
-        let empty = InteractionResponse { request_id: "x".into(), value: None, choice_index: None, approved: None, scope: None };
+        let empty = InteractionResponse {
+            request_id: "x".into(),
+            value: None,
+            choice_index: None,
+            approved: None,
+            scope: None,
+        };
         assert_eq!(response_as_text(&empty), "");
     }
 
