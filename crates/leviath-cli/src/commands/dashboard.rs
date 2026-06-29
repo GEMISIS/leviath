@@ -25,6 +25,8 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{mpsc, Mutex};
 
+use tui_textarea::TextArea;
+
 use super::run::build_provider_registry;
 use crate::config::Config;
 use crate::interaction;
@@ -201,7 +203,8 @@ struct Dashboard {
     agents: Vec<DashboardAgent>,
     selected: usize,
     log: Vec<LogEntry>,
-    input_buffer: String,
+    /// Multi-line input textarea (active when input_mode = true and kind = FreeText).
+    input_textarea: TextArea<'static>,
     input_mode: bool,
     /// True when the full-screen detail view is open for the selected agent
     detail_view: bool,
@@ -258,7 +261,7 @@ impl Dashboard {
             agents: Vec::new(),
             selected: 0,
             log,
-            input_buffer: String::new(),
+            input_textarea: TextArea::default(),
             input_mode: false,
             detail_view: false,
             event_rx,
@@ -618,7 +621,7 @@ impl Dashboard {
         let (resp, display) = match &req {
             Some(r) => match r.kind {
                 InteractionKind::FreeText => {
-                    let raw = self.input_buffer.trim().to_string();
+                    let raw = self.input_textarea.lines().join("\n").trim().to_string();
                     let input = if raw == "/quit" || raw == "/exit" {
                         String::new()
                     } else {
@@ -651,7 +654,7 @@ impl Dashboard {
                 }
             },
             None => {
-                let raw = self.input_buffer.trim().to_string();
+                let raw = self.input_textarea.lines().join("\n").trim().to_string();
                 let input = if raw == "/quit" || raw == "/exit" {
                     String::new()
                 } else {
@@ -669,7 +672,7 @@ impl Dashboard {
         };
 
         self.input_mode = false;
-        self.input_buffer.clear();
+        self.input_textarea = TextArea::default();
         self.choice_selected = 0;
 
         let answered_id = resp.request_id.clone();
@@ -780,7 +783,8 @@ impl Dashboard {
         self.selected_stage == input_stage_idx
     }
 
-    fn handle_key(&mut self, key: KeyCode) {
+    fn handle_key(&mut self, key: crossterm::event::KeyEvent) {
+        let key_code = key.code;
         // Help overlay takes priority
         if self.show_help {
             self.show_help = false;
@@ -789,7 +793,7 @@ impl Dashboard {
 
         // Delete confirmation popup has highest priority
         if self.confirm_delete {
-            match key {
+            match key_code {
                 KeyCode::Char('y') | KeyCode::Char('Y') => {
                     self.confirm_delete = false;
                     self.delete_selected_agent();
@@ -814,41 +818,52 @@ impl Dashboard {
                     .map(|r| r.options.len())
                     .unwrap_or(0);
 
-                match key {
-                    KeyCode::Esc => {
-                        self.input_mode = false;
-                        self.input_buffer.clear();
-                        self.choice_selected = 0;
-                    }
-                    KeyCode::Enter => {
-                        self.submit_input();
-                    }
-                    KeyCode::Up => {
-                        if !matches!(kind, Some(InteractionKind::FreeText) | None) && self.choice_selected > 0 {
-                            self.choice_selected -= 1;
+                match &kind {
+                    Some(InteractionKind::FreeText) | None => {
+                        match key_code {
+                            KeyCode::Enter if key.modifiers.is_empty() => {
+                                self.submit_input();
+                            }
+                            KeyCode::Esc => {
+                                self.input_mode = false;
+                                self.input_textarea = TextArea::default();
+                                self.choice_selected = 0;
+                            }
+                            _ => {
+                                self.input_textarea.input(tui_textarea::Input::from(key));
+                            }
                         }
                     }
-                    KeyCode::Down => {
-                        if !matches!(kind, Some(InteractionKind::FreeText) | None) && options_len > 0 && self.choice_selected < options_len - 1 {
-                            self.choice_selected += 1;
+                    _ => {
+                        match key_code {
+                            KeyCode::Esc => {
+                                self.input_mode = false;
+                                self.input_textarea = TextArea::default();
+                                self.choice_selected = 0;
+                            }
+                            KeyCode::Enter => {
+                                self.submit_input();
+                            }
+                            KeyCode::Up => {
+                                if self.choice_selected > 0 { self.choice_selected -= 1; }
+                            }
+                            KeyCode::Down => {
+                                if options_len > 0 && self.choice_selected < options_len - 1 {
+                                    self.choice_selected += 1;
+                                }
+                            }
+                            _ => {}
                         }
                     }
-                    KeyCode::Char(c) if matches!(kind, Some(InteractionKind::FreeText) | None) => {
-                        self.input_buffer.push(c);
-                    }
-                    KeyCode::Backspace if matches!(kind, Some(InteractionKind::FreeText) | None) => {
-                        self.input_buffer.pop();
-                    }
-                    _ => {}
                 }
                 return;
             }
 
             // Search mode: intercept all keys for query editing
             if self.search_mode {
-                match key {
+                match key_code {
                     KeyCode::Esc | KeyCode::Enter => {
-                        if key == KeyCode::Esc {
+                        if key_code == KeyCode::Esc {
                             self.search_query.clear();
                             self.search_match_idx = 0;
                         }
@@ -868,7 +883,7 @@ impl Dashboard {
             }
 
             // Detail view — not in input mode
-            match key {
+            match key_code {
                 KeyCode::Esc => {
                     if !self.search_query.is_empty() {
                         // First Esc clears the search; second exits detail view
@@ -935,7 +950,7 @@ impl Dashboard {
                     if self.selected_stage_can_respond() {
                         self.input_mode = true;
                         self.choice_selected = 0;
-                        self.input_buffer.clear();
+                        self.input_textarea = TextArea::default();
                     }
                 }
                 KeyCode::Up => {
@@ -1060,7 +1075,7 @@ impl Dashboard {
                                 a.pending_request = None;
                             }
                             self.input_mode = false;
-                            self.input_buffer.clear();
+                            self.input_textarea = TextArea::default();
                             self.add_log(format!("{}: Killed", agent_id));
                         }
                     }
@@ -1073,7 +1088,7 @@ impl Dashboard {
         // ── Main agent list ──────────────────────────────────────────────────
         // ── Main list filter mode: intercept all keys for query editing ─────────
         if self.list_search_mode {
-            match key {
+            match key_code {
                 KeyCode::Esc => {
                     self.list_search_mode = false;
                     self.list_search_query.clear();
@@ -1098,7 +1113,7 @@ impl Dashboard {
             return;
         }
 
-        match key {
+        match key_code {
             KeyCode::Esc => {
                 if !self.list_search_query.is_empty() {
                     // First Esc clears the filter; second exits (quit)
@@ -1297,7 +1312,7 @@ impl Dashboard {
     fn draw_help_overlay(&self, frame: &mut Frame) {
         let area = frame.area();
         let w: u16 = 62.min(area.width.saturating_sub(4));
-        let h: u16 = 34.min(area.height.saturating_sub(4));
+        let h: u16 = 38.min(area.height.saturating_sub(4));
         let x = (area.width.saturating_sub(w)) / 2;
         let y = (area.height.saturating_sub(h)) / 2;
         let popup = Rect { x, y, width: w, height: h };
@@ -1327,6 +1342,12 @@ impl Dashboard {
             Line::from(vec![Span::styled("  i        ", Style::default().fg(C_WHITE).add_modifier(Modifier::BOLD)), Span::raw("Respond (when input needed)")]),
             Line::from(vec![Span::styled("  k        ", Style::default().fg(C_WHITE).add_modifier(Modifier::BOLD)), Span::raw("Kill agent")]),
             Line::from(vec![Span::styled("  Esc      ", Style::default().fg(C_WHITE).add_modifier(Modifier::BOLD)), Span::raw("Clear search / back to list")]),
+            Line::from(""),
+            Line::from(Span::styled("  Input (text response)", Style::default().fg(C_ACCENT).add_modifier(Modifier::BOLD))),
+            Line::from(""),
+            Line::from(vec![Span::styled("  Enter    ", Style::default().fg(C_WHITE).add_modifier(Modifier::BOLD)), Span::raw("Send response")]),
+            Line::from(vec![Span::styled("  Alt+↵    ", Style::default().fg(C_WHITE).add_modifier(Modifier::BOLD)), Span::raw("Insert newline (multi-line)")]),
+            Line::from(vec![Span::styled("  Esc      ", Style::default().fg(C_WHITE).add_modifier(Modifier::BOLD)), Span::raw("Cancel input")]),
             Line::from(""),
             Line::from(Span::styled("  Any key to dismiss", Style::default().fg(C_DIM))),
         ];
@@ -1552,7 +1573,7 @@ impl Dashboard {
             let n = options.len() as u16;
             if self.input_mode {
                 match &kind {
-                    Some(InteractionKind::FreeText) | None => 7,
+                    Some(InteractionKind::FreeText) | None => 11,
                     _ => (n + 4).min(14),
                 }
             } else {
@@ -2052,106 +2073,96 @@ impl Dashboard {
         // ── Input / prompt pane ───────────────────────────────────────────────
         if prompt_height > 0 {
             let prompt_area = chunks[chunk_idx];
-            let required = pending_req.as_ref().map(|r| r.required).unwrap_or(true);
-            let (title, prompt_lines): (&str, Vec<Line>) = if self.input_mode {
-                let mut lines: Vec<Line> = vec![];
-                match &kind {
-                    Some(InteractionKind::FreeText) | None => {
-                        let prompt_text = pending_req.as_ref()
-                            .map(|r| r.prompt.as_str())
-                            .or(agent.waiting_prompt.as_deref())
-                            .unwrap_or("Enter response:");
-                        lines.push(Line::from(Span::styled(
-                            format!(" {}", prompt_text),
-                            Style::default().fg(C_WARN),
-                        )));
-                        lines.push(Line::from(""));
-                        lines.push(Line::from(vec![
-                            Span::styled(" > ", Style::default().fg(C_SUCCESS)),
-                            Span::raw(self.input_buffer.clone()),
-                            Span::styled("█", Style::default().fg(C_SUCCESS)),
-                        ]));
-                        lines.push(Line::from(""));
-                        let hint = if !required {
-                            " [Enter] send  [empty or /quit to end]  [Esc] cancel"
-                        } else {
-                            " [Enter] send  [Esc] cancel"
-                        };
-                        lines.push(Line::from(Span::styled(hint, Style::default().fg(C_DIM))));
-                    }
-                    _ => {
-                        for (i, opt) in options.iter().enumerate() {
-                            let sel = i == self.choice_selected;
-                            let prefix = if sel { " > " } else { "   " };
-                            let label = match &kind {
-                                Some(InteractionKind::Confirm) => {
-                                    format!("{}{}) {}", prefix, if i == 0 { "y" } else { "n" }, opt)
-                                }
-                                _ => format!("{}[{}] {}", prefix, i + 1, opt),
-                            };
-                            let style = if sel {
-                                Style::default().fg(C_WARN).add_modifier(Modifier::BOLD)
-                            } else {
-                                Style::default().fg(C_MUTED)
-                            };
-                            lines.push(Line::from(Span::styled(label, style)));
-                        }
-                        lines.push(Line::from(""));
-                        lines.push(Line::from(Span::styled(
-                            " [↑↓] select  [Enter] confirm  [Esc] cancel",
-                            Style::default().fg(C_DIM),
-                        )));
-                    }
-                }
-                (" Response ", lines)
-            } else {
-                let mut lines: Vec<Line> = vec![];
-                let prompt_text = pending_req.as_ref()
-                    .map(|r| r.prompt.as_str())
-                    .or(agent.waiting_prompt.as_deref())
-                    .unwrap_or("Waiting for input");
-                lines.push(Line::from(Span::styled(
-                    format!(" {}", prompt_text),
-                    Style::default().fg(C_WARN),
-                )));
-                if !options.is_empty() {
-                    lines.push(Line::from(""));
-                    for (i, opt) in options.iter().enumerate() {
-                        let label = match &kind {
-                            Some(InteractionKind::Confirm) => {
-                                format!("   {}) {}", if i == 0 { "y" } else { "n" }, opt)
-                            }
-                            _ => format!("   [{}] {}", i + 1, opt),
-                        };
-                        lines.push(Line::from(Span::styled(label, Style::default().fg(C_MUTED))));
-                    }
-                }
-                lines.push(Line::from(""));
-                let hint = if matches!(agent.status, AgentDisplayStatus::CompleteInteractive) {
-                    " [i] respond"
-                } else {
-                    " [i] respond  [k] kill"
-                };
-                lines.push(Line::from(Span::styled(hint, Style::default().fg(C_DIM))));
-                let title = if matches!(agent.status, AgentDisplayStatus::CompleteInteractive) {
-                    " Input Allowed "
-                } else {
-                    " Input Required "
-                };
-                (title, lines)
-            };
+            let _required = pending_req.as_ref().map(|r| r.required).unwrap_or(true);
 
-            let prompt_color = if self.input_mode { C_SUCCESS } else { C_WARN };
-            let prompt_widget = Paragraph::new(prompt_lines)
-                .block(
+            if self.input_mode && matches!(&kind, Some(InteractionKind::FreeText) | None) {
+                // ── FreeText: render the multi-line tui-textarea widget ──────────
+                let hint = " Response  [Enter] send  [Alt+↵] newline  [Esc] cancel ";
+                self.input_textarea.set_block(
                     Block::default()
                         .borders(Borders::ALL)
                         .border_type(BorderType::Rounded)
-                        .border_style(Style::default().fg(prompt_color))
-                        .title(Span::styled(title, Style::default().fg(prompt_color).add_modifier(Modifier::BOLD))),
-                )
-                .wrap(Wrap { trim: true });
-            frame.render_widget(prompt_widget, prompt_area);
+                        .border_style(Style::default().fg(C_SUCCESS))
+                        .title(Span::styled(hint, Style::default().fg(C_SUCCESS).add_modifier(Modifier::BOLD))),
+                );
+                self.input_textarea.set_style(Style::default().fg(C_WHITE));
+                self.input_textarea.set_cursor_style(Style::default().fg(Color::Black).bg(C_ACCENT));
+                frame.render_widget(&self.input_textarea, prompt_area);
+            } else {
+                let (title, prompt_lines): (&str, Vec<Line>) = if self.input_mode {
+                    let mut lines: Vec<Line> = vec![];
+                    // MultipleChoice / ToolApproval / Confirm
+                    for (i, opt) in options.iter().enumerate() {
+                        let sel = i == self.choice_selected;
+                        let prefix = if sel { " > " } else { "   " };
+                        let label = match &kind {
+                            Some(InteractionKind::Confirm) => {
+                                format!("{}{}) {}", prefix, if i == 0 { "y" } else { "n" }, opt)
+                            }
+                            _ => format!("{}[{}] {}", prefix, i + 1, opt),
+                        };
+                        let style = if sel {
+                            Style::default().fg(C_WARN).add_modifier(Modifier::BOLD)
+                        } else {
+                            Style::default().fg(C_MUTED)
+                        };
+                        lines.push(Line::from(Span::styled(label, style)));
+                    }
+                    lines.push(Line::from(""));
+                    lines.push(Line::from(Span::styled(
+                        " [↑↓] select  [Enter] confirm  [Esc] cancel",
+                        Style::default().fg(C_DIM),
+                    )));
+                    (" Response ", lines)
+                } else {
+                    let mut lines: Vec<Line> = vec![];
+                    let prompt_text = pending_req.as_ref()
+                        .map(|r| r.prompt.as_str())
+                        .or(agent.waiting_prompt.as_deref())
+                        .unwrap_or("Waiting for input");
+                    lines.push(Line::from(Span::styled(
+                        format!(" {}", prompt_text),
+                        Style::default().fg(C_WARN),
+                    )));
+                    if !options.is_empty() {
+                        lines.push(Line::from(""));
+                        for (i, opt) in options.iter().enumerate() {
+                            let label = match &kind {
+                                Some(InteractionKind::Confirm) => {
+                                    format!("   {}) {}", if i == 0 { "y" } else { "n" }, opt)
+                                }
+                                _ => format!("   [{}] {}", i + 1, opt),
+                            };
+                            lines.push(Line::from(Span::styled(label, Style::default().fg(C_MUTED))));
+                        }
+                    }
+                    lines.push(Line::from(""));
+                    let hint = if matches!(agent.status, AgentDisplayStatus::CompleteInteractive) {
+                        " [i] respond"
+                    } else {
+                        " [i] respond  [k] kill"
+                    };
+                    lines.push(Line::from(Span::styled(hint, Style::default().fg(C_DIM))));
+                    let title = if matches!(agent.status, AgentDisplayStatus::CompleteInteractive) {
+                        " Input Allowed "
+                    } else {
+                        " Input Required "
+                    };
+                    (title, lines)
+                };
+
+                let prompt_color = if self.input_mode { C_SUCCESS } else { C_WARN };
+                let prompt_widget = Paragraph::new(prompt_lines)
+                    .block(
+                        Block::default()
+                            .borders(Borders::ALL)
+                            .border_type(BorderType::Rounded)
+                            .border_style(Style::default().fg(prompt_color))
+                            .title(Span::styled(title, Style::default().fg(prompt_color).add_modifier(Modifier::BOLD))),
+                    )
+                    .wrap(Wrap { trim: true });
+                frame.render_widget(prompt_widget, prompt_area);
+            }
         }
     }
 
@@ -2530,7 +2541,7 @@ pub async fn execute(_args: DashboardArgs) -> anyhow::Result<()> {
         if event::poll(tick_rate)? {
             match event::read()? {
                 Event::Key(key) if key.kind == KeyEventKind::Press => {
-                    dashboard.handle_key(key.code);
+                    dashboard.handle_key(key);
                 }
                 Event::Mouse(mouse) => {
                     dashboard.handle_mouse(mouse);

@@ -54,3 +54,4 @@ dotenvy = "0.15"
 crossterm = "0.28"
 ratatui = "0.29"
 pulldown-cmark = "0.12"
+tui-textarea = { version = "0.7", features = ["crossterm"] }
