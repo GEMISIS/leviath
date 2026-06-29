@@ -1,11 +1,15 @@
 //! `lev run` - Run an agent
 
 use clap::Args;
-use leviath_core::blueprint::{ModelConfig, StageMode, ToolResultRouting};
+use leviath_core::blueprint::{
+    EdgeTransform, ModelConfig, StageMode, StageResult, ToolResultRouting, TransitionCondition,
+    TransitionEdge,
+};
 use leviath_core::layout::RegionDefinition;
 use leviath_core::lifecycle::CompactionConfig;
 use leviath_core::{Blueprint, ContextLayout, Region, RegionKind, Stage};
 use leviath_runtime::{AgentEngine, AgentPool, AgentState, ContextWindow, ProviderRegistry};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio_stream::StreamExt;
@@ -385,6 +389,473 @@ pub async fn execute(args: RunArgs) -> anyhow::Result<()> {
     Ok(())
 }
 
+// ─── Graph traversal runtime ────────────────────────────────────────────────
+
+/// Determine whether a blueprint uses graph mode (any stage has transitions set).
+fn is_graph_mode(blueprint: &Blueprint) -> bool {
+    blueprint.stages.iter().any(|s| s.transitions.is_some())
+}
+
+/// Resolve the next transition from a stage, considering conditions, visit counts,
+/// and LLM routing when multiple edges are available.
+///
+/// Returns `None` when the stage is terminal (no valid outgoing transitions).
+async fn resolve_transition(
+    stage: &Stage,
+    stage_idx: usize,
+    blueprint: &Blueprint,
+    visit_counts: &HashMap<String, usize>,
+    stage_result: &StageResult,
+    engine: &mut AgentEngine,
+    entity: bevy_ecs::prelude::Entity,
+    provider_name: &str,
+    model_name: &str,
+) -> Option<(TransitionEdge, usize)> {
+    match &stage.transitions {
+        None => {
+            // Linear mode: advance to next stage by index
+            if stage_idx + 1 < blueprint.stages.len() {
+                let next = &blueprint.stages[stage_idx + 1];
+                let next_idx = stage_idx + 1;
+                Some((
+                    TransitionEdge {
+                        target: next.name.clone(),
+                        condition: TransitionCondition::Always,
+                        hint: None,
+                        transform: EdgeTransform::Direct,
+                    },
+                    next_idx,
+                ))
+            } else {
+                None // terminal
+            }
+        }
+        Some(transitions) => {
+            if transitions.is_empty() {
+                return None; // terminal stage
+            }
+
+            // Filter edges by visit count limits
+            let available: Vec<(&String, &TransitionEdge)> = transitions
+                .iter()
+                .filter(|(target_name, _edge)| {
+                    let target_stage = blueprint.find_stage(target_name);
+                    if let Some(ts) = target_stage {
+                        if let Some(max_rev) = ts.max_revisits {
+                            let visits = visit_counts.get(target_name.as_str()).copied().unwrap_or(0);
+                            visits <= max_rev // allow first visit + max_revisits
+                        } else {
+                            true
+                        }
+                    } else {
+                        false // unknown target, skip
+                    }
+                })
+                .collect();
+
+            if available.is_empty() {
+                return None; // all targets exhausted
+            }
+
+            // Step 1: Error condition — auto-transition if error occurred
+            if *stage_result == StageResult::Error {
+                if let Some((_name, edge)) = available
+                    .iter()
+                    .find(|(_, e)| e.condition == TransitionCondition::Error)
+                {
+                    let target_idx = blueprint
+                        .stages
+                        .iter()
+                        .position(|s| s.name == edge.target)
+                        .unwrap_or(0);
+                    return Some(((*edge).clone(), target_idx));
+                }
+            }
+
+            // Step 2: MaxIterations condition — auto-transition
+            if *stage_result == StageResult::MaxIterations {
+                if let Some((_name, edge)) = available
+                    .iter()
+                    .find(|(_, e)| e.condition == TransitionCondition::MaxIterations)
+                {
+                    let target_idx = blueprint
+                        .stages
+                        .iter()
+                        .position(|s| s.name == edge.target)
+                        .unwrap_or(0);
+                    return Some(((*edge).clone(), target_idx));
+                }
+            }
+
+            // Step 3: Filter to only always/llm_choice edges for LLM prompt
+            let choosable: Vec<(&String, &TransitionEdge)> = available
+                .into_iter()
+                .filter(|(_, e)| {
+                    matches!(
+                        e.condition,
+                        TransitionCondition::Always | TransitionCondition::LlmChoice
+                    )
+                })
+                .collect();
+
+            match choosable.len() {
+                0 => None, // terminal
+                1 => {
+                    let (_, edge) = choosable[0];
+                    let target_idx = blueprint
+                        .stages
+                        .iter()
+                        .position(|s| s.name == edge.target)
+                        .unwrap_or(0);
+                    Some((edge.clone(), target_idx))
+                }
+                _ => {
+                    // Multiple edges: prompt LLM to choose
+                    let chosen = prompt_llm_transition(
+                        stage,
+                        &choosable,
+                        engine,
+                        entity,
+                        provider_name,
+                        model_name,
+                    )
+                    .await;
+                    match chosen {
+                        Some(edge) => {
+                            let target_idx = blueprint
+                                .stages
+                                .iter()
+                                .position(|s| s.name == edge.target)
+                                .unwrap_or(0);
+                            Some((edge, target_idx))
+                        }
+                        None => {
+                            // LLM didn't pick a valid target — treat as terminal
+                            None
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Prompt the LLM to choose between multiple transition edges.
+async fn prompt_llm_transition(
+    stage: &Stage,
+    edges: &[(&String, &TransitionEdge)],
+    engine: &mut AgentEngine,
+    entity: bevy_ecs::prelude::Entity,
+    provider_name: &str,
+    model_name: &str,
+) -> Option<TransitionEdge> {
+    // Build the transition prompt
+    let prompt = if let Some(ref custom_prompt) = stage.transition_prompt {
+        let mut p = custom_prompt.clone();
+        p.push_str("\n\nAvailable transitions:\n");
+        for (name, edge) in edges {
+            p.push_str(&format!("- {}", name));
+            if let Some(ref hint) = edge.hint {
+                p.push_str(&format!(": {}", hint));
+            }
+            p.push('\n');
+        }
+        p.push_str("\nRespond with ONLY the stage name you want to transition to, nothing else.");
+        p
+    } else {
+        let mut p = format!(
+            "Stage '{}' is complete. Available next stages:\n",
+            stage.name
+        );
+        for (name, edge) in edges {
+            p.push_str(&format!("- {}", name));
+            if let Some(ref hint) = edge.hint {
+                p.push_str(&format!(": {}", hint));
+            }
+            p.push('\n');
+        }
+        p.push_str("\nWhich stage should run next? Respond with ONLY the stage name.");
+        p
+    };
+
+    // Inject the transition prompt into the context window
+    if let Some(mut window) = engine.world_mut().get_mut::<ContextWindow>(entity) {
+        let tokens = prompt.len() / 4 + 1;
+        let _ = window.add_to_region(
+            "conversation",
+            format!("User: {}", prompt),
+            tokens,
+        );
+    }
+
+    // Run a single inference call to get the LLM's choice
+    let provider = engine.get_provider(provider_name)?;
+    let (messages, max_tokens) = {
+        let window = engine.world().get::<ContextWindow>(entity)?;
+        let messages = window.assemble_messages();
+        let remaining = window.max_tokens.saturating_sub(window.current_tokens);
+        let max_tokens = remaining.min(256); // short response expected
+        (messages, max_tokens)
+    };
+
+    let temperature = if provider.capabilities(model_name).supports_temperature {
+        0.0 // deterministic for routing
+    } else {
+        0.0
+    };
+
+    let request = leviath_providers::InferenceRequest {
+        messages,
+        model: model_name.to_string(),
+        max_tokens,
+        temperature,
+        tools: Vec::new(),
+        extra: serde_json::Value::Null,
+    };
+
+    let response = provider.infer(request).await.ok()?;
+    let choice = response.content.trim().to_string();
+
+    // Add the LLM's response to context
+    if let Some(mut window) = engine.world_mut().get_mut::<ContextWindow>(entity) {
+        let tokens = choice.len() / 4 + 1;
+        let _ = window.add_to_region(
+            "conversation",
+            format!("Assistant: Transitioning to: {}", choice),
+            tokens,
+        );
+    }
+
+    // Match the response to an available edge
+    for (name, edge) in edges {
+        if choice.eq_ignore_ascii_case(name) || choice.contains(name.as_str()) {
+            return Some((*edge).clone());
+        }
+    }
+
+    // Fuzzy fallback: check if any edge target is contained in the response
+    for (name, edge) in edges {
+        if choice.to_lowercase().contains(&name.to_lowercase()) {
+            return Some((*edge).clone());
+        }
+    }
+
+    // If nothing matched, pick the first edge as fallback
+    tracing::warn!(
+        stage = %stage.name,
+        llm_response = %choice,
+        "LLM transition response didn't match any edge — using first available"
+    );
+    Some(edges.first()?.1.clone())
+}
+
+/// Apply an edge transform to the context window before entering the next stage.
+async fn apply_edge_transform(
+    edge: &TransitionEdge,
+    visit_counts: &HashMap<String, usize>,
+    engine: &mut AgentEngine,
+    entity: bevy_ecs::prelude::Entity,
+    provider_name: &str,
+    model_name: &str,
+    compaction_config: Option<&CompactionConfig>,
+) {
+    let visits = visit_counts.get(&edge.target).copied().unwrap_or(0);
+
+    // Default: Direct for first visit, Compact for revisits (when no explicit transform)
+    let effective_transform = match &edge.transform {
+        EdgeTransform::Direct if visits > 0 => {
+            // Revisit with no explicit transform: use compact
+            &EdgeTransform::Compact { prompt: None }
+        }
+        other => other,
+    };
+
+    match effective_transform {
+        EdgeTransform::Direct => {
+            // No-op: context carries forward as-is
+        }
+        EdgeTransform::Clear => {
+            // Clear all non-pinned regions
+            if let Some(mut window) = engine.world_mut().get_mut::<ContextWindow>(entity) {
+                for region in &mut window.regions {
+                    if !matches!(
+                        region.kind,
+                        RegionKind::Pinned | RegionKind::CompactHistory { .. }
+                    ) {
+                        region.clear();
+                    }
+                }
+                window.current_tokens = window.calculate_tokens();
+            }
+        }
+        EdgeTransform::Compact { prompt } => {
+            // LLM-summarize conversation/scratch regions
+            let compact_prompt = prompt.clone().unwrap_or_else(|| {
+                format!(
+                    "Summarize the conversation so far as context for the next stage '{}'. \
+                     Keep key decisions, findings, and action items. Be concise.",
+                    edge.target
+                )
+            });
+            apply_compact_transform(
+                engine,
+                entity,
+                provider_name,
+                model_name,
+                &compact_prompt,
+                compaction_config,
+            )
+            .await;
+        }
+        EdgeTransform::Custom {
+            carry: _,
+            compact,
+            clear,
+            compact_prompt,
+        } => {
+            if let Some(mut window) = engine.world_mut().get_mut::<ContextWindow>(entity) {
+                // Clear specified regions
+                for region in &mut window.regions {
+                    if clear.contains(&region.name) {
+                        region.clear();
+                    }
+                }
+                window.current_tokens = window.calculate_tokens();
+            }
+
+            // Compact specified regions
+            if !compact.is_empty() {
+                let prompt = compact_prompt.clone().unwrap_or_else(|| {
+                    format!(
+                        "Summarize the content from regions [{}] as context for stage '{}'.",
+                        compact.join(", "),
+                        edge.target
+                    )
+                });
+                apply_compact_transform(
+                    engine,
+                    entity,
+                    provider_name,
+                    model_name,
+                    &prompt,
+                    compaction_config,
+                )
+                .await;
+            }
+
+            // carry regions are left untouched (they carry forward as-is)
+        }
+    }
+}
+
+/// Run LLM compaction on the conversation/compacting regions.
+async fn apply_compact_transform(
+    engine: &mut AgentEngine,
+    entity: bevy_ecs::prelude::Entity,
+    provider_name: &str,
+    model_name: &str,
+    prompt: &str,
+    compaction_config: Option<&CompactionConfig>,
+) {
+    // Use the compaction provider/model if configured, otherwise fall back to the stage's
+    let (compact_provider, compact_model) = if let Some(cc) = compaction_config {
+        (cc.provider.as_str(), cc.model.as_str())
+    } else {
+        (provider_name, model_name)
+    };
+
+    let provider = match engine.get_provider(compact_provider) {
+        Some(p) => p,
+        None => return,
+    };
+
+    // Gather content from compactable regions
+    let content_to_compact = {
+        let window = match engine.world().get::<ContextWindow>(entity) {
+            Some(w) => w,
+            None => return,
+        };
+        let mut parts = Vec::new();
+        for region in &window.regions {
+            if matches!(
+                region.kind,
+                RegionKind::SlidingWindow { .. }
+                    | RegionKind::Compacting { .. }
+                    | RegionKind::Temporary
+                    | RegionKind::Clearable
+            ) && !region.content.is_empty()
+            {
+                let region_content: String = region
+                    .content
+                    .iter()
+                    .map(|e| e.content.as_str())
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                parts.push(format!("[{}]:\n{}", region.name, region_content));
+            }
+        }
+        parts.join("\n\n")
+    };
+
+    if content_to_compact.is_empty() {
+        return;
+    }
+
+    let messages = vec![
+        leviath_providers::Message {
+            role: "system".to_string(),
+            content: prompt.to_string(),
+        },
+        leviath_providers::Message {
+            role: "user".to_string(),
+            content: content_to_compact,
+        },
+    ];
+
+    let max_summary_tokens = compaction_config
+        .map(|cc| cc.max_summary_tokens)
+        .unwrap_or(2000);
+
+    let request = leviath_providers::InferenceRequest {
+        messages,
+        model: compact_model.to_string(),
+        max_tokens: max_summary_tokens,
+        temperature: compaction_config.map(|cc| cc.temperature).unwrap_or(0.3),
+        tools: Vec::new(),
+        extra: serde_json::Value::Null,
+    };
+
+    match provider.infer(request).await {
+        Ok(response) => {
+            if let Some(mut window) = engine.world_mut().get_mut::<ContextWindow>(entity) {
+                // Clear compactable regions
+                for region in &mut window.regions {
+                    if matches!(
+                        region.kind,
+                        RegionKind::SlidingWindow { .. }
+                            | RegionKind::Compacting { .. }
+                            | RegionKind::Temporary
+                            | RegionKind::Clearable
+                    ) {
+                        region.clear();
+                    }
+                }
+                // Add the summary to conversation
+                let tokens = response.content.len() / 4 + 1;
+                let _ = window.add_to_region(
+                    "conversation",
+                    format!("[Context summary from previous stage]: {}", response.content),
+                    tokens,
+                );
+                window.current_tokens = window.calculate_tokens();
+            }
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "Failed to compact context during edge transform");
+        }
+    }
+}
+
 /// Run an agent in the foreground (inline, blocking) — the original behavior.
 async fn run_foreground(args: RunArgs) -> anyhow::Result<()> {
     let path = args.path.unwrap_or_else(|| ".".to_string());
@@ -598,8 +1069,21 @@ async fn run_foreground(args: RunArgs) -> anyhow::Result<()> {
     let compaction_config = blueprint.compaction_config.clone();
     let compaction_ref = compaction_config.as_ref();
 
-    let num_stages = blueprint.stages.len();
-    for (stage_idx, stage) in blueprint.stages.iter().enumerate() {
+    // ─── Graph stage loop ────────────────────────────────────────────────────
+    let entry_name = blueprint.resolve_entry_stage_name();
+    let mut current_stage_name_val = entry_name;
+    let mut current_stage_idx = blueprint
+        .stages
+        .iter()
+        .position(|s| s.name == current_stage_name_val)
+        .unwrap_or(0);
+    let mut visit_counts: HashMap<String, usize> = HashMap::new();
+
+    loop {
+        let stage = blueprint
+            .find_stage(&current_stage_name_val)
+            .ok_or_else(|| anyhow::anyhow!("Stage '{}' not found", current_stage_name_val))?;
+
         let provider_name = &stage.model.provider;
         let model_name = args.model.as_deref().unwrap_or(&stage.model.model);
 
@@ -628,13 +1112,19 @@ async fn run_foreground(args: RunArgs) -> anyhow::Result<()> {
             return Ok(());
         }
 
+        let visit_num = visit_counts.get(&stage.name).copied().unwrap_or(0);
+        let visit_label = if visit_num > 0 {
+            format!(" (visit {})", visit_num + 1)
+        } else {
+            String::new()
+        };
         println!(
-            "\n--- Stage {}/{}: {} ({}:{}) ---",
-            stage_idx + 1,
-            num_stages,
+            "\n--- Stage {}: {} ({}:{}){} ---",
+            current_stage_idx + 1,
             stage.name,
             provider_name,
             model_name,
+            visit_label,
         );
 
         if provider_name == "claude-code" {
@@ -683,6 +1173,9 @@ async fn run_foreground(args: RunArgs) -> anyhow::Result<()> {
         let routing_ref = routing_config.as_ref();
         let max_iterations = stage.max_iterations.unwrap_or(20);
 
+        // Determine stage result for transition condition evaluation
+        let stage_result_val: StageResult;
+
         match &stage.mode {
             StageMode::Interactive => {
                 run_interactive_stage(
@@ -697,6 +1190,7 @@ async fn run_foreground(args: RunArgs) -> anyhow::Result<()> {
                     &mut exec,
                 )
                 .await?;
+                stage_result_val = StageResult::Success;
             }
             StageMode::InteractivePoints { points } => {
                 run_interactive_points_stage(
@@ -713,9 +1207,10 @@ async fn run_foreground(args: RunArgs) -> anyhow::Result<()> {
                     &mut exec,
                 )
                 .await?;
+                stage_result_val = StageResult::Success;
             }
             StageMode::Autonomous => {
-                run_autonomous_stage(
+                match run_autonomous_stage(
                     &mut engine,
                     entity,
                     provider_name,
@@ -726,19 +1221,83 @@ async fn run_foreground(args: RunArgs) -> anyhow::Result<()> {
                     compaction_ref,
                     &mut exec,
                 )
-                .await?;
+                .await
+                {
+                    Ok(()) => {
+                        // Check if we hit max_iterations by looking at iteration count
+                        if let Some(state) = engine.world().get::<AgentState>(entity) {
+                            if stage.max_iterations.is_some()
+                                && state.iteration >= max_iterations
+                            {
+                                stage_result_val = StageResult::MaxIterations;
+                            } else {
+                                stage_result_val = StageResult::Success;
+                            }
+                        } else {
+                            stage_result_val = StageResult::Success;
+                        }
+                    }
+                    Err(e) => {
+                        // Check if error edges exist; if so, route to error handler
+                        if is_graph_mode(&blueprint) {
+                            println!("Stage error: {} — checking error transitions", e);
+                            stage_result_val = StageResult::Error;
+                        } else {
+                            return Err(e);
+                        }
+                    }
+                }
             }
         }
 
-        if stage_idx + 1 < num_stages {
-            let next_name = &blueprint.stages[stage_idx + 1].name;
-            if let Some(mut window) = engine.world_mut().get_mut::<ContextWindow>(entity) {
-                let marker = format!(
-                    "[Stage complete: {}, transitioning to: {}]",
-                    stage.name, next_name
-                );
-                let tokens = marker.len() / 4 + 1;
-                let _ = window.add_to_region("conversation", marker, tokens);
+        *visit_counts.entry(stage.name.clone()).or_default() += 1;
+
+        // Resolve the next transition
+        // We need to clone the stage name before passing blueprint as &mut
+        let stage_name_owned = current_stage_name_val.clone();
+        let stage_ref = blueprint.find_stage(&stage_name_owned).unwrap();
+        let transition = resolve_transition(
+            stage_ref,
+            current_stage_idx,
+            &blueprint,
+            &visit_counts,
+            &stage_result_val,
+            &mut engine,
+            entity,
+            provider_name,
+            model_name,
+        )
+        .await;
+
+        match transition {
+            Some((edge, next_idx)) => {
+                let next_name = edge.target.clone();
+                if let Some(mut window) = engine.world_mut().get_mut::<ContextWindow>(entity) {
+                    let marker = format!(
+                        "[Stage complete: {}, transitioning to: {}]",
+                        stage_name_owned, next_name
+                    );
+                    let tokens = marker.len() / 4 + 1;
+                    let _ = window.add_to_region("conversation", marker, tokens);
+                }
+
+                // Apply edge transform
+                apply_edge_transform(
+                    &edge,
+                    &visit_counts,
+                    &mut engine,
+                    entity,
+                    &edge.target, // use target's provider — but we'll use current for simplicity
+                    model_name,
+                    compaction_ref,
+                )
+                .await;
+
+                current_stage_name_val = next_name;
+                current_stage_idx = next_idx;
+            }
+            None => {
+                break; // terminal: no valid transitions
             }
         }
     }
@@ -1071,8 +1630,22 @@ async fn run_worker_inner(args: &WorkerArgs, meta: &mut RunMeta) -> anyhow::Resu
         let _ = runstate::write_stages_index(&args.run_id, &initial_stages);
     }
 
-    let num_stages = blueprint.stages.len();
-    for (stage_idx, stage) in blueprint.stages.iter().enumerate() {
+    // ─── Graph stage loop (worker) ──────────────────────────────────────────
+    let entry_name = blueprint.resolve_entry_stage_name();
+    let mut current_stage_name_val = entry_name;
+    let mut current_stage_idx_val = blueprint
+        .stages
+        .iter()
+        .position(|s| s.name == current_stage_name_val)
+        .unwrap_or(0);
+    let mut visit_counts: HashMap<String, usize> = HashMap::new();
+
+    loop {
+        let stage = blueprint
+            .find_stage(&current_stage_name_val)
+            .ok_or_else(|| anyhow::anyhow!("Stage '{}' not found", current_stage_name_val))?;
+
+        let stage_idx = current_stage_idx_val;
         let provider_name = &stage.model.provider;
         let model_name = args.model.as_deref().unwrap_or(&stage.model.model);
 
@@ -1108,13 +1681,14 @@ async fn run_worker_inner(args: &WorkerArgs, meta: &mut RunMeta) -> anyhow::Resu
             return Ok(());
         }
 
+        let visit_num = visit_counts.get(&stage.name).copied().unwrap_or(0);
+        let visit_label = if visit_num > 0 {
+            format!(" (visit {})", visit_num + 1)
+        } else {
+            String::new()
+        };
         let stage_header = format!(
-            "Stage {}/{}: {} ({}:{})",
-            stage_idx + 1,
-            num_stages,
-            stage.name,
-            provider_name,
-            model_name,
+            "Stage {}: {} ({}:{}){}", stage_idx + 1, stage.name, provider_name, model_name, visit_label,
         );
         println!("\n--- {} ---", stage_header);
         record_stage_log(
@@ -1191,8 +1765,11 @@ async fn run_worker_inner(args: &WorkerArgs, meta: &mut RunMeta) -> anyhow::Resu
         let routing_ref = routing_config.as_ref();
         let max_iterations = stage.max_iterations.unwrap_or(20);
 
+        // Determine stage result for transition condition evaluation
+        let stage_result_val: StageResult;
+
         // Workers now support interactive stage modes via the file-based IPC channel.
-        let stage_result: anyhow::Result<Option<leviath_providers::InferenceResponse>> =
+        let stage_run_result: anyhow::Result<Option<leviath_providers::InferenceResponse>> =
             match &stage.mode {
                 StageMode::Interactive => run_interactive_stage(
                     &mut engine,
@@ -1250,7 +1827,7 @@ async fn run_worker_inner(args: &WorkerArgs, meta: &mut RunMeta) -> anyhow::Resu
                 .unwrap_or(0)
         };
 
-        match stage_result {
+        match stage_run_result {
             Ok(resp_opt) => {
                 if let Some(resp) = resp_opt {
                     // Route the readable agent response to both stdout (legacy) and per-stage output
@@ -1281,6 +1858,18 @@ async fn run_worker_inner(args: &WorkerArgs, meta: &mut RunMeta) -> anyhow::Resu
                         }
                     }
                 }
+
+                // Determine if max_iterations was hit
+                if let Some(state) = engine.world().get::<AgentState>(entity) {
+                    if stage.max_iterations.is_some() && state.iteration >= max_iterations {
+                        stage_result_val = StageResult::MaxIterations;
+                    } else {
+                        stage_result_val = StageResult::Success;
+                    }
+                } else {
+                    stage_result_val = StageResult::Success;
+                }
+
                 // Mark stage complete
                 {
                     let mut stages = runstate::read_stages_index(&args.run_id);
@@ -1294,25 +1883,45 @@ async fn run_worker_inner(args: &WorkerArgs, meta: &mut RunMeta) -> anyhow::Resu
                 }
             }
             Err(e) => {
-                let msg = format!("Stage '{}' inference error: {}", stage.name, e);
-                println!("{}", msg);
-                record_stage_log(&args.run_id, stage_idx, &format!("[error] {}", msg));
-                // Mark stage error
-                {
-                    let mut stages = runstate::read_stages_index(&args.run_id);
-                    if let Some(r) = stages.get_mut(stage_idx) {
-                        r.status = StageRunStatus::Error;
-                        r.ended_at = Some(stage_ended_at);
+                // In graph mode, errors can route to error-handler stages
+                if is_graph_mode(&blueprint) {
+                    let msg = format!("Stage '{}' error: {} — checking error transitions", stage.name, e);
+                    println!("{}", msg);
+                    record_stage_log(&args.run_id, stage_idx, &format!("[error] {}", msg));
+                    stage_result_val = StageResult::Error;
+
+                    // Mark stage as errored but don't abort
+                    {
+                        let mut stages = runstate::read_stages_index(&args.run_id);
+                        if let Some(r) = stages.get_mut(stage_idx) {
+                            r.status = StageRunStatus::Error;
+                            r.ended_at = Some(stage_ended_at);
+                        }
+                        let _ = runstate::write_stages_index(&args.run_id, &stages);
                     }
-                    let _ = runstate::write_stages_index(&args.run_id, &stages);
+                } else {
+                    let msg = format!("Stage '{}' inference error: {}", stage.name, e);
+                    println!("{}", msg);
+                    record_stage_log(&args.run_id, stage_idx, &format!("[error] {}", msg));
+                    // Mark stage error
+                    {
+                        let mut stages = runstate::read_stages_index(&args.run_id);
+                        if let Some(r) = stages.get_mut(stage_idx) {
+                            r.status = StageRunStatus::Error;
+                            r.ended_at = Some(stage_ended_at);
+                        }
+                        let _ = runstate::write_stages_index(&args.run_id, &stages);
+                    }
+                    meta.status = RunStatus::Error;
+                    meta.error = Some(msg);
+                    meta.touch();
+                    let _ = runstate::write_meta(meta);
+                    return Ok(());
                 }
-                meta.status = RunStatus::Error;
-                meta.error = Some(msg);
-                meta.touch();
-                let _ = runstate::write_meta(meta);
-                return Ok(());
             }
         }
+
+        *visit_counts.entry(stage.name.clone()).or_default() += 1;
 
         if let Some(state) = engine.world().get::<AgentState>(entity) {
             meta.iteration = state.iteration;
@@ -1325,25 +1934,59 @@ async fn run_worker_inner(args: &WorkerArgs, meta: &mut RunMeta) -> anyhow::Resu
             let _ = runstate::write_stage_context(&args.run_id, stage_idx, &snap);
         }
 
-        if stage_idx + 1 < num_stages {
-            let next_name = &blueprint.stages[stage_idx + 1].name;
-            let marker = format!(
-                "[Stage complete: {}, transitioning to: {}]",
-                stage.name, next_name
-            );
-            record_stage_log(&args.run_id, stage_idx, &marker);
-            if let Some(mut window) = engine.world_mut().get_mut::<ContextWindow>(entity) {
-                let tokens = marker.len() / 4 + 1;
-                let _ = window.add_to_region("conversation", marker, tokens);
+        // Resolve the next transition
+        let stage_name_owned = current_stage_name_val.clone();
+        let stage_ref = blueprint.find_stage(&stage_name_owned).unwrap();
+        let transition = resolve_transition(
+            stage_ref,
+            current_stage_idx_val,
+            &blueprint,
+            &visit_counts,
+            &stage_result_val,
+            &mut engine,
+            entity,
+            provider_name,
+            model_name,
+        )
+        .await;
+
+        match transition {
+            Some((edge, next_idx)) => {
+                let next_name = edge.target.clone();
+                let marker = format!(
+                    "[Stage complete: {}, transitioning to: {}]",
+                    stage_name_owned, next_name
+                );
+                record_stage_log(&args.run_id, stage_idx, &marker);
+                if let Some(mut window) = engine.world_mut().get_mut::<ContextWindow>(entity) {
+                    let tokens = marker.len() / 4 + 1;
+                    let _ = window.add_to_region("conversation", marker, tokens);
+                }
+
+                // Apply edge transform
+                apply_edge_transform(
+                    &edge,
+                    &visit_counts,
+                    &mut engine,
+                    entity,
+                    provider_name,
+                    model_name,
+                    compaction_ref,
+                )
+                .await;
+
+                current_stage_name_val = next_name;
+                current_stage_idx_val = next_idx;
             }
+            None => break, // terminal: no valid transitions
         }
     }
 
     let done_msg = "[All stages complete]";
     println!("\n{}", done_msg);
     // Log the completion message to the last stage's log
-    if num_stages > 0 {
-        record_stage_log(&args.run_id, num_stages - 1, done_msg);
+    if blueprint.stages.len() > 0 {
+        record_stage_log(&args.run_id, current_stage_idx_val, done_msg);
     }
     tool_registry.shutdown().await;
     Ok(())
@@ -2184,6 +2827,11 @@ fn parse_manifest(content: &str) -> anyhow::Result<Blueprint> {
         .and_then(|v| v.as_integer())
         .map(|v| v as usize);
 
+    let entry_stage = agent
+        .get("entry_stage")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+
     let mut stages = Vec::new();
     if let Some(stages_table) = parsed.get("stages").and_then(|v| v.as_table()) {
         for (stage_name, stage_value) in stages_table {
@@ -2339,6 +2987,125 @@ fn parse_manifest(content: &str) -> anyhow::Result<Blueprint> {
                 }
             }
 
+            // Parse max_revisits
+            if let Some(mr) = stage_value
+                .get("max_revisits")
+                .and_then(|v| v.as_integer())
+            {
+                stage.max_revisits = Some(mr as usize);
+            }
+
+            // Parse transition_prompt
+            if let Some(tp) = stage_value
+                .get("transition_prompt")
+                .and_then(|v| v.as_str())
+            {
+                stage.transition_prompt = Some(tp.trim().to_string());
+            }
+
+            // Parse transitions: [stages.<name>.transitions.<target>]
+            if let Some(transitions_table) = stage_value
+                .get("transitions")
+                .and_then(|v| v.as_table())
+            {
+                let mut transitions = std::collections::HashMap::new();
+                for (target_name, edge_value) in transitions_table {
+                    let hint = edge_value
+                        .get("hint")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string());
+
+                    let condition = match edge_value
+                        .get("condition")
+                        .and_then(|v| v.as_str())
+                    {
+                        Some("error") => {
+                            leviath_core::blueprint::TransitionCondition::Error
+                        }
+                        Some("max_iterations") => {
+                            leviath_core::blueprint::TransitionCondition::MaxIterations
+                        }
+                        Some("llm_choice") => {
+                            leviath_core::blueprint::TransitionCondition::LlmChoice
+                        }
+                        Some("always") | None => {
+                            leviath_core::blueprint::TransitionCondition::Always
+                        }
+                        Some(custom) => {
+                            leviath_core::blueprint::TransitionCondition::Custom(
+                                custom.to_string(),
+                            )
+                        }
+                    };
+
+                    let transform = match edge_value
+                        .get("transform")
+                        .and_then(|v| v.as_str())
+                    {
+                        Some("clear") => leviath_core::blueprint::EdgeTransform::Clear,
+                        Some("compact") | Some("summarize") => {
+                            leviath_core::blueprint::EdgeTransform::Compact { prompt: None }
+                        }
+                        Some("custom") => {
+                            // Parse transform_config sub-table
+                            let tc = edge_value.get("transform_config");
+                            let carry = tc
+                                .and_then(|v| v.get("carry"))
+                                .and_then(|v| v.as_array())
+                                .map(|arr| {
+                                    arr.iter()
+                                        .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                                        .collect()
+                                })
+                                .unwrap_or_default();
+                            let compact = tc
+                                .and_then(|v| v.get("compact"))
+                                .and_then(|v| v.as_array())
+                                .map(|arr| {
+                                    arr.iter()
+                                        .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                                        .collect()
+                                })
+                                .unwrap_or_default();
+                            let clear = tc
+                                .and_then(|v| v.get("clear"))
+                                .and_then(|v| v.as_array())
+                                .map(|arr| {
+                                    arr.iter()
+                                        .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                                        .collect()
+                                })
+                                .unwrap_or_default();
+                            let compact_prompt = tc
+                                .and_then(|v| v.get("compact_prompt"))
+                                .and_then(|v| v.as_str())
+                                .map(|s| s.to_string());
+                            leviath_core::blueprint::EdgeTransform::Custom {
+                                carry,
+                                compact,
+                                clear,
+                                compact_prompt,
+                            }
+                        }
+                        Some("direct") | None => {
+                            leviath_core::blueprint::EdgeTransform::Direct
+                        }
+                        Some(_) => leviath_core::blueprint::EdgeTransform::Direct,
+                    };
+
+                    transitions.insert(
+                        target_name.clone(),
+                        leviath_core::blueprint::TransitionEdge {
+                            target: target_name.clone(),
+                            condition,
+                            hint,
+                            transform,
+                        },
+                    );
+                }
+                stage.transitions = Some(transitions);
+            }
+
             stages.push(stage);
         }
     }
@@ -2427,6 +3194,7 @@ fn parse_manifest(content: &str) -> anyhow::Result<Blueprint> {
     let mut blueprint = Blueprint::new(name, description, stages, layout);
     blueprint.version = version;
     blueprint.max_child_depth = max_child_depth;
+    blueprint.entry_stage = entry_stage;
 
     if let Some(compaction_table) = parsed.get("compaction").and_then(|v| v.as_table()) {
         let mut cc = CompactionConfig::default();

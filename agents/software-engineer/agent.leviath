@@ -2,6 +2,7 @@
 name = "software-engineer"
 version = "0.1.0"
 description = "Plan-then-implement agent — mirrors the Claude Code plan→approve→code→review workflow"
+entry_stage = "plan"
 
 # Global tool permissions for this agent: write tools require approval by default.
 # Use `lev run default --yolo` to skip all approvals, or `--allow bash` for selective override.
@@ -22,6 +23,7 @@ model = { provider = "anthropic", model = "claude-sonnet-4-6" }
 description = "Explore the codebase and produce a step-by-step implementation plan"
 available_tools = ["read_file", "list_dir"]
 max_iterations = 20
+transition_prompt = "You've produced a plan. Ready to implement?"
 system_prompt = """
 You are the planning stage of a code assistant.
 
@@ -47,6 +49,9 @@ End with:
 read_file = "allow"
 list_dir  = "allow"
 
+[stages.plan.transitions.implement]
+hint = "Plan approved, start coding"
+
 [[stages.plan.interaction_points]]
 name     = "plan_approval"
 prompt   = "Review the plan above. What would you like to do?"
@@ -64,6 +69,7 @@ model = { provider = "anthropic", model = "claude-sonnet-4-6" }
 description = "Write code according to the approved plan"
 available_tools = ["write_file", "read_file", "edit_file", "list_dir", "bash"]
 max_iterations = 50
+max_revisits = 5
 system_prompt = """
 You are the implementation stage. The plan has been approved by the user.
 Execute the plan step by step:
@@ -75,15 +81,35 @@ Work methodically through each plan step. After completing all steps, provide a 
 summary of what was created/modified and whether tests passed.
 """
 
+[stages.implement.transitions.review]
+hint = "Implementation complete, ready for review"
+transform = "compact"
+
+[stages.implement.transitions.plan]
+hint = "Need to fundamentally rethink the approach"
+transform = "compact"
+
+[stages.implement.transitions.error_recovery]
+condition = "error"
+transform = "direct"
+
 # ─── Stage 3: Review ─────────────────────────────────────────────────────────
-# Human-in-the-loop review. Interactive so the human can ask for changes.
+# Autonomous review. Transitions back to implement if issues found,
+# or completes (no outgoing transitions left) when code is clean.
 
 [stages.review]
-mode = "interactive"
+mode = "autonomous"
 model = { provider = "anthropic", model = "claude-opus-4-8" }
-description = "Review the implementation and discuss with the user"
+description = "Review the implementation and evaluate code quality"
 available_tools = ["read_file", "list_dir"]
-max_iterations = 15
+max_revisits = 3
+transition_prompt = """
+Review complete. Based on your findings:
+- If there are issues that need fixing, transition to 'implement'
+- If the code is clean and correct, the task is done (no transition needed)
+
+Minor style issues don't warrant another implementation pass.
+"""
 system_prompt = """
 You are the review stage. The implementation is complete.
 Read the files that were created or modified and provide a quality review:
@@ -95,14 +121,44 @@ Read the files that were created or modified and provide a quality review:
 End with one of:
   APPROVED — no significant issues
   NEEDS CHANGES — <list specific required changes>
-
-After the verdict, remain in interactive mode so the user can ask follow-up questions
-or request specific fixes before they commit the code.
 """
 
 [stages.review.tool_permissions]
 read_file = "allow"
 list_dir  = "allow"
+
+[stages.review.transitions.implement]
+hint = "Issues found — needs another implementation pass"
+transform = "custom"
+
+[stages.review.transitions.implement.transform_config]
+carry = ["task", "codebase"]
+compact = ["conversation"]
+clear = ["scratch"]
+compact_prompt = "Summarize review findings as a numbered list of required fixes."
+
+# ─── Stage 4: Error Recovery ────────────────────────────────────────────────
+# Only reachable via error condition edges — invisible during normal flow.
+
+[stages.error_recovery]
+mode = "autonomous"
+model = { provider = "anthropic", model = "claude-sonnet-4-6" }
+description = "Diagnose and resolve errors encountered during implementation"
+available_tools = ["read_file", "bash"]
+max_iterations = 10
+max_revisits = 2
+system_prompt = """
+An error occurred during implementation. Your job:
+1. Read the error details from the conversation context.
+2. Diagnose the root cause.
+3. Suggest a fix or workaround.
+
+Once you've identified the issue, transition back to implement to retry.
+"""
+
+[stages.error_recovery.transitions.implement]
+hint = "Error diagnosed and resolved, retry implementation"
+transform = "compact"
 
 # ─── Compaction ──────────────────────────────────────────────────────────────
 

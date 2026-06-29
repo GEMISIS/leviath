@@ -44,6 +44,9 @@ pub struct Blueprint {
     /// Maximum depth of the sub-agent tree (default: 3)
     pub max_child_depth: Option<usize>,
 
+    /// Which stage to start from (default: first defined)
+    pub entry_stage: Option<String>,
+
     /// Additional metadata
     pub metadata: HashMap<String, serde_json::Value>,
 }
@@ -66,6 +69,7 @@ impl Blueprint {
             version: "0.1.0".to_string(),
             compaction_config: None,
             max_child_depth: None,
+            entry_stage: None,
             metadata: HashMap::new(),
         }
     }
@@ -103,7 +107,131 @@ impl Blueprint {
             transform.validate(&self.context_layout)?;
         }
 
+        // Graph validation
+        self.validate_graph()?;
+
         Ok(())
+    }
+
+    /// Validate stage graph constraints.
+    fn validate_graph(&self) -> Result<(), String> {
+        let stage_names: std::collections::HashSet<&str> =
+            self.stages.iter().map(|s| s.name.as_str()).collect();
+
+        // Entry stage must exist if set
+        if let Some(ref entry) = self.entry_stage {
+            if !stage_names.contains(entry.as_str()) {
+                return Err(format!(
+                    "entry_stage '{}' does not match any defined stage",
+                    entry
+                ));
+            }
+        }
+
+        let has_any_transitions = self.stages.iter().any(|s| s.transitions.is_some());
+        if !has_any_transitions {
+            // Pure linear mode — no graph validation needed
+            return Ok(());
+        }
+
+        // All transition targets must exist
+        for stage in &self.stages {
+            if let Some(ref transitions) = stage.transitions {
+                for (target_name, _edge) in transitions {
+                    if !stage_names.contains(target_name.as_str()) {
+                        return Err(format!(
+                            "Stage '{}' has transition to unknown stage '{}'",
+                            stage.name, target_name
+                        ));
+                    }
+                }
+
+                // Self-loop safety: stages that transition to themselves need max_revisits
+                if transitions.contains_key(&stage.name) && stage.max_revisits.is_none() {
+                    return Err(format!(
+                        "Stage '{}' has a self-loop transition but no max_revisits set",
+                        stage.name
+                    ));
+                }
+            }
+        }
+
+        // At least one terminal path must exist (a stage with no outgoing transitions,
+        // or with only conditional transitions that may not fire)
+        let entry = self.resolve_entry_stage_name();
+        let has_terminal = self.has_terminal_path(&entry, &mut std::collections::HashSet::new());
+        if !has_terminal {
+            return Err(
+                "No terminal path exists from entry stage — agent would never complete".to_string(),
+            );
+        }
+
+        Ok(())
+    }
+
+    /// Resolve the entry stage name.
+    pub fn resolve_entry_stage_name(&self) -> String {
+        self.entry_stage
+            .clone()
+            .unwrap_or_else(|| self.stages.first().map(|s| s.name.clone()).unwrap_or_default())
+    }
+
+    /// Check if there is a terminal path reachable from `stage_name`.
+    fn has_terminal_path(
+        &self,
+        stage_name: &str,
+        visited: &mut std::collections::HashSet<String>,
+    ) -> bool {
+        if visited.contains(stage_name) {
+            return false;
+        }
+        visited.insert(stage_name.to_string());
+
+        let stage = self.stages.iter().find(|s| s.name == stage_name);
+        let stage = match stage {
+            Some(s) => s,
+            None => return false,
+        };
+
+        match &stage.transitions {
+            None => {
+                // Linear mode: check if there's a next stage by index
+                let idx = self.stages.iter().position(|s| s.name == stage_name).unwrap_or(0);
+                if idx + 1 >= self.stages.len() {
+                    return true; // terminal
+                }
+                self.has_terminal_path(&self.stages[idx + 1].name, visited)
+            }
+            Some(transitions) => {
+                if transitions.is_empty() {
+                    return true; // terminal stage
+                }
+                // Check if any transition leads to a terminal
+                for target in transitions.keys() {
+                    if self.has_terminal_path(target, visited) {
+                        return true;
+                    }
+                }
+                // If all targets are exhaustible (already visited + have max_revisits),
+                // the stage will eventually have zero available edges → terminal
+                let all_exhaustible = transitions.keys().all(|target| {
+                    if !visited.contains(target) {
+                        return false;
+                    }
+                    self.stages
+                        .iter()
+                        .find(|s| s.name == *target)
+                        .map(|s| s.max_revisits.is_some())
+                        .unwrap_or(false)
+                });
+                all_exhaustible
+            }
+        }
+    }
+
+    /// Find a stage by name.
+    pub fn find_stage(&self, name: &str) -> Option<&Stage> {
+        self.stages.iter().find(|s| s.name == name)
     }
 }
 
@@ -234,6 +362,15 @@ pub struct Stage {
     /// during this stage have completed.
     #[serde(default)]
     pub requires_children: bool,
+
+    /// Directed transitions from this stage (None = linear/next-in-list)
+    pub transitions: Option<HashMap<String, TransitionEdge>>,
+
+    /// Max times this stage can be re-entered (revisits, not counting first visit)
+    pub max_revisits: Option<usize>,
+
+    /// Custom prompt for transition decisions (overrides default)
+    pub transition_prompt: Option<String>,
 }
 
 impl Stage {
@@ -251,6 +388,9 @@ impl Stage {
             tool_result_routing: None,
             tool_permissions: HashMap::new(),
             requires_children: false,
+            transitions: None,
+            max_revisits: None,
+            transition_prompt: None,
         }
     }
 
@@ -390,6 +530,78 @@ pub struct RegionMapping {
     pub transform: Option<ContentTransform>,
 }
 
+/// A directed transition edge from one stage to another.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TransitionEdge {
+    /// Target stage name (derived from the HashMap key during parsing)
+    pub target: String,
+
+    /// When this edge is available
+    #[serde(default)]
+    pub condition: TransitionCondition,
+
+    /// Human-readable hint for the LLM
+    pub hint: Option<String>,
+
+    /// How context transforms when crossing this edge
+    #[serde(default)]
+    pub transform: EdgeTransform,
+}
+
+/// Condition that determines when a transition edge is available.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum TransitionCondition {
+    /// Always available (LLM chooses)
+    #[default]
+    Always,
+    /// Only on error
+    Error,
+    /// Only when max_iterations hit
+    MaxIterations,
+    /// LLM picks from available transitions (default for multi-transition stages)
+    LlmChoice,
+    /// Custom condition string (future: Rhai expression)
+    Custom(String),
+}
+
+/// How context transforms when crossing a transition edge.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EdgeTransform {
+    /// Copy everything as-is (default for single-transition linear stages)
+    #[default]
+    Direct,
+
+    /// Clear stage-specific regions, keep pinned/system
+    Clear,
+
+    /// LLM-compact stage content into summary
+    Compact {
+        #[serde(default)]
+        prompt: Option<String>,
+    },
+
+    /// Per-region rules
+    Custom {
+        carry: Vec<String>,
+        compact: Vec<String>,
+        clear: Vec<String>,
+        compact_prompt: Option<String>,
+    },
+}
+
+/// Result of running a stage, used for transition condition evaluation.
+#[derive(Debug, Clone, PartialEq)]
+pub enum StageResult {
+    /// Stage completed normally
+    Success,
+    /// Stage encountered an error
+    Error,
+    /// Stage hit max_iterations without LLM signaling completion
+    MaxIterations,
+}
+
 /// Content transformation type.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ContentTransform {
@@ -498,5 +710,203 @@ mod tests {
         assert!(stage.tool_result_routing.is_some());
         let r = stage.tool_result_routing.unwrap();
         assert_eq!(r.max_result_tokens, Some(5000));
+    }
+
+    fn make_model() -> ModelConfig {
+        ModelConfig::new("anthropic".to_string(), "claude-sonnet-4".to_string())
+    }
+
+    fn make_layout() -> ContextLayout {
+        let regions = vec![RegionDefinition::new(
+            "test".to_string(),
+            RegionKind::Pinned,
+            5000,
+        )];
+        ContextLayout::new(regions, 10000)
+    }
+
+    #[test]
+    fn test_graph_validation_entry_stage_exists() {
+        let stages = vec![Stage::new("plan".to_string(), make_model())];
+        let mut bp = Blueprint::new("t".into(), "".into(), stages, make_layout());
+        bp.entry_stage = Some("nonexistent".to_string());
+        assert!(bp.validate().is_err());
+    }
+
+    #[test]
+    fn test_graph_validation_entry_stage_valid() {
+        let stages = vec![Stage::new("plan".to_string(), make_model())];
+        let mut bp = Blueprint::new("t".into(), "".into(), stages, make_layout());
+        bp.entry_stage = Some("plan".to_string());
+        assert!(bp.validate().is_ok());
+    }
+
+    #[test]
+    fn test_graph_validation_transition_target_missing() {
+        let mut stage = Stage::new("plan".to_string(), make_model());
+        let mut transitions = HashMap::new();
+        transitions.insert(
+            "nonexistent".to_string(),
+            TransitionEdge {
+                target: "nonexistent".to_string(),
+                condition: TransitionCondition::Always,
+                hint: None,
+                transform: EdgeTransform::Direct,
+            },
+        );
+        stage.transitions = Some(transitions);
+        let bp = Blueprint::new("t".into(), "".into(), vec![stage], make_layout());
+        assert!(bp.validate().is_err());
+    }
+
+    #[test]
+    fn test_graph_validation_self_loop_requires_max_revisits() {
+        let mut stage = Stage::new("impl".to_string(), make_model());
+        let mut transitions = HashMap::new();
+        transitions.insert(
+            "impl".to_string(),
+            TransitionEdge {
+                target: "impl".to_string(),
+                condition: TransitionCondition::Always,
+                hint: None,
+                transform: EdgeTransform::Direct,
+            },
+        );
+        stage.transitions = Some(transitions);
+        let bp = Blueprint::new("t".into(), "".into(), vec![stage], make_layout());
+        assert!(bp.validate().is_err());
+    }
+
+    #[test]
+    fn test_graph_validation_self_loop_with_max_revisits_ok() {
+        let mut stage = Stage::new("impl".to_string(), make_model());
+        stage.max_revisits = Some(3);
+        let mut transitions = HashMap::new();
+        transitions.insert(
+            "impl".to_string(),
+            TransitionEdge {
+                target: "impl".to_string(),
+                condition: TransitionCondition::Always,
+                hint: None,
+                transform: EdgeTransform::Direct,
+            },
+        );
+        stage.transitions = Some(transitions);
+        let bp = Blueprint::new("t".into(), "".into(), vec![stage], make_layout());
+        // Should pass: self-loop has max_revisits, and the self-loop target
+        // will eventually exhaust, leaving zero edges → terminal
+        assert!(bp.validate().is_ok());
+    }
+
+    #[test]
+    fn test_graph_validation_terminal_path_exists() {
+        let mut plan = Stage::new("plan".to_string(), make_model());
+        let mut review = Stage::new("review".to_string(), make_model());
+        review.transitions = Some(HashMap::new()); // terminal: no outgoing
+
+        let mut transitions = HashMap::new();
+        transitions.insert(
+            "review".to_string(),
+            TransitionEdge {
+                target: "review".to_string(),
+                condition: TransitionCondition::Always,
+                hint: None,
+                transform: EdgeTransform::Direct,
+            },
+        );
+        plan.transitions = Some(transitions);
+
+        let bp = Blueprint::new("t".into(), "".into(), vec![plan, review], make_layout());
+        assert!(bp.validate().is_ok());
+    }
+
+    #[test]
+    fn test_graph_no_terminal_path() {
+        // Two stages that only transition to each other with no terminal
+        let mut a = Stage::new("a".to_string(), make_model());
+        let mut b = Stage::new("b".to_string(), make_model());
+
+        let mut a_transitions = HashMap::new();
+        a_transitions.insert(
+            "b".to_string(),
+            TransitionEdge {
+                target: "b".to_string(),
+                condition: TransitionCondition::Always,
+                hint: None,
+                transform: EdgeTransform::Direct,
+            },
+        );
+        a.transitions = Some(a_transitions);
+
+        let mut b_transitions = HashMap::new();
+        b_transitions.insert(
+            "a".to_string(),
+            TransitionEdge {
+                target: "a".to_string(),
+                condition: TransitionCondition::Always,
+                hint: None,
+                transform: EdgeTransform::Direct,
+            },
+        );
+        b.transitions = Some(b_transitions);
+
+        let bp = Blueprint::new("t".into(), "".into(), vec![a, b], make_layout());
+        assert!(bp.validate().is_err());
+    }
+
+    #[test]
+    fn test_linear_stages_still_validate() {
+        // No transitions set at all — pure linear mode
+        let stages = vec![
+            Stage::new("plan".to_string(), make_model()),
+            Stage::new("impl".to_string(), make_model()),
+            Stage::new("review".to_string(), make_model()),
+        ];
+        let bp = Blueprint::new("t".into(), "".into(), stages, make_layout());
+        assert!(bp.validate().is_ok());
+    }
+
+    #[test]
+    fn test_resolve_entry_stage_name() {
+        let stages = vec![
+            Stage::new("plan".to_string(), make_model()),
+            Stage::new("impl".to_string(), make_model()),
+        ];
+        let mut bp = Blueprint::new("t".into(), "".into(), stages, make_layout());
+        assert_eq!(bp.resolve_entry_stage_name(), "plan");
+
+        bp.entry_stage = Some("impl".to_string());
+        assert_eq!(bp.resolve_entry_stage_name(), "impl");
+    }
+
+    #[test]
+    fn test_find_stage() {
+        let stages = vec![
+            Stage::new("plan".to_string(), make_model()),
+            Stage::new("impl".to_string(), make_model()),
+        ];
+        let bp = Blueprint::new("t".into(), "".into(), stages, make_layout());
+        assert!(bp.find_stage("plan").is_some());
+        assert!(bp.find_stage("impl").is_some());
+        assert!(bp.find_stage("nonexistent").is_none());
+    }
+
+    #[test]
+    fn test_transition_condition_default() {
+        let cond = TransitionCondition::default();
+        assert_eq!(cond, TransitionCondition::Always);
+    }
+
+    #[test]
+    fn test_edge_transform_default() {
+        let t = EdgeTransform::default();
+        assert!(matches!(t, EdgeTransform::Direct));
+    }
+
+    #[test]
+    fn test_stage_result_variants() {
+        assert_eq!(StageResult::Success, StageResult::Success);
+        assert_ne!(StageResult::Error, StageResult::Success);
+        assert_ne!(StageResult::MaxIterations, StageResult::Error);
     }
 }

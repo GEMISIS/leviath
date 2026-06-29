@@ -16,7 +16,10 @@ pub mod layout;
 pub mod lifecycle;
 pub mod region;
 
-pub use blueprint::{Blueprint, ContextTransform, Stage, ToolFilter, ToolResultRouting};
+pub use blueprint::{
+    Blueprint, ContextTransform, EdgeTransform, Stage, StageResult, ToolFilter, ToolResultRouting,
+    TransitionCondition, TransitionEdge,
+};
 pub use error::{Error, Result};
 pub use layout::{ContextLayout, RegionDefinition};
 pub use lifecycle::{CompactionConfig, CompactionStrategy, EvictionPolicy};
