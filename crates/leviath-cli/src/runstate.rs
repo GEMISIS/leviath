@@ -112,6 +112,15 @@ impl RunMeta {
     }
 }
 
+/// One content entry within a region, captured at snapshot time.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RegionEntrySnapshot {
+    pub content: String,
+    pub tokens: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<serde_json::Value>,
+}
+
 /// Per-region token snapshot written by the background worker after each inference.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RegionSnapshot {
@@ -120,6 +129,9 @@ pub struct RegionSnapshot {
     pub kind: String,
     pub current_tokens: usize,
     pub max_tokens: usize,
+    /// Actual content entries stored in this region (empty for zero-token regions).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub entries: Vec<RegionEntrySnapshot>,
 }
 
 /// Snapshot of the full context window, written to `context.json` alongside `meta.json`.

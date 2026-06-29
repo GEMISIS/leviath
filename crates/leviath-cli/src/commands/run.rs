@@ -2377,6 +2377,11 @@ fn build_context_snapshot(
     let window = engine.world().get::<ContextWindow>(entity)?;
     use leviath_core::RegionKind;
     let regions = window.regions.iter().map(|r| {
+        let entries = r.content.iter().map(|e| runstate::RegionEntrySnapshot {
+            content: e.content.clone(),
+            tokens: e.tokens,
+            metadata: e.metadata.clone(),
+        }).collect();
         runstate::RegionSnapshot {
             name: r.name.clone(),
             kind: match &r.kind {
@@ -2389,6 +2394,7 @@ fn build_context_snapshot(
             }.to_string(),
             current_tokens: r.current_tokens,
             max_tokens: r.max_tokens,
+            entries,
         }
     }).collect();
     Some(runstate::ContextSnapshot {

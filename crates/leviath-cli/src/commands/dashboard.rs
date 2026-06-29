@@ -64,6 +64,7 @@ pub struct DashboardArgs {}
 enum StageContentMode {
     Output,
     Logs,
+    Context,
 }
 
 /// Display status for agents in the dashboard.
@@ -965,6 +966,10 @@ impl Dashboard {
                     self.stage_content_mode = StageContentMode::Output;
                     self.detail_scroll = 0;
                 }
+                KeyCode::Char('c') => {
+                    self.stage_content_mode = StageContentMode::Context;
+                    self.detail_scroll = 0;
+                }
                 KeyCode::Char('i') => {
                     if self.selected_stage_can_respond() {
                         self.input_mode = true;
@@ -1050,17 +1055,26 @@ impl Dashboard {
                         self.search_match_idx = self.search_match_idx.saturating_sub(1);
                     }
                 }
-                // Yank: `y` copies the current stage output to clipboard
+                // Yank: `y` copies the current stage content to clipboard
                 KeyCode::Char('y') => {
                     if let Some(agent) = self.selected_agent() {
                         if agent.is_run_state {
-                            let is_output = self.stage_content_mode == StageContentMode::Output;
-                            let content = if is_output {
-                                runstate::tail_stage_output(&agent.id, self.selected_stage, 524_288)
-                            } else {
-                                runstate::tail_stage_log(&agent.id, self.selected_stage, 524_288)
+                            let (content, label) = match self.stage_content_mode {
+                                StageContentMode::Output => (
+                                    runstate::tail_stage_output(&agent.id, self.selected_stage, 524_288),
+                                    "Output",
+                                ),
+                                StageContentMode::Logs => (
+                                    runstate::tail_stage_log(&agent.id, self.selected_stage, 524_288),
+                                    "Logs",
+                                ),
+                                StageContentMode::Context => {
+                                    let json = std::fs::read_to_string(
+                                        runstate::stage_dir(&agent.id, self.selected_stage).join("context.json")
+                                    ).unwrap_or_default();
+                                    (json, "Context JSON")
+                                }
                             };
-                            let label = if is_output { "Output" } else { "Logs" };
                             if yank_to_clipboard(&content) {
                                 self.toasts.push(Toast {
                                     message: format!("{} yanked to clipboard", label),
@@ -1945,58 +1959,122 @@ impl Dashboard {
             }
         }
 
-        // ── Content pane (Output or Logs) ─────────────────────────────────────
+        // ── Content pane (Output / Logs / Context) ────────────────────────────
         {
             let content_area = chunks[chunk_idx]; chunk_idx += 1;
             let inner_h = content_area.height.saturating_sub(2) as usize;
 
-            let is_output = self.stage_content_mode == StageContentMode::Output;
+            let render_width = content_area.width.saturating_sub(2);
+            let is_context = self.stage_content_mode == StageContentMode::Context;
+            let is_output  = self.stage_content_mode == StageContentMode::Output;
 
-            // Read per-stage content
-            let content = if agent.is_run_state {
-                if is_output {
-                    runstate::tail_stage_output(&agent.id, self.selected_stage, 131_072)
+            // ── Context view: structured region breakdown ──────────────────────
+            let all_lines: Vec<Line> = if is_context {
+                let snap_opt = if agent.is_run_state {
+                    runstate::read_stage_context(&agent.id, self.selected_stage)
+                        .or_else(|| agent.context_snapshot.clone())
                 } else {
-                    runstate::tail_stage_log(&agent.id, self.selected_stage, 131_072)
+                    agent.context_snapshot.clone()
+                };
+                if let Some(snap) = snap_opt {
+                    let mut lines: Vec<Line> = Vec::new();
+                    // Overall usage header
+                    let total_pct = if snap.max_tokens > 0 {
+                        (snap.total_tokens * 100 / snap.max_tokens).min(100)
+                    } else { 0 };
+                    lines.push(Line::from(vec![
+                        Span::styled(format!(" {} regions  ", snap.regions.len()), Style::default().fg(C_DIM)),
+                        Span::styled(format!("{}/{} tokens total  {}%", format_tokens(snap.total_tokens), format_tokens(snap.max_tokens), total_pct), Style::default().fg(C_MUTED)),
+                    ]));
+                    lines.push(Line::from(""));
+                    for region in &snap.regions {
+                        // Region header bar
+                        let pct = if region.max_tokens > 0 {
+                            (region.current_tokens * 100 / region.max_tokens).min(100)
+                        } else { 0 };
+                        let bar_w = 16usize;
+                        let filled = bar_w * pct / 100;
+                        let bar = format!("{}{}", "█".repeat(filled), "░".repeat(bar_w - filled));
+                        let bar_color = if pct >= 90 { C_ERROR } else if pct >= 70 { C_WARN } else if pct > 0 { C_SUCCESS } else { C_DIM };
+                        let kind_color = match region.kind.as_str() {
+                            "pinned"   => C_ACCENT,
+                            "sliding"  => C_SUCCESS,
+                            "compacting" | "history" => C_WARN,
+                            "temporary" | "clearable" => C_MUTED,
+                            _ => C_DIM,
+                        };
+                        lines.push(Line::from(vec![
+                            Span::styled("▌ ", Style::default().fg(C_ACCENT).add_modifier(Modifier::BOLD)),
+                            Span::styled(format!("{:<16}", region.name), Style::default().fg(C_WHITE).add_modifier(Modifier::BOLD)),
+                            Span::styled(format!("{:<12}", region.kind), Style::default().fg(kind_color)),
+                            Span::styled(bar, Style::default().fg(bar_color)),
+                            Span::styled(format!("  {}/{}", format_tokens(region.current_tokens), format_tokens(region.max_tokens)), Style::default().fg(C_DIM)),
+                        ]));
+                        if region.entries.is_empty() {
+                            lines.push(Line::from(Span::styled("  (empty)", Style::default().fg(C_DIM))));
+                        } else {
+                            for (idx, entry) in region.entries.iter().enumerate() {
+                                // Entry separator with token count
+                                lines.push(Line::from(vec![
+                                    Span::styled(format!("  ┄ entry {}  ", idx + 1), Style::default().fg(C_DIM)),
+                                    Span::styled(format!("{} tokens", entry.tokens), Style::default().fg(C_DIM)),
+                                ]));
+                                // Render entry content through the markdown renderer
+                                let rendered = render::markdown_to_text(&entry.content, render_width.saturating_sub(2));
+                                for mut l in rendered.lines {
+                                    // Indent by 2 spaces
+                                    l.spans.insert(0, Span::raw("  "));
+                                    lines.push(l);
+                                }
+                            }
+                        }
+                        lines.push(Line::from(""));
+                    }
+                    lines
+                } else {
+                    vec![Line::from(Span::styled(" no context snapshot available for this stage", Style::default().fg(C_DIM)))]
                 }
             } else {
-                String::new()
-            };
+                // ── Output / Logs: read from stage files ──────────────────────
+                let content = if agent.is_run_state {
+                    if is_output {
+                        runstate::tail_stage_output(&agent.id, self.selected_stage, 131_072)
+                    } else {
+                        runstate::tail_stage_log(&agent.id, self.selected_stage, 131_072)
+                    }
+                } else {
+                    String::new()
+                };
 
-            // Render content: markdown for Output, color-coded for Logs
-            let render_width = content_area.width.saturating_sub(2);
-            let all_lines: Vec<Line> = if is_output && !content.is_empty() {
-                // Run agent output through the markdown renderer — degrades cleanly
-                // for plain text while making markdown-formatted output beautiful.
-                let rendered = render::markdown_to_text(&content, render_width);
-                rendered.lines
-            } else if !is_output {
-                // Logs: color-code prefixes
-                content.lines()
-                    .map(|l| {
-                        let (color, prefix_end) = if l.starts_with("[tool]") {
-                            (C_ACCENT, 6)
-                        } else if l.starts_with("[error]") {
-                            (C_ERROR, 7)
-                        } else if l.starts_with("[denied]") {
-                            (C_WARN, 8)
-                        } else if l.starts_with("---") || l.starts_with("[All") {
-                            (C_DIM, 0)
-                        } else {
-                            (C_MUTED, 0)
-                        };
-                        if prefix_end > 0 && l.len() > prefix_end {
-                            Line::from(vec![
-                                Span::styled(format!(" {}", &l[..prefix_end]), Style::default().fg(color).add_modifier(Modifier::BOLD)),
-                                Span::styled(l[prefix_end..].to_string(), Style::default().fg(C_MUTED)),
-                            ])
-                        } else {
-                            Line::from(Span::styled(format!(" {}", l), Style::default().fg(color)))
-                        }
-                    })
-                    .collect()
-            } else {
-                Vec::new()
+                if is_output && !content.is_empty() {
+                    render::markdown_to_text(&content, render_width).lines
+                } else if !is_output {
+                    content.lines()
+                        .map(|l| {
+                            let (color, prefix_end) = if l.starts_with("[tool]") {
+                                (C_ACCENT, 6)
+                            } else if l.starts_with("[error]") {
+                                (C_ERROR, 7)
+                            } else if l.starts_with("[denied]") {
+                                (C_WARN, 8)
+                            } else if l.starts_with("---") || l.starts_with("[All") {
+                                (C_DIM, 0)
+                            } else {
+                                (C_MUTED, 0)
+                            };
+                            if prefix_end > 0 && l.len() > prefix_end {
+                                Line::from(vec![
+                                    Span::styled(format!(" {}", &l[..prefix_end]), Style::default().fg(color).add_modifier(Modifier::BOLD)),
+                                    Span::styled(l[prefix_end..].to_string(), Style::default().fg(C_MUTED)),
+                                ])
+                            } else {
+                                Line::from(Span::styled(format!(" {}", l), Style::default().fg(color)))
+                            }
+                        })
+                        .collect()
+                } else {
+                    Vec::new()
+                }
             };
 
             // ── Error / Cancelled banner ─────────────────────────────────────
@@ -2083,9 +2161,10 @@ impl Dashboard {
                 }).collect()
             };
 
-            // Tool count badge for logs tab (count from raw content, not rendered Lines)
-            let tool_count = if !is_output && !content.is_empty() {
-                let tc = content.lines().filter(|l| l.starts_with("[tool]")).count();
+            // Tool count badge for logs tab (count from raw log file, not rendered Lines)
+            let tool_count = if self.stage_content_mode == StageContentMode::Logs && agent.is_run_state {
+                let raw = runstate::tail_stage_log(&agent.id, self.selected_stage, 131_072);
+                let tc = raw.lines().filter(|l| l.starts_with("[tool]")).count();
                 if tc > 0 { format!(" · {} tools", tc) } else { String::new() }
             } else { String::new() };
 
@@ -2102,10 +2181,10 @@ impl Dashboard {
                 String::new()
             };
 
-            let mode_label = if is_output {
-                format!(" Output  [l] logs{}{} ", tool_count, search_indicator)
-            } else {
-                format!(" Logs  [o] output{}{} ", tool_count, search_indicator)
+            let mode_label = match self.stage_content_mode {
+                StageContentMode::Output  => format!(" Output  [l] logs  [c] ctx{}{} ", tool_count, search_indicator),
+                StageContentMode::Logs    => format!(" Logs  [o] output  [c] ctx{}{} ", tool_count, search_indicator),
+                StageContentMode::Context => format!(" Context Window  [o] output  [l] logs{} ", search_indicator),
             };
             let scroll_info = if total > inner_h {
                 let pct = if max_scroll == 0 { 100usize } else {
@@ -2116,10 +2195,15 @@ impl Dashboard {
                 String::new()
             };
 
-            // Build the bottom-left file path hint
+            // Bottom-left file path hint (context.json for context mode)
             let file_path_hint = if agent.is_run_state {
+                let file_name = match self.stage_content_mode {
+                    StageContentMode::Output  => "output.log",
+                    StageContentMode::Logs    => "logs.log",
+                    StageContentMode::Context => "context.json",
+                };
                 let raw = runstate::stage_dir(&agent.id, self.selected_stage)
-                    .join(if is_output { "output.log" } else { "logs.log" })
+                    .join(file_name)
                     .to_string_lossy()
                     .to_string();
                 let home = dirs::home_dir()
@@ -2412,8 +2496,8 @@ impl Dashboard {
                 Span::raw(" search  "),
                 Span::styled("[y]", Style::default().add_modifier(Modifier::BOLD)),
                 Span::raw(" yank  "),
-                Span::styled("[l/o]", Style::default().add_modifier(Modifier::BOLD)),
-                Span::raw(" logs/out  "),
+                Span::styled("[l/o/c]", Style::default().add_modifier(Modifier::BOLD)),
+                Span::raw(" logs/out/ctx  "),
             ];
             if can_respond {
                 spans.push(Span::styled("[i]", Style::default().fg(C_WARN).add_modifier(Modifier::BOLD)));
