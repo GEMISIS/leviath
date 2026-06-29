@@ -9,11 +9,7 @@ use tiktoken_rs::get_bpe_from_model;
 ///
 /// Uses tiktoken for OpenAI/GPT models, approximate counting for others.
 pub fn count_tokens(text: &str, model: &str) -> usize {
-    if model.starts_with("gpt-")
-        || model.starts_with("o1-")
-        || model.starts_with("o3-")
-        || model.starts_with("o4-")
-    {
+    if model.starts_with("gpt-") || model.starts_with("o3-") || model.starts_with("o4-") {
         count_tokens_tiktoken(text, model)
     } else if model.starts_with("claude-") {
         // Anthropic: ~3.5 chars per token (no official Rust tokenizer)
@@ -50,25 +46,6 @@ pub fn approximate_count(text: &str) -> usize {
     text.len().div_ceil(4)
 }
 
-/// Get maximum context tokens for a model.
-pub fn max_context_tokens(model: &str) -> usize {
-    if model.contains("claude-opus-4")
-        || model.contains("claude-sonnet-4")
-        || model.contains("claude-3")
-    {
-        200_000
-    } else if model.starts_with("gpt-4") {
-        128_000
-    } else if model.starts_with("gpt-3.5") {
-        16_384
-    } else if model.starts_with("o1") || model.starts_with("o3") || model.starts_with("o4") {
-        200_000
-    } else {
-        // Default conservative estimate
-        4096
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -84,8 +61,8 @@ mod tests {
     #[test]
     fn test_tiktoken_count() {
         let text = "Hello, world! This is a test.";
-        let count = count_tokens(text, "gpt-4");
-        // tiktoken should give a reasonable count
+        let count = count_tokens(text, "gpt-5.4-mini");
+        // tiktoken should give a reasonable count (falls back to cl100k_base)
         assert!(count > 0);
         assert!(count < text.len());
     }
@@ -93,15 +70,8 @@ mod tests {
     #[test]
     fn test_anthropic_count() {
         let text = "Hello, world! This is a test.";
-        let count = count_tokens(text, "claude-sonnet-4");
+        let count = count_tokens(text, "claude-sonnet-4-6");
         assert!(count > 0);
         assert!(count < text.len());
-    }
-
-    #[test]
-    fn test_max_context_tokens() {
-        assert_eq!(max_context_tokens("claude-opus-4"), 200_000);
-        assert_eq!(max_context_tokens("gpt-4-turbo"), 128_000);
-        assert_eq!(max_context_tokens("unknown-model"), 4096);
     }
 }

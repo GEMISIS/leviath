@@ -446,7 +446,7 @@ pub struct ModelConfig {
     /// Provider name (e.g., "anthropic", "openai")
     pub provider: String,
 
-    /// Model identifier (e.g., "claude-sonnet-4-5")
+    /// Model identifier (e.g., "claude-sonnet-4-6")
     pub model: String,
 
     /// Optional parameters for this model
@@ -643,7 +643,7 @@ mod tests {
 
         let stages = vec![Stage::new(
             "analyze".to_string(),
-            ModelConfig::new("anthropic".to_string(), "claude-sonnet-4".to_string()),
+            ModelConfig::new("anthropic".to_string(), "claude-sonnet-4-6".to_string()),
         )];
 
         let blueprint = Blueprint::new(
@@ -661,13 +661,13 @@ mod tests {
     fn test_stage_validation() {
         let stage = Stage::new(
             "test".to_string(),
-            ModelConfig::new("anthropic".to_string(), "claude-sonnet-4".to_string()),
+            ModelConfig::new("anthropic".to_string(), "claude-sonnet-4-6".to_string()),
         );
         assert!(stage.validate().is_ok());
 
         let empty_stage = Stage::new(
             "".to_string(),
-            ModelConfig::new("anthropic".to_string(), "claude-sonnet-4".to_string()),
+            ModelConfig::new("anthropic".to_string(), "claude-sonnet-4-6".to_string()),
         );
         assert!(empty_stage.validate().is_err());
     }
@@ -703,7 +703,7 @@ mod tests {
     fn test_stage_with_tool_result_routing() {
         let mut stage = Stage::new(
             "implement".to_string(),
-            ModelConfig::new("anthropic".to_string(), "claude-sonnet-4".to_string()),
+            ModelConfig::new("anthropic".to_string(), "claude-sonnet-4-6".to_string()),
         );
 
         let routing = ToolResultRouting {
@@ -720,7 +720,7 @@ mod tests {
     }
 
     fn make_model() -> ModelConfig {
-        ModelConfig::new("anthropic".to_string(), "claude-sonnet-4".to_string())
+        ModelConfig::new("anthropic".to_string(), "claude-sonnet-4-6".to_string())
     }
 
     fn make_layout() -> ContextLayout {
