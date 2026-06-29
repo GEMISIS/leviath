@@ -20,7 +20,7 @@ Pick a pre-built agent or create your own. Run it. Watch it actually remember wh
 
 ## Quick Start
 
-### Install
+### 1. Install
 
 ```bash
 # macOS
@@ -36,23 +36,41 @@ curl -fsSL https://github.com/GEMISIS/leviath/releases/latest/download/leviath-l
 cargo install --path crates/leviath-cli
 ```
 
-### Run
+### 2. Configure a Provider
+
+Before running anything, you need at least one LLM provider set up. Run the interactive setup wizard:
 
 ```bash
-lev setup                  # Configure your API key (Anthropic, OpenAI, etc.)
-lev run agents/coder --task "Build a CLI that converts CSV to JSON"
-lev dash                   # Open the dashboard to watch it work
+lev setup
 ```
 
-Or create a custom agent:
+It'll walk you through adding API keys for Anthropic, OpenAI, OpenRouter, or pointing to a local [Ollama](https://ollama.com) instance (no key needed). You can also pass keys directly:
 
 ```bash
-lev create my-agent        # Generates an agent.leviath config file
+lev setup --non-interactive --anthropic-key sk-ant-...
+```
+
+### 3. Run Your First Agent
+
+```bash
+lev run coder --task "Build a CLI that converts CSV to JSON"
+```
+
+Open the dashboard to watch it work:
+
+```bash
+lev dash
+```
+
+### 4. Create a Custom Agent
+
+```bash
+lev create my-agent        # Scaffolds a new agent directory
 cd my-agent
-lev run --task "Your task here"
+lev run . --task "Your task here"
 ```
 
-**Requirements:** An API key from any [supported provider](#providers), or [Ollama](https://ollama.com) for local models (no key needed). Pre-built binaries have no other dependencies.
+This generates an `agent.leviath` config you can customize — pick models per stage, define context regions, choose tools. See [agent configuration →](https://leviath.dev/docs/agents)
 
 ## Features
 
@@ -102,17 +120,14 @@ lev run --task "Your task here"
 
 ## Pre-built Agents
 
-Seven agents ship out of the box:
+Four agents ship out of the box:
 
 | Agent | Stages | Best For |
 |-------|--------|----------|
 | **software-engineer** | plan → implement → review | Full coding workflow (default) |
 | **coder** | analyze → implement → review | Focused implementation |
 | **reviewer** | scan → deep_review → report | Code review and audit |
-| **deep-researcher** | gather → analyze → synthesize | Thorough single-topic investigation |
-| **wide-researcher** | survey → compare → summarize | Broad multi-topic survey |
-| **daily-briefer** | collect → prioritize → brief | Morning summaries from multiple sources |
-| **writing-assistant** | research → outline → draft → edit | Blog posts, reports, documentation |
+| **researcher** | gather → analyze → summarize | Research and synthesis |
 
 ## Dashboard
 
