@@ -42,6 +42,7 @@ jobs:
   coverage:
     name: Coverage
     runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
@@ -49,12 +50,24 @@ jobs:
       - name: Install cargo-tarpaulin
         run: cargo install cargo-tarpaulin
       - name: Generate coverage
-        run: cargo tarpaulin --workspace --out xml --output-dir coverage
-      - name: Upload to Codecov
-        uses: codecov/codecov-action@v5
+        run: cargo tarpaulin --workspace --out json --output-dir coverage
+      - name: Extract coverage percentage
+        id: cov
+        run: |
+          COV=$(python3 -c "import json; d=json.load(open('coverage/tarpaulin-report.json')); print(f\"{d['coverage']:.1f}\")")
+          echo "pct=$COV" >> "$GITHUB_OUTPUT"
+          echo "Coverage: $COV%"
+      - name: Update coverage badge
+        uses: schneegans/dynamic-badges-action@v1.7.0
         with:
-          files: coverage/cobertura.xml
-          fail_ci_if_error: false
+          auth: ${{ secrets.GIST_TOKEN }}
+          gistID: ${{ vars.COVERAGE_GIST_ID }}
+          filename: coverage.json
+          label: coverage
+          message: ${{ steps.cov.outputs.pct }}%
+          valColorRange: ${{ steps.cov.outputs.pct }}
+          minColorRange: 50
+          maxColorRange: 90
 
   fmt:
     name: Format
