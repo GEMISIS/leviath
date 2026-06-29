@@ -271,7 +271,7 @@ pub fn list_runs() -> Vec<RunMeta> {
         }
     }
 
-    runs.sort_by(|a, b| b.started_at.cmp(&a.started_at));
+    runs.sort_by_key(|r| std::cmp::Reverse(r.started_at));
     runs
 }
 

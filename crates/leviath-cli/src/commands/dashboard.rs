@@ -1006,10 +1006,10 @@ impl Dashboard {
                                 self.choice_selected -= 1;
                             }
                         }
-                        KeyCode::Down => {
-                            if options_len > 0 && self.choice_selected < options_len - 1 {
-                                self.choice_selected += 1;
-                            }
+                        KeyCode::Down
+                            if options_len > 0 && self.choice_selected < options_len - 1 =>
+                        {
+                            self.choice_selected += 1;
                         }
                         _ => {}
                     },
@@ -2394,11 +2394,10 @@ impl Dashboard {
             };
 
             if let Some(snap) = snap_opt {
-                let total_pct = if snap.max_tokens > 0 {
-                    (snap.total_tokens * 100 / snap.max_tokens).min(100)
-                } else {
-                    0
-                };
+                let total_pct = (snap.total_tokens * 100)
+                    .checked_div(snap.max_tokens)
+                    .unwrap_or(0)
+                    .min(100);
                 let bar_color = if total_pct >= 90 {
                     C_ERROR
                 } else if total_pct >= 70 {
@@ -2502,11 +2501,10 @@ impl Dashboard {
                 if let Some(snap) = snap_opt {
                     let mut lines: Vec<Line> = Vec::new();
                     // Overall usage header
-                    let total_pct = if snap.max_tokens > 0 {
-                        (snap.total_tokens * 100 / snap.max_tokens).min(100)
-                    } else {
-                        0
-                    };
+                    let total_pct = (snap.total_tokens * 100)
+                        .checked_div(snap.max_tokens)
+                        .unwrap_or(0)
+                        .min(100);
                     lines.push(Line::from(vec![
                         Span::styled(
                             format!(" {} regions  ", snap.regions.len()),
@@ -2546,11 +2544,10 @@ impl Dashboard {
                     lines.push(Line::from(""));
                     for region in &snap.regions {
                         // Region header bar
-                        let pct = if region.max_tokens > 0 {
-                            (region.current_tokens * 100 / region.max_tokens).min(100)
-                        } else {
-                            0
-                        };
+                        let pct = (region.current_tokens * 100)
+                            .checked_div(region.max_tokens)
+                            .unwrap_or(0)
+                            .min(100);
                         let bar_w = 16usize;
                         let filled = bar_w * pct / 100;
                         let bar = format!("{}{}", "█".repeat(filled), "░".repeat(bar_w - filled));
@@ -2858,11 +2855,10 @@ impl Dashboard {
                 }
             };
             let scroll_info = if total > inner_h {
-                let pct = if max_scroll == 0 {
-                    100usize
-                } else {
-                    100 - self.detail_scroll.min(max_scroll) * 100 / max_scroll
-                };
+                let pct = 100
+                    - (self.detail_scroll.min(max_scroll) * 100)
+                        .checked_div(max_scroll)
+                        .unwrap_or(0);
                 format!(" {}% ({}/{}) ", pct, end, total)
             } else {
                 String::new()
@@ -2949,11 +2945,10 @@ impl Dashboard {
                 " Review ".to_string()
             };
             let rv_scroll_info = if review_lines.len() > inner_h {
-                let pct = if max_rv_scroll == 0 {
-                    100usize
-                } else {
-                    100 - self.review_scroll.min(max_rv_scroll) * 100 / max_rv_scroll
-                };
+                let pct = 100
+                    - (self.review_scroll.min(max_rv_scroll) * 100)
+                        .checked_div(max_rv_scroll)
+                        .unwrap_or(0);
                 format!(" {}% ", pct)
             } else {
                 String::new()
