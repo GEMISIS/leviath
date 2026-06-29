@@ -1,7 +1,7 @@
 <p align="center">
   <h1 align="center">Leviath</h1>
   <p align="center">
-    <strong>Hardware-inspired context management for LLM agents</strong>
+    <strong>A structured agent runtime for LLMs</strong>
   </p>
   <p align="center">
     <a href="https://github.com/GEMISIS/leviath/actions"><img src="https://github.com/GEMISIS/leviath/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
@@ -12,9 +12,9 @@
 
 ---
 
-Every AI agent framework manages context the same way: a flat message array that gets randomly truncated or summarized when it fills up. After ~20 tool calls, your agent has forgotten half of what it read.
+Most agent tools give LLMs a flat message array and hope for the best. Leviath gives them structure — **structured memory** so agents don't forget what they're building, **multi-stage workflows** so each phase uses the right model and tools, and an **ECS engine** so you can run dozens of agents without your machine catching fire.
 
-Leviath fixes this with **typed memory regions** — inspired by CPU cache hierarchies, not chat logs. Architecture docs stay pinned. Tool results evict first. Conversation history auto-compacts into summaries. Your agent keeps its understanding of what it's building, even 100+ iterations in.
+Define an agent in TOML. Run it. Watch it actually remember what it read 50 tool calls ago.
 
 ```
 ┌─────────────────────── Context Window ───────────────────────┐
