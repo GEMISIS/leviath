@@ -1075,7 +1075,13 @@ impl Dashboard {
                                     (json, "Context JSON")
                                 }
                             };
-                            if yank_to_clipboard(&content) {
+                            if content.is_empty() {
+                                self.toasts.push(Toast {
+                                    message: format!("No {} content to yank", label),
+                                    remaining_ticks: 25,
+                                    level: ToastLevel::Warning,
+                                });
+                            } else if yank_to_clipboard(&content) {
                                 self.toasts.push(Toast {
                                     message: format!("{} yanked to clipboard", label),
                                     remaining_ticks: 25,
@@ -1986,6 +1992,27 @@ impl Dashboard {
                         Span::styled(format!(" {} regions  ", snap.regions.len()), Style::default().fg(C_DIM)),
                         Span::styled(format!("{}/{} tokens total  {}%", format_tokens(snap.total_tokens), format_tokens(snap.max_tokens), total_pct), Style::default().fg(C_MUTED)),
                     ]));
+
+                    // Detect old runs: tokens exist but no entry content was captured
+                    let has_tokens = snap.regions.iter().any(|r| r.current_tokens > 0);
+                    let has_entries = snap.regions.iter().any(|r| !r.entries.is_empty());
+                    if has_tokens && !has_entries {
+                        lines.push(Line::from(""));
+                        lines.push(Line::from(Span::styled(
+                            " ℹ  This run predates context content capture.",
+                            Style::default().fg(C_WARN),
+                        )));
+                        lines.push(Line::from(Span::styled(
+                            "    Token counts are shown but entry content is unavailable.",
+                            Style::default().fg(C_DIM),
+                        )));
+                        lines.push(Line::from(Span::styled(
+                            "    Re-run the agent to see full context details.",
+                            Style::default().fg(C_DIM),
+                        )));
+                        lines.push(Line::from(""));
+                    }
+
                     lines.push(Line::from(""));
                     for region in &snap.regions {
                         // Region header bar
