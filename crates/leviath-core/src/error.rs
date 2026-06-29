@@ -5,6 +5,38 @@ use thiserror::Error;
 /// Result type alias using Leviath's Error type.
 pub type Result<T> = std::result::Result<T, Error>;
 
+/// Errors from blueprint, stage, region, and layout validation.
+#[derive(Debug, Clone, Error)]
+pub enum ValidationError {
+    /// Blueprint-level validation failure
+    #[error("Invalid blueprint: {0}")]
+    Blueprint(String),
+
+    /// Stage-level validation failure
+    #[error("Invalid stage '{stage}': {message}")]
+    Stage { stage: String, message: String },
+
+    /// Region-level validation failure
+    #[error("Invalid region '{region}': {message}")]
+    Region { region: String, message: String },
+
+    /// Layout-level validation failure
+    #[error("Invalid layout: {0}")]
+    Layout(String),
+
+    /// Graph structure validation failure
+    #[error("Invalid graph: {0}")]
+    Graph(String),
+
+    /// Transition validation failure
+    #[error("Invalid transition from '{from}' to '{to}': {message}")]
+    Transition {
+        from: String,
+        to: String,
+        message: String,
+    },
+}
+
 /// Core error types for Leviath.
 #[derive(Error, Debug)]
 pub enum Error {

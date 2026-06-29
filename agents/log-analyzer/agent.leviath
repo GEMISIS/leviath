@@ -1,0 +1,116 @@
+[agent]
+name = "log-analyzer"
+version = "0.1.0"
+description = "Analyzes log files — identifies anomalies, trends, and error patterns using Rhai scripts"
+entry_stage = "ingest"
+
+[stages.ingest]
+mode = "autonomous"
+model = { provider = "anthropic", model = "claude-sonnet-4-6" }
+description = "Read log files, identify format and patterns"
+available_tools = ["read_file", "list_dir", "bash"]
+max_iterations = 15
+system_prompt = """
+You are ingesting log files for analysis. Your job:
+1. Read the provided log files or directories
+2. Identify the log format (JSON, syslog, Apache, custom, etc.)
+3. Note the time range covered and total volume
+4. Identify the fields/columns available
+5. Look for obvious structural issues (corrupted lines, encoding problems)
+
+Store your findings about format and structure in context for the next stage.
+"""
+
+[stages.ingest.transitions.analyze]
+hint = "Log format identified, ready to analyze"
+
+[stages.analyze]
+mode = "autonomous"
+model = { provider = "anthropic", model = "claude-opus-4-6" }
+description = "Identify anomalies, trends, and error patterns"
+available_tools = ["read_file", "bash"]
+max_iterations = 25
+max_revisits = 3
+transition_prompt = """
+You've analyzed the logs. Do you need to write a script to parse/filter/aggregate
+the data more precisely, or do you have enough findings to produce a report?
+"""
+system_prompt = """
+You are analyzing log data. Look for:
+1. Error patterns — recurring errors, error spikes, cascading failures
+2. Anomalies — unusual request rates, latency outliers, unexpected status codes
+3. Trends — gradual degradation, growing queue depths, memory creep
+4. Correlations — errors that co-occur, time-based patterns
+5. Security signals — auth failures, unusual access patterns, injection attempts
+
+Quantify everything. Note timestamps and frequencies. Rank findings by severity.
+"""
+
+[stages.analyze.transitions.script]
+hint = "Need a script to parse/filter/aggregate log data"
+transform = "compact"
+
+[stages.analyze.transitions.report]
+hint = "Analysis complete — ready to produce report"
+transform = "compact"
+
+[stages.script]
+mode = "autonomous"
+model = { provider = "anthropic", model = "claude-sonnet-4-6" }
+description = "Write and execute Rhai scripts to parse, filter, and aggregate log data"
+available_tools = ["read_file", "bash"]
+max_iterations = 20
+max_revisits = 5
+transition_prompt = """
+Your script has produced results. Do you need to refine the script or write
+another one, or are you ready to return to analysis with these results?
+"""
+system_prompt = """
+You are writing Rhai scripts to process log data. Use bash to run your scripts
+against the log files. Common tasks:
+- Parse structured fields from log lines
+- Filter by time range, severity, or pattern
+- Aggregate counts, rates, percentiles
+- Detect anomalies using statistical thresholds
+- Extract and correlate events across log sources
+
+Write small, focused scripts. Test each one before building on it.
+Iterate until the output answers the analysis questions.
+"""
+
+[stages.script.transitions.script]
+hint = "Need to refine or write another script"
+transform = "direct"
+
+[stages.script.transitions.analyze]
+hint = "Script results ready — return to analysis"
+transform = "compact"
+
+[stages.report]
+mode = "autonomous"
+model = { provider = "anthropic", model = "claude-opus-4-6" }
+description = "Produce a structured analysis report with findings"
+available_tools = ["write_file"]
+max_iterations = 10
+system_prompt = """
+Write a structured log analysis report. Include:
+- Executive summary (top findings in 3-5 bullets)
+- Log source overview (files, format, time range, volume)
+- Findings by severity (critical, warning, info)
+  - For each finding: description, evidence, frequency, impact
+- Trends and patterns observed
+- Recommendations (what to fix, what to monitor)
+- Raw data appendix (key log excerpts, script outputs)
+
+Be precise. Include timestamps, counts, and percentages. Reference specific log lines.
+"""
+
+[compaction]
+provider = "anthropic"
+model = "claude-sonnet-4-6"
+
+[context.regions]
+logs = { kind = "temporary", max_tokens = 50000 }
+scripts = { kind = "compacting", threshold_tokens = 20000, max_tokens = 30000 }
+findings = { kind = "pinned", max_tokens = 15000 }
+scratch = { kind = "clearable", max_tokens = 5000 }

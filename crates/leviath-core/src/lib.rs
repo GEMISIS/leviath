@@ -20,7 +20,7 @@ pub use blueprint::{
     Blueprint, ContextTransform, EdgeTransform, Stage, StageResult, ToolFilter, ToolResultRouting,
     TransitionCondition, TransitionEdge,
 };
-pub use error::{Error, Result};
+pub use error::{Error, Result, ValidationError};
 pub use layout::{ContextLayout, RegionDefinition};
 pub use lifecycle::{CompactionConfig, CompactionStrategy, EvictionPolicy};
 pub use region::{ContentFormat, Region, RegionEntry, RegionKind, RegionSchema};

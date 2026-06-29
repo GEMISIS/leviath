@@ -16,6 +16,8 @@ version = "0.1.0"
 edition = "2021"
 license = "MIT"
 authors = ["Gerald McAlister <gemisis@gmail.com>"]
+repository = "https://github.com/GEMISIS/leviath"
+description = "A structured agent runtime for LLMs — context memory, multi-stage workflows, and ECS-based orchestration"
 
 [workspace.dependencies]
 # Core crates

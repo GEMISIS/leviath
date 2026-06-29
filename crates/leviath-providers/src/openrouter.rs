@@ -3,11 +3,10 @@
 //! OpenRouter provides access to multiple models through a unified API.
 //! Uses OpenAI-compatible format with additional headers.
 
-use crate::openai::OpenAiSseStream;
+use crate::openai_compat::{parse_openai_response, OpenAiSseStream};
 use crate::provider::{
-    check_http_response, parse_openai_finish_reason, InferenceRequest, InferenceResponse,
-    ModelCapabilities, ModelInfo, Provider, ProviderConfig, ProviderError, Result, StreamChunk,
-    TokenUsage, ToolCall,
+    check_http_response, InferenceRequest, InferenceResponse, ModelCapabilities, ModelInfo,
+    Provider, ProviderConfig, ProviderError, Result, StreamChunk,
 };
 use crate::rate_limit::RateLimiter;
 use async_trait::async_trait;
@@ -120,79 +119,6 @@ impl OpenRouterProvider {
 
         body
     }
-
-    /// Parse response (OpenAI-compatible format).
-    fn parse_response(&self, body: &serde_json::Value) -> Result<InferenceResponse> {
-        let choice = body
-            .get("choices")
-            .and_then(|c| c.as_array())
-            .and_then(|c| c.first())
-            .ok_or_else(|| ProviderError::InvalidResponse("No choices in response".to_string()))?;
-
-        let message = choice
-            .get("message")
-            .ok_or_else(|| ProviderError::InvalidResponse("No message in choice".to_string()))?;
-
-        let content = message
-            .get("content")
-            .and_then(|c| c.as_str())
-            .unwrap_or("")
-            .to_string();
-
-        let mut tool_calls = Vec::new();
-        if let Some(tcs) = message.get("tool_calls").and_then(|tc| tc.as_array()) {
-            for tc in tcs {
-                let id = tc
-                    .get("id")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string();
-                let function = tc.get("function").unwrap_or(&serde_json::Value::Null);
-                let name = function
-                    .get("name")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string();
-                let arguments_str = function
-                    .get("arguments")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("{}");
-                let arguments: serde_json::Value = serde_json::from_str(arguments_str)
-                    .unwrap_or(serde_json::Value::Object(serde_json::Map::new()));
-                tool_calls.push(ToolCall {
-                    id,
-                    name,
-                    arguments,
-                });
-            }
-        }
-
-        let usage = body.get("usage");
-        let prompt_tokens = usage
-            .and_then(|u| u.get("prompt_tokens"))
-            .and_then(|v| v.as_u64())
-            .unwrap_or(0) as usize;
-        let completion_tokens = usage
-            .and_then(|u| u.get("completion_tokens"))
-            .and_then(|v| v.as_u64())
-            .unwrap_or(0) as usize;
-
-        let finish_reason = choice
-            .get("finish_reason")
-            .and_then(|v| v.as_str())
-            .unwrap_or("stop");
-
-        Ok(InferenceResponse {
-            content,
-            tool_calls,
-            tokens_used: TokenUsage {
-                prompt_tokens,
-                completion_tokens,
-                total_tokens: prompt_tokens + completion_tokens,
-            },
-            finish_reason: parse_openai_finish_reason(finish_reason),
-        })
-    }
 }
 
 #[async_trait]
@@ -228,7 +154,7 @@ impl Provider for OpenRouterProvider {
             .await
             .map_err(|e| ProviderError::InvalidResponse(e.to_string()))?;
 
-        let result = self.parse_response(&response_body)?;
+        let result = parse_openai_response(&response_body)?;
 
         if let Some(limiter) = &self.rate_limiter {
             limiter.record_tokens(result.tokens_used.total_tokens).await;

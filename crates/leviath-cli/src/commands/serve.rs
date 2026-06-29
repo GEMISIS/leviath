@@ -416,7 +416,7 @@ async fn validate_blueprint(Json(body): Json<ValidateBlueprintReq>) -> Json<Vali
             }),
             Err(e) => Json(ValidateResponse {
                 valid: false,
-                errors: Some(vec![e]),
+                errors: Some(vec![e.to_string()]),
             }),
         },
         Err(e) => Json(ValidateResponse {

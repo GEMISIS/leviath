@@ -85,7 +85,7 @@ impl PackageManifest {
         // Validate blueprint
         self.blueprint
             .validate()
-            .map_err(|e| anyhow::anyhow!("Blueprint validation failed: {}", e))?;
+            .map_err(|e| anyhow::anyhow!("{}", e))?;
 
         Ok(())
     }

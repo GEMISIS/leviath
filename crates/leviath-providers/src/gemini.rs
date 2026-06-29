@@ -1,11 +1,11 @@
 //! Google Gemini provider implementation (via OpenAI-compatible endpoint).
 
+use crate::openai_compat::{build_openai_request_body, parse_openai_response, OpenAiSseStream};
 #[cfg(test)]
 use crate::provider::FinishReason;
 use crate::provider::{
-    check_http_response, parse_openai_finish_reason, InferenceRequest, InferenceResponse,
-    ModelCapabilities, ModelInfo, Provider, ProviderConfig, ProviderError, Result, StreamChunk,
-    TokenUsage, ToolCall,
+    check_http_response, InferenceRequest, InferenceResponse, ModelCapabilities, ModelInfo,
+    Provider, ProviderConfig, ProviderError, Result, StreamChunk,
 };
 use crate::rate_limit::RateLimiter;
 use async_trait::async_trait;
@@ -13,8 +13,6 @@ use futures_core::Stream;
 use reqwest::Client;
 use std::collections::HashMap;
 use std::pin::Pin;
-
-use crate::openai::OpenAiSseStream;
 
 /// Google Gemini provider using the OpenAI-compatible endpoint.
 pub struct GeminiProvider {
@@ -93,120 +91,6 @@ impl GeminiProvider {
             max_output_tokens: 65_535,
         }
     }
-
-    /// Build the request body for the OpenAI Chat Completions API.
-    fn build_request_body(&self, request: &InferenceRequest) -> serde_json::Value {
-        let messages: Vec<serde_json::Value> = request
-            .messages
-            .iter()
-            .map(|msg| {
-                serde_json::json!({
-                    "role": msg.role,
-                    "content": msg.content,
-                })
-            })
-            .collect();
-
-        let mut body = serde_json::json!({
-            "model": request.model,
-            "max_tokens": request.max_tokens,
-            "temperature": request.temperature,
-            "messages": messages,
-        });
-
-        if !request.tools.is_empty() {
-            let tools: Vec<serde_json::Value> = request
-                .tools
-                .iter()
-                .map(|t| {
-                    serde_json::json!({
-                        "type": "function",
-                        "function": {
-                            "name": t.name,
-                            "description": t.description,
-                            "parameters": t.parameters,
-                        }
-                    })
-                })
-                .collect();
-            body["tools"] = serde_json::Value::Array(tools);
-        }
-
-        body
-    }
-
-    /// Parse the API response body.
-    fn parse_response(&self, body: &serde_json::Value) -> Result<InferenceResponse> {
-        let choice = body
-            .get("choices")
-            .and_then(|c| c.as_array())
-            .and_then(|c| c.first())
-            .ok_or_else(|| ProviderError::InvalidResponse("No choices in response".to_string()))?;
-
-        let message = choice
-            .get("message")
-            .ok_or_else(|| ProviderError::InvalidResponse("No message in choice".to_string()))?;
-
-        let content = message
-            .get("content")
-            .and_then(|c| c.as_str())
-            .unwrap_or("")
-            .to_string();
-
-        let mut tool_calls = Vec::new();
-        if let Some(tcs) = message.get("tool_calls").and_then(|tc| tc.as_array()) {
-            for tc in tcs {
-                let id = tc
-                    .get("id")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string();
-                let function = tc.get("function").unwrap_or(&serde_json::Value::Null);
-                let name = function
-                    .get("name")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string();
-                let arguments_str = function
-                    .get("arguments")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("{}");
-                let arguments: serde_json::Value = serde_json::from_str(arguments_str)
-                    .unwrap_or(serde_json::Value::Object(serde_json::Map::new()));
-                tool_calls.push(ToolCall {
-                    id,
-                    name,
-                    arguments,
-                });
-            }
-        }
-
-        let usage = body.get("usage");
-        let prompt_tokens = usage
-            .and_then(|u| u.get("prompt_tokens"))
-            .and_then(|v| v.as_u64())
-            .unwrap_or(0) as usize;
-        let completion_tokens = usage
-            .and_then(|u| u.get("completion_tokens"))
-            .and_then(|v| v.as_u64())
-            .unwrap_or(0) as usize;
-
-        let finish_reason = choice
-            .get("finish_reason")
-            .and_then(|v| v.as_str())
-            .unwrap_or("stop");
-
-        Ok(InferenceResponse {
-            content,
-            tool_calls,
-            tokens_used: TokenUsage {
-                prompt_tokens,
-                completion_tokens,
-                total_tokens: prompt_tokens + completion_tokens,
-            },
-            finish_reason: parse_openai_finish_reason(finish_reason),
-        })
-    }
 }
 
 #[async_trait]
@@ -218,7 +102,7 @@ impl Provider for GeminiProvider {
             limiter.acquire().await?;
         }
 
-        let body = self.build_request_body(&request);
+        let body = build_openai_request_body(&request);
 
         let response = self
             .client
@@ -241,7 +125,7 @@ impl Provider for GeminiProvider {
             .await
             .map_err(|e| ProviderError::InvalidResponse(e.to_string()))?;
 
-        let result = self.parse_response(&response_body)?;
+        let result = parse_openai_response(&response_body)?;
 
         if let Some(limiter) = &self.rate_limiter {
             limiter.record_tokens(result.tokens_used.total_tokens).await;
@@ -260,7 +144,7 @@ impl Provider for GeminiProvider {
             limiter.acquire().await?;
         }
 
-        let mut body = self.build_request_body(&request);
+        let mut body = build_openai_request_body(&request);
         body["stream"] = serde_json::Value::Bool(true);
         body["stream_options"] = serde_json::json!({ "include_usage": true });
 
@@ -450,7 +334,6 @@ mod tests {
 
     #[test]
     fn test_build_request_body() {
-        let provider = GeminiProvider::new("test-key".to_string());
         let request = InferenceRequest {
             messages: vec![
                 crate::provider::Message {
@@ -469,14 +352,13 @@ mod tests {
             extra: serde_json::Value::Null,
         };
 
-        let body = provider.build_request_body(&request);
+        let body = build_openai_request_body(&request);
         assert_eq!(body["model"], "gemini-3.5-flash");
         assert_eq!(body["messages"].as_array().unwrap().len(), 2);
     }
 
     #[test]
     fn test_parse_response() {
-        let provider = GeminiProvider::new("test-key".to_string());
         let body = serde_json::json!({
             "choices": [{
                 "message": {
@@ -492,7 +374,7 @@ mod tests {
             }
         });
 
-        let response = provider.parse_response(&body).unwrap();
+        let response = parse_openai_response(&body).unwrap();
         assert_eq!(response.content, "Hello!");
         assert_eq!(response.tokens_used.prompt_tokens, 10);
         assert!(matches!(response.finish_reason, FinishReason::Complete));
@@ -500,7 +382,6 @@ mod tests {
 
     #[test]
     fn test_parse_response_with_tool_calls() {
-        let provider = GeminiProvider::new("test-key".to_string());
         let body = serde_json::json!({
             "choices": [{
                 "message": {
@@ -520,7 +401,7 @@ mod tests {
             "usage": { "prompt_tokens": 20, "completion_tokens": 15, "total_tokens": 35 }
         });
 
-        let response = provider.parse_response(&body).unwrap();
+        let response = parse_openai_response(&body).unwrap();
         assert_eq!(response.tool_calls.len(), 1);
         assert_eq!(response.tool_calls[0].name, "search");
         assert!(matches!(response.finish_reason, FinishReason::ToolCall));

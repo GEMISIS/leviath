@@ -15,6 +15,7 @@ pub mod claude_code;
 pub mod gemini;
 pub mod ollama;
 pub mod openai;
+pub mod openai_compat;
 pub mod openrouter;
 pub mod provider;
 pub mod rate_limit;

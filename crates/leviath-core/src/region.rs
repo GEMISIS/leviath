@@ -362,7 +362,7 @@ pub enum ContentFormat {
 /// like "only mermaid diagrams in the architecture region".
 pub trait Validator: Send + Sync {
     /// Validate content and return an error message if invalid.
-    fn validate(&self, content: &str) -> Result<(), String>;
+    fn validate(&self, content: &str) -> std::result::Result<(), crate::error::ValidationError>;
 
     /// Get a description of what this validator checks.
     fn description(&self) -> &str;

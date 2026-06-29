@@ -128,7 +128,7 @@ Same model (Claude Sonnet), same tools — only context management differs. [Ful
 
 ## Pre-built Agents
 
-Eight agents ship out of the box:
+Nine agents ship out of the box:
 
 | Agent | Stages | Best For |
 |-------|--------|----------|
@@ -138,6 +138,7 @@ Eight agents ship out of the box:
 | **deep-researcher** | gather ⇄ analyze → synthesize | Thorough single-topic investigation |
 | **wide-researcher** | survey ⇄ compare → summarize | Broad multi-topic landscape survey |
 | **researcher** | gather ⇄ analyze → summarize | General-purpose research |
+| **log-analyzer** | ingest → analyze ⇄ script → report | Log file analysis with scripted aggregation |
 | **daily-briefer** | collect → prioritize → brief | Morning summaries from multiple sources |
 | **writing-assistant** | research → outline → draft ⇄ edit | Blog posts, reports, documentation |
 

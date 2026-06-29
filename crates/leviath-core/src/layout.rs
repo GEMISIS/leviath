@@ -5,6 +5,7 @@
 //! to a hardware memory map that defines where different types of data live and
 //! how they're managed.
 
+use crate::error::ValidationError;
 use crate::region::{RegionKind, RegionSchema};
 use serde::{Deserialize, Serialize};
 
@@ -58,22 +59,25 @@ impl ContextLayout {
     /// - Sum of max_tokens doesn't exceed total_budget_tokens
     /// - All region names in eviction_order exist
     /// - No duplicate region names
-    pub fn validate(&self) -> Result<(), String> {
+    pub fn validate(&self) -> std::result::Result<(), ValidationError> {
         // Check for duplicate region names
         let mut names = std::collections::HashSet::new();
         for region in &self.regions {
             if !names.insert(region.name.as_str()) {
-                return Err(format!("Duplicate region name: {}", region.name));
+                return Err(ValidationError::Region {
+                    region: region.name.clone(),
+                    message: "duplicate region name".to_string(),
+                });
             }
         }
 
         // Check that eviction_order regions exist
         for name in &self.eviction_order {
             if !names.contains(name.as_str()) {
-                return Err(format!(
-                    "Eviction order references unknown region: {}",
+                return Err(ValidationError::Layout(format!(
+                    "eviction order references unknown region: {}",
                     name
-                ));
+                )));
             }
         }
 

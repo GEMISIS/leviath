@@ -5,6 +5,7 @@
 //! Blueprints are typically defined in `leviath.toml` files and can be
 //! shared, installed, and versioned.
 
+use crate::error::ValidationError;
 use crate::layout::ContextLayout;
 use crate::lifecycle::CompactionConfig;
 use serde::{Deserialize, Serialize};
@@ -93,7 +94,7 @@ impl Blueprint {
     }
 
     /// Validate that the blueprint is well-formed.
-    pub fn validate(&self) -> Result<(), String> {
+    pub fn validate(&self) -> std::result::Result<(), ValidationError> {
         // Validate context layout
         self.context_layout.validate()?;
 
@@ -114,17 +115,17 @@ impl Blueprint {
     }
 
     /// Validate stage graph constraints.
-    fn validate_graph(&self) -> Result<(), String> {
+    fn validate_graph(&self) -> std::result::Result<(), ValidationError> {
         let stage_names: std::collections::HashSet<&str> =
             self.stages.iter().map(|s| s.name.as_str()).collect();
 
         // Entry stage must exist if set
         if let Some(ref entry) = self.entry_stage {
             if !stage_names.contains(entry.as_str()) {
-                return Err(format!(
+                return Err(ValidationError::Graph(format!(
                     "entry_stage '{}' does not match any defined stage",
                     entry
-                ));
+                )));
             }
         }
 
@@ -139,19 +140,20 @@ impl Blueprint {
             if let Some(ref transitions) = stage.transitions {
                 for target_name in transitions.keys() {
                     if !stage_names.contains(target_name.as_str()) {
-                        return Err(format!(
-                            "Stage '{}' has transition to unknown stage '{}'",
-                            stage.name, target_name
-                        ));
+                        return Err(ValidationError::Transition {
+                            from: stage.name.clone(),
+                            to: target_name.clone(),
+                            message: "target stage does not exist".to_string(),
+                        });
                     }
                 }
 
                 // Self-loop safety: stages that transition to themselves need max_revisits
                 if transitions.contains_key(&stage.name) && stage.max_revisits.is_none() {
-                    return Err(format!(
-                        "Stage '{}' has a self-loop transition but no max_revisits set",
-                        stage.name
-                    ));
+                    return Err(ValidationError::Stage {
+                        stage: stage.name.clone(),
+                        message: "self-loop transition requires max_revisits".to_string(),
+                    });
                 }
             }
         }
@@ -161,9 +163,9 @@ impl Blueprint {
         let entry = self.resolve_entry_stage_name();
         let has_terminal = self.has_terminal_path(&entry, &mut std::collections::HashSet::new());
         if !has_terminal {
-            return Err(
-                "No terminal path exists from entry stage — agent would never complete".to_string(),
-            );
+            return Err(ValidationError::Graph(
+                "no terminal path exists from entry stage — agent would never complete".to_string(),
+            ));
         }
 
         Ok(())
@@ -426,9 +428,12 @@ impl Stage {
     }
 
     /// Validate that this stage is well-formed.
-    fn validate(&self) -> Result<(), String> {
+    fn validate(&self) -> std::result::Result<(), ValidationError> {
         if self.name.is_empty() {
-            return Err("Stage name cannot be empty".to_string());
+            return Err(ValidationError::Stage {
+                stage: "(empty)".to_string(),
+                message: "stage name cannot be empty".to_string(),
+            });
         }
 
         // Validate stage-specific context layout if present
@@ -509,15 +514,15 @@ pub struct ContextTransform {
 
 impl ContextTransform {
     /// Validate that this transform references valid regions.
-    fn validate(&self, layout: &ContextLayout) -> Result<(), String> {
+    fn validate(&self, layout: &ContextLayout) -> std::result::Result<(), ValidationError> {
         for mapping in &self.mappings {
             // We can only validate target regions against the current layout
             // (source regions belong to a different blueprint)
             if layout.get_region(&mapping.to_region).is_none() {
-                return Err(format!(
-                    "Transform target region '{}' not found in layout",
-                    mapping.to_region
-                ));
+                return Err(ValidationError::Region {
+                    region: mapping.to_region.clone(),
+                    message: "transform target region not found in layout".to_string(),
+                });
             }
         }
         Ok(())
