@@ -2116,11 +2116,31 @@ impl Dashboard {
                 String::new()
             };
 
+            // Build the bottom-left file path hint
+            let file_path_hint = if agent.is_run_state {
+                let raw = runstate::stage_dir(&agent.id, self.selected_stage)
+                    .join(if is_output { "output.log" } else { "logs.log" })
+                    .to_string_lossy()
+                    .to_string();
+                let home = dirs::home_dir()
+                    .map(|h| h.to_string_lossy().to_string())
+                    .unwrap_or_default();
+                let shortened = if !home.is_empty() && raw.starts_with(&home) {
+                    format!("~{}", &raw[home.len()..])
+                } else {
+                    raw
+                };
+                format!(" {} ", shortened)
+            } else {
+                String::new()
+            };
+
             let content_block = Block::default()
                 .borders(Borders::ALL)
                 .border_type(BorderType::Rounded)
                 .border_style(Style::default().fg(C_BORDER_FOCUS))
                 .title(Span::styled(mode_label, Style::default().fg(C_ACCENT)))
+                .title_bottom(Line::from(Span::styled(file_path_hint, Style::default().fg(C_DIM))).left_aligned())
                 .title_bottom(Span::styled(scroll_info, Style::default().fg(C_DIM)));
 
             let content_widget = Paragraph::new(visible)
