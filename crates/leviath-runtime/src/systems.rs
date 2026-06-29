@@ -6,9 +6,11 @@
 //! - Tool execution: running tools and updating context with results
 
 use crate::components::{
-    AgentState, AgentStatus, ContextWindow, MessageInbox, NeedsCompaction, TaskAssignment,
+    AgentState, AgentStatus, CancellationToken, ContextWindow, MessageInbox, NeedsCompaction,
+    ParentRef, SubAgentChildren, TaskAssignment,
 };
 use bevy_ecs::prelude::*;
+use bevy_ecs::system::ParamSet;
 
 /// System that manages context window state.
 ///
@@ -196,6 +198,144 @@ pub fn message_delivery_system(
     }
 }
 
+/// System that monitors child agent completion and injects results into parent context.
+///
+/// When a child agent's status becomes Complete or Error, this system:
+/// 1. Looks up the parent via the child's ParentRef
+/// 2. Injects a completion/error message into the parent's context window
+/// 3. Clears the parent's pending_wait if it was waiting for this child
+///
+/// Uses ParamSet to safely access AgentState from two conflicting queries.
+pub fn child_completion_system(
+    mut queries: ParamSet<(
+        Query<(&AgentState, &ParentRef)>,
+        Query<(&mut AgentState, Option<&mut ContextWindow>)>,
+    )>,
+) {
+    // Pass 1: collect completed children info (read-only)
+    let mut completions: Vec<(Entity, String, Option<String>)> = Vec::new();
+
+    for (child_state, parent_ref) in queries.p0().iter() {
+        match &child_state.status {
+            AgentStatus::Complete => {
+                completions.push((
+                    parent_ref.parent_entity,
+                    child_state.agent_id.clone(),
+                    None,
+                ));
+            }
+            AgentStatus::Error { message } => {
+                completions.push((
+                    parent_ref.parent_entity,
+                    child_state.agent_id.clone(),
+                    Some(message.clone()),
+                ));
+            }
+            _ => {}
+        }
+    }
+
+    // Pass 2: apply updates to parents (mutable)
+    let mut parent_query = queries.p1();
+    for (parent_entity, child_id, error_msg) in completions {
+        if let Ok((mut parent_state, parent_window)) = parent_query.get_mut(parent_entity) {
+            // Skip if already processed
+            if !parent_state.spawned_children_ids.contains(&child_id) {
+                continue;
+            }
+
+            // Clear pending_wait if parent was waiting for this child
+            if parent_state.pending_wait.as_deref() == Some(&child_id) {
+                parent_state.pending_wait = None;
+            }
+
+            // Remove child from tracked list
+            parent_state
+                .spawned_children_ids
+                .retain(|id| id != &child_id);
+
+            tracing::info!(
+                parent = %parent_state.agent_id,
+                child = %child_id,
+                "Child completion injected into parent context"
+            );
+
+            // Inject result into parent's context window
+            if let Some(mut window) = parent_window {
+                let content = if let Some(err) = error_msg {
+                    format!("[Child agent '{}' error]: {}", child_id, err)
+                } else {
+                    format!("[Child agent '{}' completed successfully]", child_id)
+                };
+                let tokens = content.len() / 4 + 1;
+                let _ = window.add_to_region("conversation", content, tokens);
+            }
+        }
+    }
+}
+
+/// System that cascades cancellation from parent to all descendants.
+///
+/// When an agent is Cancelled and has SubAgentChildren, recursively cancel all descendants.
+/// Uses ParamSet to avoid query conflicts on AgentState.
+pub fn cascade_kill_system(
+    mut queries: ParamSet<(
+        Query<(&AgentState, &SubAgentChildren)>,
+        Query<(&mut AgentState, &CancellationToken)>,
+    )>,
+) {
+    // Pass 1: collect children of cancelled parents
+    let mut to_cancel: Vec<Entity> = Vec::new();
+
+    for (state, children) in queries.p0().iter() {
+        if matches!(state.status, AgentStatus::Cancelled) {
+            for &child in &children.children {
+                to_cancel.push(child);
+            }
+        }
+    }
+
+    // Pass 2: cancel each child
+    let mut cancel_query = queries.p1();
+    for child_entity in to_cancel {
+        if let Ok((mut state, token)) = cancel_query.get_mut(child_entity) {
+            if !matches!(state.status, AgentStatus::Cancelled) {
+                token.cancel();
+                state.status = AgentStatus::Cancelled;
+                tracing::info!(agent_id = %state.agent_id, "Cascade-cancelled child agent");
+            }
+        }
+    }
+}
+
+/// System that gates stage transitions when `requires_children` is set.
+///
+/// If an agent is Active but has a pending_wait, switch to Waiting.
+/// If the agent is Waiting and all children are done, switch back to Active.
+pub fn stage_gating_system(mut query: Query<&mut AgentState>) {
+    for mut state in query.iter_mut() {
+        // If the agent is Active but has pending children, switch to Waiting
+        if matches!(state.status, AgentStatus::Active)
+            && !state.spawned_children_ids.is_empty()
+            && state.pending_wait.is_some()
+        {
+            state.status = AgentStatus::Waiting;
+        }
+
+        // If the agent is Waiting and all children are done, switch back to Active
+        if matches!(state.status, AgentStatus::Waiting)
+            && state.spawned_children_ids.is_empty()
+            && state.pending_wait.is_none()
+        {
+            state.status = AgentStatus::Active;
+            tracing::info!(
+                agent_id = %state.agent_id,
+                "All children complete, resuming agent"
+            );
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -207,5 +347,8 @@ mod tests {
         let _ = inference_system;
         let _ = eviction_system;
         let _ = pool_management_system;
+        let _ = child_completion_system;
+        let _ = cascade_kill_system;
+        let _ = stage_gating_system;
     }
 }

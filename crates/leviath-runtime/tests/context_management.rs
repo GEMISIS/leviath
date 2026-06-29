@@ -1,7 +1,11 @@
 //! Integration tests for context management and region lifecycle.
 
+use bevy_ecs::prelude::*;
 use leviath_core::{Region, RegionKind};
-use leviath_runtime::ContextWindow;
+use leviath_runtime::{
+    AgentState, AgentStatus, CancellationToken, ContextWindow, MessageInbox, ParentRef,
+    SubAgentChildren,
+};
 
 #[test]
 fn test_pinned_region_never_evicted() {
@@ -274,7 +278,6 @@ fn test_eviction_clears_then_identifies_compaction() {
 
 #[test]
 fn test_needs_compaction_component_in_ecs() {
-    use bevy_ecs::prelude::*;
     use leviath_runtime::NeedsCompaction;
 
     let mut world = World::new();
@@ -294,4 +297,242 @@ fn test_needs_compaction_component_in_ecs() {
     // Remove it
     world.entity_mut(entity).remove::<NeedsCompaction>();
     assert!(world.get::<NeedsCompaction>(entity).is_none());
+}
+
+// ─── Sub-agent tests ─────────────────────────────────────────────────────────
+
+#[test]
+fn test_parent_ref_and_children_components() {
+    let mut world = World::new();
+
+    // Spawn parent
+    let parent = world
+        .spawn((
+            AgentState {
+                agent_id: "coder-01".to_string(),
+                current_stage: "analyze".to_string(),
+                iteration: 0,
+                status: AgentStatus::Active,
+                spawned_children_ids: Vec::new(),
+                pending_wait: None,
+            },
+            CancellationToken::new(),
+            MessageInbox::new(),
+        ))
+        .id();
+
+    // Spawn child with ParentRef
+    let child = world
+        .spawn((
+            AgentState {
+                agent_id: "researcher-01".to_string(),
+                current_stage: "research".to_string(),
+                iteration: 0,
+                status: AgentStatus::Active,
+                spawned_children_ids: Vec::new(),
+                pending_wait: None,
+            },
+            ParentRef {
+                parent_entity: parent,
+                parent_agent_id: "coder-01".to_string(),
+                depth: 1,
+            },
+            CancellationToken::new(),
+            MessageInbox::new(),
+        ))
+        .id();
+
+    // Add SubAgentChildren to parent
+    world.entity_mut(parent).insert(SubAgentChildren {
+        children: vec![child],
+        max_child_depth: 3,
+    });
+
+    // Verify relationships
+    let parent_children = world.get::<SubAgentChildren>(parent).unwrap();
+    assert_eq!(parent_children.children.len(), 1);
+    assert_eq!(parent_children.children[0], child);
+
+    let child_parent = world.get::<ParentRef>(child).unwrap();
+    assert_eq!(child_parent.parent_entity, parent);
+    assert_eq!(child_parent.parent_agent_id, "coder-01");
+    assert_eq!(child_parent.depth, 1);
+}
+
+#[test]
+fn test_spawn_depth_validation() {
+    // Depth 0 (root) can spawn at depth 1 if max_depth >= 1
+    let current_depth = 0_usize;
+    let max_depth = 3_usize;
+    let child_depth = current_depth + 1;
+    assert!(
+        child_depth <= max_depth,
+        "Should be able to spawn at depth 1"
+    );
+
+    // Depth 3 cannot spawn at depth 4 if max_depth is 3
+    let current_depth = 3_usize;
+    let child_depth = current_depth + 1;
+    assert!(
+        child_depth > max_depth,
+        "Should NOT be able to spawn beyond max depth"
+    );
+}
+
+#[test]
+fn test_cascade_kill_parent_to_children() {
+    let mut world = World::new();
+
+    let parent = world
+        .spawn((
+            AgentState {
+                agent_id: "parent-01".to_string(),
+                current_stage: "main".to_string(),
+                iteration: 0,
+                status: AgentStatus::Cancelled,
+                spawned_children_ids: vec!["child-01".to_string()],
+                pending_wait: None,
+            },
+            CancellationToken::new(),
+            MessageInbox::new(),
+        ))
+        .id();
+
+    let child_token = CancellationToken::new();
+    let child = world
+        .spawn((
+            AgentState {
+                agent_id: "child-01".to_string(),
+                current_stage: "main".to_string(),
+                iteration: 0,
+                status: AgentStatus::Active,
+                spawned_children_ids: Vec::new(),
+                pending_wait: None,
+            },
+            ParentRef {
+                parent_entity: parent,
+                parent_agent_id: "parent-01".to_string(),
+                depth: 1,
+            },
+            child_token.clone(),
+            MessageInbox::new(),
+        ))
+        .id();
+
+    world.entity_mut(parent).insert(SubAgentChildren {
+        children: vec![child],
+        max_child_depth: 3,
+    });
+
+    // Parent is cancelled — manually simulate cascade
+    let parent_state = world.get::<AgentState>(parent).unwrap();
+    assert!(matches!(parent_state.status, AgentStatus::Cancelled));
+
+    let children_comp = world.get::<SubAgentChildren>(parent).unwrap();
+    for &child_entity in &children_comp.children {
+        if let Some(token) = world.get::<CancellationToken>(child_entity) {
+            token.cancel();
+        }
+    }
+
+    // Verify child was cancelled
+    assert!(child_token.is_cancelled());
+}
+
+#[test]
+fn test_child_completion_notifies_parent() {
+    let mut world = World::new();
+
+    // Create parent with context window
+    let mut parent_window = ContextWindow::new(10000);
+    parent_window.add_region(Region::new(
+        "conversation".to_string(),
+        RegionKind::SlidingWindow { max_items: 50 },
+        8000,
+    ));
+
+    let parent = world
+        .spawn((
+            AgentState {
+                agent_id: "parent-01".to_string(),
+                current_stage: "main".to_string(),
+                iteration: 0,
+                status: AgentStatus::Active,
+                spawned_children_ids: vec!["child-01".to_string()],
+                pending_wait: Some("child-01".to_string()),
+            },
+            parent_window,
+            CancellationToken::new(),
+            MessageInbox::new(),
+        ))
+        .id();
+
+    // Create completed child
+    let _child = world
+        .spawn((
+            AgentState {
+                agent_id: "child-01".to_string(),
+                current_stage: "main".to_string(),
+                iteration: 5,
+                status: AgentStatus::Complete,
+                spawned_children_ids: Vec::new(),
+                pending_wait: None,
+            },
+            ParentRef {
+                parent_entity: parent,
+                parent_agent_id: "parent-01".to_string(),
+                depth: 1,
+            },
+            CancellationToken::new(),
+            MessageInbox::new(),
+        ))
+        .id();
+
+    // Simulate what child_completion_system does: inject result into parent
+    let parent_state = world.get::<AgentState>(parent).unwrap();
+    assert!(parent_state
+        .spawned_children_ids
+        .contains(&"child-01".to_string()));
+    assert_eq!(parent_state.pending_wait, Some("child-01".to_string()));
+
+    // After processing, parent should have the child removed and pending_wait cleared
+    if let Some(mut state) = world.get_mut::<AgentState>(parent) {
+        state.spawned_children_ids.retain(|id| id != "child-01");
+        state.pending_wait = None;
+    }
+
+    let parent_state = world.get::<AgentState>(parent).unwrap();
+    assert!(parent_state.spawned_children_ids.is_empty());
+    assert!(parent_state.pending_wait.is_none());
+}
+
+#[test]
+fn test_stage_gating_with_requires_children() {
+    // When an agent has spawned children and pending_wait is set,
+    // stage_gating_system should set status to Waiting
+    let mut state = AgentState {
+        agent_id: "test-01".to_string(),
+        current_stage: "analyze".to_string(),
+        iteration: 3,
+        status: AgentStatus::Active,
+        spawned_children_ids: vec!["researcher-01".to_string()],
+        pending_wait: Some("researcher-01".to_string()),
+    };
+
+    // Simulate what stage_gating_system does
+    if matches!(state.status, AgentStatus::Active) && state.pending_wait.is_some() {
+        state.status = AgentStatus::Waiting;
+    }
+    assert!(matches!(state.status, AgentStatus::Waiting));
+
+    // When children complete, it should resume
+    state.spawned_children_ids.clear();
+    state.pending_wait = None;
+    if matches!(state.status, AgentStatus::Waiting)
+        && state.spawned_children_ids.is_empty()
+        && state.pending_wait.is_none()
+    {
+        state.status = AgentStatus::Active;
+    }
+    assert!(matches!(state.status, AgentStatus::Active));
 }

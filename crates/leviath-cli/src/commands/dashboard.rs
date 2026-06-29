@@ -148,6 +148,10 @@ pub struct DashboardAgent {
     /// Original model override
     #[allow(dead_code)]
     pub model: Option<String>,
+    /// Parent agent ID (if this is a sub-agent)
+    pub parent_id: Option<String>,
+    /// Depth in the sub-agent tree (0 = root)
+    pub depth: usize,
     /// Unix timestamp when the run started (for elapsed display)
     pub started_at: i64,
     /// Frozen wall-clock time (Unix seconds) when the agent entered a waiting state.
@@ -644,6 +648,8 @@ impl Dashboard {
                     task: run.task.clone(),
                     title: run.title.clone(),
                     model: run.model.clone(),
+                    parent_id: None,
+                    depth: 0,
                     started_at: run.started_at,
                     active_until: if matches!(
                         run.status,
@@ -685,6 +691,13 @@ impl Dashboard {
             }
             if let Some(window) = engine.world().get::<ContextWindow>(agent.entity) {
                 agent.context_tokens = (window.current_tokens, window.max_tokens);
+            }
+            // Populate parent info from ParentRef component
+            if let Some(parent_ref) =
+                engine.world().get::<leviath_runtime::ParentRef>(agent.entity)
+            {
+                agent.parent_id = Some(parent_ref.parent_agent_id.clone());
+                agent.depth = parent_ref.depth;
             }
         }
         self.update_display_indices();
@@ -1801,6 +1814,67 @@ impl Dashboard {
                 )),
         );
         frame.render_widget(widget, popup);
+    }
+
+    /// Build a tree-ordered list of agent indices with tree connector prefixes.
+    ///
+    /// Returns Vec<(original_index, tree_prefix)> in depth-first tree order.
+    #[allow(dead_code)]
+    fn build_tree_order(&self) -> Vec<(usize, String)> {
+        let mut result = Vec::new();
+
+        // Find root agents (no parent_id)
+        let root_indices: Vec<usize> = self
+            .agents
+            .iter()
+            .enumerate()
+            .filter(|(_, a)| a.parent_id.is_none())
+            .map(|(i, _)| i)
+            .collect();
+
+        for &idx in &root_indices {
+            self.collect_tree_children(idx, "", &mut result, true);
+        }
+
+        result
+    }
+
+    #[allow(dead_code)]
+    fn collect_tree_children(
+        &self,
+        idx: usize,
+        prefix: &str,
+        result: &mut Vec<(usize, String)>,
+        is_root: bool,
+    ) {
+        let display_prefix = if is_root {
+            String::new()
+        } else {
+            prefix.to_string()
+        };
+        result.push((idx, display_prefix));
+
+        let agent_id = &self.agents[idx].id;
+        let children: Vec<usize> = self
+            .agents
+            .iter()
+            .enumerate()
+            .filter(|(_, a)| a.parent_id.as_deref() == Some(agent_id))
+            .map(|(i, _)| i)
+            .collect();
+
+        for (ci, &child_idx) in children.iter().enumerate() {
+            let is_last = ci == children.len() - 1;
+            let connector = if is_last { "└─ " } else { "├─ " };
+            let child_prefix = if is_root {
+                connector.to_string()
+            } else {
+                let base = prefix.replace("├─ ", "│  ").replace("└─ ", "   ");
+                format!("{}{}", base, connector)
+            };
+
+            self.collect_tree_children(child_idx, &child_prefix, result, false);
+        }
     }
 
     fn draw_agent_table(&mut self, frame: &mut Frame, area: Rect) {

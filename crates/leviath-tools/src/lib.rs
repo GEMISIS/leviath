@@ -139,6 +139,121 @@ impl BuiltinTools {
         ]
     }
 
+    /// Tool definitions for sub-agent management tools.
+    ///
+    /// These are advertised to the LLM but executed externally (by the CLI's
+    /// tool registry) since they require access to the AgentEngine.
+    pub fn subagent_tool_defs() -> Vec<Tool> {
+        vec![
+            Tool {
+                name: "spawn_agent".to_string(),
+                description: "Spawn a sub-agent from a blueprint to work on a task. Returns the new agent's ID. If wait=true, blocks until the sub-agent completes and returns its result.".to_string(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "blueprint": {
+                            "type": "string",
+                            "description": "Name of the agent blueprint to spawn"
+                        },
+                        "task": {
+                            "type": "string",
+                            "description": "Task prompt for the sub-agent"
+                        },
+                        "wait": {
+                            "type": "boolean",
+                            "description": "If true, block until the sub-agent completes and return its result. Default: false",
+                            "default": false
+                        },
+                        "seed_context": {
+                            "type": "string",
+                            "description": "Optional initial context to inject into the sub-agent's first Pinned region"
+                        },
+                        "max_child_depth": {
+                            "type": "integer",
+                            "description": "Optional max depth for the sub-agent's own children"
+                        }
+                    },
+                    "required": ["blueprint", "task"]
+                }),
+            },
+            Tool {
+                name: "check_agent".to_string(),
+                description: "Check the status of a sub-agent. Returns its current status and result if complete. Non-blocking.".to_string(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "agent_id": {
+                            "type": "string",
+                            "description": "ID of the agent to check"
+                        }
+                    },
+                    "required": ["agent_id"]
+                }),
+            },
+            Tool {
+                name: "wait_for_agent".to_string(),
+                description: "Block until a sub-agent completes, then return its final result.".to_string(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "agent_id": {
+                            "type": "string",
+                            "description": "ID of the agent to wait for"
+                        }
+                    },
+                    "required": ["agent_id"]
+                }),
+            },
+            Tool {
+                name: "send_to_agent".to_string(),
+                description: "Send a message to a running sub-agent's context window.".to_string(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "agent_id": {
+                            "type": "string",
+                            "description": "ID of the target agent"
+                        },
+                        "message": {
+                            "type": "string",
+                            "description": "Message content to send"
+                        },
+                        "target_region": {
+                            "type": "string",
+                            "description": "Context region to deliver to (default: conversation)"
+                        }
+                    },
+                    "required": ["agent_id", "message"]
+                }),
+            },
+            Tool {
+                name: "kill_agent".to_string(),
+                description: "Kill a sub-agent and all its descendants. Sets their cancellation tokens and marks them as cancelled.".to_string(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "agent_id": {
+                            "type": "string",
+                            "description": "ID of the agent to kill"
+                        }
+                    },
+                    "required": ["agent_id"]
+                }),
+            },
+        ]
+    }
+
+    /// Names of sub-agent tools.
+    pub fn subagent_tool_names() -> Vec<String> {
+        vec![
+            "spawn_agent".to_string(),
+            "check_agent".to_string(),
+            "wait_for_agent".to_string(),
+            "send_to_agent".to_string(),
+            "kill_agent".to_string(),
+        ]
+    }
+
     /// Names of all built-in tools.
     pub fn names(&self) -> Vec<String> {
         vec![

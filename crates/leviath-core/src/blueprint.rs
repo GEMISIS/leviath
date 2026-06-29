@@ -41,6 +41,9 @@ pub struct Blueprint {
     /// Configuration for LLM-based compaction
     pub compaction_config: Option<CompactionConfig>,
 
+    /// Maximum depth of the sub-agent tree (default: 3)
+    pub max_child_depth: Option<usize>,
+
     /// Additional metadata
     pub metadata: HashMap<String, serde_json::Value>,
 }
@@ -62,6 +65,7 @@ impl Blueprint {
             transforms: Vec::new(),
             version: "0.1.0".to_string(),
             compaction_config: None,
+            max_child_depth: None,
             metadata: HashMap::new(),
         }
     }
@@ -225,6 +229,11 @@ pub struct Stage {
     /// Narrower than agent-level, wider than launch flags.
     #[serde(default)]
     pub tool_permissions: HashMap<String, String>,
+
+    /// If true, don't advance to the next stage until all children spawned
+    /// during this stage have completed.
+    #[serde(default)]
+    pub requires_children: bool,
 }
 
 impl Stage {
@@ -241,6 +250,7 @@ impl Stage {
             config: HashMap::new(),
             tool_result_routing: None,
             tool_permissions: HashMap::new(),
+            requires_children: false,
         }
     }
 

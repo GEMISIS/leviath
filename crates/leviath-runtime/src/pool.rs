@@ -53,6 +53,8 @@ impl AgentPool {
                 .unwrap_or_else(|| "default".to_string()),
             iteration: 0,
             status: AgentStatus::Idle,
+            spawned_children_ids: Vec::new(),
+            pending_wait: None,
         };
 
         // Spawn entity with components

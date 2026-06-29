@@ -221,6 +221,10 @@ pub struct RunArgs {
     #[arg(long, value_delimiter = ',')]
     pub deny: Vec<String>,
 
+    /// Maximum sub-agent tree depth (overrides blueprint config, lower wins)
+    #[arg(long)]
+    pub max_depth: Option<usize>,
+
     /// Number of background instances to spawn (default: 1)
     #[arg(short = 'n', long, default_value = "1")]
     pub count: usize,
@@ -260,6 +264,10 @@ pub struct WorkerArgs {
     /// Tools to deny entirely (comma-separated)
     #[arg(long, value_delimiter = ',')]
     pub deny: Vec<String>,
+
+    /// Maximum sub-agent tree depth
+    #[arg(long)]
+    pub max_depth: Option<usize>,
 }
 
 pub async fn execute(args: RunArgs) -> anyhow::Result<()> {
@@ -336,6 +344,9 @@ pub async fn execute(args: RunArgs) -> anyhow::Result<()> {
         }
         for t in &args.deny {
             cmd.arg("--deny").arg(t);
+        }
+        if let Some(md) = args.max_depth {
+            cmd.arg("--max-depth").arg(md.to_string());
         }
 
         cmd.current_dir(&workdir)
@@ -2168,6 +2179,11 @@ fn parse_manifest(content: &str) -> anyhow::Result<Blueprint> {
         .unwrap_or("")
         .to_string();
 
+    let max_child_depth = agent
+        .get("max_child_depth")
+        .and_then(|v| v.as_integer())
+        .map(|v| v as usize);
+
     let mut stages = Vec::new();
     if let Some(stages_table) = parsed.get("stages").and_then(|v| v.as_table()) {
         for (stage_name, stage_value) in stages_table {
@@ -2301,6 +2317,14 @@ fn parse_manifest(content: &str) -> anyhow::Result<Blueprint> {
                 stage.tool_result_routing = Some(routing);
             }
 
+            // Parse requires_children flag
+            if let Some(rc) = stage_value
+                .get("requires_children")
+                .and_then(|v| v.as_bool())
+            {
+                stage.requires_children = rc;
+            }
+
             // Parse per-stage tool permissions: [stages.<name>.tool_permissions]
             if let Some(tp_table) = stage_value
                 .get("tool_permissions")
@@ -2402,6 +2426,7 @@ fn parse_manifest(content: &str) -> anyhow::Result<Blueprint> {
 
     let mut blueprint = Blueprint::new(name, description, stages, layout);
     blueprint.version = version;
+    blueprint.max_child_depth = max_child_depth;
 
     if let Some(compaction_table) = parsed.get("compaction").and_then(|v| v.as_table()) {
         let mut cc = CompactionConfig::default();

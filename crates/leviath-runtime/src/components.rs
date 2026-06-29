@@ -23,6 +23,35 @@ pub struct AgentState {
 
     /// Agent status
     pub status: AgentStatus,
+
+    /// IDs of child agents spawned by this agent
+    pub spawned_children_ids: Vec<String>,
+
+    /// If set, this agent is blocked waiting for the named child to complete
+    pub pending_wait: Option<String>,
+}
+
+/// Reference to a parent agent, making this agent a sub-agent.
+#[derive(Component, Debug, Clone)]
+pub struct ParentRef {
+    /// Entity of the parent agent
+    pub parent_entity: Entity,
+
+    /// Agent ID of the parent
+    pub parent_agent_id: String,
+
+    /// Depth in the agent tree (root = 0)
+    pub depth: usize,
+}
+
+/// Tracks child agents spawned by this agent.
+#[derive(Component, Debug, Clone)]
+pub struct SubAgentChildren {
+    /// Child agent entities
+    pub children: Vec<Entity>,
+
+    /// Maximum allowed sub-agent tree depth
+    pub max_child_depth: usize,
 }
 
 /// Status of an agent.
@@ -816,5 +845,40 @@ mod tests {
             AgentStatus::Cancelled => {} // OK
             _ => panic!("Expected Cancelled"),
         }
+    }
+
+    #[test]
+    fn test_parent_ref_component() {
+        let parent_ref = super::ParentRef {
+            parent_entity: Entity::from_raw(42),
+            parent_agent_id: "coder-01".to_string(),
+            depth: 1,
+        };
+        assert_eq!(parent_ref.parent_agent_id, "coder-01");
+        assert_eq!(parent_ref.depth, 1);
+    }
+
+    #[test]
+    fn test_children_component() {
+        let children = super::SubAgentChildren {
+            children: vec![Entity::from_raw(1), Entity::from_raw(2)],
+            max_child_depth: 3,
+        };
+        assert_eq!(children.children.len(), 2);
+        assert_eq!(children.max_child_depth, 3);
+    }
+
+    #[test]
+    fn test_agent_state_with_children_fields() {
+        let state = AgentState {
+            agent_id: "test-01".to_string(),
+            current_stage: "analyze".to_string(),
+            iteration: 0,
+            status: AgentStatus::Active,
+            spawned_children_ids: vec!["child-01".to_string(), "child-02".to_string()],
+            pending_wait: Some("child-01".to_string()),
+        };
+        assert_eq!(state.spawned_children_ids.len(), 2);
+        assert_eq!(state.pending_wait, Some("child-01".to_string()));
     }
 }

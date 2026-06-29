@@ -93,6 +93,9 @@ impl AgentEngine {
             systems::inference_system,
             systems::eviction_system,
             systems::pool_management_system,
+            systems::child_completion_system,
+            systems::cascade_kill_system,
+            systems::stage_gating_system,
         ));
 
         let (message_tx, message_rx) = mpsc::unbounded_channel();
@@ -118,6 +121,9 @@ impl AgentEngine {
             systems::inference_system,
             systems::eviction_system,
             systems::pool_management_system,
+            systems::child_completion_system,
+            systems::cascade_kill_system,
+            systems::stage_gating_system,
         ));
 
         let (message_tx, message_rx) = mpsc::unbounded_channel();
