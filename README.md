@@ -216,7 +216,7 @@ Stage tabs, context window visualization, markdown rendering, search/filter, cli
 
 ## API Server
 
-`lev serve` exposes a REST + WebSocket API for programmatic control — build your own UI, integrate with other tools, or orchestrate agents from a harness like Solar City.
+`lev serve` exposes a REST + WebSocket API for programmatic control — build your own UI, integrate with other tools, or orchestrate agents from a custom harness.
 
 ```bash
 lev serve --port 3000
