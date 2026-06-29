@@ -16,12 +16,19 @@ Most agent tools give LLMs a flat message array and hope for the best. Leviath g
 
 Define an agent in TOML. Run it. Watch it actually remember what it read 50 tool calls ago.
 
+<!-- TODO: hero image/gif of dashboard with agents running -->
+
 ## Quick Start
 
 ```bash
-# Install
-cargo install --path crates/leviath-cli
+# Install (macOS)
+brew install leviath
 
+# Or download a binary from GitHub Releases
+# Or build from source: cargo install --path crates/leviath-cli
+```
+
+```bash
 # Set up API keys
 lev setup
 
@@ -38,7 +45,8 @@ Or use a pre-built agent:
 
 ```bash
 lev run agents/software-engineer --task "Add error handling to the API module"
-lev run agents/researcher --task "Compare spiking neural networks vs transformers"
+lev run agents/deep-researcher --task "How do spiking neural networks compare to transformers?"
+lev run agents/daily-briefer --task "What happened in AI research this week?"
 ```
 
 No Rust code needed — agents are defined in a single TOML file.
@@ -49,60 +57,22 @@ No Rust code needed — agents are defined in a single TOML file.
 
 Every other agent framework manages context as a flat message array that gets randomly truncated when full. Leviath replaces this with **typed memory regions**, each with its own lifecycle — inspired by CPU cache hierarchies, not chat logs.
 
-```
-┌─────────────────────── Context Window ───────────────────────┐
-│ 🔒 Pinned           │ Architecture, objectives │ NEVER evicted │
-│ 📜 SlidingWindow     │ Recent conversation      │ NEVER reduced │
-│ 📦 Compacting        │ Implementation history   │ LLM-summarized│
-│ 📎 Temporary         │ File contents            │ Oldest first  │
-│ 🧹 Clearable         │ Scratch/tool output      │ Wiped first   │
-│ 🗂️ CompactHistory    │ Stored summaries         │ Accumulates   │
-└──────────────────────────────────────────────────────────────┘
-```
+<!-- TODO: screenshot of context window visualization in dashboard -->
 
 When context fills up, eviction follows a **deterministic cascade** — not random truncation:
 
-**Clearable** → **Temporary** → **Compacting** → **Error**
+| Region | Behavior | Eviction Order |
+|--------|----------|----------------|
+| 🔒 **Pinned** | Architecture, objectives | Never evicted |
+| 📜 **SlidingWindow** | Recent conversation | Never reduced |
+| 🗂️ **CompactHistory** | Stored summaries | Accumulates |
+| 📦 **Compacting** | Implementation history | LLM-summarized → CompactHistory |
+| 📎 **Temporary** | File contents, search results | Oldest entries first |
+| 🧹 **Clearable** | Scratch, tool output | Wiped first |
 
 Pinned and SlidingWindow regions are **never** touched. Your agent's core understanding survives no matter how many tool calls it makes.
 
-<table>
-<tr>
-<td><strong>Flat context (everyone else)</strong></td>
-<td><strong>Structured regions (Leviath)</strong></td>
-</tr>
-<tr>
-<td>
-
-```
-[system prompt          ]
-[message 1              ]
-[message 2              ]
-[tool result (huge)     ]  ← pushes out
-[message 3              ]     important
-[tool result            ]     context
-[message 4              ]
-[...truncated or        ]
-[   randomly summarized ]
-```
-
-</td>
-<td>
-
-```
-🔒 [architecture: always here  ]
-📜 [conversation: last 15 turns]
-📦 [impl history: auto-compacts]
-📎 [files: evicts oldest first ]
-🧹 [scratch: wipes when full   ]
-🗂️ [summaries: accumulates     ]
-```
-
-</td>
-</tr>
-</table>
-
-You control where every piece of information lands — and what happens to it when memory gets tight:
+You control where every piece of information lands — and what happens when memory gets tight:
 
 ```toml
 # Context regions — the memory architecture
@@ -127,18 +97,17 @@ bash = "scratch"          # Shell output → clearable (wipes first)
 
 ### 🔀 Multi-Stage Workflows
 
-Each stage of an agent gets its own model, tool permissions, context layout, and interaction mode. Use a fast model for analysis, a powerful one for implementation, and a different one for review — each seeing only the context it needs.
+Each stage of an agent gets its own model, tool permissions, context layout, and interaction mode. Use a fast model for research, a powerful one for synthesis, and a different one for review — each seeing only the context it needs.
 
 ```toml
+[stages.gather]
+mode = "autonomous"
+model = { provider = "anthropic", model = "claude-sonnet-4-5" }
+available_tools = ["read_file", "list_dir", "web_search"]
+
 [stages.analyze]
 mode = "autonomous"
 model = { provider = "anthropic", model = "claude-sonnet-4-5" }
-available_tools = ["read_file", "list_dir", "search"]
-
-[stages.implement]
-mode = "autonomous"
-model = { provider = "anthropic", model = "claude-sonnet-4-5" }
-available_tools = ["read_file", "write_file", "edit_file", "bash"]
 
 [stages.review]
 mode = "interactive"  # Pauses for user approval
@@ -154,12 +123,12 @@ Stages support three interaction modes:
 | `interactive_points` | Runs autonomously but pauses at named checkpoints |
 
 ```toml
-[stages.implement]
+[stages.draft]
 mode = "interactive_points"
 
-[[stages.implement.interaction_points]]
-name = "design_review"
-prompt = "Here's the proposed design. Approve or suggest changes:"
+[[stages.draft.interaction_points]]
+name = "outline_review"
+prompt = "Here's the proposed outline. Approve or suggest changes:"
 required = true
 ```
 
@@ -179,44 +148,34 @@ What makes Leviath's sub-agents different: a sub-agent at any depth can **indepe
 [agent]
 max_child_depth = 3  # How deep the sub-agent tree can go
 
-[stages.analyze]
+[stages.research]
 requires_children = true  # Don't advance until children complete
 available_tools = ["spawn_agent", "check_agent", "wait_for_agent", "send_to_agent", "kill_agent"]
 ```
 
-```
-● coder-01          ACTIVE    implement   iter 12
-  ├─ researcher-01  COMPLETE
-  ├─ researcher-02  ACTIVE    analyze     iter 3
-  └─ researcher-03  ◆WAITING              (input needed)
-```
+<!-- TODO: screenshot of dashboard showing agent tree with sub-agents -->
+
+## Performance
+
+<!-- TODO: benchmarks comparing resource usage and context retention -->
+
+*Benchmarks coming soon. We're measuring:*
+- *Resource usage: Leviath (ECS) vs process-per-agent at 10/25/50/100 concurrent agents*
+- *Context retention: accuracy on architectural questions after 20/50/100 tool calls*
+- *Token efficiency: total tokens consumed for equivalent task completion*
+- *SWE-bench Lite: resolve rate comparison with structured vs flat context*
 
 ## Dashboard
 
 `lev dash` — a full terminal UI for managing concurrent agents:
 
-```
-┌─ Agents ─────────────────────────────────────────────────────┐
-│ ID           │ Stage       │ Status     │ Tokens   │ Iter    │
-│ coder-01     │ implement   │ ●ACTIVE    │ 45k/80k  │ 12      │
-│ coder-02     │ review      │ ◆WAITING   │ 32k/80k  │ 8       │
-│ reviewer-01  │ deep_review │ ●ACTIVE    │ 28k/50k  │ 5       │
-├─ Detail ─────────────────────────────────────────────────────┤
-│ [coder-02] Waiting for input at: review                      │
-│ The implementation looks good. Ready to commit?              │
-│ > _                                                          │
-├─ Log ────────────────────────────────────────────────────────┤
-│ 09:15:32 coder-01 → read_file(src/main.rs)                  │
-│ 09:15:35 coder-02 → Waiting for user input                  │
-└──────────────────────────────────────────────────────────────┘
- [↑↓]select  [Enter]respond  [c]ancel  [k]ill  [d]elete  [q]uit
-```
+<!-- TODO: screenshot/gif of dashboard in action -->
 
 Stage tabs, context window visualization, markdown rendering, search/filter, clipboard yank, mouse support.
 
 ## API Server
 
-`lev serve` exposes a REST + WebSocket API for programmatic control — build your own UI, integrate with other tools, or orchestrate agents from a custom harness.
+`lev serve` exposes a REST + WebSocket API for programmatic control. Build your own UI, integrate from any language, or orchestrate agents from a custom harness — no Rust or library imports needed, just HTTP.
 
 ```bash
 lev serve --port 3000
@@ -238,18 +197,20 @@ lev serve --port 3000
 curl -X POST http://localhost:3000/api/agents \
   -H "Content-Type: application/json" \
   -d '{
-    "blueprint": "coder",
-    "task": "Build a REST API",
+    "blueprint": "deep-researcher",
+    "task": "Analyze the current state of quantum computing",
     "callback_url": "https://your-server.com/hook",
     "metadata": { "project_id": "abc123" }
   }'
 ```
 
+Integrate from Python, TypeScript, Go, or anything that speaks HTTP — no SDK required.
+
 ## CLI Reference
 
 | Command | Description |
 |---------|-------------|
-| `lev create <name>` | Create agent project (`--template software-engineer\|coder\|researcher`) |
+| `lev create <name>` | Create agent project (`--template` to pick a starting blueprint) |
 | `lev run [path] --task "..."` | Run agent in background (`--model`, `--yolo`, `--max-depth`) |
 | `lev dash` | TUI dashboard for managing all agents |
 | `lev serve` | REST + WebSocket API server (`--port`, `--host`) |
@@ -291,10 +252,15 @@ Claude Code shells out to the `claude` CLI — no prompt caching, tool execution
 | **software-engineer** | plan → implement → review | Full coding workflow (default template) |
 | **coder** | analyze → implement → review | Focused implementation tasks |
 | **reviewer** | scan → deep_review → report | Code review and audit |
-| **researcher** | gather → analyze → summarize | Research and synthesis |
+| **deep-researcher** | gather → analyze → synthesize | Thorough investigation of a single topic |
+| **wide-researcher** | survey → compare → summarize | Broad survey across multiple topics |
+| **daily-briefer** | collect → prioritize → brief | Morning summaries from multiple sources |
+| **writing-assistant** | research → outline → draft → edit | Blog posts, reports, documentation |
 
 ```bash
-lev run agents/coder --task "Refactor the auth module"
+lev run agents/deep-researcher --task "What are the tradeoffs between CRDT and OT for collaborative editing?"
+lev run agents/coder --task "Refactor the auth module to use JWT"
+lev run agents/writing-assistant --task "Write a blog post about structured context management"
 ```
 
 ## Testing & Packaging
