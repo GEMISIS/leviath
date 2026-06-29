@@ -428,22 +428,22 @@ impl Provider for ClaudeCodeProvider {
     async fn list_models(&self) -> Result<Vec<ModelInfo>> {
         let models = vec![
             ModelInfo {
-                id: "claude-sonnet-4-5".to_string(),
-                display_name: Some("Claude Sonnet 4.5".to_string()),
+                id: "claude-sonnet-4-6".to_string(),
+                display_name: Some("Claude Sonnet 4.6".to_string()),
                 provider: "claude-code".to_string(),
-                capabilities: self.builtin_capabilities("claude-sonnet-4-5"),
+                capabilities: self.builtin_capabilities("claude-sonnet-4-6"),
             },
             ModelInfo {
-                id: "claude-opus-4".to_string(),
-                display_name: Some("Claude Opus 4".to_string()),
+                id: "claude-opus-4-8".to_string(),
+                display_name: Some("Claude Opus 4.8".to_string()),
                 provider: "claude-code".to_string(),
-                capabilities: self.builtin_capabilities("claude-opus-4"),
+                capabilities: self.builtin_capabilities("claude-opus-4-8"),
             },
             ModelInfo {
-                id: "claude-haiku-3-5".to_string(),
-                display_name: Some("Claude Haiku 3.5".to_string()),
+                id: "claude-haiku-4-5".to_string(),
+                display_name: Some("Claude Haiku 4.5".to_string()),
                 provider: "claude-code".to_string(),
-                capabilities: self.builtin_capabilities("claude-haiku-3-5"),
+                capabilities: self.builtin_capabilities("claude-haiku-4-5"),
             },
         ];
         Ok(models)
@@ -502,7 +502,7 @@ mod tests {
     #[test]
     fn test_capabilities_defaults() {
         let provider = ClaudeCodeProvider::new();
-        let caps = provider.capabilities("claude-sonnet-4-5");
+        let caps = provider.capabilities("claude-sonnet-4-6");
         assert!(!caps.supports_temperature);
         assert!(caps.supports_streaming);
         assert!(!caps.supports_tools);
@@ -513,21 +513,21 @@ mod tests {
     #[test]
     fn test_capabilities_opus() {
         let provider = ClaudeCodeProvider::new();
-        let caps = provider.capabilities("claude-opus-4");
+        let caps = provider.capabilities("claude-opus-4-8");
         assert_eq!(caps.max_output_tokens, 32_000);
     }
 
     #[test]
     fn test_capabilities_haiku() {
         let provider = ClaudeCodeProvider::new();
-        let caps = provider.capabilities("claude-haiku-3-5");
+        let caps = provider.capabilities("claude-haiku-4-5");
         assert_eq!(caps.max_output_tokens, 8_192);
     }
 
     #[test]
     fn test_count_tokens() {
         let provider = ClaudeCodeProvider::new();
-        let tokens = provider.count_tokens("Hello, world!", "claude-sonnet-4-5");
+        let tokens = provider.count_tokens("Hello, world!", "claude-sonnet-4-6");
         assert!(tokens > 0);
         assert!(tokens < 100);
     }
@@ -535,7 +535,7 @@ mod tests {
     #[test]
     fn test_max_context_tokens() {
         let provider = ClaudeCodeProvider::new();
-        assert_eq!(provider.max_context_tokens("claude-sonnet-4-5"), 200_000);
+        assert_eq!(provider.max_context_tokens("claude-sonnet-4-6"), 200_000);
     }
 
     #[test]

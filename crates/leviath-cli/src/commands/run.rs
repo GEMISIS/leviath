@@ -1105,7 +1105,7 @@ async fn run_foreground(args: RunArgs) -> anyhow::Result<()> {
             println!("\nOr set the ANTHROPIC_API_KEY environment variable.");
             println!("\nOr use Claude Code (no API key needed):");
             println!("  [stages.main]");
-            println!("  model = {{ provider = \"claude-code\", model = \"claude-sonnet-4-5\" }}");
+            println!("  model = {{ provider = \"claude-code\", model = \"claude-sonnet-4-6\" }}");
             return Ok(());
         }
 
@@ -2535,7 +2535,7 @@ async fn stream_inference(
 fn default_title_model(provider: &str) -> &'static str {
     match provider {
         "anthropic" | "claude-code" => "claude-haiku-4-5-20251001",
-        "openai" => "gpt-4o-mini",
+        "openai" => "gpt-5.4-mini",
         "google" => "gemini-3.5-flash",
         "openrouter" => "anthropic/claude-haiku-4-5",
         // For Ollama and unknown providers, fall through to the caller's
