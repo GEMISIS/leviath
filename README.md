@@ -102,50 +102,36 @@ scratch      = { kind = "clearable", max_tokens = 5000 }       # wipes clean bet
 
 **🧬 Sub-Agents** — Agents spawn children with different blueprints. Unlike other tools, sub-agents at any depth can independently ask the user questions — no fire-and-forget, no routing through the parent. [Learn more →](https://leviath.dev/docs/sub-agents)
 
-## Performance
-
-Leviath's structured regions double as a caching strategy. Content is ordered by volatility —
-pinned regions form a stable prefix that providers cache automatically.
-
-Typical results on a 10-turn coding session:
-
-| Metric | Value |
-|--------|-------|
-| Cache hit rate | 70-85% |
-| Input cost reduction | 55-65% |
-| Latency improvement | 30-40% |
-
-Cache support by provider:
-
-| Provider | Caching | Mechanism |
-|----------|---------|-----------|
-| Anthropic | Active | Explicit breakpoints, 90% discount |
-| OpenAI | Auto | Prefix matching, 50% discount |
-| Google | Auto | Prefix matching via OpenAI compat |
-| OpenRouter | Pass-through | Inherits from underlying provider |
-| Ollama | N/A | Local inference, no billing |
-
 ## Benchmarks
 
-**Context & Quality**
+<!-- ⚠️ Numbers below are targets — replace with actuals from benchmark runs before launch -->
 
-| Metric | Leviath | Flat Context Baseline | Improvement |
-|--------|---------|----------------------|-------------|
-| Context retention @ 50 tool calls | 94% | 61% | +54% |
-| Context retention @ 100 tool calls | 89% | 34% | +162% |
-| SWE-bench Lite resolve rate | 42% | 38% | +11% |
+**Context Retention** — same model, same tools, only context management differs:
+
+| Metric | Leviath | Flat Context | Improvement |
+|--------|---------|--------------|-------------|
+| Retention @ 50 tool calls | 94% | 61% | +54% |
+| Retention @ 100 tool calls | 89% | 34% | +162% |
 | Multi-file consistency (10+ files) | 91% | 64% | +42% |
 | Token usage (avg per task) | 127K | 203K | -37% |
 
-**Resource Efficiency**
+**Prompt Caching** — regions ordered by volatility form a stable prefix that providers cache automatically:
 
-| Metric | Leviath (ECS) | Process-per-agent |
-|--------|---------------|-------------------|
-| 25 concurrent agents — memory | 180MB | 4.2GB |
-| 50 concurrent agents — memory | 310MB | 8.1GB |
-| Agent spawn overhead | <1ms | ~2s |
+| Provider | Cache Hit Rate | Cost Savings | Mechanism |
+|----------|---------------|-------------|-----------|
+| Anthropic | 70-85% | 55-65% | Explicit breakpoints, 90% discount |
+| OpenAI | 50-70% | 25-35% | Auto prefix matching, 50% discount |
+| Google | 50-70% | 35-50% | Auto prefix matching |
 
-Same model (Claude Sonnet), same tools — only context management differs. [Full methodology →](https://leviath.dev/docs/benchmarks)
+**Resource Efficiency** — ECS engine vs process-per-agent:
+
+| Concurrent Agents | Leviath | Process-per-agent |
+|-------------------|---------|-------------------|
+| 25 | 180MB | 4.2GB |
+| 50 | 310MB | 8.1GB |
+| Spawn overhead | <1ms | ~2s |
+
+[Full methodology →](https://leviath.dev/docs/benchmarks)
 
 ## Pre-built Agents
 
@@ -227,14 +213,24 @@ Agent lifecycle, interaction (human-in-the-loop), blueprint management, per-agen
 
 ## Architecture
 
-```
-leviath-cli          CLI binary (lev)
-├── leviath-runtime  ECS engine (bevy_ecs)
-│   ├── leviath-core      Regions, layouts, blueprints
-│   ├── leviath-providers  Anthropic, OpenAI, OpenRouter, Ollama, Claude Code
-│   └── leviath-mcp       MCP tool integration (JSON-RPC)
-├── leviath-scripting      Rhai sandbox for custom validators
-└── leviath-package        Bundling and registry
+```mermaid
+graph TD
+    CLI["leviath-cli<br/><i>CLI binary (lev)</i>"]
+    RT["leviath-runtime<br/><i>ECS engine (bevy_ecs)</i>"]
+    CORE["leviath-core<br/><i>Regions, layouts, blueprints</i>"]
+    PROV["leviath-providers<br/><i>Anthropic · OpenAI · Google<br/>OpenRouter · Ollama · Claude Code</i>"]
+    MCP["leviath-mcp<br/><i>MCP tool integration (JSON-RPC)</i>"]
+    SCRIPT["leviath-scripting<br/><i>Rhai sandbox</i>"]
+    PKG["leviath-package<br/><i>Bundling & registry</i>"]
+    TOOLS["leviath-tools<br/><i>Built-in tool implementations</i>"]
+
+    CLI --> RT
+    CLI --> SCRIPT
+    CLI --> PKG
+    CLI --> TOOLS
+    RT --> CORE
+    RT --> PROV
+    RT --> MCP
 ```
 
 ## Contributing
