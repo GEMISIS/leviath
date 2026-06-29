@@ -5,6 +5,7 @@
   </p>
   <p align="center">
     <a href="https://github.com/GEMISIS/leviath/actions"><img src="https://github.com/GEMISIS/leviath/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+    <a href="https://codecov.io/gh/GEMISIS/leviath"><img src="https://codecov.io/gh/GEMISIS/leviath/graph/badge.svg" alt="Coverage"></a>
     <a href="https://github.com/GEMISIS/leviath/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License: MIT"></a>
     <a href="https://leviath.dev"><img src="https://img.shields.io/badge/docs-leviath.dev-8b5cf6" alt="Docs"></a>
   </p>
@@ -62,6 +63,9 @@ lev setup --non-interactive --anthropic-key sk-ant-...
 
 ```bash
 lev run coder --task "Build a CLI that converts CSV to JSON"
+
+# or try a non-coding agent
+lev run deep-researcher --task "Survey the current state of solid-state battery technology"
 ```
 
 Open the dashboard to watch it work:
@@ -84,7 +88,15 @@ This generates an `agent.leviath` config you can customize — pick models per s
 
 **🧠 Structured Context Memory** — Six region types with deterministic eviction. Architecture docs stay pinned. Tool results evict first. Conversation auto-compacts into summaries. Route tool results to specific regions so file reads don't push out your system prompt. [Learn more →](https://leviath.dev/docs/context)
 
-**🔀 Multi-Stage Workflows** — Each stage gets its own model, tools, context layout, and interaction mode. Sonnet for analysis, Opus for review, each seeing only the context it needs. Stages can be linear or a directed graph with conditional transitions and LLM-driven routing. [Learn more →](https://leviath.dev/docs/stages)
+```toml
+[context.regions]
+architecture = { kind = "pinned", max_tokens = 4000 }         # never evicted
+conversation = { kind = "compacting", threshold_tokens = 8000 } # auto-summarizes when full
+tool_results = { kind = "temporary", max_tokens = 20000 }      # oldest evicts first
+scratch      = { kind = "clearable", max_tokens = 5000 }       # wipes clean between stages
+```
+
+**🔀 Multi-Stage Workflows** — Each stage gets its own model, tools, context layout, and interaction mode. Sonnet for analysis, Opus for review, each seeing only the context it needs. Stages can be linear or a [directed graph](https://leviath.dev/docs/stages#graph) with conditional transitions, error recovery, and LLM-driven routing — check your graph with `lev validate`. [Learn more →](https://leviath.dev/docs/stages)
 
 **🎮 ECS Agent Engine** — Agents run as entities in a [bevy_ecs](https://bevyengine.org/) world. 50 agents share one process with game-engine-style scheduling, instead of 50 OS processes fighting for resources. [Learn more →](https://leviath.dev/docs/engine)
 
@@ -112,55 +124,7 @@ This generates an `agent.leviath` config you can customize — pick models per s
 | 50 concurrent agents — memory | 310MB | 8.1GB |
 | Agent spawn overhead | <1ms | ~2s |
 
-<details>
-<summary><strong>Methodology</strong></summary>
-
-<!-- ⚠️ PLACEHOLDER: Fill in methodology before launch -->
-
-- **Context retention (CRT):** Architectural questions asked at intervals during a multi-file coding task. Same model (Claude Sonnet), same tools, only context management differs.
-- **SWE-bench Lite:** 300 real GitHub issues. Same model and tools, structured regions vs single flat message array.
-- **Multi-file consistency (MFCN):** Tasks requiring changes across 10+ files. Scored on whether changes in file A align with changes in file B.
-- **Token usage:** Average across SWE-bench Lite tasks.
-- **Memory:** RSS measured at steady state with N agents actively running inference.
-- **Spawn overhead:** Time from spawn request to first inference call.
-
-</details>
-
-## Stage Graph
-
-Stages can be a simple linear sequence or a directed graph with conditional transitions, LLM-driven routing, and per-edge context transforms. Linear configs keep working with zero changes — graph mode activates only when you add `transitions` to a stage.
-
-```toml
-[agent]
-name = "iterative-coder"
-entry_stage = "plan"
-
-[stages.plan]
-model = { provider = "anthropic", model = "claude-sonnet-4-6" }
-transition_prompt = "Plan complete. Ready to implement?"
-
-[stages.plan.transitions.implement]
-hint = "Plan approved, start coding"
-
-[stages.implement]
-model = { provider = "anthropic", model = "claude-sonnet-4-6" }
-max_revisits = 5
-
-[stages.implement.transitions.review]
-hint = "Implementation complete"
-transform = "compact"
-
-[stages.review]
-model = { provider = "anthropic", model = "claude-opus-4-6" }
-max_revisits = 3
-
-[stages.review.transitions.implement]
-hint = "Issues found — needs fixes"
-transform = "compact"
-# No other always-transitions → terminal when review passes
-```
-
-Transitions support conditions (`always`, `error`, `max_iterations`), context transforms (`direct`, `compact`, `clear`, `custom`), and LLM routing hints. The dashboard renders graph agents with a visual stage graph showing visit counts, reachability, and color-coded status. Validate your graph with `lev validate`.
+Same model (Claude Sonnet), same tools — only context management differs. [Full methodology →](https://leviath.dev/docs/benchmarks)
 
 ## Pre-built Agents
 
@@ -179,7 +143,23 @@ Eight agents ship out of the box:
 
 ## Dashboard
 
-<!-- TODO: screenshot/gif of dashboard -->
+<!-- TODO: replace with real screenshot -->
+```
+┌─ Agents ──────────────────────────────────┐┌─ Stage: implement (2/3) ─────────────────┐
+│ ● software-engineer  Active   3m 22s      ││ ⠋ Implementing CSV parser module...      │
+│ ○ deep-researcher    Waiting  1m 05s      ││                                          │
+│ ○ daily-briefer      Complete 0m 48s      ││ ┌─ Context ─────────────────────────────┐ │
+│                                           ││ │ ████████░░░░░ 61% (42K/68K tokens)   │ │
+│                                           ││ │ pinned: 4K  conv: 18K  tools: 20K    │ │
+│                                           ││ └───────────────────────────────────────┘ │
+├─ Log ─────────────────────────────────────┤│                                          │
+│ [3:22] write_file src/parser.rs           ││ > fn parse_record(line: &str) -> Vec... │
+│ [3:18] read_file Cargo.toml              ││ > fn detect_delimiter(header: &str)...  │
+│ [3:15] bash cargo check                  ││ >                                        │
+│ [3:10] write_file src/main.rs            ││ > // Handle quoted fields containing    │
+│ [3:02] ✓ Stage 'analyze' complete         ││ > // delimiters and newlines             │
+└───────────────────────────────────────────┘└──────────────────────────────────────────┘
+```
 
 `lev dash` — a full TUI for managing concurrent agents. Stage tabs, context window visualization, markdown rendering, search/filter, sub-agent tree view, clipboard yank, mouse support.
 
@@ -189,19 +169,14 @@ Eight agents ship out of the box:
 
 ```bash
 lev serve --port 3000
+
+# spawn an agent
+curl -X POST http://localhost:3000/api/agents \
+  -H "Content-Type: application/json" \
+  -d '{"blueprint": "coder", "task": "Add input validation", "webhook_url": "https://example.com/hook"}'
 ```
 
-**Agents** — `POST /api/agents` (spawn), `GET /api/agents` (list), `GET /api/agents/:id` (status), `DELETE /api/agents/:id` (kill), `GET /api/agents/:id/context` (context snapshot), `GET /api/agents/tree` (full hierarchy)
-
-**Interaction** — `GET /api/agents/:id/interaction` (pending questions), `POST /api/agents/:id/interaction` (submit response), `POST /api/agents/:id/message` (inject message)
-
-**Blueprints** — Full CRUD at `/api/blueprints` + `POST /api/blueprints/validate`
-
-**Real-time** — `ws://localhost:3000/ws` for global events, `ws://localhost:3000/ws/agents/:id` for per-agent streaming. Events: stage transitions, tool calls, context updates, completions.
-
-**Webhooks** — Pass `webhook_url` when spawning an agent to get a POST callback on completion with the full result payload.
-
-[Full API reference →](https://leviath.dev/docs/api)
+Agent lifecycle, interaction (human-in-the-loop), blueprint management, per-agent WebSocket streaming, and webhook callbacks on completion. [Full API reference →](https://leviath.dev/docs/api)
 
 ## CLI
 
