@@ -315,6 +315,7 @@ fn test_parent_ref_and_children_components() {
                 status: AgentStatus::Active,
                 spawned_children_ids: Vec::new(),
                 pending_wait: None,
+                accepts_messages: true,
             },
             CancellationToken::new(),
             MessageInbox::new(),
@@ -331,6 +332,7 @@ fn test_parent_ref_and_children_components() {
                 status: AgentStatus::Active,
                 spawned_children_ids: Vec::new(),
                 pending_wait: None,
+                accepts_messages: true,
             },
             ParentRef {
                 parent_entity: parent,
@@ -392,6 +394,7 @@ fn test_cascade_kill_parent_to_children() {
                 status: AgentStatus::Cancelled,
                 spawned_children_ids: vec!["child-01".to_string()],
                 pending_wait: None,
+                accepts_messages: true,
             },
             CancellationToken::new(),
             MessageInbox::new(),
@@ -408,6 +411,7 @@ fn test_cascade_kill_parent_to_children() {
                 status: AgentStatus::Active,
                 spawned_children_ids: Vec::new(),
                 pending_wait: None,
+                accepts_messages: true,
             },
             ParentRef {
                 parent_entity: parent,
@@ -460,6 +464,7 @@ fn test_child_completion_notifies_parent() {
                 status: AgentStatus::Active,
                 spawned_children_ids: vec!["child-01".to_string()],
                 pending_wait: Some("child-01".to_string()),
+                accepts_messages: true,
             },
             parent_window,
             CancellationToken::new(),
@@ -477,6 +482,7 @@ fn test_child_completion_notifies_parent() {
                 status: AgentStatus::Complete,
                 spawned_children_ids: Vec::new(),
                 pending_wait: None,
+                accepts_messages: true,
             },
             ParentRef {
                 parent_entity: parent,
@@ -517,6 +523,7 @@ fn test_stage_gating_with_requires_children() {
         status: AgentStatus::Active,
         spawned_children_ids: vec!["researcher-01".to_string()],
         pending_wait: Some("researcher-01".to_string()),
+        accepts_messages: true,
     };
 
     // Simulate what stage_gating_system does

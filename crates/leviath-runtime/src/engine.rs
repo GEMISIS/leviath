@@ -209,11 +209,21 @@ impl AgentEngine {
     }
 
     /// Deliver messages from agent inboxes into their context windows.
+    ///
+    /// Only delivers if the agent's current stage accepts messages
+    /// (`AgentState.accepts_messages`). If false, messages stay in the inbox
+    /// and will be delivered when the stage changes to one that accepts them.
     fn deliver_inbox_messages(&mut self) {
         let mut deliveries: Vec<(Entity, Vec<AgentMessage>)> = Vec::new();
 
-        let mut query = self.world.query::<(Entity, &mut MessageInbox)>();
-        for (entity, mut inbox) in query.iter_mut(&mut self.world) {
+        let mut query = self
+            .world
+            .query::<(Entity, &AgentState, &mut MessageInbox)>();
+        for (entity, state, mut inbox) in query.iter_mut(&mut self.world) {
+            if !state.accepts_messages {
+                // Leave messages in inbox until a stage that accepts them
+                continue;
+            }
             let msgs = inbox.drain_all();
             if !msgs.is_empty() {
                 deliveries.push((entity, msgs));
@@ -225,11 +235,8 @@ impl AgentEngine {
                 for msg in msgs {
                     let region_name = msg.target_region.as_deref().unwrap_or("conversation");
                     let tokens = msg.content.len() / 4 + 1;
-                    let _ = window.add_to_region(
-                        region_name,
-                        format!("[Message]: {}", msg.content),
-                        tokens,
-                    );
+                    let _ =
+                        window.add_to_region(region_name, format!("User: {}", msg.content), tokens);
                 }
             }
         }
@@ -542,6 +549,9 @@ impl AgentEngine {
                 }
             }
 
+            // Check for any user messages that arrived during tool execution
+            self.process_messages();
+
             // After adding tool results, check if context needs eviction + compaction
             if let Some(cc) = compaction_config {
                 match self.evict_and_compact(entity, cc).await {
@@ -825,5 +835,114 @@ mod tests {
         assert!(config.persist);
         assert!(config.max_result_tokens.is_none());
         assert!(config.tool_overrides.is_empty());
+    }
+
+    #[test]
+    fn test_deliver_inbox_messages_respects_accepts_messages_false() {
+        let mut engine = AgentEngine::new();
+        let entity = engine
+            .world_mut()
+            .spawn((
+                AgentState {
+                    agent_id: "test-agent".to_string(),
+                    current_stage: "report".to_string(),
+                    iteration: 0,
+                    status: AgentStatus::Active,
+                    spawned_children_ids: Vec::new(),
+                    pending_wait: None,
+                    accepts_messages: false,
+                },
+                MessageInbox::new(),
+                {
+                    let mut window = ContextWindow::new(10000);
+                    window.add_region(leviath_core::Region::new(
+                        "conversation".to_string(),
+                        leviath_core::RegionKind::SlidingWindow { max_items: 50 },
+                        8000,
+                    ));
+                    window
+                },
+            ))
+            .id();
+
+        // Send a message
+        engine
+            .send_message(AgentMessage {
+                agent_id: "test-agent".to_string(),
+                content: "hello".to_string(),
+                target_region: None,
+                priority: 0,
+            })
+            .unwrap();
+
+        // Process — should route to inbox but NOT deliver to context
+        engine.process_messages();
+
+        // Message should still be in inbox
+        let inbox = engine.world().get::<MessageInbox>(entity).unwrap();
+        assert_eq!(
+            inbox.messages.len(),
+            1,
+            "message should stay in inbox when accepts_messages=false"
+        );
+
+        // Context should be empty
+        let window = engine.world().get::<ContextWindow>(entity).unwrap();
+        let conv = window.get_region("conversation").unwrap();
+        assert!(conv.content.is_empty(), "no messages should be in context");
+    }
+
+    #[test]
+    fn test_deliver_inbox_messages_delivers_when_accepts_messages_true() {
+        let mut engine = AgentEngine::new();
+        let entity = engine
+            .world_mut()
+            .spawn((
+                AgentState {
+                    agent_id: "test-agent".to_string(),
+                    current_stage: "analyze".to_string(),
+                    iteration: 0,
+                    status: AgentStatus::Active,
+                    spawned_children_ids: Vec::new(),
+                    pending_wait: None,
+                    accepts_messages: true,
+                },
+                MessageInbox::new(),
+                {
+                    let mut window = ContextWindow::new(10000);
+                    window.add_region(leviath_core::Region::new(
+                        "conversation".to_string(),
+                        leviath_core::RegionKind::SlidingWindow { max_items: 50 },
+                        8000,
+                    ));
+                    window
+                },
+            ))
+            .id();
+
+        engine
+            .send_message(AgentMessage {
+                agent_id: "test-agent".to_string(),
+                content: "focus on error handling".to_string(),
+                target_region: None,
+                priority: 0,
+            })
+            .unwrap();
+
+        engine.process_messages();
+
+        // Message should be delivered to context
+        let window = engine.world().get::<ContextWindow>(entity).unwrap();
+        let conv = window.get_region("conversation").unwrap();
+        assert_eq!(conv.content.len(), 1);
+        assert!(
+            conv.content[0].content.starts_with("User: "),
+            "message should be formatted as 'User: ...' not '[Message]: ...'"
+        );
+        assert!(conv.content[0].content.contains("focus on error handling"));
+
+        // Inbox should be drained
+        let inbox = engine.world().get::<MessageInbox>(entity).unwrap();
+        assert!(inbox.messages.is_empty());
     }
 }

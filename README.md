@@ -102,6 +102,8 @@ scratch      = { kind = "clearable", max_tokens = 5000 }       # wipes clean bet
 
 **🧬 Sub-Agents** — Agents spawn children with different blueprints. Unlike other tools, sub-agents at any depth can independently ask the user questions — no fire-and-forget, no routing through the parent. [Learn more →](https://leviath.dev/docs/sub-agents)
 
+**💬 Mid-Run Collaboration** — Send messages to agents while they work. Type in the terminal or use the dashboard — your input is injected between inference calls so the agent sees it naturally. Redirect an implementation, answer a question, or add constraints without restarting. Enabled by default on all stages.
+
 ## Benchmarks
 
 <!-- ⚠️ Numbers below are targets — replace with actuals from benchmark runs before launch -->

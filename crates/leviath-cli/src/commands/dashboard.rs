@@ -188,6 +188,8 @@ pub struct DashboardAgent {
     pub waiting_secs: u64,
     /// Cached graph transition info (None = linear mode or not yet loaded)
     graph_info: Option<GraphTransitionInfo>,
+    /// Whether the current stage accepts mid-run user messages
+    pub accepts_messages: bool,
 }
 
 /// Event from an agent back to the dashboard.
@@ -691,6 +693,7 @@ impl Dashboard {
                     },
                     waiting_secs: 0,
                     graph_info: load_graph_info(&run.agent_path),
+                    accepts_messages: true, // default; stage-level control via agent state
                 });
             }
         }
@@ -719,6 +722,7 @@ impl Dashboard {
                     AgentStatus::Cancelled => agent.status = AgentDisplayStatus::Cancelled,
                     AgentStatus::Idle => agent.status = AgentDisplayStatus::Idle,
                 }
+                agent.accepts_messages = state.accepts_messages;
             }
             if let Some(window) = engine.world().get::<ContextWindow>(agent.entity) {
                 agent.context_tokens = (window.current_tokens, window.max_tokens);
@@ -884,7 +888,11 @@ impl Dashboard {
                 agent_id: agent_id.clone(),
                 input: input_text,
             });
-            self.add_log(format!("Sent: {}", display));
+            if req.is_none() {
+                self.add_log(format!("💬 User: \"{}\"", display));
+            } else {
+                self.add_log(format!("Sent: {}", display));
+            }
         }
     }
 
@@ -963,6 +971,15 @@ impl Dashboard {
     }
 
     /// True if the currently selected stage tab is the one actively accepting input.
+    /// Check if the selected agent is active and accepts mid-run messages.
+    fn selected_agent_accepts_messages(&self) -> bool {
+        let agent = match self.selected_agent() {
+            Some(a) => a,
+            None => return false,
+        };
+        matches!(agent.status, AgentDisplayStatus::Active) && agent.accepts_messages
+    }
+
     fn selected_stage_can_respond(&self) -> bool {
         let agent = match self.selected_agent() {
             Some(a) => a,
@@ -1162,6 +1179,14 @@ impl Dashboard {
                 }
                 KeyCode::Char('i') => {
                     if self.selected_stage_can_respond() {
+                        self.input_mode = true;
+                        self.choice_selected = 0;
+                        self.input_textarea = TextArea::default();
+                    }
+                }
+                KeyCode::Char('m') => {
+                    // Send a mid-run message to any active agent (regardless of interaction state)
+                    if self.selected_agent_accepts_messages() {
                         self.input_mode = true;
                         self.choice_selected = 0;
                         self.input_textarea = TextArea::default();
@@ -2204,6 +2229,11 @@ impl Dashboard {
                     Style::default().fg(C_DIM),
                 ),
                 Span::styled(format!(" · {} ", elapsed), Style::default().fg(C_DIM)),
+                if agent.accepts_messages {
+                    Span::styled("💬 ", Style::default().fg(C_SUCCESS))
+                } else {
+                    Span::styled("🔇 ", Style::default().fg(C_DIM))
+                },
                 Span::styled("· ", Style::default().fg(C_DIM)),
                 Span::styled(agent.id.clone(), Style::default().fg(C_DIM)),
             ]);
@@ -3770,6 +3800,13 @@ impl Dashboard {
                     Style::default().fg(C_WARN).add_modifier(Modifier::BOLD),
                 ));
                 spans.push(Span::raw(" respond  "));
+            }
+            if self.selected_agent_accepts_messages() {
+                spans.push(Span::styled(
+                    "[m]",
+                    Style::default().fg(C_ACCENT).add_modifier(Modifier::BOLD),
+                ));
+                spans.push(Span::raw(" message  "));
             }
             if can_kill {
                 spans.push(Span::styled(

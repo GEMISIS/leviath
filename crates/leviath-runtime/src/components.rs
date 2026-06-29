@@ -29,6 +29,10 @@ pub struct AgentState {
 
     /// If set, this agent is blocked waiting for the named child to complete
     pub pending_wait: Option<String>,
+
+    /// Whether the current stage accepts mid-run user messages.
+    /// When false, messages stay in the inbox until a stage that accepts them.
+    pub accepts_messages: bool,
 }
 
 /// Reference to a parent agent, making this agent a sub-agent.
@@ -942,6 +946,7 @@ mod tests {
             status: AgentStatus::Active,
             spawned_children_ids: vec!["child-01".to_string(), "child-02".to_string()],
             pending_wait: Some("child-01".to_string()),
+            accepts_messages: true,
         };
         assert_eq!(state.spawned_children_ids.len(), 2);
         assert_eq!(state.pending_wait, Some("child-01".to_string()));

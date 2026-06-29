@@ -8,7 +8,9 @@ use leviath_core::blueprint::{
 use leviath_core::layout::RegionDefinition;
 use leviath_core::lifecycle::CompactionConfig;
 use leviath_core::{Blueprint, ContextLayout, Region, RegionKind, Stage};
-use leviath_runtime::{AgentEngine, AgentPool, AgentState, ContextWindow, ProviderRegistry};
+use leviath_runtime::{
+    AgentEngine, AgentMessage, AgentPool, AgentState, ContextWindow, ProviderRegistry,
+};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -1133,6 +1135,15 @@ async fn run_foreground(args: RunArgs) -> anyhow::Result<()> {
             println!();
         }
 
+        // Update accepts_messages on the agent state for this stage
+        if let Some(mut state) = engine.world_mut().get_mut::<AgentState>(entity) {
+            state.accepts_messages = stage.accepts_messages;
+        }
+
+        if stage.accepts_messages {
+            println!("💬 Type a message and press Enter to send input to the agent while it runs.");
+        }
+
         if let Some(ref stage_layout) = stage.context_layout {
             swap_context_layout(&mut engine, entity, stage_layout);
         }
@@ -1171,6 +1182,32 @@ async fn run_foreground(args: RunArgs) -> anyhow::Result<()> {
                 });
         let routing_ref = routing_config.as_ref();
         let max_iterations = stage.max_iterations.unwrap_or(20);
+
+        // Spawn a background stdin reader to accept mid-run messages
+        let stdin_handle = if stage.accepts_messages {
+            let message_tx = engine.get_message_sender();
+            let stdin_agent_id = agent_id.clone();
+            Some(tokio::spawn(async move {
+                use tokio::io::AsyncBufReadExt;
+                let stdin = tokio::io::stdin();
+                let reader = tokio::io::BufReader::new(stdin);
+                let mut lines = reader.lines();
+                while let Ok(Some(line)) = lines.next_line().await {
+                    let trimmed = line.trim().to_string();
+                    if trimmed.is_empty() {
+                        continue;
+                    }
+                    let _ = message_tx.send(AgentMessage {
+                        agent_id: stdin_agent_id.clone(),
+                        content: trimmed,
+                        target_region: None,
+                        priority: 10,
+                    });
+                }
+            }))
+        } else {
+            None
+        };
 
         // Determine stage result for transition condition evaluation
         let stage_result_val: StageResult;
@@ -1245,6 +1282,11 @@ async fn run_foreground(args: RunArgs) -> anyhow::Result<()> {
                     }
                 }
             }
+        }
+
+        // Cancel the stdin reader task now that the stage is complete
+        if let Some(handle) = stdin_handle {
+            handle.abort();
         }
 
         *visit_counts.entry(stage.name.clone()).or_default() += 1;
@@ -1727,6 +1769,11 @@ async fn run_worker_inner(args: &WorkerArgs, meta: &mut RunMeta) -> anyhow::Resu
         meta.status = RunStatus::Running;
         meta.touch();
         let _ = runstate::write_meta(meta);
+
+        // Update accepts_messages on the agent state for this stage
+        if let Some(mut state) = engine.world_mut().get_mut::<AgentState>(entity) {
+            state.accepts_messages = stage.accepts_messages;
+        }
 
         if let Some(ref stage_layout) = stage.context_layout {
             swap_context_layout(&mut engine, entity, stage_layout);

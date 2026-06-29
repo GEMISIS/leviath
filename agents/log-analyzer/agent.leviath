@@ -92,6 +92,7 @@ model = { provider = "anthropic", model = "claude-opus-4-6" }
 description = "Produce a structured analysis report with findings"
 available_tools = ["write_file"]
 max_iterations = 10
+accepts_messages = false  # generating final report, don't interrupt
 system_prompt = """
 Write a structured log analysis report. Include:
 - Executive summary (top findings in 3-5 bullets)

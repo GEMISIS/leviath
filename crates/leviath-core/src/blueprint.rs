@@ -380,6 +380,17 @@ pub struct Stage {
 
     /// Custom prompt for transition decisions (overrides default)
     pub transition_prompt: Option<String>,
+
+    /// Whether this stage accepts mid-run user messages.
+    /// When true, messages sent to the agent are injected into context
+    /// between inference calls. Default: true.
+    #[serde(default = "default_true")]
+    pub accepts_messages: bool,
+}
+
+/// Default value for bool fields that should default to true.
+fn default_true() -> bool {
+    true
 }
 
 impl Stage {
@@ -400,6 +411,7 @@ impl Stage {
             transitions: None,
             max_revisits: None,
             transition_prompt: None,
+            accepts_messages: true,
         }
     }
 
@@ -920,5 +932,53 @@ mod tests {
         assert_eq!(StageResult::Success, StageResult::Success);
         assert_ne!(StageResult::Error, StageResult::Success);
         assert_ne!(StageResult::MaxIterations, StageResult::Error);
+    }
+
+    #[test]
+    fn test_stage_accepts_messages_default_true() {
+        let stage = Stage::new(
+            "test".to_string(),
+            ModelConfig::new("anthropic".to_string(), "claude-sonnet-4-6".to_string()),
+        );
+        assert!(
+            stage.accepts_messages,
+            "accepts_messages should default to true"
+        );
+    }
+
+    #[test]
+    fn test_stage_accepts_messages_serde_roundtrip() {
+        // Serialize a stage with accepts_messages = false, then deserialize
+        let mut stage = Stage::new(
+            "report".to_string(),
+            ModelConfig::new("anthropic".to_string(), "claude-opus-4-6".to_string()),
+        );
+        stage.accepts_messages = false;
+
+        let json = serde_json::to_string(&stage).expect("should serialize");
+        let deserialized: Stage = serde_json::from_str(&json).expect("should deserialize");
+        assert!(
+            !deserialized.accepts_messages,
+            "accepts_messages should be false after roundtrip"
+        );
+    }
+
+    #[test]
+    fn test_stage_accepts_messages_json_default() {
+        // When accepts_messages is missing from JSON, it should default to true
+        let json = r#"{
+            "name": "analyze",
+            "model": { "provider": "anthropic", "model": "claude-sonnet-4-6", "parameters": {} },
+            "available_tools": [],
+            "mode": "Autonomous",
+            "config": {},
+            "tool_permissions": {},
+            "requires_children": false
+        }"#;
+        let stage: Stage = serde_json::from_str(json).expect("should parse");
+        assert!(
+            stage.accepts_messages,
+            "accepts_messages should default to true when not specified"
+        );
     }
 }

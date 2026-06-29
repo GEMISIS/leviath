@@ -55,6 +55,7 @@ impl AgentPool {
             status: AgentStatus::Idle,
             spawned_children_ids: Vec::new(),
             pending_wait: None,
+            accepts_messages: true,
         };
 
         // Spawn entity with components

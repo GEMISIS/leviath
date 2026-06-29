@@ -57,6 +57,7 @@ pub enum ServerEvent {
         status: String,
         stage: String,
         iteration: usize,
+        accepts_messages: bool,
     },
     ContextUpdate {
         agent_id: String,
@@ -1194,6 +1195,7 @@ async fn polling_loop(state: AppState) {
                     status: status_str.clone(),
                     stage: meta.current_stage.clone(),
                     iteration: meta.iteration,
+                    accepts_messages: true, // default; stage-level control via agent state
                 });
 
                 // Token update
@@ -1595,6 +1597,7 @@ model = "claude-sonnet-4-6"
             status: "running".to_string(),
             stage: "implement".to_string(),
             iteration: 5,
+            accepts_messages: true,
         };
         let json = serde_json::to_string(&event).unwrap();
         assert!(json.contains("\"type\":\"agent_status\""));
