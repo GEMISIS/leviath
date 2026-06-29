@@ -11,6 +11,7 @@
 //! - **Lifecycle**: Policies for eviction, compaction, and context management
 
 pub mod blueprint;
+pub mod cache;
 pub mod error;
 pub mod layout;
 pub mod lifecycle;
@@ -20,6 +21,7 @@ pub use blueprint::{
     Blueprint, ContextTransform, EdgeTransform, Stage, StageResult, ToolFilter, ToolResultRouting,
     TransitionCondition, TransitionEdge,
 };
+pub use cache::{CacheBreakpoint, CacheHint};
 pub use error::{Error, Result, ValidationError};
 pub use layout::{ContextLayout, RegionDefinition};
 pub use lifecycle::{CompactionConfig, CompactionStrategy, EvictionPolicy};

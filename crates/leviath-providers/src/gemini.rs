@@ -339,10 +339,12 @@ mod tests {
                 crate::provider::Message {
                     role: "system".to_string(),
                     content: "You are helpful.".to_string(),
+                    cache_breakpoint: false,
                 },
                 crate::provider::Message {
                     role: "user".to_string(),
                     content: "Hello".to_string(),
+                    cache_breakpoint: false,
                 },
             ],
             model: "gemini-3.5-flash".to_string(),

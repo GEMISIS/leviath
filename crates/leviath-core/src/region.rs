@@ -70,6 +70,22 @@ pub enum RegionKind {
     },
 }
 
+impl RegionKind {
+    /// Return the cache hint appropriate for this region kind.
+    pub fn cache_hint(&self) -> crate::cache::CacheHint {
+        match self {
+            RegionKind::Pinned | RegionKind::CompactHistory { .. } => {
+                crate::cache::CacheHint::Always
+            }
+            RegionKind::Compacting { .. } => crate::cache::CacheHint::UntilChanged,
+            RegionKind::SlidingWindow { .. } => crate::cache::CacheHint::SlidingPrefix {
+                stable_fraction: 0.75,
+            },
+            RegionKind::Temporary | RegionKind::Clearable => crate::cache::CacheHint::Never,
+        }
+    }
+}
+
 /// A single region in the context window with its content and metadata.
 ///
 /// Each region tracks its own token budget, current usage, and optional
@@ -440,5 +456,54 @@ mod tests {
         assert_eq!(region.content[0].content, "b");
         assert_eq!(region.content[1].content, "c");
         assert_eq!(region.current_tokens, 50);
+    }
+
+    #[test]
+    fn test_cache_hint_pinned() {
+        let kind = RegionKind::Pinned;
+        assert_eq!(kind.cache_hint(), crate::cache::CacheHint::Always);
+    }
+
+    #[test]
+    fn test_cache_hint_compact_history() {
+        let kind = RegionKind::CompactHistory {
+            source_region: "conv".to_string(),
+        };
+        assert_eq!(kind.cache_hint(), crate::cache::CacheHint::Always);
+    }
+
+    #[test]
+    fn test_cache_hint_compacting() {
+        let kind = RegionKind::Compacting {
+            threshold_tokens: 1000,
+        };
+        assert_eq!(kind.cache_hint(), crate::cache::CacheHint::UntilChanged);
+    }
+
+    #[test]
+    fn test_cache_hint_sliding_window() {
+        let kind = RegionKind::SlidingWindow { max_items: 10 };
+        match kind.cache_hint() {
+            crate::cache::CacheHint::SlidingPrefix { stable_fraction } => {
+                assert!((stable_fraction - 0.75).abs() < f32::EPSILON);
+            }
+            other => panic!("Expected SlidingPrefix, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_cache_hint_temporary() {
+        assert_eq!(
+            RegionKind::Temporary.cache_hint(),
+            crate::cache::CacheHint::Never
+        );
+    }
+
+    #[test]
+    fn test_cache_hint_clearable() {
+        assert_eq!(
+            RegionKind::Clearable.cache_hint(),
+            crate::cache::CacheHint::Never
+        );
     }
 }

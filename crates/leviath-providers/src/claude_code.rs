@@ -175,6 +175,8 @@ fn parse_claude_json(json: &serde_json::Value) -> Result<InferenceResponse> {
             prompt_tokens,
             completion_tokens,
             total_tokens: prompt_tokens + completion_tokens,
+            cached_tokens: 0,
+            cache_write_tokens: 0,
         },
         finish_reason,
     })
@@ -247,6 +249,8 @@ fn parse_stream_line(line: &str) -> Option<StreamChunk> {
                     prompt_tokens,
                     completion_tokens,
                     total_tokens: prompt_tokens + completion_tokens,
+                    cached_tokens: 0,
+                    cache_write_tokens: 0,
                 }),
                 finish_reason: Some(finish_reason),
             })
@@ -677,18 +681,22 @@ mod tests {
             Message {
                 role: "system".to_string(),
                 content: "You are helpful.".to_string(),
+                cache_breakpoint: false,
             },
             Message {
                 role: "user".to_string(),
                 content: "Hello".to_string(),
+                cache_breakpoint: false,
             },
             Message {
                 role: "assistant".to_string(),
                 content: "Hi there!".to_string(),
+                cache_breakpoint: false,
             },
             Message {
                 role: "user".to_string(),
                 content: "How are you?".to_string(),
+                cache_breakpoint: false,
             },
         ];
 
@@ -705,14 +713,17 @@ mod tests {
             Message {
                 role: "system".to_string(),
                 content: "You are helpful.".to_string(),
+                cache_breakpoint: false,
             },
             Message {
                 role: "system".to_string(),
                 content: "Be concise.".to_string(),
+                cache_breakpoint: false,
             },
             Message {
                 role: "user".to_string(),
                 content: "Hello".to_string(),
+                cache_breakpoint: false,
             },
         ];
 
@@ -726,6 +737,7 @@ mod tests {
         let messages = vec![Message {
             role: "user".to_string(),
             content: "Hello".to_string(),
+            cache_breakpoint: false,
         }];
 
         assert!(ClaudeCodeProvider::extract_system_prompt(&messages).is_none());

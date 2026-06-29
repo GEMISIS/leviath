@@ -118,6 +118,11 @@ pub struct Message {
 
     /// Message content
     pub content: String,
+
+    /// If true, this message is a cache breakpoint -- the provider should
+    /// mark everything up to and including this message as cacheable.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub cache_breakpoint: bool,
 }
 
 /// A tool that can be called by the model.
@@ -160,6 +165,14 @@ pub struct TokenUsage {
 
     /// Total tokens
     pub total_tokens: usize,
+
+    /// Tokens read from cache (Anthropic: cache_read_input_tokens)
+    #[serde(default)]
+    pub cached_tokens: usize,
+
+    /// Tokens written to cache this request (Anthropic: cache_creation_input_tokens)
+    #[serde(default)]
+    pub cache_write_tokens: usize,
 }
 
 /// Reason inference completed.

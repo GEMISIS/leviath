@@ -63,6 +63,9 @@ pub struct RunMeta {
     pub iteration: usize,
     pub prompt_tokens: usize,
     pub completion_tokens: usize,
+    /// Cumulative tokens read from provider cache.
+    #[serde(default)]
+    pub cached_tokens: usize,
     /// Absolute path to the working directory for tool execution
     pub workdir: String,
     /// Unix timestamp (seconds)
@@ -109,6 +112,7 @@ impl RunMeta {
             iteration: 0,
             prompt_tokens: 0,
             completion_tokens: 0,
+            cached_tokens: 0,
             workdir,
             started_at: now,
             updated_at: now,
@@ -368,6 +372,9 @@ pub struct StageRecord {
     pub status: StageRunStatus,
     pub prompt_tokens: usize,
     pub completion_tokens: usize,
+    /// Tokens read from provider cache in this stage.
+    #[serde(default)]
+    pub cached_tokens: usize,
     /// Unix timestamp (seconds); None until the stage starts.
     pub started_at: Option<i64>,
     /// Unix timestamp (seconds); None until the stage ends.
@@ -382,6 +389,7 @@ impl StageRecord {
             status: StageRunStatus::Pending,
             prompt_tokens: 0,
             completion_tokens: 0,
+            cached_tokens: 0,
             started_at: None,
             ended_at: None,
         }

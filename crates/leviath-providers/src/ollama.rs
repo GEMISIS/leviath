@@ -252,6 +252,8 @@ impl OllamaProvider {
                 prompt_tokens: prompt_eval_count,
                 completion_tokens: eval_count,
                 total_tokens: prompt_eval_count + eval_count,
+                cached_tokens: 0,
+                cache_write_tokens: 0,
             },
             finish_reason,
         })
@@ -481,6 +483,8 @@ where
                             prompt_tokens: prompt_eval_count,
                             completion_tokens: eval_count,
                             total_tokens: prompt_eval_count + eval_count,
+                            cached_tokens: 0,
+                            cache_write_tokens: 0,
                         }),
                         finish_reason: Some(FinishReason::Complete),
                     })));

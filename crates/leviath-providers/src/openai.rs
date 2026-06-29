@@ -286,10 +286,12 @@ mod tests {
                 crate::provider::Message {
                     role: "system".to_string(),
                     content: "You are helpful.".to_string(),
+                    cache_breakpoint: false,
                 },
                 crate::provider::Message {
                     role: "user".to_string(),
                     content: "Hello".to_string(),
+                    cache_breakpoint: false,
                 },
             ],
             model: "gpt-5.4-mini".to_string(),
@@ -427,5 +429,52 @@ mod tests {
         let caps = provider.capabilities("gpt-5.4-mini");
         assert!(!caps.supports_temperature);
         assert_eq!(caps.max_context_tokens, 1);
+    }
+
+    #[test]
+    fn test_parse_response_with_cached_tokens() {
+        let body = serde_json::json!({
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "content": "Hello!"
+                },
+                "finish_reason": "stop"
+            }],
+            "usage": {
+                "prompt_tokens": 100,
+                "completion_tokens": 20,
+                "total_tokens": 120,
+                "prompt_tokens_details": {
+                    "cached_tokens": 80
+                }
+            }
+        });
+
+        let response = parse_openai_response(&body).unwrap();
+        assert_eq!(response.tokens_used.prompt_tokens, 100);
+        assert_eq!(response.tokens_used.cached_tokens, 80);
+        assert_eq!(response.tokens_used.cache_write_tokens, 0);
+    }
+
+    #[test]
+    fn test_parse_response_without_cached_tokens() {
+        let body = serde_json::json!({
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "content": "Hello!"
+                },
+                "finish_reason": "stop"
+            }],
+            "usage": {
+                "prompt_tokens": 100,
+                "completion_tokens": 20,
+                "total_tokens": 120
+            }
+        });
+
+        let response = parse_openai_response(&body).unwrap();
+        assert_eq!(response.tokens_used.cached_tokens, 0);
     }
 }

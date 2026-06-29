@@ -112,6 +112,12 @@ pub fn parse_openai_response(body: &serde_json::Value) -> Result<InferenceRespon
         .and_then(|v| v.as_str())
         .unwrap_or("stop");
 
+    let cached_tokens = usage
+        .and_then(|u| u.get("prompt_tokens_details"))
+        .and_then(|d| d.get("cached_tokens"))
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0) as usize;
+
     Ok(InferenceResponse {
         content,
         tool_calls,
@@ -119,6 +125,8 @@ pub fn parse_openai_response(body: &serde_json::Value) -> Result<InferenceRespon
             prompt_tokens,
             completion_tokens,
             total_tokens: prompt_tokens + completion_tokens,
+            cached_tokens,
+            cache_write_tokens: 0,
         },
         finish_reason: parse_openai_finish_reason(finish_reason),
     })
@@ -220,6 +228,11 @@ pub fn parse_openai_sse_event(buffer: &mut String) -> Option<Option<StreamChunk>
                         .get("completion_tokens")
                         .and_then(|v| v.as_u64())
                         .unwrap_or(0) as usize;
+                    let cached_tokens = usage
+                        .get("prompt_tokens_details")
+                        .and_then(|d| d.get("cached_tokens"))
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0) as usize;
                     return Some(Some(StreamChunk {
                         delta: String::new(),
                         tool_calls: Vec::new(),
@@ -227,6 +240,8 @@ pub fn parse_openai_sse_event(buffer: &mut String) -> Option<Option<StreamChunk>
                             prompt_tokens,
                             completion_tokens,
                             total_tokens: prompt_tokens + completion_tokens,
+                            cached_tokens,
+                            cache_write_tokens: 0,
                         }),
                         finish_reason: None,
                     }));
@@ -281,10 +296,17 @@ pub fn parse_openai_sse_event(buffer: &mut String) -> Option<Option<StreamChunk>
                     .get("completion_tokens")
                     .and_then(|v| v.as_u64())
                     .unwrap_or(0) as usize;
+                let cached = usage
+                    .get("prompt_tokens_details")
+                    .and_then(|d| d.get("cached_tokens"))
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0) as usize;
                 TokenUsage {
                     prompt_tokens: pt,
                     completion_tokens: ct,
                     total_tokens: pt + ct,
+                    cached_tokens: cached,
+                    cache_write_tokens: 0,
                 }
             });
 

@@ -60,6 +60,9 @@ enum Commands {
     /// Validate an agent blueprint
     Validate(commands::validate::ValidateArgs),
 
+    /// Benchmark cache efficiency for an agent
+    Bench(commands::bench::BenchArgs),
+
     /// Start the REST + WebSocket API server
     Serve(commands::serve::ServeArgs),
 
@@ -92,6 +95,7 @@ async fn main() -> anyhow::Result<()> {
         Commands::Models(args) => commands::models::execute(args).await,
         Commands::Validate(args) => commands::validate::execute(args).await,
         Commands::Serve(args) => commands::serve::execute(args).await,
+        Commands::Bench(args) => commands::bench::execute(args).await,
         Commands::RunWorker(args) => commands::run::execute_worker(args).await,
     }
 }

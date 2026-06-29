@@ -146,12 +146,26 @@ impl AnthropicProvider {
         let mut system_parts: Vec<serde_json::Value> = Vec::new();
         let mut messages: Vec<serde_json::Value> = Vec::new();
 
+        // Track cache breakpoints — Anthropic allows max 4.
+        let mut breakpoint_count = 0;
+        const MAX_BREAKPOINTS: usize = 4;
+
         for msg in &request.messages {
             if msg.role == "system" {
                 system_parts.push(serde_json::json!({
                     "type": "text",
                     "text": msg.content,
                     "cache_control": { "type": "ephemeral" }
+                }));
+            } else if msg.cache_breakpoint && breakpoint_count < MAX_BREAKPOINTS {
+                breakpoint_count += 1;
+                messages.push(serde_json::json!({
+                    "role": msg.role,
+                    "content": [{
+                        "type": "text",
+                        "text": msg.content,
+                        "cache_control": { "type": "ephemeral" }
+                    }],
                 }));
             } else {
                 messages.push(serde_json::json!({
@@ -272,6 +286,15 @@ impl AnthropicProvider {
             .and_then(|v| v.as_str())
             .unwrap_or("end_turn");
 
+        let cached_tokens = usage
+            .and_then(|u| u.get("cache_read_input_tokens"))
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0) as usize;
+        let cache_write_tokens = usage
+            .and_then(|u| u.get("cache_creation_input_tokens"))
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0) as usize;
+
         Ok(InferenceResponse {
             content,
             tool_calls,
@@ -279,6 +302,8 @@ impl AnthropicProvider {
                 prompt_tokens,
                 completion_tokens,
                 total_tokens: prompt_tokens + completion_tokens,
+                cached_tokens,
+                cache_write_tokens,
             },
             finish_reason: Self::parse_stop_reason(stop_reason),
         })
@@ -653,6 +678,8 @@ fn parse_sse_event(buffer: &mut String, tool_index: &mut usize) -> Option<Stream
                     prompt_tokens: 0,
                     completion_tokens: output_tokens,
                     total_tokens: output_tokens,
+                    cached_tokens: 0,
+                    cache_write_tokens: 0,
                 }),
                 finish_reason: Some(AnthropicProvider::parse_stop_reason(stop_reason)),
             })
@@ -664,8 +691,16 @@ fn parse_sse_event(buffer: &mut String, tool_index: &mut usize) -> Option<Stream
                 .and_then(|u| u.get("input_tokens"))
                 .and_then(|v| v.as_u64())
                 .unwrap_or(0) as usize;
+            let cached = usage
+                .and_then(|u| u.get("cache_read_input_tokens"))
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0) as usize;
+            let cache_write = usage
+                .and_then(|u| u.get("cache_creation_input_tokens"))
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0) as usize;
 
-            if input_tokens > 0 {
+            if input_tokens > 0 || cached > 0 || cache_write > 0 {
                 Some(StreamChunk {
                     delta: String::new(),
                     tool_calls: Vec::new(),
@@ -673,6 +708,8 @@ fn parse_sse_event(buffer: &mut String, tool_index: &mut usize) -> Option<Stream
                         prompt_tokens: input_tokens,
                         completion_tokens: 0,
                         total_tokens: input_tokens,
+                        cached_tokens: cached,
+                        cache_write_tokens: cache_write,
                     }),
                     finish_reason: None,
                 })
@@ -709,10 +746,12 @@ mod tests {
                 crate::provider::Message {
                     role: "system".to_string(),
                     content: "You are helpful.".to_string(),
+                    cache_breakpoint: false,
                 },
                 crate::provider::Message {
                     role: "user".to_string(),
                     content: "Hello".to_string(),
+                    cache_breakpoint: false,
                 },
             ],
             model: "claude-sonnet-4-6".to_string(),
@@ -841,5 +880,137 @@ mod tests {
         // Override should take precedence over built-in
         assert!(!caps.supports_temperature);
         assert_eq!(caps.max_output_tokens, 32_768);
+    }
+
+    #[test]
+    fn test_build_request_body_with_cache_breakpoint() {
+        let provider = AnthropicProvider::new("test-key".to_string());
+        let request = InferenceRequest {
+            messages: vec![
+                crate::provider::Message {
+                    role: "system".to_string(),
+                    content: "You are helpful.".to_string(),
+                    cache_breakpoint: false,
+                },
+                crate::provider::Message {
+                    role: "user".to_string(),
+                    content: "Hello".to_string(),
+                    cache_breakpoint: true,
+                },
+                crate::provider::Message {
+                    role: "user".to_string(),
+                    content: "World".to_string(),
+                    cache_breakpoint: false,
+                },
+            ],
+            model: "claude-sonnet-4-6".to_string(),
+            max_tokens: 1024,
+            temperature: 0.7,
+            tools: vec![],
+            extra: serde_json::Value::Null,
+        };
+
+        let body = provider.build_request_body(&request);
+        let messages = body["messages"].as_array().unwrap();
+
+        // First non-system message has cache_breakpoint: true
+        let first_msg = &messages[0];
+        assert!(
+            first_msg.get("content").unwrap().is_array(),
+            "Cache breakpoint message should use content blocks array"
+        );
+        let content_block = &first_msg["content"][0];
+        assert_eq!(
+            content_block["cache_control"]["type"], "ephemeral",
+            "Cache breakpoint should have cache_control"
+        );
+
+        // Second non-system message has no cache_breakpoint
+        let second_msg = &messages[1];
+        assert!(
+            second_msg.get("content").unwrap().is_string(),
+            "Non-breakpoint message should use simple string content"
+        );
+    }
+
+    #[test]
+    fn test_build_request_body_max_4_breakpoints() {
+        let provider = AnthropicProvider::new("test-key".to_string());
+        let mut messages: Vec<crate::provider::Message> = (0..6)
+            .map(|i| crate::provider::Message {
+                role: "user".to_string(),
+                content: format!("Message {}", i),
+                cache_breakpoint: true,
+            })
+            .collect();
+        // Add a system message
+        messages.insert(
+            0,
+            crate::provider::Message {
+                role: "system".to_string(),
+                content: "System".to_string(),
+                cache_breakpoint: false,
+            },
+        );
+
+        let request = InferenceRequest {
+            messages,
+            model: "claude-sonnet-4-6".to_string(),
+            max_tokens: 1024,
+            temperature: 0.7,
+            tools: vec![],
+            extra: serde_json::Value::Null,
+        };
+
+        let body = provider.build_request_body(&request);
+        let msgs = body["messages"].as_array().unwrap();
+
+        // Count messages that have content blocks with cache_control
+        let bp_count = msgs
+            .iter()
+            .filter(|m| {
+                m.get("content")
+                    .and_then(|c| c.as_array())
+                    .and_then(|arr| arr.first())
+                    .and_then(|block| block.get("cache_control"))
+                    .is_some()
+            })
+            .count();
+        assert_eq!(bp_count, 4, "Should cap at 4 cache breakpoints");
+    }
+
+    #[test]
+    fn test_parse_response_with_cache_metrics() {
+        let provider = AnthropicProvider::new("test-key".to_string());
+        let body = serde_json::json!({
+            "content": [
+                { "type": "text", "text": "Hello!" }
+            ],
+            "stop_reason": "end_turn",
+            "usage": {
+                "input_tokens": 100,
+                "output_tokens": 20,
+                "cache_read_input_tokens": 80,
+                "cache_creation_input_tokens": 10
+            }
+        });
+
+        let response = provider.parse_response(&body).unwrap();
+        assert_eq!(response.tokens_used.prompt_tokens, 100);
+        assert_eq!(response.tokens_used.cached_tokens, 80);
+        assert_eq!(response.tokens_used.cache_write_tokens, 10);
+    }
+
+    #[test]
+    fn test_token_usage_defaults_cache_fields_to_zero() {
+        let usage = TokenUsage {
+            prompt_tokens: 100,
+            completion_tokens: 50,
+            total_tokens: 150,
+            cached_tokens: 0,
+            cache_write_tokens: 0,
+        };
+        assert_eq!(usage.cached_tokens, 0);
+        assert_eq!(usage.cache_write_tokens, 0);
     }
 }

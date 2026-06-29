@@ -144,6 +144,8 @@ pub struct DashboardAgent {
     pub tokens_in: usize,
     /// Cumulative completion (output) tokens for background runs.
     pub tokens_out: usize,
+    /// Cumulative tokens read from provider cache.
+    pub cached_tokens: usize,
     /// Context-window occupancy for in-process agents: (current, max).
     pub context_tokens: (usize, usize),
     pub iteration: usize,
@@ -560,6 +562,7 @@ impl Dashboard {
                 agent.iteration = run.iteration;
                 agent.tokens_in = run.prompt_tokens;
                 agent.tokens_out = run.completion_tokens;
+                agent.cached_tokens = run.cached_tokens;
                 agent.title = run.title.clone();
                 agent.pid = run.pid;
                 let now_is_waiting = matches!(
@@ -660,6 +663,7 @@ impl Dashboard {
                     status,
                     tokens_in: run.prompt_tokens,
                     tokens_out: run.completion_tokens,
+                    cached_tokens: run.cached_tokens,
                     context_tokens: (0, 0),
                     iteration: run.iteration,
                     waiting_prompt,
@@ -2247,10 +2251,17 @@ impl Dashboard {
                 .unwrap_or_default();
 
             let total_tok_part = if agent.tokens_in > 0 || agent.tokens_out > 0 {
+                let cache_part = if agent.cached_tokens > 0 && agent.tokens_in > 0 {
+                    let pct = (agent.cached_tokens as f64 / agent.tokens_in as f64) * 100.0;
+                    format!("  cache {:.0}%", pct)
+                } else {
+                    String::new()
+                };
                 format!(
-                    "  ·  total {}↑ {}↓",
+                    "  ·  total {}↑ {}↓{}",
                     format_tokens(agent.tokens_in),
-                    format_tokens(agent.tokens_out)
+                    format_tokens(agent.tokens_out),
+                    cache_part,
                 )
             } else {
                 String::new()

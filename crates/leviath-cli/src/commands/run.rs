@@ -799,10 +799,12 @@ async fn apply_compact_transform(
         leviath_providers::Message {
             role: "system".to_string(),
             content: prompt.to_string(),
+            cache_breakpoint: false,
         },
         leviath_providers::Message {
             role: "user".to_string(),
             content: content_to_compact,
+            cache_breakpoint: false,
         },
     ];
 
@@ -1843,6 +1845,7 @@ async fn run_worker_inner(args: &WorkerArgs, meta: &mut RunMeta) -> anyhow::Resu
 
                     meta.prompt_tokens += resp.tokens_used.prompt_tokens;
                     meta.completion_tokens += resp.tokens_used.completion_tokens;
+                    meta.cached_tokens += resp.tokens_used.cached_tokens;
 
                     // Carry the final response forward so the next stage sees the previous stage's output
                     if !resp.content.is_empty() {
@@ -1878,6 +1881,7 @@ async fn run_worker_inner(args: &WorkerArgs, meta: &mut RunMeta) -> anyhow::Resu
                         r.ended_at = Some(stage_ended_at);
                         r.prompt_tokens = meta.prompt_tokens;
                         r.completion_tokens = meta.completion_tokens;
+                        r.cached_tokens = meta.cached_tokens;
                     }
                     let _ = runstate::write_stages_index(&args.run_id, &stages);
                 }
@@ -2076,6 +2080,7 @@ where
             if let Some(ref mut m) = meta_holder {
                 m.prompt_tokens += response.tokens_used.prompt_tokens;
                 m.completion_tokens += response.tokens_used.completion_tokens;
+                m.cached_tokens += response.tokens_used.cached_tokens;
                 m.touch();
                 let _ = runstate::write_meta(m);
             }
@@ -2112,6 +2117,7 @@ where
             if let Some(ref mut m) = meta_holder {
                 m.prompt_tokens += response.tokens_used.prompt_tokens;
                 m.completion_tokens += response.tokens_used.completion_tokens;
+                m.cached_tokens += response.tokens_used.cached_tokens;
                 m.touch();
                 let _ = runstate::write_meta(m);
             }
@@ -2297,6 +2303,7 @@ where
                     record_stage_log(&m.run_id, m.stage_index, &token_line);
                     m.prompt_tokens += resp.tokens_used.prompt_tokens;
                     m.completion_tokens += resp.tokens_used.completion_tokens;
+                    m.cached_tokens += resp.tokens_used.cached_tokens;
                     m.touch();
                     let _ = runstate::write_meta(m);
                 }
@@ -2519,6 +2526,8 @@ async fn stream_inference(
         prompt_tokens: 0,
         completion_tokens: full_content.len() / 4,
         total_tokens: full_content.len() / 4,
+        cached_tokens: 0,
+        cache_write_tokens: 0,
     });
 
     Ok(leviath_providers::InferenceResponse {
@@ -2584,10 +2593,12 @@ async fn generate_title(
                 content: "Write a terse 3-6 word title summarising the task. \
                           No quotes, no punctuation at the end, no markdown."
                     .to_string(),
+                cache_breakpoint: false,
             },
             leviath_providers::Message {
                 role: "user".to_string(),
                 content: task.to_string(),
+                cache_breakpoint: false,
             },
         ],
         model,

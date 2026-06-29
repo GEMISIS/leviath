@@ -659,10 +659,12 @@ impl AgentEngine {
                 Message {
                     role: "system".to_string(),
                     content: system_prompt,
+                    cache_breakpoint: false,
                 },
                 Message {
                     role: "user".to_string(),
                     content: user_prompt,
+                    cache_breakpoint: false,
                 },
             ],
             model: compaction_config.model.clone(),

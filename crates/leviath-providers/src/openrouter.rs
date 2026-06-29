@@ -71,15 +71,33 @@ impl OpenRouterProvider {
     }
 
     /// Build the request body (OpenAI-compatible format).
+    ///
+    /// For Anthropic models (detected by `claude` in name), pass through
+    /// cache breakpoint markers as content-block cache_control annotations.
     fn build_request_body(&self, request: &InferenceRequest) -> serde_json::Value {
+        let is_anthropic = request.model.contains("claude");
+        let mut breakpoint_count = 0usize;
+
         let messages: Vec<serde_json::Value> = request
             .messages
             .iter()
             .map(|msg| {
-                serde_json::json!({
-                    "role": msg.role,
-                    "content": msg.content,
-                })
+                if is_anthropic && msg.cache_breakpoint && breakpoint_count < 4 {
+                    breakpoint_count += 1;
+                    serde_json::json!({
+                        "role": msg.role,
+                        "content": [{
+                            "type": "text",
+                            "text": msg.content,
+                            "cache_control": { "type": "ephemeral" }
+                        }],
+                    })
+                } else {
+                    serde_json::json!({
+                        "role": msg.role,
+                        "content": msg.content,
+                    })
+                }
             })
             .collect();
 
@@ -463,6 +481,7 @@ mod tests {
             messages: vec![crate::provider::Message {
                 role: "user".to_string(),
                 content: "Hello".to_string(),
+                cache_breakpoint: false,
             }],
             model: "anthropic/claude-sonnet-4".to_string(),
             max_tokens: 1024,

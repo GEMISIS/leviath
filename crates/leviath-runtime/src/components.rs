@@ -285,12 +285,19 @@ impl ContextWindow {
     /// - Tool results → user messages with [Tool results] prefix
     /// - Other regions → user messages with region header
     pub fn assemble_messages(&self) -> Vec<leviath_providers::Message> {
+        use leviath_core::CacheHint;
+
         let mut messages = Vec::new();
+        // Track region boundaries: (start_index, cache_hint) for each region
+        let mut region_boundaries: Vec<(usize, CacheHint)> = Vec::new();
 
         for region in &self.regions {
             if region.content.is_empty() {
                 continue;
             }
+
+            let start_idx = messages.len();
+            let hint = region.kind.cache_hint();
 
             match &region.kind {
                 leviath_core::RegionKind::Pinned
@@ -305,6 +312,7 @@ impl ContextWindow {
                     messages.push(leviath_providers::Message {
                         role: "system".to_string(),
                         content,
+                        cache_breakpoint: false,
                     });
                 }
                 leviath_core::RegionKind::SlidingWindow { .. }
@@ -316,16 +324,19 @@ impl ContextWindow {
                             messages.push(leviath_providers::Message {
                                 role: "assistant".to_string(),
                                 content: rest.to_string(),
+                                cache_breakpoint: false,
                             });
                         } else if let Some(rest) = trimmed.strip_prefix("User: ") {
                             messages.push(leviath_providers::Message {
                                 role: "user".to_string(),
                                 content: rest.to_string(),
+                                cache_breakpoint: false,
                             });
                         } else {
                             messages.push(leviath_providers::Message {
                                 role: "user".to_string(),
                                 content: entry.content.clone(),
+                                cache_breakpoint: false,
                             });
                         }
                     }
@@ -341,6 +352,7 @@ impl ContextWindow {
                     messages.push(leviath_providers::Message {
                         role: "user".to_string(),
                         content: format!("[Tool results from {}]:\n{}", region.name, content),
+                        cache_breakpoint: false,
                     });
                 }
                 leviath_core::RegionKind::Clearable => {
@@ -353,8 +365,14 @@ impl ContextWindow {
                     messages.push(leviath_providers::Message {
                         role: "user".to_string(),
                         content: format!("[{}]:\n{}", region.name, content),
+                        cache_breakpoint: false,
                     });
                 }
+            }
+
+            // Record region boundary if it produced any messages
+            if messages.len() > start_idx {
+                region_boundaries.push((start_idx, hint));
             }
         }
 
@@ -363,7 +381,54 @@ impl ContextWindow {
             messages.push(leviath_providers::Message {
                 role: "user".to_string(),
                 content: "Begin.".to_string(),
+                cache_breakpoint: false,
             });
+        }
+
+        // Apply cache breakpoints at region boundaries (max 4 for Anthropic compat)
+        let mut breakpoints_set = 0usize;
+        const MAX_BREAKPOINTS: usize = 4;
+
+        for (start_idx, hint) in &region_boundaries {
+            if breakpoints_set >= MAX_BREAKPOINTS {
+                break;
+            }
+            match hint {
+                CacheHint::Always | CacheHint::UntilChanged => {
+                    // Mark the last message of this region group
+                    // Find the end: it's just before the next region's start, or end of messages
+                    let region_end = region_boundaries
+                        .iter()
+                        .find(|(s, _)| *s > *start_idx)
+                        .map(|(s, _)| s - 1)
+                        .unwrap_or(messages.len() - 1);
+                    if region_end < messages.len() {
+                        messages[region_end].cache_breakpoint = true;
+                        breakpoints_set += 1;
+                    }
+                }
+                CacheHint::SlidingPrefix { stable_fraction } => {
+                    // Find end of this region's messages
+                    let region_end = region_boundaries
+                        .iter()
+                        .find(|(s, _)| *s > *start_idx)
+                        .map(|(s, _)| *s)
+                        .unwrap_or(messages.len());
+                    let region_msg_count = region_end - start_idx;
+                    if region_msg_count > 1 {
+                        let stable_count =
+                            (region_msg_count as f32 * stable_fraction).floor() as usize;
+                        if stable_count > 0 {
+                            let bp_idx = start_idx + stable_count - 1;
+                            if bp_idx < messages.len() {
+                                messages[bp_idx].cache_breakpoint = true;
+                                breakpoints_set += 1;
+                            }
+                        }
+                    }
+                }
+                CacheHint::Never => {}
+            }
         }
 
         messages
@@ -880,5 +945,91 @@ mod tests {
         };
         assert_eq!(state.spawned_children_ids.len(), 2);
         assert_eq!(state.pending_wait, Some("child-01".to_string()));
+    }
+
+    #[test]
+    fn test_assemble_messages_cache_breakpoints_pinned() {
+        let mut window = ContextWindow::new(10000);
+
+        let mut system = Region::new("system".to_string(), RegionKind::Pinned, 1000);
+        system
+            .add_entry("You are a helpful assistant.".to_string(), 100)
+            .unwrap();
+        window.add_region(system);
+
+        let mut conv = Region::new(
+            "conversation".to_string(),
+            RegionKind::SlidingWindow { max_items: 10 },
+            5000,
+        );
+        conv.add_entry("User: Hello".to_string(), 50).unwrap();
+        conv.add_entry("Assistant: Hi".to_string(), 50).unwrap();
+        conv.add_entry("User: How are you?".to_string(), 50)
+            .unwrap();
+        conv.add_entry("Assistant: Good!".to_string(), 50).unwrap();
+        window.add_region(conv);
+
+        let msgs = window.assemble_messages();
+
+        // System (Pinned) message should have cache_breakpoint = true
+        assert!(
+            msgs[0].cache_breakpoint,
+            "Pinned region last message should be a cache breakpoint"
+        );
+
+        // SlidingWindow with 4 messages: stable prefix = floor(4 * 0.75) = 3
+        // So index 0 = system, index 1..4 = conversation, breakpoint at index 1+3-1 = 3
+        assert!(
+            msgs[3].cache_breakpoint,
+            "SlidingWindow stable prefix boundary should be a cache breakpoint"
+        );
+    }
+
+    #[test]
+    fn test_assemble_messages_max_4_breakpoints() {
+        let mut window = ContextWindow::new(100000);
+
+        // Add 5 pinned regions — only first 4 should get breakpoints
+        for i in 0..5 {
+            let mut region = Region::new(format!("pinned_{}", i), RegionKind::Pinned, 10000);
+            region.add_entry(format!("Content {}", i), 100).unwrap();
+            window.add_region(region);
+        }
+
+        // Add a compacting region
+        let mut compacting = Region::new(
+            "compacting".to_string(),
+            RegionKind::Compacting {
+                threshold_tokens: 5000,
+            },
+            10000,
+        );
+        compacting
+            .add_entry("User: hello".to_string(), 100)
+            .unwrap();
+        window.add_region(compacting);
+
+        let msgs = window.assemble_messages();
+        let bp_count = msgs.iter().filter(|m| m.cache_breakpoint).count();
+        assert!(
+            bp_count <= 4,
+            "Should not exceed 4 cache breakpoints, got {}",
+            bp_count
+        );
+    }
+
+    #[test]
+    fn test_assemble_messages_no_breakpoints_on_temporary() {
+        let mut window = ContextWindow::new(10000);
+
+        let mut temp = Region::new("temp".to_string(), RegionKind::Temporary, 5000);
+        temp.add_entry("tool output".to_string(), 100).unwrap();
+        window.add_region(temp);
+
+        let msgs = window.assemble_messages();
+        assert!(
+            !msgs.iter().any(|m| m.cache_breakpoint),
+            "Temporary regions should never get cache breakpoints"
+        );
     }
 }
