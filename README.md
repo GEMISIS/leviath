@@ -1,233 +1,182 @@
-# Leviath
+<p align="center">
+  <h1 align="center">Leviath</h1>
+  <p align="center">
+    <strong>Hardware-inspired context management for LLM agents</strong>
+  </p>
+  <p align="center">
+    <a href="https://github.com/GEMISIS/leviath/actions"><img src="https://github.com/GEMISIS/leviath/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+    <a href="https://github.com/GEMISIS/leviath/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License: MIT"></a>
+    <a href="https://leviath.dev"><img src="https://img.shields.io/badge/docs-leviath.dev-8b5cf6" alt="Docs"></a>
+  </p>
+</p>
 
-**Hardware-inspired context window management for LLM agents.**
+---
 
-Leviath gives LLM agents structured, tiered memory instead of flat conversation arrays. Inspired by hardware memory architectures — think CPU cache hierarchies, not chat logs — it provides explicit control over what stays in context, what gets summarized, and what gets evicted when memory fills up.
+Every AI agent framework manages context the same way: a flat message array that gets randomly truncated or summarized when it fills up. After ~20 tool calls, your agent has forgotten half of what it read.
 
-## Quickstart
+Leviath fixes this with **typed memory regions** — inspired by CPU cache hierarchies, not chat logs. Architecture docs stay pinned. Tool results evict first. Conversation history auto-compacts into summaries. Your agent keeps its understanding of what it's building, even 100+ iterations in.
 
-```bash
-# Install the CLI
-cargo install --path crates/leviath-cli
-
-# Create an agent
-lev init my-agent && cd my-agent
-
-# Set your API key (already gitignored)
-echo 'ANTHROPIC_API_KEY=sk-ant-...' > .env
-
-# Run it
-lev run --task "Explain how CPU cache hierarchies work"
+```
+┌─────────────────────── Context Window ───────────────────────┐
+│ 🔒 Pinned           │ Architecture, objectives │ NEVER evicted │
+│ 📜 SlidingWindow     │ Recent conversation      │ NEVER reduced │
+│ 📦 Compacting        │ Implementation history   │ LLM-summarized│
+│ 📎 Temporary         │ File contents            │ Oldest first  │
+│ 🧹 Clearable         │ Scratch/tool output      │ Wiped first   │
+│ 🗂️ CompactHistory    │ Stored summaries         │ Accumulates   │
+└──────────────────────────────────────────────────────────────┘
 ```
 
-Or run one of the pre-built agents:
+## Quick Start
 
 ```bash
-# Run the multi-stage coding agent (analyze → implement → review)
-lev run agents/coder --task "Build a CLI tool that converts CSV to JSON"
+# Install
+cargo install --path crates/leviath-cli
 
-# Run the research agent (gather → analyze → summarize)
+# Set up API keys
+lev setup
+
+# Create and run an agent
+lev create my-agent
+cd my-agent
+lev run --task "Build a CLI that converts CSV to JSON"
+
+# Manage running agents
+lev dash
+```
+
+Or use a pre-built agent:
+
+```bash
+lev run agents/software-engineer --task "Add error handling to the API module"
 lev run agents/researcher --task "Compare spiking neural networks vs transformers"
 ```
 
-Managing multiple agents at once:
+No Rust code needed — agents are defined in a single TOML file.
 
-```bash
-# Spawn an agent in the background, then open the interactive dashboard
-lev run agents/coder --task "Refactor the auth module"
-lev dash
+## Why Leviath?
 
-# Inside the dashboard:
-#   [↑↓] to select an agent
-#   [Enter] to open the detail view
-#   [i] to respond when an agent is waiting for input
-#   [c] to cancel, [k] to kill, [d] to delete, [q] to quit
+<table>
+<tr>
+<td><strong>Flat context (everyone else)</strong></td>
+<td><strong>Structured regions (Leviath)</strong></td>
+</tr>
+<tr>
+<td>
+
+```
+[system prompt          ]
+[message 1              ]
+[message 2              ]
+[tool result (huge)     ]  ← pushes out
+[message 3              ]     important
+[tool result            ]     context
+[message 4              ]
+[...truncated or        ]
+[   randomly summarized ]
 ```
 
-Your agent is defined in `agent.leviath` — edit it to change models, add stages, or configure memory regions. No Rust code needed.
+</td>
+<td>
 
-**API Key Priority:** `~/.leviath/config.toml` (chmod 600) > `.env` in project dir (gitignored) > environment variables (stripped from MCP child processes).
-
-### Using Claude Code (No API Key)
-
-If you have a Claude Code subscription, you can use Leviath without any API keys:
-
-```toml
-[stages.main]
-model = { provider = "claude-code", model = "claude-sonnet-4-5" }
+```
+🔒 [architecture: always here  ]
+📜 [conversation: last 15 turns]
+📦 [impl history: auto-compacts]
+📎 [files: evicts oldest first ]
+🧹 [scratch: wipes when full   ]
+🗂️ [summaries: accumulates     ]
 ```
 
-```bash
-lev init my-agent && cd my-agent
-# Edit agent.leviath to use provider = "claude-code"
-lev run --task "Your task here"
-```
+</td>
+</tr>
+</table>
 
-> **Limitations:** The claude-code provider shells out to the `claude` CLI for each inference call. Compared to direct API providers:
-> - **No prompt caching** — each call starts fresh (~100-200ms overhead)
-> - **Tool execution is handled by Claude Code**, not Leviath — tool result routing and per-stage filtering don't apply
-> - **Not ideal for many concurrent agents** — each agent spawns separate CLI processes
-> - **Best for:** Single-agent workflows, prototyping, users who want to try Leviath without API costs
-> - **For full features:** Use `provider = "anthropic"` with an API key
+When context fills up, eviction follows a deterministic cascade:
 
-## The Problem
+**Clearable** (wipe scratch) → **Temporary** (evict oldest files) → **Compacting** (LLM-summarize to history) → **Error** (nothing left to free)
 
-Every LLM agent framework manages context the same way: a flat array of messages with uniform compaction when it gets too long. This is like running a computer with one big memory pool that gets randomly wiped when full.
-
-Leviath replaces this with **typed memory regions**, each with its own lifecycle:
-
-```mermaid
-graph LR
-    subgraph Context Window
-        P[🔒 Pinned<br><i>Never evicted</i>]
-        SW[📜 SlidingWindow<br><i>Last N entries</i>]
-        T[📎 Temporary<br><i>First evicted</i>]
-        CL[🧹 Clearable<br><i>Wiped when needed</i>]
-        CO[📦 Compacting<br><i>LLM-summarized</i>]
-        CH[🗂️ CompactHistory<br><i>Stored summaries</i>]
-    end
-
-    CO -- summarizes into --> CH
-
-    style P fill:#4a9eff,color:#fff
-    style SW fill:#22c55e,color:#fff
-    style T fill:#f59e0b,color:#fff
-    style CL fill:#ef4444,color:#fff
-    style CO fill:#8b5cf6,color:#fff
-    style CH fill:#6366f1,color:#fff
-```
-
-When context fills up, eviction is deterministic:
-
-```mermaid
-flowchart LR
-    Full[Context Full] --> CL[Clear<br>Clearable]
-    CL -->|still full| T[Evict oldest<br>Temporary]
-    T -->|still full| CO[Compact via LLM<br>Compacting → History]
-    CO -->|still full| ERR[Error<br>Can't free more]
-
-    P[Pinned] -.-x|NEVER| ERR
-    SW[SlidingWindow] -.-x|NEVER| ERR
-
-    style CL fill:#ef4444,color:#fff
-    style T fill:#f59e0b,color:#fff
-    style CO fill:#8b5cf6,color:#fff
-    style ERR fill:#991b1b,color:#fff
-    style P fill:#4a9eff,color:#fff
-    style SW fill:#22c55e,color:#fff
-```
+Pinned and SlidingWindow regions are **never** touched. Your agent's core understanding survives.
 
 ## How It Works
 
-```mermaid
-flowchart TB
-    subgraph Agent["agent.leviath"]
-        direction TB
-        B[Blueprint] --> S1[Stage: analyze<br><i>claude-sonnet-4-5</i>]
-        B --> S2[Stage: implement<br><i>claude-sonnet-4-5</i>]
-        B --> S3[Stage: review<br><i>claude-opus-4</i>]
-        B --> CW[Context Window]
-    end
-
-    subgraph CW[" "]
-        direction LR
-        R1["🔒 architecture<br>4,000 tok"]
-        R2["📎 files<br>30,000 tok"]
-        R3["📜 conversation<br>15,000 tok"]
-        R4["📦 impl_history<br>15,000 tok"]
-        R5["🧹 scratch<br>10,000 tok"]
-    end
-
-    S1 -->|sequential| S2 -->|sequential| S3
-
-    subgraph Providers
-        A[Anthropic]
-        O[OpenAI]
-        OR[OpenRouter]
-        OL[Ollama]
-        CC[Claude Code]
-    end
-
-    subgraph Tools["MCP Tools"]
-        T1[read_file]
-        T2[write_file]
-        T3[search]
-    end
-
-    S2 --> A
-    S2 --> Tools
-
-    style Agent fill:#1e293b,color:#fff
-    style R1 fill:#4a9eff,color:#fff
-    style R2 fill:#f59e0b,color:#fff
-    style R3 fill:#22c55e,color:#fff
-    style R4 fill:#8b5cf6,color:#fff
-    style R5 fill:#ef4444,color:#fff
-```
-
-Agents are defined in a single TOML file — no Rust code needed:
+### Define an Agent
 
 ```toml
+# agent.leviath
 [agent]
 name = "my-agent"
 version = "0.1.0"
-description = "A research assistant"
 
-# Stages execute sequentially, each with its own model
-[stages.gather]
-mode = "autonomous"
-model = { provider = "anthropic", model = "claude-sonnet-4-5" }
-available_tools = ["web_search", "read_file"]
-
+# Stages execute sequentially, each with its own model and tools
 [stages.analyze]
 mode = "autonomous"
 model = { provider = "anthropic", model = "claude-sonnet-4-5" }
+available_tools = ["read_file", "list_dir", "search"]
+
+[stages.implement]
+mode = "autonomous"
+model = { provider = "anthropic", model = "claude-sonnet-4-5" }
+available_tools = ["read_file", "write_file", "edit_file", "bash"]
 
 [stages.review]
-mode = "interactive"  # Pauses for user input
+mode = "interactive"  # Pauses for user approval
 model = { provider = "anthropic", model = "claude-opus-4" }
 
-# Context regions — the memory map
+# Context regions — the memory architecture
 [context.regions]
-objective = { kind = "pinned", max_tokens = 2000 }
-sources = { kind = "temporary", max_tokens = 40000 }
-findings = { kind = "compacting", threshold_tokens = 8000, max_tokens = 15000 }
-findings_history = { kind = "compact_history", source_region = "findings", max_tokens = 10000 }
-conversation = { kind = "sliding_window", max_items = 15, max_tokens = 12000 }
-scratch = { kind = "clearable", max_tokens = 8000 }
+architecture = { kind = "pinned", max_tokens = 4000 }
+codebase     = { kind = "temporary", max_tokens = 30000 }
+conversation = { kind = "sliding_window", max_items = 15, max_tokens = 15000 }
+impl_history = { kind = "compacting", threshold_tokens = 8000, max_tokens = 15000 }
+history      = { kind = "compact_history", source_region = "impl_history", max_tokens = 10000 }
+scratch      = { kind = "clearable", max_tokens = 10000 }
+```
 
-# Compaction config (optional — uses defaults if omitted)
-[compaction]
-provider = "anthropic"
-model = "claude-sonnet-4"
+### Route Tool Results
+
+Control where tool outputs land in memory:
+
+```toml
+[stages.implement.tool_routing]
+default_region = "scratch"
+max_result_tokens = 5000
+
+[stages.implement.tool_routing.overrides]
+read_file = "codebase"    # File contents → temporary region (evicts oldest)
+search = "codebase"       # Search results → same region
+bash = "scratch"          # Shell output → clearable (wipes first)
+```
+
+### Spawn Sub-Agents
+
+Agents can spawn child agents with different blueprints:
+
+```toml
+[agent]
+max_child_depth = 3  # How deep the sub-agent tree can go
+
+[stages.analyze]
+requires_children = true  # Don't advance until children complete
+available_tools = ["spawn_agent", "check_agent", "wait_for_agent", "send_to_agent", "kill_agent"]
+```
+
+Sub-agents are just agents — they get their own context window, their own stages, and appear in the dashboard tree:
+
+```
+● coder-01          ACTIVE    implement   iter 12
+  ├─ researcher-01  COMPLETE
+  ├─ researcher-02  ACTIVE    analyze     iter 3
+  └─ researcher-03  ◆WAITING              (input needed)
 ```
 
 ## Stage Modes
 
-```mermaid
-flowchart LR
-    subgraph Autonomous
-        A1[Infer] --> A2{Tool calls?}
-        A2 -->|yes| A3[Execute tools] --> A1
-        A2 -->|no| A4[Done]
-    end
-
-    subgraph Interactive
-        I1[Infer] --> I2[Show response]
-        I2 --> I3[Wait for input]
-        I3 --> I1
-    end
-
-    subgraph InteractivePoints
-        IP1[Run N iterations] --> IP2[Pause at checkpoint]
-        IP2 --> IP3[Get input]
-        IP3 --> IP1
-    end
-```
-
-- **`autonomous`** — runs without user input until complete
-- **`interactive`** — pauses after each inference for user input
-- **`interactive_points`** — runs autonomously but pauses at named checkpoints:
+| Mode | Behavior |
+|------|----------|
+| `autonomous` | Runs without user input until complete |
+| `interactive` | Pauses after each inference for user input |
+| `interactive_points` | Runs autonomously but pauses at named checkpoints |
 
 ```toml
 [stages.implement]
@@ -239,72 +188,124 @@ prompt = "Here's the proposed design. Approve or suggest changes:"
 required = true
 ```
 
-## CLI
+## CLI Reference
 
 | Command | Description |
-|---|---|
+|---------|-------------|
 | `lev create <name>` | Create agent project (`--template software-engineer\|coder\|researcher`) |
-| `lev run [path] --task <task>` | Run an agent in the background (`--model` to override) |
-| `lev dash` | TUI for managing all running and completed agents |
-| `lev pack [path]` | Bundle for distribution → `.leviath-bundle` |
-| `lev add <package>` | Install from bundle or registry |
-| `lev spawn <name>` | Spawn from installed blueprint (`--count N`) |
-| `lev list` | List installed and available agents |
-| `lev test [path]` | Run tests (`--dry-run` for no API calls) |
-| `lev context [agent_id]` | Inspect context window state |
+| `lev run [path] --task "..."` | Run agent in background (`--model`, `--yolo`, `--max-depth`) |
+| `lev dash` | TUI dashboard for managing all agents |
+| `lev serve` | REST + WebSocket API server (`--port`, `--host`) |
+| `lev pack [path]` | Bundle agent for distribution |
+| `lev add <bundle>` | Install agent from bundle |
+| `lev remove <name>` | Uninstall agent |
+| `lev list` | List installed agents |
+| `lev test [path]` | Run agent tests (`--dry-run`) |
+| `lev setup` | Configure API keys and providers |
+| `lev models` | List available models |
 
 ## Dashboard
 
-`lev dash` provides a terminal UI for managing multiple agents at once:
+`lev dash` provides a full terminal UI for managing concurrent agents:
 
 ```
-┌─ Agents ──────────────────────────────────────────────────┐
-│ ID           │ Stage       │ Status     │ Tokens  │ Iter  │
-│ coder-1      │ implement   │ ●ACTIVE    │ 45k/80k │ 12    │
-│ coder-2      │ review      │ ◆WAITING   │ 32k/80k │ 8     │
-│ reviewer-1   │ deep_review │ ●ACTIVE    │ 28k/50k │ 5     │
-├─ Agent Detail ────────────────────────────────────────────┤
-│ [coder-2] Waiting for input at: review                   │
-│ The implementation looks good. Ready to commit?           │
-│ > _                                                       │
-├─ Log ─────────────────────────────────────────────────────┤
-│ 09:15:32 coder-1: Called tool read_file(src/main.rs)      │
-│ 09:15:35 coder-2: Waiting for user input                  │
-└───────────────────────────────────────────────────────────┘
- [q]uit  [Enter]respond  [↑↓]select  [c]ancel  [k]ill  [n]ew
+┌─ Agents ─────────────────────────────────────────────────────┐
+│ ID           │ Stage       │ Status     │ Tokens   │ Iter    │
+│ coder-01     │ implement   │ ●ACTIVE    │ 45k/80k  │ 12      │
+│ coder-02     │ review      │ ◆WAITING   │ 32k/80k  │ 8       │
+│ reviewer-01  │ deep_review │ ●ACTIVE    │ 28k/50k  │ 5       │
+├─ Detail ─────────────────────────────────────────────────────┤
+│ [coder-02] Waiting for input at: review                      │
+│ The implementation looks good. Ready to commit?              │
+│ > _                                                          │
+├─ Log ────────────────────────────────────────────────────────┤
+│ 09:15:32 coder-01 → read_file(src/main.rs)                  │
+│ 09:15:35 coder-02 → Waiting for user input                  │
+└──────────────────────────────────────────────────────────────┘
+ [↑↓]select  [Enter]respond  [c]ancel  [k]ill  [d]elete  [q]uit
 ```
 
-## Tool Result Routing
+Features: stage tabs, context window visualization, markdown rendering, search/filter, clipboard yank, mouse support.
 
-Control where tool outputs land in the context window:
+## API Server
+
+`lev serve` exposes a REST + WebSocket API for programmatic control:
+
+```bash
+lev serve --port 3000
+```
+
+**REST endpoints:**
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/api/blueprints` | List available blueprints |
+| `POST` | `/api/blueprints` | Create new blueprint |
+| `POST` | `/api/blueprints/validate` | Validate manifest |
+| `POST` | `/api/agents` | Spawn agent (with metadata, webhook callback) |
+| `GET` | `/api/agents` | List agents (filter by status) |
+| `GET` | `/api/agents/tree` | Agent hierarchy with cumulative tokens |
+| `GET` | `/api/agents/:id/context` | Context window snapshot |
+| `GET` | `/api/agents/:id/result` | Final output of completed agent |
+| `DELETE` | `/api/agents/:id` | Kill agent (cascades to children) |
+
+**WebSocket:** Connect to `/ws` for real-time events (status changes, context updates, logs, interaction prompts).
+
+Spawn with a webhook to get notified on completion:
+
+```bash
+curl -X POST http://localhost:3000/api/agents \
+  -H "Content-Type: application/json" \
+  -d '{
+    "blueprint": "coder",
+    "task": "Build a REST API",
+    "callback_url": "https://your-server.com/hook",
+    "metadata": { "project_id": "abc123" }
+  }'
+```
+
+## Providers
+
+| Provider | Models | API Key |
+|----------|--------|---------|
+| Anthropic | Claude Opus, Sonnet, Haiku | `ANTHROPIC_API_KEY` |
+| OpenAI | GPT-4o, o1, o3 | `OPENAI_API_KEY` |
+| OpenRouter | Any model | `OPENROUTER_API_KEY` |
+| Ollama | Local models | None (localhost) |
+| Claude Code | Via `claude` CLI | None (subscription) |
+
+**Key priority:** `~/.leviath/config.toml` (chmod 600) > `.env` in project dir > environment variables.
+
+### Using Claude Code (No API Key)
 
 ```toml
-[stages.implement.tool_routing]
-default_region = "tool_results"
-persist = true
-max_result_tokens = 5000
+[stages.main]
+model = { provider = "claude-code", model = "claude-sonnet-4-5" }
+```
 
-[stages.implement.tool_routing.overrides]
-read_file = "codebase"
-search = "findings"
+> Claude Code shells out to the `claude` CLI — no prompt caching, tool execution handled by Claude Code, not ideal for many concurrent agents. Best for prototyping without API costs.
+
+## Pre-built Agents
+
+| Agent | Stages | Best For |
+|-------|--------|----------|
+| **software-engineer** | plan → implement → review | Full coding workflow (default template) |
+| **coder** | analyze → implement → review | Focused implementation tasks |
+| **reviewer** | scan → deep_review → report | Code review and audit |
+| **researcher** | gather → analyze → summarize | Research and synthesis |
+
+```bash
+lev run agents/coder --task "Refactor the auth module"
 ```
 
 ## Testing
 
-Create `tests/` in your agent project:
-
 ```toml
-# tests/basic.toml — run agent, check assertions
+# tests/basic.toml
 [[test]]
 name = "greeting"
 input = "Say hello"
 expect_contains = "hello"
-```
-
-```rhai
-// tests/validate.rhai — test validators
-let tokens = count_tokens("Hello world");
-tokens > 0 && tokens < 100
 ```
 
 ```bash
@@ -317,70 +318,47 @@ lev test --dry-run        # Validate structure only
 ```bash
 lev pack                  # → my-agent-0.1.0.leviath-bundle
 lev add agent.leviath-bundle
-lev spawn my-agent
 ```
 
 ## Architecture
 
-```mermaid
-graph TB
-    CLI["leviath-cli<br><code>lev</code> binary"]
-    CLI --> Runtime
-    CLI --> Package
-
-    subgraph Engine
-        Runtime["leviath-runtime<br>bevy_ecs engine"]
-        Runtime --> Core["leviath-core<br>regions, layouts, blueprints"]
-        Runtime --> Providers["leviath-providers<br>Anthropic, OpenAI,<br>OpenRouter, Ollama, Claude Code"]
-        Runtime --> MCP["leviath-mcp<br>MCP tools (JSON-RPC)"]
-    end
-
-    Scripting["leviath-scripting<br>Rhai sandbox"] --> Core
-    Package["leviath-package<br>bundling, registry"] --> Core
-
-    style CLI fill:#4a9eff,color:#fff
-    style Runtime fill:#22c55e,color:#fff
-    style Core fill:#6366f1,color:#fff
-    style Providers fill:#f59e0b,color:#fff
-    style MCP fill:#ef4444,color:#fff
-    style Scripting fill:#8b5cf6,color:#fff
-    style Package fill:#64748b,color:#fff
+```
+leviath-cli          CLI binary (lev)
+├── leviath-runtime  ECS engine (bevy_ecs)
+│   ├── leviath-core      Regions, layouts, blueprints
+│   ├── leviath-providers  Anthropic, OpenAI, OpenRouter, Ollama, Claude Code
+│   └── leviath-mcp       MCP tool integration (JSON-RPC)
+├── leviath-scripting      Rhai sandbox for custom validators
+└── leviath-package        Bundling and registry
 ```
 
-## Pre-built Agents
-
-Four agents ship in `agents/`:
-
-- **software-engineer** — `plan → implement → review` (plan requires approval). The default `lev create` template. Full Claude Code–style workflow.
-- **coder** — `analyze → implement → review` (interactive review). Architecture pinned, files temporary, implementation auto-compacts.
-- **reviewer** — `scan → deep_review → report`. Guidelines pinned, findings temporary.
-- **researcher** — `gather → analyze → summarize`. Findings compact automatically.
-
-```bash
-cp -r agents/coder my-coder
-lev run my-coder/ --task "Build a REST API"
-```
+8 crates, ~18K lines Rust, 185+ tests.
 
 ## Development
 
 ```bash
-cargo build && cargo test    # 155 tests
-cargo clippy                 # Zero warnings
+git clone https://github.com/GEMISIS/leviath.git
+cd leviath
+cargo build
+cargo test --workspace     # All tests
+cargo clippy --workspace   # Zero warnings policy
 ```
 
 **Git worktrees** for parallel development:
 
 ```bash
 git worktree add ../leviath-feat-x feat/x
-cd ../leviath-feat-x
-cargo build                  # Own target/, no interference
-
-# Version-specific installs
-cargo install --path crates/leviath-cli --root ~/.local/leviath-feat-x
+cd ../leviath-feat-x && cargo build  # Own target dir, no interference
 ```
 
 ## License
 
-MIT
+[MIT](LICENSE)
 
-**Website:** [leviath.dev](https://leviath.dev) · **Repository:** [github.com/GEMISIS/leviath](https://github.com/GEMISIS/leviath)
+---
+
+<p align="center">
+  <a href="https://leviath.dev">Website</a> ·
+  <a href="https://github.com/GEMISIS/leviath">GitHub</a> ·
+  <a href="https://github.com/GEMISIS/leviath/issues">Issues</a>
+</p>
