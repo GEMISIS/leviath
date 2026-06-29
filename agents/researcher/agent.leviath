@@ -2,25 +2,38 @@
 name = "researcher"
 version = "0.1.0"
 description = "Research assistant for gathering and synthesizing information"
+entry_stage = "gather"
 
 [stages.gather]
 mode = "autonomous"
-model = { provider = "anthropic", model = "claude-sonnet-4-5" }
+model = { provider = "anthropic", model = "claude-sonnet-4-6" }
 description = "Gather relevant information on the topic"
+max_revisits = 3
+
+[stages.gather.transitions.analyze]
 
 [stages.analyze]
 mode = "autonomous"
-model = { provider = "anthropic", model = "claude-opus-4-5" }
+model = { provider = "anthropic", model = "claude-opus-4-6" }
 description = "Analyze and synthesize findings"
+transition_prompt = "Do you have enough information, or do you need to gather more?"
+
+[stages.analyze.transitions.gather]
+hint = "More information needed"
+transform = "compact"
+
+[stages.analyze.transitions.summarize]
+hint = "Analysis complete"
+transform = "compact"
 
 [stages.summarize]
 mode = "autonomous"
-model = { provider = "anthropic", model = "claude-sonnet-4-5" }
+model = { provider = "anthropic", model = "claude-sonnet-4-6" }
 description = "Create a concise summary"
 
 [compaction]
 provider = "anthropic"
-model = "claude-sonnet-4"
+model = "claude-sonnet-4-6"
 
 [context.regions]
 query = { kind = "pinned", max_tokens = 1000 }

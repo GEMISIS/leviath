@@ -11,3 +11,4 @@ pub mod run;
 pub mod serve;
 pub mod setup;
 pub mod test;
+pub mod validate;

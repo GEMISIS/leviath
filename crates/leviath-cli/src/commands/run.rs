@@ -400,6 +400,7 @@ fn is_graph_mode(blueprint: &Blueprint) -> bool {
 /// and LLM routing when multiple edges are available.
 ///
 /// Returns `None` when the stage is terminal (no valid outgoing transitions).
+#[allow(clippy::too_many_arguments)]
 async fn resolve_transition(
     stage: &Stage,
     stage_idx: usize,
@@ -442,7 +443,8 @@ async fn resolve_transition(
                     let target_stage = blueprint.find_stage(target_name);
                     if let Some(ts) = target_stage {
                         if let Some(max_rev) = ts.max_revisits {
-                            let visits = visit_counts.get(target_name.as_str()).copied().unwrap_or(0);
+                            let visits =
+                                visit_counts.get(target_name.as_str()).copied().unwrap_or(0);
                             visits <= max_rev // allow first visit + max_revisits
                         } else {
                             true
@@ -581,11 +583,7 @@ async fn prompt_llm_transition(
     // Inject the transition prompt into the context window
     if let Some(mut window) = engine.world_mut().get_mut::<ContextWindow>(entity) {
         let tokens = prompt.len() / 4 + 1;
-        let _ = window.add_to_region(
-            "conversation",
-            format!("User: {}", prompt),
-            tokens,
-        );
+        let _ = window.add_to_region("conversation", format!("User: {}", prompt), tokens);
     }
 
     // Run a single inference call to get the LLM's choice
@@ -598,11 +596,7 @@ async fn prompt_llm_transition(
         (messages, max_tokens)
     };
 
-    let temperature = if provider.capabilities(model_name).supports_temperature {
-        0.0 // deterministic for routing
-    } else {
-        0.0
-    };
+    let temperature = 0.0; // deterministic for routing
 
     let request = leviath_providers::InferenceRequest {
         messages,
@@ -844,7 +838,10 @@ async fn apply_compact_transform(
                 let tokens = response.content.len() / 4 + 1;
                 let _ = window.add_to_region(
                     "conversation",
-                    format!("[Context summary from previous stage]: {}", response.content),
+                    format!(
+                        "[Context summary from previous stage]: {}",
+                        response.content
+                    ),
                     tokens,
                 );
                 window.current_tokens = window.calculate_tokens();
@@ -1226,9 +1223,7 @@ async fn run_foreground(args: RunArgs) -> anyhow::Result<()> {
                     Ok(()) => {
                         // Check if we hit max_iterations by looking at iteration count
                         if let Some(state) = engine.world().get::<AgentState>(entity) {
-                            if stage.max_iterations.is_some()
-                                && state.iteration >= max_iterations
-                            {
+                            if stage.max_iterations.is_some() && state.iteration >= max_iterations {
                                 stage_result_val = StageResult::MaxIterations;
                             } else {
                                 stage_result_val = StageResult::Success;
@@ -1688,7 +1683,12 @@ async fn run_worker_inner(args: &WorkerArgs, meta: &mut RunMeta) -> anyhow::Resu
             String::new()
         };
         let stage_header = format!(
-            "Stage {}: {} ({}:{}){}", stage_idx + 1, stage.name, provider_name, model_name, visit_label,
+            "Stage {}: {} ({}:{}){}",
+            stage_idx + 1,
+            stage.name,
+            provider_name,
+            model_name,
+            visit_label,
         );
         println!("\n--- {} ---", stage_header);
         record_stage_log(
@@ -1885,7 +1885,10 @@ async fn run_worker_inner(args: &WorkerArgs, meta: &mut RunMeta) -> anyhow::Resu
             Err(e) => {
                 // In graph mode, errors can route to error-handler stages
                 if is_graph_mode(&blueprint) {
-                    let msg = format!("Stage '{}' error: {} — checking error transitions", stage.name, e);
+                    let msg = format!(
+                        "Stage '{}' error: {} — checking error transitions",
+                        stage.name, e
+                    );
                     println!("{}", msg);
                     record_stage_log(&args.run_id, stage_idx, &format!("[error] {}", msg));
                     stage_result_val = StageResult::Error;
@@ -1985,7 +1988,7 @@ async fn run_worker_inner(args: &WorkerArgs, meta: &mut RunMeta) -> anyhow::Resu
     let done_msg = "[All stages complete]";
     println!("\n{}", done_msg);
     // Log the completion message to the last stage's log
-    if blueprint.stages.len() > 0 {
+    if !blueprint.stages.is_empty() {
         record_stage_log(&args.run_id, current_stage_idx_val, done_msg);
     }
     tool_registry.shutdown().await;
@@ -2988,10 +2991,7 @@ fn parse_manifest(content: &str) -> anyhow::Result<Blueprint> {
             }
 
             // Parse max_revisits
-            if let Some(mr) = stage_value
-                .get("max_revisits")
-                .and_then(|v| v.as_integer())
-            {
+            if let Some(mr) = stage_value.get("max_revisits").and_then(|v| v.as_integer()) {
                 stage.max_revisits = Some(mr as usize);
             }
 
@@ -3004,9 +3004,8 @@ fn parse_manifest(content: &str) -> anyhow::Result<Blueprint> {
             }
 
             // Parse transitions: [stages.<name>.transitions.<target>]
-            if let Some(transitions_table) = stage_value
-                .get("transitions")
-                .and_then(|v| v.as_table())
+            if let Some(transitions_table) =
+                stage_value.get("transitions").and_then(|v| v.as_table())
             {
                 let mut transitions = std::collections::HashMap::new();
                 for (target_name, edge_value) in transitions_table {
@@ -3015,13 +3014,8 @@ fn parse_manifest(content: &str) -> anyhow::Result<Blueprint> {
                         .and_then(|v| v.as_str())
                         .map(|s| s.to_string());
 
-                    let condition = match edge_value
-                        .get("condition")
-                        .and_then(|v| v.as_str())
-                    {
-                        Some("error") => {
-                            leviath_core::blueprint::TransitionCondition::Error
-                        }
+                    let condition = match edge_value.get("condition").and_then(|v| v.as_str()) {
+                        Some("error") => leviath_core::blueprint::TransitionCondition::Error,
                         Some("max_iterations") => {
                             leviath_core::blueprint::TransitionCondition::MaxIterations
                         }
@@ -3032,16 +3026,11 @@ fn parse_manifest(content: &str) -> anyhow::Result<Blueprint> {
                             leviath_core::blueprint::TransitionCondition::Always
                         }
                         Some(custom) => {
-                            leviath_core::blueprint::TransitionCondition::Custom(
-                                custom.to_string(),
-                            )
+                            leviath_core::blueprint::TransitionCondition::Custom(custom.to_string())
                         }
                     };
 
-                    let transform = match edge_value
-                        .get("transform")
-                        .and_then(|v| v.as_str())
-                    {
+                    let transform = match edge_value.get("transform").and_then(|v| v.as_str()) {
                         Some("clear") => leviath_core::blueprint::EdgeTransform::Clear,
                         Some("compact") | Some("summarize") => {
                             leviath_core::blueprint::EdgeTransform::Compact { prompt: None }
@@ -3087,9 +3076,7 @@ fn parse_manifest(content: &str) -> anyhow::Result<Blueprint> {
                                 compact_prompt,
                             }
                         }
-                        Some("direct") | None => {
-                            leviath_core::blueprint::EdgeTransform::Direct
-                        }
+                        Some("direct") | None => leviath_core::blueprint::EdgeTransform::Direct,
                         Some(_) => leviath_core::blueprint::EdgeTransform::Direct,
                     };
 

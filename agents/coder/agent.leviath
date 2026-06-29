@@ -2,6 +2,7 @@
 name = "coder"
 version = "0.1.0"
 description = "Multi-stage coding agent with structured context"
+entry_stage = "analyze"
 
 [stages.analyze]
 mode = "autonomous"
@@ -9,6 +10,7 @@ model = { provider = "anthropic", model = "claude-sonnet-4-6" }
 description = "Understand requirements and plan implementation"
 available_tools = ["read_file", "list_dir"]
 max_iterations = 15
+
 system_prompt = """
 You are analyzing a coding task to produce a concise implementation plan.
 Use list_dir or read_file only if you need to check what already exists in the project.
@@ -17,12 +19,16 @@ Output a short bullet-list plan: which files to create, what each does, and any 
 Be brief — the implement stage will do the actual coding.
 """
 
+[stages.analyze.transitions.implement]
+
 [stages.implement]
 mode = "autonomous"
 model = { provider = "anthropic", model = "claude-sonnet-4-6" }
 description = "Write code according to the plan"
 available_tools = ["write_file", "read_file", "edit_file", "list_dir", "bash"]
 max_iterations = 50
+max_revisits = 3
+
 system_prompt = """
 You are implementing a coding task. Write working, production-quality code.
 Use write_file to create each file. Use bash to run tests or verify the build once all files are written.
@@ -30,17 +36,27 @@ Do NOT spend iterations reading the codebase unless you need to check something 
 Create all files needed to complete the task, then confirm with a short summary of what was created.
 """
 
+[stages.implement.transitions.review]
+transform = "compact"
+
 [stages.review]
 mode = "interactive"
-model = { provider = "anthropic", model = "claude-opus-4-8" }
+model = { provider = "anthropic", model = "claude-opus-4-6" }
 description = "Review code before finalizing (requires human approval)"
 available_tools = ["read_file", "list_dir"]
 max_iterations = 10
+max_revisits = 2
+transition_prompt = "Review complete. Is the code ready, or does it need fixes?"
+
 system_prompt = """
 You are reviewing the implementation. Use read_file to read the files that were just created.
 Provide concise, actionable feedback: correctness, edge cases, error handling, and code quality.
 End with a clear verdict: approve as-is, or list specific changes needed.
 """
+
+[stages.review.transitions.implement]
+hint = "Issues found"
+transform = "compact"
 
 [compaction]
 provider = "anthropic"

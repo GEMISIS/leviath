@@ -30,6 +30,30 @@ use crate::interaction;
 use crate::render;
 use crate::runstate::{self, RunStatus, StageRecord, StageRunStatus};
 
+use leviath_core::{EdgeTransform, TransitionCondition};
+
+// ─── Graph view data ─────────────────────────────────────────────────────────
+
+/// Cached transition info parsed from the agent's blueprint.
+#[derive(Debug, Clone)]
+struct GraphTransitionInfo {
+    /// Map: source_stage → Vec<(target_stage, hint, condition_label, transform_label)>
+    edges: std::collections::HashMap<String, Vec<GraphEdge>>,
+    /// Entry stage name
+    entry_stage: String,
+    /// All stage names in definition order
+    stage_names: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+struct GraphEdge {
+    target: String,
+    hint: Option<String>,
+    condition: String,
+    #[allow(dead_code)]
+    transform: String,
+}
+
 // ─── Theme palette ────────────────────────────────────────────────────────────
 
 const C_ACCENT: Color = Color::Cyan;
@@ -160,6 +184,8 @@ pub struct DashboardAgent {
     /// Total seconds spent waiting for user input across all completed waits.
     /// Subtracted from elapsed to show only actual running time.
     pub waiting_secs: u64,
+    /// Cached graph transition info (None = linear mode or not yet loaded)
+    graph_info: Option<GraphTransitionInfo>,
 }
 
 /// Event from an agent back to the dashboard.
@@ -660,6 +686,7 @@ impl Dashboard {
                         None
                     },
                     waiting_secs: 0,
+                    graph_info: load_graph_info(&run.agent_path),
                 });
             }
         }
@@ -2073,7 +2100,8 @@ impl Dashboard {
 
         let header_h: u16 = 1; // compact breadcrumb line
         let info_h: u16 = 4; // task + workdir/stats strip (2 content + 2 border lines)
-        let tabs_h: u16 = 3; // tabs row in a block (border top + tab line + border bottom)
+        let is_graph_view = agent.graph_info.is_some();
+        let tabs_h: u16 = if is_graph_view { 7 } else { 3 }; // graph needs more height
         let context_h: u16 = if agent.context_snapshot.is_some() || !agent.stages.is_empty() {
             5
         } else {
@@ -2269,194 +2297,208 @@ impl Dashboard {
             );
         }
 
-        // ── Stage tabs ─────────────────────────────────────────────────────────
+        // ── Stage tabs / graph view ─────────────────────────────────────────
         {
             let tabs_area = chunks[chunk_idx];
             chunk_idx += 1;
 
-            // Build tab titles with status glyphs
-            let tab_titles: Vec<Line> = if agent.stages.is_empty() {
-                // Fallback: synthesize stage names from RunMeta info
-                (0..agent.num_stages.max(1))
-                    .map(|i| {
-                        let glyph = if i < agent.stage_index {
-                            Span::styled(
-                                format!("{} ", GLYPH_COMPLETE),
-                                Style::default().fg(C_SUCCESS),
-                            )
-                        } else if i == agent.stage_index {
-                            match &agent.status {
-                                AgentDisplayStatus::Active => Span::styled(
-                                    format!(
-                                        "{} ",
-                                        SPINNER[(self.tick_count as usize) % SPINNER.len()]
-                                    ),
-                                    Style::default().fg(C_ACTIVE),
-                                ),
-                                AgentDisplayStatus::Waiting => Span::styled(
-                                    format!("{} ", GLYPH_WAITING),
-                                    Style::default().fg(C_WARN),
-                                ),
-                                AgentDisplayStatus::Error(_) => Span::styled(
-                                    format!("{} ", GLYPH_ERROR),
-                                    Style::default().fg(C_ERROR),
-                                ),
-                                _ => Span::styled(
+            if let Some(ref graph) = agent.graph_info {
+                // ── Graph view: render stages as boxes with arrows ──────────────
+                self.draw_graph_view(frame, tabs_area, &agent, graph);
+            } else {
+                // ── Linear tabs view (existing behavior) ───────────────────────
+                // Build tab titles with status glyphs
+                let tab_titles: Vec<Line> = if agent.stages.is_empty() {
+                    // Fallback: synthesize stage names from RunMeta info
+                    (0..agent.num_stages.max(1))
+                        .map(|i| {
+                            let glyph = if i < agent.stage_index {
+                                Span::styled(
                                     format!("{} ", GLYPH_COMPLETE),
                                     Style::default().fg(C_SUCCESS),
-                                ),
-                            }
-                        } else {
-                            Span::styled(format!("{} ", GLYPH_PENDING), Style::default().fg(C_DIM))
-                        };
-                        let stage_label = if i == agent.stage_index {
-                            truncate(&agent.stage, 12)
-                        } else {
-                            format!("stage {}", i + 1)
-                        };
-                        let label_span = if i == agent.stage_index {
-                            Span::styled(
-                                stage_label,
-                                Style::default().fg(C_WHITE).add_modifier(Modifier::BOLD),
-                            )
-                        } else {
-                            Span::styled(stage_label, Style::default().fg(C_MUTED))
-                        };
-                        // Live stage marker
-                        let live_marker = if i == agent.stage_index
-                            && !matches!(
-                                agent.status,
-                                AgentDisplayStatus::Complete
-                                    | AgentDisplayStatus::CompleteInteractive
-                                    | AgentDisplayStatus::Cancelled
-                                    | AgentDisplayStatus::Error(_)
-                            ) {
-                            Span::styled("*", Style::default().fg(C_WARN))
-                        } else {
-                            Span::raw("")
-                        };
-                        Line::from(vec![glyph, label_span, live_marker])
-                    })
-                    .collect()
-            } else {
-                agent
-                    .stages
-                    .iter()
-                    .enumerate()
-                    .map(|(i, s)| {
-                        // Compute stage duration string
-                        let dur_str = match (s.started_at, s.ended_at) {
-                            (Some(start), Some(end)) => {
-                                let secs = (end - start).max(0) as u64;
-                                if secs < 60 {
-                                    format!(" {}s", secs)
-                                } else {
-                                    format!(" {}m{}s", secs / 60, secs % 60)
+                                )
+                            } else if i == agent.stage_index {
+                                match &agent.status {
+                                    AgentDisplayStatus::Active => Span::styled(
+                                        format!(
+                                            "{} ",
+                                            SPINNER[(self.tick_count as usize) % SPINNER.len()]
+                                        ),
+                                        Style::default().fg(C_ACTIVE),
+                                    ),
+                                    AgentDisplayStatus::Waiting => Span::styled(
+                                        format!("{} ", GLYPH_WAITING),
+                                        Style::default().fg(C_WARN),
+                                    ),
+                                    AgentDisplayStatus::Error(_) => Span::styled(
+                                        format!("{} ", GLYPH_ERROR),
+                                        Style::default().fg(C_ERROR),
+                                    ),
+                                    _ => Span::styled(
+                                        format!("{} ", GLYPH_COMPLETE),
+                                        Style::default().fg(C_SUCCESS),
+                                    ),
                                 }
-                            }
-                            (Some(start), None) if s.status == StageRunStatus::Active => {
-                                // Exclude accumulated wait time from the stage timer
-                                let effective_start = start + agent.waiting_secs as i64;
-                                let dur = if let Some(until) = agent.active_until {
-                                    elapsed_str_until(effective_start, until)
-                                } else {
-                                    elapsed_str(effective_start)
-                                };
-                                format!(" {}", dur)
-                            }
-                            _ => String::new(),
-                        };
+                            } else {
+                                Span::styled(
+                                    format!("{} ", GLYPH_PENDING),
+                                    Style::default().fg(C_DIM),
+                                )
+                            };
+                            let stage_label = if i == agent.stage_index {
+                                truncate(&agent.stage, 12)
+                            } else {
+                                format!("stage {}", i + 1)
+                            };
+                            let label_span = if i == agent.stage_index {
+                                Span::styled(
+                                    stage_label,
+                                    Style::default().fg(C_WHITE).add_modifier(Modifier::BOLD),
+                                )
+                            } else {
+                                Span::styled(stage_label, Style::default().fg(C_MUTED))
+                            };
+                            // Live stage marker
+                            let live_marker = if i == agent.stage_index
+                                && !matches!(
+                                    agent.status,
+                                    AgentDisplayStatus::Complete
+                                        | AgentDisplayStatus::CompleteInteractive
+                                        | AgentDisplayStatus::Cancelled
+                                        | AgentDisplayStatus::Error(_)
+                                ) {
+                                Span::styled("*", Style::default().fg(C_WARN))
+                            } else {
+                                Span::raw("")
+                            };
+                            Line::from(vec![glyph, label_span, live_marker])
+                        })
+                        .collect()
+                } else {
+                    agent
+                        .stages
+                        .iter()
+                        .enumerate()
+                        .map(|(i, s)| {
+                            // Compute stage duration string
+                            let dur_str = match (s.started_at, s.ended_at) {
+                                (Some(start), Some(end)) => {
+                                    let secs = (end - start).max(0) as u64;
+                                    if secs < 60 {
+                                        format!(" {}s", secs)
+                                    } else {
+                                        format!(" {}m{}s", secs / 60, secs % 60)
+                                    }
+                                }
+                                (Some(start), None) if s.status == StageRunStatus::Active => {
+                                    // Exclude accumulated wait time from the stage timer
+                                    let effective_start = start + agent.waiting_secs as i64;
+                                    let dur = if let Some(until) = agent.active_until {
+                                        elapsed_str_until(effective_start, until)
+                                    } else {
+                                        elapsed_str(effective_start)
+                                    };
+                                    format!(" {}", dur)
+                                }
+                                _ => String::new(),
+                            };
 
-                        let (glyph, glyph_style) = match &s.status {
-                            StageRunStatus::Pending => (GLYPH_PENDING, Style::default().fg(C_DIM)),
-                            StageRunStatus::Active => {
-                                let run_done = matches!(
+                            let (glyph, glyph_style) = match &s.status {
+                                StageRunStatus::Pending => {
+                                    (GLYPH_PENDING, Style::default().fg(C_DIM))
+                                }
+                                StageRunStatus::Active => {
+                                    let run_done = matches!(
+                                        agent.status,
+                                        AgentDisplayStatus::Complete
+                                            | AgentDisplayStatus::CompleteInteractive
+                                            | AgentDisplayStatus::Cancelled
+                                            | AgentDisplayStatus::Error(_)
+                                    );
+                                    if run_done {
+                                        // Run finished — treat lingering Active stage as complete
+                                        (GLYPH_COMPLETE, Style::default().fg(C_SUCCESS))
+                                    } else {
+                                        let spin =
+                                            SPINNER[(self.tick_count as usize) % SPINNER.len()];
+                                        return Line::from(vec![
+                                            Span::styled(
+                                                format!("{} ", spin),
+                                                Style::default().fg(C_ACTIVE),
+                                            ),
+                                            Span::styled(
+                                                truncate(&s.name, 10),
+                                                Style::default()
+                                                    .fg(C_WHITE)
+                                                    .add_modifier(Modifier::BOLD),
+                                            ),
+                                            Span::styled("*", Style::default().fg(C_WARN)),
+                                            Span::styled(dur_str, Style::default().fg(C_DIM)),
+                                        ]);
+                                    }
+                                }
+                                StageRunStatus::WaitingInput => {
+                                    (GLYPH_WAITING, Style::default().fg(C_WARN))
+                                }
+                                StageRunStatus::Complete => {
+                                    (GLYPH_COMPLETE, Style::default().fg(C_SUCCESS))
+                                }
+                                StageRunStatus::Error => {
+                                    (GLYPH_ERROR, Style::default().fg(C_ERROR))
+                                }
+                            };
+                            let is_live = i == agent.stage_index
+                                && !matches!(
                                     agent.status,
                                     AgentDisplayStatus::Complete
                                         | AgentDisplayStatus::CompleteInteractive
                                         | AgentDisplayStatus::Cancelled
                                         | AgentDisplayStatus::Error(_)
                                 );
-                                if run_done {
-                                    // Run finished — treat lingering Active stage as complete
-                                    (GLYPH_COMPLETE, Style::default().fg(C_SUCCESS))
-                                } else {
-                                    let spin = SPINNER[(self.tick_count as usize) % SPINNER.len()];
-                                    return Line::from(vec![
-                                        Span::styled(
-                                            format!("{} ", spin),
-                                            Style::default().fg(C_ACTIVE),
-                                        ),
-                                        Span::styled(
-                                            truncate(&s.name, 10),
-                                            Style::default()
-                                                .fg(C_WHITE)
-                                                .add_modifier(Modifier::BOLD),
-                                        ),
-                                        Span::styled("*", Style::default().fg(C_WARN)),
-                                        Span::styled(dur_str, Style::default().fg(C_DIM)),
-                                    ]);
-                                }
-                            }
-                            StageRunStatus::WaitingInput => {
-                                (GLYPH_WAITING, Style::default().fg(C_WARN))
-                            }
-                            StageRunStatus::Complete => {
-                                (GLYPH_COMPLETE, Style::default().fg(C_SUCCESS))
-                            }
-                            StageRunStatus::Error => (GLYPH_ERROR, Style::default().fg(C_ERROR)),
-                        };
-                        let is_live = i == agent.stage_index
-                            && !matches!(
-                                agent.status,
-                                AgentDisplayStatus::Complete
-                                    | AgentDisplayStatus::CompleteInteractive
-                                    | AgentDisplayStatus::Cancelled
-                                    | AgentDisplayStatus::Error(_)
-                            );
-                        let label_style = if is_live {
-                            Style::default().fg(C_WHITE).add_modifier(Modifier::BOLD)
-                        } else {
-                            Style::default().fg(C_MUTED)
-                        };
-                        Line::from(vec![
-                            Span::styled(format!("{} ", glyph), glyph_style),
-                            Span::styled(truncate(&s.name, 10), label_style),
-                            Span::styled(dur_str, Style::default().fg(C_DIM)),
-                        ])
-                    })
-                    .collect()
-            };
+                            let label_style = if is_live {
+                                Style::default().fg(C_WHITE).add_modifier(Modifier::BOLD)
+                            } else {
+                                Style::default().fg(C_MUTED)
+                            };
+                            Line::from(vec![
+                                Span::styled(format!("{} ", glyph), glyph_style),
+                                Span::styled(truncate(&s.name, 10), label_style),
+                                Span::styled(dur_str, Style::default().fg(C_DIM)),
+                            ])
+                        })
+                        .collect()
+                };
 
-            let tabs_count = tab_titles.len().max(1);
-            let selected_tab = self.selected_stage.min(tabs_count - 1);
+                let tabs_count = tab_titles.len().max(1);
+                let selected_tab = self.selected_stage.min(tabs_count - 1);
 
-            let tab_nav = if tabs_count > 1 {
-                format!(" ←/→ to switch  stage {}/{}", selected_tab + 1, tabs_count)
-            } else {
-                " stage 1/1".to_string()
-            };
+                let tab_nav = if tabs_count > 1 {
+                    format!(" ←/→ to switch  stage {}/{}", selected_tab + 1, tabs_count)
+                } else {
+                    " stage 1/1".to_string()
+                };
 
-            let tabs_widget = Tabs::new(tab_titles)
-                .block(
-                    Block::default()
-                        .borders(Borders::ALL)
-                        .border_type(BorderType::Rounded)
-                        .border_style(Style::default().fg(C_BORDER_FOCUS))
-                        .title(Span::styled(
-                            format!(" Stages{}", tab_nav),
-                            Style::default().fg(C_DIM),
-                        )),
-                )
-                .select(selected_tab)
-                .highlight_style(
-                    Style::default()
-                        .fg(C_ACCENT)
-                        .add_modifier(Modifier::BOLD | Modifier::REVERSED),
-                )
-                .divider(Span::styled(" │ ", Style::default().fg(C_DIM)));
+                let tabs_widget = Tabs::new(tab_titles)
+                    .block(
+                        Block::default()
+                            .borders(Borders::ALL)
+                            .border_type(BorderType::Rounded)
+                            .border_style(Style::default().fg(C_BORDER_FOCUS))
+                            .title(Span::styled(
+                                format!(" Stages{}", tab_nav),
+                                Style::default().fg(C_DIM),
+                            )),
+                    )
+                    .select(selected_tab)
+                    .highlight_style(
+                        Style::default()
+                            .fg(C_ACCENT)
+                            .add_modifier(Modifier::BOLD | Modifier::REVERSED),
+                    )
+                    .divider(Span::styled(" │ ", Style::default().fg(C_DIM)));
 
-            frame.render_widget(tabs_widget, tabs_area);
+                frame.render_widget(tabs_widget, tabs_area);
+            }
         }
 
         // ── Context bar for selected stage ────────────────────────────────────
@@ -2585,6 +2627,117 @@ impl Dashboard {
                 };
                 if let Some(snap) = snap_opt {
                     let mut lines: Vec<Line> = Vec::new();
+
+                    // ── Graph transition details (prepended in graph mode) ────
+                    if let Some(ref graph) = agent.graph_info {
+                        // Find which stage is selected
+                        let sel_name = agent
+                            .stages
+                            .get(self.selected_stage)
+                            .map(|s| s.name.as_str())
+                            .or_else(|| {
+                                graph
+                                    .stage_names
+                                    .get(self.selected_stage)
+                                    .map(|s| s.as_str())
+                            })
+                            .unwrap_or(&agent.stage);
+
+                        lines.push(Line::from(vec![
+                            Span::styled(
+                                "▌ ",
+                                Style::default().fg(C_ACCENT).add_modifier(Modifier::BOLD),
+                            ),
+                            Span::styled(
+                                format!("Stage: {}", sel_name),
+                                Style::default().fg(C_WHITE).add_modifier(Modifier::BOLD),
+                            ),
+                        ]));
+
+                        // Visit count for this stage
+                        let vc = agent.stages.iter().filter(|s| s.name == sel_name).count();
+                        if vc > 0 {
+                            lines.push(Line::from(Span::styled(
+                                format!("  Visited {} time{}", vc, if vc != 1 { "s" } else { "" }),
+                                Style::default().fg(C_MUTED),
+                            )));
+                        }
+
+                        // Outgoing transitions
+                        if let Some(edges) = graph.edges.get(sel_name) {
+                            if edges.is_empty() {
+                                lines.push(Line::from(Span::styled(
+                                    "  Transitions: (terminal — no outgoing edges)",
+                                    Style::default().fg(C_DIM),
+                                )));
+                            } else {
+                                lines.push(Line::from(Span::styled(
+                                    "  Transitions:",
+                                    Style::default().fg(C_MUTED),
+                                )));
+                                for edge in edges {
+                                    let cond_part = if edge.condition != "always" {
+                                        format!(" [{}]", edge.condition)
+                                    } else {
+                                        String::new()
+                                    };
+                                    let hint_part = edge
+                                        .hint
+                                        .as_deref()
+                                        .map(|h| format!(" — {}", h))
+                                        .unwrap_or_default();
+                                    lines.push(Line::from(vec![
+                                        Span::styled(
+                                            format!("    → {}", edge.target),
+                                            Style::default().fg(C_ACCENT),
+                                        ),
+                                        Span::styled(cond_part, Style::default().fg(C_WARN)),
+                                        Span::styled(hint_part, Style::default().fg(C_DIM)),
+                                    ]));
+                                }
+                            }
+                        } else {
+                            lines.push(Line::from(Span::styled(
+                                "  Transitions: (linear — no graph edges)",
+                                Style::default().fg(C_DIM),
+                            )));
+                        }
+
+                        // Incoming transitions
+                        let incoming: Vec<(&str, &GraphEdge)> = graph
+                            .edges
+                            .iter()
+                            .flat_map(|(src, edges)| {
+                                edges
+                                    .iter()
+                                    .filter(|e| e.target == sel_name)
+                                    .map(move |e| (src.as_str(), e))
+                            })
+                            .collect();
+                        if !incoming.is_empty() {
+                            lines.push(Line::from(Span::styled(
+                                "  Incoming from:",
+                                Style::default().fg(C_MUTED),
+                            )));
+                            for (src, edge) in &incoming {
+                                let transform_part = format!(" [transform: {}]", edge.transform);
+                                lines.push(Line::from(vec![
+                                    Span::styled(
+                                        format!("    ← {}", src),
+                                        Style::default().fg(C_SUCCESS),
+                                    ),
+                                    Span::styled(transform_part, Style::default().fg(C_DIM)),
+                                ]));
+                            }
+                        }
+
+                        lines.push(Line::from(""));
+                        lines.push(Line::from(Span::styled(
+                            "─".repeat(32),
+                            Style::default().fg(C_DIM),
+                        )));
+                        lines.push(Line::from(""));
+                    }
                     // Overall usage header
                     let total_pct = (snap.total_tokens * 100)
                         .checked_div(snap.max_tokens)
@@ -3180,6 +3333,309 @@ impl Dashboard {
         }
     }
 
+    /// Render the graph view of stages in the tabs area.
+    ///
+    /// Stages are drawn as bordered boxes arranged left-to-right, with arrows
+    /// between them showing transitions. Colors indicate stage state.
+    fn draw_graph_view(
+        &self,
+        frame: &mut Frame,
+        area: Rect,
+        agent: &DashboardAgent,
+        graph: &GraphTransitionInfo,
+    ) {
+        // Determine visit counts and stage statuses from stage records
+        let mut visit_counts: std::collections::HashMap<String, usize> =
+            std::collections::HashMap::new();
+        let mut stage_statuses: std::collections::HashMap<String, &StageRunStatus> =
+            std::collections::HashMap::new();
+        for s in &agent.stages {
+            *visit_counts.entry(s.name.clone()).or_default() += 1;
+            // Track the most recent status for each stage name
+            stage_statuses.insert(s.name.clone(), &s.status);
+        }
+
+        let current_stage = &agent.stage;
+        let run_done = matches!(
+            agent.status,
+            AgentDisplayStatus::Complete
+                | AgentDisplayStatus::CompleteInteractive
+                | AgentDisplayStatus::Cancelled
+                | AgentDisplayStatus::Error(_)
+        );
+
+        // Determine reachable stages from current position
+        let reachable = {
+            let mut set = std::collections::HashSet::new();
+            let mut queue = vec![current_stage.as_str()];
+            while let Some(name) = queue.pop() {
+                if !set.insert(name.to_string()) {
+                    continue;
+                }
+                if let Some(edges) = graph.edges.get(name) {
+                    for edge in edges {
+                        if !set.contains(&edge.target) {
+                            queue.push(
+                                graph
+                                    .stage_names
+                                    .iter()
+                                    .find(|s| **s == edge.target)
+                                    .map(|s| s.as_str())
+                                    .unwrap_or(""),
+                            );
+                        }
+                    }
+                }
+            }
+            set
+        };
+
+        // Determine which stages to show: visited OR reachable from current
+        let visible_stages: Vec<&String> = graph
+            .stage_names
+            .iter()
+            .filter(|name| {
+                visit_counts.contains_key(name.as_str())
+                    || reachable.contains(name.as_str())
+                    || **name == graph.entry_stage
+            })
+            .collect();
+
+        if visible_stages.is_empty() {
+            frame.render_widget(
+                Paragraph::new(" No stages yet.")
+                    .style(Style::default().fg(C_DIM))
+                    .block(
+                        Block::default()
+                            .borders(Borders::ALL)
+                            .border_type(BorderType::Rounded)
+                            .border_style(Style::default().fg(C_BORDER)),
+                    ),
+                area,
+            );
+            return;
+        }
+
+        // Compute node widths: stage name + padding + visit count
+        let node_widths: Vec<usize> = visible_stages
+            .iter()
+            .map(|name| {
+                let vc = visit_counts.get(name.as_str()).copied().unwrap_or(0);
+                let count_suffix = if vc > 1 {
+                    format!(" x{}", vc)
+                } else {
+                    String::new()
+                };
+                // Box: "│ name ×N │" => name.len() + count.len() + 4 (borders + padding)
+                name.len() + count_suffix.len() + 4
+            })
+            .collect();
+
+        let arrow_w = 3usize; // " → "
+        let inner_w = area.width.saturating_sub(2) as usize; // within block borders
+
+        // Build the graph lines (5 lines inside block: top border, padding, content, padding, bottom border of nodes)
+        let mut line1_spans: Vec<Span> = Vec::new(); // ┌───┐   ┌───┐
+        let mut line2_spans: Vec<Span> = Vec::new(); // │ X │──→│ Y │
+        let mut line3_spans: Vec<Span> = Vec::new(); // └───┘   └───┘
+        let mut line4_spans: Vec<Span> = Vec::new(); // transition detail line
+        let mut total_w = 0usize;
+
+        for (i, name) in visible_stages.iter().enumerate() {
+            let vc = visit_counts.get(name.as_str()).copied().unwrap_or(0);
+            let count_suffix = if vc > 1 {
+                format!(" x{}", vc)
+            } else {
+                String::new()
+            };
+
+            let nw = node_widths[i];
+            let label_w = nw - 4; // inner width
+
+            // Determine node color
+            let is_current = *name == current_stage && !run_done;
+            let node_color = if is_current {
+                C_ACCENT // bright/active — currently running
+            } else if let Some(status) = stage_statuses.get(name.as_str()) {
+                match status {
+                    StageRunStatus::Complete => C_SUCCESS, // green — completed
+                    StageRunStatus::Error => C_ERROR,      // red — error
+                    StageRunStatus::Active if run_done => C_SUCCESS,
+                    StageRunStatus::Active => C_ACCENT,
+                    StageRunStatus::WaitingInput => C_WARN, // yellow
+                    StageRunStatus::Pending => C_DIM,
+                }
+            } else if !reachable.contains(name.as_str()) {
+                C_DIM // gray — unreachable
+            } else {
+                C_MUTED // dim — unvisited but available
+            };
+
+            let border_mod = if is_current {
+                Modifier::BOLD
+            } else {
+                Modifier::empty()
+            };
+            let border_style = Style::default().fg(node_color).add_modifier(border_mod);
+
+            // Node top border: ┌──────┐
+            let top = format!("┌{}┐", "─".repeat(nw - 2));
+            line1_spans.push(Span::styled(top, border_style));
+
+            // Node middle: │ name ×N │
+            let label_style = if is_current {
+                Style::default().fg(C_WHITE).add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(node_color)
+            };
+            line2_spans.push(Span::styled("│".to_string(), border_style));
+            line2_spans.push(Span::styled(
+                format!(
+                    " {:<width$}",
+                    format!("{}{}", name, count_suffix),
+                    width = label_w
+                ),
+                label_style,
+            ));
+            line2_spans.push(Span::styled("│".to_string(), border_style));
+
+            // Node bottom border: └──────┘
+            let bottom = format!("└{}┘", "─".repeat(nw - 2));
+            line3_spans.push(Span::styled(bottom, border_style));
+
+            // Glyph under the node
+            let glyph = if is_current {
+                let spin = SPINNER[(self.tick_count as usize) % SPINNER.len()];
+                Span::styled(
+                    format!("{:^width$}", spin, width = nw),
+                    Style::default().fg(C_ACCENT),
+                )
+            } else if vc > 0 {
+                let g = if stage_statuses
+                    .get(name.as_str())
+                    .is_some_and(|s| matches!(s, StageRunStatus::Error))
+                {
+                    GLYPH_ERROR
+                } else {
+                    GLYPH_COMPLETE
+                };
+                Span::styled(
+                    format!("{:^width$}", g, width = nw),
+                    Style::default().fg(node_color),
+                )
+            } else {
+                Span::styled(
+                    format!("{:^width$}", GLYPH_PENDING, width = nw),
+                    Style::default().fg(C_DIM),
+                )
+            };
+            line4_spans.push(glyph);
+
+            total_w += nw;
+
+            // Arrow to next node
+            if i < visible_stages.len() - 1 {
+                // Check if there's an edge from this stage to the next visible stage
+                let next_name = visible_stages[i + 1];
+                let has_edge = graph
+                    .edges
+                    .get(name.as_str())
+                    .is_some_and(|edges| edges.iter().any(|e| e.target == **next_name));
+                let has_reverse = graph
+                    .edges
+                    .get(next_name.as_str())
+                    .is_some_and(|edges| edges.iter().any(|e| e.target == **name));
+
+                let arrow = if has_edge && has_reverse {
+                    "←→"
+                } else if has_edge {
+                    "──→"
+                } else if has_reverse {
+                    "←──"
+                } else {
+                    "   "
+                };
+                let arrow_color = if has_edge || has_reverse {
+                    C_MUTED
+                } else {
+                    C_DIM
+                };
+                line1_spans.push(Span::styled(
+                    " ".repeat(arrow_w),
+                    Style::default().fg(C_DIM),
+                ));
+                line2_spans.push(Span::styled(
+                    arrow.to_string(),
+                    Style::default().fg(arrow_color),
+                ));
+                line3_spans.push(Span::styled(
+                    " ".repeat(arrow_w),
+                    Style::default().fg(C_DIM),
+                ));
+                line4_spans.push(Span::styled(
+                    " ".repeat(arrow_w),
+                    Style::default().fg(C_DIM),
+                ));
+                total_w += arrow_w;
+            }
+
+            if total_w > inner_w {
+                break; // don't overflow
+            }
+        }
+
+        // Selected stage info line
+        let selected_name = visible_stages
+            .get(self.selected_stage)
+            .map(|s| s.as_str())
+            .unwrap_or(current_stage);
+        let selected_edges = graph.edges.get(selected_name);
+        let edge_summary = if let Some(edges) = selected_edges {
+            let parts: Vec<String> = edges
+                .iter()
+                .filter(|e| e.condition != "error") // hide error edges in summary
+                .map(|e| {
+                    let hint_part = e
+                        .hint
+                        .as_deref()
+                        .map(|h| format!("({})", truncate(h, 20)))
+                        .unwrap_or_default();
+                    format!("→{}{}", e.target, hint_part)
+                })
+                .collect();
+            if parts.is_empty() {
+                " (terminal)".to_string()
+            } else {
+                format!("  {}", parts.join("  "))
+            }
+        } else {
+            String::new()
+        };
+
+        let nav_hint = format!(
+            " ←/→ select  stage {}/{}{}",
+            self.selected_stage + 1,
+            visible_stages.len(),
+            edge_summary,
+        );
+
+        let graph_block = Block::default()
+            .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
+            .border_style(Style::default().fg(C_BORDER_FOCUS))
+            .title(Span::styled(" Stage Graph ", Style::default().fg(C_ACCENT)));
+
+        let lines = vec![
+            Line::from(line1_spans),
+            Line::from(line2_spans),
+            Line::from(line3_spans),
+            Line::from(line4_spans),
+            Line::from(Span::styled(nav_hint, Style::default().fg(C_DIM))),
+        ];
+        let widget = Paragraph::new(lines).block(graph_block);
+        frame.render_widget(widget, area);
+    }
+
     fn draw_log_panel(&self, frame: &mut Frame, area: Rect) {
         let log_lines: Vec<Line> = self
             .log
@@ -3528,6 +3984,59 @@ fn osc52_yank_raw(text: &str) -> bool {
     let _ = stdout.write_all(osc.as_bytes());
     let _ = stdout.flush();
     true
+}
+
+/// Load graph transition info from an agent manifest directory.
+/// Returns `None` for linear agents or if the manifest can't be read/parsed.
+fn load_graph_info(agent_path: &str) -> Option<GraphTransitionInfo> {
+    let manifest_path = std::path::Path::new(agent_path).join("agent.leviath");
+    let content = std::fs::read_to_string(&manifest_path).ok()?;
+    let blueprint = super::run::parse_manifest_public(&content).ok()?;
+
+    // Check if any stage has transitions (graph mode)
+    let is_graph = blueprint.stages.iter().any(|s| s.transitions.is_some());
+    if !is_graph {
+        return None;
+    }
+
+    let mut edges = std::collections::HashMap::new();
+    let stage_names: Vec<String> = blueprint.stages.iter().map(|s| s.name.clone()).collect();
+
+    for stage in &blueprint.stages {
+        if let Some(ref transitions) = stage.transitions {
+            let stage_edges: Vec<GraphEdge> = transitions
+                .iter()
+                .map(|(target, edge)| {
+                    let condition = match &edge.condition {
+                        TransitionCondition::Always => "always".to_string(),
+                        TransitionCondition::Error => "error".to_string(),
+                        TransitionCondition::MaxIterations => "max_iterations".to_string(),
+                        TransitionCondition::LlmChoice => "llm_choice".to_string(),
+                        TransitionCondition::Custom(s) => s.clone(),
+                    };
+                    let transform = match &edge.transform {
+                        EdgeTransform::Direct => "direct".to_string(),
+                        EdgeTransform::Clear => "clear".to_string(),
+                        EdgeTransform::Compact { .. } => "compact".to_string(),
+                        EdgeTransform::Custom { .. } => "custom".to_string(),
+                    };
+                    GraphEdge {
+                        target: target.clone(),
+                        hint: edge.hint.clone(),
+                        condition,
+                        transform,
+                    }
+                })
+                .collect();
+            edges.insert(stage.name.clone(), stage_edges);
+        }
+    }
+
+    Some(GraphTransitionInfo {
+        edges,
+        entry_stage: blueprint.resolve_entry_stage_name(),
+        stage_names,
+    })
 }
 
 /// Format a Unix timestamp as a relative time string ("just now", "2m ago", "1h ago").

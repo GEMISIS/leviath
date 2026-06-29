@@ -76,7 +76,7 @@ This generates an `agent.leviath` config you can customize — pick models per s
 
 **🧠 Structured Context Memory** — Six region types with deterministic eviction. Architecture docs stay pinned. Tool results evict first. Conversation auto-compacts into summaries. Route tool results to specific regions so file reads don't push out your system prompt. [Learn more →](https://leviath.dev/docs/context)
 
-**🔀 Multi-Stage Workflows** — Each stage gets its own model, tools, context layout, and interaction mode. Sonnet for analysis, Opus for review, each seeing only the context it needs. Three modes: autonomous, interactive, and checkpoint-based. [Learn more →](https://leviath.dev/docs/stages)
+**🔀 Multi-Stage Workflows** — Each stage gets its own model, tools, context layout, and interaction mode. Sonnet for analysis, Opus for review, each seeing only the context it needs. Stages can be linear or a directed graph with conditional transitions and LLM-driven routing. [Learn more →](https://leviath.dev/docs/stages)
 
 **🎮 ECS Agent Engine** — Agents run as entities in a [bevy_ecs](https://bevyengine.org/) world. 50 agents share one process with game-engine-style scheduling, instead of 50 OS processes fighting for resources. [Learn more →](https://leviath.dev/docs/engine)
 
@@ -118,16 +118,52 @@ This generates an `agent.leviath` config you can customize — pick models per s
 
 </details>
 
+## Stage Graph
+
+Stages can be a simple linear sequence or a directed graph with conditional transitions, LLM-driven routing, and per-edge context transforms. Linear configs keep working with zero changes — graph mode activates only when you add `transitions` to a stage.
+
+```toml
+[agent]
+name = "iterative-coder"
+entry_stage = "plan"
+
+[stages.plan]
+model = { provider = "anthropic", model = "claude-sonnet-4-6" }
+transition_prompt = "Plan complete. Ready to implement?"
+
+[stages.plan.transitions.implement]
+hint = "Plan approved, start coding"
+
+[stages.implement]
+model = { provider = "anthropic", model = "claude-sonnet-4-6" }
+max_revisits = 5
+
+[stages.implement.transitions.review]
+hint = "Implementation complete"
+transform = "compact"
+
+[stages.review]
+model = { provider = "anthropic", model = "claude-opus-4-6" }
+max_revisits = 3
+
+[stages.review.transitions.implement]
+hint = "Issues found — needs fixes"
+transform = "compact"
+# No other always-transitions → terminal when review passes
+```
+
+Transitions support conditions (`always`, `error`, `max_iterations`), context transforms (`direct`, `compact`, `clear`, `custom`), and LLM routing hints. The dashboard renders graph agents with a visual stage graph showing visit counts, reachability, and color-coded status. Validate your graph with `lev validate`.
+
 ## Pre-built Agents
 
 Four agents ship out of the box:
 
 | Agent | Stages | Best For |
 |-------|--------|----------|
-| **software-engineer** | plan → implement → review | Full coding workflow (default) |
-| **coder** | analyze → implement → review | Focused implementation |
-| **reviewer** | scan → deep_review → report | Code review and audit |
-| **researcher** | gather → analyze → summarize | Research and synthesis |
+| **software-engineer** | plan ⇄ implement ⇄ review | Full coding workflow with graph transitions (default) |
+| **coder** | analyze → implement ⇄ review | Focused implementation with review loop |
+| **reviewer** | scan → deep_review → report | Code review and audit with error handling |
+| **researcher** | gather ⇄ analyze → summarize | Research with iterative gathering |
 
 ## Dashboard
 
@@ -153,6 +189,7 @@ lev serve --port 3000
 | `lev run [path] --task "..."` | Run agent |
 | `lev dash` | TUI dashboard |
 | `lev serve` | API server |
+| `lev validate [path]` | Validate agent blueprint |
 | `lev pack` / `lev add` / `lev remove` | Package management |
 | `lev list` | List agents |
 | `lev test` | Run agent tests |

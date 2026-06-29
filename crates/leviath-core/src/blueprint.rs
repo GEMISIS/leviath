@@ -137,7 +137,7 @@ impl Blueprint {
         // All transition targets must exist
         for stage in &self.stages {
             if let Some(ref transitions) = stage.transitions {
-                for (target_name, _edge) in transitions {
+                for target_name in transitions.keys() {
                     if !stage_names.contains(target_name.as_str()) {
                         return Err(format!(
                             "Stage '{}' has transition to unknown stage '{}'",
@@ -171,9 +171,12 @@ impl Blueprint {
 
     /// Resolve the entry stage name.
     pub fn resolve_entry_stage_name(&self) -> String {
-        self.entry_stage
-            .clone()
-            .unwrap_or_else(|| self.stages.first().map(|s| s.name.clone()).unwrap_or_default())
+        self.entry_stage.clone().unwrap_or_else(|| {
+            self.stages
+                .first()
+                .map(|s| s.name.clone())
+                .unwrap_or_default()
+        })
     }
 
     /// Check if there is a terminal path reachable from `stage_name`.
@@ -196,7 +199,11 @@ impl Blueprint {
         match &stage.transitions {
             None => {
                 // Linear mode: check if there's a next stage by index
-                let idx = self.stages.iter().position(|s| s.name == stage_name).unwrap_or(0);
+                let idx = self
+                    .stages
+                    .iter()
+                    .position(|s| s.name == stage_name)
+                    .unwrap_or(0);
                 if idx + 1 >= self.stages.len() {
                     return true; // terminal
                 }

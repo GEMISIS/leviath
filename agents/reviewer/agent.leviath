@@ -2,21 +2,41 @@
 name = "reviewer"
 version = "0.1.0"
 description = "Code review agent with focus on quality, security, and best practices"
+entry_stage = "scan"
 
 [stages.scan]
 mode = "autonomous"
-model = { provider = "anthropic", model = "claude-sonnet-4-5" }
+model = { provider = "anthropic", model = "claude-sonnet-4-6" }
 description = "Initial scan for obvious issues"
+
+[stages.scan.transitions.deep_review]
 
 [stages.deep_review]
 mode = "autonomous"
-model = { provider = "anthropic", model = "claude-opus-4-5" }
+model = { provider = "anthropic", model = "claude-opus-4-6" }
 description = "In-depth analysis of code quality, security, and architecture"
+max_revisits = 2
+
+[stages.deep_review.transitions.report]
+transform = "compact"
+
+[stages.deep_review.transitions.error_handler]
+condition = "error"
 
 [stages.report]
 mode = "autonomous"
-model = { provider = "anthropic", model = "claude-sonnet-4-5" }
+model = { provider = "anthropic", model = "claude-sonnet-4-6" }
 description = "Generate actionable review report"
+
+[stages.error_handler]
+mode = "autonomous"
+model = { provider = "anthropic", model = "claude-sonnet-4-6" }
+description = "Handle errors encountered during deep review"
+available_tools = ["read_file", "bash"]
+max_iterations = 10
+max_revisits = 1
+
+[stages.error_handler.transitions.deep_review]
 
 [context.regions]
 guidelines = { kind = "pinned", max_tokens = 3000 }
