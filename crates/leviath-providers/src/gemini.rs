@@ -73,10 +73,11 @@ impl GeminiProvider {
 
     /// Return built-in capability defaults for a model.
     ///
-    /// Known model families (all share 1M context, 65K output, full tool/streaming support):
-    /// - gemini-3.5-flash, gemini-3.1-pro-preview, gemini-3-flash (thinking capable)
-    /// - gemini-2.5-pro, gemini-2.5-flash (thinking capable)
-    /// - gemini-3.1-flash-lite, gemini-2.5-flash-lite (no thinking)
+    /// Current model families (all share 1M context, 65K output, full tool/streaming support):
+    /// - gemini-3.5-flash (latest flash, near-Pro intelligence)
+    /// - gemini-3.1-pro-preview (latest pro, reasoning-first)
+    /// - gemini-3-flash (complex multimodal/agentic)
+    /// - gemini-3.1-flash-lite (cost-efficient, high-volume)
     ///
     /// All Gemini models currently expose identical capabilities via the
     /// OpenAI-compatible endpoint, so a single default covers all families.
@@ -406,36 +407,9 @@ mod tests {
     }
 
     #[test]
-    fn test_builtin_capabilities_gemini_25_pro() {
+    fn test_builtin_capabilities_gemini_31_flash_lite() {
         let provider = GeminiProvider::new("test-key".to_string());
-        let caps = provider.builtin_capabilities("gemini-2.5-pro");
-        assert!(caps.supports_temperature);
-        assert!(caps.supports_tools);
-        assert_eq!(caps.max_context_tokens, 1_048_576);
-        assert_eq!(caps.max_output_tokens, 65_535);
-    }
-
-    #[test]
-    fn test_builtin_capabilities_gemini_25_flash() {
-        let provider = GeminiProvider::new("test-key".to_string());
-        let caps = provider.builtin_capabilities("gemini-2.5-flash");
-        assert!(caps.supports_temperature);
-        assert!(caps.supports_tools);
-        assert_eq!(caps.max_context_tokens, 1_048_576);
-        assert_eq!(caps.max_output_tokens, 65_535);
-    }
-
-    #[test]
-    fn test_builtin_capabilities_flash_lite() {
-        let provider = GeminiProvider::new("test-key".to_string());
-
         let caps = provider.builtin_capabilities("gemini-3.1-flash-lite");
-        assert!(caps.supports_temperature);
-        assert!(caps.supports_tools);
-        assert_eq!(caps.max_context_tokens, 1_048_576);
-        assert_eq!(caps.max_output_tokens, 65_535);
-
-        let caps = provider.builtin_capabilities("gemini-2.5-flash-lite");
         assert!(caps.supports_temperature);
         assert!(caps.supports_tools);
         assert_eq!(caps.max_context_tokens, 1_048_576);
@@ -458,7 +432,7 @@ mod tests {
     fn test_capabilities_override() {
         let mut overrides = HashMap::new();
         overrides.insert(
-            "gemini-2.5-flash".to_string(),
+            "gemini-3.5-flash".to_string(),
             ModelCapabilities {
                 supports_temperature: false,
                 supports_streaming: false,
@@ -469,7 +443,7 @@ mod tests {
             },
         );
         let provider = GeminiProvider::with_overrides("test-key".to_string(), overrides);
-        let caps = provider.capabilities("gemini-2.5-flash");
+        let caps = provider.capabilities("gemini-3.5-flash");
         assert!(!caps.supports_temperature);
         assert_eq!(caps.max_context_tokens, 1);
     }
@@ -488,7 +462,7 @@ mod tests {
                     content: "Hello".to_string(),
                 },
             ],
-            model: "gemini-2.5-flash".to_string(),
+            model: "gemini-3.5-flash".to_string(),
             max_tokens: 1024,
             temperature: 0.7,
             tools: vec![],
@@ -496,7 +470,7 @@ mod tests {
         };
 
         let body = provider.build_request_body(&request);
-        assert_eq!(body["model"], "gemini-2.5-flash");
+        assert_eq!(body["model"], "gemini-3.5-flash");
         assert_eq!(body["messages"].as_array().unwrap().len(), 2);
     }
 
@@ -555,7 +529,10 @@ mod tests {
     #[test]
     fn test_context_limits() {
         let provider = GeminiProvider::new("test-key".to_string());
-        assert_eq!(provider.max_context_tokens("gemini-2.5-flash"), 1_048_576);
-        assert_eq!(provider.max_context_tokens("gemini-2.5-pro"), 1_048_576);
+        assert_eq!(provider.max_context_tokens("gemini-3.5-flash"), 1_048_576);
+        assert_eq!(
+            provider.max_context_tokens("gemini-3.1-pro-preview"),
+            1_048_576
+        );
     }
 }
