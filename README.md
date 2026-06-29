@@ -107,12 +107,6 @@ scratch      = { kind = "clearable", max_tokens = 5000 }       # wipes clean bet
 Leviath's structured regions double as a caching strategy. Content is ordered by volatility —
 pinned regions form a stable prefix that providers cache automatically.
 
-Run `lev bench` to measure cache efficiency on your setup:
-
-```bash
-lev bench coder --provider anthropic --turns 10
-```
-
 Typical results on a 10-turn coding session:
 
 | Metric | Value |

@@ -1,7 +1,6 @@
 //! CLI command implementations.
 
 pub mod add;
-pub mod bench;
 pub mod create;
 pub mod dashboard;
 pub mod list;
