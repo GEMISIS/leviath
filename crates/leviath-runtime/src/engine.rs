@@ -736,7 +736,7 @@ mod tests {
     #[test]
     fn test_engine_creation() {
         let engine = AgentEngine::new();
-        assert!(engine.world().entities().len() == 0);
+        assert!(engine.world().entities().is_empty());
     }
 
     #[test]

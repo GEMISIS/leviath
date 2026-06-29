@@ -464,10 +464,12 @@ mod tests {
             ModelConfig::new("anthropic".to_string(), "claude-sonnet-4".to_string()),
         );
 
-        let mut routing = ToolResultRouting::default();
-        routing.default_region = "tool_results".to_string();
-        routing.persist = true;
-        routing.max_result_tokens = Some(5000);
+        let routing = ToolResultRouting {
+            default_region: "tool_results".to_string(),
+            persist: true,
+            max_result_tokens: Some(5000),
+            ..Default::default()
+        };
         stage.tool_result_routing = Some(routing);
 
         assert!(stage.tool_result_routing.is_some());
