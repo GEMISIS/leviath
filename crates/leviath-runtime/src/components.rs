@@ -466,8 +466,7 @@ impl MessageInbox {
     pub fn push(&mut self, msg: AgentMessage) {
         self.messages.push(msg);
         // Sort by priority descending so highest priority is first
-        self.messages
-            .sort_by_key(|m| std::cmp::Reverse(m.priority));
+        self.messages.sort_by_key(|m| std::cmp::Reverse(m.priority));
     }
 
     /// Drain all messages from the inbox.
