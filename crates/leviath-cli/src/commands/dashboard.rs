@@ -1451,8 +1451,14 @@ impl Dashboard {
                 } else {
                     agent.status.to_string()
                 };
+                // Show short run-ID suffix (last 4 chars) dimmed after title
+                let short_id = agent.id.split('-').next_back().unwrap_or("").to_string();
+                let title_cell = Cell::from(Line::from(vec![
+                    Span::styled(title_str, Style::default().fg(C_WHITE)),
+                    Span::styled(format!(" #{}", short_id), Style::default().fg(C_DIM)),
+                ]));
                 Row::new(vec![
-                    Cell::from(title_str),
+                    title_cell,
                     Cell::from(agent.blueprint_name.clone()),
                     Cell::from(stage_str),
                     Cell::from(status_str).style(Style::default().fg(status_color)),
@@ -1633,6 +1639,8 @@ impl Dashboard {
                 Span::styled(format!("{}↑", format_tokens(agent.tokens_in)), Style::default().fg(C_DIM)),
                 Span::styled(format!(" {}↓", format_tokens(agent.tokens_out)), Style::default().fg(C_DIM)),
                 Span::styled(format!(" · {} ", elapsed), Style::default().fg(C_DIM)),
+                Span::styled("· ", Style::default().fg(C_DIM)),
+                Span::styled(agent.id.clone(), Style::default().fg(C_DIM)),
             ]);
             frame.render_widget(Paragraph::new(hdr_line).style(Style::default().bg(Color::Rgb(20, 20, 30))), hdr_area);
         }

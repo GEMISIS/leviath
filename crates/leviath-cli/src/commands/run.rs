@@ -1334,10 +1334,17 @@ where
                 .map_err(|e| anyhow::anyhow!("Inference error: {}", e))?;
 
             println!("\nAssistant: {}", response.content);
-            println!(
-                "\n[Tokens: {} in, {} out]",
+            let token_line = format!(
+                "[Tokens: {} in, {} out]",
                 response.tokens_used.prompt_tokens, response.tokens_used.completion_tokens
             );
+            println!("\n{}", token_line);
+
+            // Route to per-stage files so the dashboard can display them.
+            if let (Some(run_id), Some(ref m)) = (&run_id_owned, &meta_holder) {
+                record_stage_output(run_id, m.stage_index, &response.content);
+                record_stage_log(run_id, m.stage_index, &token_line);
+            }
 
             // Update meta token counts so the dashboard shows them before the
             // next interaction point (before they go to WaitingInput).
@@ -1556,9 +1563,18 @@ where
             if let Ok(resp) = response {
                 if !resp.content.is_empty() {
                     println!("{}", resp.content);
+                    // Route agent response to the per-stage output file so the dashboard can display it
+                    if let (Some(run_id), Some(ref m)) = (&run_id_owned, &meta_holder) {
+                        record_stage_output(run_id, m.stage_index, &resp.content);
+                    }
                 }
                 // Update token counts in meta so the dashboard shows them before WaitingInput
                 if let Some(ref mut m) = meta_holder {
+                    let token_line = format!(
+                        "[Tokens: {} in, {} out]",
+                        resp.tokens_used.prompt_tokens, resp.tokens_used.completion_tokens
+                    );
+                    record_stage_log(&m.run_id, m.stage_index, &token_line);
                     m.prompt_tokens += resp.tokens_used.prompt_tokens;
                     m.completion_tokens += resp.tokens_used.completion_tokens;
                     m.touch();
@@ -1642,11 +1658,18 @@ where
         if let Ok(resp) = response {
             if !resp.content.is_empty() {
                 println!("{}", resp.content);
+                if let (Some(run_id), Some(ref m)) = (&run_id_owned, &meta_holder) {
+                    record_stage_output(run_id, m.stage_index, &resp.content);
+                }
             }
-            println!(
-                "\n[Tokens used: {} input, {} output]",
+            let token_line = format!(
+                "[Tokens used: {} input, {} output]",
                 resp.tokens_used.prompt_tokens, resp.tokens_used.completion_tokens
             );
+            println!("\n{}", token_line);
+            if let (Some(_), Some(ref m)) = (&run_id_owned, &meta_holder) {
+                record_stage_log(&m.run_id, m.stage_index, &token_line);
+            }
         }
     }
 
