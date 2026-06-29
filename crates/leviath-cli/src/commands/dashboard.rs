@@ -1551,6 +1551,7 @@ impl Dashboard {
             && self.selected_stage_can_respond();
 
         let header_h: u16 = 1;   // compact breadcrumb line
+        let info_h: u16 = 2;     // task + workdir/stats strip
         let tabs_h: u16 = 3;     // tabs row in a block (border top + tab line + border bottom)
         let context_h: u16 = if agent.context_snapshot.is_some() || !agent.stages.is_empty() { 3 } else { 0 };
 
@@ -1594,6 +1595,7 @@ impl Dashboard {
 
         let mut constraints = vec![
             Constraint::Length(header_h),
+            Constraint::Length(info_h),
             Constraint::Length(tabs_h),
         ];
         if context_h > 0 {
@@ -1643,6 +1645,63 @@ impl Dashboard {
                 Span::styled(agent.id.clone(), Style::default().fg(C_DIM)),
             ]);
             frame.render_widget(Paragraph::new(hdr_line).style(Style::default().bg(Color::Rgb(20, 20, 30))), hdr_area);
+        }
+
+        // ── Info strip (task + workdir/stats) ─────────────────────────────────
+        {
+            let info_area = chunks[chunk_idx]; chunk_idx += 1;
+
+            // Task line: truncated original prompt
+            let max_task = (area.width as usize).saturating_sub(10);
+            let task_display = truncate(&agent.task, max_task);
+            let task_line = Line::from(vec![
+                Span::styled(" task  ", Style::default().fg(C_DIM)),
+                Span::styled(task_display, Style::default().fg(C_MUTED)),
+            ]);
+
+            // Stats line: workdir · per-stage tokens · total tokens [· model]
+            let home = dirs::home_dir()
+                .map(|h| h.to_string_lossy().to_string())
+                .unwrap_or_default();
+            let workdir_display = if !home.is_empty() && agent.workdir.starts_with(&home) {
+                format!("~{}", &agent.workdir[home.len()..])
+            } else {
+                agent.workdir.clone()
+            };
+            let workdir_truncated = truncate(&workdir_display, 42);
+
+            let stage_tok_part = agent.stages.get(self.selected_stage)
+                .filter(|s| s.prompt_tokens > 0 || s.completion_tokens > 0)
+                .map(|s| format!("  ·  stage {}↑ {}↓",
+                    format_tokens(s.prompt_tokens), format_tokens(s.completion_tokens)))
+                .unwrap_or_default();
+
+            let total_tok_part = if agent.tokens_in > 0 || agent.tokens_out > 0 {
+                format!("  ·  total {}↑ {}↓",
+                    format_tokens(agent.tokens_in), format_tokens(agent.tokens_out))
+            } else {
+                String::new()
+            };
+
+            let model_part = agent.model.as_deref()
+                .map(|m| format!("  ·  {}", truncate(m, 24)))
+                .unwrap_or_default();
+
+            let stats_line = Line::from(vec![
+                Span::styled(" dir   ", Style::default().fg(C_DIM)),
+                Span::styled(workdir_truncated, Style::default().fg(C_MUTED)),
+                Span::styled(stage_tok_part, Style::default().fg(C_DIM)),
+                Span::styled(total_tok_part, Style::default().fg(C_DIM)),
+                Span::styled(model_part, Style::default().fg(C_MUTED)),
+            ]);
+
+            frame.render_widget(
+                Paragraph::new(vec![task_line, stats_line])
+                    .block(Block::default()
+                        .borders(Borders::LEFT | Borders::RIGHT)
+                        .border_style(Style::default().fg(C_BORDER))),
+                info_area,
+            );
         }
 
         // ── Stage tabs ─────────────────────────────────────────────────────────
