@@ -22,7 +22,7 @@ Define an agent in TOML. Run it. Watch it actually remember what it read 50 tool
 
 ```bash
 # Install (macOS)
-brew install leviath
+brew install gemisis/tap/leviath
 
 # Or download a binary from GitHub Releases
 # Or build from source: cargo install --path crates/leviath-cli
