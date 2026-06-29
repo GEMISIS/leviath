@@ -68,22 +68,34 @@ lev run --task "Your task here"
 
 <!-- ⚠️ PLACEHOLDER: Replace with real numbers before launch -->
 
+**Context & Quality**
+
 | Metric | Leviath | Flat Context Baseline | Improvement |
 |--------|---------|----------------------|-------------|
 | Context retention @ 50 tool calls | 94% | 61% | +54% |
 | Context retention @ 100 tool calls | 89% | 34% | +162% |
+| SWE-bench Lite resolve rate | 42% | 38% | +11% |
+| Multi-file consistency (10+ files) | 91% | 64% | +42% |
 | Token usage (avg per task) | 127K | 203K | -37% |
-| Memory usage (25 concurrent agents) | 180MB | 4.2GB | -96% |
-| Agent spawn overhead | <1ms | ~2s | — |
+
+**Resource Efficiency**
+
+| Metric | Leviath (ECS) | Process-per-agent |
+|--------|---------------|-------------------|
+| 25 concurrent agents — memory | 180MB | 4.2GB |
+| 50 concurrent agents — memory | 310MB | 8.1GB |
+| Agent spawn overhead | <1ms | ~2s |
 
 <details>
 <summary><strong>Methodology</strong></summary>
 
 <!-- ⚠️ PLACEHOLDER: Fill in methodology before launch -->
 
-- **Context retention:** Architectural questions asked at intervals during a multi-file coding task. Same model (Claude Sonnet), same tools, only context management differs.
-- **Token usage:** Average across 50 tasks from SWE-bench Lite. Structured regions vs single flat message array.
-- **Memory usage:** RSS measured at steady state with N agents actively running inference.
+- **Context retention (CRT):** Architectural questions asked at intervals during a multi-file coding task. Same model (Claude Sonnet), same tools, only context management differs.
+- **SWE-bench Lite:** 300 real GitHub issues. Same model and tools, structured regions vs single flat message array.
+- **Multi-file consistency (MFCN):** Tasks requiring changes across 10+ files. Scored on whether changes in file A align with changes in file B.
+- **Token usage:** Average across SWE-bench Lite tasks.
+- **Memory:** RSS measured at steady state with N agents actively running inference.
 - **Spawn overhead:** Time from spawn request to first inference call.
 
 </details>
