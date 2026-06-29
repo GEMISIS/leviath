@@ -20,7 +20,6 @@ use ratatui::{
     },
     Frame, Terminal,
 };
-use std::collections::HashMap;
 use std::io::stdout;
 use std::sync::Arc;
 use std::time::Duration;
@@ -225,9 +224,10 @@ struct Dashboard {
     choice_selected: usize,
     /// Which stage tab is currently focused in the detail view
     selected_stage: usize,
-    /// Per-stage content mode (Output or Logs). Keyed by stage index so switching
-    /// tabs doesn't reset the user's choice.
-    stage_content_modes: HashMap<usize, StageContentMode>,
+    /// Whether the content pane shows Output or Logs — global across all stage tabs.
+    stage_content_mode: StageContentMode,
+    /// True after the first sync completes; suppresses startup toasts for pre-existing state.
+    initial_sync_done: bool,
     /// Monotonic tick counter for animations (spinner, toast timeouts)
     tick_count: u64,
     /// Active toast notifications
@@ -278,7 +278,8 @@ impl Dashboard {
             detail_scroll: 0,
             choice_selected: 0,
             selected_stage: 0,
-            stage_content_modes: HashMap::new(),
+            stage_content_mode: StageContentMode::Output,
+            initial_sync_done: false,
             tick_count: 0,
             toasts: Vec::new(),
             show_help: false,
@@ -512,23 +513,24 @@ impl Dashboard {
                     agent.last_answered_request_id = None;
                 }
             } else {
-                // New agent — check if it needs input right away (only for genuine WaitingInput, not CompleteInteractive)
-                if needs_input && waiting_prompt.is_some() && matches!(run.status, RunStatus::WaitingInput) {
-                    let name = run.title.clone().unwrap_or_else(|| truncate(&run.agent_name, 20));
-                    self.toasts.push(Toast {
-                        message: format!("Agent '{}' needs input", name),
-                        remaining_ticks: 35,
-                        level: ToastLevel::Warning,
-                    });
-                }
-                // Check for completion toast for new entries we haven't seen before
-                if matches!(run.status, RunStatus::Complete | RunStatus::CompleteInteractive) {
-                    let name = run.title.clone().unwrap_or_else(|| truncate(&run.agent_name, 20));
-                    self.toasts.push(Toast {
-                        message: format!("Agent '{}' completed", name),
-                        remaining_ticks: 35,
-                        level: ToastLevel::Info,
-                    });
+                // New agent — toasts only after the initial sync (avoid flooding on startup)
+                if self.initial_sync_done {
+                    if needs_input && waiting_prompt.is_some() && matches!(run.status, RunStatus::WaitingInput) {
+                        let name = run.title.clone().unwrap_or_else(|| truncate(&run.agent_name, 20));
+                        self.toasts.push(Toast {
+                            message: format!("Agent '{}' needs input", name),
+                            remaining_ticks: 35,
+                            level: ToastLevel::Warning,
+                        });
+                    }
+                    if matches!(run.status, RunStatus::Complete | RunStatus::CompleteInteractive) {
+                        let name = run.title.clone().unwrap_or_else(|| truncate(&run.agent_name, 20));
+                        self.toasts.push(Toast {
+                            message: format!("Agent '{}' completed", name),
+                            remaining_ticks: 35,
+                            level: ToastLevel::Info,
+                        });
+                    }
                 }
                 self.agents.push(DashboardAgent {
                     id: run.run_id.clone(),
@@ -564,6 +566,7 @@ impl Dashboard {
             }
         }
         self.update_display_indices();
+        self.initial_sync_done = true;
     }
 
     /// Sync agent state from the ECS world (in-process agents only).
@@ -955,11 +958,11 @@ impl Dashboard {
                 }
                 // Content mode toggle
                 KeyCode::Char('l') => {
-                    self.stage_content_modes.insert(self.selected_stage, StageContentMode::Logs);
+                    self.stage_content_mode = StageContentMode::Logs;
                     self.detail_scroll = 0;
                 }
                 KeyCode::Char('o') => {
-                    self.stage_content_modes.insert(self.selected_stage, StageContentMode::Output);
+                    self.stage_content_mode = StageContentMode::Output;
                     self.detail_scroll = 0;
                 }
                 KeyCode::Char('i') => {
@@ -1047,22 +1050,30 @@ impl Dashboard {
                         self.search_match_idx = self.search_match_idx.saturating_sub(1);
                     }
                 }
-                // Yank: `y` copies the current stage output to clipboard via OSC52
+                // Yank: `y` copies the current stage output to clipboard
                 KeyCode::Char('y') => {
                     if let Some(agent) = self.selected_agent() {
                         if agent.is_run_state {
-                            let is_output = self.stage_content_modes.get(&self.selected_stage).copied().unwrap_or(StageContentMode::Output) == StageContentMode::Output;
+                            let is_output = self.stage_content_mode == StageContentMode::Output;
                             let content = if is_output {
                                 runstate::tail_stage_output(&agent.id, self.selected_stage, 524_288)
                             } else {
                                 runstate::tail_stage_log(&agent.id, self.selected_stage, 524_288)
                             };
-                            osc52_yank(&content);
-                            self.add_log(format!(
-                                "Yanked {} to clipboard ({} bytes)",
-                                if is_output { "output" } else { "logs" },
-                                content.len()
-                            ));
+                            let label = if is_output { "Output" } else { "Logs" };
+                            if yank_to_clipboard(&content) {
+                                self.toasts.push(Toast {
+                                    message: format!("{} yanked to clipboard", label),
+                                    remaining_ticks: 25,
+                                    level: ToastLevel::Info,
+                                });
+                            } else {
+                                self.toasts.push(Toast {
+                                    message: "Clipboard unavailable (no pbcopy/xclip/OSC52)".to_string(),
+                                    remaining_ticks: 30,
+                                    level: ToastLevel::Error,
+                                });
+                            }
                         }
                     }
                 }
@@ -1568,7 +1579,7 @@ impl Dashboard {
         let header_h: u16 = 1;   // compact breadcrumb line
         let info_h: u16 = 4;     // task + workdir/stats strip (2 content + 2 border lines)
         let tabs_h: u16 = 3;     // tabs row in a block (border top + tab line + border bottom)
-        let context_h: u16 = if agent.context_snapshot.is_some() || !agent.stages.is_empty() { 3 } else { 0 };
+        let context_h: u16 = if agent.context_snapshot.is_some() || !agent.stages.is_empty() { 5 } else { 0 };
 
         // Review body: shown when the pending interaction carries markdown for review
         let review_body = if !self.input_mode && has_prompt {
@@ -1791,13 +1802,21 @@ impl Dashboard {
                     let (glyph, glyph_style) = match &s.status {
                         StageRunStatus::Pending => (GLYPH_PENDING, Style::default().fg(C_DIM)),
                         StageRunStatus::Active => {
-                            let spin = SPINNER[(self.tick_count as usize) % SPINNER.len()];
-                            return Line::from(vec![
-                                Span::styled(format!("{} ", spin), Style::default().fg(C_ACTIVE)),
-                                Span::styled(truncate(&s.name, 10), Style::default().fg(C_WHITE).add_modifier(Modifier::BOLD)),
-                                Span::styled("*", Style::default().fg(C_WARN)),
-                                Span::styled(dur_str, Style::default().fg(C_DIM)),
-                            ]);
+                            let run_done = matches!(agent.status,
+                                AgentDisplayStatus::Complete | AgentDisplayStatus::CompleteInteractive
+                                | AgentDisplayStatus::Cancelled | AgentDisplayStatus::Error(_));
+                            if run_done {
+                                // Run finished — treat lingering Active stage as complete
+                                (GLYPH_COMPLETE, Style::default().fg(C_SUCCESS))
+                            } else {
+                                let spin = SPINNER[(self.tick_count as usize) % SPINNER.len()];
+                                return Line::from(vec![
+                                    Span::styled(format!("{} ", spin), Style::default().fg(C_ACTIVE)),
+                                    Span::styled(truncate(&s.name, 10), Style::default().fg(C_WHITE).add_modifier(Modifier::BOLD)),
+                                    Span::styled("*", Style::default().fg(C_WARN)),
+                                    Span::styled(dur_str, Style::default().fg(C_DIM)),
+                                ]);
+                            }
                         }
                         StageRunStatus::WaitingInput => (GLYPH_WAITING, Style::default().fg(C_WARN)),
                         StageRunStatus::Complete => (GLYPH_COMPLETE, Style::default().fg(C_SUCCESS)),
@@ -1860,52 +1879,69 @@ impl Dashboard {
                 agent.context_snapshot.clone()
             };
 
+            // Constrain context card to at most 60 cols, left-aligned
+            let card_w = ctx_area.width.min(64);
+            let card_area = Rect { width: card_w, ..ctx_area };
+
             if let Some(snap) = snap_opt {
-                let inner_w = ctx_area.width.saturating_sub(4) as usize;
                 let total_pct = if snap.max_tokens > 0 {
                     (snap.total_tokens * 100 / snap.max_tokens).min(100)
                 } else { 0 };
                 let bar_color = if total_pct >= 90 { C_ERROR } else if total_pct >= 70 { C_WARN } else { C_SUCCESS };
 
-                // Build compact mini region line
-                let bar_w = inner_w.saturating_sub(28).max(8);
+                // Bar fills the inner width
+                let inner_w = (card_w as usize).saturating_sub(4).max(8);
+                let bar_w = inner_w.min(32);
                 let filled = bar_w * total_pct / 100;
                 let bar = format!("{}{}", "█".repeat(filled), "░".repeat(bar_w - filled));
 
-                // Region dots
-                let regions_str: String = snap.regions.iter().take(5).map(|r| {
-                    let kind_char = match r.kind.as_str() {
-                        "pinned" => "P",
-                        "sliding" => "S",
+                // Region summary
+                let regions_str: String = snap.regions.iter().take(6).map(|r| {
+                    match r.kind.as_str() {
+                        "pinned"               => "P",
+                        "sliding"              => "S",
                         "compacting" | "history" => "H",
-                        _ => "·",
-                    };
-                    kind_char
+                        _                      => "·",
+                    }
                 }).collect::<Vec<_>>().join(" ");
 
-                let ctx_line = Line::from(vec![
-                    Span::styled(" ctx ", Style::default().fg(C_DIM)),
+                let bar_line = Line::from(vec![
                     Span::styled(bar, Style::default().fg(bar_color)),
+                    Span::styled(format!("  {}%", total_pct), Style::default().fg(C_DIM).add_modifier(Modifier::BOLD)),
+                ]);
+                let info_line = Line::from(vec![
                     Span::styled(
-                        format!(" {:>3}%  {}/{}", total_pct, format_tokens(snap.total_tokens), format_tokens(snap.max_tokens)),
+                        format!("{} / {} tokens", format_tokens(snap.total_tokens), format_tokens(snap.max_tokens)),
+                        Style::default().fg(C_MUTED),
+                    ),
+                    Span::styled(
+                        if regions_str.is_empty() { String::new() } else { format!("   [{}]", regions_str) },
                         Style::default().fg(C_DIM),
                     ),
-                    Span::styled(format!("  [{}]", regions_str), Style::default().fg(C_DIM)),
                 ]);
 
                 frame.render_widget(
-                    Paragraph::new(ctx_line)
-                        .block(Block::default().borders(Borders::LEFT | Borders::RIGHT)
+                    Paragraph::new(vec![bar_line, info_line])
+                        .block(Block::default()
+                            .title(Span::styled(" ctx ", Style::default().fg(C_DIM)))
+                            .borders(Borders::ALL)
+                            .border_type(BorderType::Rounded)
                             .border_style(Style::default().fg(C_BORDER))),
-                    ctx_area,
+                    card_area,
                 );
             } else {
-                // No context yet for this stage
-                let empty = Paragraph::new(Line::from(Span::styled(
-                    " ctx  —  no context snapshot yet",
-                    Style::default().fg(C_DIM),
-                )));
-                frame.render_widget(empty, ctx_area);
+                frame.render_widget(
+                    Paragraph::new(Line::from(Span::styled(
+                        "no context snapshot yet",
+                        Style::default().fg(C_DIM),
+                    )))
+                    .block(Block::default()
+                        .title(Span::styled(" ctx ", Style::default().fg(C_DIM)))
+                        .borders(Borders::ALL)
+                        .border_type(BorderType::Rounded)
+                        .border_style(Style::default().fg(C_BORDER))),
+                    card_area,
+                );
             }
         }
 
@@ -1914,7 +1950,7 @@ impl Dashboard {
             let content_area = chunks[chunk_idx]; chunk_idx += 1;
             let inner_h = content_area.height.saturating_sub(2) as usize;
 
-            let is_output = self.stage_content_modes.get(&self.selected_stage).copied().unwrap_or(StageContentMode::Output) == StageContentMode::Output;
+            let is_output = self.stage_content_mode == StageContentMode::Output;
 
             // Read per-stage content
             let content = if agent.is_run_state {
@@ -2430,11 +2466,46 @@ impl Dashboard {
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
-/// Yank `text` to the system clipboard via the OSC52 terminal escape sequence.
+/// Copy `text` to the system clipboard.  Returns `true` on success.
 ///
-/// Works over SSH and in most modern terminal emulators (iTerm2, kitty, WezTerm,
-/// Windows Terminal, Alacritty, etc.).  Silently no-ops if the write fails.
-fn osc52_yank(text: &str) {
+/// Strategy (in order):
+/// 1. `pbcopy` (macOS)
+/// 2. `xclip -selection clipboard` (Linux X11)
+/// 3. `wl-copy` (Linux Wayland)
+/// 4. OSC52 via /dev/tty → stdout fallback
+fn yank_to_clipboard(text: &str) -> bool {
+    use std::process::{Command, Stdio};
+    use std::io::Write as IoWrite;
+
+    // Try native clipboard tools first — most reliable
+    let clipboard_cmds: &[(&str, &[&str])] = &[
+        ("pbcopy",  &[]),
+        ("xclip",   &["-selection", "clipboard"]),
+        ("wl-copy", &[]),
+    ];
+    for (cmd, args) in clipboard_cmds {
+        if let Ok(mut child) = Command::new(cmd)
+            .args(*args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+        {
+            if let Some(stdin) = child.stdin.as_mut() {
+                let _ = stdin.write_all(text.as_bytes());
+            }
+            if child.wait().map(|s| s.success()).unwrap_or(false) {
+                return true;
+            }
+        }
+    }
+
+    // Fall back to OSC52
+    osc52_yank_raw(text)
+}
+
+/// Yank via the OSC52 terminal escape sequence — last-resort fallback.
+fn osc52_yank_raw(text: &str) -> bool {
     use std::io::Write;
     // Base64-encode the content
     let encoded = {
@@ -2476,13 +2547,14 @@ fn osc52_yank(text: &str) {
         if let Ok(mut tty) = std::fs::OpenOptions::new().write(true).open("/dev/tty") {
             let _ = tty.write_all(osc.as_bytes());
             let _ = tty.flush();
-            return;
+            return true;
         }
     }
     // Fallback: write to stdout
     let mut stdout = std::io::stdout();
     let _ = stdout.write_all(osc.as_bytes());
     let _ = stdout.flush();
+    true
 }
 
 /// Format a Unix timestamp as a relative time string ("just now", "2m ago", "1h ago").

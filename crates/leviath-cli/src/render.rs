@@ -226,22 +226,23 @@ impl Renderer {
                     if !self.current_spans.is_empty() {
                         self.flush_line();
                     }
-                    // Emit blank line before non-first headings
+                    // Blank line before non-first headings
                     if !self.lines.is_empty() {
                         self.blank_line();
                     }
-                    let (color, prefix, use_modifier) = match level {
-                        HeadingLevel::H1 => (C_ACCENT, "# ", true),
-                        HeadingLevel::H2 => (C_ACCENT, "## ", true),
-                        HeadingLevel::H3 => (C_SUCCESS, "### ", true),
-                        HeadingLevel::H4 => (C_MUTED, "#### ", true),
-                        HeadingLevel::H5 => (C_DIM, "##### ", false),
-                        HeadingLevel::H6 => (C_DIM, "###### ", false),
+                    // Visual decorators — convey depth without # text (terminal can't vary font size)
+                    let (color, prefix, bold) = match level {
+                        HeadingLevel::H1 => (C_ACCENT,  "▌ ",  true),
+                        HeadingLevel::H2 => (C_ACCENT,  "▎ ",  true),
+                        HeadingLevel::H3 => (C_SUCCESS, "  ",   true),
+                        HeadingLevel::H4 => (C_MUTED,   "   ",  false),
+                        HeadingLevel::H5 => (C_DIM,     "    ", false),
+                        HeadingLevel::H6 => (C_DIM,     "     ",false),
                     };
                     let mut sty = Style::default().fg(color);
-                    if use_modifier { sty = sty.add_modifier(Modifier::BOLD); }
+                    if bold { sty = sty.add_modifier(Modifier::BOLD); }
                     self.current_spans.push(Span::styled(prefix, sty));
-                    self.push_inline(InlineStyle { bold: use_modifier, ..Default::default() });
+                    self.push_inline(InlineStyle { bold, ..Default::default() });
                 }
                 Event::End(TagEnd::Heading(level)) => {
                     self.pop_inline();
