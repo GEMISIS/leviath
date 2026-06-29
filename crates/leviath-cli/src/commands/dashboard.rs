@@ -2,7 +2,7 @@
 
 use clap::Args;
 use crossterm::{
-    event::{self, Event, KeyCode, KeyEventKind, MouseEvent, MouseEventKind},
+    event::{self, Event, KeyCode, KeyEventKind},
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
     ExecutableCommand,
 };
@@ -1493,21 +1493,6 @@ impl Dashboard {
                 self.show_help = true;
             }
             _ => {}
-        }
-    }
-
-    fn handle_mouse(&mut self, event: MouseEvent) {
-        // Mouse support: scroll wheel in detail view
-        if self.detail_view && !self.input_mode {
-            match event.kind {
-                MouseEventKind::ScrollUp => {
-                    self.detail_scroll = self.detail_scroll.saturating_add(3);
-                }
-                MouseEventKind::ScrollDown => {
-                    self.detail_scroll = self.detail_scroll.saturating_sub(3);
-                }
-                _ => {}
-            }
         }
     }
 
@@ -4185,10 +4170,8 @@ pub async fn execute(_args: DashboardArgs) -> anyhow::Result<()> {
 
     dashboard.add_log("Dashboard started. Use `lev run <agent>` to start an agent.".to_string());
 
-    // Enter TUI mode with mouse support
     enable_raw_mode()?;
     stdout().execute(EnterAlternateScreen)?;
-    crossterm::execute!(stdout(), crossterm::event::EnableMouseCapture)?;
 
     let backend = ratatui::backend::CrosstermBackend::new(stdout());
     let mut terminal = Terminal::new(backend)?;
@@ -4219,9 +4202,6 @@ pub async fn execute(_args: DashboardArgs) -> anyhow::Result<()> {
                 Event::Key(key) if key.kind == KeyEventKind::Press => {
                     dashboard.handle_key(key);
                 }
-                Event::Mouse(mouse) => {
-                    dashboard.handle_mouse(mouse);
-                }
                 Event::Resize(_, _) => {
                     // Terminal will redraw automatically on next tick
                 }
@@ -4235,7 +4215,6 @@ pub async fn execute(_args: DashboardArgs) -> anyhow::Result<()> {
     }
 
     // Restore terminal
-    crossterm::execute!(stdout(), crossterm::event::DisableMouseCapture)?;
     disable_raw_mode()?;
     stdout().execute(LeaveAlternateScreen)?;
 
