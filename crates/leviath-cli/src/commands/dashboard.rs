@@ -153,6 +153,9 @@ pub struct DashboardAgent {
     /// Frozen wall-clock time (Unix seconds) when the agent entered a waiting state.
     /// Used to prevent the elapsed timer from incrementing while waiting for input.
     pub active_until: Option<i64>,
+    /// Total seconds spent waiting for user input across all completed waits.
+    /// Subtracted from elapsed to show only actual running time.
+    pub waiting_secs: u64,
 }
 
 /// Event from an agent back to the dashboard.
@@ -529,18 +532,22 @@ impl Dashboard {
                 agent.tokens_out = run.completion_tokens;
                 agent.title = run.title.clone();
                 agent.pid = run.pid;
-                agent.status = status;
-                // Freeze the elapsed timer when the agent enters a waiting state
-                if matches!(
-                    agent.status,
+                let now_is_waiting = matches!(
+                    status,
                     AgentDisplayStatus::Waiting | AgentDisplayStatus::CompleteInteractive
-                ) {
+                );
+                if now_is_waiting {
+                    // Entering or staying in a wait — freeze timer at entry point
                     if agent.active_until.is_none() {
                         agent.active_until = Some(run.updated_at);
                     }
                 } else {
-                    agent.active_until = None;
+                    // Leaving a wait — accumulate how long we were waiting
+                    if let Some(wait_start) = agent.active_until.take() {
+                        agent.waiting_secs += (run.updated_at - wait_start).max(0) as u64;
+                    }
                 }
+                agent.status = status;
                 agent.workdir = run.workdir.clone();
                 agent.context_snapshot = runstate::read_context_snapshot(&run.run_id);
                 agent.stages = stages;
@@ -646,6 +653,7 @@ impl Dashboard {
                     } else {
                         None
                     },
+                    waiting_secs: 0,
                 });
             }
         }
@@ -2063,10 +2071,11 @@ impl Dashboard {
         {
             let hdr_area = chunks[chunk_idx];
             chunk_idx += 1;
+            let effective_start = agent.started_at + agent.waiting_secs as i64;
             let elapsed = if let Some(until) = agent.active_until {
-                elapsed_str_until(agent.started_at, until)
+                elapsed_str_until(effective_start, until)
             } else {
-                elapsed_str(agent.started_at)
+                elapsed_str(effective_start)
             };
             let status_color = agent.status.color();
             let spinner_frame = SPINNER[(self.tick_count as usize) % SPINNER.len()];
@@ -2271,11 +2280,12 @@ impl Dashboard {
                                 }
                             }
                             (Some(start), None) if s.status == StageRunStatus::Active => {
-                                // Freeze timer while agent is waiting for input
+                                // Exclude accumulated wait time from the stage timer
+                                let effective_start = start + agent.waiting_secs as i64;
                                 let dur = if let Some(until) = agent.active_until {
-                                    elapsed_str_until(start, until)
+                                    elapsed_str_until(effective_start, until)
                                 } else {
-                                    elapsed_str(start)
+                                    elapsed_str(effective_start)
                                 };
                                 format!(" {}", dur)
                             }
