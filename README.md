@@ -18,6 +18,14 @@ Pick a pre-built agent or create your own. Run it. Watch it actually remember wh
 
 <!-- TODO: hero gif of dashboard with agents running -->
 
+## Requirements
+
+- An API key from [Anthropic](https://console.anthropic.com/), [OpenAI](https://platform.openai.com/), or [OpenRouter](https://openrouter.ai/) — or run [Ollama](https://ollama.com) locally (free, no key)
+- macOS, Linux, or Windows
+- No runtime dependencies — single binary, no Node/Python/Docker required
+
+> **Claude Code Agent SDK:** Leviath is compatible with the [Claude Code agent SDK](https://docs.anthropic.com/en/docs/claude-code/sdk) as a provider. However, this routes all inference through Claude Code's own context management, which bypasses Leviath's structured regions — the core feature. Use a direct provider (Anthropic, OpenAI, etc.) for the full experience.
+
 ## Quick Start
 
 ### 1. Install
