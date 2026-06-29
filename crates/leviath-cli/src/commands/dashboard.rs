@@ -20,6 +20,7 @@ use ratatui::{
     },
     Frame, Terminal,
 };
+use std::collections::HashMap;
 use std::io::stdout;
 use std::sync::Arc;
 use std::time::Duration;
@@ -60,7 +61,7 @@ const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "�
 pub struct DashboardArgs {}
 
 /// Whether the detail content pane shows Output or Logs.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 enum StageContentMode {
     Output,
     Logs,
@@ -152,6 +153,9 @@ pub struct DashboardAgent {
     pub model: Option<String>,
     /// Unix timestamp when the run started (for elapsed display)
     pub started_at: i64,
+    /// Frozen wall-clock time (Unix seconds) when the agent entered a waiting state.
+    /// Used to prevent the elapsed timer from incrementing while waiting for input.
+    pub active_until: Option<i64>,
 }
 
 /// Event from an agent back to the dashboard.
@@ -221,8 +225,9 @@ struct Dashboard {
     choice_selected: usize,
     /// Which stage tab is currently focused in the detail view
     selected_stage: usize,
-    /// Whether the content pane shows Output or Logs
-    stage_content_mode: StageContentMode,
+    /// Per-stage content mode (Output or Logs). Keyed by stage index so switching
+    /// tabs doesn't reset the user's choice.
+    stage_content_modes: HashMap<usize, StageContentMode>,
     /// Monotonic tick counter for animations (spinner, toast timeouts)
     tick_count: u64,
     /// Active toast notifications
@@ -273,7 +278,7 @@ impl Dashboard {
             detail_scroll: 0,
             choice_selected: 0,
             selected_stage: 0,
-            stage_content_mode: StageContentMode::Output,
+            stage_content_modes: HashMap::new(),
             tick_count: 0,
             toasts: Vec::new(),
             show_help: false,
@@ -467,6 +472,14 @@ impl Dashboard {
                 agent.title = run.title.clone();
                 agent.pid = run.pid;
                 agent.status = status;
+                // Freeze the elapsed timer when the agent enters a waiting state
+                if matches!(agent.status, AgentDisplayStatus::Waiting | AgentDisplayStatus::CompleteInteractive) {
+                    if agent.active_until.is_none() {
+                        agent.active_until = Some(run.updated_at);
+                    }
+                } else {
+                    agent.active_until = None;
+                }
                 agent.workdir = run.workdir.clone();
                 agent.context_snapshot = runstate::read_context_snapshot(&run.run_id);
                 agent.stages = stages;
@@ -478,8 +491,9 @@ impl Dashboard {
                             .map(|a| !a.is_empty() && a == pending_id)
                             .unwrap_or(false);
                         if !already_answered {
-                            if agent.waiting_prompt.is_none() && waiting_prompt.is_some() {
-                                // Newly needs input — toast
+                            if agent.waiting_prompt.is_none() && waiting_prompt.is_some()
+                                && matches!(run.status, RunStatus::WaitingInput) {
+                                // Newly needs input — toast (not for CompleteInteractive which is optional)
                                 let name = agent.title.clone()
                                     .unwrap_or_else(|| truncate(&agent.blueprint_name, 20));
                                 self.toasts.push(Toast {
@@ -498,8 +512,8 @@ impl Dashboard {
                     agent.last_answered_request_id = None;
                 }
             } else {
-                // New agent — check if it needs input right away
-                if needs_input && waiting_prompt.is_some() {
+                // New agent — check if it needs input right away (only for genuine WaitingInput, not CompleteInteractive)
+                if needs_input && waiting_prompt.is_some() && matches!(run.status, RunStatus::WaitingInput) {
                     let name = run.title.clone().unwrap_or_else(|| truncate(&run.agent_name, 20));
                     self.toasts.push(Toast {
                         message: format!("Agent '{}' needs input", name),
@@ -541,6 +555,11 @@ impl Dashboard {
                     title: run.title.clone(),
                     model: run.model.clone(),
                     started_at: run.started_at,
+                    active_until: if matches!(run.status, RunStatus::WaitingInput | RunStatus::CompleteInteractive) {
+                        Some(run.updated_at)
+                    } else {
+                        None
+                    },
                 });
             }
         }
@@ -901,7 +920,6 @@ impl Dashboard {
                         self.selected_stage -= 1;
                         self.detail_scroll = 0;
                         self.review_scroll = 0;
-                        self.stage_content_mode = StageContentMode::Output;
                         self.search_mode = false;
                         self.search_query.clear();
                         self.search_match_idx = 0;
@@ -915,7 +933,6 @@ impl Dashboard {
                         self.selected_stage += 1;
                         self.detail_scroll = 0;
                         self.review_scroll = 0;
-                        self.stage_content_mode = StageContentMode::Output;
                         self.search_mode = false;
                         self.search_query.clear();
                         self.search_match_idx = 0;
@@ -931,7 +948,6 @@ impl Dashboard {
                         self.selected_stage = idx;
                         self.detail_scroll = 0;
                         self.review_scroll = 0;
-                        self.stage_content_mode = StageContentMode::Output;
                         self.search_mode = false;
                         self.search_query.clear();
                         self.search_match_idx = 0;
@@ -939,11 +955,11 @@ impl Dashboard {
                 }
                 // Content mode toggle
                 KeyCode::Char('l') => {
-                    self.stage_content_mode = StageContentMode::Logs;
+                    self.stage_content_modes.insert(self.selected_stage, StageContentMode::Logs);
                     self.detail_scroll = 0;
                 }
                 KeyCode::Char('o') => {
-                    self.stage_content_mode = StageContentMode::Output;
+                    self.stage_content_modes.insert(self.selected_stage, StageContentMode::Output);
                     self.detail_scroll = 0;
                 }
                 KeyCode::Char('i') => {
@@ -1035,7 +1051,7 @@ impl Dashboard {
                 KeyCode::Char('y') => {
                     if let Some(agent) = self.selected_agent() {
                         if agent.is_run_state {
-                            let is_output = self.stage_content_mode == StageContentMode::Output;
+                            let is_output = self.stage_content_modes.get(&self.selected_stage).copied().unwrap_or(StageContentMode::Output) == StageContentMode::Output;
                             let content = if is_output {
                                 runstate::tail_stage_output(&agent.id, self.selected_stage, 524_288)
                             } else {
@@ -1144,7 +1160,6 @@ impl Dashboard {
                     self.selected_stage = self.selected_agent()
                         .map(|a| a.stage_index)
                         .unwrap_or(0);
-                    self.stage_content_mode = StageContentMode::Output;
                 }
             }
             KeyCode::Char('/') => {
@@ -1423,7 +1438,7 @@ impl Dashboard {
                 let title_str = agent
                     .title
                     .as_deref()
-                    .map(|t| truncate(t, 26))
+                    .map(|t| truncate(t.trim_start_matches('#').trim(), 26))
                     .unwrap_or_else(|| truncate(&agent.task, 26));
                 let tok_str = if agent.is_run_state {
                     if agent.tokens_in == 0 && agent.tokens_out == 0 {
@@ -1551,7 +1566,7 @@ impl Dashboard {
             && self.selected_stage_can_respond();
 
         let header_h: u16 = 1;   // compact breadcrumb line
-        let info_h: u16 = 2;     // task + workdir/stats strip
+        let info_h: u16 = 4;     // task + workdir/stats strip (2 content + 2 border lines)
         let tabs_h: u16 = 3;     // tabs row in a block (border top + tab line + border bottom)
         let context_h: u16 = if agent.context_snapshot.is_some() || !agent.stages.is_empty() { 3 } else { 0 };
 
@@ -1619,7 +1634,11 @@ impl Dashboard {
         // ── Header breadcrumb ─────────────────────────────────────────────────
         {
             let hdr_area = chunks[chunk_idx]; chunk_idx += 1;
-            let elapsed = elapsed_str(agent.started_at);
+            let elapsed = if let Some(until) = agent.active_until {
+                elapsed_str_until(agent.started_at, until)
+            } else {
+                elapsed_str(agent.started_at)
+            };
             let status_color = agent.status.color();
             let spinner_frame = SPINNER[(self.tick_count as usize) % SPINNER.len()];
             let status_span = match &agent.status {
@@ -1632,7 +1651,8 @@ impl Dashboard {
                     Style::default().fg(status_color).add_modifier(Modifier::BOLD),
                 ),
             };
-            let title_text = agent.title.as_deref().unwrap_or(&agent.blueprint_name);
+            let raw_title = agent.title.as_deref().unwrap_or(&agent.blueprint_name);
+            let title_text = raw_title.trim_start_matches('#').trim();
             let hdr_line = Line::from(vec![
                 Span::styled(format!(" {} ", truncate(title_text, 28)), Style::default().fg(C_WHITE).add_modifier(Modifier::BOLD)),
                 Span::styled("· ", Style::default().fg(C_DIM)),
@@ -1698,8 +1718,10 @@ impl Dashboard {
             frame.render_widget(
                 Paragraph::new(vec![task_line, stats_line])
                     .block(Block::default()
-                        .borders(Borders::LEFT | Borders::RIGHT)
-                        .border_style(Style::default().fg(C_BORDER))),
+                        .borders(Borders::ALL)
+                        .border_type(BorderType::Rounded)
+                        .border_style(Style::default().fg(C_BORDER))
+                        .padding(Padding::horizontal(1))),
                 info_area,
             );
         }
@@ -1755,11 +1777,13 @@ impl Dashboard {
                             else { format!(" {}m{}s", secs / 60, secs % 60) }
                         }
                         (Some(start), None) if s.status == StageRunStatus::Active => {
-                            // Show live elapsed for the active stage
-                            elapsed_str(start)
-                                .chars().next()
-                                .map(|_| format!(" {}", elapsed_str(start)))
-                                .unwrap_or_default()
+                            // Freeze timer while agent is waiting for input
+                            let dur = if let Some(until) = agent.active_until {
+                                elapsed_str_until(start, until)
+                            } else {
+                                elapsed_str(start)
+                            };
+                            format!(" {}", dur)
                         }
                         _ => String::new(),
                     };
@@ -1890,7 +1914,7 @@ impl Dashboard {
             let content_area = chunks[chunk_idx]; chunk_idx += 1;
             let inner_h = content_area.height.saturating_sub(2) as usize;
 
-            let is_output = self.stage_content_mode == StageContentMode::Output;
+            let is_output = self.stage_content_modes.get(&self.selected_stage).copied().unwrap_or(StageContentMode::Output) == StageContentMode::Output;
 
             // Read per-stage content
             let content = if agent.is_run_state {
@@ -2445,9 +2469,17 @@ fn osc52_yank(text: &str) {
         }
         out
     };
-    // Write OSC52 sequence to stdout; the terminal intercepts it and
-    // writes the content to the clipboard.
     let osc = format!("\x1b]52;c;{}\x07", encoded);
+    // Write directly to /dev/tty to bypass ratatui's raw mode stdout handling.
+    #[cfg(unix)]
+    {
+        if let Ok(mut tty) = std::fs::OpenOptions::new().write(true).open("/dev/tty") {
+            let _ = tty.write_all(osc.as_bytes());
+            let _ = tty.flush();
+            return;
+        }
+    }
+    // Fallback: write to stdout
     let mut stdout = std::io::stdout();
     let _ = stdout.write_all(osc.as_bytes());
     let _ = stdout.flush();
@@ -2518,6 +2550,19 @@ fn elapsed_str(started_at: i64) -> String {
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0);
     let secs = (now - started_at).max(0) as u64;
+    if secs < 60 {
+        format!("{}s", secs)
+    } else if secs < 3600 {
+        format!("{}m{}s", secs / 60, secs % 60)
+    } else {
+        format!("{}h{}m", secs / 3600, (secs % 3600) / 60)
+    }
+}
+
+/// Format elapsed seconds from `started_at` up to `until` (not current time).
+fn elapsed_str_until(started_at: i64, until: i64) -> String {
+    if started_at == 0 { return "—".to_string(); }
+    let secs = (until - started_at).max(0) as u64;
     if secs < 60 {
         format!("{}s", secs)
     } else if secs < 3600 {

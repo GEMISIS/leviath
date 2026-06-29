@@ -1874,7 +1874,19 @@ async fn generate_title(
 
     match provider.infer(request).await {
         Ok(resp) => {
-            let title = resp.content.trim().lines().next()?.trim().to_string();
+            let raw = resp.content.trim().lines().next()?.trim().to_string();
+            // Strip leading # heading markers, backtick code formatting, surrounding quotes
+            let title = raw
+                .trim_start_matches('#')
+                .trim()
+                .trim_start_matches('`')
+                .trim_end_matches('`')
+                .trim_start_matches('"')
+                .trim_end_matches('"')
+                .trim_start_matches('\'')
+                .trim_end_matches('\'')
+                .trim()
+                .to_string();
             if title.is_empty() { None } else { Some(title) }
         }
         Err(e) => {
