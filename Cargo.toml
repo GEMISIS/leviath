@@ -55,3 +55,5 @@ crossterm = "0.28"
 ratatui = "0.29"
 pulldown-cmark = "0.12"
 tui-textarea = { version = "0.7", features = ["crossterm"] }
+axum = { version = "0.8", features = ["ws"] }
+tower-http = { version = "0.6", features = ["cors"] }

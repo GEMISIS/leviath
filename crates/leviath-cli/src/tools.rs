@@ -106,12 +106,12 @@ impl ToolRegistry {
 
 // ─── Sub-agent tool executor ─────────────────────────────────────────────────
 
-use leviath_runtime::{
-    AgentEngine, AgentPool, AgentState, AgentStatus, CancellationToken, ContextWindow,
-    SubAgentChildren, ParentRef,
-};
-use leviath_core::Blueprint;
 use bevy_ecs::prelude::Entity;
+use leviath_core::Blueprint;
+use leviath_runtime::{
+    AgentEngine, AgentPool, AgentState, AgentStatus, CancellationToken, ContextWindow, ParentRef,
+    SubAgentChildren,
+};
 use tokio::sync::RwLock;
 
 /// Shared state for sub-agent tool execution.
@@ -179,8 +179,14 @@ impl SubAgentExecutor {
     ) -> String {
         match tool_name {
             "spawn_agent" => {
-                self.exec_spawn(args, caller_agent_id, caller_entity, caller_depth, max_depth)
-                    .await
+                self.exec_spawn(
+                    args,
+                    caller_agent_id,
+                    caller_entity,
+                    caller_depth,
+                    max_depth,
+                )
+                .await
             }
             "check_agent" => self.exec_check(args, caller_agent_id).await,
             "wait_for_agent" => self.exec_wait(args, caller_agent_id).await,
@@ -206,10 +212,7 @@ impl SubAgentExecutor {
             Some(t) => t.to_string(),
             None => return "[error] missing 'task' argument".to_string(),
         };
-        let _wait = args
-            .get("wait")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
+        let _wait = args.get("wait").and_then(|v| v.as_bool()).unwrap_or(false);
         let seed_context = args
             .get("seed_context")
             .and_then(|v| v.as_str())
@@ -285,8 +288,9 @@ impl SubAgentExecutor {
                 .get::<SubAgentChildren>(caller_entity)
                 .is_some()
             {
-                if let Some(mut children) =
-                    engine.world_mut().get_mut::<SubAgentChildren>(caller_entity)
+                if let Some(mut children) = engine
+                    .world_mut()
+                    .get_mut::<SubAgentChildren>(caller_entity)
                 {
                     children.children.push(child_entity);
                 }
@@ -307,8 +311,7 @@ impl SubAgentExecutor {
 
             // Inject seed context if provided
             if let Some(seed) = &seed_context {
-                if let Some(mut window) =
-                    engine.world_mut().get_mut::<ContextWindow>(child_entity)
+                if let Some(mut window) = engine.world_mut().get_mut::<ContextWindow>(child_entity)
                 {
                     let tokens = seed.len() / 4 + 1;
                     let pinned_name = window
@@ -436,8 +439,7 @@ impl SubAgentExecutor {
                             };
                             if let Some(ce) = caller_entity {
                                 let mut eng = self.engine.blocking_write();
-                                if let Some(mut pstate) =
-                                    eng.world_mut().get_mut::<AgentState>(ce)
+                                if let Some(mut pstate) = eng.world_mut().get_mut::<AgentState>(ce)
                                 {
                                     pstate.pending_wait = None;
                                 }
@@ -454,16 +456,10 @@ impl SubAgentExecutor {
                                         .map(|e| e.content.clone())
                                 })
                                 .unwrap_or_else(|| "(no result)".to_string());
-                            return format!(
-                                "Agent '{}' completed.\nResult: {}",
-                                agent_id, result
-                            );
+                            return format!("Agent '{}' completed.\nResult: {}", agent_id, result);
                         }
                         AgentStatus::Error { message } => {
-                            return format!(
-                                "Agent '{}' failed with error: {}",
-                                agent_id, message
-                            );
+                            return format!("Agent '{}' failed with error: {}", agent_id, message);
                         }
                         AgentStatus::Cancelled => {
                             return format!("Agent '{}' was cancelled", agent_id);

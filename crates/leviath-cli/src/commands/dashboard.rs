@@ -693,8 +693,9 @@ impl Dashboard {
                 agent.context_tokens = (window.current_tokens, window.max_tokens);
             }
             // Populate parent info from ParentRef component
-            if let Some(parent_ref) =
-                engine.world().get::<leviath_runtime::ParentRef>(agent.entity)
+            if let Some(parent_ref) = engine
+                .world()
+                .get::<leviath_runtime::ParentRef>(agent.entity)
             {
                 agent.parent_id = Some(parent_ref.parent_agent_id.clone());
                 agent.depth = parent_ref.depth;

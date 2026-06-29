@@ -38,3 +38,7 @@ leviath-tools = { workspace = true }
 libc = "0.2"
 pulldown-cmark = { workspace = true }
 tui-textarea = { workspace = true }
+axum = { workspace = true }
+tower-http = { workspace = true }
+reqwest = { workspace = true }
+tower = { version = "0.5", features = ["util"] }

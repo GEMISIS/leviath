@@ -12,6 +12,7 @@
 //! - `~/.leviath/dashboard.log` — never cleared, appended across sessions
 
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -72,6 +73,15 @@ pub struct RunMeta {
     /// Short human-readable title generated from the task prompt (None until generated).
     #[serde(default)]
     pub title: Option<String>,
+    /// Custom key-value pairs from the spawn request (API metadata).
+    #[serde(default)]
+    pub metadata: HashMap<String, String>,
+    /// Webhook URL to POST on agent completion/error.
+    #[serde(default)]
+    pub callback_url: Option<String>,
+    /// Links sub-agent runs to their parent run.
+    #[serde(default)]
+    pub parent_run_id: Option<String>,
 }
 
 impl RunMeta {
@@ -104,6 +114,9 @@ impl RunMeta {
             updated_at: now,
             error: None,
             title: None,
+            metadata: HashMap::new(),
+            callback_url: None,
+            parent_run_id: None,
         }
     }
 

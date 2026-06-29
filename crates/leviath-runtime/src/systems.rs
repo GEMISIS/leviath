@@ -206,6 +206,7 @@ pub fn message_delivery_system(
 /// 3. Clears the parent's pending_wait if it was waiting for this child
 ///
 /// Uses ParamSet to safely access AgentState from two conflicting queries.
+#[allow(clippy::type_complexity)]
 pub fn child_completion_system(
     mut queries: ParamSet<(
         Query<(&AgentState, &ParentRef)>,
@@ -218,11 +219,7 @@ pub fn child_completion_system(
     for (child_state, parent_ref) in queries.p0().iter() {
         match &child_state.status {
             AgentStatus::Complete => {
-                completions.push((
-                    parent_ref.parent_entity,
-                    child_state.agent_id.clone(),
-                    None,
-                ));
+                completions.push((parent_ref.parent_entity, child_state.agent_id.clone(), None));
             }
             AgentStatus::Error { message } => {
                 completions.push((
@@ -278,6 +275,7 @@ pub fn child_completion_system(
 ///
 /// When an agent is Cancelled and has SubAgentChildren, recursively cancel all descendants.
 /// Uses ParamSet to avoid query conflicts on AgentState.
+#[allow(clippy::type_complexity)]
 pub fn cascade_kill_system(
     mut queries: ParamSet<(
         Query<(&AgentState, &SubAgentChildren)>,

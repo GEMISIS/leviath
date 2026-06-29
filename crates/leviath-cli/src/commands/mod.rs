@@ -8,5 +8,6 @@ pub mod models;
 pub mod pack;
 pub mod remove;
 pub mod run;
+pub mod serve;
 pub mod setup;
 pub mod test;

@@ -57,6 +57,9 @@ enum Commands {
     /// List and inspect available models
     Models(commands::models::ModelsArgs),
 
+    /// Start the REST + WebSocket API server
+    Serve(commands::serve::ServeArgs),
+
     /// (Internal) Background worker process — do not call directly
     #[command(name = "__run-worker", hide = true)]
     RunWorker(commands::run::WorkerArgs),
@@ -84,6 +87,7 @@ async fn main() -> anyhow::Result<()> {
         Commands::Pack(args) => commands::pack::execute(args).await,
         Commands::Dashboard(args) => commands::dashboard::execute(args).await,
         Commands::Models(args) => commands::models::execute(args).await,
+        Commands::Serve(args) => commands::serve::execute(args).await,
         Commands::RunWorker(args) => commands::run::execute_worker(args).await,
     }
 }
