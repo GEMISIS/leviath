@@ -54,6 +54,14 @@ lev run agents/researcher --task "Compare spiking neural networks vs transformer
 
 No Rust code needed — agents are defined in a single TOML file.
 
+## What Else Is Different
+
+**🎮 ECS Agent Runtime** — Leviath runs agents as entities in a [bevy_ecs](https://bevyengine.org/) world, not as separate OS processes. Spin up 50 agents and they share one process with game-engine-style scheduling. Other tools spawn a process per agent — 50 Claude Code instances means 50 node processes fighting for your CPU and RAM.
+
+**🗣️ Sub-Agents That Talk to Users** — Other tools have sub-agents (Claude Code, Codex), but they're fire-and-forget: do work, return a summary. In Leviath, a sub-agent at any depth can independently pause and ask the user a question through the dashboard — no routing through the parent. The human stays in the loop at every level.
+
+**🔀 Multi-Stage Agents** — Each stage gets its own model, tool permissions, context layout, and interaction mode. Use Sonnet for analysis (fast/cheap), Sonnet for implementation (workhorse), Opus for review (catches what Sonnet missed). Per-stage context layouts mean your review stage doesn't inherit the implementation stage's scratch data.
+
 ## Why Leviath?
 
 <table>
