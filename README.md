@@ -21,7 +21,7 @@ Pick a pre-built agent or create your own. Run it. Watch it actually remember wh
 
 ## Requirements
 
-- An API key from [Anthropic](https://console.anthropic.com/), [OpenAI](https://platform.openai.com/), or [OpenRouter](https://openrouter.ai/) — or run [Ollama](https://ollama.com) locally (free, no key)
+- An API key from [Anthropic](https://console.anthropic.com/), [OpenAI](https://platform.openai.com/), [Google AI](https://aistudio.google.com/), or [OpenRouter](https://openrouter.ai/) — or run [Ollama](https://ollama.com) locally (free, no key)
 - macOS, Linux, or Windows
 - No runtime dependencies — single binary, no Node/Python/Docker required
 
@@ -198,6 +198,7 @@ Agent lifecycle, interaction (human-in-the-loop), blueprint management, per-agen
 |----------|---------|
 | Anthropic | `ANTHROPIC_API_KEY` |
 | OpenAI | `OPENAI_API_KEY` |
+| Google (Gemini) | `GOOGLE_API_KEY` |
 | OpenRouter | `OPENROUTER_API_KEY` |
 | Ollama | None (local) |
 | Claude Code | None (subscription) |

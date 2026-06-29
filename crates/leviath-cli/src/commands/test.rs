@@ -95,6 +95,12 @@ pub async fn execute(args: TestArgs) -> anyhow::Result<()> {
                 Arc::new(leviath_providers::OpenAIProvider::new(key.clone())),
             );
         }
+        if let Some(ref key) = config.providers.google_api_key {
+            reg.register(
+                "google".to_string(),
+                Arc::new(leviath_providers::GeminiProvider::new(key.clone())),
+            );
+        }
         if let Some(ref key) = config.openrouter_api_key {
             reg.register(
                 "openrouter".to_string(),

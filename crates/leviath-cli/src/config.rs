@@ -120,6 +120,9 @@ pub struct ProviderConfig {
 
     /// OpenAI API key
     pub openai_api_key: Option<String>,
+
+    /// Google AI (Gemini) API key
+    pub google_api_key: Option<String>,
 }
 
 impl Default for Config {
@@ -129,6 +132,7 @@ impl Default for Config {
             providers: ProviderConfig {
                 anthropic_api_key: None,
                 openai_api_key: None,
+                google_api_key: None,
             },
             agent_paths: Vec::new(),
             registries: vec!["https://leviath.dev/registry".to_string()],
@@ -175,6 +179,9 @@ impl Config {
         }
         if config.providers.openai_api_key.is_none() {
             config.providers.openai_api_key = std::env::var("OPENAI_API_KEY").ok();
+        }
+        if config.providers.google_api_key.is_none() {
+            config.providers.google_api_key = std::env::var("GOOGLE_API_KEY").ok();
         }
         if config.openrouter_api_key.is_none() {
             config.openrouter_api_key = std::env::var("OPENROUTER_API_KEY").ok();
@@ -345,6 +352,7 @@ mod tests {
             providers: ProviderConfig {
                 anthropic_api_key: Some("sk-ant-test123".to_string()),
                 openai_api_key: None,
+                google_api_key: None,
             },
             ..Config::default()
         };
@@ -357,6 +365,7 @@ mod tests {
             providers: ProviderConfig {
                 anthropic_api_key: Some("bad-key".to_string()),
                 openai_api_key: None,
+                google_api_key: None,
             },
             ..Config::default()
         };
@@ -371,6 +380,7 @@ mod tests {
             providers: ProviderConfig {
                 anthropic_api_key: None,
                 openai_api_key: Some("sk-test123".to_string()),
+                google_api_key: None,
             },
             ..Config::default()
         };
@@ -383,6 +393,7 @@ mod tests {
             providers: ProviderConfig {
                 anthropic_api_key: None,
                 openai_api_key: Some("bad-key".to_string()),
+                google_api_key: None,
             },
             ..Config::default()
         };

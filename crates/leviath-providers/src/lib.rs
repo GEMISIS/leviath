@@ -12,6 +12,7 @@
 
 pub mod anthropic;
 pub mod claude_code;
+pub mod gemini;
 pub mod ollama;
 pub mod openai;
 pub mod openrouter;
@@ -21,6 +22,7 @@ pub mod tokenizer;
 
 pub use anthropic::AnthropicProvider;
 pub use claude_code::ClaudeCodeProvider;
+pub use gemini::GeminiProvider;
 pub use ollama::OllamaProvider;
 pub use openai::OpenAIProvider;
 pub use openrouter::OpenRouterProvider;

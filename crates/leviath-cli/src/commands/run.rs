@@ -2536,6 +2536,7 @@ fn default_title_model(provider: &str) -> &'static str {
     match provider {
         "anthropic" | "claude-code" => "claude-haiku-4-5-20251001",
         "openai" => "gpt-4o-mini",
+        "google" => "gemini-2.5-flash",
         "openrouter" => "anthropic/claude-haiku-4-5",
         // For Ollama and unknown providers, fall through to the caller's
         // logic which will prefer config.default_model or the run model.
@@ -2642,6 +2643,16 @@ pub fn build_provider_registry(config: &Config) -> ProviderRegistry {
         registry.register(
             "openai".to_string(),
             Arc::new(leviath_providers::OpenAIProvider::with_overrides(
+                key.clone(),
+                config.model_capabilities.clone(),
+            )),
+        );
+    }
+
+    if let Some(ref key) = config.providers.google_api_key {
+        registry.register(
+            "google".to_string(),
+            Arc::new(leviath_providers::GeminiProvider::with_overrides(
                 key.clone(),
                 config.model_capabilities.clone(),
             )),

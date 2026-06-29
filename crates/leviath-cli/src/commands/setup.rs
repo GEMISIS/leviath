@@ -19,6 +19,10 @@ pub struct SetupArgs {
     #[arg(long)]
     pub openai_key: Option<String>,
 
+    /// Google AI (Gemini) API key
+    #[arg(long)]
+    pub google_key: Option<String>,
+
     /// OpenRouter API key
     #[arg(long)]
     pub openrouter_key: Option<String>,
@@ -66,6 +70,15 @@ pub async fn execute(args: SetupArgs) -> anyhow::Result<()> {
         "sk-...",
         config.providers.openai_api_key.as_deref(),
         current_openai.as_deref(),
+    )?;
+
+    // Google AI (Gemini) API key
+    let current_google = config.providers.google_api_key.as_deref().map(redact);
+    config.providers.google_api_key = prompt_secret(
+        "Google AI (Gemini) API key",
+        "AIza...",
+        config.providers.google_api_key.as_deref(),
+        current_google.as_deref(),
     )?;
 
     // OpenRouter API key
@@ -132,6 +145,9 @@ fn apply_flags(config: &mut Config, args: &SetupArgs) {
     }
     if let Some(ref k) = args.openai_key {
         config.providers.openai_api_key = Some(k.clone());
+    }
+    if let Some(ref k) = args.google_key {
+        config.providers.google_api_key = Some(k.clone());
     }
     if let Some(ref k) = args.openrouter_key {
         config.openrouter_api_key = Some(k.clone());
