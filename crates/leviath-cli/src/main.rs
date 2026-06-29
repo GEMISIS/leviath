@@ -39,10 +39,10 @@ enum Commands {
     List(commands::list::ListArgs),
 
     /// Install a blueprint
-    Install(commands::install::InstallArgs),
+    Add(commands::add::AddArgs),
 
     /// Remove an installed blueprint
-    Uninstall(commands::uninstall::UninstallArgs),
+    Remove(commands::remove::RemoveArgs),
 
     /// Run blueprint tests
     Test(commands::test::TestArgs),
@@ -51,6 +51,7 @@ enum Commands {
     Pack(commands::pack::PackArgs),
 
     /// Interactive agent dashboard
+    #[command(name = "dash")]
     Dashboard(commands::dashboard::DashboardArgs),
 
     /// List and inspect available models
@@ -67,9 +68,7 @@ async fn main() -> anyhow::Result<()> {
 
     // Initialize tracing
     let level = if cli.verbose { "debug" } else { "info" };
-    tracing_subscriber::fmt()
-        .with_env_filter(level)
-        .init();
+    tracing_subscriber::fmt().with_env_filter(level).init();
 
     info!("Leviath CLI v{}", env!("CARGO_PKG_VERSION"));
 
@@ -79,8 +78,8 @@ async fn main() -> anyhow::Result<()> {
         Commands::Setup(args) => commands::setup::execute(args).await,
         Commands::Run(args) => commands::run::execute(args).await,
         Commands::List(args) => commands::list::execute(args).await,
-        Commands::Install(args) => commands::install::execute(args).await,
-        Commands::Uninstall(args) => commands::uninstall::execute(args).await,
+        Commands::Add(args) => commands::add::execute(args).await,
+        Commands::Remove(args) => commands::remove::execute(args).await,
         Commands::Test(args) => commands::test::execute(args).await,
         Commands::Pack(args) => commands::pack::execute(args).await,
         Commands::Dashboard(args) => commands::dashboard::execute(args).await,

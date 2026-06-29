@@ -43,9 +43,7 @@ pub async fn execute(args: PackArgs) -> anyhow::Result<()> {
 
     // Bundle the project
     let bundler = AgentBundler::new();
-    let project_dir = manifest_path
-        .parent()
-        .unwrap_or_else(|| Path::new("."));
+    let project_dir = manifest_path.parent().unwrap_or_else(|| Path::new("."));
 
     let data = bundler.bundle(project_dir)?;
     let bundle_size = data.len();
@@ -80,7 +78,7 @@ pub async fn execute(args: PackArgs) -> anyhow::Result<()> {
         println!("  Tests: {} files", test_count);
     }
 
-    println!("\nDone! Install with: lev install {}", output_path.display());
+    println!("\nDone! Install with: lev add {}", output_path.display());
 
     Ok(())
 }

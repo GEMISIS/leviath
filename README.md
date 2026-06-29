@@ -35,7 +35,7 @@ Managing multiple agents at once:
 ```bash
 # Spawn an agent in the background, then open the interactive dashboard
 lev run agents/coder --task "Refactor the auth module"
-lev dashboard
+lev dash
 
 # Inside the dashboard:
 #   [↑↓] to select an agent
@@ -245,9 +245,9 @@ required = true
 |---|---|
 | `lev create <name>` | Create agent project (`--template software-engineer\|coder\|researcher`) |
 | `lev run [path] --task <task>` | Run an agent in the background (`--model` to override) |
-| `lev dashboard` | TUI for managing all running and completed agents |
+| `lev dash` | TUI for managing all running and completed agents |
 | `lev pack [path]` | Bundle for distribution → `.leviath-bundle` |
-| `lev install <package>` | Install from bundle or registry |
+| `lev add <package>` | Install from bundle or registry |
 | `lev spawn <name>` | Spawn from installed blueprint (`--count N`) |
 | `lev list` | List installed and available agents |
 | `lev test [path]` | Run tests (`--dry-run` for no API calls) |
@@ -255,7 +255,7 @@ required = true
 
 ## Dashboard
 
-`lev dashboard` provides a terminal UI for managing multiple agents at once:
+`lev dash` provides a terminal UI for managing multiple agents at once:
 
 ```
 ┌─ Agents ──────────────────────────────────────────────────┐
@@ -316,7 +316,7 @@ lev test --dry-run        # Validate structure only
 
 ```bash
 lev pack                  # → my-agent-0.1.0.leviath-bundle
-lev install agent.leviath-bundle
+lev add agent.leviath-bundle
 lev spawn my-agent
 ```
 

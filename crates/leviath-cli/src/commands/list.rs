@@ -4,8 +4,8 @@ use clap::Args;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use crate::config::Config;
 use super::run::parse_manifest_public;
+use crate::config::Config;
 
 #[derive(Args)]
 pub struct ListArgs {
@@ -144,14 +144,14 @@ pub async fn execute(_args: ListArgs) -> anyhow::Result<()> {
         println!("  lev init my-agent");
         println!();
         println!("To install an agent:");
-        println!("  lev install <package>");
+        println!("  lev add <package>");
     }
 
     Ok(())
 }
 
 fn get_agents_dir() -> anyhow::Result<PathBuf> {
-    let home = dirs::home_dir()
-        .ok_or_else(|| anyhow::anyhow!("Could not determine home directory"))?;
+    let home =
+        dirs::home_dir().ok_or_else(|| anyhow::anyhow!("Could not determine home directory"))?;
     Ok(home.join(".leviath").join("agents"))
 }

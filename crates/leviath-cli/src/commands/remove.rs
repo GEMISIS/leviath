@@ -1,15 +1,15 @@
-//! `lev uninstall` - Remove an installed agent
+//! `lev remove` - Remove an installed agent
 
 use clap::Args;
 
 #[derive(Args)]
-pub struct UninstallArgs {
+pub struct RemoveArgs {
     /// Name of the installed agent to remove
     #[arg(value_name = "NAME")]
     pub name: String,
 }
 
-pub async fn execute(args: UninstallArgs) -> anyhow::Result<()> {
+pub async fn execute(args: RemoveArgs) -> anyhow::Result<()> {
     let installer = leviath_package::AgentInstaller::new();
 
     // Verify it's actually installed first
@@ -22,6 +22,6 @@ pub async fn execute(args: UninstallArgs) -> anyhow::Result<()> {
     }
 
     installer.uninstall(&args.name)?;
-    println!("Uninstalled agent '{}'.", args.name);
+    println!("Removed agent '{}'.", args.name);
     Ok(())
 }

@@ -2,9 +2,9 @@
 
 use clap::Args;
 use leviath_core::blueprint::{ModelConfig, StageMode, ToolResultRouting};
+use leviath_core::layout::RegionDefinition;
 use leviath_core::lifecycle::CompactionConfig;
 use leviath_core::{Blueprint, ContextLayout, Region, RegionKind, Stage};
-use leviath_core::layout::RegionDefinition;
 use leviath_runtime::{AgentEngine, AgentPool, AgentState, ContextWindow, ProviderRegistry};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -24,7 +24,11 @@ use crate::tools::{resolve_policy, ToolRegistry};
 /// - `Some(s)` otherwise → use `s` as a literal prompt.
 /// - `None` when stdin is not a TTY → error.
 /// - `None` when stdin is a TTY → launch the user's editor on a temp prompt file.
-fn resolve_task(arg: &Option<String>, agent_name: &str, description: Option<&str>) -> anyhow::Result<String> {
+fn resolve_task(
+    arg: &Option<String>,
+    agent_name: &str,
+    description: Option<&str>,
+) -> anyhow::Result<String> {
     match arg {
         Some(s) => {
             let p = std::path::Path::new(s);
@@ -49,19 +53,19 @@ fn resolve_task(arg: &Option<String>, agent_name: &str, description: Option<&str
             }
 
             // Build a commented template file for the editor
-            let mut template = format!(
-                "# Task for agent: {}\n",
-                agent_name
-            );
+            let mut template = format!("# Task for agent: {}\n", agent_name);
             if let Some(desc) = description {
                 if !desc.is_empty() {
                     template.push_str(&format!("# {}\n", desc));
                 }
             }
-            template.push_str("#\n# Describe your task below. Lines starting with '#' are ignored.\n\n");
+            template.push_str(
+                "#\n# Describe your task below. Lines starting with '#' are ignored.\n\n",
+            );
 
             // Write to a temp file
-            let tmp_path = std::env::temp_dir().join(format!("lev-task-{}.txt", std::process::id()));
+            let tmp_path =
+                std::env::temp_dir().join(format!("lev-task-{}.txt", std::process::id()));
             std::fs::write(&tmp_path, &template)
                 .map_err(|e| anyhow::anyhow!("Failed to create task temp file: {}", e))?;
 
@@ -98,10 +102,14 @@ fn launch_editor(path: &std::path::Path) -> anyhow::Result<()> {
     // Resolve editor candidates in priority order
     let mut candidates: Vec<String> = Vec::new();
     if let Ok(v) = std::env::var("VISUAL") {
-        if !v.is_empty() { candidates.push(v); }
+        if !v.is_empty() {
+            candidates.push(v);
+        }
     }
     if let Ok(e) = std::env::var("EDITOR") {
-        if !e.is_empty() { candidates.push(e); }
+        if !e.is_empty() {
+            candidates.push(e);
+        }
     }
 
     #[cfg(unix)]
@@ -124,7 +132,9 @@ fn launch_editor(path: &std::path::Path) -> anyhow::Result<()> {
     for editor in &candidates {
         // Handle editor strings that may include flags (e.g. "code --wait")
         let parts: Vec<&str> = editor.split_whitespace().collect();
-        if parts.is_empty() { continue; }
+        if parts.is_empty() {
+            continue;
+        }
 
         let mut cmd = Command::new(parts[0]);
         for arg in &parts[1..] {
@@ -144,14 +154,16 @@ fn launch_editor(path: &std::path::Path) -> anyhow::Result<()> {
                 continue;
             }
             Err(e) => {
-                return Err(anyhow::anyhow!("Failed to launch editor '{}': {}", editor, e));
+                return Err(anyhow::anyhow!(
+                    "Failed to launch editor '{}': {}",
+                    editor,
+                    e
+                ));
             }
         }
     }
 
-    anyhow::bail!(
-        "No editor found. Set $VISUAL or $EDITOR, or install vim/nano/notepad."
-    )
+    anyhow::bail!("No editor found. Set $VISUAL or $EDITOR, or install vim/nano/notepad.")
 }
 
 // ─── Per-stage recorder ───────────────────────────────────────────────────────
@@ -349,14 +361,14 @@ pub async fn execute(args: RunArgs) -> anyhow::Result<()> {
 
         if count == 1 {
             println!("Started run: {}", run_id);
-            println!("  lev dashboard  — monitor in TUI dashboard");
+            println!("  lev dash  — monitor in TUI dashboard");
         } else {
             println!("  [{}/{}] Started run: {}", i + 1, count, run_id);
         }
     }
 
     if count > 1 {
-        println!("Spawned {} runs. Use `lev dashboard` to monitor.", count);
+        println!("Spawned {} runs. Use `lev dash` to monitor.", count);
     }
 
     Ok(())
@@ -401,7 +413,8 @@ async fn run_foreground(args: RunArgs) -> anyhow::Result<()> {
     let tool_registry = Arc::new(ToolRegistry::build(workdir, &config).await);
 
     // Build launch-level tool policy overrides from CLI flags
-    let mut launch_overrides: std::collections::HashMap<String, ToolPolicy> = std::collections::HashMap::new();
+    let mut launch_overrides: std::collections::HashMap<String, ToolPolicy> =
+        std::collections::HashMap::new();
     if args.yolo {
         launch_overrides.insert("*".to_string(), ToolPolicy::Allow);
     }
@@ -461,11 +474,15 @@ async fn run_foreground(args: RunArgs) -> anyhow::Result<()> {
             for tc in calls {
                 // ── present_for_review: print document to stdout, ask for feedback ──
                 if tc.name == "present_for_review" {
-                    let title = tc.arguments.get("title")
+                    let title = tc
+                        .arguments
+                        .get("title")
                         .and_then(|v| v.as_str())
                         .unwrap_or("Review")
                         .to_string();
-                    let markdown = tc.arguments.get("markdown")
+                    let markdown = tc
+                        .arguments
+                        .get("markdown")
                         .and_then(|v| v.as_str())
                         .unwrap_or("")
                         .to_string();
@@ -477,7 +494,9 @@ async fn run_foreground(args: RunArgs) -> anyhow::Result<()> {
                     println!("{}", markdown);
                     println!("{}", "─".repeat(60));
 
-                    use crate::interaction::{InteractionRequest, request_interaction_stdin, response_as_text};
+                    use crate::interaction::{
+                        request_interaction_stdin, response_as_text, InteractionRequest,
+                    };
                     let req = InteractionRequest::review(
                         format!("fg-review-{}", tc.id),
                         &title,
@@ -517,7 +536,10 @@ async fn run_foreground(args: RunArgs) -> anyhow::Result<()> {
                     }
                     ToolPolicy::Ask => {
                         // Foreground: ask via stdin
-                        use crate::interaction::{InteractionRequest, request_interaction_stdin, response_approved, ApprovalScope};
+                        use crate::interaction::{
+                            request_interaction_stdin, response_approved, ApprovalScope,
+                            InteractionRequest,
+                        };
                         let req = InteractionRequest::tool_approval(
                             format!("fg-{}", tc.id),
                             &tc.name,
@@ -619,7 +641,11 @@ async fn run_foreground(args: RunArgs) -> anyhow::Result<()> {
         if let Some(sp) = stage.config.get("system_prompt").and_then(|v| v.as_str()) {
             if let Some(mut window) = engine.world_mut().get_mut::<ContextWindow>(entity) {
                 let tokens = sp.len() / 4 + 1;
-                let _ = window.add_to_region("conversation", format!("[Stage instructions: {}]", sp), tokens);
+                let _ = window.add_to_region(
+                    "conversation",
+                    format!("[Stage instructions: {}]", sp),
+                    tokens,
+                );
             }
         }
 
@@ -633,14 +659,16 @@ async fn run_foreground(args: RunArgs) -> anyhow::Result<()> {
                 .collect()
         };
 
-        let routing_config = stage.tool_result_routing.as_ref().map(|r| {
-            leviath_runtime::ToolResultRoutingConfig {
-                default_region: r.default_region.clone(),
-                tool_overrides: r.tool_overrides.clone(),
-                persist: r.persist,
-                max_result_tokens: r.max_result_tokens,
-            }
-        });
+        let routing_config =
+            stage
+                .tool_result_routing
+                .as_ref()
+                .map(|r| leviath_runtime::ToolResultRoutingConfig {
+                    default_region: r.default_region.clone(),
+                    tool_overrides: r.tool_overrides.clone(),
+                    persist: r.persist,
+                    max_result_tokens: r.max_result_tokens,
+                });
         let routing_ref = routing_config.as_ref();
         let max_iterations = stage.max_iterations.unwrap_or(20);
 
@@ -804,7 +832,8 @@ async fn run_worker_inner(args: &WorkerArgs, meta: &mut RunMeta) -> anyhow::Resu
         .collect();
     let agent_perms_arc = Arc::new(agent_perms);
     // Launch overrides forwarded from the CLI flags
-    let mut launch_overrides: std::collections::HashMap<String, ToolPolicy> = std::collections::HashMap::new();
+    let mut launch_overrides: std::collections::HashMap<String, ToolPolicy> =
+        std::collections::HashMap::new();
     if args.yolo {
         launch_overrides.insert("*".to_string(), ToolPolicy::Allow);
     }
@@ -817,7 +846,8 @@ async fn run_worker_inner(args: &WorkerArgs, meta: &mut RunMeta) -> anyhow::Resu
     for t in &args.deny {
         launch_overrides.insert(t.clone(), ToolPolicy::Deny);
     }
-    let launch_overrides_arc: Arc<std::collections::HashMap<String, ToolPolicy>> = Arc::new(launch_overrides);
+    let launch_overrides_arc: Arc<std::collections::HashMap<String, ToolPolicy>> =
+        Arc::new(launch_overrides);
     let run_id_arc = Arc::new(args.run_id.clone());
     // Shared mutable stage index so the executor closure can log tool activity
     // to the correct per-stage log file.
@@ -854,11 +884,15 @@ async fn run_worker_inner(args: &WorkerArgs, meta: &mut RunMeta) -> anyhow::Resu
             for tc in calls {
                 // ── present_for_review: special built-in that raises an interaction ──
                 if tc.name == "present_for_review" {
-                    let title = tc.arguments.get("title")
+                    let title = tc
+                        .arguments
+                        .get("title")
                         .and_then(|v| v.as_str())
                         .unwrap_or("Review")
                         .to_string();
-                    let markdown = tc.arguments.get("markdown")
+                    let markdown = tc
+                        .arguments
+                        .get("markdown")
                         .and_then(|v| v.as_str())
                         .unwrap_or("")
                         .to_string();
@@ -880,7 +914,10 @@ async fn run_worker_inner(args: &WorkerArgs, meta: &mut RunMeta) -> anyhow::Resu
                     record_stage_log(
                         &run_id,
                         stage_idx,
-                        &format!("[tool] present_for_review → waiting for user review: {}", title),
+                        &format!(
+                            "[tool] present_for_review → waiting for user review: {}",
+                            title
+                        ),
                     );
 
                     // Build the interaction request with markdown body
@@ -892,10 +929,8 @@ async fn run_worker_inner(args: &WorkerArgs, meta: &mut RunMeta) -> anyhow::Resu
                     );
 
                     // Write request and wait for response
-                    let resp = crate::interaction::request_interaction_bg_review(
-                        &run_id,
-                        req,
-                    ).await;
+                    let resp =
+                        crate::interaction::request_interaction_bg_review(&run_id, req).await;
 
                     let user_feedback = crate::interaction::response_as_text(&resp);
                     let result = if user_feedback.trim().is_empty() {
@@ -927,19 +962,22 @@ async fn run_worker_inner(args: &WorkerArgs, meta: &mut RunMeta) -> anyhow::Resu
                 let res = match policy {
                     ToolPolicy::Deny => {
                         let msg = format!("[denied] Tool '{}' is not permitted.", tc.name);
-                        record_stage_log(&run_id, stage_idx, &format!("[tool] {} → denied", tc.name));
+                        record_stage_log(
+                            &run_id,
+                            stage_idx,
+                            &format!("[tool] {} → denied", tc.name),
+                        );
                         msg
                     }
                     ToolPolicy::Ask => {
-                        use crate::interaction::{
-                            request_tool_approval_background, ApprovalScope,
-                        };
+                        use crate::interaction::{request_tool_approval_background, ApprovalScope};
                         let (approved, scope) = request_tool_approval_background(
                             &run_id,
                             &tc.name,
                             &tc.arguments,
                             "tool-call",
-                        ).await;
+                        )
+                        .await;
                         if approved {
                             if scope == ApprovalScope::Session {
                                 session_al.lock().await.insert(tc.name.clone());
@@ -959,10 +997,18 @@ async fn run_worker_inner(args: &WorkerArgs, meta: &mut RunMeta) -> anyhow::Resu
                             } else {
                                 result.clone()
                             };
-                            record_stage_log(&run_id, stage_idx, &format!("[tool] {} → {}", tc.name, short_result));
+                            record_stage_log(
+                                &run_id,
+                                stage_idx,
+                                &format!("[tool] {} → {}", tc.name, short_result),
+                            );
                             result
                         } else {
-                            record_stage_log(&run_id, stage_idx, &format!("[tool] {} → declined by user", tc.name));
+                            record_stage_log(
+                                &run_id,
+                                stage_idx,
+                                &format!("[tool] {} → declined by user", tc.name),
+                            );
                             format!("[denied] User declined tool call '{}'.", tc.name)
                         }
                     }
@@ -982,7 +1028,11 @@ async fn run_worker_inner(args: &WorkerArgs, meta: &mut RunMeta) -> anyhow::Resu
                         } else {
                             result.clone()
                         };
-                        record_stage_log(&run_id, stage_idx, &format!("[tool] {} → {}", tc.name, short_result));
+                        record_stage_log(
+                            &run_id,
+                            stage_idx,
+                            &format!("[tool] {} → {}", tc.name, short_result),
+                        );
                         result
                     }
                 };
@@ -1001,7 +1051,10 @@ async fn run_worker_inner(args: &WorkerArgs, meta: &mut RunMeta) -> anyhow::Resu
     // Initialize the stages index (all Pending) so the dashboard can show stages
     // before any stage starts running.
     {
-        let initial_stages: Vec<StageRecord> = blueprint.stages.iter().enumerate()
+        let initial_stages: Vec<StageRecord> = blueprint
+            .stages
+            .iter()
+            .enumerate()
             .map(|(i, s)| StageRecord::new(s.name.clone(), i))
             .collect();
         let _ = runstate::write_stages_index(&args.run_id, &initial_stages);
@@ -1053,7 +1106,11 @@ async fn run_worker_inner(args: &WorkerArgs, meta: &mut RunMeta) -> anyhow::Resu
             model_name,
         );
         println!("\n--- {} ---", stage_header);
-        record_stage_log(&args.run_id, stage_idx, &format!("--- {} ---", stage_header));
+        record_stage_log(
+            &args.run_id,
+            stage_idx,
+            &format!("--- {} ---", stage_header),
+        );
 
         if provider_name == "claude-code" {
             let warn = "⚠️  Using claude-code provider: tool routing, per-stage filtering, and prompt caching are not available.";
@@ -1064,7 +1121,10 @@ async fn run_worker_inner(args: &WorkerArgs, meta: &mut RunMeta) -> anyhow::Resu
         // Mark stage as active and update stages.json
         let stage_started_at = {
             use std::time::{SystemTime, UNIX_EPOCH};
-            SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0)
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_secs() as i64)
+                .unwrap_or(0)
         };
         {
             let mut stages = runstate::read_stages_index(&args.run_id);
@@ -1089,7 +1149,11 @@ async fn run_worker_inner(args: &WorkerArgs, meta: &mut RunMeta) -> anyhow::Resu
         if let Some(sp) = stage.config.get("system_prompt").and_then(|v| v.as_str()) {
             if let Some(mut window) = engine.world_mut().get_mut::<ContextWindow>(entity) {
                 let tokens = sp.len() / 4 + 1;
-                let _ = window.add_to_region("conversation", format!("[Stage instructions: {}]", sp), tokens);
+                let _ = window.add_to_region(
+                    "conversation",
+                    format!("[Stage instructions: {}]", sp),
+                    tokens,
+                );
             }
         }
 
@@ -1103,21 +1167,23 @@ async fn run_worker_inner(args: &WorkerArgs, meta: &mut RunMeta) -> anyhow::Resu
                 .collect()
         };
 
-        let routing_config = stage.tool_result_routing.as_ref().map(|r| {
-            leviath_runtime::ToolResultRoutingConfig {
-                default_region: r.default_region.clone(),
-                tool_overrides: r.tool_overrides.clone(),
-                persist: r.persist,
-                max_result_tokens: r.max_result_tokens,
-            }
-        });
+        let routing_config =
+            stage
+                .tool_result_routing
+                .as_ref()
+                .map(|r| leviath_runtime::ToolResultRoutingConfig {
+                    default_region: r.default_region.clone(),
+                    tool_overrides: r.tool_overrides.clone(),
+                    persist: r.persist,
+                    max_result_tokens: r.max_result_tokens,
+                });
         let routing_ref = routing_config.as_ref();
         let max_iterations = stage.max_iterations.unwrap_or(20);
 
         // Workers now support interactive stage modes via the file-based IPC channel.
-        let stage_result: anyhow::Result<Option<leviath_providers::InferenceResponse>> = match &stage.mode {
-            StageMode::Interactive => {
-                run_interactive_stage(
+        let stage_result: anyhow::Result<Option<leviath_providers::InferenceResponse>> =
+            match &stage.mode {
+                StageMode::Interactive => run_interactive_stage(
                     &mut engine,
                     entity,
                     provider_name,
@@ -1129,28 +1195,26 @@ async fn run_worker_inner(args: &WorkerArgs, meta: &mut RunMeta) -> anyhow::Resu
                     &mut exec,
                 )
                 .await
-                .map(|_| None)
-            }
-            StageMode::InteractivePoints { points } => {
-                let pts = points.clone();
-                run_interactive_points_stage(
-                    &mut engine,
-                    entity,
-                    provider_name,
-                    model_name,
-                    max_iterations,
-                    &effective_tools,
-                    routing_ref,
-                    compaction_ref,
-                    &pts,
-                    Some((&args.run_id, meta)),
-                    &mut exec,
-                )
-                .await
-                .map(|_| None)
-            }
-            StageMode::Autonomous => {
-                engine
+                .map(|_| None),
+                StageMode::InteractivePoints { points } => {
+                    let pts = points.clone();
+                    run_interactive_points_stage(
+                        &mut engine,
+                        entity,
+                        provider_name,
+                        model_name,
+                        max_iterations,
+                        &effective_tools,
+                        routing_ref,
+                        compaction_ref,
+                        &pts,
+                        Some((&args.run_id, meta)),
+                        &mut exec,
+                    )
+                    .await
+                    .map(|_| None)
+                }
+                StageMode::Autonomous => engine
                     .run_inference_loop_filtered(
                         entity,
                         provider_name,
@@ -1164,13 +1228,15 @@ async fn run_worker_inner(args: &WorkerArgs, meta: &mut RunMeta) -> anyhow::Resu
                     )
                     .await
                     .map(Some)
-                    .map_err(|e| anyhow::anyhow!("{}", e))
-            }
-        };
+                    .map_err(|e| anyhow::anyhow!("{}", e)),
+            };
 
         let stage_ended_at = {
             use std::time::{SystemTime, UNIX_EPOCH};
-            SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0)
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_secs() as i64)
+                .unwrap_or(0)
         };
 
         match stage_result {
@@ -1192,7 +1258,9 @@ async fn run_worker_inner(args: &WorkerArgs, meta: &mut RunMeta) -> anyhow::Resu
 
                     // Carry the final response forward so the next stage sees the previous stage's output
                     if !resp.content.is_empty() {
-                        if let Some(mut window) = engine.world_mut().get_mut::<ContextWindow>(entity) {
+                        if let Some(mut window) =
+                            engine.world_mut().get_mut::<ContextWindow>(entity)
+                        {
                             let tokens = resp.content.len() / 4 + 1;
                             let _ = window.add_to_region(
                                 "conversation",
@@ -1294,7 +1362,7 @@ where
     Fut: std::future::Future<Output = Vec<(String, String)>>,
 {
     use crate::interaction::{
-        InteractionRequest, make_interaction_id, request_interaction_async, response_as_text,
+        make_interaction_id, request_interaction_async, response_as_text, InteractionRequest,
     };
 
     let has_tools = !tools.is_empty();
@@ -1364,25 +1432,20 @@ where
                 );
             }
         } else {
-            let response =
-                match stream_inference(engine, entity, provider_name, model_name, None).await {
-                    Ok(r) => r,
-                    Err(e) => {
-                        tracing::debug!("Streaming unavailable, falling back: {}", e);
-                        let r = engine
-                            .run_inference_filtered(
-                                entity,
-                                provider_name,
-                                model_name,
-                                Vec::new(),
-                                None,
-                            )
-                            .await
-                            .map_err(|e| anyhow::anyhow!("Inference error: {}", e))?;
-                        println!("\nAssistant: {}", r.content);
-                        r
-                    }
-                };
+            let response = match stream_inference(engine, entity, provider_name, model_name, None)
+                .await
+            {
+                Ok(r) => r,
+                Err(e) => {
+                    tracing::debug!("Streaming unavailable, falling back: {}", e);
+                    let r = engine
+                        .run_inference_filtered(entity, provider_name, model_name, Vec::new(), None)
+                        .await
+                        .map_err(|e| anyhow::anyhow!("Inference error: {}", e))?;
+                    println!("\nAssistant: {}", r.content);
+                    r
+                }
+            };
 
             println!(
                 "\n[Tokens: {} in, {} out]",
@@ -1514,9 +1577,8 @@ where
     Fut: std::future::Future<Output = Vec<(String, String)>>,
 {
     use crate::interaction::{
-        InteractionRequest, make_interaction_id,
-        request_interaction_async, request_interaction_stdin,
-        response_as_choice, response_as_text,
+        make_interaction_id, request_interaction_async, request_interaction_stdin,
+        response_as_choice, response_as_text, InteractionRequest,
     };
 
     if points.is_empty() {
@@ -1534,7 +1596,8 @@ where
         .await;
     }
 
-    let (run_id_owned, mut meta_holder): (Option<String>, Option<&mut RunMeta>) = match run_context {
+    let (run_id_owned, mut meta_holder): (Option<String>, Option<&mut RunMeta>) = match run_context
+    {
         Some((rid, m)) => (Some(rid.to_string()), Some(m)),
         None => (None, None),
     };
@@ -1605,31 +1668,32 @@ where
         };
 
         // Dispatch via file IPC or stdin
-        let user_text = if let (Some(run_id), Some(ref mut meta)) = (&run_id_owned, &mut meta_holder) {
-            let resp = request_interaction_async(run_id, meta, ipc_req.clone(), None).await?;
-            match bp_style {
-                leviath_core::blueprint::InteractionStyle::MultipleChoice
-                | leviath_core::blueprint::InteractionStyle::Confirm => {
-                    // Resolve choice index → option string
-                    response_as_choice(&resp, &ipc_req.options)
-                        .cloned()
-                        .unwrap_or_else(|| response_as_text(&resp))
+        let user_text =
+            if let (Some(run_id), Some(ref mut meta)) = (&run_id_owned, &mut meta_holder) {
+                let resp = request_interaction_async(run_id, meta, ipc_req.clone(), None).await?;
+                match bp_style {
+                    leviath_core::blueprint::InteractionStyle::MultipleChoice
+                    | leviath_core::blueprint::InteractionStyle::Confirm => {
+                        // Resolve choice index → option string
+                        response_as_choice(&resp, &ipc_req.options)
+                            .cloned()
+                            .unwrap_or_else(|| response_as_text(&resp))
+                    }
+                    leviath_core::blueprint::InteractionStyle::FreeText => response_as_text(&resp),
                 }
-                leviath_core::blueprint::InteractionStyle::FreeText => response_as_text(&resp),
-            }
-        } else {
-            // Foreground (stdin) path — `request_interaction_stdin` prints and reads
-            let resp = request_interaction_stdin(&ipc_req);
-            match bp_style {
-                leviath_core::blueprint::InteractionStyle::MultipleChoice
-                | leviath_core::blueprint::InteractionStyle::Confirm => {
-                    response_as_choice(&resp, &ipc_req.options)
-                        .cloned()
-                        .unwrap_or_else(|| response_as_text(&resp))
+            } else {
+                // Foreground (stdin) path — `request_interaction_stdin` prints and reads
+                let resp = request_interaction_stdin(&ipc_req);
+                match bp_style {
+                    leviath_core::blueprint::InteractionStyle::MultipleChoice
+                    | leviath_core::blueprint::InteractionStyle::Confirm => {
+                        response_as_choice(&resp, &ipc_req.options)
+                            .cloned()
+                            .unwrap_or_else(|| response_as_text(&resp))
+                    }
+                    leviath_core::blueprint::InteractionStyle::FreeText => response_as_text(&resp),
                 }
-                leviath_core::blueprint::InteractionStyle::FreeText => response_as_text(&resp),
-            }
-        };
+            };
 
         if !user_text.is_empty() {
             if let Some(mut window) = engine.world_mut().get_mut::<ContextWindow>(entity) {
@@ -1787,7 +1851,10 @@ async fn stream_inference(
 
     println!();
 
-    if let Some(mut state) = engine.world_mut().get_mut::<leviath_runtime::AgentState>(entity) {
+    if let Some(mut state) = engine
+        .world_mut()
+        .get_mut::<leviath_runtime::AgentState>(entity)
+    {
         state.iteration += 1;
     }
 
@@ -1887,7 +1954,11 @@ async fn generate_title(
                 .trim_end_matches('\'')
                 .trim()
                 .to_string();
-            if title.is_empty() { None } else { Some(title) }
+            if title.is_empty() {
+                None
+            } else {
+                Some(title)
+            }
         }
         Err(e) => {
             println!("Warning: title generation failed ({})", e);
@@ -1903,21 +1974,30 @@ pub fn build_provider_registry(config: &Config) -> ProviderRegistry {
     if let Some(ref key) = config.providers.anthropic_api_key {
         registry.register(
             "anthropic".to_string(),
-            Arc::new(leviath_providers::AnthropicProvider::with_overrides(key.clone(), config.model_capabilities.clone())),
+            Arc::new(leviath_providers::AnthropicProvider::with_overrides(
+                key.clone(),
+                config.model_capabilities.clone(),
+            )),
         );
     }
 
     if let Some(ref key) = config.providers.openai_api_key {
         registry.register(
             "openai".to_string(),
-            Arc::new(leviath_providers::OpenAIProvider::with_overrides(key.clone(), config.model_capabilities.clone())),
+            Arc::new(leviath_providers::OpenAIProvider::with_overrides(
+                key.clone(),
+                config.model_capabilities.clone(),
+            )),
         );
     }
 
     if let Some(ref key) = config.openrouter_api_key {
         registry.register(
             "openrouter".to_string(),
-            Arc::new(leviath_providers::OpenRouterProvider::with_overrides(key.clone(), config.model_capabilities.clone())),
+            Arc::new(leviath_providers::OpenRouterProvider::with_overrides(
+                key.clone(),
+                config.model_capabilities.clone(),
+            )),
         );
     }
 
@@ -1960,11 +2040,7 @@ pub fn initialize_context_window(
         }
 
         if window.get_region("tool_results").is_none() {
-            let tool_region = Region::new(
-                "tool_results".to_string(),
-                RegionKind::Temporary,
-                5000,
-            );
+            let tool_region = Region::new("tool_results".to_string(), RegionKind::Temporary, 5000);
             window.add_region(tool_region);
         }
 
@@ -2118,8 +2194,9 @@ fn parse_manifest(content: &str) -> anyhow::Result<Blueprint> {
                     "interactive" => stage.with_mode(StageMode::Interactive),
                     "interactive_points" => {
                         let mut points = Vec::new();
-                        if let Some(pts_arr) =
-                            stage_value.get("interaction_points").and_then(|v| v.as_array())
+                        if let Some(pts_arr) = stage_value
+                            .get("interaction_points")
+                            .and_then(|v| v.as_array())
                         {
                             for pt in pts_arr {
                                 let pt_name = pt
@@ -2135,8 +2212,12 @@ fn parse_manifest(content: &str) -> anyhow::Result<Blueprint> {
                                 let pt_required =
                                     pt.get("required").and_then(|v| v.as_bool()).unwrap_or(true);
                                 let pt_style = match pt.get("style").and_then(|v| v.as_str()) {
-                                    Some("multiple_choice") => leviath_core::blueprint::InteractionStyle::MultipleChoice,
-                                    Some("confirm") => leviath_core::blueprint::InteractionStyle::Confirm,
+                                    Some("multiple_choice") => {
+                                        leviath_core::blueprint::InteractionStyle::MultipleChoice
+                                    }
+                                    Some("confirm") => {
+                                        leviath_core::blueprint::InteractionStyle::Confirm
+                                    }
                                     _ => leviath_core::blueprint::InteractionStyle::FreeText,
                                 };
                                 // Accept either "options" or "choices" key
@@ -2165,14 +2246,16 @@ fn parse_manifest(content: &str) -> anyhow::Result<Blueprint> {
                 };
             }
 
-            if let Some(max_iter) =
-                stage_value.get("max_iterations").and_then(|v| v.as_integer())
+            if let Some(max_iter) = stage_value
+                .get("max_iterations")
+                .and_then(|v| v.as_integer())
             {
                 stage.max_iterations = Some(max_iter as usize);
             }
 
-            if let Some(tools_arr) =
-                stage_value.get("available_tools").and_then(|v| v.as_array())
+            if let Some(tools_arr) = stage_value
+                .get("available_tools")
+                .and_then(|v| v.as_array())
             {
                 stage.available_tools = tools_arr
                     .iter()
@@ -2187,8 +2270,7 @@ fn parse_manifest(content: &str) -> anyhow::Result<Blueprint> {
                 );
             }
 
-            if let Some(routing_table) =
-                stage_value.get("tool_routing").and_then(|v| v.as_table())
+            if let Some(routing_table) = stage_value.get("tool_routing").and_then(|v| v.as_table())
             {
                 let mut routing = ToolResultRouting::default();
 
@@ -2220,10 +2302,15 @@ fn parse_manifest(content: &str) -> anyhow::Result<Blueprint> {
             }
 
             // Parse per-stage tool permissions: [stages.<name>.tool_permissions]
-            if let Some(tp_table) = stage_value.get("tool_permissions").and_then(|v| v.as_table()) {
+            if let Some(tp_table) = stage_value
+                .get("tool_permissions")
+                .and_then(|v| v.as_table())
+            {
                 for (tool_name, policy_val) in tp_table {
                     if let Some(policy_str) = policy_val.as_str() {
-                        stage.tool_permissions.insert(tool_name.clone(), policy_str.to_string());
+                        stage
+                            .tool_permissions
+                            .insert(tool_name.clone(), policy_str.to_string());
                     }
                 }
             }
@@ -2325,7 +2412,10 @@ fn parse_manifest(content: &str) -> anyhow::Result<Blueprint> {
         if let Some(model) = compaction_table.get("model").and_then(|v| v.as_str()) {
             cc.model = model.to_string();
         }
-        if let Some(sp) = compaction_table.get("system_prompt").and_then(|v| v.as_str()) {
+        if let Some(sp) = compaction_table
+            .get("system_prompt")
+            .and_then(|v| v.as_str())
+        {
             cc.system_prompt = Some(sp.to_string());
         }
         if let Some(mst) = compaction_table
@@ -2334,7 +2424,10 @@ fn parse_manifest(content: &str) -> anyhow::Result<Blueprint> {
         {
             cc.max_summary_tokens = mst as usize;
         }
-        if let Some(temp) = compaction_table.get("temperature").and_then(|v| v.as_float()) {
+        if let Some(temp) = compaction_table
+            .get("temperature")
+            .and_then(|v| v.as_float())
+        {
             cc.temperature = temp as f32;
         }
 
@@ -2345,9 +2438,10 @@ fn parse_manifest(content: &str) -> anyhow::Result<Blueprint> {
     if let Some(tp_table) = parsed.get("tool_permissions").and_then(|v| v.as_table()) {
         for (tool_name, policy_val) in tp_table {
             if let Some(policy_str) = policy_val.as_str() {
-                blueprint
-                    .metadata
-                    .insert(format!("tool_perm:{}", tool_name), serde_json::Value::String(policy_str.to_string()));
+                blueprint.metadata.insert(
+                    format!("tool_perm:{}", tool_name),
+                    serde_json::Value::String(policy_str.to_string()),
+                );
             }
         }
     }
@@ -2364,7 +2458,9 @@ fn write_context_snapshot_if_bg(
     run_id: &Option<String>,
 ) {
     let Some(ref rid) = run_id else { return };
-    let Some(snap) = build_context_snapshot(engine, entity, stage_name) else { return };
+    let Some(snap) = build_context_snapshot(engine, entity, stage_name) else {
+        return;
+    };
     let _ = runstate::write_context_snapshot(rid, &snap);
 }
 
@@ -2376,27 +2472,36 @@ fn build_context_snapshot(
 ) -> Option<runstate::ContextSnapshot> {
     let window = engine.world().get::<ContextWindow>(entity)?;
     use leviath_core::RegionKind;
-    let regions = window.regions.iter().map(|r| {
-        let entries = r.content.iter().map(|e| runstate::RegionEntrySnapshot {
-            content: e.content.clone(),
-            tokens: e.tokens,
-            metadata: e.metadata.clone(),
-        }).collect();
-        runstate::RegionSnapshot {
-            name: r.name.clone(),
-            kind: match &r.kind {
-                RegionKind::Pinned => "pinned",
-                RegionKind::Temporary => "temporary",
-                RegionKind::Clearable => "clearable",
-                RegionKind::SlidingWindow { .. } => "sliding",
-                RegionKind::Compacting { .. } => "compacting",
-                RegionKind::CompactHistory { .. } => "history",
-            }.to_string(),
-            current_tokens: r.current_tokens,
-            max_tokens: r.max_tokens,
-            entries,
-        }
-    }).collect();
+    let regions = window
+        .regions
+        .iter()
+        .map(|r| {
+            let entries = r
+                .content
+                .iter()
+                .map(|e| runstate::RegionEntrySnapshot {
+                    content: e.content.clone(),
+                    tokens: e.tokens,
+                    metadata: e.metadata.clone(),
+                })
+                .collect();
+            runstate::RegionSnapshot {
+                name: r.name.clone(),
+                kind: match &r.kind {
+                    RegionKind::Pinned => "pinned",
+                    RegionKind::Temporary => "temporary",
+                    RegionKind::Clearable => "clearable",
+                    RegionKind::SlidingWindow { .. } => "sliding",
+                    RegionKind::Compacting { .. } => "compacting",
+                    RegionKind::CompactHistory { .. } => "history",
+                }
+                .to_string(),
+                current_tokens: r.current_tokens,
+                max_tokens: r.max_tokens,
+                entries,
+            }
+        })
+        .collect();
     Some(runstate::ContextSnapshot {
         stage_name: stage_name.to_string(),
         total_tokens: window.current_tokens,

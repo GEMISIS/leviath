@@ -1,10 +1,10 @@
-//! `lev install` - Install an agent package
+//! `lev add` - Install an agent package
 
 use clap::Args;
 use std::path::Path;
 
 #[derive(Args)]
-pub struct InstallArgs {
+pub struct AddArgs {
     /// Path to agent directory, .leviath-bundle file, or registry package name
     #[arg(value_name = "PACKAGE")]
     pub package: String,
@@ -14,7 +14,7 @@ pub struct InstallArgs {
     pub registry: Option<String>,
 }
 
-pub async fn execute(args: InstallArgs) -> anyhow::Result<()> {
+pub async fn execute(args: AddArgs) -> anyhow::Result<()> {
     tracing::info!(package = %args.package, "Installing agent package");
 
     let installer = leviath_package::AgentInstaller::new();
