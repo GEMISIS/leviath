@@ -137,17 +137,6 @@ impl AnthropicProvider {
                 max_output_tokens: 32_768,
             };
         }
-        // Claude 3.5 and Claude 3
-        if model.contains("claude-3-5") || model.contains("claude-3") {
-            return ModelCapabilities {
-                supports_temperature: true,
-                supports_streaming: true,
-                supports_tools: true,
-                supports_system_prompt: true,
-                max_context_tokens: 200_000,
-                max_output_tokens: 8192,
-            };
-        }
         ModelCapabilities::default()
     }
 
@@ -709,10 +698,7 @@ mod tests {
     #[test]
     fn test_context_limits() {
         let provider = AnthropicProvider::new("test-key".to_string());
-        assert_eq!(
-            provider.max_context_tokens("claude-3-5-sonnet-20241022"),
-            200_000
-        );
+        assert_eq!(provider.max_context_tokens("claude-sonnet-4-6"), 1_000_000);
     }
 
     #[test]
@@ -828,11 +814,12 @@ mod tests {
     }
 
     #[test]
-    fn test_builtin_capabilities_claude3() {
+    fn test_builtin_capabilities_sonnet_46() {
         let provider = AnthropicProvider::new("test-key".to_string());
-        let caps = provider.builtin_capabilities("claude-3-5-sonnet-20241022");
+        let caps = provider.builtin_capabilities("claude-sonnet-4-6");
         assert!(caps.supports_temperature);
-        assert_eq!(caps.max_output_tokens, 8192);
+        assert_eq!(caps.max_context_tokens, 1_000_000);
+        assert_eq!(caps.max_output_tokens, 128_000);
     }
 
     #[test]

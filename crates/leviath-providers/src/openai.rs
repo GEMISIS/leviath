@@ -101,18 +101,8 @@ impl OpenAIProvider {
                 max_context_tokens: 1_047_576,
                 max_output_tokens: 32_768,
             }
-        // o1-mini — smaller context than o3-mini
-        } else if model.starts_with("o1-mini") {
-            ModelCapabilities {
-                supports_temperature: false,
-                supports_streaming: true,
-                supports_tools: true,
-                supports_system_prompt: true,
-                max_context_tokens: 128_000,
-                max_output_tokens: 65_536,
-            }
-        // o-series reasoning models (o1, o3, o4) — no temperature, 200K context
-        } else if model.starts_with("o1") || model.starts_with("o3") || model.starts_with("o4") {
+        // o-series reasoning models (o3, o4) — no temperature, 200K context
+        } else if model.starts_with("o3") || model.starts_with("o4") {
             ModelCapabilities {
                 supports_temperature: false,
                 supports_streaming: true,
@@ -120,33 +110,6 @@ impl OpenAIProvider {
                 supports_system_prompt: true,
                 max_context_tokens: 200_000,
                 max_output_tokens: 100_000,
-            }
-        } else if model.starts_with("gpt-4o") {
-            ModelCapabilities {
-                supports_temperature: true,
-                supports_streaming: true,
-                supports_tools: true,
-                supports_system_prompt: true,
-                max_context_tokens: 128_000,
-                max_output_tokens: 16_384,
-            }
-        } else if model.starts_with("gpt-4") {
-            ModelCapabilities {
-                supports_temperature: true,
-                supports_streaming: true,
-                supports_tools: true,
-                supports_system_prompt: true,
-                max_context_tokens: 128_000,
-                max_output_tokens: 8192,
-            }
-        } else if model.starts_with("gpt-3.5") {
-            ModelCapabilities {
-                supports_temperature: true,
-                supports_streaming: true,
-                supports_tools: true,
-                supports_system_prompt: true,
-                max_context_tokens: 16_385,
-                max_output_tokens: 4096,
             }
         } else {
             ModelCapabilities::default()
@@ -601,7 +564,7 @@ mod tests {
     #[test]
     fn test_context_limits() {
         let provider = OpenAIProvider::new("test-key".to_string());
-        assert_eq!(provider.max_context_tokens("gpt-4"), 128_000);
+        assert_eq!(provider.max_context_tokens("gpt-5.4-mini"), 400_000);
     }
 
     #[test]
@@ -618,7 +581,7 @@ mod tests {
                     content: "Hello".to_string(),
                 },
             ],
-            model: "gpt-4o".to_string(),
+            model: "gpt-5.4-mini".to_string(),
             max_tokens: 1024,
             temperature: 0.7,
             tools: vec![],
@@ -626,7 +589,7 @@ mod tests {
         };
 
         let body = provider.build_request_body(&request);
-        assert_eq!(body["model"], "gpt-4o");
+        assert_eq!(body["model"], "gpt-5.4-mini");
         assert_eq!(body["messages"].as_array().unwrap().len(), 2);
     }
 
@@ -683,22 +646,31 @@ mod tests {
     }
 
     #[test]
-    fn test_builtin_capabilities_o1() {
+    fn test_builtin_capabilities_gpt55() {
         let provider = OpenAIProvider::new("test-key".to_string());
-        let caps = provider.builtin_capabilities("o1-preview");
-        assert!(!caps.supports_temperature);
+        let caps = provider.builtin_capabilities("gpt-5.5");
+        assert!(caps.supports_temperature);
         assert!(caps.supports_streaming);
-        assert_eq!(caps.max_context_tokens, 200_000);
-        assert_eq!(caps.max_output_tokens, 100_000);
+        assert_eq!(caps.max_context_tokens, 1_050_000);
+        assert_eq!(caps.max_output_tokens, 128_000);
     }
 
     #[test]
-    fn test_builtin_capabilities_o1_mini() {
+    fn test_builtin_capabilities_gpt54_mini() {
         let provider = OpenAIProvider::new("test-key".to_string());
-        let caps = provider.builtin_capabilities("o1-mini");
-        assert!(!caps.supports_temperature);
-        assert_eq!(caps.max_context_tokens, 128_000);
-        assert_eq!(caps.max_output_tokens, 65_536);
+        let caps = provider.builtin_capabilities("gpt-5.4-mini");
+        assert!(caps.supports_temperature);
+        assert_eq!(caps.max_context_tokens, 400_000);
+        assert_eq!(caps.max_output_tokens, 128_000);
+    }
+
+    #[test]
+    fn test_builtin_capabilities_gpt54_nano() {
+        let provider = OpenAIProvider::new("test-key".to_string());
+        let caps = provider.builtin_capabilities("gpt-5.4-nano");
+        assert!(caps.supports_temperature);
+        assert_eq!(caps.max_context_tokens, 400_000);
+        assert_eq!(caps.max_output_tokens, 128_000);
     }
 
     #[test]
@@ -720,37 +692,19 @@ mod tests {
     }
 
     #[test]
-    fn test_builtin_capabilities_gpt4o() {
+    fn test_builtin_capabilities_o3() {
         let provider = OpenAIProvider::new("test-key".to_string());
-        let caps = provider.builtin_capabilities("gpt-4o");
-        assert!(caps.supports_temperature);
-        assert_eq!(caps.max_context_tokens, 128_000);
-        assert_eq!(caps.max_output_tokens, 16_384);
-    }
-
-    #[test]
-    fn test_builtin_capabilities_gpt4() {
-        let provider = OpenAIProvider::new("test-key".to_string());
-        let caps = provider.builtin_capabilities("gpt-4-turbo");
-        assert!(caps.supports_temperature);
-        assert_eq!(caps.max_context_tokens, 128_000);
-        assert_eq!(caps.max_output_tokens, 8192);
-    }
-
-    #[test]
-    fn test_builtin_capabilities_gpt35() {
-        let provider = OpenAIProvider::new("test-key".to_string());
-        let caps = provider.builtin_capabilities("gpt-3.5-turbo");
-        assert!(caps.supports_temperature);
-        assert_eq!(caps.max_context_tokens, 16_385);
-        assert_eq!(caps.max_output_tokens, 4096);
+        let caps = provider.builtin_capabilities("o3-mini");
+        assert!(!caps.supports_temperature);
+        assert_eq!(caps.max_context_tokens, 200_000);
+        assert_eq!(caps.max_output_tokens, 100_000);
     }
 
     #[test]
     fn test_capabilities_override() {
         let mut overrides = HashMap::new();
         overrides.insert(
-            "gpt-4o".to_string(),
+            "gpt-5.4-mini".to_string(),
             ModelCapabilities {
                 supports_temperature: false,
                 supports_streaming: false,
@@ -761,7 +715,7 @@ mod tests {
             },
         );
         let provider = OpenAIProvider::with_overrides("test-key".to_string(), overrides);
-        let caps = provider.capabilities("gpt-4o");
+        let caps = provider.capabilities("gpt-5.4-mini");
         assert!(!caps.supports_temperature);
         assert_eq!(caps.max_context_tokens, 1);
     }
