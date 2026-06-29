@@ -14,7 +14,7 @@
 
 Most agent tools give LLMs a flat message array and hope for the best. Leviath gives them structure — structured memory, multi-stage workflows, and an ECS engine — so agents stay coherent on long tasks, use the right model for each phase, and don't melt your machine when you run a dozen at once.
 
-Define an agent in TOML. Run it. Watch it actually remember what it read 50 tool calls ago.
+Pick a pre-built agent or create your own. Run it. Watch it actually remember what it read 50 tool calls ago.
 
 <!-- TODO: hero gif of dashboard with agents running -->
 
