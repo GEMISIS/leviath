@@ -29,9 +29,8 @@ brew install gemisis/tap/leviath
 # Linux
 curl -fsSL https://github.com/GEMISIS/leviath/releases/latest/download/leviath-linux-x64.tar.gz | tar xz -C /usr/local/bin
 
-# Windows
-winget install gemisis.leviath
-# Or download from GitHub Releases
+# Windows — download from GitHub Releases
+# https://github.com/GEMISIS/leviath/releases
 
 # Build from source (any platform, requires Rust)
 cargo install --path crates/leviath-cli
