@@ -1505,4 +1505,186 @@ mod tests {
         let result = parse_sse_event(&mut buffer, &mut tool_index);
         assert!(result.is_none());
     }
+
+    // ─── HTTP error paths (connection refused) ───────────────────────────
+
+    #[tokio::test]
+    async fn test_infer_connection_refused_returns_error() {
+        let provider = AnthropicProvider {
+            client: reqwest::Client::new(),
+            api_key: "test-key".to_string(),
+            base_url: "http://127.0.0.1:19997".to_string(),
+            rate_limiter: None,
+            capability_overrides: HashMap::new(),
+        };
+        let request = InferenceRequest {
+            messages: vec![crate::provider::Message {
+                role: "user".to_string(),
+                content: "Hello".to_string(),
+                cache_breakpoint: false,
+            }],
+            model: "claude-sonnet-4-6".to_string(),
+            max_tokens: 100,
+            temperature: 0.7,
+            tools: vec![],
+            extra: serde_json::Value::Null,
+        };
+        let result = provider.infer(request).await;
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), ProviderError::RequestFailed(_)));
+    }
+
+    #[tokio::test]
+    async fn test_infer_stream_connection_refused_returns_error() {
+        let provider = AnthropicProvider {
+            client: reqwest::Client::new(),
+            api_key: "test-key".to_string(),
+            base_url: "http://127.0.0.1:19997".to_string(),
+            rate_limiter: None,
+            capability_overrides: HashMap::new(),
+        };
+        let request = InferenceRequest {
+            messages: vec![crate::provider::Message {
+                role: "user".to_string(),
+                content: "Hello".to_string(),
+                cache_breakpoint: false,
+            }],
+            model: "claude-sonnet-4-6".to_string(),
+            max_tokens: 100,
+            temperature: 0.7,
+            tools: vec![],
+            extra: serde_json::Value::Null,
+        };
+        let result = provider.infer_stream(request).await;
+        assert!(result.is_err(), "Expected connection refused error");
+        // Verify it's a RequestFailed variant without using unwrap_err (Debug not impl'd for Stream)
+        if let Err(e) = result {
+            assert!(matches!(e, ProviderError::RequestFailed(_)));
+        }
+    }
+
+    #[tokio::test]
+    async fn test_list_models_connection_refused_returns_error() {
+        let provider = AnthropicProvider {
+            client: reqwest::Client::new(),
+            api_key: "test-key".to_string(),
+            base_url: "http://127.0.0.1:19997".to_string(),
+            rate_limiter: None,
+            capability_overrides: HashMap::new(),
+        };
+        let result = provider.list_models().await;
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), ProviderError::RequestFailed(_)));
+    }
+
+    // ─── parse_sse_event: message_delta without usage ─────────────────────
+
+    #[test]
+    fn test_parse_sse_event_message_delta_no_usage() {
+        let mut buffer = "event: message_delta\ndata: {\"delta\":{\"stop_reason\":\"end_turn\"}}\n\n".to_string();
+        let mut tool_index = 0usize;
+        let chunk = parse_sse_event(&mut buffer, &mut tool_index).unwrap();
+        assert!(matches!(chunk.finish_reason, Some(FinishReason::Complete)));
+        // No usage → tokens default to 0
+        let tokens = chunk.tokens.unwrap();
+        assert_eq!(tokens.completion_tokens, 0);
+    }
+
+    // ─── parse_sse_event: multiple events in buffer ───────────────────────
+
+    #[test]
+    fn test_parse_sse_event_multiple_events_consumed_one_at_a_time() {
+        let mut buffer = concat!(
+            "event: content_block_delta\n",
+            "data: {\"delta\":{\"type\":\"text_delta\",\"text\":\"Hello\"}}\n\n",
+            "event: content_block_delta\n",
+            "data: {\"delta\":{\"type\":\"text_delta\",\"text\":\" world\"}}\n\n"
+        ).to_string();
+        let mut tool_index = 0usize;
+
+        // First event
+        let chunk1 = parse_sse_event(&mut buffer, &mut tool_index).unwrap();
+        assert_eq!(chunk1.delta, "Hello");
+
+        // Second event
+        let chunk2 = parse_sse_event(&mut buffer, &mut tool_index).unwrap();
+        assert_eq!(chunk2.delta, " world");
+
+        // Buffer now empty
+        assert!(parse_sse_event(&mut buffer, &mut tool_index).is_none());
+    }
+
+    // ─── parse_sse_event: content_block_start non-tool type ──────────────
+
+    #[test]
+    fn test_parse_sse_event_content_block_start_no_content_block() {
+        // content_block_start with no "content_block" key
+        let mut buffer = "event: content_block_start\ndata: {\"index\":0}\n\n".to_string();
+        let mut tool_index = 0usize;
+        let result = parse_sse_event(&mut buffer, &mut tool_index);
+        assert!(result.is_none());
+    }
+
+    // ─── parse_sse_event: invalid JSON returns None ───────────────────────
+
+    #[test]
+    fn test_parse_sse_event_invalid_json_data_returns_none() {
+        let mut buffer = "event: content_block_delta\ndata: not-valid-json\n\n".to_string();
+        let mut tool_index = 0usize;
+        let result = parse_sse_event(&mut buffer, &mut tool_index);
+        assert!(result.is_none());
+    }
+
+    // ─── parse_response: stop_reason default end_turn ─────────────────────
+
+    #[test]
+    fn test_parse_response_no_stop_reason_defaults_to_complete() {
+        let provider = AnthropicProvider::new("key".to_string());
+        let body = serde_json::json!({
+            "content": [{ "type": "text", "text": "hi" }],
+            "usage": { "input_tokens": 5, "output_tokens": 2 }
+        });
+        let resp = provider.parse_response(&body).unwrap();
+        assert!(matches!(resp.finish_reason, FinishReason::Complete));
+    }
+
+    // ─── build_request_body: cache breakpoints at max limit ───────────────
+
+    #[test]
+    fn test_build_request_body_exactly_4_cache_breakpoints() {
+        let provider = AnthropicProvider::new("key".to_string());
+        // Exactly 4 messages with cache_breakpoint = true
+        let messages: Vec<crate::provider::Message> = (0..4)
+            .map(|i| crate::provider::Message {
+                role: "user".to_string(),
+                content: format!("Message {}", i),
+                cache_breakpoint: true,
+            })
+            .collect();
+
+        let request = InferenceRequest {
+            messages,
+            model: "claude-sonnet-4-6".to_string(),
+            max_tokens: 512,
+            temperature: 0.5,
+            tools: vec![],
+            extra: serde_json::Value::Null,
+        };
+
+        let body = provider.build_request_body(&request);
+        let msgs = body["messages"].as_array().unwrap();
+
+        // All 4 should have cache_control
+        let bp_count = msgs
+            .iter()
+            .filter(|m| {
+                m.get("content")
+                    .and_then(|c| c.as_array())
+                    .and_then(|arr| arr.first())
+                    .and_then(|block| block.get("cache_control"))
+                    .is_some()
+            })
+            .count();
+        assert_eq!(bp_count, 4);
+    }
 }

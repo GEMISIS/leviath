@@ -347,4 +347,163 @@ mod tests {
         let result = osc52_yank_raw("hello\nworld\ttab");
         assert!(result);
     }
+
+    // ── relative_time branches ────────────────────────────────────────────────
+
+    #[test]
+    fn test_relative_time_just_now() {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        // 3 seconds ago → "just now"
+        let result = relative_time(now - 3);
+        assert_eq!(result, "just now");
+    }
+
+    #[test]
+    fn test_relative_time_seconds_ago() {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        // 30 seconds ago → "30s ago"
+        let result = relative_time(now - 30);
+        assert!(result.ends_with("s ago"), "expected 'Xs ago', got '{}'", result);
+    }
+
+    #[test]
+    fn test_relative_time_minutes_ago() {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        // 5 minutes ago → "5m ago"
+        let result = relative_time(now - 300);
+        assert!(result.ends_with("m ago"), "expected 'Xm ago', got '{}'", result);
+    }
+
+    #[test]
+    fn test_relative_time_hours_ago_no_minutes() {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        // Exactly 2 hours → "2h ago"
+        let result = relative_time(now - 7200);
+        assert_eq!(result, "2h ago");
+    }
+
+    #[test]
+    fn test_relative_time_hours_ago_with_minutes() {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        // 1 hour 30 minutes → "1h30m ago"
+        let result = relative_time(now - 5400);
+        assert_eq!(result, "1h30m ago");
+    }
+
+    #[test]
+    fn test_relative_time_days_ago() {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        // 3 days ago → "3d ago"
+        let result = relative_time(now - 3 * 86400);
+        assert_eq!(result, "3d ago");
+    }
+
+    // ── elapsed_str branches ──────────────────────────────────────────────────
+
+    #[test]
+    fn test_elapsed_str_seconds() {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        // Started 45 seconds ago
+        let result = elapsed_str(now - 45);
+        assert!(result.ends_with('s'), "expected 'Xs', got '{}'", result);
+    }
+
+    #[test]
+    fn test_elapsed_str_minutes() {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        // Started 3 min 15 sec ago
+        let result = elapsed_str(now - 195);
+        assert!(result.contains('m'), "expected 'XmYs', got '{}'", result);
+    }
+
+    #[test]
+    fn test_elapsed_str_hours() {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        // Started 2 hours 10 minutes ago
+        let result = elapsed_str(now - 7800);
+        assert!(result.contains('h'), "expected 'XhYm', got '{}'", result);
+    }
+
+    // ── yank_to_clipboard: at least exercises the code path ──────────────────
+
+    #[test]
+    fn test_yank_to_clipboard_small_text() {
+        // In test environments pbcopy/xclip/wl-copy likely don't exist,
+        // so this will fall through to OSC52 (returns true).
+        let result = yank_to_clipboard("hello clipboard");
+        // We can't assert true/false in all CI environments, just assert no panic.
+        let _ = result;
+    }
+
+    #[test]
+    fn test_yank_to_clipboard_empty() {
+        let _ = yank_to_clipboard("");
+    }
+
+    // ── OSC52 base64 edge cases ───────────────────────────────────────────────
+
+    #[test]
+    fn test_osc52_yank_raw_one_byte() {
+        // Single byte → rem == 1 path in base64 encoder
+        let result = osc52_yank_raw("A");
+        assert!(result);
+    }
+
+    #[test]
+    fn test_osc52_yank_raw_two_bytes() {
+        // Two bytes → rem == 2 path in base64 encoder
+        let result = osc52_yank_raw("AB");
+        assert!(result);
+    }
+
+    #[test]
+    fn test_osc52_yank_raw_three_bytes() {
+        // Three bytes → exact group, no remainder
+        let result = osc52_yank_raw("ABC");
+        assert!(result);
+    }
+
+    #[test]
+    fn test_osc52_yank_raw_long_text() {
+        // Multiple 3-byte groups plus a remainder
+        let text = "The quick brown fox jumps over the lazy dog";
+        let result = osc52_yank_raw(text);
+        assert!(result);
+    }
 }

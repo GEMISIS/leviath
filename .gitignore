@@ -26,3 +26,4 @@ Thumbs.db
 .env
 
 tarpaulin-report.json
+.claude/worktrees/

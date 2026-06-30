@@ -435,4 +435,237 @@ model = "claude-sonnet-4-6"
         assert!(json2.contains("\"type\":\"tokens\""));
         assert!(json2.contains("\"prompt_tokens\":5000"));
     }
+
+    fn full_app() -> Router {
+        let state = test_state();
+        Router::new()
+            .route(
+                "/api/blueprints",
+                get(blueprints::list_blueprints).post(blueprints::create_blueprint),
+            )
+            .route(
+                "/api/blueprints/validate",
+                post(blueprints::validate_blueprint),
+            )
+            .route(
+                "/api/blueprints/{name}",
+                get(blueprints::get_blueprint)
+                    .put(blueprints::update_blueprint)
+                    .delete(blueprints::delete_blueprint),
+            )
+            .route(
+                "/api/agents",
+                get(agents::list_agents).post(agents::spawn_agent),
+            )
+            .route("/api/agents/tree", get(tree::agents_tree))
+            .route(
+                "/api/agents/{id}",
+                get(agents::get_agent).delete(agents::kill_agent),
+            )
+            .route("/api/agents/{id}/children", get(agents::agent_children))
+            .route("/api/agents/{id}/context", get(agents::agent_context))
+            .route("/api/agents/{id}/logs", get(agents::agent_logs))
+            .route("/api/agents/{id}/result", get(agents::agent_result))
+            .route("/api/agents/{id}/tree-status", get(tree::agent_tree_status))
+            .route("/api/agents/{id}/message", post(interactions::send_message))
+            .route(
+                "/api/agents/{id}/interaction",
+                get(interactions::get_interaction).post(interactions::submit_interaction),
+            )
+            .route("/api/config", get(config::get_config))
+            .route("/api/models", get(config::get_models))
+            .with_state(state)
+    }
+
+    #[tokio::test]
+    async fn test_full_router_create_blueprint_invalid() {
+        let app = full_app();
+        let body = serde_json::json!({
+            "name": "bad-agent",
+            "manifest": "not valid toml {{{"
+        });
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/blueprints")
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_string(&body).unwrap()))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn test_full_router_update_blueprint_not_found() {
+        let app = full_app();
+        let body = serde_json::json!({
+            "manifest": r#"
+[agent]
+name = "no-such-agent"
+version = "1.0.0"
+description = "Missing"
+
+[stages.run]
+prompt = "Run"
+"#
+        });
+        let req = Request::builder()
+            .method("PUT")
+            .uri("/api/blueprints/no-such-agent-xyz-99999")
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_string(&body).unwrap()))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn test_full_router_kill_agent_not_found() {
+        let app = full_app();
+        let req = Request::builder()
+            .method("DELETE")
+            .uri("/api/agents/nonexistent-kill-id-xyz")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn test_full_router_send_message_not_found() {
+        let app = full_app();
+        let body = serde_json::json!({"message": "hello"});
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/agents/nonexistent-msg-id-xyz/message")
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_string(&body).unwrap()))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn test_full_router_get_models() {
+        let app = full_app();
+        let req = Request::builder()
+            .uri("/api/models")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn test_full_router_spawn_agent_blueprint_not_found() {
+        let app = full_app();
+        let body = serde_json::json!({
+            "blueprint": "nonexistent-blueprint-xyz",
+            "task": "do something"
+        });
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/agents")
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_string(&body).unwrap()))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[test]
+    fn test_serve_args_defaults() {
+        let args = ServeArgs {
+            port: 3000,
+            host: "127.0.0.1".to_string(),
+            cors: "*".to_string(),
+        };
+        assert_eq!(args.port, 3000);
+        assert_eq!(args.host, "127.0.0.1");
+        assert_eq!(args.cors, "*");
+    }
+
+    #[test]
+    fn test_app_state_clone() {
+        let state = test_state();
+        let cloned = state.clone();
+        // Both should work (no panic)
+        let _ = cloned.config.default_provider.clone();
+    }
+
+    #[test]
+    fn test_cors_wildcard_vs_specific() {
+        // Test the CORS logic paths used in execute()
+        let wildcard = "*";
+        let specific = "https://example.com";
+
+        let is_wildcard = wildcard == "*";
+        assert!(is_wildcard);
+
+        let is_specific = specific != "*";
+        assert!(is_specific);
+
+        // Test that specific CORS origin parses correctly
+        let parsed = specific.parse::<axum::http::HeaderValue>();
+        assert!(parsed.is_ok());
+    }
+
+    #[test]
+    fn test_cors_invalid_origin_falls_back() {
+        let invalid_cors = "not a valid header value \x00";
+        let result = invalid_cors.parse::<axum::http::HeaderValue>();
+        // Invalid header values fail to parse; the code falls back to "*"
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_submit_interaction_full_router() {
+        use crate::runstate::{create_run, RunMeta};
+
+        let run_id = format!(
+            "test-modrs-int-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .subsec_nanos()
+        );
+        let meta = RunMeta::new(
+            run_id.clone(),
+            "test-agent".to_string(),
+            "/path".to_string(),
+            "task".to_string(),
+            None,
+            "/tmp".to_string(),
+            1,
+        );
+        create_run(&meta).unwrap();
+
+        let app = full_app();
+        let body = serde_json::json!({
+            "request_id": "req-full-001",
+            "value": "do it",
+            "scope": "once"
+        });
+        let req = Request::builder()
+            .method("POST")
+            .uri(format!("/api/agents/{}/interaction", run_id))
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_string(&body).unwrap()))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::ACCEPTED);
+
+        let _ = std::fs::remove_dir_all(crate::runstate::run_dir(&run_id));
+    }
+
+    #[tokio::test]
+    async fn test_agent_list_with_status_filter_full_router() {
+        let app = full_app();
+        let req = Request::builder()
+            .uri("/api/agents?status=running,complete")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
 }

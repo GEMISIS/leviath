@@ -47,6 +47,144 @@ pub(super) async fn get_models(State(state): State<AppState>) -> Json<Vec<ModelE
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::body::Body;
+    use axum::http::Request;
+    use axum::routing::get;
+    use axum::Router;
+    use std::sync::Arc;
+    use tokio::sync::broadcast;
+    use tower::ServiceExt;
+
+    use crate::config::Config;
+    use crate::commands::serve::types::ServerEvent;
+
+    fn test_state() -> AppState {
+        let (tx, _) = broadcast::channel::<ServerEvent>(64);
+        AppState {
+            config: Arc::new(Config::default()),
+            event_tx: tx,
+        }
+    }
+
+    fn test_state_with_keys() -> AppState {
+        let (tx, _) = broadcast::channel::<ServerEvent>(64);
+        AppState {
+            config: Arc::new(Config {
+                providers: crate::config::ProviderConfig {
+                    anthropic_api_key: Some("sk-ant-test".to_string()),
+                    openai_api_key: Some("sk-openai-test".to_string()),
+                    google_api_key: None,
+                },
+                openrouter_api_key: Some("sk-or-test".to_string()),
+                ollama_base_url: Some("http://localhost:11434".to_string()),
+                mcp_servers: vec![],
+                ..Default::default()
+            }),
+            event_tx: tx,
+        }
+    }
+
+    // ─── get_config endpoint ──────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn get_config_default_returns_ok() {
+        let app = Router::new()
+            .route("/api/config", get(get_config))
+            .with_state(test_state());
+        let req = Request::builder()
+            .uri("/api/config")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), axum::http::StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let config: RedactedConfig = serde_json::from_slice(&body).unwrap();
+        assert_eq!(config.default_provider, "anthropic");
+        assert!(!config.has_anthropic_key);
+        assert!(!config.has_openai_key);
+        assert!(!config.has_openrouter_key);
+        assert!(config.ollama_base_url.is_none());
+    }
+
+    #[tokio::test]
+    async fn get_config_with_keys_shows_has_key_true() {
+        let app = Router::new()
+            .route("/api/config", get(get_config))
+            .with_state(test_state_with_keys());
+        let req = Request::builder()
+            .uri("/api/config")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), axum::http::StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let config: RedactedConfig = serde_json::from_slice(&body).unwrap();
+        assert!(config.has_anthropic_key);
+        assert!(config.has_openai_key);
+        assert!(config.has_openrouter_key);
+        assert_eq!(
+            config.ollama_base_url.as_deref(),
+            Some("http://localhost:11434")
+        );
+        // Must not contain actual key values
+        let raw = std::str::from_utf8(&body).unwrap();
+        assert!(!raw.contains("sk-ant-test"));
+        assert!(!raw.contains("sk-openai-test"));
+    }
+
+    #[tokio::test]
+    async fn get_config_agent_paths_included() {
+        let (tx, _) = broadcast::channel::<ServerEvent>(64);
+        let state = AppState {
+            config: Arc::new(Config {
+                agent_paths: vec![
+                    std::path::PathBuf::from("/my/agents"),
+                    std::path::PathBuf::from("/other/agents"),
+                ],
+                ..Default::default()
+            }),
+            event_tx: tx,
+        };
+        let app = Router::new()
+            .route("/api/config", get(get_config))
+            .with_state(state);
+        let req = Request::builder()
+            .uri("/api/config")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let config: RedactedConfig = serde_json::from_slice(&body).unwrap();
+        assert_eq!(config.agent_paths.len(), 2);
+    }
+
+    // ─── get_models endpoint ──────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn get_models_returns_ok() {
+        let app = Router::new()
+            .route("/api/models", get(get_models))
+            .with_state(test_state());
+        let req = Request::builder()
+            .uri("/api/models")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), axum::http::StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let models: Vec<serde_json::Value> = serde_json::from_slice(&body).unwrap();
+        // With default config (no API keys), providers may return empty lists,
+        // but the endpoint itself should succeed
+        let _ = models;
+    }
 
     #[test]
     fn redacted_config_hides_keys() {

@@ -884,6 +884,155 @@ expect_contains = "world"
         assert!(result.is_ok());
     }
 
+    // ─── Rhai script tests ────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn dry_run_with_rhai_script_passing() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path();
+        let manifest = r#"
+[agent]
+name = "test-agent"
+version = "0.1.0"
+description = "test"
+
+[stages.main]
+model = { provider = "anthropic", model = "claude-sonnet-4-6" }
+"#;
+        std::fs::write(project.join("agent.leviath"), manifest).unwrap();
+        let tests_dir = project.join("tests");
+        std::fs::create_dir_all(&tests_dir).unwrap();
+
+        // Write a Rhai script that returns true (passes)
+        std::fs::write(tests_dir.join("pass_test.rhai"), "true").unwrap();
+
+        let args = TestArgs {
+            path: Some(project.to_str().unwrap().to_string()),
+            filter: None,
+            dry_run: true,
+        };
+        let result = execute(args).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn dry_run_with_rhai_script_returning_false() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path();
+        let manifest = r#"
+[agent]
+name = "test-agent"
+version = "0.1.0"
+description = "test"
+
+[stages.main]
+model = { provider = "anthropic", model = "claude-sonnet-4-6" }
+"#;
+        std::fs::write(project.join("agent.leviath"), manifest).unwrap();
+        let tests_dir = project.join("tests");
+        std::fs::create_dir_all(&tests_dir).unwrap();
+
+        // Write a Rhai script that returns false (fails)
+        std::fs::write(tests_dir.join("fail_test.rhai"), "false").unwrap();
+
+        let args = TestArgs {
+            path: Some(project.to_str().unwrap().to_string()),
+            filter: None,
+            dry_run: true,
+        };
+        let result = execute(args).await;
+        assert!(result.is_err()); // Should report test failure
+    }
+
+    #[tokio::test]
+    async fn dry_run_with_rhai_script_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path();
+        let manifest = r#"
+[agent]
+name = "test-agent"
+version = "0.1.0"
+description = "test"
+
+[stages.main]
+model = { provider = "anthropic", model = "claude-sonnet-4-6" }
+"#;
+        std::fs::write(project.join("agent.leviath"), manifest).unwrap();
+        let tests_dir = project.join("tests");
+        std::fs::create_dir_all(&tests_dir).unwrap();
+
+        // Write a Rhai script that throws an error
+        std::fs::write(tests_dir.join("error_test.rhai"), "throw \"intentional error\"").unwrap();
+
+        let args = TestArgs {
+            path: Some(project.to_str().unwrap().to_string()),
+            filter: None,
+            dry_run: true,
+        };
+        let result = execute(args).await;
+        assert!(result.is_err()); // Should report script error as failure
+    }
+
+    #[tokio::test]
+    async fn dry_run_with_rhai_non_bool_result_passes() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path();
+        let manifest = r#"
+[agent]
+name = "test-agent"
+version = "0.1.0"
+description = "test"
+
+[stages.main]
+model = { provider = "anthropic", model = "claude-sonnet-4-6" }
+"#;
+        std::fs::write(project.join("agent.leviath"), manifest).unwrap();
+        let tests_dir = project.join("tests");
+        std::fs::create_dir_all(&tests_dir).unwrap();
+
+        // Write a Rhai script that returns a non-bool (treated as pass)
+        std::fs::write(tests_dir.join("nonbool_test.rhai"), "42").unwrap();
+
+        let args = TestArgs {
+            path: Some(project.to_str().unwrap().to_string()),
+            filter: None,
+            dry_run: true,
+        };
+        let result = execute(args).await;
+        assert!(result.is_ok()); // Non-bool return treated as pass
+    }
+
+    #[tokio::test]
+    async fn dry_run_with_rhai_filter_matches() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path();
+        let manifest = r#"
+[agent]
+name = "test-agent"
+version = "0.1.0"
+description = "test"
+
+[stages.main]
+model = { provider = "anthropic", model = "claude-sonnet-4-6" }
+"#;
+        std::fs::write(project.join("agent.leviath"), manifest).unwrap();
+        let tests_dir = project.join("tests");
+        std::fs::create_dir_all(&tests_dir).unwrap();
+
+        // A rhai script whose name won't match the filter
+        std::fs::write(tests_dir.join("fail_test.rhai"), "false").unwrap();
+        // A rhai script that passes and matches the filter
+        std::fs::write(tests_dir.join("good_test.rhai"), "true").unwrap();
+
+        let args = TestArgs {
+            path: Some(project.to_str().unwrap().to_string()),
+            filter: Some("good".to_string()),
+            dry_run: true,
+        };
+        let result = execute(args).await;
+        assert!(result.is_ok()); // Only "good_test.rhai" runs, which passes
+    }
+
     // ─── dry_run with multiple test files ────────────────────────────────
 
     #[tokio::test]

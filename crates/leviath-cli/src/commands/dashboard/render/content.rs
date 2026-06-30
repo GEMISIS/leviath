@@ -1078,4 +1078,536 @@ mod tests {
             .collect();
         assert!(text.contains("predates"));
     }
+
+    // ─── build_context_lines: incoming edges in graph ─────────────────────
+
+    #[test]
+    fn build_context_lines_with_graph_info_and_incoming_edges() {
+        let dash = make_test_dashboard();
+        let mut agent = make_test_agent("run-incoming", AgentDisplayStatus::Active);
+        agent.context_snapshot = Some(make_context_snapshot(4000, 8000));
+        let mut edges = std::collections::HashMap::new();
+        // "plan" has edge to "implement"
+        edges.insert(
+            "plan".to_string(),
+            vec![crate::commands::dashboard::graph::GraphEdge {
+                target: "implement".to_string(),
+                hint: None,
+                condition: "always".to_string(),
+                transform: "replace".to_string(),
+            }],
+        );
+        // "implement" is selected stage — it has an incoming edge from "plan"
+        agent.graph_info = Some(crate::commands::dashboard::graph::GraphTransitionInfo {
+            edges,
+            entry_stage: "plan".to_string(),
+            stage_names: vec!["plan".to_string(), "implement".to_string()],
+        });
+        agent.stages = vec![crate::runstate::StageRecord {
+            name: "implement".to_string(),
+            index: 1,
+            status: crate::runstate::StageRunStatus::Active,
+            prompt_tokens: 100,
+            completion_tokens: 50,
+            cached_tokens: 0,
+            started_at: Some(chrono::Utc::now().timestamp() - 30),
+            ended_at: None,
+        }];
+        // selected_stage = 0, so we look up index 0 in stages which is "implement"
+        let lines = dash.build_context_lines(&agent, 80);
+        let text: String = lines
+            .iter()
+            .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
+            .collect();
+        // Should show stage info
+        assert!(!lines.is_empty());
+        // The incoming edge from "plan" should be listed
+        assert!(text.contains("← plan") || text.contains("Incoming") || text.contains("plan"));
+    }
+
+    #[test]
+    fn build_context_lines_with_terminal_stage_no_edges() {
+        let dash = make_test_dashboard();
+        let mut agent = make_test_agent("run-terminal", AgentDisplayStatus::Active);
+        agent.context_snapshot = Some(make_context_snapshot(4000, 8000));
+        let mut edges = std::collections::HashMap::new();
+        // "implement" has no outgoing edges (terminal)
+        edges.insert("plan".to_string(), vec![]);
+        agent.graph_info = Some(crate::commands::dashboard::graph::GraphTransitionInfo {
+            edges,
+            entry_stage: "plan".to_string(),
+            stage_names: vec!["plan".to_string()],
+        });
+        agent.stages = vec![crate::runstate::StageRecord {
+            name: "plan".to_string(),
+            index: 0,
+            status: crate::runstate::StageRunStatus::Complete,
+            prompt_tokens: 100,
+            completion_tokens: 50,
+            cached_tokens: 0,
+            started_at: Some(chrono::Utc::now().timestamp() - 60),
+            ended_at: Some(chrono::Utc::now().timestamp() - 10),
+        }];
+        let lines = dash.build_context_lines(&agent, 80);
+        let text: String = lines
+            .iter()
+            .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
+            .collect();
+        assert!(text.contains("terminal") || text.contains("Transitions"));
+    }
+
+    #[test]
+    fn build_context_lines_with_no_edges_for_stage() {
+        // Stage has no entry in edges map at all → shows "linear — no graph edges"
+        let dash = make_test_dashboard();
+        let mut agent = make_test_agent("run-noedge", AgentDisplayStatus::Active);
+        agent.context_snapshot = Some(make_context_snapshot(4000, 8000));
+        let edges = std::collections::HashMap::new(); // empty
+        agent.graph_info = Some(crate::commands::dashboard::graph::GraphTransitionInfo {
+            edges,
+            entry_stage: "main".to_string(),
+            stage_names: vec!["main".to_string()],
+        });
+        agent.stages = vec![crate::runstate::StageRecord {
+            name: "main".to_string(),
+            index: 0,
+            status: crate::runstate::StageRunStatus::Active,
+            prompt_tokens: 100,
+            completion_tokens: 50,
+            cached_tokens: 0,
+            started_at: Some(chrono::Utc::now().timestamp() - 30),
+            ended_at: None,
+        }];
+        let lines = dash.build_context_lines(&agent, 80);
+        let text: String = lines
+            .iter()
+            .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
+            .collect();
+        assert!(text.contains("linear") || text.contains("Transitions") || text.contains("Stage:"));
+    }
+
+    // ─── build_context_lines: multiple region kinds ───────────────────────
+
+    #[test]
+    fn build_context_lines_all_region_kinds() {
+        let dash = make_test_dashboard();
+        let mut agent = make_test_agent("run-kinds", AgentDisplayStatus::Active);
+        agent.context_snapshot = Some(runstate::ContextSnapshot {
+            stage_name: "main".to_string(),
+            total_tokens: 6000,
+            max_tokens: 8000,
+            regions: vec![
+                runstate::RegionSnapshot {
+                    name: "system".to_string(),
+                    kind: "pinned".to_string(),
+                    current_tokens: 1000,
+                    max_tokens: 2000,
+                    entries: vec![],
+                },
+                runstate::RegionSnapshot {
+                    name: "conv".to_string(),
+                    kind: "sliding".to_string(),
+                    current_tokens: 1000,
+                    max_tokens: 2000,
+                    entries: vec![],
+                },
+                runstate::RegionSnapshot {
+                    name: "hist".to_string(),
+                    kind: "history".to_string(),
+                    current_tokens: 1000,
+                    max_tokens: 2000,
+                    entries: vec![],
+                },
+                runstate::RegionSnapshot {
+                    name: "temp".to_string(),
+                    kind: "temporary".to_string(),
+                    current_tokens: 1000,
+                    max_tokens: 2000,
+                    entries: vec![],
+                },
+                runstate::RegionSnapshot {
+                    name: "cls".to_string(),
+                    kind: "clearable".to_string(),
+                    current_tokens: 1000,
+                    max_tokens: 2000,
+                    entries: vec![],
+                },
+                runstate::RegionSnapshot {
+                    name: "other".to_string(),
+                    kind: "unknown_kind".to_string(),
+                    current_tokens: 1000,
+                    max_tokens: 2000,
+                    entries: vec![],
+                },
+            ],
+        });
+        let lines = dash.build_context_lines(&agent, 80);
+        assert!(!lines.is_empty());
+    }
+
+    // ─── build_context_lines: 90%+ bar color (error red) ─────────────────
+
+    #[test]
+    fn build_context_lines_high_usage_region() {
+        let dash = make_test_dashboard();
+        let mut agent = make_test_agent("run-hiuse", AgentDisplayStatus::Active);
+        agent.context_snapshot = Some(runstate::ContextSnapshot {
+            stage_name: "main".to_string(),
+            total_tokens: 7500,
+            max_tokens: 8000,
+            regions: vec![runstate::RegionSnapshot {
+                name: "system".to_string(),
+                kind: "pinned".to_string(),
+                current_tokens: 7500,
+                max_tokens: 8000,
+                entries: vec![],
+            }],
+        });
+        let lines = dash.build_context_lines(&agent, 80);
+        assert!(!lines.is_empty());
+    }
+
+    // ─── build_context_lines: 70-90% bar (warning yellow) ────────────────
+
+    #[test]
+    fn build_context_lines_medium_usage_region() {
+        let dash = make_test_dashboard();
+        let mut agent = make_test_agent("run-meduse", AgentDisplayStatus::Active);
+        agent.context_snapshot = Some(runstate::ContextSnapshot {
+            stage_name: "main".to_string(),
+            total_tokens: 5800,
+            max_tokens: 8000,
+            regions: vec![runstate::RegionSnapshot {
+                name: "system".to_string(),
+                kind: "compacting".to_string(),
+                current_tokens: 5800,
+                max_tokens: 8000,
+                entries: vec![],
+            }],
+        });
+        let lines = dash.build_context_lines(&agent, 80);
+        assert!(!lines.is_empty());
+    }
+
+    // ─── build_context_lines: zero usage region ───────────────────────────
+
+    #[test]
+    fn build_context_lines_zero_usage_region() {
+        let dash = make_test_dashboard();
+        let mut agent = make_test_agent("run-zerouse", AgentDisplayStatus::Active);
+        agent.context_snapshot = Some(runstate::ContextSnapshot {
+            stage_name: "main".to_string(),
+            total_tokens: 0,
+            max_tokens: 8000,
+            regions: vec![runstate::RegionSnapshot {
+                name: "empty".to_string(),
+                kind: "sliding".to_string(),
+                current_tokens: 0,
+                max_tokens: 8000,
+                entries: vec![],
+            }],
+        });
+        let lines = dash.build_context_lines(&agent, 80);
+        assert!(!lines.is_empty());
+    }
+
+    // ─── render_content_pane: with active search producing matches ─────────
+
+    #[test]
+    fn render_content_pane_search_with_matches() {
+        let backend = TestBackend::new(120, 40);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut dash = make_test_dashboard();
+        dash.stage_content_mode = StageContentMode::Output;
+        // We need actual content lines to match against — build_output_lines
+        // will return empty for non-run-state, so use context mode with a snapshot
+        // that has entries containing "hello"
+        dash.stage_content_mode = StageContentMode::Context;
+        dash.search_query = "token".to_string();
+        let mut agent = make_test_agent("run-sm2", AgentDisplayStatus::Active);
+        agent.context_snapshot = Some(runstate::ContextSnapshot {
+            stage_name: "main".to_string(),
+            total_tokens: 4000,
+            max_tokens: 8000,
+            regions: vec![runstate::RegionSnapshot {
+                name: "system".to_string(),
+                kind: "pinned".to_string(),
+                current_tokens: 2000,
+                max_tokens: 4000,
+                entries: vec![runstate::RegionEntrySnapshot {
+                    content: "hello token world".to_string(),
+                    tokens: 5,
+                    metadata: None,
+                }],
+            }],
+        });
+        terminal
+            .draw(|f| {
+                let area = Rect::new(0, 0, 100, 20);
+                dash.render_content_pane(f, area, &agent, 100);
+            })
+            .unwrap();
+    }
+
+    // ─── render_content_pane: scroll at bottom (detail_scroll = 0) ────────
+
+    #[test]
+    fn render_content_pane_scrollbar_visible_when_overflow() {
+        let backend = TestBackend::new(120, 40);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut dash = make_test_dashboard();
+        dash.stage_content_mode = StageContentMode::Context;
+        dash.detail_scroll = 5;
+        let mut agent = make_test_agent("run-scroll", AgentDisplayStatus::Active);
+        // Make snapshot with many entries to exceed screen height
+        let entries: Vec<runstate::RegionEntrySnapshot> = (0..50)
+            .map(|i| runstate::RegionEntrySnapshot {
+                content: format!("content line {}", i),
+                tokens: 10,
+                metadata: None,
+            })
+            .collect();
+        agent.context_snapshot = Some(runstate::ContextSnapshot {
+            stage_name: "main".to_string(),
+            total_tokens: 4000,
+            max_tokens: 8000,
+            regions: vec![runstate::RegionSnapshot {
+                name: "big".to_string(),
+                kind: "sliding".to_string(),
+                current_tokens: 4000,
+                max_tokens: 8000,
+                entries,
+            }],
+        });
+        terminal
+            .draw(|f| {
+                let area = Rect::new(0, 0, 100, 20);
+                dash.render_content_pane(f, area, &agent, 100);
+            })
+            .unwrap();
+    }
+
+    // ─── build_output_lines: logs mode with prefixed lines ────────────────
+
+    #[test]
+    fn build_output_lines_logs_mode_non_run_state() {
+        let dash = make_test_dashboard();
+        let agent = make_test_agent("run-logs-nrs", AgentDisplayStatus::Active);
+        // non-run-state, is_output = false
+        let lines = dash.build_output_lines(&agent, false, 80);
+        // Should be empty because no disk content
+        assert!(lines.is_empty());
+    }
+
+    // ─── render_content_pane: stage_name from stages list ─────────────────
+
+    #[test]
+    fn render_content_pane_with_stage_name_in_title() {
+        let backend = TestBackend::new(120, 40);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut dash = make_test_dashboard();
+        dash.stage_content_mode = StageContentMode::Output;
+        let mut agent = make_test_agent("run-sn", AgentDisplayStatus::Active);
+        agent.stages = vec![crate::runstate::StageRecord {
+            name: "analyze".to_string(),
+            index: 0,
+            status: crate::runstate::StageRunStatus::Active,
+            prompt_tokens: 0,
+            completion_tokens: 0,
+            cached_tokens: 0,
+            started_at: None,
+            ended_at: None,
+        }];
+        terminal
+            .draw(|f| {
+                let area = Rect::new(0, 0, 100, 10);
+                dash.render_content_pane(f, area, &agent, 100);
+            })
+            .unwrap();
+    }
+
+    // ─── render_content_pane: Logs mode with tool count (run_state) ──────
+
+    #[test]
+    fn render_content_pane_logs_mode_run_state() {
+        let backend = TestBackend::new(120, 40);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut dash = make_test_dashboard();
+        dash.stage_content_mode = StageContentMode::Logs;
+        // is_run_state = true means it tries to read disk, but dir won't exist
+        // so it returns empty content gracefully
+        let mut agent = make_test_agent("run-logs-rs", AgentDisplayStatus::Active);
+        agent.is_run_state = true;
+        terminal
+            .draw(|f| {
+                let area = Rect::new(0, 0, 100, 20);
+                dash.render_content_pane(f, area, &agent, 100);
+            })
+            .unwrap();
+    }
+
+    // ─── render_context_bar: bar color variants ───────────────────────────
+
+    #[test]
+    fn render_context_bar_regions_string_with_many_region_types() {
+        let backend = TestBackend::new(120, 10);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let dash = make_test_dashboard();
+        let mut agent = make_test_agent("run-regions", AgentDisplayStatus::Active);
+        agent.context_snapshot = Some(runstate::ContextSnapshot {
+            stage_name: "main".to_string(),
+            total_tokens: 4000,
+            max_tokens: 8000,
+            regions: vec![
+                runstate::RegionSnapshot {
+                    name: "s1".to_string(),
+                    kind: "pinned".to_string(),
+                    current_tokens: 500,
+                    max_tokens: 1000,
+                    entries: vec![],
+                },
+                runstate::RegionSnapshot {
+                    name: "s2".to_string(),
+                    kind: "sliding".to_string(),
+                    current_tokens: 500,
+                    max_tokens: 1000,
+                    entries: vec![],
+                },
+                runstate::RegionSnapshot {
+                    name: "s3".to_string(),
+                    kind: "compacting".to_string(),
+                    current_tokens: 500,
+                    max_tokens: 1000,
+                    entries: vec![],
+                },
+                runstate::RegionSnapshot {
+                    name: "s4".to_string(),
+                    kind: "history".to_string(),
+                    current_tokens: 500,
+                    max_tokens: 1000,
+                    entries: vec![],
+                },
+                runstate::RegionSnapshot {
+                    name: "s5".to_string(),
+                    kind: "other".to_string(),
+                    current_tokens: 500,
+                    max_tokens: 1000,
+                    entries: vec![],
+                },
+                runstate::RegionSnapshot {
+                    name: "s6".to_string(),
+                    kind: "more".to_string(),
+                    current_tokens: 500,
+                    max_tokens: 1000,
+                    entries: vec![],
+                },
+                runstate::RegionSnapshot {
+                    name: "s7".to_string(),
+                    kind: "extra".to_string(),
+                    current_tokens: 500,
+                    max_tokens: 1000,
+                    entries: vec![],
+                },
+            ],
+        });
+        terminal
+            .draw(|f| {
+                let area = Rect::new(0, 0, 80, 5);
+                dash.render_context_bar(f, area, &agent);
+            })
+            .unwrap();
+    }
+
+    // ─── render_context_bar: run_state agent uses stage context ──────────
+
+    #[test]
+    fn render_context_bar_run_state_uses_stage_context() {
+        let backend = TestBackend::new(120, 10);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let dash = make_test_dashboard();
+        let mut agent = make_test_agent("run-rs-ctx", AgentDisplayStatus::Active);
+        // is_run_state = true, context_snapshot as fallback
+        agent.is_run_state = true;
+        agent.context_snapshot = Some(make_context_snapshot(3000, 8000));
+        terminal
+            .draw(|f| {
+                let area = Rect::new(0, 0, 80, 5);
+                dash.render_context_bar(f, area, &agent);
+            })
+            .unwrap();
+    }
+
+    // ─── render_content_pane: Context mode with is_run_state (disk fallback)
+
+    #[test]
+    fn render_content_pane_context_mode_run_state() {
+        let backend = TestBackend::new(120, 40);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut dash = make_test_dashboard();
+        dash.stage_content_mode = StageContentMode::Context;
+        let mut agent = make_test_agent("run-ctx-rs", AgentDisplayStatus::Active);
+        agent.is_run_state = true;
+        // No context_snapshot so it shows "no context snapshot available"
+        terminal
+            .draw(|f| {
+                let area = Rect::new(0, 0, 100, 20);
+                dash.render_content_pane(f, area, &agent, 100);
+            })
+            .unwrap();
+    }
+
+    // ─── render_content_pane: file path hint for context mode ─────────────
+
+    #[test]
+    fn render_content_pane_file_path_hint_context_mode() {
+        let backend = TestBackend::new(120, 40);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut dash = make_test_dashboard();
+        dash.stage_content_mode = StageContentMode::Context;
+        let mut agent = make_test_agent("run-ctx-fph", AgentDisplayStatus::Active);
+        agent.is_run_state = true;
+        terminal
+            .draw(|f| {
+                let area = Rect::new(0, 0, 100, 20);
+                dash.render_content_pane(f, area, &agent, 100);
+            })
+            .unwrap();
+    }
+
+    // ─── render_content_pane: file path hint for Logs mode ───────────────
+
+    #[test]
+    fn render_content_pane_file_path_hint_logs_mode() {
+        let backend = TestBackend::new(120, 40);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut dash = make_test_dashboard();
+        dash.stage_content_mode = StageContentMode::Logs;
+        let mut agent = make_test_agent("run-logs-fph", AgentDisplayStatus::Active);
+        agent.is_run_state = true;
+        terminal
+            .draw(|f| {
+                let area = Rect::new(0, 0, 100, 20);
+                dash.render_content_pane(f, area, &agent, 100);
+            })
+            .unwrap();
+    }
+
+    // ─── render_content_pane: search with no matches shows 0 matches ──────
+
+    #[test]
+    fn render_content_pane_search_no_matches() {
+        let backend = TestBackend::new(120, 40);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut dash = make_test_dashboard();
+        dash.stage_content_mode = StageContentMode::Context;
+        dash.search_query = "xyznotfound".to_string();
+        let mut agent = make_test_agent("run-nm", AgentDisplayStatus::Active);
+        agent.context_snapshot = Some(make_context_snapshot(4000, 8000));
+        terminal
+            .draw(|f| {
+                let area = Rect::new(0, 0, 100, 20);
+                dash.render_content_pane(f, area, &agent, 100);
+            })
+            .unwrap();
+    }
 }

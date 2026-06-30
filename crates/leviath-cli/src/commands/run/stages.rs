@@ -935,4 +935,415 @@ mod tests {
             io.outputs
         );
     }
+
+    // ─── run_interactive_points_stage: with actual interaction points ──────
+
+    fn make_free_text_point(name: &str, prompt: &str) -> leviath_core::blueprint::InteractionPoint {
+        leviath_core::blueprint::InteractionPoint {
+            name: name.to_string(),
+            prompt: prompt.to_string(),
+            required: false,
+            style: leviath_core::blueprint::InteractionStyle::FreeText,
+            options: vec![],
+        }
+    }
+
+    fn make_multiple_choice_point(
+        name: &str,
+        prompt: &str,
+        options: Vec<String>,
+    ) -> leviath_core::blueprint::InteractionPoint {
+        leviath_core::blueprint::InteractionPoint {
+            name: name.to_string(),
+            prompt: prompt.to_string(),
+            required: false,
+            style: leviath_core::blueprint::InteractionStyle::MultipleChoice,
+            options,
+        }
+    }
+
+    fn make_confirm_point(
+        name: &str,
+        prompt: &str,
+    ) -> leviath_core::blueprint::InteractionPoint {
+        leviath_core::blueprint::InteractionPoint {
+            name: name.to_string(),
+            prompt: prompt.to_string(),
+            required: false,
+            style: leviath_core::blueprint::InteractionStyle::Confirm,
+            options: vec![],
+        }
+    }
+
+    /// Helper: spawn a background task that watches for pending.json and writes a response.
+    /// Returns a JoinHandle that should be awaited or aborted after the test.
+    fn spawn_interaction_responder(
+        run_id: String,
+        responses: Vec<crate::interaction::InteractionResponse>,
+    ) -> tokio::task::JoinHandle<()> {
+        tokio::spawn(async move {
+            let mut resp_iter = responses.into_iter();
+            loop {
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                if let Some(req) = crate::interaction::read_request(&run_id) {
+                    if let Some(mut resp) = resp_iter.next() {
+                        resp.request_id = req.id.clone();
+                        crate::interaction::write_response(&run_id, &resp).unwrap();
+                    } else {
+                        break;
+                    }
+                }
+            }
+        })
+    }
+
+    #[tokio::test]
+    async fn interactive_points_single_free_text_point_stdin() {
+        use crate::interaction::InteractionResponse;
+
+        let bp = make_blueprint(vec![make_stage("main")]);
+        let (mut engine, _pool, entity) = make_engine_and_entity(&bp, "Agent answer");
+        let mut io = MockIO::new();
+
+        let run_id = format!("test-ip-ft-{}", std::process::id());
+        let mut meta = RunMeta::new(
+            run_id.clone(), "test".into(), "/p".into(), "t".into(), None, "/tmp".into(), 1,
+        );
+        runstate::create_run(&meta).unwrap();
+
+        let points = vec![make_free_text_point("feedback", "What do you think?")];
+
+        let responder = spawn_interaction_responder(
+            run_id.clone(),
+            vec![InteractionResponse::text("", "my feedback")],
+        );
+
+        run_interactive_points_stage(
+            &mut engine,
+            entity,
+            "mock",
+            "test-model",
+            4,
+            &[],
+            None,
+            None,
+            &points,
+            Some((&run_id, &mut meta)),
+            &mut io,
+            &mut noop_exec,
+        )
+        .await
+        .unwrap();
+
+        responder.abort();
+        let _ = std::fs::remove_dir_all(runstate::run_dir(&run_id));
+    }
+
+    #[tokio::test]
+    async fn interactive_points_multiple_choice_stdin() {
+        use crate::interaction::InteractionResponse;
+
+        let bp = make_blueprint(vec![make_stage("main")]);
+        let (mut engine, _pool, entity) = make_engine_and_entity(&bp, "Agent response");
+        let mut io = MockIO::new();
+
+        let run_id = format!("test-ip-mc-{}", std::process::id());
+        let mut meta = RunMeta::new(
+            run_id.clone(), "test".into(), "/p".into(), "t".into(), None, "/tmp".into(), 1,
+        );
+        runstate::create_run(&meta).unwrap();
+
+        let points = vec![make_multiple_choice_point(
+            "pick_one",
+            "Choose an option",
+            vec!["Option A".to_string(), "Option B".to_string()],
+        )];
+
+        // choice_index 1 = "Option B" (0-based)
+        let responder = spawn_interaction_responder(
+            run_id.clone(),
+            vec![InteractionResponse::choice("", 1)],
+        );
+
+        run_interactive_points_stage(
+            &mut engine,
+            entity,
+            "mock",
+            "test-model",
+            4,
+            &[],
+            None,
+            None,
+            &points,
+            Some((&run_id, &mut meta)),
+            &mut io,
+            &mut noop_exec,
+        )
+        .await
+        .unwrap();
+
+        responder.abort();
+        let _ = std::fs::remove_dir_all(runstate::run_dir(&run_id));
+    }
+
+    #[tokio::test]
+    async fn interactive_points_confirm_stdin() {
+        use crate::interaction::InteractionResponse;
+
+        let bp = make_blueprint(vec![make_stage("main")]);
+        let (mut engine, _pool, entity) = make_engine_and_entity(&bp, "Agent response");
+        let mut io = MockIO::new();
+
+        let run_id = format!("test-ip-cf-{}", std::process::id());
+        let mut meta = RunMeta::new(
+            run_id.clone(), "test".into(), "/p".into(), "t".into(), None, "/tmp".into(), 1,
+        );
+        runstate::create_run(&meta).unwrap();
+
+        let points = vec![make_confirm_point("confirm_step", "Are you sure?")];
+
+        let responder = spawn_interaction_responder(
+            run_id.clone(),
+            vec![InteractionResponse::text("", "yes")],
+        );
+
+        run_interactive_points_stage(
+            &mut engine,
+            entity,
+            "mock",
+            "test-model",
+            4,
+            &[],
+            None,
+            None,
+            &points,
+            Some((&run_id, &mut meta)),
+            &mut io,
+            &mut noop_exec,
+        )
+        .await
+        .unwrap();
+
+        responder.abort();
+        let _ = std::fs::remove_dir_all(runstate::run_dir(&run_id));
+    }
+
+    #[tokio::test]
+    async fn interactive_points_multiple_points_all_visited() {
+        use crate::interaction::InteractionResponse;
+
+        let bp = make_blueprint(vec![make_stage("main")]);
+        let (mut engine, _pool, entity) = make_engine_and_entity(&bp, "Mid-stage response");
+        let mut io = MockIO::new();
+
+        let run_id = format!("test-ip-mp-{}", std::process::id());
+        let mut meta = RunMeta::new(
+            run_id.clone(), "test".into(), "/p".into(), "t".into(), None, "/tmp".into(), 1,
+        );
+        runstate::create_run(&meta).unwrap();
+
+        let points = vec![
+            make_free_text_point("step1", "Tell me about step 1"),
+            make_multiple_choice_point(
+                "step2",
+                "Pick one",
+                vec!["A".to_string(), "B".to_string()],
+            ),
+            make_confirm_point("step3", "Confirm?"),
+        ];
+
+        let responder = spawn_interaction_responder(
+            run_id.clone(),
+            vec![
+                InteractionResponse::text("", "first input"),
+                InteractionResponse::choice("", 0),
+                InteractionResponse::text("", "yes"),
+            ],
+        );
+
+        run_interactive_points_stage(
+            &mut engine,
+            entity,
+            "mock",
+            "test-model",
+            9,
+            &[],
+            None,
+            None,
+            &points,
+            Some((&run_id, &mut meta)),
+            &mut io,
+            &mut noop_exec,
+        )
+        .await
+        .unwrap();
+
+        responder.abort();
+        let _ = std::fs::remove_dir_all(runstate::run_dir(&run_id));
+    }
+
+    #[tokio::test]
+    async fn interactive_points_with_zero_remaining_iterations() {
+        use crate::interaction::InteractionResponse;
+
+        // max_iterations = 1, points = 2 → iterations_per_segment rounds down to 0
+        // The stage should still run (just skips inference) and ask interaction points
+        let bp = make_blueprint(vec![make_stage("main")]);
+        let (mut engine, _pool, entity) = make_engine_and_entity(&bp, "Response");
+        let mut io = MockIO::new();
+
+        let run_id = format!("test-ip-zero-{}", std::process::id());
+        let mut meta = RunMeta::new(
+            run_id.clone(), "test".into(), "/p".into(), "t".into(), None, "/tmp".into(), 1,
+        );
+        runstate::create_run(&meta).unwrap();
+
+        let points = vec![
+            make_free_text_point("p1", "Point 1"),
+            make_free_text_point("p2", "Point 2"),
+        ];
+
+        let responder = spawn_interaction_responder(
+            run_id.clone(),
+            vec![
+                InteractionResponse::text("", "a"),
+                InteractionResponse::text("", "b"),
+            ],
+        );
+
+        run_interactive_points_stage(
+            &mut engine,
+            entity,
+            "mock",
+            "test-model",
+            1, // small max_iterations
+            &[],
+            None,
+            None,
+            &points,
+            Some((&run_id, &mut meta)),
+            &mut io,
+            &mut noop_exec,
+        )
+        .await
+        .unwrap();
+
+        responder.abort();
+        let _ = std::fs::remove_dir_all(runstate::run_dir(&run_id));
+    }
+
+    #[tokio::test]
+    async fn interactive_points_empty_user_input_is_ok() {
+        use crate::interaction::InteractionResponse;
+
+        // Empty answer → nothing injected into context window (branch coverage)
+        let bp = make_blueprint(vec![make_stage("main")]);
+        let (mut engine, _pool, entity) = make_engine_and_entity(&bp, "Response");
+        let mut io = MockIO::new();
+
+        let run_id = format!("test-ip-empty-{}", std::process::id());
+        let mut meta = RunMeta::new(
+            run_id.clone(), "test".into(), "/p".into(), "t".into(), None, "/tmp".into(), 1,
+        );
+        runstate::create_run(&meta).unwrap();
+
+        let points = vec![make_free_text_point("ask", "Say something")];
+
+        // Respond with empty text
+        let responder = spawn_interaction_responder(
+            run_id.clone(),
+            vec![InteractionResponse::text("", "")],
+        );
+
+        run_interactive_points_stage(
+            &mut engine,
+            entity,
+            "mock",
+            "test-model",
+            2,
+            &[],
+            None,
+            None,
+            &points,
+            Some((&run_id, &mut meta)),
+            &mut io,
+            &mut noop_exec,
+        )
+        .await
+        .unwrap();
+
+        responder.abort();
+        let _ = std::fs::remove_dir_all(runstate::run_dir(&run_id));
+    }
+
+    #[tokio::test]
+    async fn autonomous_stage_with_tools() {
+        // Test the autonomous stage with tools provided (exercises tool executor path)
+        let bp = make_blueprint(vec![make_stage("main")]);
+        let (mut engine, _pool, entity) = make_engine_and_entity(&bp, "Tool result response");
+        let mut io = MockIO::new();
+
+        let tools = vec![leviath_providers::Tool {
+            name: "my_tool".to_string(),
+            description: "a test tool".to_string(),
+            parameters: serde_json::json!({}),
+        }];
+
+        run_autonomous_stage(
+            &mut engine,
+            entity,
+            "mock",
+            "test-model",
+            1,
+            &tools,
+            None,
+            None,
+            &mut io,
+            &mut noop_exec,
+        )
+        .await
+        .unwrap();
+
+        let all_output = io.outputs.join("");
+        assert!(
+            all_output.contains("Tool result response"),
+            "Expected tool response in: {:?}",
+            io.outputs
+        );
+    }
+
+    #[tokio::test]
+    async fn interactive_stage_with_tools_max_turns_reached() {
+        // Test that the interactive stage tool-path also respects max_iterations=0
+        let bp = make_blueprint(vec![make_stage("main")]);
+        let (mut engine, _pool, entity) = make_engine_and_entity(&bp, "Response");
+        let mut io = MockIO::new();
+
+        let tools = vec![leviath_providers::Tool {
+            name: "test_tool".to_string(),
+            description: "test".to_string(),
+            parameters: serde_json::json!({}),
+        }];
+
+        run_interactive_stage(
+            &mut engine,
+            entity,
+            "mock",
+            "test-model",
+            0, // immediately hits limit
+            &tools,
+            None,
+            "main",
+            &mut io,
+            &mut noop_exec,
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            io.outputs.iter().any(|o| o.contains("[Max turns reached]")),
+            "Expected max turns message: {:?}",
+            io.outputs
+        );
+    }
 }

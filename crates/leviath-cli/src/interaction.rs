@@ -1419,4 +1419,560 @@ mod tests {
         assert_eq!(make_interaction_id(1, 2), "1-2");
         assert_eq!(make_interaction_id(10, 20), "10-20");
     }
+
+    // ─── default_true() via serde deserialization ─────────────────────────
+    // Deserializing a request that lacks `required` exercises default_true().
+
+    #[test]
+    fn test_default_true_via_serde_missing_required_field() {
+        // JSON without `required` — should default to true via default_true()
+        let json = r#"{
+            "id": "dt1",
+            "kind": "free_text",
+            "prompt": "test prompt",
+            "stage_name": "stage"
+        }"#;
+        let req: InteractionRequest = serde_json::from_str(json).unwrap();
+        assert!(req.required, "required should default to true via default_true()");
+    }
+
+    // ─── request_interaction (synchronous) ───────────────────────────────
+    // Spawn a thread that writes the response after a short delay.
+
+    #[test]
+    fn test_request_interaction_sync_success() {
+        let run_id = "test-sync-request-ok";
+        let dir = crate::runstate::run_dir(run_id);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // Create meta.json so write_meta succeeds
+        let mut meta = crate::runstate::RunMeta::new(
+            run_id.to_string(),
+            "agent".to_string(),
+            "/tmp/agent.toml".to_string(),
+            "task".to_string(),
+            None,
+            "/tmp".to_string(),
+            1,
+        );
+        crate::runstate::create_run(&meta).unwrap();
+
+        let req_id = "sync-req-1".to_string();
+        let run_id_clone = run_id.to_string();
+        let req_id_clone = req_id.clone();
+
+        // Spawn thread that writes the response after 150ms
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(150));
+            let resp = InteractionResponse::text(&req_id_clone, "the answer");
+            write_response(&run_id_clone, &resp).ok();
+        });
+
+        let req = InteractionRequest::free_text(&req_id, "What?", "plan", true);
+        let result = request_interaction(run_id, &mut meta, req, Some(Duration::from_secs(5)));
+        assert!(result.is_ok());
+        let resp = result.unwrap();
+        assert_eq!(resp.value.as_deref(), Some("the answer"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_request_interaction_sync_timeout() {
+        let run_id = "test-sync-request-timeout";
+        let dir = crate::runstate::run_dir(run_id);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let mut meta = crate::runstate::RunMeta::new(
+            run_id.to_string(),
+            "agent".to_string(),
+            "/tmp/agent.toml".to_string(),
+            "task".to_string(),
+            None,
+            "/tmp".to_string(),
+            1,
+        );
+        crate::runstate::create_run(&meta).unwrap();
+
+        let req = InteractionRequest::free_text("sync-timeout", "What?", "plan", true);
+        // Timeout of 200ms — no response will be written
+        let result = request_interaction(
+            run_id,
+            &mut meta,
+            req,
+            Some(Duration::from_millis(200)),
+        );
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("timed out"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_request_interaction_sync_not_required_status() {
+        let run_id = "test-sync-request-not-required";
+        let dir = crate::runstate::run_dir(run_id);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let mut meta = crate::runstate::RunMeta::new(
+            run_id.to_string(),
+            "agent".to_string(),
+            "/tmp/agent.toml".to_string(),
+            "task".to_string(),
+            None,
+            "/tmp".to_string(),
+            1,
+        );
+        crate::runstate::create_run(&meta).unwrap();
+
+        let run_id_clone = run_id.to_string();
+        // Spawn thread that writes the response immediately
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(150));
+            let resp = InteractionResponse::text("not-req-1", "ok");
+            write_response(&run_id_clone, &resp).ok();
+        });
+
+        // required: false → CompleteInteractive status branch
+        let req = InteractionRequest::free_text("not-req-1", "Optional?", "plan", false);
+        let result =
+            request_interaction(run_id, &mut meta, req, Some(Duration::from_secs(5)));
+        assert!(result.is_ok());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_request_interaction_sync_stale_response_then_correct() {
+        let run_id = "test-sync-stale-then-correct";
+        let dir = crate::runstate::run_dir(run_id);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let mut meta = crate::runstate::RunMeta::new(
+            run_id.to_string(),
+            "agent".to_string(),
+            "/tmp/agent.toml".to_string(),
+            "task".to_string(),
+            None,
+            "/tmp".to_string(),
+            1,
+        );
+        crate::runstate::create_run(&meta).unwrap();
+
+        let run_id_clone = run_id.to_string();
+        // Write a stale response first (different request_id), then the correct one
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(120));
+            // Stale response
+            let stale = InteractionResponse::text("other-req", "stale answer");
+            write_response(&run_id_clone, &stale).ok();
+            // Give time for it to be consumed, then write correct one
+            std::thread::sleep(std::time::Duration::from_millis(150));
+            let correct = InteractionResponse::text("target-req", "correct answer");
+            write_response(&run_id_clone, &correct).ok();
+        });
+
+        let req = InteractionRequest::free_text("target-req", "What?", "plan", true);
+        let result =
+            request_interaction(run_id, &mut meta, req, Some(Duration::from_secs(5)));
+        assert!(result.is_ok());
+        let resp = result.unwrap();
+        assert_eq!(resp.value.as_deref(), Some("correct answer"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ─── request_interaction_async ────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_request_interaction_async_success() {
+        let run_id = "test-async-request-ok";
+        let dir = crate::runstate::run_dir(run_id);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let mut meta = crate::runstate::RunMeta::new(
+            run_id.to_string(),
+            "agent".to_string(),
+            "/tmp/agent.toml".to_string(),
+            "task".to_string(),
+            None,
+            "/tmp".to_string(),
+            1,
+        );
+        crate::runstate::create_run(&meta).unwrap();
+
+        let run_id_clone = run_id.to_string();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(150)).await;
+            let resp = InteractionResponse::text("async-req-1", "async answer");
+            write_response(&run_id_clone, &resp).ok();
+        });
+
+        let req = InteractionRequest::free_text("async-req-1", "Async?", "plan", true);
+        let result = request_interaction_async(
+            run_id,
+            &mut meta,
+            req,
+            Some(Duration::from_secs(5)),
+        )
+        .await;
+        assert!(result.is_ok());
+        assert_eq!(
+            result.unwrap().value.as_deref(),
+            Some("async answer")
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn test_request_interaction_async_timeout() {
+        let run_id = "test-async-request-timeout";
+        let dir = crate::runstate::run_dir(run_id);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let mut meta = crate::runstate::RunMeta::new(
+            run_id.to_string(),
+            "agent".to_string(),
+            "/tmp/agent.toml".to_string(),
+            "task".to_string(),
+            None,
+            "/tmp".to_string(),
+            1,
+        );
+        crate::runstate::create_run(&meta).unwrap();
+
+        let req = InteractionRequest::free_text("async-timeout", "Async?", "plan", true);
+        let result = request_interaction_async(
+            run_id,
+            &mut meta,
+            req,
+            Some(Duration::from_millis(200)),
+        )
+        .await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("timed out"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn test_request_interaction_async_not_required() {
+        let run_id = "test-async-request-not-req";
+        let dir = crate::runstate::run_dir(run_id);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let mut meta = crate::runstate::RunMeta::new(
+            run_id.to_string(),
+            "agent".to_string(),
+            "/tmp/agent.toml".to_string(),
+            "task".to_string(),
+            None,
+            "/tmp".to_string(),
+            1,
+        );
+        crate::runstate::create_run(&meta).unwrap();
+
+        let run_id_clone = run_id.to_string();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(150)).await;
+            let resp = InteractionResponse::text("async-not-req", "ok");
+            write_response(&run_id_clone, &resp).ok();
+        });
+
+        // required: false → CompleteInteractive status branch
+        let req = InteractionRequest::free_text("async-not-req", "Optional?", "plan", false);
+        let result = request_interaction_async(
+            run_id,
+            &mut meta,
+            req,
+            Some(Duration::from_secs(5)),
+        )
+        .await;
+        assert!(result.is_ok());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn test_request_interaction_async_stale_then_correct() {
+        let run_id = "test-async-stale-then-correct";
+        let dir = crate::runstate::run_dir(run_id);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let mut meta = crate::runstate::RunMeta::new(
+            run_id.to_string(),
+            "agent".to_string(),
+            "/tmp/agent.toml".to_string(),
+            "task".to_string(),
+            None,
+            "/tmp".to_string(),
+            1,
+        );
+        crate::runstate::create_run(&meta).unwrap();
+
+        let run_id_clone = run_id.to_string();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(120)).await;
+            // Stale response
+            let stale = InteractionResponse::text("wrong-id", "stale");
+            write_response(&run_id_clone, &stale).ok();
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            // Correct response
+            let correct = InteractionResponse::text("async-stale-target", "correct");
+            write_response(&run_id_clone, &correct).ok();
+        });
+
+        let req =
+            InteractionRequest::free_text("async-stale-target", "Async?", "plan", true);
+        let result = request_interaction_async(
+            run_id,
+            &mut meta,
+            req,
+            Some(Duration::from_secs(5)),
+        )
+        .await;
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().value.as_deref(), Some("correct"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ─── request_interaction_bg_review ────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_request_interaction_bg_review_responds() {
+        let run_id = "test-bg-review-ok";
+        let dir = crate::runstate::run_dir(run_id);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // Create meta so the meta-update path succeeds
+        let meta = crate::runstate::RunMeta::new(
+            run_id.to_string(),
+            "agent".to_string(),
+            "/tmp/agent.toml".to_string(),
+            "task".to_string(),
+            None,
+            "/tmp".to_string(),
+            1,
+        );
+        crate::runstate::create_run(&meta).unwrap();
+
+        let run_id_clone = run_id.to_string();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(150)).await;
+            let resp = InteractionResponse::text("bg-rev-1", "reviewed");
+            write_response(&run_id_clone, &resp).ok();
+        });
+
+        let req = InteractionRequest::review(
+            "bg-rev-1",
+            "Review this",
+            "# Plan\n\nDetails here",
+            "plan",
+        );
+        let resp = request_interaction_bg_review(run_id, req).await;
+        assert_eq!(resp.value.as_deref(), Some("reviewed"));
+        assert_eq!(resp.request_id, "bg-rev-1");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn test_request_interaction_bg_review_no_meta() {
+        // bg_review should work even when meta.json doesn't exist
+        let run_id = "test-bg-review-no-meta";
+        let dir = crate::runstate::run_dir(run_id);
+        std::fs::create_dir_all(&dir).unwrap();
+        // No meta.json created
+
+        let run_id_clone = run_id.to_string();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(150)).await;
+            let resp = InteractionResponse::text("bg-rev-no-meta", "answer");
+            write_response(&run_id_clone, &resp).ok();
+        });
+
+        let req = InteractionRequest::free_text("bg-rev-no-meta", "Review?", "plan", true);
+        let resp = request_interaction_bg_review(run_id, req).await;
+        assert_eq!(resp.request_id, "bg-rev-no-meta");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn test_request_interaction_bg_review_stale_then_correct() {
+        let run_id = "test-bg-review-stale";
+        let dir = crate::runstate::run_dir(run_id);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let run_id_clone = run_id.to_string();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(120)).await;
+            // Stale response
+            let stale = InteractionResponse::text("wrong", "stale");
+            write_response(&run_id_clone, &stale).ok();
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            // Correct response
+            let correct = InteractionResponse::text("bg-rev-target", "ok");
+            write_response(&run_id_clone, &correct).ok();
+        });
+
+        let req =
+            InteractionRequest::free_text("bg-rev-target", "Review?", "plan", true);
+        let resp = request_interaction_bg_review(run_id, req).await;
+        assert_eq!(resp.value.as_deref(), Some("ok"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ─── request_tool_approval_background ────────────────────────────────
+
+    #[tokio::test]
+    async fn test_request_tool_approval_background_approved() {
+        let run_id = "test-tool-approval-bg-ok";
+        let dir = crate::runstate::run_dir(run_id);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let meta = crate::runstate::RunMeta::new(
+            run_id.to_string(),
+            "agent".to_string(),
+            "/tmp/agent.toml".to_string(),
+            "task".to_string(),
+            None,
+            "/tmp".to_string(),
+            1,
+        );
+        crate::runstate::create_run(&meta).unwrap();
+
+        // Calculate the expected request ID (same hash as the function uses)
+        let tool_name = "bash";
+        let hash = tool_name
+            .bytes()
+            .fold(0usize, |a, b| a.wrapping_add(b as usize));
+        let req_id = make_interaction_id(hash, 0);
+
+        let run_id_clone = run_id.to_string();
+        let req_id_clone = req_id.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(150)).await;
+            let resp =
+                InteractionResponse::approval(&req_id_clone, true, ApprovalScope::Once);
+            write_response(&run_id_clone, &resp).ok();
+        });
+
+        let args = serde_json::json!({"command": "ls"});
+        let (approved, scope) =
+            request_tool_approval_background(run_id, tool_name, &args, "code").await;
+        assert!(approved);
+        assert_eq!(scope, ApprovalScope::Once);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn test_request_tool_approval_background_denied() {
+        let run_id = "test-tool-approval-bg-denied";
+        let dir = crate::runstate::run_dir(run_id);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // No meta.json — exercises the else branch
+        let tool_name = "write_file";
+        let hash = tool_name
+            .bytes()
+            .fold(0usize, |a, b| a.wrapping_add(b as usize));
+        let req_id = make_interaction_id(hash, 0);
+
+        let run_id_clone = run_id.to_string();
+        let req_id_clone = req_id.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(150)).await;
+            let resp =
+                InteractionResponse::approval(&req_id_clone, false, ApprovalScope::Once);
+            write_response(&run_id_clone, &resp).ok();
+        });
+
+        let args = serde_json::json!({"path": "/tmp/f.txt"});
+        let (approved, scope) =
+            request_tool_approval_background(run_id, tool_name, &args, "code").await;
+        assert!(!approved);
+        assert_eq!(scope, ApprovalScope::Once);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn test_request_tool_approval_background_session_scope() {
+        let run_id = "test-tool-approval-bg-session";
+        let dir = crate::runstate::run_dir(run_id);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let meta = crate::runstate::RunMeta::new(
+            run_id.to_string(),
+            "agent".to_string(),
+            "/tmp/agent.toml".to_string(),
+            "task".to_string(),
+            None,
+            "/tmp".to_string(),
+            1,
+        );
+        crate::runstate::create_run(&meta).unwrap();
+
+        let tool_name = "edit_file";
+        let hash = tool_name
+            .bytes()
+            .fold(0usize, |a, b| a.wrapping_add(b as usize));
+        let req_id = make_interaction_id(hash, 0);
+
+        let run_id_clone = run_id.to_string();
+        let req_id_clone = req_id.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(150)).await;
+            let resp =
+                InteractionResponse::approval(&req_id_clone, true, ApprovalScope::Session);
+            write_response(&run_id_clone, &resp).ok();
+        });
+
+        let args = serde_json::json!({});
+        let (approved, scope) =
+            request_tool_approval_background(run_id, tool_name, &args, "impl").await;
+        assert!(approved);
+        assert_eq!(scope, ApprovalScope::Session);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn test_request_tool_approval_background_stale_then_correct() {
+        let run_id = "test-tool-approval-bg-stale";
+        let dir = crate::runstate::run_dir(run_id);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let tool_name = "bash";
+        let hash = tool_name
+            .bytes()
+            .fold(0usize, |a, b| a.wrapping_add(b as usize));
+        let req_id = make_interaction_id(hash, 0);
+
+        let run_id_clone = run_id.to_string();
+        let req_id_clone = req_id.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(120)).await;
+            // Write a stale response first
+            let stale = InteractionResponse::approval("wrong-id", true, ApprovalScope::Once);
+            write_response(&run_id_clone, &stale).ok();
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            // Write the correct response
+            let correct =
+                InteractionResponse::approval(&req_id_clone, false, ApprovalScope::Once);
+            write_response(&run_id_clone, &correct).ok();
+        });
+
+        let args = serde_json::json!({"command": "rm -rf"});
+        let (approved, _scope) =
+            request_tool_approval_background(run_id, tool_name, &args, "code").await;
+        assert!(!approved);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

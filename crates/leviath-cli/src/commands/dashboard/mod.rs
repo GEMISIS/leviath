@@ -132,6 +132,12 @@ pub async fn execute(_args: DashboardArgs) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use state::Dashboard;
+
+    fn make_test_dashboard() -> Dashboard {
+        let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
+        Dashboard::new(cmd_tx)
+    }
 
     #[test]
     fn dashboard_args_can_be_constructed() {
@@ -215,8 +221,104 @@ mod tests {
         assert!(dbg.contains("something broke"));
     }
 
+    // ─── engine_background_loop: CancelAgent command ─────────────────────
+
+    #[tokio::test]
+    async fn engine_background_loop_cancel_agent() {
+        let engine = Arc::new(Mutex::new(AgentEngine::new()));
+        let (cmd_tx, cmd_rx) = mpsc::unbounded_channel::<EngineCommand>();
+        let (event_tx, mut event_rx) = mpsc::unbounded_channel::<AgentEvent>();
+
+        // Start the background loop
+        tokio::spawn(engine_background_loop(engine, cmd_rx, event_tx));
+
+        // Send a CancelAgent command
+        cmd_tx
+            .send(EngineCommand::CancelAgent {
+                agent_id: "agent-nonexistent".to_string(),
+            })
+            .unwrap();
+
+        // The loop should process it and send back a StatusChanged event
+        let event = tokio::time::timeout(
+            std::time::Duration::from_millis(500),
+            event_rx.recv(),
+        )
+        .await;
+        assert!(event.is_ok(), "timed out waiting for StatusChanged event");
+        let ev = event.unwrap();
+        assert!(ev.is_some());
+        if let Some(AgentEvent::StatusChanged { agent_id, status }) = ev {
+            assert_eq!(agent_id, "agent-nonexistent");
+            assert!(matches!(status, AgentDisplayStatus::Cancelled));
+        } else {
+            panic!("expected StatusChanged event");
+        }
+    }
+
+    #[tokio::test]
+    async fn engine_background_loop_send_input_command() {
+        let engine = Arc::new(Mutex::new(AgentEngine::new()));
+        let (cmd_tx, cmd_rx) = mpsc::unbounded_channel::<EngineCommand>();
+        let (event_tx, _event_rx) = mpsc::unbounded_channel::<AgentEvent>();
+
+        tokio::spawn(engine_background_loop(engine, cmd_rx, event_tx));
+
+        // Send a SendInput command — should not panic even if no agent exists
+        cmd_tx
+            .send(EngineCommand::SendInput {
+                agent_id: "nonexistent".to_string(),
+                input: "test input".to_string(),
+            })
+            .unwrap();
+
+        // Give it a moment to process
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        // No panic = success
+    }
+
+    #[tokio::test]
+    async fn engine_background_loop_exits_when_channel_dropped() {
+        let engine = Arc::new(Mutex::new(AgentEngine::new()));
+        let (cmd_tx, cmd_rx) = mpsc::unbounded_channel::<EngineCommand>();
+        let (event_tx, _event_rx) = mpsc::unbounded_channel::<AgentEvent>();
+
+        let handle = tokio::spawn(engine_background_loop(engine, cmd_rx, event_tx));
+
+        // Drop the sender to close the channel
+        drop(cmd_tx);
+
+        // The loop should exit because the channel is closed
+        let result = tokio::time::timeout(
+            std::time::Duration::from_millis(500),
+            handle,
+        )
+        .await;
+        assert!(result.is_ok(), "engine_background_loop should exit when channel is closed");
+    }
+
+    // ─── Dashboard basic integration ──────────────────────────────────────
+
     #[test]
-    fn dashboard_agent_struct_fields() {
+    fn dashboard_new_and_initial_state() {
+        let dash = make_test_dashboard();
+        assert!(!dash.should_quit);
+        assert!(!dash.detail_view);
+        assert!(!dash.show_help);
+    }
+
+    #[test]
+    fn dashboard_draw_renders_without_panic() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+        let backend = TestBackend::new(120, 40);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut dash = make_test_dashboard();
+        terminal.draw(|f| dash.draw(f)).unwrap();
+    }
+
+    #[test]
+    fn dashboard_agent_struct_fields_from_mod() {
         let agent = DashboardAgent {
             id: "run-test".to_string(),
             blueprint_name: "tester".to_string(),

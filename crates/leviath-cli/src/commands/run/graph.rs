@@ -1410,4 +1410,583 @@ mod tests {
         assert_eq!(edge.target, "b");
         assert_eq!(idx, 1);
     }
+
+    // ─── Helpers for mock provider ────────────────────────────────────────────
+
+    use async_trait::async_trait;
+    use leviath_providers::{
+        FinishReason, InferenceRequest, InferenceResponse, ModelCapabilities, ModelInfo, Provider,
+        ProviderError, TokenUsage,
+    };
+    use std::sync::Arc;
+
+    /// A mock provider that returns a fixed response string.
+    struct MockProvider {
+        response: String,
+    }
+
+    impl MockProvider {
+        fn new(response: impl Into<String>) -> Self {
+            Self {
+                response: response.into(),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl Provider for MockProvider {
+        async fn infer(
+            &self,
+            _request: InferenceRequest,
+        ) -> Result<InferenceResponse, ProviderError> {
+            Ok(InferenceResponse {
+                content: self.response.clone(),
+                tool_calls: vec![],
+                tokens_used: TokenUsage {
+                    prompt_tokens: 10,
+                    completion_tokens: 5,
+                    total_tokens: 15,
+                    cached_tokens: 0,
+                    cache_write_tokens: 0,
+                },
+                finish_reason: FinishReason::Complete,
+            })
+        }
+
+        fn count_tokens(&self, text: &str, _model: &str) -> usize {
+            text.len() / 4
+        }
+
+        fn max_context_tokens(&self, _model: &str) -> usize {
+            100_000
+        }
+
+        fn name(&self) -> &str {
+            "mock"
+        }
+
+        fn capabilities(&self, _model: &str) -> ModelCapabilities {
+            ModelCapabilities::default()
+        }
+
+        async fn list_models(&self) -> Result<Vec<ModelInfo>, ProviderError> {
+            Ok(vec![])
+        }
+    }
+
+    fn make_engine_with_mock_provider(
+        blueprint: &Blueprint,
+        response: &str,
+    ) -> (AgentEngine, bevy_ecs::prelude::Entity) {
+        let mut registry = ProviderRegistry::new();
+        registry.register("mock".to_string(), Arc::new(MockProvider::new(response)));
+        let mut engine = AgentEngine::with_providers(registry);
+        let mut pool = AgentPool::new(blueprint.clone());
+        let agent_id = pool.spawn_agent(engine.world_mut());
+        let entity = pool.get_agent(&agent_id).unwrap();
+
+        crate::commands::run::helpers::initialize_context_window(
+            &mut engine,
+            entity,
+            blueprint,
+            "test task",
+        );
+
+        (engine, entity)
+    }
+
+    // ─── prompt_llm_transition ────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn prompt_llm_transition_returns_matching_edge() {
+        // LLM returns "b" which matches edge "b"
+        let bp = make_blueprint(vec![
+            make_stage("a"),
+            make_stage("b"),
+            make_stage("c"),
+        ]);
+        let (mut engine, entity) = make_engine_with_mock_provider(&bp, "b");
+
+        let stage = &bp.stages[0];
+        let edge_b = TransitionEdge {
+            target: "b".to_string(),
+            condition: TransitionCondition::LlmChoice,
+            hint: Some("go to b".to_string()),
+            transform: EdgeTransform::Direct,
+        };
+        let edge_c = TransitionEdge {
+            target: "c".to_string(),
+            condition: TransitionCondition::LlmChoice,
+            hint: None,
+            transform: EdgeTransform::Direct,
+        };
+        let name_b = "b".to_string();
+        let name_c = "c".to_string();
+        let edges: Vec<(&String, &TransitionEdge)> =
+            vec![(&name_b, &edge_b), (&name_c, &edge_c)];
+
+        let result = prompt_llm_transition(stage, &edges, &mut engine, entity, "mock", "test")
+            .await;
+
+        assert!(result.is_some(), "Expected a transition edge");
+        assert_eq!(result.unwrap().target, "b");
+    }
+
+    #[tokio::test]
+    async fn prompt_llm_transition_with_custom_prompt() {
+        // Stage has a custom transition_prompt — exercises the custom prompt branch
+        let bp = make_blueprint(vec![
+            make_stage("a"),
+            make_stage("b"),
+            make_stage("c"),
+        ]);
+        let (mut engine, entity) = make_engine_with_mock_provider(&bp, "c");
+
+        let mut stage = bp.stages[0].clone();
+        stage.transition_prompt = Some("Custom: pick the next stage.".to_string());
+
+        let edge_b = TransitionEdge {
+            target: "b".to_string(),
+            condition: TransitionCondition::LlmChoice,
+            hint: None,
+            transform: EdgeTransform::Direct,
+        };
+        let edge_c = TransitionEdge {
+            target: "c".to_string(),
+            condition: TransitionCondition::LlmChoice,
+            hint: Some("c is the better choice".to_string()),
+            transform: EdgeTransform::Direct,
+        };
+        let name_b = "b".to_string();
+        let name_c = "c".to_string();
+        let edges: Vec<(&String, &TransitionEdge)> =
+            vec![(&name_b, &edge_b), (&name_c, &edge_c)];
+
+        let result = prompt_llm_transition(&stage, &edges, &mut engine, entity, "mock", "test")
+            .await;
+
+        assert!(result.is_some());
+        // Provider returns "c", which matches edge_c
+        assert_eq!(result.unwrap().target, "c");
+    }
+
+    #[tokio::test]
+    async fn prompt_llm_transition_fallback_to_first_edge_when_no_match() {
+        // LLM returns something that doesn't match any edge name → falls back to first.
+        // Use stage names with no common substrings to avoid fuzzy match false-positives.
+        let bp = make_blueprint(vec![
+            make_stage("a"),
+            make_stage("stage_alpha"),
+            make_stage("stage_beta"),
+        ]);
+        // Provider returns something with no overlap with "stage_alpha" or "stage_beta"
+        let (mut engine, entity) = make_engine_with_mock_provider(&bp, "XXXXXXXX_no_match_here");
+
+        let stage = &bp.stages[0];
+        let edge_alpha = TransitionEdge {
+            target: "stage_alpha".to_string(),
+            condition: TransitionCondition::LlmChoice,
+            hint: None,
+            transform: EdgeTransform::Direct,
+        };
+        let edge_beta = TransitionEdge {
+            target: "stage_beta".to_string(),
+            condition: TransitionCondition::LlmChoice,
+            hint: None,
+            transform: EdgeTransform::Direct,
+        };
+        let name_alpha = "stage_alpha".to_string();
+        let name_beta = "stage_beta".to_string();
+        // edge_alpha is first in the slice → fallback should return it
+        let edges: Vec<(&String, &TransitionEdge)> =
+            vec![(&name_alpha, &edge_alpha), (&name_beta, &edge_beta)];
+
+        let result = prompt_llm_transition(stage, &edges, &mut engine, entity, "mock", "test")
+            .await;
+
+        assert!(result.is_some());
+        // Fallback picks the first edge in the slice (edge_alpha)
+        assert_eq!(result.unwrap().target, "stage_alpha");
+    }
+
+    #[tokio::test]
+    async fn prompt_llm_transition_no_provider_returns_none() {
+        // No provider registered → prompt_llm_transition returns None
+        let bp = make_blueprint(vec![make_stage("a"), make_stage("b")]);
+        let (mut engine, entity) = make_engine_and_entity(&bp); // no provider
+
+        let stage = &bp.stages[0];
+        let edge_b = TransitionEdge {
+            target: "b".to_string(),
+            condition: TransitionCondition::LlmChoice,
+            hint: None,
+            transform: EdgeTransform::Direct,
+        };
+        let name_b = "b".to_string();
+        let edges: Vec<(&String, &TransitionEdge)> = vec![(&name_b, &edge_b)];
+
+        // No ContextWindow → get_provider returns None → returns None
+        let result =
+            prompt_llm_transition(stage, &edges, &mut engine, entity, "nonexistent", "test").await;
+
+        assert!(result.is_none());
+    }
+
+    // ─── resolve_transition: multiple LlmChoice edges triggers prompt_llm_transition
+
+    #[tokio::test]
+    async fn resolve_transition_multiple_llm_choice_uses_provider() {
+        // Two LlmChoice edges: provider will return "c" → should route to c
+        let stage_a_orig = make_stage("a");
+        let stage_b = make_stage("b");
+        let stage_c = make_stage("c");
+
+        let mut stage_a = stage_a_orig.clone();
+        let mut transitions = HashMap::new();
+        transitions.insert(
+            "b".to_string(),
+            TransitionEdge {
+                target: "b".to_string(),
+                condition: TransitionCondition::LlmChoice,
+                hint: None,
+                transform: EdgeTransform::Direct,
+            },
+        );
+        transitions.insert(
+            "c".to_string(),
+            TransitionEdge {
+                target: "c".to_string(),
+                condition: TransitionCondition::LlmChoice,
+                hint: None,
+                transform: EdgeTransform::Direct,
+            },
+        );
+        stage_a.transitions = Some(transitions);
+
+        let bp = make_blueprint(vec![stage_a, stage_b, stage_c]);
+        // Provider returns "c" so the LLM routing should pick stage c
+        let (mut engine, entity) = make_engine_with_mock_provider(&bp, "c");
+        let visit_counts = HashMap::new();
+
+        let result = resolve_transition(
+            &bp.stages[0],
+            0,
+            &bp,
+            &visit_counts,
+            &StageResult::Success,
+            &mut engine,
+            entity,
+            "mock",
+            "test",
+        )
+        .await;
+
+        assert!(result.is_some());
+        let (edge, idx) = result.unwrap();
+        assert_eq!(edge.target, "c");
+        assert_eq!(idx, 2);
+    }
+
+    // ─── apply_compact_transform with working provider ─────────────────────
+
+    #[tokio::test]
+    async fn apply_compact_transform_with_content_and_provider() {
+        let bp = make_blueprint(vec![make_stage("a")]);
+        let (mut engine, entity) = make_engine_with_mock_provider(&bp, "Summary of context");
+
+        // Add content to the conversation region so compact has something to work with
+        if let Some(mut window) = engine.world_mut().get_mut::<ContextWindow>(entity) {
+            let _ = window.add_to_region(
+                "conversation",
+                "User: hello\nAssistant: world".to_string(),
+                10,
+            );
+        }
+
+        apply_compact_transform(
+            &mut engine,
+            entity,
+            "mock",
+            "test",
+            "Summarize the conversation",
+            None,
+        )
+        .await;
+
+        // After compact, conversation should contain the summary
+        let window = engine.world().get::<ContextWindow>(entity).unwrap();
+        let conv = window.get_region("conversation").unwrap();
+        let all_content: String = conv.content.iter().map(|e| e.content.as_str()).collect();
+        assert!(
+            all_content.contains("Summary of context"),
+            "Expected summary in conversation: {}",
+            all_content
+        );
+    }
+
+    #[tokio::test]
+    async fn apply_compact_transform_with_compaction_config() {
+        let bp = make_blueprint(vec![make_stage("a")]);
+        let (mut engine, entity) = make_engine_with_mock_provider(&bp, "Compact summary");
+
+        // Add content to conversation
+        if let Some(mut window) = engine.world_mut().get_mut::<ContextWindow>(entity) {
+            let _ =
+                window.add_to_region("conversation", "Some conversation history".to_string(), 5);
+        }
+
+        let config = leviath_core::lifecycle::CompactionConfig {
+            provider: "mock".to_string(),
+            model: "test".to_string(),
+            max_summary_tokens: 100,
+            temperature: 0.0,
+            system_prompt: None,
+            user_prompt_template: None,
+        };
+
+        apply_compact_transform(
+            &mut engine,
+            entity,
+            "mock",
+            "test",
+            "Summarize",
+            Some(&config),
+        )
+        .await;
+
+        let window = engine.world().get::<ContextWindow>(entity).unwrap();
+        let conv = window.get_region("conversation").unwrap();
+        let all_content: String = conv.content.iter().map(|e| e.content.as_str()).collect();
+        assert!(
+            all_content.contains("Compact summary"),
+            "Expected compact summary: {}",
+            all_content
+        );
+    }
+
+    // ─── apply_edge_transform: Compact with default prompt (None) + real provider
+
+    #[tokio::test]
+    async fn apply_edge_transform_compact_no_prompt_with_provider() {
+        let bp = make_blueprint(vec![make_stage("a"), make_stage("b")]);
+        let (mut engine, entity) = make_engine_with_mock_provider(&bp, "Compacted context");
+
+        // Add conversation content
+        if let Some(mut window) = engine.world_mut().get_mut::<ContextWindow>(entity) {
+            let _ = window.add_to_region("conversation", "existing conversation".to_string(), 5);
+        }
+
+        let edge = TransitionEdge {
+            target: "b".to_string(),
+            condition: TransitionCondition::Always,
+            hint: None,
+            transform: EdgeTransform::Compact { prompt: None }, // None → default prompt
+        };
+        let visit_counts = HashMap::new();
+
+        apply_edge_transform(
+            &edge,
+            &visit_counts,
+            &mut engine,
+            entity,
+            "mock",
+            "test",
+            None,
+        )
+        .await;
+
+        // Conversation should now contain the compacted summary
+        let window = engine.world().get::<ContextWindow>(entity).unwrap();
+        let conv = window.get_region("conversation").unwrap();
+        let all_content: String = conv.content.iter().map(|e| e.content.as_str()).collect();
+        assert!(
+            all_content.contains("Compacted context"),
+            "Expected compacted content: {}",
+            all_content
+        );
+    }
+
+    #[tokio::test]
+    async fn apply_edge_transform_direct_first_visit_is_noop_with_provider() {
+        // Direct transform on first visit (visits=0) should still be a no-op
+        let bp = make_blueprint(vec![make_stage("a"), make_stage("b")]);
+        let (mut engine, entity) = make_engine_with_mock_provider(&bp, "Response");
+
+        if let Some(mut window) = engine.world_mut().get_mut::<ContextWindow>(entity) {
+            let _ = window.add_to_region("conversation", "original content".to_string(), 5);
+        }
+
+        let edge = TransitionEdge {
+            target: "b".to_string(),
+            condition: TransitionCondition::Always,
+            hint: None,
+            transform: EdgeTransform::Direct,
+        };
+        let visit_counts = HashMap::new(); // no visits yet
+
+        apply_edge_transform(
+            &edge,
+            &visit_counts,
+            &mut engine,
+            entity,
+            "mock",
+            "test",
+            None,
+        )
+        .await;
+
+        // Content should be unchanged
+        let window = engine.world().get::<ContextWindow>(entity).unwrap();
+        let conv = window.get_region("conversation").unwrap();
+        assert!(
+            conv.content.iter().any(|e| e.content == "original content"),
+            "Content should be preserved on direct first-visit"
+        );
+    }
+
+    #[tokio::test]
+    async fn apply_edge_transform_custom_compact_with_prompt_and_provider() {
+        let bp = make_blueprint(vec![make_stage("a"), make_stage("b")]);
+        let (mut engine, entity) = make_engine_with_mock_provider(&bp, "Custom compact result");
+
+        if let Some(mut window) = engine.world_mut().get_mut::<ContextWindow>(entity) {
+            let _ = window.add_to_region("conversation", "conv content to compact".to_string(), 5);
+        }
+
+        let edge = TransitionEdge {
+            target: "b".to_string(),
+            condition: TransitionCondition::Always,
+            hint: None,
+            transform: EdgeTransform::Custom {
+                carry: vec![],
+                compact: vec!["conversation".to_string()],
+                clear: vec![],
+                compact_prompt: Some("Custom compact prompt for test".to_string()),
+            },
+        };
+        let visit_counts = HashMap::new();
+
+        apply_edge_transform(
+            &edge,
+            &visit_counts,
+            &mut engine,
+            entity,
+            "mock",
+            "test",
+            None,
+        )
+        .await;
+
+        let window = engine.world().get::<ContextWindow>(entity).unwrap();
+        let conv = window.get_region("conversation").unwrap();
+        let all_content: String = conv.content.iter().map(|e| e.content.as_str()).collect();
+        assert!(
+            all_content.contains("Custom compact result"),
+            "Expected custom compact result: {}",
+            all_content
+        );
+    }
+
+    #[tokio::test]
+    async fn apply_edge_transform_custom_no_compact_no_clear_is_noop() {
+        // Custom transform with empty compact and clear lists should be a no-op
+        let bp = make_blueprint(vec![make_stage("a"), make_stage("b")]);
+        let (mut engine, entity) = make_engine_and_entity(&bp);
+
+        if let Some(mut window) = engine.world_mut().get_mut::<ContextWindow>(entity) {
+            let _ = window.add_to_region("conversation", "preserved content".to_string(), 5);
+        }
+
+        let edge = TransitionEdge {
+            target: "b".to_string(),
+            condition: TransitionCondition::Always,
+            hint: None,
+            transform: EdgeTransform::Custom {
+                carry: vec!["conversation".to_string()],
+                compact: vec![],
+                clear: vec![],
+                compact_prompt: None,
+            },
+        };
+        let visit_counts = HashMap::new();
+
+        apply_edge_transform(
+            &edge,
+            &visit_counts,
+            &mut engine,
+            entity,
+            "anthropic",
+            "test",
+            None,
+        )
+        .await;
+
+        let window = engine.world().get::<ContextWindow>(entity).unwrap();
+        let conv = window.get_region("conversation").unwrap();
+        assert!(
+            conv.content.iter().any(|e| e.content == "preserved content"),
+            "Content should be preserved"
+        );
+    }
+
+    // ─── resolve_transition: multiple LlmChoice edges, provider returns no match
+    //     → falls back to first edge
+
+    #[tokio::test]
+    async fn resolve_transition_multiple_llm_choice_fallback_to_first() {
+        let stage_b = make_stage("b");
+        let stage_c = make_stage("c");
+
+        let mut stage_a = make_stage("a");
+        let mut transitions = HashMap::new();
+        // Note: HashMap iteration order is not guaranteed; but we insert b first, then c.
+        // The fallback picks the first element of the choosable Vec (which depends on HashMap order).
+        // We just check that a valid edge was returned.
+        transitions.insert(
+            "b".to_string(),
+            TransitionEdge {
+                target: "b".to_string(),
+                condition: TransitionCondition::LlmChoice,
+                hint: None,
+                transform: EdgeTransform::Direct,
+            },
+        );
+        transitions.insert(
+            "c".to_string(),
+            TransitionEdge {
+                target: "c".to_string(),
+                condition: TransitionCondition::LlmChoice,
+                hint: None,
+                transform: EdgeTransform::Direct,
+            },
+        );
+        stage_a.transitions = Some(transitions);
+
+        let bp = make_blueprint(vec![stage_a, stage_b, stage_c]);
+        // Provider returns garbage → fallback to first edge
+        let (mut engine, entity) = make_engine_with_mock_provider(&bp, "XXXXXXXXX_no_match");
+        let visit_counts = HashMap::new();
+
+        let result = resolve_transition(
+            &bp.stages[0],
+            0,
+            &bp,
+            &visit_counts,
+            &StageResult::Success,
+            &mut engine,
+            entity,
+            "mock",
+            "test",
+        )
+        .await;
+
+        assert!(result.is_some(), "Expected a fallback edge");
+        let (edge, _) = result.unwrap();
+        // Must be one of the valid targets
+        assert!(
+            edge.target == "b" || edge.target == "c",
+            "Expected b or c, got {}",
+            edge.target
+        );
+    }
 }

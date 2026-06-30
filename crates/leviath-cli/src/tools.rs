@@ -247,7 +247,7 @@ impl SubAgentExecutor {
             let pool = pools
                 .entry(blueprint_name.clone())
                 .or_insert_with(|| AgentPool::new(blueprint.clone()));
-            let mut engine = self.engine.blocking_write();
+            let mut engine = self.engine.write().await;
             pool.spawn_agent(engine.world_mut())
         };
 
@@ -270,7 +270,7 @@ impl SubAgentExecutor {
 
         // Attach ParentRef and SubAgentChildren components
         {
-            let mut engine = self.engine.blocking_write();
+            let mut engine = self.engine.write().await;
 
             // Add ParentRef to child
             engine
@@ -360,7 +360,7 @@ impl SubAgentExecutor {
             }
         };
 
-        let engine = self.engine.blocking_read();
+        let engine = self.engine.read().await;
         let world = engine.world();
 
         let status = match world.get::<AgentState>(entity) {
@@ -416,7 +416,7 @@ impl SubAgentExecutor {
                 entities.get(caller_agent_id).copied()
             };
             if let Some(ce) = caller_entity {
-                let mut engine = self.engine.blocking_write();
+                let mut engine = self.engine.write().await;
                 if let Some(mut state) = engine.world_mut().get_mut::<AgentState>(ce) {
                     state.pending_wait = Some(agent_id.clone());
                 }
@@ -426,7 +426,7 @@ impl SubAgentExecutor {
         // Poll until child completes (check every 500ms)
         loop {
             {
-                let engine = self.engine.blocking_read();
+                let engine = self.engine.read().await;
                 let world = engine.world();
                 if let Some(state) = world.get::<AgentState>(entity) {
                     match &state.status {
@@ -438,7 +438,7 @@ impl SubAgentExecutor {
                                 entities.get(caller_agent_id).copied()
                             };
                             if let Some(ce) = caller_entity {
-                                let mut eng = self.engine.blocking_write();
+                                let mut eng = self.engine.write().await;
                                 if let Some(mut pstate) = eng.world_mut().get_mut::<AgentState>(ce)
                                 {
                                     pstate.pending_wait = None;
@@ -446,7 +446,7 @@ impl SubAgentExecutor {
                             }
 
                             // Get final result
-                            let eng = self.engine.blocking_read();
+                            let eng = self.engine.read().await;
                             let result = eng
                                 .world()
                                 .get::<ContextWindow>(entity)
@@ -488,7 +488,7 @@ impl SubAgentExecutor {
             .and_then(|v| v.as_str())
             .map(|s| s.to_string());
 
-        let engine = self.engine.blocking_read();
+        let engine = self.engine.read().await;
         let msg = leviath_runtime::AgentMessage {
             agent_id: agent_id.clone(),
             content: message,
@@ -518,7 +518,7 @@ impl SubAgentExecutor {
         // Cascade kill: collect all descendants first
         let mut to_kill = vec![entity];
         {
-            let engine = self.engine.blocking_read();
+            let engine = self.engine.read().await;
             let world = engine.world();
             let mut i = 0;
             while i < to_kill.len() {
@@ -532,7 +532,7 @@ impl SubAgentExecutor {
 
         // Cancel all
         {
-            let mut engine = self.engine.blocking_write();
+            let mut engine = self.engine.write().await;
             for e in &to_kill {
                 if let Some(token) = engine.world().get::<CancellationToken>(*e) {
                     token.cancel();
@@ -1534,5 +1534,320 @@ mod policy_tests {
             )
             .await;
         assert!(result.contains("not found"));
+    }
+
+    // ─── ToolRegistry build with failing MCP server ────────────────────────
+    // Exercises the Err branch (lines 52-58): a bad command fails to connect.
+
+    #[tokio::test]
+    async fn test_tool_registry_build_with_failing_mcp_server() {
+        use leviath_mcp::MCPServerConfig;
+        use std::collections::HashMap as StdHashMap;
+
+        let bad_server = MCPServerConfig {
+            name: "bad-server".to_string(),
+            command: "/nonexistent/binary/that/does/not/exist".to_string(),
+            args: vec![],
+            env: StdHashMap::new(),
+        };
+        let mut config = Config::default();
+        config.mcp_servers = vec![bad_server];
+
+        let workdir = std::env::current_dir().unwrap();
+        // Should not panic; the error branch is non-fatal (just a tracing::warn)
+        let registry = ToolRegistry::build(workdir, &config).await;
+
+        // MCP tool defs should be empty because connection failed
+        assert!(registry.mcp_tool_defs.is_empty());
+        // Built-ins should still be present
+        assert!(!registry.builtin_names.is_empty());
+    }
+
+    // ─── exec_spawn success path ──────────────────────────────────────────
+    // Register a blueprint, spawn a caller entity in the world, then call spawn.
+    // Uses multi_thread flavor because exec_spawn internally calls blocking_write().
+
+    #[tokio::test]
+    async fn test_subagent_executor_spawn_success() {
+        let registry = leviath_runtime::ProviderRegistry::new();
+        let engine = leviath_runtime::AgentEngine::with_providers(registry);
+        let engine_arc = Arc::new(tokio::sync::RwLock::new(engine));
+        let exec = SubAgentExecutor::new(Arc::clone(&engine_arc));
+
+        // Spawn a caller entity in the world so entity_mut(caller_entity) works
+        let caller_entity = {
+            let mut eng = engine_arc.write().await;
+            eng.world_mut().spawn(()).id()
+        };
+
+        let bp = leviath_core::Blueprint::new(
+            "spawn-bp".to_string(),
+            "desc".to_string(),
+            vec![],
+            leviath_core::ContextLayout::new(vec![], 128_000),
+        );
+        exec.register_blueprint(bp);
+
+        let result = exec
+            .execute(
+                "spawn_agent",
+                &serde_json::json!({"blueprint": "spawn-bp", "task": "do work"}),
+                "caller-agent",
+                caller_entity,
+                0,
+                3,
+            )
+            .await;
+        assert!(
+            result.contains("Spawned sub-agent"),
+            "Expected spawn success, got: {}",
+            result
+        );
+        assert!(result.contains("spawn-bp"));
+    }
+
+    #[tokio::test]
+    async fn test_subagent_executor_spawn_with_seed_context() {
+        let registry = leviath_runtime::ProviderRegistry::new();
+        let engine = leviath_runtime::AgentEngine::with_providers(registry);
+        let engine_arc = Arc::new(tokio::sync::RwLock::new(engine));
+        let exec = SubAgentExecutor::new(Arc::clone(&engine_arc));
+
+        let caller_entity = {
+            let mut eng = engine_arc.write().await;
+            eng.world_mut().spawn(()).id()
+        };
+
+        let bp = leviath_core::Blueprint::new(
+            "seed-bp".to_string(),
+            "desc".to_string(),
+            vec![],
+            leviath_core::ContextLayout::new(vec![], 128_000),
+        );
+        exec.register_blueprint(bp);
+
+        // spawn_agent with seed_context
+        let result = exec
+            .execute(
+                "spawn_agent",
+                &serde_json::json!({
+                    "blueprint": "seed-bp",
+                    "task": "seed task",
+                    "seed_context": "Initial context for the agent"
+                }),
+                "caller-seed",
+                caller_entity,
+                0,
+                3,
+            )
+            .await;
+        assert!(
+            result.contains("Spawned sub-agent"),
+            "Expected spawn success, got: {}",
+            result
+        );
+    }
+
+    // ─── exec_check with a real spawned agent ─────────────────────────────
+
+    #[tokio::test]
+    async fn test_subagent_executor_check_registered_agent() {
+        use leviath_runtime::{AgentPool, AgentState};
+
+        let registry = leviath_runtime::ProviderRegistry::new();
+        let engine = leviath_runtime::AgentEngine::with_providers(registry);
+        let engine_arc = Arc::new(tokio::sync::RwLock::new(engine));
+        let exec = SubAgentExecutor::new(Arc::clone(&engine_arc));
+
+        let bp = leviath_core::Blueprint::new(
+            "check-bp".to_string(),
+            "desc".to_string(),
+            vec![],
+            leviath_core::ContextLayout::new(vec![], 128_000),
+        );
+
+        // Spawn agent into world directly through pool
+        let agent_id = {
+            let mut eng = engine_arc.write().await;
+            let mut pool = AgentPool::new(bp);
+            let id = pool.spawn_agent(eng.world_mut());
+            // Register entity in exec's lookup
+            let entity = pool.get_agent(&id).unwrap();
+            exec.register_agent(id.clone(), entity);
+            id
+        };
+
+        // check_agent — should return status
+        let result = exec
+            .execute(
+                "check_agent",
+                &serde_json::json!({"agent_id": agent_id}),
+                "caller",
+                bevy_ecs::prelude::Entity::from_raw(0),
+                0,
+                3,
+            )
+            .await;
+        assert!(
+            result.contains("Status:"),
+            "Expected status output, got: {}",
+            result
+        );
+    }
+
+    // ─── exec_send success path ────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_subagent_executor_send_success() {
+        let registry = leviath_runtime::ProviderRegistry::new();
+        let engine = leviath_runtime::AgentEngine::with_providers(registry);
+        let engine_arc = Arc::new(tokio::sync::RwLock::new(engine));
+        let exec = SubAgentExecutor::new(Arc::clone(&engine_arc));
+
+        // send_to_agent just sends to the channel; should succeed even if agent
+        // doesn't exist in the world
+        let result = exec
+            .execute(
+                "send_to_agent",
+                &serde_json::json!({"agent_id": "some-agent", "message": "hello!"}),
+                "caller",
+                bevy_ecs::prelude::Entity::from_raw(0),
+                0,
+                3,
+            )
+            .await;
+        assert!(
+            result.contains("Message sent"),
+            "Expected message sent, got: {}",
+            result
+        );
+    }
+
+    #[tokio::test]
+    async fn test_subagent_executor_send_with_target_region() {
+        let registry = leviath_runtime::ProviderRegistry::new();
+        let engine = leviath_runtime::AgentEngine::with_providers(registry);
+        let engine_arc = Arc::new(tokio::sync::RwLock::new(engine));
+        let exec = SubAgentExecutor::new(Arc::clone(&engine_arc));
+
+        let result = exec
+            .execute(
+                "send_to_agent",
+                &serde_json::json!({
+                    "agent_id": "target-agent",
+                    "message": "important update",
+                    "target_region": "conversation"
+                }),
+                "caller",
+                bevy_ecs::prelude::Entity::from_raw(0),
+                0,
+                3,
+            )
+            .await;
+        assert!(
+            result.contains("Message sent"),
+            "Expected message sent, got: {}",
+            result
+        );
+    }
+
+    // ─── exec_kill success path ────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_subagent_executor_kill_registered_agent() {
+        use leviath_runtime::AgentPool;
+
+        let registry = leviath_runtime::ProviderRegistry::new();
+        let engine = leviath_runtime::AgentEngine::with_providers(registry);
+        let engine_arc = Arc::new(tokio::sync::RwLock::new(engine));
+        let exec = SubAgentExecutor::new(Arc::clone(&engine_arc));
+
+        let bp = leviath_core::Blueprint::new(
+            "kill-bp".to_string(),
+            "desc".to_string(),
+            vec![],
+            leviath_core::ContextLayout::new(vec![], 128_000),
+        );
+
+        let agent_id = {
+            let mut eng = engine_arc.write().await;
+            let mut pool = AgentPool::new(bp);
+            let id = pool.spawn_agent(eng.world_mut());
+            let entity = pool.get_agent(&id).unwrap();
+            exec.register_agent(id.clone(), entity);
+            id
+        };
+
+        let result = exec
+            .execute(
+                "kill_agent",
+                &serde_json::json!({"agent_id": agent_id}),
+                "caller",
+                bevy_ecs::prelude::Entity::from_raw(0),
+                0,
+                3,
+            )
+            .await;
+        assert!(
+            result.contains("Killed agent"),
+            "Expected kill confirmation, got: {}",
+            result
+        );
+        // Single agent killed (no descendants)
+        assert!(
+            result.contains(&agent_id),
+            "Result should include agent ID: {}",
+            result
+        );
+    }
+
+    // ─── exec_spawn second spawn (SubAgentChildren already present) ───────
+
+    #[tokio::test]
+    async fn test_subagent_executor_spawn_second_child_updates_children() {
+        let registry = leviath_runtime::ProviderRegistry::new();
+        let engine = leviath_runtime::AgentEngine::with_providers(registry);
+        let engine_arc = Arc::new(tokio::sync::RwLock::new(engine));
+        let exec = SubAgentExecutor::new(Arc::clone(&engine_arc));
+
+        // Pre-spawn a caller entity that has AgentState (for spawned_children_ids update)
+        let caller_entity = {
+            let mut eng = engine_arc.write().await;
+            eng.world_mut().spawn(()).id()
+        };
+
+        let bp = leviath_core::Blueprint::new(
+            "multi-spawn-bp".to_string(),
+            "desc".to_string(),
+            vec![],
+            leviath_core::ContextLayout::new(vec![], 128_000),
+        );
+        exec.register_blueprint(bp);
+
+        // First spawn
+        let r1 = exec
+            .execute(
+                "spawn_agent",
+                &serde_json::json!({"blueprint": "multi-spawn-bp", "task": "task 1"}),
+                "caller-multi",
+                caller_entity,
+                0,
+                3,
+            )
+            .await;
+        assert!(r1.contains("Spawned"), "First spawn failed: {}", r1);
+
+        // Second spawn — exercises the `SubAgentChildren already exists` branch
+        let r2 = exec
+            .execute(
+                "spawn_agent",
+                &serde_json::json!({"blueprint": "multi-spawn-bp", "task": "task 2"}),
+                "caller-multi",
+                caller_entity,
+                0,
+                3,
+            )
+            .await;
+        assert!(r2.contains("Spawned"), "Second spawn failed: {}", r2);
     }
 }

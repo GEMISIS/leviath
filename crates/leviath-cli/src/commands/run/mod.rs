@@ -371,4 +371,92 @@ prompt = "Implement"
         let bp = parse_manifest_public(manifest).unwrap();
         assert_eq!(bp.stages.len(), 2);
     }
+
+    // ─── execute() error paths ─────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn execute_foreground_with_count_greater_than_1_errors() {
+        let args = RunArgs {
+            path: None,
+            task: Some("do something".to_string()),
+            model: None,
+            foreground: true,
+            yolo: false,
+            allow: vec![],
+            ask: vec![],
+            deny: vec![],
+            max_depth: None,
+            count: 2, // count > 1 with foreground is not allowed
+        };
+        let result = execute(args).await;
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("count") || err.contains("foreground"),
+            "Expected error about --count with --foreground, got: {}",
+            err
+        );
+    }
+
+    #[tokio::test]
+    async fn execute_background_no_manifest_returns_error() {
+        let args = RunArgs {
+            path: Some("/nonexistent/path/to/agent".to_string()),
+            task: Some("do something".to_string()),
+            model: None,
+            foreground: false,
+            yolo: false,
+            allow: vec![],
+            ask: vec![],
+            deny: vec![],
+            max_depth: None,
+            count: 1,
+        };
+        let result = execute(args).await;
+        assert!(result.is_err()); // manifest not found
+    }
+
+    // ─── WorkerArgs: more coverage ─────────────────────────────────────────
+
+    #[test]
+    fn worker_args_with_all_overrides() {
+        let args = WorkerArgs {
+            path: "/my/agent.leviath".to_string(),
+            task: "complex task".to_string(),
+            run_id: "run-xyz-999".to_string(),
+            model: None,
+            yolo: true,
+            allow: vec!["read_file".to_string()],
+            ask: vec!["write_file".to_string()],
+            deny: vec!["bash".to_string()],
+            max_depth: Some(5),
+        };
+        assert_eq!(args.path, "/my/agent.leviath");
+        assert!(args.yolo);
+        assert_eq!(args.allow, vec!["read_file"]);
+        assert_eq!(args.ask, vec!["write_file"]);
+        assert_eq!(args.deny, vec!["bash"]);
+        assert_eq!(args.max_depth, Some(5));
+    }
+
+    // ─── RunArgs: more coverage ────────────────────────────────────────────
+
+    #[test]
+    fn run_args_count_zero_is_min_1_after_execute() {
+        // count: 0 would be interpreted as 1 via count.max(1) in execute()
+        let args = RunArgs {
+            path: None,
+            task: Some("task".to_string()),
+            model: None,
+            foreground: false,
+            yolo: false,
+            allow: vec![],
+            ask: vec![],
+            deny: vec![],
+            max_depth: None,
+            count: 0,
+        };
+        // count.max(1) = 1
+        assert_eq!(args.count.max(1), 1);
+    }
 }

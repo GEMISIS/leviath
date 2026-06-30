@@ -873,4 +873,359 @@ mod tests {
         let json = serde_json::to_string(&content).unwrap();
         assert!(json.contains("\"type\":\"resource\""));
     }
+
+    // ─── MCPClient spawn / connect / list_tools / call_tool / shutdown ────────
+    // We use Python as a minimal in-process JSON-RPC 2.0 stub server that reads
+    // one request per line and responds with a canned reply.
+
+    /// Spawn a Python-backed stub MCP server.  The script reads JSON-RPC lines
+    /// from stdin and writes canned responses to stdout.
+    async fn spawn_stub_client(script: &str) -> MCPClient {
+        MCPClient::spawn("python3", &["-c", script], &HashMap::new())
+            .await
+            .expect("Failed to spawn stub MCP server")
+    }
+
+    // Python script that answers initialize then tools/list then tools/call
+    const STUB_INIT_LIST_CALL: &str = r#"
+import sys, json
+
+def respond(id, result):
+    msg = json.dumps({"jsonrpc": "2.0", "id": id, "result": result})
+    sys.stdout.write(msg + "\n")
+    sys.stdout.flush()
+
+for line in sys.stdin:
+    line = line.strip()
+    if not line:
+        continue
+    req = json.loads(line)
+    method = req.get("method", "")
+    id_ = req.get("id")
+    if method == "initialize":
+        respond(id_, {"capabilities": {"tools": {"listChanged": True}}, "protocolVersion": "2024-11-05"})
+    elif method == "notifications/initialized":
+        pass  # notification -- no response
+    elif method == "tools/list":
+        respond(id_, {"tools": [{"name": "echo", "description": "echo tool", "inputSchema": {}}]})
+    elif method == "tools/call":
+        respond(id_, {"content": [{"type": "text", "text": "hello from tool"}], "isError": False})
+    elif method == "notifications/cancelled":
+        pass
+    else:
+        respond(id_, {"error": {"code": -32601, "message": "method not found"}})
+"#;
+
+    // Script that always returns a JSON-RPC error for every request
+    const STUB_ERROR_SERVER: &str = r#"
+import sys, json
+
+for line in sys.stdin:
+    line = line.strip()
+    if not line:
+        continue
+    req = json.loads(line)
+    id_ = req.get("id")
+    if id_ is not None:
+        msg = json.dumps({"jsonrpc": "2.0", "id": id_, "error": {"code": -32600, "message": "server error"}})
+        sys.stdout.write(msg + "\n")
+        sys.stdout.flush()
+"#;
+
+    // Script that closes stdout immediately (simulates process exit mid-request)
+    const STUB_CLOSE_IMMEDIATELY: &str = r#"
+import sys
+sys.stdout.close()
+"#;
+
+    #[tokio::test]
+    async fn test_mcp_client_spawn_succeeds() {
+        let _client = spawn_stub_client(STUB_INIT_LIST_CALL).await;
+        // If we got here, spawn worked
+    }
+
+    #[tokio::test]
+    async fn test_mcp_client_connect_parses_capabilities() {
+        let mut client = spawn_stub_client(STUB_INIT_LIST_CALL).await;
+        client.connect().await.expect("connect should succeed");
+
+        let caps = client.capabilities().expect("should have capabilities");
+        assert!(caps.tools.is_some());
+        assert_eq!(caps.tools.as_ref().unwrap().list_changed, Some(true));
+    }
+
+    #[tokio::test]
+    async fn test_mcp_client_capabilities_before_connect_is_none() {
+        let client = spawn_stub_client(STUB_INIT_LIST_CALL).await;
+        // Before connect, capabilities should be None
+        assert!(client.capabilities().is_none());
+    }
+
+    #[tokio::test]
+    async fn test_mcp_client_cached_tools_before_list_is_empty() {
+        let client = spawn_stub_client(STUB_INIT_LIST_CALL).await;
+        assert!(client.cached_tools().is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_mcp_client_list_tools_returns_tools() {
+        let mut client = spawn_stub_client(STUB_INIT_LIST_CALL).await;
+        client.connect().await.unwrap();
+
+        let tools = client.list_tools().await.expect("list_tools should succeed");
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0].name, "echo");
+
+        // cached_tools() should now return them too
+        assert_eq!(client.cached_tools().len(), 1);
+        assert_eq!(client.cached_tools()[0].name, "echo");
+    }
+
+    #[tokio::test]
+    async fn test_mcp_client_call_tool_returns_result() {
+        let mut client = spawn_stub_client(STUB_INIT_LIST_CALL).await;
+        client.connect().await.unwrap();
+        // Consume the tools/list response first
+        client.list_tools().await.unwrap();
+
+        let result = client
+            .call_tool("echo", serde_json::json!({"msg": "hi"}))
+            .await
+            .expect("call_tool should succeed");
+
+        assert_eq!(result.content.len(), 1);
+        match &result.content[0] {
+            ToolResultContent::Text { text } => assert_eq!(text, "hello from tool"),
+            other => panic!("Expected Text content, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_mcp_client_shutdown_succeeds() {
+        let mut client = spawn_stub_client(STUB_INIT_LIST_CALL).await;
+        client.connect().await.unwrap();
+        // Shutdown should not fail even if the process is still running
+        client.shutdown().await.expect("shutdown should succeed");
+    }
+
+    #[tokio::test]
+    async fn test_mcp_client_shutdown_with_dead_process() {
+        let mut client = spawn_stub_client(STUB_CLOSE_IMMEDIATELY).await;
+        // Process closed stdout immediately; shutdown should still succeed
+        client.shutdown().await.expect("shutdown should be graceful");
+    }
+
+    #[tokio::test]
+    async fn test_mcp_client_server_error_propagates() {
+        let mut client = spawn_stub_client(STUB_ERROR_SERVER).await;
+        // initialize sends a request and the error server will return an error response
+        let err = client.connect().await;
+        assert!(err.is_err(), "Expected error from error server");
+        assert!(
+            err.unwrap_err().to_string().contains("server error"),
+            "Expected server error message"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_mcp_client_empty_response_is_error() {
+        // A script that writes nothing (closes stdout) causes "closed connection" error
+        let script = r#"
+import sys
+# Read one line then close -- simulates EOF during request
+for line in sys.stdin:
+    break
+sys.stdout.close()
+"#;
+        let mut client = spawn_stub_client(script).await;
+        let err = client.connect().await;
+        assert!(
+            err.is_err(),
+            "Expected error when server closes connection"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_mcp_client_malformed_json_response_is_error() {
+        let script = r#"
+import sys
+for line in sys.stdin:
+    sys.stdout.write("this is not json\n")
+    sys.stdout.flush()
+    break
+"#;
+        let mut client = spawn_stub_client(script).await;
+        let err = client.connect().await;
+        assert!(err.is_err(), "Expected error for malformed JSON");
+        assert!(
+            err.unwrap_err().to_string().contains("parse"),
+            "Expected parse error"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_mcp_client_spawn_invalid_command_fails() {
+        let result = MCPClient::spawn(
+            "/nonexistent/command/that/does/not/exist",
+            &[],
+            &HashMap::new(),
+        )
+        .await;
+        assert!(result.is_err());
+        let err_msg = result.err().unwrap().to_string();
+        assert!(err_msg.contains("Failed to spawn"), "err: {}", err_msg);
+    }
+
+    #[tokio::test]
+    async fn test_mcp_client_connect_with_no_capabilities_field() {
+        // Server returns initialize result without a "capabilities" key
+        let script = r#"
+import sys, json
+
+for line in sys.stdin:
+    line = line.strip()
+    if not line:
+        continue
+    req = json.loads(line)
+    method = req.get("method", "")
+    id_ = req.get("id")
+    if method == "initialize":
+        msg = json.dumps({"jsonrpc": "2.0", "id": id_, "result": {"protocolVersion": "2024-11-05"}})
+        sys.stdout.write(msg + "\n")
+        sys.stdout.flush()
+    elif method == "notifications/initialized":
+        pass
+    elif method == "notifications/cancelled":
+        pass
+"#;
+        let mut client = spawn_stub_client(script).await;
+        // Should succeed with default (empty) capabilities
+        client.connect().await.expect("connect should succeed");
+        let caps = client.capabilities().unwrap();
+        assert!(caps.tools.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_mcp_client_list_tools_missing_tools_key_returns_empty() {
+        // Server returns initialize ok and tools/list without "tools" key -> empty list
+        let script = r#"
+import sys, json
+
+for line in sys.stdin:
+    line = line.strip()
+    if not line:
+        continue
+    req = json.loads(line)
+    method = req.get("method", "")
+    id_ = req.get("id")
+    if method == "initialize":
+        msg = json.dumps({"jsonrpc": "2.0", "id": id_, "result": {"capabilities": {}}})
+        sys.stdout.write(msg + "\n")
+        sys.stdout.flush()
+    elif method == "notifications/initialized":
+        pass
+    elif method == "tools/list":
+        # Return result without "tools" key
+        msg = json.dumps({"jsonrpc": "2.0", "id": id_, "result": {}})
+        sys.stdout.write(msg + "\n")
+        sys.stdout.flush()
+    elif method == "notifications/cancelled":
+        pass
+"#;
+        let mut client = spawn_stub_client(script).await;
+        client.connect().await.unwrap();
+        let tools = client.list_tools().await.expect("list_tools should succeed");
+        assert!(tools.is_empty(), "Expected empty list when tools key absent");
+    }
+
+    #[tokio::test]
+    async fn test_mcp_client_list_tools_malformed_response_is_error() {
+        // Server returns valid initialize but tools/list with bad tools array
+        let script = r#"
+import sys, json
+
+for line in sys.stdin:
+    line = line.strip()
+    if not line:
+        continue
+    req = json.loads(line)
+    method = req.get("method", "")
+    id_ = req.get("id")
+    if method == "initialize":
+        msg = json.dumps({"jsonrpc": "2.0", "id": id_, "result": {"capabilities": {}}})
+        sys.stdout.write(msg + "\n")
+        sys.stdout.flush()
+    elif method == "notifications/initialized":
+        pass
+    elif method == "tools/list":
+        # Return tools as a string instead of an array -- triggers parse error
+        msg = json.dumps({"jsonrpc": "2.0", "id": id_, "result": {"tools": "not_an_array"}})
+        sys.stdout.write(msg + "\n")
+        sys.stdout.flush()
+    elif method == "notifications/cancelled":
+        pass
+"#;
+        let mut client = spawn_stub_client(script).await;
+        client.connect().await.unwrap();
+        let err = client.list_tools().await;
+        assert!(err.is_err());
+        assert!(err.unwrap_err().to_string().contains("parse"));
+    }
+
+    #[tokio::test]
+    async fn test_mcp_client_call_tool_malformed_result_is_error() {
+        let script = r#"
+import sys, json
+
+for line in sys.stdin:
+    line = line.strip()
+    if not line:
+        continue
+    req = json.loads(line)
+    method = req.get("method", "")
+    id_ = req.get("id")
+    if method == "initialize":
+        msg = json.dumps({"jsonrpc": "2.0", "id": id_, "result": {"capabilities": {}}})
+        sys.stdout.write(msg + "\n")
+        sys.stdout.flush()
+    elif method == "notifications/initialized":
+        pass
+    elif method == "tools/call":
+        # Return a result that can't be parsed as ToolResult
+        msg = json.dumps({"jsonrpc": "2.0", "id": id_, "result": "bad_tool_result"})
+        sys.stdout.write(msg + "\n")
+        sys.stdout.flush()
+    elif method == "notifications/cancelled":
+        pass
+"#;
+        let mut client = spawn_stub_client(script).await;
+        client.connect().await.unwrap();
+        let err = client.call_tool("broken", serde_json::json!({})).await;
+        assert!(err.is_err());
+        assert!(err.unwrap_err().to_string().contains("parse"));
+    }
+
+    #[tokio::test]
+    async fn test_mcp_client_response_with_no_result_is_error() {
+        // Server returns a valid JSON-RPC response with neither result nor error
+        let script = r#"
+import sys, json
+
+for line in sys.stdin:
+    line = line.strip()
+    if not line:
+        continue
+    req = json.loads(line)
+    id_ = req.get("id")
+    if id_ is not None:
+        # No "result", no "error"
+        msg = json.dumps({"jsonrpc": "2.0", "id": id_})
+        sys.stdout.write(msg + "\n")
+        sys.stdout.flush()
+"#;
+        let mut client = spawn_stub_client(script).await;
+        let err = client.connect().await;
+        assert!(err.is_err());
+        assert!(err.unwrap_err().to_string().contains("no result"));
+    }
 }

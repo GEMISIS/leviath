@@ -223,6 +223,259 @@ pub(super) async fn validate_blueprint(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::body::Body;
+    use axum::http::Request;
+    use axum::routing::{get, post};
+    use axum::Router;
+    use std::sync::Arc;
+    use tokio::sync::broadcast;
+    use tower::ServiceExt;
+
+    use crate::config::Config;
+
+    fn test_state_with_path(path: PathBuf) -> AppState {
+        let (tx, _) = broadcast::channel(64);
+        AppState {
+            config: Arc::new(Config {
+                agent_paths: vec![path],
+                ..Default::default()
+            }),
+            event_tx: tx,
+        }
+    }
+
+    fn test_manifest() -> &'static str {
+        r#"
+[agent]
+name = "test-bp"
+version = "1.0.0"
+description = "A test blueprint"
+
+[stages.plan]
+prompt = "Plan the work"
+"#
+    }
+
+    // ─── list_blueprints ──────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn list_blueprints_empty_path_returns_ok() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = test_state_with_path(dir.path().to_path_buf());
+        let app = Router::new()
+            .route("/api/blueprints", get(list_blueprints))
+            .with_state(state);
+        let req = Request::builder()
+            .uri("/api/blueprints")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), axum::http::StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let blueprints: Vec<serde_json::Value> = serde_json::from_slice(&body).unwrap();
+        // No blueprints in the empty temp dir (ignoring ~/.leviath/agents)
+        let _ = blueprints;
+    }
+
+    #[tokio::test]
+    async fn list_blueprints_with_agent_returns_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let agent_dir = dir.path().join("my-agent");
+        std::fs::create_dir_all(&agent_dir).unwrap();
+        std::fs::write(agent_dir.join("agent.leviath"), test_manifest()).unwrap();
+
+        let state = test_state_with_path(dir.path().to_path_buf());
+        let app = Router::new()
+            .route("/api/blueprints", get(list_blueprints))
+            .with_state(state);
+        let req = Request::builder()
+            .uri("/api/blueprints")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), axum::http::StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let blueprints: Vec<serde_json::Value> = serde_json::from_slice(&body).unwrap();
+        assert!(
+            blueprints.iter().any(|b| b["name"].as_str() == Some("test-bp")),
+            "test-bp should be listed"
+        );
+    }
+
+    // ─── get_blueprint ────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn get_blueprint_existing_returns_ok() {
+        let dir = tempfile::tempdir().unwrap();
+        let agent_dir = dir.path().join("test-bp");
+        std::fs::create_dir_all(&agent_dir).unwrap();
+        std::fs::write(agent_dir.join("agent.leviath"), test_manifest()).unwrap();
+
+        let state = test_state_with_path(dir.path().to_path_buf());
+        let app = Router::new()
+            .route("/api/blueprints/{name}", get(get_blueprint))
+            .with_state(state);
+        let req = Request::builder()
+            .uri("/api/blueprints/test-bp")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), axum::http::StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let bp: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(bp["name"].as_str().unwrap(), "test-bp");
+        assert_eq!(bp["version"].as_str().unwrap(), "1.0.0");
+    }
+
+    #[tokio::test]
+    async fn get_blueprint_not_found_returns_404() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = test_state_with_path(dir.path().to_path_buf());
+        let app = Router::new()
+            .route("/api/blueprints/{name}", get(get_blueprint))
+            .with_state(state);
+        let req = Request::builder()
+            .uri("/api/blueprints/does-not-exist-xyz")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), axum::http::StatusCode::NOT_FOUND);
+    }
+
+    // ─── create_blueprint ─────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn create_blueprint_invalid_manifest_returns_400() {
+        let app = Router::new()
+            .route("/api/blueprints", post(create_blueprint));
+        let body = serde_json::json!({
+            "name": "bad-agent",
+            "manifest": "not valid toml [[[{"
+        });
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/blueprints")
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_string(&body).unwrap()))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), axum::http::StatusCode::BAD_REQUEST);
+    }
+
+    // ─── update_blueprint ─────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn update_blueprint_invalid_manifest_returns_400() {
+        use axum::routing::put;
+
+        let app = Router::new()
+            .route("/api/blueprints/{name}", put(update_blueprint));
+        let body = serde_json::json!({
+            "manifest": "not valid toml {{{"
+        });
+        let req = Request::builder()
+            .method("PUT")
+            .uri("/api/blueprints/my-agent")
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_string(&body).unwrap()))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), axum::http::StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn update_blueprint_not_found_returns_404() {
+        use axum::routing::put;
+
+        let app = Router::new()
+            .route("/api/blueprints/{name}", put(update_blueprint));
+        let body = serde_json::json!({
+            "manifest": r#"
+[agent]
+name = "no-such-agent"
+version = "1.0.0"
+description = "Missing"
+
+[stages.run]
+prompt = "Run"
+"#
+        });
+        let req = Request::builder()
+            .method("PUT")
+            .uri("/api/blueprints/no-such-agent-xyz-99999")
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_string(&body).unwrap()))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), axum::http::StatusCode::NOT_FOUND);
+    }
+
+    // ─── delete_blueprint ─────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn delete_blueprint_not_found_returns_404() {
+        use axum::routing::delete;
+
+        let app = Router::new()
+            .route("/api/blueprints/{name}", delete(delete_blueprint));
+        let req = Request::builder()
+            .method("DELETE")
+            .uri("/api/blueprints/nonexistent-xyz")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), axum::http::StatusCode::NOT_FOUND);
+    }
+
+    // ─── validate_blueprint ───────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn validate_blueprint_valid_manifest_returns_ok_valid_true() {
+        let app = Router::new()
+            .route("/api/blueprints/validate", post(validate_blueprint));
+        let body = serde_json::json!({"manifest": test_manifest()});
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/blueprints/validate")
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_string(&body).unwrap()))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), axum::http::StatusCode::OK);
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let result: ValidateResponse = serde_json::from_slice(&bytes).unwrap();
+        assert!(result.valid);
+        assert!(result.errors.is_none());
+    }
+
+    #[tokio::test]
+    async fn validate_blueprint_invalid_manifest_returns_ok_valid_false() {
+        let app = Router::new()
+            .route("/api/blueprints/validate", post(validate_blueprint));
+        let body = serde_json::json!({"manifest": "not toml at all [[[{"});
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/blueprints/validate")
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_string(&body).unwrap()))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), axum::http::StatusCode::OK);
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let result: ValidateResponse = serde_json::from_slice(&bytes).unwrap();
+        assert!(!result.valid);
+        assert!(result.errors.is_some());
+    }
 
     #[test]
     fn agents_dir_is_under_home() {

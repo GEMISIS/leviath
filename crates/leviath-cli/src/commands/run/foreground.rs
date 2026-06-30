@@ -570,4 +570,72 @@ mod tests {
         )
         .await;
     }
+
+    #[tokio::test]
+    async fn foreground_start_message_reader_returns_handle_when_accepts() {
+        let rt = tokio::runtime::Handle::current();
+        let _ = rt; // ensure we are in async context
+
+        let mut cb = ForegroundCallbacks {};
+        let registry = leviath_runtime::ProviderRegistry::new();
+        let engine = leviath_runtime::AgentEngine::with_providers(registry);
+        // When accepts=true, a JoinHandle is spawned for stdin reading
+        let handle = cb.start_message_reader(&engine, "agent-1", true);
+        assert!(handle.is_some(), "Should return Some(JoinHandle) when accepts is true");
+        // Abort it immediately to avoid blocking
+        if let Some(h) = handle {
+            h.abort();
+        }
+    }
+
+    #[tokio::test]
+    async fn foreground_on_stage_error_various_stages() {
+        let mut cb = ForegroundCallbacks {};
+        // Linear mode: returns None
+        let err = anyhow::anyhow!("stage failed");
+        assert!(cb.on_stage_error("plan", 0, &err, false).await.is_none());
+        assert!(cb.on_stage_error("code", 1, &err, false).await.is_none());
+        // Graph mode: returns Some(Error)
+        assert_eq!(cb.on_stage_error("review", 2, &err, true).await, Some(StageResult::Error));
+    }
+
+    #[tokio::test]
+    async fn foreground_callbacks_complete_sequence() {
+        let mut cb = ForegroundCallbacks {};
+
+        // Simulate a complete stage lifecycle
+        cb.on_stage_enter("plan", 0, "anthropic", "claude-sonnet-4-6", "").await;
+        cb.on_claude_code_warning(0).await;
+
+        let registry = leviath_runtime::ProviderRegistry::new();
+        let mut engine = leviath_runtime::AgentEngine::with_providers(registry);
+        let mut pool = AgentPool::new(leviath_core::Blueprint::new(
+            "test".to_string(),
+            "test".to_string(),
+            vec![],
+            leviath_core::ContextLayout::new(vec![], 0),
+        ));
+        let agent_id = pool.spawn_agent(engine.world_mut());
+        let entity = pool.get_agent(&agent_id).unwrap();
+
+        cb.on_stage_result("plan", 0, &StageResult::Success, None, &mut engine, entity).await;
+        cb.on_transition("plan", "code", 0).await;
+        cb.on_stage_enter("code", 1, "anthropic", "claude-sonnet-4-6", "").await;
+        cb.on_stage_result("code", 1, &StageResult::Success, None, &mut engine, entity).await;
+        cb.on_complete(1).await;
+        cb.on_post_stage(&engine, entity, "code").await;
+    }
+
+    #[test]
+    fn foreground_callbacks_all_provider_missing_messages() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let mut cb = ForegroundCallbacks {};
+            // Test with various provider names
+            for provider in ["anthropic", "openai", "google", "openrouter", "ollama"] {
+                let result = cb.on_provider_missing(provider, 0).await;
+                assert!(result, "on_provider_missing should always return true");
+            }
+        });
+    }
 }

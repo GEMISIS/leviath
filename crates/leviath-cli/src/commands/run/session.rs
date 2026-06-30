@@ -460,4 +460,95 @@ mod tests {
         let result = resolve_task(&Some("".to_string()), "test", None);
         assert_eq!(result.unwrap(), "");
     }
+
+    // ─── resolve_task: file with multiple lines and trailing whitespace ──
+
+    #[test]
+    fn resolve_task_file_with_multiple_trailing_newlines() {
+        let dir = std::env::temp_dir().join("lev-test-resolve-trail");
+        let _ = std::fs::create_dir_all(&dir);
+        let file = dir.join("trail.txt");
+        std::fs::write(&file, "task content\n\n\n\n").unwrap();
+
+        let result = resolve_task(&Some(file.to_str().unwrap().to_string()), "test", None);
+        assert_eq!(result.unwrap(), "task content");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ─── build_provider_registry: model_capabilities propagated ──────────
+
+    #[test]
+    fn build_provider_registry_propagates_model_capabilities() {
+        use leviath_providers::ModelCapabilities;
+        let mut caps = std::collections::HashMap::new();
+        caps.insert(
+            "custom-model".to_string(),
+            ModelCapabilities {
+                supports_temperature: true,
+                supports_streaming: true,
+                supports_tools: true,
+                supports_system_prompt: true,
+                max_context_tokens: 9999,
+                max_output_tokens: 999,
+            },
+        );
+        let config = crate::config::Config {
+            model_capabilities: caps,
+            providers: crate::config::ProviderConfig {
+                anthropic_api_key: Some("sk-ant-test".to_string()),
+                openai_api_key: None,
+                google_api_key: None,
+            },
+            ..crate::config::Config::default()
+        };
+        let registry = build_provider_registry(&config);
+        // Verify anthropic provider was registered
+        assert!(registry.has("anthropic"));
+        // Verify ollama always registered
+        assert!(registry.has("ollama"));
+    }
+
+    // ─── launch_editor: candidates exhausted when no editors available ────
+
+    #[test]
+    fn resolve_task_file_with_real_content() {
+        let dir = std::env::temp_dir().join("lev-test-resolve-real");
+        let _ = std::fs::create_dir_all(&dir);
+        let file = dir.join("real.txt");
+        std::fs::write(&file, "Implement a REST API server\nwith authentication\n").unwrap();
+
+        let result = resolve_task(&Some(file.to_str().unwrap().to_string()), "api-agent", Some("API agent"));
+        let task = result.unwrap();
+        assert!(task.contains("Implement a REST API server"));
+        assert!(task.contains("with authentication"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ─── build_provider_registry: all providers registered ───────────────
+
+    #[test]
+    fn build_provider_registry_ollama_with_custom_url_propagates_caps() {
+        use leviath_providers::ModelCapabilities;
+        let mut caps = std::collections::HashMap::new();
+        caps.insert(
+            "llama3-8b".to_string(),
+            ModelCapabilities {
+                supports_temperature: false,
+                supports_streaming: false,
+                supports_tools: false,
+                supports_system_prompt: false,
+                max_context_tokens: 99,
+                max_output_tokens: 99,
+            },
+        );
+        let config = crate::config::Config {
+            ollama_base_url: Some("http://custom-ollama:11434".to_string()),
+            model_capabilities: caps,
+            ..crate::config::Config::default()
+        };
+        let registry = build_provider_registry(&config);
+        assert!(registry.has("ollama"));
+    }
 }

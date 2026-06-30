@@ -877,6 +877,167 @@ mod tests {
         }
     }
 
+    // ─── execute() / list() / show() async entry points ──────────────────
+
+    #[tokio::test]
+    async fn execute_list_command_runs_without_error() {
+        let args = ModelsArgs {
+            command: ModelsCommand::List(ListArgs {
+                provider: None,
+                remote: false,
+            }),
+        };
+        // Should succeed: prints the builtin table
+        let result = execute(args).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn execute_list_with_provider_filter_runs_without_error() {
+        let args = ModelsArgs {
+            command: ModelsCommand::List(ListArgs {
+                provider: Some("anthropic".to_string()),
+                remote: false,
+            }),
+        };
+        let result = execute(args).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn execute_list_with_nonexistent_provider_filter() {
+        let args = ModelsArgs {
+            command: ModelsCommand::List(ListArgs {
+                provider: Some("nonexistent_provider".to_string()),
+                remote: false,
+            }),
+        };
+        // Should succeed but print "No models found."
+        let result = execute(args).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn execute_show_known_model_runs_without_error() {
+        let args = ModelsArgs {
+            command: ModelsCommand::Show(ShowArgs {
+                model: "claude-sonnet-4-6".to_string(),
+                provider: None,
+                remote: false,
+            }),
+        };
+        // Should find model in builtin table and print details
+        let result = execute(args).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn execute_show_unknown_model_runs_without_error() {
+        let args = ModelsArgs {
+            command: ModelsCommand::Show(ShowArgs {
+                model: "totally-unknown-model-xyz".to_string(),
+                provider: None,
+                remote: false,
+            }),
+        };
+        // Should print "Model not found" message without error
+        let result = execute(args).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn execute_show_unknown_model_with_remote_no_provider() {
+        let args = ModelsArgs {
+            command: ModelsCommand::Show(ShowArgs {
+                model: "totally-unknown-model-xyz".to_string(),
+                provider: None,
+                remote: true, // remote but no provider = skips remote lookup
+            }),
+        };
+        let result = execute(args).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn execute_show_unknown_model_with_remote_unconfigured_provider() {
+        let args = ModelsArgs {
+            command: ModelsCommand::Show(ShowArgs {
+                model: "totally-unknown-model-xyz".to_string(),
+                provider: Some("anthropic".to_string()),
+                remote: true,
+                // Provider won't be configured in test env (no API key)
+            }),
+        };
+        // Should warn about unconfigured provider and then show not-found message
+        let result = execute(args).await;
+        assert!(result.is_ok());
+    }
+
+    // ─── list() with builtin model having overrides in config ─────────────
+
+    #[tokio::test]
+    async fn list_with_openrouter_filter() {
+        let args = ModelsArgs {
+            command: ModelsCommand::List(ListArgs {
+                provider: Some("openrouter".to_string()),
+                remote: false,
+            }),
+        };
+        let result = execute(args).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn list_with_openai_filter() {
+        let args = ModelsArgs {
+            command: ModelsCommand::List(ListArgs {
+                provider: Some("openai".to_string()),
+                remote: false,
+            }),
+        };
+        let result = execute(args).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn show_builtin_anthropic_opus() {
+        let args = ModelsArgs {
+            command: ModelsCommand::Show(ShowArgs {
+                model: "claude-opus-4-6".to_string(),
+                provider: None,
+                remote: false,
+            }),
+        };
+        let result = execute(args).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn show_builtin_openai_model() {
+        let args = ModelsArgs {
+            command: ModelsCommand::Show(ShowArgs {
+                model: "gpt-5.5".to_string(),
+                provider: None,
+                remote: false,
+            }),
+        };
+        let result = execute(args).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn show_builtin_deepseek_r1() {
+        let args = ModelsArgs {
+            command: ModelsCommand::Show(ShowArgs {
+                model: "deepseek/deepseek-r1".to_string(),
+                provider: None,
+                remote: false,
+            }),
+        };
+        let result = execute(args).await;
+        assert!(result.is_ok());
+    }
+
     // ─── builtin_table as ModelInfo conversion ──────────────────────────
 
     #[test]

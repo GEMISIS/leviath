@@ -296,4 +296,107 @@ mod tests {
         let back: PackageInfo = serde_json::from_str(&json).unwrap();
         assert_eq!(back.description, "An agent for processing text");
     }
+
+    // ─── PackageRegistry HTTP error paths ──────────────────────────────
+
+    #[tokio::test]
+    async fn search_connection_refused_returns_error() {
+        // Use a port that's unlikely to be listening
+        let registry = PackageRegistry::new("http://127.0.0.1:19999".to_string());
+        let result = registry.search("test-query").await;
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("Failed to search") || err.contains("error"),
+            "Expected search error, got: {}",
+            err
+        );
+    }
+
+    #[tokio::test]
+    async fn download_connection_refused_returns_error() {
+        let registry = PackageRegistry::new("http://127.0.0.1:19999".to_string());
+        let result = registry.download("my-package", "1.0.0").await;
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("Failed to download") || err.contains("error"),
+            "Expected download error, got: {}",
+            err
+        );
+    }
+
+    #[tokio::test]
+    async fn get_info_connection_refused_returns_error() {
+        let registry = PackageRegistry::new("http://127.0.0.1:19999".to_string());
+        let result = registry.get_info("my-package").await;
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("Failed to get package info") || err.contains("error"),
+            "Expected get_info error, got: {}",
+            err
+        );
+    }
+
+    #[tokio::test]
+    async fn publish_connection_refused_returns_error() {
+        let registry = PackageRegistry::new("http://127.0.0.1:19999".to_string());
+        let bundle = b"fake bundle data";
+        let result = registry.publish(bundle, "my-token").await;
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("Failed to publish") || err.contains("error"),
+            "Expected publish error, got: {}",
+            err
+        );
+    }
+
+    // ─── PackageInfo various field combinations ─────────────────────────
+
+    #[test]
+    fn package_info_multiple_authors() {
+        let info = PackageInfo {
+            name: "multi-author".to_string(),
+            version: "1.0.0".to_string(),
+            description: "By many authors".to_string(),
+            authors: vec![
+                "Alice".to_string(),
+                "Bob".to_string(),
+                "Charlie".to_string(),
+            ],
+            downloads: 100,
+        };
+        let json = serde_json::to_string(&info).unwrap();
+        let back: PackageInfo = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.authors.len(), 3);
+        assert_eq!(back.authors[0], "Alice");
+        assert_eq!(back.authors[2], "Charlie");
+    }
+
+    #[test]
+    fn package_info_zero_downloads() {
+        let json = r#"{
+            "name": "new-package",
+            "version": "0.1.0",
+            "description": "New",
+            "downloads": 0
+        }"#;
+        let info: PackageInfo = serde_json::from_str(json).unwrap();
+        assert_eq!(info.downloads, 0);
+    }
+
+    #[test]
+    fn package_registry_new_with_empty_url() {
+        // Should not panic even with unusual URLs
+        let registry = PackageRegistry::new("".to_string());
+        assert_eq!(registry.url, "");
+    }
+
+    #[test]
+    fn package_registry_new_with_localhost() {
+        let registry = PackageRegistry::new("http://localhost:8080".to_string());
+        assert_eq!(registry.url, "http://localhost:8080");
+    }
 }

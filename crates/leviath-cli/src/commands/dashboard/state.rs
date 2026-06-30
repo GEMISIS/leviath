@@ -1536,6 +1536,151 @@ mod tests {
         assert!(!dash.selected_stage_can_respond());
     }
 
+    // ─── add_log: timestamp format and persistence ────────────────────────
+
+    #[test]
+    fn add_log_appends_entry() {
+        let mut dash = make_test_dashboard();
+        dash.log.clear();
+        dash.add_log("hello from test".to_string());
+        assert!(!dash.log.is_empty());
+        assert!(dash.log.last().unwrap().message == "hello from test");
+        // Timestamp should look like HH:MM:SS
+        let ts = &dash.log.last().unwrap().timestamp;
+        assert!(ts.contains(':'), "timestamp should contain ':', got '{}'", ts);
+    }
+
+    #[test]
+    fn add_log_trims_when_over_200() {
+        let mut dash = make_test_dashboard();
+        dash.log.clear();
+        // Fill to exactly 200
+        for i in 0..200 {
+            dash.log.push(crate::commands::dashboard::types::LogEntry {
+                timestamp: "00:00:00".to_string(),
+                message: format!("seed {}", i),
+            });
+        }
+        // Adding one more should remove oldest
+        dash.add_log("newest".to_string());
+        assert!(dash.log.len() <= 200);
+        assert_eq!(dash.log.last().unwrap().message, "newest");
+    }
+
+    // ─── load_log_seed: exercises the parsing code ───────────────────────
+
+    #[test]
+    fn load_log_seed_returns_vec() {
+        // We cannot control the on-disk file in tests, but we can confirm
+        // the method returns a Vec (even if empty) without panicking.
+        let entries = Dashboard::load_log_seed();
+        // Just assert it's a valid Vec
+        let _ = entries.len();
+    }
+
+    // ─── push_toast: level variants ──────────────────────────────────────
+
+    #[test]
+    fn push_toast_warning_level() {
+        let mut dash = make_test_dashboard();
+        dash.push_toast("warning!", ToastLevel::Warning);
+        assert_eq!(dash.toasts.len(), 1);
+        assert!(matches!(dash.toasts[0].level, ToastLevel::Warning));
+    }
+
+    #[test]
+    fn push_toast_error_level() {
+        let mut dash = make_test_dashboard();
+        dash.push_toast("error!", ToastLevel::Error);
+        assert_eq!(dash.toasts.len(), 1);
+        assert!(matches!(dash.toasts[0].level, ToastLevel::Error));
+    }
+
+    // ─── tick_toasts: already at zero stays zero ──────────────────────────
+
+    #[test]
+    fn tick_toasts_already_expired_removed() {
+        let mut dash = make_test_dashboard();
+        dash.toasts.push(Toast {
+            message: "gone".to_string(),
+            remaining_ticks: 1,
+            level: ToastLevel::Info,
+        });
+        dash.tick_toasts(); // goes to 0 and is removed
+        assert!(dash.toasts.is_empty());
+    }
+
+    // ─── update_display_indices: CompleteInteractive priority ────────────
+
+    #[test]
+    fn update_display_indices_complete_interactive_priority() {
+        let mut dash = make_test_dashboard();
+        dash.agents
+            .push(make_test_agent("active", AgentDisplayStatus::Active));
+        dash.agents.push(make_test_agent(
+            "ci",
+            AgentDisplayStatus::CompleteInteractive,
+        ));
+        dash.update_display_indices();
+        // Active(0) should come before CompleteInteractive(2)
+        let ids: Vec<&str> = dash
+            .display_indices
+            .iter()
+            .map(|&i| dash.agents[i].id.as_str())
+            .collect();
+        assert_eq!(ids[0], "active");
+        assert_eq!(ids[1], "ci");
+    }
+
+    // ─── selected_stage_can_respond: only pending_request path ───────────
+
+    #[test]
+    fn selected_stage_can_respond_with_only_pending_request_no_waiting_prompt() {
+        let mut dash = make_test_dashboard();
+        let mut agent = make_test_agent("run-1", AgentDisplayStatus::Waiting);
+        // Only pending_request, no waiting_prompt
+        agent.waiting_prompt = None;
+        agent.pending_request = Some(crate::interaction::InteractionRequest::free_text(
+            "req-1",
+            "Prompt text",
+            "main",
+            true,
+        ));
+        agent.stage_index = 0;
+        agent.stages = vec![crate::runstate::StageRecord::new("main".to_string(), 0)];
+        dash.agents.push(agent);
+        dash.update_display_indices();
+        dash.selected_stage = 0;
+        // pending_request is Some so should be able to respond
+        assert!(dash.selected_stage_can_respond());
+    }
+
+    // ─── delete_selected_agent: run state agent removal ──────────────────
+
+    #[test]
+    fn delete_selected_agent_removes_run_state_agent() {
+        let mut dash = make_test_dashboard();
+        dash.log.clear();
+        // Use a real temp dir that exists to avoid "delete failed" log
+        let tmp_id = format!("test-run-{}", std::process::id());
+        let run_dir = crate::runstate::run_dir(&tmp_id);
+        let _ = std::fs::create_dir_all(&run_dir);
+
+        let mut agent = make_test_agent(&tmp_id, AgentDisplayStatus::Complete);
+        agent.is_run_state = true;
+        agent.pid = 0; // no actual process to kill
+        dash.agents.push(agent);
+        dash.update_display_indices();
+
+        dash.delete_selected_agent();
+
+        // Agent should have been removed from the list
+        assert!(
+            dash.agents.is_empty() || dash.agents[0].id != tmp_id,
+            "agent should have been removed"
+        );
+    }
+
     // ─── selected_stage_can_respond: empty stage_name falls back ──────────
 
     #[test]

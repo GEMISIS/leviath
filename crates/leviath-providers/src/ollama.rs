@@ -1154,4 +1154,302 @@ mod tests {
         let provider = OllamaProvider::with_base_url("https://remote:11434".to_string());
         assert_eq!(provider.base_url, "https://remote:11434");
     }
+
+    // ─── HTTP error paths (connection refused) ──────────────────────────
+
+    #[tokio::test]
+    async fn test_infer_connection_refused() {
+        let provider = OllamaProvider::with_base_url("http://127.0.0.1:19998".to_string());
+        let request = InferenceRequest {
+            messages: vec![crate::provider::Message {
+                role: "user".to_string(),
+                content: "Hello".to_string(),
+                cache_breakpoint: false,
+            }],
+            model: "llama3-8b".to_string(),
+            max_tokens: 100,
+            temperature: 0.5,
+            tools: vec![],
+            extra: serde_json::Value::Null,
+        };
+        let result = provider.infer(request).await;
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        // Should be RequestFailed
+        assert!(matches!(err, ProviderError::RequestFailed(_)));
+    }
+
+    #[tokio::test]
+    async fn test_infer_stream_connection_refused() {
+        let provider = OllamaProvider::with_base_url("http://127.0.0.1:19998".to_string());
+        let request = InferenceRequest {
+            messages: vec![crate::provider::Message {
+                role: "user".to_string(),
+                content: "Hello".to_string(),
+                cache_breakpoint: false,
+            }],
+            model: "llama3-8b".to_string(),
+            max_tokens: 100,
+            temperature: 0.5,
+            tools: vec![],
+            extra: serde_json::Value::Null,
+        };
+        let result = provider.infer_stream(request).await;
+        assert!(result.is_err(), "Expected connection refused error");
+        if let Err(e) = result {
+            assert!(matches!(e, ProviderError::RequestFailed(_)));
+        }
+    }
+
+    #[tokio::test]
+    async fn test_list_models_connection_refused() {
+        let provider = OllamaProvider::with_base_url("http://127.0.0.1:19998".to_string());
+        let result = provider.list_models().await;
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), ProviderError::RequestFailed(_)));
+    }
+
+    // ─── with_base_url: invalid URL pattern triggers warning ─────────────
+
+    #[test]
+    fn test_with_base_url_invalid_protocol_does_not_panic() {
+        // Should log a warning but not panic
+        let provider = OllamaProvider::with_base_url("ftp://invalid:11434".to_string());
+        assert_eq!(provider.base_url, "ftp://invalid:11434");
+    }
+
+    #[test]
+    fn test_with_overrides_invalid_protocol_does_not_panic() {
+        let provider = OllamaProvider::with_overrides(
+            "ftp://invalid:11434".to_string(),
+            HashMap::new(),
+        );
+        assert_eq!(provider.base_url, "ftp://invalid:11434");
+    }
+
+    // ─── parse_response: tool_call with null function ────────────────────
+
+    #[test]
+    fn test_parse_response_tool_call_null_function_field() {
+        let provider = OllamaProvider::new();
+        let body = serde_json::json!({
+            "message": {
+                "role": "assistant",
+                "content": "done",
+                "tool_calls": [
+                    {
+                        "function": null
+                    }
+                ]
+            },
+            "eval_count": 0,
+            "prompt_eval_count": 0,
+            "done": true
+        });
+        // When function is null, name and arguments should default
+        let response = provider.parse_response(&body).unwrap();
+        // tool_calls has 1 entry with empty name
+        assert_eq!(response.tool_calls.len(), 1);
+        assert_eq!(response.tool_calls[0].name, "");
+    }
+
+    // ─── NdjsonStream: parse logic ────────────────────────────────────────
+
+    #[test]
+    fn test_ollama_ndjson_stream_parses_done_line() {
+        use futures_core::Stream;
+        use std::pin::Pin;
+        use std::task::{Context, Poll};
+
+        // Create a stream from a static slice of bytes
+        struct StaticStream {
+            data: Vec<Vec<u8>>,
+            idx: usize,
+        }
+
+        impl Stream for StaticStream {
+            type Item = std::result::Result<bytes::Bytes, reqwest::Error>;
+
+            fn poll_next(
+                mut self: Pin<&mut Self>,
+                _cx: &mut Context<'_>,
+            ) -> Poll<Option<Self::Item>> {
+                if self.idx < self.data.len() {
+                    let chunk = bytes::Bytes::from(self.data[self.idx].clone());
+                    self.idx += 1;
+                    Poll::Ready(Some(Ok(chunk)))
+                } else {
+                    Poll::Ready(None)
+                }
+            }
+        }
+
+        // Build a test NDJSON stream with one non-done and one done message
+        let chunk1 = b"{\"message\":{\"role\":\"assistant\",\"content\":\"Hello \"},\"done\":false}\n".to_vec();
+        let chunk2 = b"{\"message\":{\"role\":\"assistant\",\"content\":\"world\"},\"done\":true,\"eval_count\":10,\"prompt_eval_count\":20}\n".to_vec();
+
+        let static_stream = StaticStream {
+            data: vec![chunk1, chunk2],
+            idx: 0,
+        };
+
+        let mut ndjson_stream = OllamaNdjsonStream::new(static_stream);
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            use tokio_stream::StreamExt;
+            let chunks: Vec<_> = ndjson_stream.collect().await;
+            assert!(chunks.len() >= 2);
+            // First chunk: content "Hello "
+            let first = chunks[0].as_ref().unwrap();
+            assert_eq!(first.delta, "Hello ");
+            assert!(first.finish_reason.is_none());
+            // Last chunk: done=true
+            let last = chunks.last().unwrap().as_ref().unwrap();
+            assert!(last.finish_reason.is_some());
+            assert!(matches!(last.finish_reason, Some(FinishReason::Complete)));
+            let tokens = last.tokens.as_ref().unwrap();
+            assert_eq!(tokens.completion_tokens, 10);
+            assert_eq!(tokens.prompt_tokens, 20);
+        });
+    }
+
+    #[test]
+    fn test_ollama_ndjson_stream_invalid_json_returns_error() {
+        use futures_core::Stream;
+        use std::pin::Pin;
+        use std::task::{Context, Poll};
+
+        struct StaticStream {
+            data: Vec<Vec<u8>>,
+            idx: usize,
+        }
+
+        impl Stream for StaticStream {
+            type Item = std::result::Result<bytes::Bytes, reqwest::Error>;
+            fn poll_next(
+                mut self: Pin<&mut Self>,
+                _cx: &mut Context<'_>,
+            ) -> Poll<Option<Self::Item>> {
+                if self.idx < self.data.len() {
+                    let chunk = bytes::Bytes::from(self.data[self.idx].clone());
+                    self.idx += 1;
+                    Poll::Ready(Some(Ok(chunk)))
+                } else {
+                    Poll::Ready(None)
+                }
+            }
+        }
+
+        // Invalid JSON line
+        let chunk1 = b"not valid json at all\n".to_vec();
+        let static_stream = StaticStream {
+            data: vec![chunk1],
+            idx: 0,
+        };
+
+        let mut ndjson_stream = OllamaNdjsonStream::new(static_stream);
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            use tokio_stream::StreamExt;
+            let chunks: Vec<_> = ndjson_stream.collect().await;
+            // First item should be an error
+            assert!(!chunks.is_empty());
+            assert!(chunks[0].is_err());
+        });
+    }
+
+    #[test]
+    fn test_ollama_ndjson_stream_remaining_buffer_parsed() {
+        use futures_core::Stream;
+        use std::pin::Pin;
+        use std::task::{Context, Poll};
+
+        struct StaticStream {
+            data: Vec<Vec<u8>>,
+            idx: usize,
+        }
+
+        impl Stream for StaticStream {
+            type Item = std::result::Result<bytes::Bytes, reqwest::Error>;
+            fn poll_next(
+                mut self: Pin<&mut Self>,
+                _cx: &mut Context<'_>,
+            ) -> Poll<Option<Self::Item>> {
+                if self.idx < self.data.len() {
+                    let chunk = bytes::Bytes::from(self.data[self.idx].clone());
+                    self.idx += 1;
+                    Poll::Ready(Some(Ok(chunk)))
+                } else {
+                    Poll::Ready(None)
+                }
+            }
+        }
+
+        // Send data WITHOUT trailing newline — it's in the remaining buffer
+        let chunk1 = b"{\"message\":{\"role\":\"assistant\",\"content\":\"leftover\"},\"done\":false}".to_vec();
+        let static_stream = StaticStream {
+            data: vec![chunk1],
+            idx: 0,
+        };
+
+        let mut ndjson_stream = OllamaNdjsonStream::new(static_stream);
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            use tokio_stream::StreamExt;
+            let chunks: Vec<_> = ndjson_stream.collect().await;
+            // The remaining buffer should be parsed on stream end
+            assert_eq!(chunks.len(), 1);
+            let chunk = chunks[0].as_ref().unwrap();
+            assert_eq!(chunk.delta, "leftover");
+        });
+    }
+
+    #[test]
+    fn test_ollama_ndjson_stream_empty_line_skipped() {
+        use futures_core::Stream;
+        use std::pin::Pin;
+        use std::task::{Context, Poll};
+
+        struct StaticStream {
+            data: Vec<Vec<u8>>,
+            idx: usize,
+        }
+
+        impl Stream for StaticStream {
+            type Item = std::result::Result<bytes::Bytes, reqwest::Error>;
+            fn poll_next(
+                mut self: Pin<&mut Self>,
+                _cx: &mut Context<'_>,
+            ) -> Poll<Option<Self::Item>> {
+                if self.idx < self.data.len() {
+                    let chunk = bytes::Bytes::from(self.data[self.idx].clone());
+                    self.idx += 1;
+                    Poll::Ready(Some(Ok(chunk)))
+                } else {
+                    Poll::Ready(None)
+                }
+            }
+        }
+
+        // Empty line followed by real data
+        let chunk1 = b"\n{\"message\":{\"role\":\"assistant\",\"content\":\"hi\"},\"done\":false}\n".to_vec();
+        let static_stream = StaticStream {
+            data: vec![chunk1],
+            idx: 0,
+        };
+
+        let mut ndjson_stream = OllamaNdjsonStream::new(static_stream);
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            use tokio_stream::StreamExt;
+            let chunks: Vec<_> = ndjson_stream.collect().await;
+            // Empty line is skipped; one real chunk
+            assert_eq!(chunks.len(), 1);
+            assert_eq!(chunks[0].as_ref().unwrap().delta, "hi");
+        });
+    }
 }
