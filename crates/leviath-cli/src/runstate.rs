@@ -186,6 +186,9 @@ fn now_secs() -> i64 {
 
 /// Directory where all run state is stored.
 pub fn runs_dir() -> PathBuf {
+    if let Ok(override_dir) = std::env::var("LEVIATH_RUNS_DIR") {
+        return PathBuf::from(override_dir);
+    }
     dirs::home_dir()
         .unwrap_or_default()
         .join(".leviath")
