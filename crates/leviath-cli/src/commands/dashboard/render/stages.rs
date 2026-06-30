@@ -504,3 +504,319 @@ impl Dashboard {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::runstate::{StageRecord, StageRunStatus};
+    use ratatui::backend::TestBackend;
+    use ratatui::layout::Rect;
+    use ratatui::Terminal;
+    use std::collections::HashMap;
+    use tokio::sync::mpsc;
+
+    fn make_test_dashboard() -> Dashboard {
+        let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
+        Dashboard::new(cmd_tx)
+    }
+
+    fn make_test_agent(id: &str, status: AgentDisplayStatus) -> DashboardAgent {
+        DashboardAgent {
+            id: id.to_string(),
+            blueprint_name: "test-agent".to_string(),
+            agent_path: "/path".to_string(),
+            stage: "main".to_string(),
+            stage_index: 0,
+            num_stages: 2,
+            status,
+            tokens_in: 100,
+            tokens_out: 50,
+            cached_tokens: 10,
+            context_tokens: (500, 8000),
+            iteration: 3,
+            waiting_prompt: None,
+            pending_request: None,
+            last_answered_request_id: None,
+            context_snapshot: None,
+            stages: vec![],
+            entity: bevy_ecs::prelude::Entity::from_raw(0),
+            is_run_state: true,
+            pid: 0,
+            workdir: "/tmp/test".to_string(),
+            task: "test task".to_string(),
+            title: Some("My Test".to_string()),
+            model: None,
+            parent_id: None,
+            depth: 0,
+            started_at: chrono::Utc::now().timestamp() - 60,
+            active_until: None,
+            waiting_secs: 0,
+            graph_info: None,
+            accepts_messages: true,
+        }
+    }
+
+    fn make_stage_record(name: &str, status: StageRunStatus) -> StageRecord {
+        StageRecord {
+            name: name.to_string(),
+            index: 0,
+            status: status.clone(),
+            prompt_tokens: 100,
+            completion_tokens: 50,
+            cached_tokens: 0,
+            started_at: Some(chrono::Utc::now().timestamp() - 30),
+            ended_at: if status == StageRunStatus::Complete {
+                Some(chrono::Utc::now().timestamp())
+            } else {
+                None
+            },
+        }
+    }
+
+    #[test]
+    fn render_stage_tabs_linear_empty_stages() {
+        let backend = TestBackend::new(120, 10);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let dash = make_test_dashboard();
+        let agent = make_test_agent("run-s", AgentDisplayStatus::Active);
+        terminal
+            .draw(|f| {
+                let area = Rect::new(0, 0, 120, 3);
+                dash.render_stage_tabs(f, area, &agent);
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn render_stage_tabs_linear_with_records() {
+        let backend = TestBackend::new(120, 10);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let dash = make_test_dashboard();
+        let mut agent = make_test_agent("run-sr", AgentDisplayStatus::Active);
+        agent.stages = vec![
+            make_stage_record("plan", StageRunStatus::Complete),
+            make_stage_record("implement", StageRunStatus::Active),
+        ];
+        agent.num_stages = 2;
+        terminal
+            .draw(|f| {
+                let area = Rect::new(0, 0, 120, 3);
+                dash.render_stage_tabs(f, area, &agent);
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn draw_linear_tabs_various_statuses() {
+        let backend = TestBackend::new(120, 10);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let dash = make_test_dashboard();
+        let mut agent = make_test_agent("run-vs", AgentDisplayStatus::Active);
+        agent.stages = vec![
+            make_stage_record("s1", StageRunStatus::Complete),
+            make_stage_record("s2", StageRunStatus::WaitingInput),
+            make_stage_record("s3", StageRunStatus::Active),
+            make_stage_record("s4", StageRunStatus::Pending),
+            make_stage_record("s5", StageRunStatus::Error),
+        ];
+        agent.num_stages = 5;
+        agent.stage_index = 2;
+        terminal
+            .draw(|f| {
+                let area = Rect::new(0, 0, 120, 3);
+                dash.draw_linear_tabs(f, area, &agent);
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn build_edge_summary_none() {
+        let result = Dashboard::build_edge_summary(None);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn build_edge_summary_empty_edges() {
+        let edges: Vec<GraphEdge> = vec![];
+        let result = Dashboard::build_edge_summary(Some(&edges));
+        assert!(result.contains("terminal"));
+    }
+
+    #[test]
+    fn build_edge_summary_multiple_edges() {
+        let edges = vec![
+            GraphEdge {
+                target: "stage_b".to_string(),
+                hint: Some("on success".to_string()),
+                condition: "always".to_string(),
+                transform: "replace".to_string(),
+            },
+            GraphEdge {
+                target: "stage_c".to_string(),
+                hint: None,
+                condition: "always".to_string(),
+                transform: "replace".to_string(),
+            },
+        ];
+        let result = Dashboard::build_edge_summary(Some(&edges));
+        assert!(result.contains("stage_b"));
+        assert!(result.contains("stage_c"));
+        assert!(result.contains("on success"));
+    }
+
+    #[test]
+    fn build_edge_summary_filters_error() {
+        let edges = vec![
+            GraphEdge {
+                target: "error_handler".to_string(),
+                hint: None,
+                condition: "error".to_string(),
+                transform: "replace".to_string(),
+            },
+            GraphEdge {
+                target: "next".to_string(),
+                hint: None,
+                condition: "always".to_string(),
+                transform: "replace".to_string(),
+            },
+        ];
+        let result = Dashboard::build_edge_summary(Some(&edges));
+        assert!(!result.contains("error_handler"));
+        assert!(result.contains("next"));
+    }
+
+    #[test]
+    fn render_stage_tabs_graph_mode() {
+        let backend = TestBackend::new(120, 10);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let dash = make_test_dashboard();
+        let mut agent = make_test_agent("run-g", AgentDisplayStatus::Active);
+        agent.stages = vec![
+            make_stage_record("plan", StageRunStatus::Complete),
+            make_stage_record("implement", StageRunStatus::Active),
+        ];
+        agent.num_stages = 2;
+        let mut edges = HashMap::new();
+        edges.insert(
+            "plan".to_string(),
+            vec![GraphEdge {
+                target: "implement".to_string(),
+                hint: None,
+                condition: "always".to_string(),
+                transform: "replace".to_string(),
+            }],
+        );
+        agent.graph_info = Some(GraphTransitionInfo {
+            edges,
+            entry_stage: "plan".to_string(),
+            stage_names: vec!["plan".to_string(), "implement".to_string()],
+        });
+        terminal
+            .draw(|f| {
+                let area = Rect::new(0, 0, 120, 7);
+                dash.render_stage_tabs(f, area, &agent);
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn draw_graph_view_basic() {
+        let backend = TestBackend::new(120, 10);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let dash = make_test_dashboard();
+        let mut agent = make_test_agent("run-gv", AgentDisplayStatus::Active);
+        agent.stage = "plan".to_string();
+        agent.stages = vec![make_stage_record("plan", StageRunStatus::Active)];
+        let mut edges = HashMap::new();
+        edges.insert(
+            "plan".to_string(),
+            vec![GraphEdge {
+                target: "implement".to_string(),
+                hint: Some("after planning".to_string()),
+                condition: "always".to_string(),
+                transform: "replace".to_string(),
+            }],
+        );
+        let graph = GraphTransitionInfo {
+            edges,
+            entry_stage: "plan".to_string(),
+            stage_names: vec!["plan".to_string(), "implement".to_string()],
+        };
+        terminal
+            .draw(|f| {
+                let area = Rect::new(0, 0, 120, 7);
+                dash.draw_graph_view(f, area, &agent, &graph);
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn draw_graph_view_bidirectional_edges() {
+        let backend = TestBackend::new(120, 10);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let dash = make_test_dashboard();
+        let mut agent = make_test_agent("run-bi", AgentDisplayStatus::Active);
+        agent.stage = "plan".to_string();
+        agent.stages = vec![
+            make_stage_record("plan", StageRunStatus::Complete),
+            make_stage_record("implement", StageRunStatus::Active),
+        ];
+        let mut edges = HashMap::new();
+        edges.insert(
+            "plan".to_string(),
+            vec![GraphEdge {
+                target: "implement".to_string(),
+                hint: None,
+                condition: "always".to_string(),
+                transform: "replace".to_string(),
+            }],
+        );
+        edges.insert(
+            "implement".to_string(),
+            vec![GraphEdge {
+                target: "plan".to_string(),
+                hint: None,
+                condition: "always".to_string(),
+                transform: "replace".to_string(),
+            }],
+        );
+        let graph = GraphTransitionInfo {
+            edges,
+            entry_stage: "plan".to_string(),
+            stage_names: vec!["plan".to_string(), "implement".to_string()],
+        };
+        terminal
+            .draw(|f| {
+                let area = Rect::new(0, 0, 120, 7);
+                dash.draw_graph_view(f, area, &agent, &graph);
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn build_stage_tab_title_complete() {
+        let dash = make_test_dashboard();
+        let agent = make_test_agent("run-t", AgentDisplayStatus::Active);
+        let record = make_stage_record("plan", StageRunStatus::Complete);
+        let line = dash.build_stage_tab_title(0, &record, &agent);
+        assert!(!line.spans.is_empty());
+    }
+
+    #[test]
+    fn build_stage_tab_title_active_running() {
+        let dash = make_test_dashboard();
+        let agent = make_test_agent("run-t2", AgentDisplayStatus::Active);
+        let record = make_stage_record("implement", StageRunStatus::Active);
+        let line = dash.build_stage_tab_title(0, &record, &agent);
+        assert!(!line.spans.is_empty());
+    }
+
+    #[test]
+    fn build_stage_tab_title_active_run_done() {
+        let dash = make_test_dashboard();
+        let agent = make_test_agent("run-t3", AgentDisplayStatus::Complete);
+        let record = make_stage_record("implement", StageRunStatus::Active);
+        let line = dash.build_stage_tab_title(0, &record, &agent);
+        assert!(!line.spans.is_empty());
+    }
+}

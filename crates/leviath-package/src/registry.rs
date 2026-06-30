@@ -183,4 +183,117 @@ mod tests {
         let registry = PackageRegistry::new("https://registry.example.com".to_string());
         assert_eq!(registry.url, "https://registry.example.com");
     }
+
+    // ─── PackageInfo serialization ──────────────────────────────────────
+
+    #[test]
+    fn package_info_empty_authors() {
+        let info = PackageInfo {
+            name: "agent".to_string(),
+            version: "1.0.0".to_string(),
+            description: "desc".to_string(),
+            authors: vec![],
+            downloads: 0,
+        };
+        let json = serde_json::to_string(&info).unwrap();
+        let back: PackageInfo = serde_json::from_str(&json).unwrap();
+        assert!(back.authors.is_empty());
+        assert_eq!(back.downloads, 0);
+    }
+
+    #[test]
+    fn package_info_large_downloads() {
+        let info = PackageInfo {
+            name: "popular".to_string(),
+            version: "10.0.0".to_string(),
+            description: "Very popular".to_string(),
+            authors: vec!["Author".to_string()],
+            downloads: 1_000_000,
+        };
+        let json = serde_json::to_string(&info).unwrap();
+        let back: PackageInfo = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.downloads, 1_000_000);
+    }
+
+    #[test]
+    fn package_info_clone() {
+        let info = PackageInfo {
+            name: "agent".to_string(),
+            version: "1.0.0".to_string(),
+            description: "desc".to_string(),
+            authors: vec!["alice".to_string()],
+            downloads: 5,
+        };
+        let cloned = info.clone();
+        assert_eq!(cloned.name, "agent");
+        assert_eq!(cloned.authors.len(), 1);
+    }
+
+    #[test]
+    fn package_info_debug() {
+        let info = PackageInfo {
+            name: "agent".to_string(),
+            version: "1.0.0".to_string(),
+            description: "desc".to_string(),
+            authors: vec![],
+            downloads: 0,
+        };
+        let debug = format!("{:?}", info);
+        assert!(debug.contains("agent"));
+    }
+
+    // ─── PackageRegistry URL construction ───────────────────────────────
+
+    #[test]
+    fn package_registry_preserves_url() {
+        let registry = PackageRegistry::new("https://custom-registry.io".to_string());
+        assert_eq!(registry.url, "https://custom-registry.io");
+    }
+
+    #[test]
+    fn package_registry_url_without_trailing_slash() {
+        let registry = PackageRegistry::new("https://registry.example.com".to_string());
+        // URL should be stored as-is without trailing slash
+        assert!(!registry.url.ends_with('/'));
+    }
+
+    #[test]
+    fn package_registry_url_with_trailing_slash() {
+        let registry = PackageRegistry::new("https://registry.example.com/".to_string());
+        // URL stored as-is (trailing slash preserved by constructor)
+        assert!(registry.url.ends_with('/'));
+    }
+
+    // ─── PackageInfo from JSON with extra fields ────────────────────────
+
+    #[test]
+    fn package_info_ignores_unknown_fields() {
+        let json = r#"{
+            "name": "test",
+            "version": "1.0.0",
+            "description": "Test package",
+            "authors": [],
+            "downloads": 10,
+            "extra_field": "ignored"
+        }"#;
+        // serde by default ignores unknown fields
+        let info: Result<PackageInfo, _> = serde_json::from_str(json);
+        assert!(info.is_ok());
+    }
+
+    // ─── PackageInfo with unicode ───────────────────────────────────────
+
+    #[test]
+    fn package_info_unicode_description() {
+        let info = PackageInfo {
+            name: "unicode-agent".to_string(),
+            version: "1.0.0".to_string(),
+            description: "An agent for processing text".to_string(),
+            authors: vec!["Author Name".to_string()],
+            downloads: 0,
+        };
+        let json = serde_json::to_string(&info).unwrap();
+        let back: PackageInfo = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.description, "An agent for processing text");
+    }
 }

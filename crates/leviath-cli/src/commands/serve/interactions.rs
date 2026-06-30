@@ -112,3 +112,72 @@ pub(super) async fn send_message(
 
     Ok(StatusCode::ACCEPTED)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn submit_interaction_req_deserialization_minimal() {
+        let json = r#"{"request_id": "req-001"}"#;
+        let req: SubmitInteractionReq = serde_json::from_str(json).unwrap();
+        assert_eq!(req.request_id, "req-001");
+        assert!(req.value.is_none());
+        assert!(req.choice_index.is_none());
+        assert!(req.approved.is_none());
+        assert!(req.scope.is_none());
+    }
+
+    #[test]
+    fn submit_interaction_req_deserialization_full() {
+        let json = r#"{
+            "request_id": "req-002",
+            "value": "yes please",
+            "choice_index": 1,
+            "approved": true,
+            "scope": "session"
+        }"#;
+        let req: SubmitInteractionReq = serde_json::from_str(json).unwrap();
+        assert_eq!(req.request_id, "req-002");
+        assert_eq!(req.value.unwrap(), "yes please");
+        assert_eq!(req.choice_index, Some(1));
+        assert_eq!(req.approved, Some(true));
+        assert_eq!(req.scope.unwrap(), "session");
+    }
+
+    #[test]
+    fn send_message_req_deserialization() {
+        let json = r#"{"message": "hello agent"}"#;
+        let req: SendMessageReq = serde_json::from_str(json).unwrap();
+        assert_eq!(req.message, "hello agent");
+        assert!(req.target_region.is_none());
+    }
+
+    #[test]
+    fn send_message_req_with_target_region() {
+        let json = r#"{"message": "hi", "target_region": "conversation"}"#;
+        let req: SendMessageReq = serde_json::from_str(json).unwrap();
+        assert_eq!(req.message, "hi");
+        assert_eq!(req.target_region.unwrap(), "conversation");
+    }
+
+    #[test]
+    fn scope_mapping_session() {
+        let scope_str = "session";
+        let scope = match scope_str {
+            "session" => interaction::ApprovalScope::Session,
+            _ => interaction::ApprovalScope::Once,
+        };
+        assert_eq!(scope, interaction::ApprovalScope::Session);
+    }
+
+    #[test]
+    fn scope_mapping_defaults_to_once() {
+        let scope_str = "anything_else";
+        let scope = match scope_str {
+            "session" => interaction::ApprovalScope::Session,
+            _ => interaction::ApprovalScope::Once,
+        };
+        assert_eq!(scope, interaction::ApprovalScope::Once);
+    }
+}

@@ -418,4 +418,111 @@ mod tests {
             1_048_576
         );
     }
+
+    // ── Additional coverage tests ──────────────────────────────────────────
+
+    #[test]
+    fn test_with_config_default_url() {
+        let config = ProviderConfig {
+            api_key: "key".to_string(),
+            base_url: None,
+            rate_limit: None,
+        };
+        let provider = GeminiProvider::with_config(config);
+        assert!(provider
+            .base_url
+            .contains("generativelanguage.googleapis.com"));
+    }
+
+    #[test]
+    fn test_with_config_custom_url() {
+        let config = ProviderConfig {
+            api_key: "key".to_string(),
+            base_url: Some("https://custom.google.com".to_string()),
+            rate_limit: None,
+        };
+        let provider = GeminiProvider::with_config(config);
+        assert_eq!(provider.base_url, "https://custom.google.com");
+    }
+
+    #[test]
+    fn test_with_config_with_rate_limit() {
+        let config = ProviderConfig {
+            api_key: "key".to_string(),
+            base_url: None,
+            rate_limit: Some(crate::provider::RateLimitConfig {
+                requests_per_minute: 30,
+                tokens_per_minute: 50000,
+            }),
+        };
+        let provider = GeminiProvider::with_config(config);
+        assert!(provider.rate_limiter.is_some());
+    }
+
+    #[test]
+    fn test_count_tokens_uses_tiktoken() {
+        let provider = GeminiProvider::new("key".to_string());
+        let tokens = provider.count_tokens("Hello, world!", "gemini-3.5-flash");
+        assert!(tokens > 0);
+    }
+
+    #[test]
+    fn test_count_tokens_empty() {
+        let provider = GeminiProvider::new("key".to_string());
+        let tokens = provider.count_tokens("", "gemini-3.5-flash");
+        assert_eq!(tokens, 0);
+    }
+
+    #[test]
+    fn test_capabilities_override_takes_precedence() {
+        let mut overrides = HashMap::new();
+        overrides.insert(
+            "gemini-custom".to_string(),
+            ModelCapabilities {
+                supports_temperature: false,
+                supports_streaming: false,
+                supports_tools: false,
+                supports_system_prompt: false,
+                max_context_tokens: 42,
+                max_output_tokens: 10,
+            },
+        );
+        let provider = GeminiProvider::with_overrides("key".to_string(), overrides);
+        let caps = provider.capabilities("gemini-custom");
+        assert_eq!(caps.max_context_tokens, 42);
+        assert!(!caps.supports_temperature);
+    }
+
+    #[test]
+    fn test_capabilities_builtin_fallthrough() {
+        let provider = GeminiProvider::with_overrides("key".to_string(), HashMap::new());
+        let caps = provider.capabilities("gemini-3.5-flash");
+        assert_eq!(caps.max_context_tokens, 1_048_576);
+    }
+
+    #[test]
+    fn test_max_context_tokens_delegates() {
+        let provider = GeminiProvider::new("key".to_string());
+        assert_eq!(provider.max_context_tokens("gemini-3.5-flash"), 1_048_576);
+    }
+
+    #[test]
+    fn test_parse_response_no_choices() {
+        let body = serde_json::json!({});
+        let result = parse_openai_response(&body);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_response_finish_reason_length() {
+        let body = serde_json::json!({
+            "choices": [{
+                "message": { "content": "truncated" },
+                "finish_reason": "length"
+            }],
+            "usage": { "prompt_tokens": 5, "completion_tokens": 100 }
+        });
+        let response = parse_openai_response(&body).unwrap();
+        assert!(matches!(response.finish_reason, FinishReason::TokenLimit));
+    }
 }

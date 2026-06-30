@@ -425,3 +425,149 @@ pub async fn run_foreground(args: RunArgs) -> anyhow::Result<()> {
     tool_registry.shutdown().await;
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn foreground_callbacks_construction() {
+        let _cb = ForegroundCallbacks {};
+    }
+
+    #[tokio::test]
+    async fn foreground_on_provider_missing_returns_true() {
+        let mut cb = ForegroundCallbacks {};
+        let result = cb.on_provider_missing("nonexistent", 0).await;
+        assert!(result, "on_provider_missing should return true (abort)");
+    }
+
+    #[tokio::test]
+    async fn foreground_on_stage_enter_does_not_panic() {
+        let mut cb = ForegroundCallbacks {};
+        cb.on_stage_enter("plan", 0, "anthropic", "claude-sonnet-4-6", "")
+            .await;
+        cb.on_stage_enter("code", 1, "openai", "gpt-5", " (visit 2)")
+            .await;
+    }
+
+    #[tokio::test]
+    async fn foreground_on_claude_code_warning_does_not_panic() {
+        let mut cb = ForegroundCallbacks {};
+        cb.on_claude_code_warning(0).await;
+    }
+
+    #[test]
+    fn foreground_get_run_context_returns_none() {
+        let mut cb = ForegroundCallbacks {};
+        assert!(cb.get_run_context().is_none());
+    }
+
+    #[tokio::test]
+    async fn foreground_on_stage_result_is_noop() {
+        let mut cb = ForegroundCallbacks {};
+        let registry = leviath_runtime::ProviderRegistry::new();
+        let mut engine = leviath_runtime::AgentEngine::with_providers(registry);
+        let mut pool = AgentPool::new(leviath_core::Blueprint::new(
+            "test".to_string(),
+            "test".to_string(),
+            vec![],
+            leviath_core::ContextLayout::new(vec![], 0),
+        ));
+        let agent_id = pool.spawn_agent(engine.world_mut());
+        let entity = pool.get_agent(&agent_id).unwrap();
+        cb.on_stage_result("main", 0, &StageResult::Success, None, &mut engine, entity)
+            .await;
+    }
+
+    #[tokio::test]
+    async fn foreground_on_stage_error_graph_mode() {
+        let mut cb = ForegroundCallbacks {};
+        let err = anyhow::anyhow!("test error");
+        let result = cb.on_stage_error("main", 0, &err, true).await;
+        assert_eq!(result, Some(StageResult::Error));
+    }
+
+    #[tokio::test]
+    async fn foreground_on_stage_error_linear_mode() {
+        let mut cb = ForegroundCallbacks {};
+        let err = anyhow::anyhow!("test error");
+        let result = cb.on_stage_error("main", 0, &err, false).await;
+        assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn foreground_on_transition_is_noop() {
+        let mut cb = ForegroundCallbacks {};
+        cb.on_transition("plan", "code", 0).await;
+    }
+
+    #[tokio::test]
+    async fn foreground_on_complete_does_not_panic() {
+        let mut cb = ForegroundCallbacks {};
+        cb.on_complete(2).await;
+    }
+
+    #[tokio::test]
+    async fn foreground_on_post_stage_is_noop() {
+        let mut cb = ForegroundCallbacks {};
+        let registry = leviath_runtime::ProviderRegistry::new();
+        let engine = leviath_runtime::AgentEngine::with_providers(registry);
+        let entity = bevy_ecs::prelude::Entity::from_raw(0);
+        cb.on_post_stage(&engine, entity, "main").await;
+    }
+
+    #[test]
+    fn foreground_start_message_reader_returns_none_when_not_accepts() {
+        let mut cb = ForegroundCallbacks {};
+        let registry = leviath_runtime::ProviderRegistry::new();
+        let engine = leviath_runtime::AgentEngine::with_providers(registry);
+        let handle = cb.start_message_reader(&engine, "agent-1", false);
+        assert!(handle.is_none(), "Should return None when accepts is false");
+    }
+
+    #[tokio::test]
+    async fn foreground_on_stage_enter_with_visit_label() {
+        let mut cb = ForegroundCallbacks {};
+        // Should not panic
+        cb.on_stage_enter("review", 2, "openai", "gpt-5", " (visit 3)")
+            .await;
+    }
+
+    #[tokio::test]
+    async fn foreground_on_complete_multiple_stages() {
+        let mut cb = ForegroundCallbacks {};
+        cb.on_complete(5).await;
+    }
+
+    #[tokio::test]
+    async fn foreground_on_transition_is_noop_different_stages() {
+        let mut cb = ForegroundCallbacks {};
+        cb.on_transition("plan", "implement", 0).await;
+        cb.on_transition("implement", "review", 1).await;
+    }
+
+    #[tokio::test]
+    async fn foreground_on_stage_result_no_response_is_noop() {
+        let mut cb = ForegroundCallbacks {};
+        let registry = leviath_runtime::ProviderRegistry::new();
+        let mut engine = leviath_runtime::AgentEngine::with_providers(registry);
+        let mut pool = AgentPool::new(leviath_core::Blueprint::new(
+            "test".to_string(),
+            "test".to_string(),
+            vec![],
+            leviath_core::ContextLayout::new(vec![], 0),
+        ));
+        let agent_id = pool.spawn_agent(engine.world_mut());
+        let entity = pool.get_agent(&agent_id).unwrap();
+        cb.on_stage_result(
+            "main",
+            0,
+            &StageResult::MaxIterations,
+            None,
+            &mut engine,
+            entity,
+        )
+        .await;
+    }
+}

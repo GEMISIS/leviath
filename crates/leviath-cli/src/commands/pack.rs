@@ -133,3 +133,165 @@ fn count_files(dir: &Path) -> anyhow::Result<usize> {
     }
     Ok(count)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ─── format_size ───────────────────────────────────────────────────────
+
+    #[test]
+    fn format_size_bytes() {
+        assert_eq!(format_size(0), "0 B");
+        assert_eq!(format_size(512), "512 B");
+        assert_eq!(format_size(1023), "1023 B");
+    }
+
+    #[test]
+    fn format_size_kilobytes() {
+        assert_eq!(format_size(1024), "1.0 KB");
+        assert_eq!(format_size(2048), "2.0 KB");
+        assert_eq!(format_size(1536), "1.5 KB");
+    }
+
+    #[test]
+    fn format_size_megabytes() {
+        assert_eq!(format_size(1024 * 1024), "1.0 MB");
+        assert_eq!(format_size(5 * 1024 * 1024), "5.0 MB");
+    }
+
+    // ─── count_files ───────────────────────────────────────────────────────
+
+    #[test]
+    fn count_files_empty_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(count_files(dir.path()).unwrap(), 0);
+    }
+
+    #[test]
+    fn count_files_with_files() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.txt"), "a").unwrap();
+        std::fs::write(dir.path().join("b.txt"), "b").unwrap();
+        assert_eq!(count_files(dir.path()).unwrap(), 2);
+    }
+
+    #[test]
+    fn count_files_nested() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("top.txt"), "t").unwrap();
+        std::fs::create_dir_all(dir.path().join("sub")).unwrap();
+        std::fs::write(dir.path().join("sub/nested.txt"), "n").unwrap();
+        assert_eq!(count_files(dir.path()).unwrap(), 2);
+    }
+
+    // ─── find_manifest ─────────────────────────────────────────────────────
+
+    #[test]
+    fn find_manifest_in_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = dir.path().join("agent.leviath");
+        std::fs::write(&manifest, "name = \"test\"").unwrap();
+
+        let result = find_manifest(dir.path());
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), manifest);
+    }
+
+    #[test]
+    fn find_manifest_direct_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = dir.path().join("agent.leviath");
+        std::fs::write(&manifest, "name = \"test\"").unwrap();
+
+        let result = find_manifest(&manifest);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), manifest);
+    }
+
+    #[test]
+    fn find_manifest_not_found_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        // No agent.leviath in the dir
+        let result = find_manifest(dir.path());
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("agent.leviath"));
+    }
+
+    // ─── output path determination ─────────────────────────────────────────
+
+    #[test]
+    fn output_path_from_args() {
+        let output = Some("my-output.leviath-bundle".to_string());
+        let output_path = if let Some(ref out) = output {
+            PathBuf::from(out)
+        } else {
+            PathBuf::from("default.leviath-bundle")
+        };
+        assert_eq!(output_path, PathBuf::from("my-output.leviath-bundle"));
+    }
+
+    #[test]
+    fn output_path_default() {
+        let name = "my-agent";
+        let version = "1.0.0";
+        let output_path = PathBuf::from(format!("{}-{}.leviath-bundle", name, version));
+        assert_eq!(output_path, PathBuf::from("my-agent-1.0.0.leviath-bundle"));
+    }
+
+    // ─── format_size edge cases ───────────────────────────────────────────
+
+    #[test]
+    fn format_size_boundary_kb() {
+        assert_eq!(format_size(1023), "1023 B");
+        assert_eq!(format_size(1024), "1.0 KB");
+    }
+
+    #[test]
+    fn format_size_boundary_mb() {
+        assert_eq!(format_size(1024 * 1024 - 1), "1024.0 KB");
+        assert_eq!(format_size(1024 * 1024), "1.0 MB");
+    }
+
+    #[test]
+    fn format_size_fractional_kb() {
+        // 1536 = 1.5 KB
+        assert_eq!(format_size(1536), "1.5 KB");
+        // 2560 = 2.5 KB
+        assert_eq!(format_size(2560), "2.5 KB");
+    }
+
+    // ─── count_files edge cases ───────────────────────────────────────────
+
+    #[test]
+    fn count_files_nested_multiple_levels() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("a/b/c")).unwrap();
+        std::fs::write(dir.path().join("root.txt"), "r").unwrap();
+        std::fs::write(dir.path().join("a/level1.txt"), "1").unwrap();
+        std::fs::write(dir.path().join("a/b/level2.txt"), "2").unwrap();
+        std::fs::write(dir.path().join("a/b/c/level3.txt"), "3").unwrap();
+        assert_eq!(count_files(dir.path()).unwrap(), 4);
+    }
+
+    // ─── find_manifest edge cases ─────────────────────────────────────────
+
+    #[test]
+    fn find_manifest_nonexistent_path_errors() {
+        let result = find_manifest(Path::new("/tmp/nonexistent-leviath-test-dir"));
+        assert!(result.is_err());
+    }
+
+    // ─── output path generation ───────────────────────────────────────────
+
+    #[test]
+    fn output_path_with_special_chars() {
+        let name = "my-agent";
+        let version = "1.0.0-beta.1";
+        let output_path = PathBuf::from(format!("{}-{}.leviath-bundle", name, version));
+        assert_eq!(
+            output_path,
+            PathBuf::from("my-agent-1.0.0-beta.1.leviath-bundle")
+        );
+    }
+}

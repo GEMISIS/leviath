@@ -407,4 +407,453 @@ mod tests {
         let config = Config::default();
         assert!(config.validate_keys().is_empty());
     }
+
+    // ─── Config defaults ───────────────────────────────────────────────────
+
+    #[test]
+    fn config_default_values() {
+        let config = Config::default();
+        assert_eq!(config.default_provider, "anthropic");
+        assert!(config.providers.anthropic_api_key.is_none());
+        assert!(config.providers.openai_api_key.is_none());
+        assert!(config.providers.google_api_key.is_none());
+        assert!(config.openrouter_api_key.is_none());
+        assert!(config.ollama_base_url.is_none());
+        assert!(config.mcp_servers.is_empty());
+        assert!(config.default_model.is_none());
+        assert!(config.model_capabilities.is_empty());
+        assert!(config.tool_permissions.is_empty());
+        assert!(!config.registries.is_empty());
+    }
+
+    // ─── TitleConfig ───────────────────────────────────────────────────────
+
+    #[test]
+    fn title_config_default() {
+        let tc = TitleConfig::default();
+        assert!(tc.enabled);
+        assert!(tc.provider.is_none());
+        assert!(tc.model.is_none());
+    }
+
+    #[test]
+    fn title_config_serde_roundtrip() {
+        let tc = TitleConfig {
+            enabled: false,
+            provider: Some("openai".to_string()),
+            model: Some("gpt-5.4-mini".to_string()),
+        };
+        let json = serde_json::to_string(&tc).unwrap();
+        let back: TitleConfig = serde_json::from_str(&json).unwrap();
+        assert!(!back.enabled);
+        assert_eq!(back.provider.as_deref(), Some("openai"));
+        assert_eq!(back.model.as_deref(), Some("gpt-5.4-mini"));
+    }
+
+    // ─── ToolPolicy ────────────────────────────────────────────────────────
+
+    #[test]
+    fn tool_policy_default_is_ask() {
+        let policy = ToolPolicy::default();
+        assert_eq!(policy, ToolPolicy::Ask);
+    }
+
+    #[test]
+    fn tool_policy_serde_roundtrip() {
+        for policy in [ToolPolicy::Allow, ToolPolicy::Ask, ToolPolicy::Deny] {
+            let json = serde_json::to_string(&policy).unwrap();
+            let back: ToolPolicy = serde_json::from_str(&json).unwrap();
+            assert_eq!(policy, back);
+        }
+    }
+
+    #[test]
+    fn tool_policy_snake_case_serialization() {
+        assert_eq!(
+            serde_json::to_string(&ToolPolicy::Allow).unwrap(),
+            "\"allow\""
+        );
+        assert_eq!(serde_json::to_string(&ToolPolicy::Ask).unwrap(), "\"ask\"");
+        assert_eq!(
+            serde_json::to_string(&ToolPolicy::Deny).unwrap(),
+            "\"deny\""
+        );
+    }
+
+    // ─── Config TOML parsing ───────────────────────────────────────────────
+
+    #[test]
+    fn config_from_toml_with_all_fields() {
+        let toml_content = r#"
+default_provider = "openai"
+openrouter_api_key = "sk-or-test"
+ollama_base_url = "http://my-ollama:11434"
+default_model = "gpt-5"
+registries = ["https://example.com/registry"]
+agent_paths = []
+
+[providers]
+anthropic_api_key = "sk-ant-test"
+openai_api_key = "sk-test"
+google_api_key = "AIza-test"
+
+[tool_permissions]
+bash = "deny"
+read_file = "allow"
+
+[title]
+enabled = false
+provider = "anthropic"
+model = "claude-haiku-4-5"
+"#;
+        let config: Config = toml::from_str(toml_content).unwrap();
+        assert_eq!(config.default_provider, "openai");
+        assert_eq!(
+            config.providers.anthropic_api_key.as_deref(),
+            Some("sk-ant-test")
+        );
+        assert_eq!(config.providers.openai_api_key.as_deref(), Some("sk-test"));
+        assert_eq!(
+            config.providers.google_api_key.as_deref(),
+            Some("AIza-test")
+        );
+        assert_eq!(config.openrouter_api_key.as_deref(), Some("sk-or-test"));
+        assert_eq!(
+            config.ollama_base_url.as_deref(),
+            Some("http://my-ollama:11434")
+        );
+        assert_eq!(config.default_model.as_deref(), Some("gpt-5"));
+        assert!(!config.title.enabled);
+        assert_eq!(config.tool_permissions.get("bash"), Some(&ToolPolicy::Deny));
+        assert_eq!(
+            config.tool_permissions.get("read_file"),
+            Some(&ToolPolicy::Allow)
+        );
+    }
+
+    #[test]
+    fn config_from_minimal_toml() {
+        let toml_content = r#"
+default_provider = "anthropic"
+registries = []
+agent_paths = []
+
+[providers]
+"#;
+        let config: Config = toml::from_str(toml_content).unwrap();
+        assert_eq!(config.default_provider, "anthropic");
+        assert!(config.providers.anthropic_api_key.is_none());
+    }
+
+    #[test]
+    fn config_from_toml_with_mcp_servers() {
+        let toml_content = r#"
+default_provider = "anthropic"
+registries = []
+agent_paths = []
+
+[providers]
+
+[[mcp_servers]]
+name = "test-server"
+command = "echo"
+args = ["hello"]
+"#;
+        let config: Config = toml::from_str(toml_content).unwrap();
+        assert_eq!(config.mcp_servers.len(), 1);
+        assert_eq!(config.mcp_servers[0].name, "test-server");
+    }
+
+    #[test]
+    fn config_from_toml_with_model_capabilities() {
+        let toml_content = r#"
+default_provider = "anthropic"
+registries = []
+agent_paths = []
+
+[providers]
+
+[model_capabilities."my-custom-model"]
+supports_temperature = true
+supports_streaming = false
+supports_tools = true
+supports_system_prompt = true
+max_context_tokens = 4096
+max_output_tokens = 2048
+"#;
+        let config: Config = toml::from_str(toml_content).unwrap();
+        let caps = config.model_capabilities.get("my-custom-model").unwrap();
+        assert!(caps.supports_temperature);
+        assert!(!caps.supports_streaming);
+        assert_eq!(caps.max_context_tokens, 4096);
+        assert_eq!(caps.max_output_tokens, 2048);
+    }
+
+    // ─── validate_keys with both keys ──────────────────────────────────────
+
+    #[test]
+    fn validate_keys_both_bad() {
+        let config = Config {
+            providers: ProviderConfig {
+                anthropic_api_key: Some("bad".to_string()),
+                openai_api_key: Some("bad".to_string()),
+                google_api_key: None,
+            },
+            ..Config::default()
+        };
+        let warnings = config.validate_keys();
+        assert_eq!(warnings.len(), 2);
+    }
+
+    // ─── redact_key edge cases ─────────────────────────────────────────────
+
+    #[test]
+    fn redact_key_exactly_9_chars() {
+        // 9 chars: should show first 4 + ... + last 4
+        assert_eq!(redact_key("123456789"), "1234...6789");
+    }
+
+    #[test]
+    fn redact_key_empty() {
+        assert_eq!(redact_key(""), "***");
+    }
+
+    // ─── config_path ───────────────────────────────────────────────────────
+
+    #[test]
+    fn config_path_contains_leviath() {
+        let path = Config::config_path();
+        assert!(path.to_str().unwrap().contains(".leviath"));
+        assert!(path.to_str().unwrap().ends_with("config.toml"));
+    }
+
+    // ─── Config save/load roundtrip ────────────────────────────────────────
+
+    #[test]
+    fn config_toml_roundtrip() {
+        let config = Config {
+            default_provider: "openai".to_string(),
+            providers: ProviderConfig {
+                anthropic_api_key: Some("sk-ant-key".to_string()),
+                openai_api_key: None,
+                google_api_key: None,
+            },
+            tool_permissions: {
+                let mut m = HashMap::new();
+                m.insert("bash".to_string(), ToolPolicy::Deny);
+                m
+            },
+            ..Config::default()
+        };
+
+        let serialized = toml::to_string_pretty(&config).unwrap();
+        let deserialized: Config = toml::from_str(&serialized).unwrap();
+        assert_eq!(deserialized.default_provider, "openai");
+        assert_eq!(
+            deserialized.providers.anthropic_api_key.as_deref(),
+            Some("sk-ant-key")
+        );
+        assert_eq!(
+            deserialized.tool_permissions.get("bash"),
+            Some(&ToolPolicy::Deny)
+        );
+    }
+
+    // ─── validate_keys: both keys valid ──────────────────────────────────
+
+    #[test]
+    fn validate_keys_both_valid() {
+        let config = Config {
+            providers: ProviderConfig {
+                anthropic_api_key: Some("sk-ant-good-key".to_string()),
+                openai_api_key: Some("sk-good-key".to_string()),
+                google_api_key: None,
+            },
+            ..Config::default()
+        };
+        assert!(config.validate_keys().is_empty());
+    }
+
+    // ─── validate_keys: google key has no validation ─────────────────────
+
+    #[test]
+    fn validate_keys_google_key_not_validated() {
+        let config = Config {
+            providers: ProviderConfig {
+                anthropic_api_key: None,
+                openai_api_key: None,
+                google_api_key: Some("anything-goes".to_string()),
+            },
+            ..Config::default()
+        };
+        // Google key has no prefix validation
+        assert!(config.validate_keys().is_empty());
+    }
+
+    // ─── redact_key additional ───────────────────────────────────────────
+
+    #[test]
+    fn redact_key_typical_openai() {
+        let key = "sk-proj-abcdef12345678";
+        let redacted = redact_key(key);
+        assert!(redacted.starts_with("sk-p"));
+        assert!(redacted.ends_with("5678"));
+        assert!(redacted.contains("..."));
+    }
+
+    #[test]
+    fn redact_key_typical_anthropic() {
+        let key = "sk-ant-api03-abc123xyz";
+        let redacted = redact_key(key);
+        assert!(redacted.starts_with("sk-a"));
+        assert!(redacted.contains("..."));
+    }
+
+    // ─── Config TOML parsing: registries ─────────────────────────────────
+
+    #[test]
+    fn config_from_toml_custom_registries() {
+        let toml_content = r#"
+default_provider = "anthropic"
+registries = ["https://my-registry.example.com", "https://backup.example.com"]
+agent_paths = ["/my/agents"]
+
+[providers]
+"#;
+        let config: Config = toml::from_str(toml_content).unwrap();
+        assert_eq!(config.registries.len(), 2);
+        assert_eq!(config.registries[0], "https://my-registry.example.com");
+        assert_eq!(config.agent_paths.len(), 1);
+    }
+
+    // ─── Config save writes file ─────────────────────────────────────────
+
+    #[test]
+    fn config_save_creates_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("subdir").join("config.toml");
+        // We can't easily test Config::save() because it uses a fixed path,
+        // but we can test the serialization and write manually
+        let config = Config::default();
+        let content = toml::to_string_pretty(&config).unwrap();
+        std::fs::create_dir_all(config_path.parent().unwrap()).unwrap();
+        std::fs::write(&config_path, &content).unwrap();
+        assert!(config_path.exists());
+        let loaded_content = std::fs::read_to_string(&config_path).unwrap();
+        let loaded: Config = toml::from_str(&loaded_content).unwrap();
+        assert_eq!(loaded.default_provider, "anthropic");
+    }
+
+    // ─── TitleConfig serde from TOML ─────────────────────────────────────
+
+    #[test]
+    fn title_config_from_toml_defaults() {
+        let toml_content = r#"
+default_provider = "anthropic"
+registries = []
+agent_paths = []
+
+[providers]
+"#;
+        let config: Config = toml::from_str(toml_content).unwrap();
+        assert!(config.title.enabled);
+        assert!(config.title.provider.is_none());
+        assert!(config.title.model.is_none());
+    }
+
+    #[test]
+    fn title_config_from_toml_disabled() {
+        let toml_content = r#"
+default_provider = "anthropic"
+registries = []
+agent_paths = []
+
+[providers]
+
+[title]
+enabled = false
+"#;
+        let config: Config = toml::from_str(toml_content).unwrap();
+        assert!(!config.title.enabled);
+    }
+
+    // ─── ToolPolicy in tool_permissions ───────────────────────────────────
+
+    #[test]
+    fn config_tool_permissions_allow() {
+        let toml_content = r#"
+default_provider = "anthropic"
+registries = []
+agent_paths = []
+
+[providers]
+
+[tool_permissions]
+read_file = "allow"
+write_file = "ask"
+bash = "deny"
+"#;
+        let config: Config = toml::from_str(toml_content).unwrap();
+        assert_eq!(
+            config.tool_permissions.get("read_file"),
+            Some(&ToolPolicy::Allow)
+        );
+        assert_eq!(
+            config.tool_permissions.get("write_file"),
+            Some(&ToolPolicy::Ask)
+        );
+        assert_eq!(config.tool_permissions.get("bash"), Some(&ToolPolicy::Deny));
+    }
+
+    // ─── Config with agent_paths ─────────────────────────────────────────
+
+    #[test]
+    fn config_with_agent_paths() {
+        let toml_content = r#"
+default_provider = "anthropic"
+registries = []
+agent_paths = ["/home/user/agents", "/opt/agents"]
+
+[providers]
+"#;
+        let config: Config = toml::from_str(toml_content).unwrap();
+        assert_eq!(config.agent_paths.len(), 2);
+    }
+
+    // ─── Config with multiple model_capabilities ─────────────────────────
+
+    #[test]
+    fn config_multiple_model_capabilities() {
+        let toml_content = r#"
+default_provider = "anthropic"
+registries = []
+agent_paths = []
+
+[providers]
+
+[model_capabilities."model-a"]
+supports_temperature = true
+supports_streaming = true
+supports_tools = true
+supports_system_prompt = true
+max_context_tokens = 8192
+max_output_tokens = 4096
+
+[model_capabilities."model-b"]
+supports_temperature = false
+supports_streaming = false
+supports_tools = false
+supports_system_prompt = false
+max_context_tokens = 2048
+max_output_tokens = 1024
+"#;
+        let config: Config = toml::from_str(toml_content).unwrap();
+        assert_eq!(config.model_capabilities.len(), 2);
+        let caps_a = config.model_capabilities.get("model-a").unwrap();
+        assert!(caps_a.supports_temperature);
+        assert_eq!(caps_a.max_context_tokens, 8192);
+        let caps_b = config.model_capabilities.get("model-b").unwrap();
+        assert!(!caps_b.supports_temperature);
+        assert_eq!(caps_b.max_context_tokens, 2048);
+    }
 }

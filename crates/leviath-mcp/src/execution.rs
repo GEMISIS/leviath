@@ -183,4 +183,201 @@ mod tests {
         let executor = ToolExecutor::new();
         assert_eq!(executor.server_count(), 0);
     }
+
+    // ─── ToolExecutor::default ──────────────────────────────────────────
+
+    #[test]
+    fn test_tool_executor_default() {
+        let executor = ToolExecutor::default();
+        assert_eq!(executor.server_count(), 0);
+    }
+
+    // ─── map_result: text content ───────────────────────────────────────
+
+    #[test]
+    fn test_map_result_text_content() {
+        let tool_result = ToolResult {
+            content: vec![ToolResultContent::Text {
+                text: "Hello world".to_string(),
+            }],
+            is_error: false,
+        };
+        let result = ToolExecutor::map_result(tool_result);
+        assert!(result.success);
+        assert_eq!(result.text, "Hello world");
+    }
+
+    #[test]
+    fn test_map_result_error() {
+        let tool_result = ToolResult {
+            content: vec![ToolResultContent::Text {
+                text: "Something failed".to_string(),
+            }],
+            is_error: true,
+        };
+        let result = ToolExecutor::map_result(tool_result);
+        assert!(!result.success);
+        assert_eq!(result.text, "Something failed");
+    }
+
+    #[test]
+    fn test_map_result_empty_content() {
+        let tool_result = ToolResult {
+            content: vec![],
+            is_error: false,
+        };
+        let result = ToolExecutor::map_result(tool_result);
+        assert!(result.success);
+        assert_eq!(result.text, "");
+    }
+
+    #[test]
+    fn test_map_result_multiple_text() {
+        let tool_result = ToolResult {
+            content: vec![
+                ToolResultContent::Text {
+                    text: "line1".to_string(),
+                },
+                ToolResultContent::Text {
+                    text: "line2".to_string(),
+                },
+            ],
+            is_error: false,
+        };
+        let result = ToolExecutor::map_result(tool_result);
+        assert_eq!(result.text, "line1\nline2");
+    }
+
+    #[test]
+    fn test_map_result_image_excluded_from_text() {
+        let tool_result = ToolResult {
+            content: vec![
+                ToolResultContent::Text {
+                    text: "before".to_string(),
+                },
+                ToolResultContent::Image {
+                    data: "base64data".to_string(),
+                    mime_type: "image/png".to_string(),
+                },
+                ToolResultContent::Text {
+                    text: "after".to_string(),
+                },
+            ],
+            is_error: false,
+        };
+        let result = ToolExecutor::map_result(tool_result);
+        assert_eq!(result.text, "before\nafter");
+    }
+
+    #[test]
+    fn test_map_result_resource_with_text() {
+        let tool_result = ToolResult {
+            content: vec![ToolResultContent::Resource {
+                uri: "file:///test".to_string(),
+                text: Some("resource content".to_string()),
+            }],
+            is_error: false,
+        };
+        let result = ToolExecutor::map_result(tool_result);
+        assert_eq!(result.text, "resource content");
+    }
+
+    #[test]
+    fn test_map_result_resource_without_text() {
+        let tool_result = ToolResult {
+            content: vec![ToolResultContent::Resource {
+                uri: "file:///test".to_string(),
+                text: None,
+            }],
+            is_error: false,
+        };
+        let result = ToolExecutor::map_result(tool_result);
+        assert_eq!(result.text, "");
+    }
+
+    #[test]
+    fn test_map_result_data_is_json() {
+        let tool_result = ToolResult {
+            content: vec![ToolResultContent::Text {
+                text: "hi".to_string(),
+            }],
+            is_error: false,
+        };
+        let result = ToolExecutor::map_result(tool_result);
+        assert!(result.data.is_array());
+    }
+
+    // ─── execute_filtered: allowed tool ────────────────────────────────
+
+    #[tokio::test]
+    async fn test_execute_filtered_allowed_tool_but_no_server() {
+        let mut executor = ToolExecutor::new();
+        let allowed = vec!["read_file".to_string()];
+
+        // Tool is allowed but no server has it
+        let result = executor
+            .execute_filtered("read_file", serde_json::json!({}), &allowed)
+            .await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("No MCP server"));
+    }
+
+    // ─── execute: no server ─────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_execute_no_server_errors() {
+        let mut executor = ToolExecutor::new();
+        let result = executor
+            .execute("nonexistent_tool", serde_json::json!({}))
+            .await;
+        assert!(result.is_err());
+    }
+
+    // ─── execute_on: unknown server ─────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_execute_on_unknown_server() {
+        let mut executor = ToolExecutor::new();
+        let result = executor
+            .execute_on("unknown_server", "tool", serde_json::json!({}))
+            .await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("not found"));
+    }
+
+    // ─── shutdown_all: empty executor ───────────────────────────────────
+
+    #[tokio::test]
+    async fn test_shutdown_all_empty() {
+        let mut executor = ToolExecutor::new();
+        let result = executor.shutdown_all().await;
+        assert!(result.is_ok());
+        assert_eq!(executor.server_count(), 0);
+    }
+
+    // ─── ExecutionResult ────────────────────────────────────────────────
+
+    #[test]
+    fn test_execution_result_clone() {
+        let result = ExecutionResult {
+            success: true,
+            data: serde_json::json!("test"),
+            text: "hello".to_string(),
+        };
+        let cloned = result.clone();
+        assert!(cloned.success);
+        assert_eq!(cloned.text, "hello");
+    }
+
+    #[test]
+    fn test_execution_result_debug() {
+        let result = ExecutionResult {
+            success: false,
+            data: Value::Null,
+            text: "error".to_string(),
+        };
+        let debug = format!("{:?}", result);
+        assert!(debug.contains("success"));
+        assert!(debug.contains("false"));
+    }
 }

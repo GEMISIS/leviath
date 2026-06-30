@@ -128,3 +128,131 @@ pub async fn execute(_args: DashboardArgs) -> anyhow::Result<()> {
     println!("Dashboard closed.");
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dashboard_args_can_be_constructed() {
+        let _args = DashboardArgs {};
+    }
+
+    #[test]
+    fn agent_display_status_variants_display() {
+        let statuses = vec![
+            AgentDisplayStatus::Active,
+            AgentDisplayStatus::Waiting,
+            AgentDisplayStatus::Complete,
+            AgentDisplayStatus::CompleteInteractive,
+            AgentDisplayStatus::Error("test error".to_string()),
+            AgentDisplayStatus::Idle,
+            AgentDisplayStatus::Cancelled,
+        ];
+        for status in statuses {
+            let display = format!("{}", status);
+            assert!(!display.is_empty());
+        }
+    }
+
+    #[test]
+    fn agent_event_log_variant() {
+        let event = AgentEvent::Log("test message".to_string());
+        let dbg = format!("{:?}", event);
+        assert!(dbg.contains("test message"));
+    }
+
+    #[test]
+    fn agent_event_stage_changed() {
+        let event = AgentEvent::StageChanged {
+            agent_id: "agent-1".to_string(),
+            stage: "implement".to_string(),
+        };
+        let dbg = format!("{:?}", event);
+        assert!(dbg.contains("agent-1"));
+        assert!(dbg.contains("implement"));
+    }
+
+    #[test]
+    fn agent_event_status_changed() {
+        let event = AgentEvent::StatusChanged {
+            agent_id: "agent-1".to_string(),
+            status: AgentDisplayStatus::Complete,
+        };
+        let dbg = format!("{:?}", event);
+        assert!(dbg.contains("agent-1"));
+        assert!(dbg.contains("Complete"));
+    }
+
+    #[test]
+    fn agent_event_needs_input() {
+        let event = AgentEvent::NeedsInput {
+            agent_id: "agent-1".to_string(),
+            prompt: "What should I do?".to_string(),
+        };
+        let dbg = format!("{:?}", event);
+        assert!(dbg.contains("What should I do?"));
+    }
+
+    #[test]
+    fn agent_event_tool_called() {
+        let event = AgentEvent::ToolCalled {
+            agent_id: "agent-1".to_string(),
+            tool: "read_file".to_string(),
+            args: r#"{"path": "foo.txt"}"#.to_string(),
+        };
+        let dbg = format!("{:?}", event);
+        assert!(dbg.contains("read_file"));
+    }
+
+    #[test]
+    fn agent_event_error() {
+        let event = AgentEvent::Error {
+            agent_id: "agent-1".to_string(),
+            error: "something broke".to_string(),
+        };
+        let dbg = format!("{:?}", event);
+        assert!(dbg.contains("something broke"));
+    }
+
+    #[test]
+    fn dashboard_agent_struct_fields() {
+        let agent = DashboardAgent {
+            id: "run-test".to_string(),
+            blueprint_name: "tester".to_string(),
+            agent_path: "/path".to_string(),
+            stage: "init".to_string(),
+            stage_index: 0,
+            num_stages: 1,
+            status: AgentDisplayStatus::Idle,
+            tokens_in: 0,
+            tokens_out: 0,
+            cached_tokens: 0,
+            context_tokens: (0, 0),
+            iteration: 0,
+            waiting_prompt: None,
+            pending_request: None,
+            last_answered_request_id: None,
+            context_snapshot: None,
+            stages: vec![],
+            entity: bevy_ecs::prelude::Entity::from_raw(0),
+            is_run_state: false,
+            pid: 0,
+            workdir: "/tmp".to_string(),
+            task: "test task".to_string(),
+            title: None,
+            model: None,
+            parent_id: None,
+            depth: 0,
+            started_at: 0,
+            active_until: None,
+            waiting_secs: 0,
+            graph_info: None,
+            accepts_messages: false,
+        };
+        assert_eq!(agent.id, "run-test");
+        assert_eq!(agent.blueprint_name, "tester");
+        assert_eq!(agent.stage, "init");
+        assert!(!agent.is_run_state);
+    }
+}

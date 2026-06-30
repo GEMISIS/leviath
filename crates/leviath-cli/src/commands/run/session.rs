@@ -264,4 +264,200 @@ mod tests {
         // Path doesn't exist as a file, so it's treated as a literal string
         assert_eq!(result.unwrap(), "/nonexistent/path/do_something");
     }
+
+    #[test]
+    fn resolve_task_file_with_whitespace_only_errors() {
+        let dir = std::env::temp_dir().join("lev-test-resolve-ws");
+        let _ = std::fs::create_dir_all(&dir);
+        let file = dir.join("whitespace.txt");
+        std::fs::write(&file, "   \n\t\n  \n").unwrap();
+
+        let result = resolve_task(&Some(file.to_str().unwrap().to_string()), "test", None);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("empty"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn resolve_task_file_trims_content() {
+        let dir = std::env::temp_dir().join("lev-test-resolve-trim");
+        let _ = std::fs::create_dir_all(&dir);
+        let file = dir.join("trimme.txt");
+        std::fs::write(&file, "  hello world  \n\n").unwrap();
+
+        let result = resolve_task(&Some(file.to_str().unwrap().to_string()), "test", None);
+        assert_eq!(result.unwrap(), "hello world");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn resolve_task_preserves_literal_string_as_is() {
+        let result = resolve_task(&Some("  spaces around  ".to_string()), "test", None);
+        assert_eq!(result.unwrap(), "  spaces around  ");
+    }
+
+    #[test]
+    fn build_provider_registry_with_empty_config() {
+        let config = Config::default();
+        let registry = build_provider_registry(&config);
+        // Should always have ollama and claude-code registered
+        assert!(registry.has("ollama"), "ollama should be registered");
+        assert!(
+            registry.has("claude-code"),
+            "claude-code should be registered"
+        );
+        // Should NOT have anthropic, openai, google without keys
+        assert!(
+            !registry.has("anthropic"),
+            "anthropic should not be registered without key"
+        );
+        assert!(
+            !registry.has("openai"),
+            "openai should not be registered without key"
+        );
+        assert!(
+            !registry.has("google"),
+            "google should not be registered without key"
+        );
+    }
+
+    #[test]
+    fn build_provider_registry_with_anthropic_key() {
+        let config = Config {
+            providers: crate::config::ProviderConfig {
+                anthropic_api_key: Some("sk-ant-test-key-12345".to_string()),
+                ..Config::default().providers
+            },
+            ..Config::default()
+        };
+        let registry = build_provider_registry(&config);
+        assert!(registry.has("anthropic"), "anthropic should be registered");
+    }
+
+    #[test]
+    fn build_provider_registry_with_openai_key() {
+        let config = Config {
+            providers: crate::config::ProviderConfig {
+                openai_api_key: Some("sk-test-key-12345".to_string()),
+                ..Config::default().providers
+            },
+            ..Config::default()
+        };
+        let registry = build_provider_registry(&config);
+        assert!(registry.has("openai"), "openai should be registered");
+    }
+
+    #[test]
+    fn build_provider_registry_with_google_key() {
+        let config = Config {
+            providers: crate::config::ProviderConfig {
+                google_api_key: Some("AIzatest12345".to_string()),
+                ..Config::default().providers
+            },
+            ..Config::default()
+        };
+        let registry = build_provider_registry(&config);
+        assert!(registry.has("google"), "google should be registered");
+    }
+
+    #[test]
+    fn build_provider_registry_with_openrouter_key() {
+        let config = Config {
+            openrouter_api_key: Some("sk-or-test-12345".to_string()),
+            ..Config::default()
+        };
+        let registry = build_provider_registry(&config);
+        assert!(
+            registry.has("openrouter"),
+            "openrouter should be registered"
+        );
+    }
+
+    #[test]
+    fn build_provider_registry_custom_ollama_url() {
+        let config = Config {
+            ollama_base_url: Some("http://my-server:11434".to_string()),
+            ..Config::default()
+        };
+        let registry = build_provider_registry(&config);
+        assert!(registry.has("ollama"), "ollama should be registered");
+    }
+
+    // ─── build_provider_registry with all keys ──────────────────────────
+
+    #[test]
+    fn build_provider_registry_all_keys_set() {
+        let config = Config {
+            providers: crate::config::ProviderConfig {
+                anthropic_api_key: Some("sk-ant-test".to_string()),
+                openai_api_key: Some("sk-test".to_string()),
+                google_api_key: Some("AIza-test".to_string()),
+            },
+            openrouter_api_key: Some("sk-or-test".to_string()),
+            ollama_base_url: Some("http://custom:11434".to_string()),
+            ..Config::default()
+        };
+        let registry = build_provider_registry(&config);
+        assert!(registry.has("anthropic"));
+        assert!(registry.has("openai"));
+        assert!(registry.has("google"));
+        assert!(registry.has("openrouter"));
+        assert!(registry.has("ollama"));
+        assert!(registry.has("claude-code"));
+    }
+
+    // ─── resolve_task: multiline file content ───────────────────────────
+
+    #[test]
+    fn resolve_task_multiline_file() {
+        let dir = std::env::temp_dir().join("lev-test-resolve-multiline");
+        let _ = std::fs::create_dir_all(&dir);
+        let file = dir.join("multi.txt");
+        std::fs::write(&file, "line one\nline two\nline three\n").unwrap();
+
+        let result = resolve_task(&Some(file.to_str().unwrap().to_string()), "test", None);
+        let task = result.unwrap();
+        assert!(task.contains("line one"));
+        assert!(task.contains("line two"));
+        assert!(task.contains("line three"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ─── resolve_task: literal string with special chars ────────────────
+
+    #[test]
+    fn resolve_task_literal_with_special_chars() {
+        let result = resolve_task(
+            &Some("Write a function that does X & Y <html>".to_string()),
+            "test",
+            None,
+        );
+        assert_eq!(result.unwrap(), "Write a function that does X & Y <html>");
+    }
+
+    // ─── build_provider_registry: no providers except defaults ──────────
+
+    #[test]
+    fn build_provider_registry_defaults_always_have_ollama_and_claude_code() {
+        let config = Config::default();
+        let registry = build_provider_registry(&config);
+        // These should always be present regardless of key configuration
+        let provider_count = ["ollama", "claude-code"]
+            .iter()
+            .filter(|name| registry.has(name))
+            .count();
+        assert_eq!(provider_count, 2);
+    }
+
+    // ─── resolve_task: file with only comments in editor-like format ────
+
+    #[test]
+    fn resolve_task_literal_empty_string() {
+        // Empty string is treated as literal, returns as-is
+        let result = resolve_task(&Some("".to_string()), "test", None);
+        assert_eq!(result.unwrap(), "");
+    }
 }

@@ -431,4 +431,148 @@ mod tests {
         // Should not panic or error with None run_id
         write_context_snapshot_if_bg(&engine, entity, "main", &None);
     }
+
+    // ─── swap_context_layout: new layout drops old regions ──────────────
+
+    #[test]
+    fn swap_context_layout_drops_unlisted_regions() {
+        let bp = make_blueprint_with_regions(vec![
+            RegionDefinition::new("system".to_string(), RegionKind::Pinned, 2000),
+            RegionDefinition::new(
+                "conversation".to_string(),
+                RegionKind::SlidingWindow { max_items: 10 },
+                10000,
+            ),
+        ]);
+        let (mut engine, entity) = make_engine_and_entity(&bp);
+        initialize_context_window(&mut engine, entity, &bp, "task");
+
+        // New layout only has system — conversation and tool_results should be dropped
+        let new_layout = ContextLayout::new(
+            vec![RegionDefinition::new(
+                "system".to_string(),
+                RegionKind::Pinned,
+                3000,
+            )],
+            3000,
+        );
+
+        swap_context_layout(&mut engine, entity, &new_layout);
+
+        let window = engine.world().get::<ContextWindow>(entity).unwrap();
+        assert!(window.get_region("system").is_some());
+        assert!(window.get_region("conversation").is_none());
+        assert!(window.get_region("tool_results").is_none());
+    }
+
+    // ─── swap_context_layout: adds new regions ──────────────────────────
+
+    #[test]
+    fn swap_context_layout_adds_new_regions() {
+        let bp = make_blueprint_with_regions(vec![RegionDefinition::new(
+            "system".to_string(),
+            RegionKind::Pinned,
+            2000,
+        )]);
+        let (mut engine, entity) = make_engine_and_entity(&bp);
+        initialize_context_window(&mut engine, entity, &bp, "task");
+
+        let new_layout = ContextLayout::new(
+            vec![
+                RegionDefinition::new("system".to_string(), RegionKind::Pinned, 2000),
+                RegionDefinition::new("scratch".to_string(), RegionKind::Clearable, 5000),
+                RegionDefinition::new("notes".to_string(), RegionKind::Temporary, 3000),
+            ],
+            10000,
+        );
+
+        swap_context_layout(&mut engine, entity, &new_layout);
+
+        let window = engine.world().get::<ContextWindow>(entity).unwrap();
+        assert!(window.get_region("scratch").is_some());
+        assert!(window.get_region("notes").is_some());
+    }
+
+    // ─── initialize_context_window: no pinned region ────────────────────
+
+    #[test]
+    fn initialize_context_window_no_pinned_region() {
+        let bp = make_blueprint_with_regions(vec![RegionDefinition::new(
+            "conversation".to_string(),
+            RegionKind::SlidingWindow { max_items: 10 },
+            10000,
+        )]);
+        let (mut engine, entity) = make_engine_and_entity(&bp);
+
+        // No pinned region means task won't be injected into system, but should not panic
+        initialize_context_window(&mut engine, entity, &bp, "task");
+
+        let window = engine.world().get::<ContextWindow>(entity).unwrap();
+        assert!(window.get_region("conversation").is_some());
+    }
+
+    // ─── build_context_snapshot: region kind strings ────────────────────
+
+    #[test]
+    fn build_context_snapshot_region_kinds() {
+        let bp = make_blueprint_with_regions(vec![
+            RegionDefinition::new("system".to_string(), RegionKind::Pinned, 2000),
+            RegionDefinition::new("temp".to_string(), RegionKind::Temporary, 1000),
+            RegionDefinition::new("clear".to_string(), RegionKind::Clearable, 1000),
+        ]);
+        let (mut engine, entity) = make_engine_and_entity(&bp);
+        initialize_context_window(&mut engine, entity, &bp, "task");
+
+        let snap = build_context_snapshot(&engine, entity, "test").unwrap();
+        let kinds: Vec<&str> = snap.regions.iter().map(|r| r.kind.as_str()).collect();
+        assert!(kinds.contains(&"pinned"));
+        assert!(kinds.contains(&"temporary"));
+        assert!(kinds.contains(&"clearable"));
+    }
+
+    // ─── build_context_snapshot: returns None for invalid entity ────────
+
+    #[test]
+    fn build_context_snapshot_invalid_entity() {
+        let bp = make_blueprint_with_regions(vec![RegionDefinition::new(
+            "system".to_string(),
+            RegionKind::Pinned,
+            2000,
+        )]);
+        let (engine, _entity) = make_engine_and_entity(&bp);
+
+        // Create a fake entity that doesn't have a ContextWindow
+        let fake_entity = bevy_ecs::prelude::Entity::from_raw(9999);
+        let snap = build_context_snapshot(&engine, fake_entity, "test");
+        assert!(snap.is_none());
+    }
+
+    // ─── default_title_model: all known providers ───────────────────────
+
+    #[test]
+    fn default_title_model_empty_for_unknown() {
+        assert_eq!(default_title_model("custom-provider"), "");
+        assert_eq!(default_title_model(""), "");
+    }
+
+    // ─── initialize_context_window: empty task ──────────────────────────
+
+    #[test]
+    fn initialize_context_window_empty_task() {
+        let bp = make_blueprint_with_regions(vec![
+            RegionDefinition::new("system".to_string(), RegionKind::Pinned, 2000),
+            RegionDefinition::new(
+                "conversation".to_string(),
+                RegionKind::SlidingWindow { max_items: 10 },
+                10000,
+            ),
+        ]);
+        let (mut engine, entity) = make_engine_and_entity(&bp);
+        initialize_context_window(&mut engine, entity, &bp, "");
+
+        let window = engine.world().get::<ContextWindow>(entity).unwrap();
+        let sys = window.get_region("system").unwrap();
+        // Empty task still gets added
+        assert_eq!(sys.content.len(), 1);
+    }
 }

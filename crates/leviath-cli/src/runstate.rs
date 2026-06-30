@@ -919,4 +919,221 @@ mod tests {
     fn read_stage_context_missing_returns_none() {
         assert!(read_stage_context("nonexistent-run", 99).is_none());
     }
+
+    // ─── dashboard_log_path ────────────────────────────────────────────────
+
+    #[test]
+    fn dashboard_log_path_structure() {
+        let path = dashboard_log_path();
+        assert!(path.to_str().unwrap().contains(".leviath"));
+        assert!(path.to_str().unwrap().ends_with("dashboard.log"));
+    }
+
+    // ─── runs_dir / run_dir ────────────────────────────────────────────────
+
+    #[test]
+    fn runs_dir_structure() {
+        let path = runs_dir();
+        assert!(path.to_str().unwrap().contains(".leviath"));
+        assert!(path.to_str().unwrap().ends_with("runs"));
+    }
+
+    #[test]
+    fn run_dir_contains_run_id() {
+        let path = run_dir("my-run-123");
+        assert!(path.to_str().unwrap().contains("my-run-123"));
+    }
+
+    // ─── tail_file edge cases ──────────────────────────────────────────────
+
+    #[test]
+    fn tail_file_exact_size() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("exact.txt");
+        std::fs::write(&path, "exactly").unwrap();
+        // max_bytes == file size
+        let result = tail_file(&path, 7);
+        assert_eq!(result, "exactly");
+    }
+
+    // ─── RunMeta metadata and callback_url ─────────────────────────────────
+
+    #[test]
+    fn run_meta_with_metadata() {
+        let mut meta = RunMeta::new(
+            "meta-run".into(),
+            "agent".into(),
+            "/p".into(),
+            "task".into(),
+            None,
+            "/w".into(),
+            1,
+        );
+        meta.metadata
+            .insert("key1".to_string(), "value1".to_string());
+        meta.callback_url = Some("https://example.com/hook".to_string());
+        meta.parent_run_id = Some("parent-123".to_string());
+
+        let json = serde_json::to_string(&meta).unwrap();
+        let back: RunMeta = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.metadata.get("key1").unwrap(), "value1");
+        assert_eq!(
+            back.callback_url.as_deref(),
+            Some("https://example.com/hook")
+        );
+        assert_eq!(back.parent_run_id.as_deref(), Some("parent-123"));
+    }
+
+    // ─── StageRecord modifications ─────────────────────────────────────────
+
+    #[test]
+    fn stage_record_mutation() {
+        let mut rec = StageRecord::new("test".into(), 0);
+        rec.status = StageRunStatus::Active;
+        rec.started_at = Some(1000);
+        rec.prompt_tokens = 500;
+        rec.completion_tokens = 200;
+        rec.cached_tokens = 50;
+
+        assert_eq!(rec.status, StageRunStatus::Active);
+        assert_eq!(rec.started_at, Some(1000));
+        assert_eq!(rec.prompt_tokens, 500);
+        assert_eq!(rec.completion_tokens, 200);
+        assert_eq!(rec.cached_tokens, 50);
+
+        rec.status = StageRunStatus::Complete;
+        rec.ended_at = Some(2000);
+        assert_eq!(rec.status, StageRunStatus::Complete);
+        assert_eq!(rec.ended_at, Some(2000));
+    }
+
+    // ─── ContextSnapshot with entries ──────────────────────────────────────
+
+    #[test]
+    fn context_snapshot_with_entries() {
+        let snap = ContextSnapshot {
+            stage_name: "main".into(),
+            total_tokens: 1000,
+            max_tokens: 8192,
+            regions: vec![
+                RegionSnapshot {
+                    name: "system".into(),
+                    kind: "pinned".into(),
+                    current_tokens: 100,
+                    max_tokens: 2000,
+                    entries: vec![
+                        RegionEntrySnapshot {
+                            content: "You are helpful".into(),
+                            tokens: 3,
+                            metadata: None,
+                        },
+                        RegionEntrySnapshot {
+                            content: "Additional instruction".into(),
+                            tokens: 5,
+                            metadata: Some(serde_json::json!({"source": "user"})),
+                        },
+                    ],
+                },
+                RegionSnapshot {
+                    name: "conversation".into(),
+                    kind: "sliding".into(),
+                    current_tokens: 900,
+                    max_tokens: 6000,
+                    entries: vec![],
+                },
+            ],
+        };
+
+        let json = serde_json::to_string_pretty(&snap).unwrap();
+        let back: ContextSnapshot = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.regions.len(), 2);
+        assert_eq!(back.regions[0].entries.len(), 2);
+        assert_eq!(back.regions[0].entries[1].tokens, 5);
+        assert!(back.regions[0].entries[1].metadata.is_some());
+    }
+
+    // ─── RegionEntrySnapshot metadata ──────────────────────────────────────
+
+    #[test]
+    fn region_entry_snapshot_metadata_omitted_when_none() {
+        let entry = RegionEntrySnapshot {
+            content: "test".into(),
+            tokens: 1,
+            metadata: None,
+        };
+        let json = serde_json::to_value(&entry).unwrap();
+        assert!(json.get("metadata").is_none());
+    }
+
+    // ─── Multiple stage output appends ─────────────────────────────────────
+
+    #[test]
+    fn append_stage_output_multiple_stages() {
+        let run_id = "test-multi-stage-out";
+        append_stage_output(run_id, 0, "stage 0 output");
+        append_stage_output(run_id, 1, "stage 1 output");
+        append_stage_output(run_id, 2, "stage 2 output");
+
+        let out0 = tail_stage_output(run_id, 0, 4096);
+        let out1 = tail_stage_output(run_id, 1, 4096);
+        let out2 = tail_stage_output(run_id, 2, 4096);
+
+        assert!(out0.contains("stage 0 output"));
+        assert!(out1.contains("stage 1 output"));
+        assert!(out2.contains("stage 2 output"));
+        // Verify no cross-contamination
+        assert!(!out0.contains("stage 1 output"));
+
+        let _ = std::fs::remove_dir_all(run_dir(run_id));
+    }
+
+    // ─── list_runs ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn list_runs_returns_sorted() {
+        let meta1 = RunMeta::new(
+            "test-list-run-a".into(),
+            "agent".into(),
+            "/p".into(),
+            "task a".into(),
+            None,
+            "/w".into(),
+            1,
+        );
+        let meta2 = RunMeta::new(
+            "test-list-run-b".into(),
+            "agent".into(),
+            "/p".into(),
+            "task b".into(),
+            None,
+            "/w".into(),
+            1,
+        );
+
+        let _ = create_run(&meta1);
+        // Small delay to ensure different timestamps
+        let _ = create_run(&meta2);
+
+        let runs = list_runs();
+        // Both should appear in the list
+        let ids: Vec<&str> = runs.iter().map(|r| r.run_id.as_str()).collect();
+        assert!(ids.contains(&"test-list-run-a"));
+        assert!(ids.contains(&"test-list-run-b"));
+
+        // Cleanup
+        let _ = std::fs::remove_dir_all(run_dir("test-list-run-a"));
+        let _ = std::fs::remove_dir_all(run_dir("test-list-run-b"));
+    }
+
+    // ─── tail_stage_log / tail_stage_output empty ──────────────────────────
+
+    #[test]
+    fn tail_stage_output_nonexistent_returns_empty() {
+        assert_eq!(tail_stage_output("no-such-run-xyz", 0, 4096), "");
+    }
+
+    #[test]
+    fn tail_stage_log_nonexistent_returns_empty() {
+        assert_eq!(tail_stage_log("no-such-run-xyz", 0, 4096), "");
+    }
 }

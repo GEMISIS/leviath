@@ -749,4 +749,136 @@ mod tests {
         assert_eq!(provider.binary_path, "claude");
         assert_eq!(provider.name(), "claude-code");
     }
+
+    // ── Additional coverage tests ──────────────────────────────────────────
+
+    #[test]
+    fn test_with_overrides_none() {
+        let provider = ClaudeCodeProvider::with_overrides("claude".to_string(), None);
+        assert!(provider.capability_overrides.is_empty());
+    }
+
+    #[test]
+    fn test_max_context_tokens_with_override() {
+        let mut overrides = HashMap::new();
+        overrides.insert(
+            "custom-model".to_string(),
+            ModelCapabilities {
+                supports_temperature: false,
+                supports_streaming: false,
+                supports_tools: false,
+                supports_system_prompt: false,
+                max_context_tokens: 50_000,
+                max_output_tokens: 5_000,
+            },
+        );
+        let provider = ClaudeCodeProvider::with_overrides("claude".to_string(), Some(overrides));
+        assert_eq!(provider.max_context_tokens("custom-model"), 50_000);
+    }
+
+    #[test]
+    fn test_max_context_tokens_default() {
+        let provider = ClaudeCodeProvider::new();
+        assert_eq!(provider.max_context_tokens("some-unknown"), 200_000);
+    }
+
+    #[test]
+    fn test_builtin_capabilities_sonnet_default() {
+        let provider = ClaudeCodeProvider::new();
+        let caps = provider.builtin_capabilities("claude-sonnet-4-6");
+        assert_eq!(caps.max_output_tokens, 16_000);
+    }
+
+    #[test]
+    fn test_count_tokens_larger_text() {
+        let provider = ClaudeCodeProvider::new();
+        let text = "a".repeat(350);
+        let tokens = provider.count_tokens(&text, "claude-sonnet-4-6");
+        assert_eq!(tokens, 100); // ceil(350 / 3.5) = 100
+    }
+
+    #[test]
+    fn test_count_tokens_empty() {
+        let provider = ClaudeCodeProvider::new();
+        let tokens = provider.count_tokens("", "claude-sonnet-4-6");
+        assert_eq!(tokens, 0);
+    }
+
+    #[test]
+    fn test_parse_stop_reason_variants() {
+        assert!(matches!(
+            parse_stop_reason(Some("end_turn")),
+            FinishReason::Complete
+        ));
+        assert!(matches!(
+            parse_stop_reason(Some("stop")),
+            FinishReason::Complete
+        ));
+        assert!(matches!(
+            parse_stop_reason(Some("tool_use")),
+            FinishReason::ToolCall
+        ));
+        assert!(matches!(
+            parse_stop_reason(Some("max_tokens")),
+            FinishReason::TokenLimit
+        ));
+        assert!(matches!(parse_stop_reason(None), FinishReason::Complete));
+        assert!(matches!(
+            parse_stop_reason(Some("unknown")),
+            FinishReason::Complete
+        ));
+    }
+
+    #[test]
+    fn test_parse_claude_response_missing_fields() {
+        let json = r#"{"type":"result","subtype":"success","is_error":false}"#;
+        let response = parse_claude_response(json).unwrap();
+        assert_eq!(response.content, "");
+        assert_eq!(response.tokens_used.prompt_tokens, 0);
+        assert_eq!(response.tokens_used.completion_tokens, 0);
+        assert!(matches!(response.finish_reason, FinishReason::Complete));
+    }
+
+    #[test]
+    fn test_parse_stream_line_assistant_empty_content() {
+        let line = r#"{"type":"assistant","content":""}"#;
+        assert!(parse_stream_line(line).is_none());
+    }
+
+    #[test]
+    fn test_parse_stream_line_content_block_delta_empty() {
+        let line = r#"{"type":"content_block_delta","delta":{"text":""}}"#;
+        assert!(parse_stream_line(line).is_none());
+    }
+
+    #[test]
+    fn test_parse_stream_line_result_with_tool_use_stop() {
+        let line = r#"{"type":"result","result":"","stop_reason":"tool_use","usage":{"input_tokens":5,"output_tokens":3}}"#;
+        let chunk = parse_stream_line(line).unwrap();
+        assert!(matches!(chunk.finish_reason, Some(FinishReason::ToolCall)));
+    }
+
+    #[test]
+    fn test_build_prompt_unknown_role() {
+        let messages = vec![Message {
+            role: "tool".to_string(),
+            content: "result data".to_string(),
+            cache_breakpoint: false,
+        }];
+        let prompt = ClaudeCodeProvider::build_prompt(&messages);
+        assert!(prompt.contains("tool: result data"));
+    }
+
+    #[tokio::test]
+    async fn test_list_models() {
+        let provider = ClaudeCodeProvider::new();
+        let models = provider.list_models().await.unwrap();
+        assert_eq!(models.len(), 3);
+        assert!(models.iter().any(|m| m.id == "claude-sonnet-4-6"));
+        assert!(models.iter().any(|m| m.id == "claude-opus-4-8"));
+        assert!(models.iter().any(|m| m.id == "claude-haiku-4-5"));
+        for model in &models {
+            assert_eq!(model.provider, "claude-code");
+        }
+    }
 }

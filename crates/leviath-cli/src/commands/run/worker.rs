@@ -654,3 +654,442 @@ async fn run_worker_inner(args: &WorkerArgs, meta: &mut RunMeta) -> anyhow::Resu
     tool_registry.shutdown().await;
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn worker_callbacks_now_secs_returns_positive() {
+        let ts = WorkerCallbacks::now_secs();
+        assert!(ts > 0, "Expected positive timestamp, got {}", ts);
+    }
+
+    #[test]
+    fn worker_callbacks_now_secs_is_recent() {
+        let ts = WorkerCallbacks::now_secs();
+        // Should be after 2024-01-01 (1704067200) and before 2040
+        assert!(ts > 1_704_067_200, "Timestamp too old: {}", ts);
+        assert!(ts < 2_208_988_800, "Timestamp too far in future: {}", ts);
+    }
+
+    #[test]
+    fn worker_callbacks_construction() {
+        let mut meta = RunMeta::new(
+            "test-run".into(),
+            "agent".into(),
+            "/path".into(),
+            "task".into(),
+            None,
+            "/work".into(),
+            3,
+        );
+        let cb = WorkerCallbacks {
+            run_id: "test-run".to_string(),
+            meta: &mut meta,
+            blueprint_stages_len: 3,
+        };
+        assert_eq!(cb.run_id, "test-run");
+        assert_eq!(cb.blueprint_stages_len, 3);
+    }
+
+    #[tokio::test]
+    async fn worker_callbacks_on_complete_with_zero_stages() {
+        let mut meta = RunMeta::new(
+            "test-complete".into(),
+            "agent".into(),
+            "/p".into(),
+            "t".into(),
+            None,
+            "/w".into(),
+            0,
+        );
+        let mut cb = WorkerCallbacks {
+            run_id: "test-complete".to_string(),
+            meta: &mut meta,
+            blueprint_stages_len: 0,
+        };
+        // Should not panic even with 0 stages
+        cb.on_complete(0).await;
+    }
+
+    #[test]
+    fn worker_callbacks_get_run_context_returns_some() {
+        let mut meta = RunMeta::new(
+            "ctx-run".into(),
+            "a".into(),
+            "/p".into(),
+            "t".into(),
+            None,
+            "/w".into(),
+            1,
+        );
+        let mut cb = WorkerCallbacks {
+            run_id: "ctx-run".to_string(),
+            meta: &mut meta,
+            blueprint_stages_len: 1,
+        };
+        let ctx = cb.get_run_context();
+        assert!(ctx.is_some());
+        let (rid, _meta_ref) = ctx.unwrap();
+        assert_eq!(rid, "ctx-run");
+    }
+
+    #[test]
+    fn worker_callbacks_start_message_reader_returns_none() {
+        let mut meta = RunMeta::new(
+            "msg-run".into(),
+            "a".into(),
+            "/p".into(),
+            "t".into(),
+            None,
+            "/w".into(),
+            1,
+        );
+        let mut cb = WorkerCallbacks {
+            run_id: "msg-run".to_string(),
+            meta: &mut meta,
+            blueprint_stages_len: 1,
+        };
+        let registry = leviath_runtime::ProviderRegistry::new();
+        let engine = leviath_runtime::AgentEngine::with_providers(registry);
+        let handle = cb.start_message_reader(&engine, "agent-1", true);
+        assert!(handle.is_none(), "Worker should not start a message reader");
+    }
+
+    #[tokio::test]
+    async fn worker_callbacks_on_complete_with_positive_stages() {
+        let mut meta = RunMeta::new(
+            "test-complete-pos".into(),
+            "agent".into(),
+            "/p".into(),
+            "t".into(),
+            None,
+            "/w".into(),
+            3,
+        );
+        let mut cb = WorkerCallbacks {
+            run_id: "test-complete-pos".to_string(),
+            meta: &mut meta,
+            blueprint_stages_len: 3,
+        };
+        // Should not panic with positive stages
+        cb.on_complete(2).await;
+    }
+
+    #[tokio::test]
+    async fn worker_callbacks_on_transition_does_not_panic() {
+        let mut meta = RunMeta::new(
+            "test-trans".into(),
+            "agent".into(),
+            "/p".into(),
+            "t".into(),
+            None,
+            "/w".into(),
+            2,
+        );
+        let mut cb = WorkerCallbacks {
+            run_id: "test-trans".to_string(),
+            meta: &mut meta,
+            blueprint_stages_len: 2,
+        };
+        cb.on_transition("plan", "code", 0).await;
+    }
+
+    #[tokio::test]
+    async fn worker_callbacks_on_claude_code_warning_does_not_panic() {
+        let mut meta = RunMeta::new(
+            "test-ccw".into(),
+            "agent".into(),
+            "/p".into(),
+            "t".into(),
+            None,
+            "/w".into(),
+            1,
+        );
+        let mut cb = WorkerCallbacks {
+            run_id: "test-ccw".to_string(),
+            meta: &mut meta,
+            blueprint_stages_len: 1,
+        };
+        cb.on_claude_code_warning(0).await;
+    }
+
+    #[tokio::test]
+    async fn worker_callbacks_on_provider_missing_returns_true() {
+        // Use a temp dir for run state
+        let run_id = "test-worker-prov-miss";
+        let dir = crate::runstate::run_dir(run_id);
+        let _ = std::fs::create_dir_all(&dir);
+
+        // Write initial stages index
+        let stages = vec![crate::runstate::StageRecord::new("main".to_string(), 0)];
+        let _ = crate::runstate::write_stages_index(run_id, &stages);
+
+        let mut meta = RunMeta::new(
+            run_id.into(),
+            "agent".into(),
+            "/p".into(),
+            "t".into(),
+            None,
+            "/w".into(),
+            1,
+        );
+        let mut cb = WorkerCallbacks {
+            run_id: run_id.to_string(),
+            meta: &mut meta,
+            blueprint_stages_len: 1,
+        };
+        let result = cb.on_provider_missing("nonexistent", 0).await;
+        assert!(result, "on_provider_missing should return true (abort)");
+        assert!(matches!(cb.meta.status, RunStatus::Error));
+        assert!(cb.meta.error.is_some());
+        assert!(cb.meta.error.as_ref().unwrap().contains("nonexistent"));
+
+        let _ = std::fs::remove_dir_all(crate::runstate::run_dir(run_id));
+    }
+
+    #[tokio::test]
+    async fn worker_callbacks_on_stage_enter_updates_meta() {
+        let run_id = "test-worker-stage-enter";
+        let dir = crate::runstate::run_dir(run_id);
+        let _ = std::fs::create_dir_all(&dir);
+
+        let stages = vec![
+            crate::runstate::StageRecord::new("plan".to_string(), 0),
+            crate::runstate::StageRecord::new("code".to_string(), 1),
+        ];
+        let _ = crate::runstate::write_stages_index(run_id, &stages);
+
+        let mut meta = RunMeta::new(
+            run_id.into(),
+            "agent".into(),
+            "/p".into(),
+            "t".into(),
+            None,
+            "/w".into(),
+            2,
+        );
+        let mut cb = WorkerCallbacks {
+            run_id: run_id.to_string(),
+            meta: &mut meta,
+            blueprint_stages_len: 2,
+        };
+        cb.on_stage_enter("plan", 0, "anthropic", "claude-sonnet-4-6", "")
+            .await;
+        assert_eq!(cb.meta.current_stage, "plan");
+        assert_eq!(cb.meta.stage_index, 0);
+        assert!(matches!(cb.meta.status, RunStatus::Running));
+
+        let _ = std::fs::remove_dir_all(crate::runstate::run_dir(run_id));
+    }
+
+    #[tokio::test]
+    async fn worker_callbacks_on_stage_enter_with_visit_label() {
+        let run_id = "test-worker-visit-label";
+        let dir = crate::runstate::run_dir(run_id);
+        let _ = std::fs::create_dir_all(&dir);
+
+        let stages = vec![crate::runstate::StageRecord::new("code".to_string(), 0)];
+        let _ = crate::runstate::write_stages_index(run_id, &stages);
+
+        let mut meta = RunMeta::new(
+            run_id.into(),
+            "agent".into(),
+            "/p".into(),
+            "t".into(),
+            None,
+            "/w".into(),
+            1,
+        );
+        let mut cb = WorkerCallbacks {
+            run_id: run_id.to_string(),
+            meta: &mut meta,
+            blueprint_stages_len: 1,
+        };
+        cb.on_stage_enter("code", 0, "anthropic", "claude-sonnet-4-6", " (visit 2)")
+            .await;
+        assert_eq!(cb.meta.current_stage, "code");
+
+        let _ = std::fs::remove_dir_all(crate::runstate::run_dir(run_id));
+    }
+
+    #[tokio::test]
+    async fn worker_callbacks_on_stage_error_graph_mode() {
+        let run_id = "test-worker-stage-err-graph";
+        let dir = crate::runstate::run_dir(run_id);
+        let _ = std::fs::create_dir_all(&dir);
+
+        let stages = vec![crate::runstate::StageRecord::new("main".to_string(), 0)];
+        let _ = crate::runstate::write_stages_index(run_id, &stages);
+
+        let mut meta = RunMeta::new(
+            run_id.into(),
+            "agent".into(),
+            "/p".into(),
+            "t".into(),
+            None,
+            "/w".into(),
+            1,
+        );
+        let mut cb = WorkerCallbacks {
+            run_id: run_id.to_string(),
+            meta: &mut meta,
+            blueprint_stages_len: 1,
+        };
+
+        let err = anyhow::anyhow!("test error");
+        let result = cb.on_stage_error("main", 0, &err, true).await;
+        assert_eq!(result, Some(leviath_core::blueprint::StageResult::Error));
+
+        let _ = std::fs::remove_dir_all(crate::runstate::run_dir(run_id));
+    }
+
+    #[tokio::test]
+    async fn worker_callbacks_on_stage_error_linear_mode() {
+        let run_id = "test-worker-stage-err-linear";
+        let dir = crate::runstate::run_dir(run_id);
+        let _ = std::fs::create_dir_all(&dir);
+
+        let stages = vec![crate::runstate::StageRecord::new("main".to_string(), 0)];
+        let _ = crate::runstate::write_stages_index(run_id, &stages);
+
+        let mut meta = RunMeta::new(
+            run_id.into(),
+            "agent".into(),
+            "/p".into(),
+            "t".into(),
+            None,
+            "/w".into(),
+            1,
+        );
+        let mut cb = WorkerCallbacks {
+            run_id: run_id.to_string(),
+            meta: &mut meta,
+            blueprint_stages_len: 1,
+        };
+
+        let err = anyhow::anyhow!("linear error");
+        let result = cb.on_stage_error("main", 0, &err, false).await;
+        assert!(result.is_none());
+        assert!(matches!(cb.meta.status, RunStatus::Error));
+        assert!(cb.meta.error.as_ref().unwrap().contains("linear error"));
+
+        let _ = std::fs::remove_dir_all(crate::runstate::run_dir(run_id));
+    }
+
+    #[tokio::test]
+    async fn worker_callbacks_on_stage_result_updates_stages() {
+        let run_id = "test-worker-stage-result";
+        let dir = crate::runstate::run_dir(run_id);
+        let _ = std::fs::create_dir_all(&dir);
+        // Create stages dir for output
+        let stage_dir = crate::runstate::stage_dir(run_id, 0);
+        let _ = std::fs::create_dir_all(&stage_dir);
+
+        let stages = vec![crate::runstate::StageRecord::new("main".to_string(), 0)];
+        let _ = crate::runstate::write_stages_index(run_id, &stages);
+
+        let mut meta = RunMeta::new(
+            run_id.into(),
+            "agent".into(),
+            "/p".into(),
+            "t".into(),
+            None,
+            "/w".into(),
+            1,
+        );
+        let mut cb = WorkerCallbacks {
+            run_id: run_id.to_string(),
+            meta: &mut meta,
+            blueprint_stages_len: 1,
+        };
+
+        let registry = leviath_runtime::ProviderRegistry::new();
+        let mut engine = leviath_runtime::AgentEngine::with_providers(registry);
+        let mut pool = leviath_runtime::AgentPool::new(leviath_core::Blueprint::new(
+            "test".to_string(),
+            "test".to_string(),
+            vec![],
+            leviath_core::ContextLayout::new(vec![], 0),
+        ));
+        let agent_id = pool.spawn_agent(engine.world_mut());
+        let entity = pool.get_agent(&agent_id).unwrap();
+
+        // Test with a response
+        let response = leviath_providers::InferenceResponse {
+            content: "test output".to_string(),
+            tool_calls: vec![],
+            tokens_used: leviath_providers::TokenUsage {
+                prompt_tokens: 100,
+                completion_tokens: 50,
+                total_tokens: 150,
+                cached_tokens: 10,
+                cache_write_tokens: 0,
+            },
+            finish_reason: leviath_providers::FinishReason::Complete,
+        };
+
+        cb.on_stage_result(
+            "main",
+            0,
+            &leviath_core::blueprint::StageResult::Success,
+            Some(&response),
+            &mut engine,
+            entity,
+        )
+        .await;
+
+        assert_eq!(cb.meta.prompt_tokens, 100);
+        assert_eq!(cb.meta.completion_tokens, 50);
+        assert_eq!(cb.meta.cached_tokens, 10);
+
+        let _ = std::fs::remove_dir_all(crate::runstate::run_dir(run_id));
+    }
+
+    #[tokio::test]
+    async fn worker_callbacks_on_stage_result_no_response() {
+        let run_id = "test-worker-stage-result-none";
+        let dir = crate::runstate::run_dir(run_id);
+        let _ = std::fs::create_dir_all(&dir);
+
+        let stages = vec![crate::runstate::StageRecord::new("main".to_string(), 0)];
+        let _ = crate::runstate::write_stages_index(run_id, &stages);
+
+        let mut meta = RunMeta::new(
+            run_id.into(),
+            "agent".into(),
+            "/p".into(),
+            "t".into(),
+            None,
+            "/w".into(),
+            1,
+        );
+        let mut cb = WorkerCallbacks {
+            run_id: run_id.to_string(),
+            meta: &mut meta,
+            blueprint_stages_len: 1,
+        };
+
+        let registry = leviath_runtime::ProviderRegistry::new();
+        let mut engine = leviath_runtime::AgentEngine::with_providers(registry);
+        let entity = bevy_ecs::prelude::Entity::from_raw(0);
+
+        // No response
+        cb.on_stage_result(
+            "main",
+            0,
+            &leviath_core::blueprint::StageResult::Success,
+            None,
+            &mut engine,
+            entity,
+        )
+        .await;
+
+        // Tokens should remain zero
+        assert_eq!(cb.meta.prompt_tokens, 0);
+        assert_eq!(cb.meta.completion_tokens, 0);
+
+        let _ = std::fs::remove_dir_all(crate::runstate::run_dir(run_id));
+    }
+}

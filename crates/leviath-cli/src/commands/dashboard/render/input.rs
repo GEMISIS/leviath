@@ -199,3 +199,256 @@ impl Dashboard {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ratatui::backend::TestBackend;
+    use ratatui::layout::Rect;
+    use ratatui::Terminal;
+    use tokio::sync::mpsc;
+
+    fn make_test_dashboard() -> Dashboard {
+        let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
+        Dashboard::new(cmd_tx)
+    }
+
+    fn make_test_agent(id: &str, status: AgentDisplayStatus) -> DashboardAgent {
+        DashboardAgent {
+            id: id.to_string(),
+            blueprint_name: "test-agent".to_string(),
+            agent_path: "/path".to_string(),
+            stage: "main".to_string(),
+            stage_index: 0,
+            num_stages: 1,
+            status,
+            tokens_in: 100,
+            tokens_out: 50,
+            cached_tokens: 10,
+            context_tokens: (500, 8000),
+            iteration: 3,
+            waiting_prompt: Some("What should I do?".to_string()),
+            pending_request: None,
+            last_answered_request_id: None,
+            context_snapshot: None,
+            stages: vec![],
+            entity: bevy_ecs::prelude::Entity::from_raw(0),
+            is_run_state: true,
+            pid: 0,
+            workdir: "/tmp/test".to_string(),
+            task: "test task".to_string(),
+            title: Some("My Test".to_string()),
+            model: None,
+            parent_id: None,
+            depth: 0,
+            started_at: chrono::Utc::now().timestamp() - 60,
+            active_until: None,
+            waiting_secs: 0,
+            graph_info: None,
+            accepts_messages: true,
+        }
+    }
+
+    fn make_pending_req(kind: interaction::InteractionKind) -> interaction::InteractionRequest {
+        interaction::InteractionRequest {
+            id: "req-1".to_string(),
+            kind,
+            prompt: "Choose wisely".to_string(),
+            options: vec!["Option A".to_string(), "Option B".to_string()],
+            tool_name: None,
+            tool_arguments: None,
+            required: true,
+            stage_name: "main".to_string(),
+            body: None,
+            body_format: interaction::BodyFormat::Plain,
+        }
+    }
+
+    #[test]
+    fn render_review_body_basic() {
+        let backend = TestBackend::new(120, 40);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut dash = make_test_dashboard();
+        let lines: Vec<ratatui::text::Line<'static>> = vec![
+            ratatui::text::Line::from("Line 1"),
+            ratatui::text::Line::from("Line 2"),
+            ratatui::text::Line::from("Line 3"),
+        ];
+        let pending: Option<interaction::InteractionRequest> = None;
+        terminal
+            .draw(|f| {
+                let area = Rect::new(0, 0, 80, 10);
+                dash.render_review_body(f, area, &lines, &pending);
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn render_review_body_with_scrollbar() {
+        let backend = TestBackend::new(120, 40);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut dash = make_test_dashboard();
+        // Create more lines than fit in the area to trigger scrollbar
+        let lines: Vec<ratatui::text::Line<'static>> = (0..50)
+            .map(|i| ratatui::text::Line::from(format!("Line {}", i)))
+            .collect();
+        let pending: Option<interaction::InteractionRequest> = None;
+        terminal
+            .draw(|f| {
+                let area = Rect::new(0, 0, 80, 10);
+                dash.render_review_body(f, area, &lines, &pending);
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn render_review_body_with_pending_req() {
+        let backend = TestBackend::new(120, 40);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut dash = make_test_dashboard();
+        let lines: Vec<ratatui::text::Line<'static>> =
+            vec![ratatui::text::Line::from("Review content")];
+        let pending = Some(make_pending_req(interaction::InteractionKind::FreeText));
+        terminal
+            .draw(|f| {
+                let area = Rect::new(0, 0, 80, 10);
+                dash.render_review_body(f, area, &lines, &pending);
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn render_input_pane_freetext_input_mode() {
+        let backend = TestBackend::new(120, 40);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut dash = make_test_dashboard();
+        dash.input_mode = true;
+        let agent = make_test_agent("run-ft", AgentDisplayStatus::Waiting);
+        let pending: Option<interaction::InteractionRequest> = None;
+        let kind = Some(interaction::InteractionKind::FreeText);
+        let options: Vec<String> = vec![];
+        terminal
+            .draw(|f| {
+                let area = Rect::new(0, 0, 80, 11);
+                dash.render_input_pane(f, area, &agent, &pending, &kind, &options);
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn render_input_pane_freetext_input_mode_no_kind() {
+        let backend = TestBackend::new(120, 40);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut dash = make_test_dashboard();
+        dash.input_mode = true;
+        let agent = make_test_agent("run-ft2", AgentDisplayStatus::Waiting);
+        let pending: Option<interaction::InteractionRequest> = None;
+        let kind: Option<interaction::InteractionKind> = None;
+        let options: Vec<String> = vec![];
+        terminal
+            .draw(|f| {
+                let area = Rect::new(0, 0, 80, 11);
+                dash.render_input_pane(f, area, &agent, &pending, &kind, &options);
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn render_input_pane_multiple_choice_input_mode() {
+        let backend = TestBackend::new(120, 40);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut dash = make_test_dashboard();
+        dash.input_mode = true;
+        let agent = make_test_agent("run-mc", AgentDisplayStatus::Waiting);
+        let pending = Some(make_pending_req(
+            interaction::InteractionKind::MultipleChoice,
+        ));
+        let kind = Some(interaction::InteractionKind::MultipleChoice);
+        let options = vec!["Option A".to_string(), "Option B".to_string()];
+        terminal
+            .draw(|f| {
+                let area = Rect::new(0, 0, 80, 14);
+                dash.render_input_pane(f, area, &agent, &pending, &kind, &options);
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn render_input_pane_confirm_input_mode() {
+        let backend = TestBackend::new(120, 40);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut dash = make_test_dashboard();
+        dash.input_mode = true;
+        let agent = make_test_agent("run-conf", AgentDisplayStatus::Waiting);
+        let pending = Some(make_pending_req(interaction::InteractionKind::Confirm));
+        let kind = Some(interaction::InteractionKind::Confirm);
+        let options = vec!["Yes".to_string(), "No".to_string()];
+        terminal
+            .draw(|f| {
+                let area = Rect::new(0, 0, 80, 14);
+                dash.render_input_pane(f, area, &agent, &pending, &kind, &options);
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn render_input_pane_not_input_mode_with_prompt() {
+        let backend = TestBackend::new(120, 40);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut dash = make_test_dashboard();
+        dash.input_mode = false;
+        let agent = make_test_agent("run-noinput", AgentDisplayStatus::Waiting);
+        let pending = Some(make_pending_req(interaction::InteractionKind::FreeText));
+        let kind = Some(interaction::InteractionKind::FreeText);
+        let options: Vec<String> = vec![];
+        terminal
+            .draw(|f| {
+                let area = Rect::new(0, 0, 80, 8);
+                dash.render_input_pane(f, area, &agent, &pending, &kind, &options);
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn render_input_pane_preview_with_options() {
+        let backend = TestBackend::new(120, 40);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut dash = make_test_dashboard();
+        dash.input_mode = false;
+        let agent = make_test_agent("run-preview", AgentDisplayStatus::Waiting);
+        let pending = Some(make_pending_req(
+            interaction::InteractionKind::MultipleChoice,
+        ));
+        let kind = Some(interaction::InteractionKind::MultipleChoice);
+        let options = vec![
+            "Option A".to_string(),
+            "Option B".to_string(),
+            "Option C".to_string(),
+        ];
+        terminal
+            .draw(|f| {
+                let area = Rect::new(0, 0, 80, 14);
+                dash.render_input_pane(f, area, &agent, &pending, &kind, &options);
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn render_input_pane_complete_interactive() {
+        let backend = TestBackend::new(120, 40);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut dash = make_test_dashboard();
+        dash.input_mode = false;
+        let mut agent = make_test_agent("run-ci", AgentDisplayStatus::CompleteInteractive);
+        agent.waiting_prompt = Some("Anything else?".to_string());
+        let pending: Option<interaction::InteractionRequest> = None;
+        let kind: Option<interaction::InteractionKind> = None;
+        let options: Vec<String> = vec![];
+        terminal
+            .draw(|f| {
+                let area = Rect::new(0, 0, 80, 8);
+                dash.render_input_pane(f, area, &agent, &pending, &kind, &options);
+            })
+            .unwrap();
+    }
+}

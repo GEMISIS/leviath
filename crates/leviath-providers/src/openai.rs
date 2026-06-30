@@ -477,4 +477,135 @@ mod tests {
         let response = parse_openai_response(&body).unwrap();
         assert_eq!(response.tokens_used.cached_tokens, 0);
     }
+
+    // ── Additional coverage tests ──────────────────────────────────────────
+
+    #[test]
+    fn test_name() {
+        let provider = OpenAIProvider::new("key".to_string());
+        assert_eq!(provider.name(), "openai");
+    }
+
+    #[test]
+    fn test_with_config_default_url() {
+        let config = ProviderConfig {
+            api_key: "key".to_string(),
+            base_url: None,
+            rate_limit: None,
+        };
+        let provider = OpenAIProvider::with_config(config);
+        assert_eq!(provider.base_url, "https://api.openai.com/v1");
+    }
+
+    #[test]
+    fn test_with_config_custom_url() {
+        let config = ProviderConfig {
+            api_key: "key".to_string(),
+            base_url: Some("https://custom.openai.com".to_string()),
+            rate_limit: None,
+        };
+        let provider = OpenAIProvider::with_config(config);
+        assert_eq!(provider.base_url, "https://custom.openai.com");
+    }
+
+    #[test]
+    fn test_count_tokens_uses_tiktoken() {
+        let provider = OpenAIProvider::new("key".to_string());
+        let tokens = provider.count_tokens("Hello, world!", "gpt-5.4-mini");
+        assert!(tokens > 0);
+        assert!(tokens < 20);
+    }
+
+    #[test]
+    fn test_count_tokens_empty() {
+        let provider = OpenAIProvider::new("key".to_string());
+        let tokens = provider.count_tokens("", "gpt-5.4-mini");
+        assert_eq!(tokens, 0);
+    }
+
+    #[test]
+    fn test_max_context_tokens_delegates_to_capabilities() {
+        let provider = OpenAIProvider::new("key".to_string());
+        assert_eq!(provider.max_context_tokens("gpt-5.5"), 1_050_000);
+        assert_eq!(provider.max_context_tokens("gpt-4.1"), 1_047_576);
+        assert_eq!(provider.max_context_tokens("o3-mini"), 200_000);
+    }
+
+    #[test]
+    fn test_builtin_capabilities_unknown_model() {
+        let provider = OpenAIProvider::new("key".to_string());
+        let caps = provider.builtin_capabilities("totally-unknown");
+        let default = ModelCapabilities::default();
+        assert_eq!(caps.max_context_tokens, default.max_context_tokens);
+    }
+
+    #[test]
+    fn test_capabilities_uses_override() {
+        let mut overrides = HashMap::new();
+        overrides.insert(
+            "gpt-5.5".to_string(),
+            ModelCapabilities {
+                supports_temperature: false,
+                supports_streaming: false,
+                supports_tools: false,
+                supports_system_prompt: false,
+                max_context_tokens: 1,
+                max_output_tokens: 1,
+            },
+        );
+        let provider = OpenAIProvider::with_overrides("key".to_string(), overrides);
+        let caps = provider.capabilities("gpt-5.5");
+        assert_eq!(caps.max_context_tokens, 1);
+    }
+
+    #[test]
+    fn test_parse_response_no_content() {
+        let body = serde_json::json!({
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "content": null
+                },
+                "finish_reason": "stop"
+            }],
+            "usage": {
+                "prompt_tokens": 5,
+                "completion_tokens": 0,
+                "total_tokens": 5
+            }
+        });
+        let response = parse_openai_response(&body).unwrap();
+        assert_eq!(response.content, "");
+    }
+
+    #[test]
+    fn test_parse_response_finish_reason_length() {
+        let body = serde_json::json!({
+            "choices": [{
+                "message": { "content": "truncated" },
+                "finish_reason": "length"
+            }],
+            "usage": { "prompt_tokens": 5, "completion_tokens": 5, "total_tokens": 10 }
+        });
+        let response = parse_openai_response(&body).unwrap();
+        assert!(matches!(response.finish_reason, FinishReason::TokenLimit));
+    }
+
+    #[test]
+    fn test_gpt5_family_context() {
+        let provider = OpenAIProvider::new("key".to_string());
+        // gpt-5.4, gpt-5-mini, etc. should all match gpt-5 pattern
+        assert_eq!(provider.max_context_tokens("gpt-5.4"), 400_000);
+        assert_eq!(provider.max_context_tokens("gpt-5-mini"), 400_000);
+    }
+
+    #[test]
+    fn test_o4_mini_capabilities() {
+        let provider = OpenAIProvider::new("key".to_string());
+        let caps = provider.builtin_capabilities("o4-mini");
+        assert!(!caps.supports_temperature);
+        assert!(caps.supports_tools);
+        assert_eq!(caps.max_context_tokens, 200_000);
+        assert_eq!(caps.max_output_tokens, 100_000);
+    }
 }

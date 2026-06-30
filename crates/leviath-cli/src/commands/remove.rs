@@ -25,3 +25,32 @@ pub async fn execute(args: RemoveArgs) -> anyhow::Result<()> {
     println!("Removed agent '{}'.", args.name);
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn remove_args_stores_name() {
+        let args = RemoveArgs {
+            name: "my-agent".to_string(),
+        };
+        assert_eq!(args.name, "my-agent");
+    }
+
+    #[test]
+    fn remove_args_accepts_various_names() {
+        for name in &[
+            "simple",
+            "with-dash",
+            "with_underscore",
+            "CamelCase",
+            "v1.0.0",
+        ] {
+            let args = RemoveArgs {
+                name: name.to_string(),
+            };
+            assert_eq!(args.name, *name);
+        }
+    }
+}

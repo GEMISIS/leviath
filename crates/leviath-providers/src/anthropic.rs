@@ -1013,4 +1013,496 @@ mod tests {
         assert_eq!(usage.cached_tokens, 0);
         assert_eq!(usage.cache_write_tokens, 0);
     }
+
+    // ── Additional coverage tests ──────────────────────────────────────────
+
+    #[test]
+    fn test_count_tokens_basic() {
+        let provider = AnthropicProvider::new("test-key".to_string());
+        let tokens = provider.count_tokens("Hello, world!", "claude-sonnet-4-6");
+        assert!(tokens > 0, "Should produce at least one token");
+        // ~3.5 chars per token → 13 chars ≈ 3-4 tokens
+        assert!(tokens < 10);
+    }
+
+    #[test]
+    fn test_count_tokens_empty() {
+        let provider = AnthropicProvider::new("test-key".to_string());
+        let tokens = provider.count_tokens("", "claude-sonnet-4-6");
+        assert_eq!(tokens, 0);
+    }
+
+    #[test]
+    fn test_count_tokens_long_string() {
+        let provider = AnthropicProvider::new("test-key".to_string());
+        let text = "a".repeat(3500);
+        let tokens = provider.count_tokens(&text, "claude-sonnet-4-6");
+        assert_eq!(tokens, 1000); // 3500 / 3.5 = 1000
+    }
+
+    #[test]
+    fn test_name() {
+        let provider = AnthropicProvider::new("test-key".to_string());
+        assert_eq!(provider.name(), "anthropic");
+    }
+
+    #[test]
+    fn test_with_config_default_base_url() {
+        let config = ProviderConfig {
+            api_key: "test-key".to_string(),
+            base_url: None,
+            rate_limit: None,
+        };
+        let provider = AnthropicProvider::with_config(config);
+        assert_eq!(provider.base_url, "https://api.anthropic.com/v1");
+    }
+
+    #[test]
+    fn test_with_config_custom_base_url() {
+        let config = ProviderConfig {
+            api_key: "test-key".to_string(),
+            base_url: Some("https://custom.api.com".to_string()),
+            rate_limit: None,
+        };
+        let provider = AnthropicProvider::with_config(config);
+        assert_eq!(provider.base_url, "https://custom.api.com");
+    }
+
+    #[test]
+    fn test_with_config_with_rate_limit() {
+        let config = ProviderConfig {
+            api_key: "test-key".to_string(),
+            base_url: None,
+            rate_limit: Some(crate::provider::RateLimitConfig {
+                requests_per_minute: 10,
+                tokens_per_minute: 50000,
+            }),
+        };
+        let provider = AnthropicProvider::with_config(config);
+        assert!(provider.rate_limiter.is_some());
+    }
+
+    #[test]
+    fn test_builtin_capabilities_opus46() {
+        let provider = AnthropicProvider::new("test-key".to_string());
+        let caps = provider.builtin_capabilities("claude-opus-4-6");
+        assert!(caps.supports_temperature);
+        assert!(caps.supports_streaming);
+        assert!(caps.supports_tools);
+        assert!(caps.supports_system_prompt);
+        assert_eq!(caps.max_context_tokens, 1_000_000);
+        assert_eq!(caps.max_output_tokens, 128_000);
+    }
+
+    #[test]
+    fn test_builtin_capabilities_opus47() {
+        let provider = AnthropicProvider::new("test-key".to_string());
+        let caps = provider.builtin_capabilities("claude-opus-4-7");
+        assert!(!caps.supports_temperature);
+        assert_eq!(caps.max_context_tokens, 1_000_000);
+        assert_eq!(caps.max_output_tokens, 128_000);
+    }
+
+    #[test]
+    fn test_builtin_capabilities_mythos5() {
+        let provider = AnthropicProvider::new("test-key".to_string());
+        let caps = provider.builtin_capabilities("claude-mythos-5");
+        assert!(!caps.supports_temperature);
+        assert_eq!(caps.max_context_tokens, 1_000_000);
+        assert_eq!(caps.max_output_tokens, 128_000);
+    }
+
+    #[test]
+    fn test_builtin_capabilities_generic_claude4_fallback() {
+        let provider = AnthropicProvider::new("test-key".to_string());
+        // Uses generic claude-4.x fallback (not matching specific model patterns above)
+        let caps = provider.builtin_capabilities("claude-haiku-4");
+        assert!(!caps.supports_temperature);
+        assert_eq!(caps.max_context_tokens, 1_000_000);
+        assert_eq!(caps.max_output_tokens, 32_768);
+    }
+
+    #[test]
+    fn test_builtin_capabilities_unknown_model() {
+        let provider = AnthropicProvider::new("test-key".to_string());
+        let caps = provider.builtin_capabilities("some-unknown-model");
+        // Should return ModelCapabilities::default()
+        let default = ModelCapabilities::default();
+        assert_eq!(caps.max_context_tokens, default.max_context_tokens);
+    }
+
+    #[test]
+    fn test_capabilities_uses_override_when_present() {
+        let mut overrides = HashMap::new();
+        overrides.insert(
+            "custom-model".to_string(),
+            ModelCapabilities {
+                supports_temperature: true,
+                supports_streaming: false,
+                supports_tools: false,
+                supports_system_prompt: false,
+                max_context_tokens: 42,
+                max_output_tokens: 10,
+            },
+        );
+        let provider = AnthropicProvider::with_overrides("key".to_string(), overrides);
+        let caps = provider.capabilities("custom-model");
+        assert_eq!(caps.max_context_tokens, 42);
+        assert!(!caps.supports_streaming);
+    }
+
+    #[test]
+    fn test_capabilities_falls_through_to_builtin() {
+        let provider = AnthropicProvider::with_overrides("key".to_string(), HashMap::new());
+        let caps = provider.capabilities("claude-sonnet-4-6");
+        assert_eq!(caps.max_context_tokens, 1_000_000);
+    }
+
+    #[test]
+    fn test_max_context_tokens_delegates_to_capabilities() {
+        let provider = AnthropicProvider::new("key".to_string());
+        assert_eq!(provider.max_context_tokens("claude-haiku-4-5"), 200_000);
+        assert_eq!(provider.max_context_tokens("claude-opus-4-8"), 1_000_000);
+    }
+
+    #[test]
+    fn test_parse_stop_reason_all_variants() {
+        assert!(matches!(
+            AnthropicProvider::parse_stop_reason("end_turn"),
+            FinishReason::Complete
+        ));
+        assert!(matches!(
+            AnthropicProvider::parse_stop_reason("tool_use"),
+            FinishReason::ToolCall
+        ));
+        assert!(matches!(
+            AnthropicProvider::parse_stop_reason("max_tokens"),
+            FinishReason::TokenLimit
+        ));
+        assert!(matches!(
+            AnthropicProvider::parse_stop_reason("stop_sequence"),
+            FinishReason::Stop
+        ));
+        assert!(matches!(
+            AnthropicProvider::parse_stop_reason("unknown_reason"),
+            FinishReason::Complete
+        ));
+    }
+
+    #[test]
+    fn test_parse_response_empty_content_blocks() {
+        let provider = AnthropicProvider::new("key".to_string());
+        let body = serde_json::json!({
+            "content": [],
+            "stop_reason": "end_turn",
+            "usage": { "input_tokens": 5, "output_tokens": 0 }
+        });
+        let resp = provider.parse_response(&body).unwrap();
+        assert_eq!(resp.content, "");
+        assert!(resp.tool_calls.is_empty());
+    }
+
+    #[test]
+    fn test_parse_response_no_content_field() {
+        let provider = AnthropicProvider::new("key".to_string());
+        let body = serde_json::json!({
+            "stop_reason": "end_turn",
+            "usage": { "input_tokens": 5, "output_tokens": 0 }
+        });
+        let resp = provider.parse_response(&body).unwrap();
+        assert_eq!(resp.content, "");
+    }
+
+    #[test]
+    fn test_parse_response_no_usage_field() {
+        let provider = AnthropicProvider::new("key".to_string());
+        let body = serde_json::json!({
+            "content": [{ "type": "text", "text": "Hello" }],
+            "stop_reason": "end_turn"
+        });
+        let resp = provider.parse_response(&body).unwrap();
+        assert_eq!(resp.tokens_used.prompt_tokens, 0);
+        assert_eq!(resp.tokens_used.completion_tokens, 0);
+    }
+
+    #[test]
+    fn test_parse_response_unknown_content_type_ignored() {
+        let provider = AnthropicProvider::new("key".to_string());
+        let body = serde_json::json!({
+            "content": [
+                { "type": "image", "data": "abc" },
+                { "type": "text", "text": "Hello" }
+            ],
+            "stop_reason": "end_turn",
+            "usage": { "input_tokens": 10, "output_tokens": 5 }
+        });
+        let resp = provider.parse_response(&body).unwrap();
+        assert_eq!(resp.content, "Hello");
+    }
+
+    #[test]
+    fn test_parse_response_tool_call_missing_fields() {
+        let provider = AnthropicProvider::new("key".to_string());
+        let body = serde_json::json!({
+            "content": [
+                { "type": "tool_use" }
+            ],
+            "stop_reason": "tool_use",
+            "usage": { "input_tokens": 10, "output_tokens": 5 }
+        });
+        let resp = provider.parse_response(&body).unwrap();
+        assert_eq!(resp.tool_calls.len(), 1);
+        assert_eq!(resp.tool_calls[0].id, "");
+        assert_eq!(resp.tool_calls[0].name, "");
+    }
+
+    #[test]
+    fn test_parse_response_total_tokens_computed() {
+        let provider = AnthropicProvider::new("key".to_string());
+        let body = serde_json::json!({
+            "content": [{ "type": "text", "text": "ok" }],
+            "stop_reason": "end_turn",
+            "usage": { "input_tokens": 100, "output_tokens": 50 }
+        });
+        let resp = provider.parse_response(&body).unwrap();
+        assert_eq!(resp.tokens_used.total_tokens, 150);
+    }
+
+    #[test]
+    fn test_build_request_body_with_tools() {
+        let provider = AnthropicProvider::new("key".to_string());
+        let request = InferenceRequest {
+            messages: vec![crate::provider::Message {
+                role: "user".to_string(),
+                content: "Use the tool".to_string(),
+                cache_breakpoint: false,
+            }],
+            model: "claude-sonnet-4-6".to_string(),
+            max_tokens: 1024,
+            temperature: 0.7,
+            tools: vec![crate::provider::Tool {
+                name: "search".to_string(),
+                description: "Search the web".to_string(),
+                parameters: serde_json::json!({"type": "object"}),
+            }],
+            extra: serde_json::Value::Null,
+        };
+
+        let body = provider.build_request_body(&request);
+        let tools = body["tools"].as_array().unwrap();
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0]["name"], "search");
+        assert_eq!(tools[0]["input_schema"]["type"], "object");
+    }
+
+    #[test]
+    fn test_build_request_body_no_temperature_for_opus48() {
+        let provider = AnthropicProvider::new("key".to_string());
+        let request = InferenceRequest {
+            messages: vec![crate::provider::Message {
+                role: "user".to_string(),
+                content: "Hi".to_string(),
+                cache_breakpoint: false,
+            }],
+            model: "claude-opus-4-8".to_string(),
+            max_tokens: 1024,
+            temperature: 0.7,
+            tools: vec![],
+            extra: serde_json::Value::Null,
+        };
+
+        let body = provider.build_request_body(&request);
+        // Opus 4.8 doesn't support temperature, so it should NOT be in the body
+        assert!(body.get("temperature").is_none());
+    }
+
+    #[test]
+    fn test_build_request_body_temperature_for_sonnet46() {
+        let provider = AnthropicProvider::new("key".to_string());
+        let request = InferenceRequest {
+            messages: vec![crate::provider::Message {
+                role: "user".to_string(),
+                content: "Hi".to_string(),
+                cache_breakpoint: false,
+            }],
+            model: "claude-sonnet-4-6".to_string(),
+            max_tokens: 1024,
+            temperature: 0.5,
+            tools: vec![],
+            extra: serde_json::Value::Null,
+        };
+
+        let body = provider.build_request_body(&request);
+        assert_eq!(body["temperature"], 0.5);
+    }
+
+    #[test]
+    fn test_build_request_body_multiple_system_messages() {
+        let provider = AnthropicProvider::new("key".to_string());
+        let request = InferenceRequest {
+            messages: vec![
+                crate::provider::Message {
+                    role: "system".to_string(),
+                    content: "System part 1".to_string(),
+                    cache_breakpoint: false,
+                },
+                crate::provider::Message {
+                    role: "system".to_string(),
+                    content: "System part 2".to_string(),
+                    cache_breakpoint: false,
+                },
+                crate::provider::Message {
+                    role: "user".to_string(),
+                    content: "Hello".to_string(),
+                    cache_breakpoint: false,
+                },
+            ],
+            model: "claude-sonnet-4-6".to_string(),
+            max_tokens: 1024,
+            temperature: 0.7,
+            tools: vec![],
+            extra: serde_json::Value::Null,
+        };
+
+        let body = provider.build_request_body(&request);
+        // Multiple system messages → should be an array
+        assert!(body["system"].is_array());
+        assert_eq!(body["system"].as_array().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn test_build_request_body_no_system_messages() {
+        let provider = AnthropicProvider::new("key".to_string());
+        let request = InferenceRequest {
+            messages: vec![crate::provider::Message {
+                role: "user".to_string(),
+                content: "Hello".to_string(),
+                cache_breakpoint: false,
+            }],
+            model: "claude-sonnet-4-6".to_string(),
+            max_tokens: 1024,
+            temperature: 0.7,
+            tools: vec![],
+            extra: serde_json::Value::Null,
+        };
+
+        let body = provider.build_request_body(&request);
+        assert!(body.get("system").is_none());
+    }
+
+    // ── SSE parsing tests ──────────────────────────────────────────────────
+
+    #[test]
+    fn test_parse_sse_event_text_delta() {
+        let mut buffer = "event: content_block_delta\ndata: {\"delta\":{\"type\":\"text_delta\",\"text\":\"Hello\"}}\n\n".to_string();
+        let mut tool_index = 0usize;
+        let chunk = parse_sse_event(&mut buffer, &mut tool_index).unwrap();
+        assert_eq!(chunk.delta, "Hello");
+        assert!(chunk.tool_calls.is_empty());
+        assert!(buffer.is_empty());
+    }
+
+    #[test]
+    fn test_parse_sse_event_input_json_delta() {
+        let mut buffer = "event: content_block_delta\ndata: {\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"key\\\"\"}}\n\n".to_string();
+        let mut tool_index = 1usize;
+        let chunk = parse_sse_event(&mut buffer, &mut tool_index).unwrap();
+        assert_eq!(chunk.delta, "");
+        assert_eq!(chunk.tool_calls.len(), 1);
+        assert_eq!(chunk.tool_calls[0].index, 1);
+        assert_eq!(chunk.tool_calls[0].arguments_delta, "{\"key\"");
+    }
+
+    #[test]
+    fn test_parse_sse_event_content_block_start_tool_use() {
+        let mut buffer = "event: content_block_start\ndata: {\"content_block\":{\"type\":\"tool_use\",\"id\":\"toolu_1\",\"name\":\"search\"}}\n\n".to_string();
+        let mut tool_index = 0usize;
+        let chunk = parse_sse_event(&mut buffer, &mut tool_index).unwrap();
+        assert_eq!(chunk.tool_calls.len(), 1);
+        assert_eq!(chunk.tool_calls[0].id, Some("toolu_1".to_string()));
+        assert_eq!(chunk.tool_calls[0].name, Some("search".to_string()));
+        assert_eq!(chunk.tool_calls[0].index, 0);
+        assert_eq!(tool_index, 1, "tool_index should increment");
+    }
+
+    #[test]
+    fn test_parse_sse_event_content_block_start_text_returns_none() {
+        let mut buffer = "event: content_block_start\ndata: {\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n".to_string();
+        let mut tool_index = 0usize;
+        let result = parse_sse_event(&mut buffer, &mut tool_index);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_parse_sse_event_message_delta() {
+        let mut buffer = "event: message_delta\ndata: {\"delta\":{\"stop_reason\":\"tool_use\"},\"usage\":{\"output_tokens\":42}}\n\n".to_string();
+        let mut tool_index = 0usize;
+        let chunk = parse_sse_event(&mut buffer, &mut tool_index).unwrap();
+        assert!(matches!(chunk.finish_reason, Some(FinishReason::ToolCall)));
+        let tokens = chunk.tokens.unwrap();
+        assert_eq!(tokens.completion_tokens, 42);
+    }
+
+    #[test]
+    fn test_parse_sse_event_message_start_with_usage() {
+        let mut buffer = "event: message_start\ndata: {\"message\":{\"usage\":{\"input_tokens\":100,\"cache_read_input_tokens\":50,\"cache_creation_input_tokens\":10}}}\n\n".to_string();
+        let mut tool_index = 0usize;
+        let chunk = parse_sse_event(&mut buffer, &mut tool_index).unwrap();
+        let tokens = chunk.tokens.unwrap();
+        assert_eq!(tokens.prompt_tokens, 100);
+        assert_eq!(tokens.cached_tokens, 50);
+        assert_eq!(tokens.cache_write_tokens, 10);
+    }
+
+    #[test]
+    fn test_parse_sse_event_message_start_zero_usage_returns_none() {
+        let mut buffer =
+            "event: message_start\ndata: {\"message\":{\"usage\":{\"input_tokens\":0}}}\n\n"
+                .to_string();
+        let mut tool_index = 0usize;
+        let result = parse_sse_event(&mut buffer, &mut tool_index);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_parse_sse_event_message_stop_returns_none() {
+        let mut buffer = "event: message_stop\ndata: {}\n\n".to_string();
+        let mut tool_index = 0usize;
+        let result = parse_sse_event(&mut buffer, &mut tool_index);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_parse_sse_event_ping_returns_none() {
+        let mut buffer = "event: ping\ndata: {}\n\n".to_string();
+        let mut tool_index = 0usize;
+        let result = parse_sse_event(&mut buffer, &mut tool_index);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_parse_sse_event_unknown_event_returns_none() {
+        let mut buffer = "event: some_future_event\ndata: {\"foo\":\"bar\"}\n\n".to_string();
+        let mut tool_index = 0usize;
+        let result = parse_sse_event(&mut buffer, &mut tool_index);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_parse_sse_event_incomplete_buffer() {
+        let mut buffer = "event: content_block_delta\ndata: {\"delta\":".to_string();
+        let mut tool_index = 0usize;
+        let result = parse_sse_event(&mut buffer, &mut tool_index);
+        assert!(result.is_none());
+        // Buffer should be unchanged
+        assert!(buffer.contains("content_block_delta"));
+    }
+
+    #[test]
+    fn test_parse_sse_event_empty_data_returns_none() {
+        let mut buffer = "event: content_block_delta\n\n\n".to_string();
+        let mut tool_index = 0usize;
+        let result = parse_sse_event(&mut buffer, &mut tool_index);
+        assert!(result.is_none());
+    }
 }

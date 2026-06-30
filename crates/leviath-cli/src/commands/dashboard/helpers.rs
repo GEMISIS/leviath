@@ -277,4 +277,74 @@ mod tests {
         // until < started_at → clamped to 0
         assert_eq!(elapsed_str_until(200, 100), "0s");
     }
+
+    // ── Additional coverage tests ──────────────────────────────────────────
+
+    #[test]
+    fn test_format_tokens_boundary_999() {
+        assert_eq!(format_tokens(999), "999");
+    }
+
+    #[test]
+    fn test_format_tokens_boundary_1000() {
+        assert_eq!(format_tokens(1000), "1k");
+    }
+
+    #[test]
+    fn test_format_tokens_boundary_999999() {
+        assert_eq!(format_tokens(999_999), "999k");
+    }
+
+    #[test]
+    fn test_format_tokens_boundary_1000000() {
+        assert_eq!(format_tokens(1_000_000), "1M");
+    }
+
+    #[test]
+    fn test_truncate_unicode() {
+        // Truncation with simple ASCII substring (may split multi-byte in real usage,
+        // but the function uses byte indexing)
+        let result = truncate("abcdef", 3);
+        assert_eq!(result, "abc…");
+    }
+
+    #[test]
+    fn test_elapsed_str_until_exact_minute() {
+        assert_eq!(elapsed_str_until(1000, 1060), "1m0s");
+    }
+
+    #[test]
+    fn test_elapsed_str_until_exact_hour() {
+        assert_eq!(elapsed_str_until(1000, 4600), "1h0m");
+    }
+
+    #[test]
+    fn test_elapsed_str_until_same_time() {
+        assert_eq!(elapsed_str_until(100, 100), "0s");
+    }
+
+    #[test]
+    fn test_elapsed_str_until_zero_start_returns_dash() {
+        assert_eq!(elapsed_str_until(0, 60), "—");
+    }
+
+    #[test]
+    fn test_osc52_yank_raw_produces_output() {
+        // We can't easily verify clipboard content, but we can verify it doesn't panic
+        // and returns true (it falls through to stdout writing)
+        let result = osc52_yank_raw("test data");
+        assert!(result);
+    }
+
+    #[test]
+    fn test_osc52_yank_raw_empty_string() {
+        let result = osc52_yank_raw("");
+        assert!(result);
+    }
+
+    #[test]
+    fn test_osc52_yank_raw_special_chars() {
+        let result = osc52_yank_raw("hello\nworld\ttab");
+        assert!(result);
+    }
 }

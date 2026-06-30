@@ -337,6 +337,8 @@ pub fn stage_gating_system(mut query: Query<&mut AgentState>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::AgentMessage;
+    use leviath_core::{Region, RegionKind};
 
     #[test]
     fn test_systems_compile() {
@@ -348,5 +350,688 @@ mod tests {
         let _ = child_completion_system;
         let _ = cascade_kill_system;
         let _ = stage_gating_system;
+    }
+
+    // ── Helper to create an AgentState ─────────────────────────────────────
+
+    fn make_agent_state(id: &str, status: AgentStatus) -> AgentState {
+        AgentState {
+            agent_id: id.to_string(),
+            current_stage: "main".to_string(),
+            iteration: 0,
+            status,
+            spawned_children_ids: Vec::new(),
+            pending_wait: None,
+            accepts_messages: true,
+        }
+    }
+
+    // ── pool_management_system ─────────────────────────────────────────────
+
+    #[test]
+    fn pool_management_despawns_completed_agents() {
+        let mut world = World::new();
+        let entity = world
+            .spawn(make_agent_state("agent-1", AgentStatus::Complete))
+            .id();
+
+        let mut schedule = Schedule::default();
+        schedule.add_systems(pool_management_system);
+        schedule.run(&mut world);
+
+        assert!(
+            world.get_entity(entity).is_err(),
+            "Completed agent should be despawned"
+        );
+    }
+
+    #[test]
+    fn pool_management_despawns_error_agents() {
+        let mut world = World::new();
+        let entity = world
+            .spawn(make_agent_state(
+                "agent-err",
+                AgentStatus::Error {
+                    message: "boom".to_string(),
+                },
+            ))
+            .id();
+
+        let mut schedule = Schedule::default();
+        schedule.add_systems(pool_management_system);
+        schedule.run(&mut world);
+
+        assert!(
+            world.get_entity(entity).is_err(),
+            "Error agent should be despawned"
+        );
+    }
+
+    #[test]
+    fn pool_management_despawns_cancelled_agents() {
+        let mut world = World::new();
+        let entity = world
+            .spawn(make_agent_state("agent-cancel", AgentStatus::Cancelled))
+            .id();
+
+        let mut schedule = Schedule::default();
+        schedule.add_systems(pool_management_system);
+        schedule.run(&mut world);
+
+        assert!(
+            world.get_entity(entity).is_err(),
+            "Cancelled agent should be despawned"
+        );
+    }
+
+    #[test]
+    fn pool_management_keeps_active_agents() {
+        let mut world = World::new();
+        let entity = world
+            .spawn(make_agent_state("agent-active", AgentStatus::Active))
+            .id();
+
+        let mut schedule = Schedule::default();
+        schedule.add_systems(pool_management_system);
+        schedule.run(&mut world);
+
+        assert!(
+            world.get_entity(entity).is_ok(),
+            "Active agent should remain"
+        );
+    }
+
+    #[test]
+    fn pool_management_keeps_waiting_agents() {
+        let mut world = World::new();
+        let entity = world
+            .spawn(make_agent_state("agent-wait", AgentStatus::Waiting))
+            .id();
+
+        let mut schedule = Schedule::default();
+        schedule.add_systems(pool_management_system);
+        schedule.run(&mut world);
+
+        assert!(
+            world.get_entity(entity).is_ok(),
+            "Waiting agent should remain"
+        );
+    }
+
+    #[test]
+    fn pool_management_keeps_idle_agents() {
+        let mut world = World::new();
+        let entity = world
+            .spawn(make_agent_state("agent-idle", AgentStatus::Idle))
+            .id();
+
+        let mut schedule = Schedule::default();
+        schedule.add_systems(pool_management_system);
+        schedule.run(&mut world);
+
+        assert!(world.get_entity(entity).is_ok(), "Idle agent should remain");
+    }
+
+    // ── inference_system ───────────────────────────────────────────────────
+
+    #[test]
+    fn inference_system_increments_iteration_for_active_agent() {
+        let mut world = World::new();
+        let entity = world
+            .spawn((
+                make_agent_state("agent-1", AgentStatus::Active),
+                ContextWindow::new(10000),
+                TaskAssignment {
+                    task_id: "task-1".to_string(),
+                    prompt: "Do something".to_string(),
+                    priority: 1,
+                    assigned_at: 0,
+                },
+            ))
+            .id();
+
+        let mut schedule = Schedule::default();
+        schedule.add_systems(inference_system);
+        schedule.run(&mut world);
+
+        let state = world.get::<AgentState>(entity).unwrap();
+        assert_eq!(state.iteration, 1);
+    }
+
+    #[test]
+    fn inference_system_skips_idle_agents() {
+        let mut world = World::new();
+        let entity = world
+            .spawn((
+                make_agent_state("agent-idle", AgentStatus::Idle),
+                ContextWindow::new(10000),
+                TaskAssignment {
+                    task_id: "task-1".to_string(),
+                    prompt: "Do something".to_string(),
+                    priority: 1,
+                    assigned_at: 0,
+                },
+            ))
+            .id();
+
+        let mut schedule = Schedule::default();
+        schedule.add_systems(inference_system);
+        schedule.run(&mut world);
+
+        let state = world.get::<AgentState>(entity).unwrap();
+        assert_eq!(state.iteration, 0, "Idle agent should not be iterated");
+    }
+
+    #[test]
+    fn inference_system_skips_waiting_agents() {
+        let mut world = World::new();
+        let entity = world
+            .spawn((
+                make_agent_state("agent-wait", AgentStatus::Waiting),
+                ContextWindow::new(10000),
+                TaskAssignment {
+                    task_id: "task-1".to_string(),
+                    prompt: "Do something".to_string(),
+                    priority: 1,
+                    assigned_at: 0,
+                },
+            ))
+            .id();
+
+        let mut schedule = Schedule::default();
+        schedule.add_systems(inference_system);
+        schedule.run(&mut world);
+
+        let state = world.get::<AgentState>(entity).unwrap();
+        assert_eq!(state.iteration, 0);
+    }
+
+    // ── context_management_system ──────────────────────────────────────────
+
+    #[test]
+    fn context_management_updates_current_tokens() {
+        let mut world = World::new();
+        let mut window = ContextWindow::new(10000);
+        let mut region = Region::new("scratch".to_string(), RegionKind::Clearable, 5000);
+        region.add_entry("data".to_string(), 500).unwrap();
+        window.add_region(region);
+
+        let entity = world
+            .spawn((make_agent_state("agent-1", AgentStatus::Active), window))
+            .id();
+
+        let mut schedule = Schedule::default();
+        schedule.add_systems(context_management_system);
+        schedule.run(&mut world);
+
+        let window = world.get::<ContextWindow>(entity).unwrap();
+        assert_eq!(window.current_tokens, 500);
+    }
+
+    #[test]
+    fn context_management_triggers_eviction_when_over_threshold() {
+        let mut world = World::new();
+        let mut window = ContextWindow::new(1000);
+        let mut region = Region::new("scratch".to_string(), RegionKind::Clearable, 1000);
+        region.add_entry("data".to_string(), 950).unwrap();
+        window.add_region(region);
+        // Set current_tokens to over 90%
+        window.current_tokens = 950;
+
+        let entity = world
+            .spawn((make_agent_state("agent-1", AgentStatus::Active), window))
+            .id();
+
+        let mut schedule = Schedule::default();
+        schedule.add_systems(context_management_system);
+        schedule.run(&mut world);
+
+        let window = world.get::<ContextWindow>(entity).unwrap();
+        // After eviction, clearable region should be cleared
+        assert_eq!(window.current_tokens, 0);
+    }
+
+    #[test]
+    fn context_management_adds_needs_compaction_component() {
+        let mut world = World::new();
+        let mut window = ContextWindow::new(1000);
+        // Only compacting region, no clearable/temporary
+        let mut region = Region::new(
+            "impl".to_string(),
+            RegionKind::Compacting {
+                threshold_tokens: 500,
+            },
+            1000,
+        );
+        region.add_entry("data".to_string(), 920).unwrap();
+        window.add_region(region);
+        window.current_tokens = 920;
+
+        let entity = world
+            .spawn((make_agent_state("agent-1", AgentStatus::Active), window))
+            .id();
+
+        let mut schedule = Schedule::default();
+        schedule.add_systems(context_management_system);
+        schedule.run(&mut world);
+
+        // Should have NeedsCompaction component
+        let compaction = world.get::<NeedsCompaction>(entity);
+        assert!(
+            compaction.is_some(),
+            "Should add NeedsCompaction when compacting regions need it"
+        );
+        assert!(compaction.unwrap().regions.contains(&"impl".to_string()));
+    }
+
+    // ── eviction_system ────────────────────────────────────────────────────
+
+    #[test]
+    fn eviction_system_triggers_at_95_percent() {
+        let mut world = World::new();
+        let mut window = ContextWindow::new(1000);
+        let mut region = Region::new("temp".to_string(), RegionKind::Temporary, 1000);
+        region.add_entry("old data".to_string(), 960).unwrap();
+        window.add_region(region);
+        window.current_tokens = 960;
+
+        let entity = world
+            .spawn((make_agent_state("agent-1", AgentStatus::Active), window))
+            .id();
+
+        let mut schedule = Schedule::default();
+        schedule.add_systems(eviction_system);
+        schedule.run(&mut world);
+
+        let window = world.get::<ContextWindow>(entity).unwrap();
+        // After eviction, temporary entry should be removed
+        assert_eq!(window.current_tokens, 0);
+    }
+
+    #[test]
+    fn eviction_system_no_trigger_below_threshold() {
+        let mut world = World::new();
+        let mut window = ContextWindow::new(1000);
+        let mut region = Region::new("temp".to_string(), RegionKind::Temporary, 1000);
+        region.add_entry("data".to_string(), 500).unwrap();
+        window.add_region(region);
+        window.current_tokens = 500;
+
+        let entity = world
+            .spawn((make_agent_state("agent-1", AgentStatus::Active), window))
+            .id();
+
+        let mut schedule = Schedule::default();
+        schedule.add_systems(eviction_system);
+        schedule.run(&mut world);
+
+        let window = world.get::<ContextWindow>(entity).unwrap();
+        assert_eq!(window.current_tokens, 500, "Should not evict below 95%");
+    }
+
+    // ── stage_gating_system ────────────────────────────────────────────────
+
+    #[test]
+    fn stage_gating_active_with_pending_wait_switches_to_waiting() {
+        let mut world = World::new();
+        let mut state = make_agent_state("agent-1", AgentStatus::Active);
+        state.spawned_children_ids = vec!["child-1".to_string()];
+        state.pending_wait = Some("child-1".to_string());
+
+        let entity = world.spawn(state).id();
+
+        let mut schedule = Schedule::default();
+        schedule.add_systems(stage_gating_system);
+        schedule.run(&mut world);
+
+        let state = world.get::<AgentState>(entity).unwrap();
+        assert!(matches!(state.status, AgentStatus::Waiting));
+    }
+
+    #[test]
+    fn stage_gating_waiting_with_no_children_switches_to_active() {
+        let mut world = World::new();
+        let mut state = make_agent_state("agent-1", AgentStatus::Waiting);
+        state.spawned_children_ids = Vec::new();
+        state.pending_wait = None;
+
+        let entity = world.spawn(state).id();
+
+        let mut schedule = Schedule::default();
+        schedule.add_systems(stage_gating_system);
+        schedule.run(&mut world);
+
+        let state = world.get::<AgentState>(entity).unwrap();
+        assert!(matches!(state.status, AgentStatus::Active));
+    }
+
+    #[test]
+    fn stage_gating_waiting_with_children_stays_waiting() {
+        let mut world = World::new();
+        let mut state = make_agent_state("agent-1", AgentStatus::Waiting);
+        state.spawned_children_ids = vec!["child-1".to_string()];
+        state.pending_wait = Some("child-1".to_string());
+
+        let entity = world.spawn(state).id();
+
+        let mut schedule = Schedule::default();
+        schedule.add_systems(stage_gating_system);
+        schedule.run(&mut world);
+
+        let state = world.get::<AgentState>(entity).unwrap();
+        assert!(matches!(state.status, AgentStatus::Waiting));
+    }
+
+    #[test]
+    fn stage_gating_active_without_pending_stays_active() {
+        let mut world = World::new();
+        let state = make_agent_state("agent-1", AgentStatus::Active);
+
+        let entity = world.spawn(state).id();
+
+        let mut schedule = Schedule::default();
+        schedule.add_systems(stage_gating_system);
+        schedule.run(&mut world);
+
+        let state = world.get::<AgentState>(entity).unwrap();
+        assert!(matches!(state.status, AgentStatus::Active));
+    }
+
+    // ── cascade_kill_system ────────────────────────────────────────────────
+
+    #[test]
+    fn cascade_kill_cancels_children_of_cancelled_parent() {
+        let mut world = World::new();
+
+        let child_entity = world
+            .spawn((
+                make_agent_state("child-1", AgentStatus::Active),
+                CancellationToken::new(),
+            ))
+            .id();
+
+        world.spawn((
+            make_agent_state("parent", AgentStatus::Cancelled),
+            SubAgentChildren {
+                children: vec![child_entity],
+                max_child_depth: 3,
+            },
+        ));
+
+        let mut schedule = Schedule::default();
+        schedule.add_systems(cascade_kill_system);
+        schedule.run(&mut world);
+
+        let child_state = world.get::<AgentState>(child_entity).unwrap();
+        assert!(matches!(child_state.status, AgentStatus::Cancelled));
+
+        let token = world.get::<CancellationToken>(child_entity).unwrap();
+        assert!(token.is_cancelled());
+    }
+
+    #[test]
+    fn cascade_kill_does_not_cancel_children_of_active_parent() {
+        let mut world = World::new();
+
+        let child_entity = world
+            .spawn((
+                make_agent_state("child-1", AgentStatus::Active),
+                CancellationToken::new(),
+            ))
+            .id();
+
+        world.spawn((
+            make_agent_state("parent", AgentStatus::Active),
+            SubAgentChildren {
+                children: vec![child_entity],
+                max_child_depth: 3,
+            },
+        ));
+
+        let mut schedule = Schedule::default();
+        schedule.add_systems(cascade_kill_system);
+        schedule.run(&mut world);
+
+        let child_state = world.get::<AgentState>(child_entity).unwrap();
+        assert!(matches!(child_state.status, AgentStatus::Active));
+    }
+
+    #[test]
+    fn cascade_kill_skips_already_cancelled_children() {
+        let mut world = World::new();
+
+        let child_entity = world
+            .spawn((
+                make_agent_state("child-1", AgentStatus::Cancelled),
+                CancellationToken::new(),
+            ))
+            .id();
+
+        world.spawn((
+            make_agent_state("parent", AgentStatus::Cancelled),
+            SubAgentChildren {
+                children: vec![child_entity],
+                max_child_depth: 3,
+            },
+        ));
+
+        let mut schedule = Schedule::default();
+        schedule.add_systems(cascade_kill_system);
+        schedule.run(&mut world);
+
+        // Should still be cancelled but not error
+        let child_state = world.get::<AgentState>(child_entity).unwrap();
+        assert!(matches!(child_state.status, AgentStatus::Cancelled));
+    }
+
+    // ── child_completion_system ────────────────────────────────────────────
+
+    #[test]
+    fn child_completion_injects_success_into_parent_context() {
+        let mut world = World::new();
+
+        let mut parent_state = make_agent_state("parent", AgentStatus::Active);
+        parent_state.spawned_children_ids = vec!["child-1".to_string()];
+        parent_state.pending_wait = Some("child-1".to_string());
+
+        let mut parent_window = ContextWindow::new(10000);
+        let conv = Region::new(
+            "conversation".to_string(),
+            RegionKind::SlidingWindow { max_items: 100 },
+            5000,
+        );
+        parent_window.add_region(conv);
+
+        let parent_entity = world.spawn((parent_state, parent_window)).id();
+
+        world.spawn((
+            make_agent_state("child-1", AgentStatus::Complete),
+            ParentRef {
+                parent_entity,
+                parent_agent_id: "parent".to_string(),
+                depth: 1,
+            },
+        ));
+
+        let mut schedule = Schedule::default();
+        schedule.add_systems(child_completion_system);
+        schedule.run(&mut world);
+
+        let parent_state = world.get::<AgentState>(parent_entity).unwrap();
+        assert!(
+            parent_state.pending_wait.is_none(),
+            "pending_wait should be cleared"
+        );
+        assert!(
+            parent_state.spawned_children_ids.is_empty(),
+            "child should be removed from spawned list"
+        );
+
+        let parent_window = world.get::<ContextWindow>(parent_entity).unwrap();
+        let conv = parent_window.get_region("conversation").unwrap();
+        assert!(
+            conv.content
+                .iter()
+                .any(|e| e.content.contains("completed successfully")),
+            "Completion message should be injected"
+        );
+    }
+
+    #[test]
+    fn child_completion_injects_error_into_parent_context() {
+        let mut world = World::new();
+
+        let mut parent_state = make_agent_state("parent", AgentStatus::Active);
+        parent_state.spawned_children_ids = vec!["child-err".to_string()];
+
+        let mut parent_window = ContextWindow::new(10000);
+        let conv = Region::new(
+            "conversation".to_string(),
+            RegionKind::SlidingWindow { max_items: 100 },
+            5000,
+        );
+        parent_window.add_region(conv);
+
+        let parent_entity = world.spawn((parent_state, parent_window)).id();
+
+        let mut child_state = make_agent_state(
+            "child-err",
+            AgentStatus::Error {
+                message: "something went wrong".to_string(),
+            },
+        );
+        child_state.agent_id = "child-err".to_string();
+
+        world.spawn((
+            child_state,
+            ParentRef {
+                parent_entity,
+                parent_agent_id: "parent".to_string(),
+                depth: 1,
+            },
+        ));
+
+        let mut schedule = Schedule::default();
+        schedule.add_systems(child_completion_system);
+        schedule.run(&mut world);
+
+        let parent_window = world.get::<ContextWindow>(parent_entity).unwrap();
+        let conv = parent_window.get_region("conversation").unwrap();
+        assert!(conv
+            .content
+            .iter()
+            .any(|e| e.content.contains("error") && e.content.contains("something went wrong")));
+    }
+
+    #[test]
+    fn child_completion_skips_untracked_children() {
+        let mut world = World::new();
+
+        let parent_state = make_agent_state("parent", AgentStatus::Active);
+        // Note: spawned_children_ids is empty — child is not tracked
+
+        let parent_entity = world.spawn(parent_state).id();
+
+        world.spawn((
+            make_agent_state("child-unknown", AgentStatus::Complete),
+            ParentRef {
+                parent_entity,
+                parent_agent_id: "parent".to_string(),
+                depth: 1,
+            },
+        ));
+
+        let mut schedule = Schedule::default();
+        schedule.add_systems(child_completion_system);
+        schedule.run(&mut world);
+
+        // Should not panic or error
+        let parent_state = world.get::<AgentState>(parent_entity).unwrap();
+        assert!(parent_state.spawned_children_ids.is_empty());
+    }
+
+    // ── message_delivery_system ────────────────────────────────────────────
+
+    #[test]
+    fn message_delivery_adds_messages_to_context() {
+        let mut world = World::new();
+
+        let mut window = ContextWindow::new(10000);
+        let conv = Region::new(
+            "conversation".to_string(),
+            RegionKind::SlidingWindow { max_items: 100 },
+            5000,
+        );
+        window.add_region(conv);
+
+        let mut inbox = MessageInbox::new();
+        inbox.push(AgentMessage {
+            agent_id: "agent-1".to_string(),
+            content: "Hello from user".to_string(),
+            target_region: Some("conversation".to_string()),
+            priority: 0,
+        });
+
+        let entity = world
+            .spawn((
+                make_agent_state("agent-1", AgentStatus::Active),
+                inbox,
+                window,
+            ))
+            .id();
+
+        let mut schedule = Schedule::default();
+        schedule.add_systems(message_delivery_system);
+        schedule.run(&mut world);
+
+        let inbox = world.get::<MessageInbox>(entity).unwrap();
+        assert!(inbox.messages.is_empty(), "Inbox should be drained");
+
+        let window = world.get::<ContextWindow>(entity).unwrap();
+        let conv = window.get_region("conversation").unwrap();
+        assert!(conv
+            .content
+            .iter()
+            .any(|e| e.content.contains("Hello from user")));
+    }
+
+    #[test]
+    fn message_delivery_defaults_to_conversation_region() {
+        let mut world = World::new();
+
+        let mut window = ContextWindow::new(10000);
+        let conv = Region::new(
+            "conversation".to_string(),
+            RegionKind::SlidingWindow { max_items: 100 },
+            5000,
+        );
+        window.add_region(conv);
+
+        let mut inbox = MessageInbox::new();
+        inbox.push(AgentMessage {
+            agent_id: "agent-1".to_string(),
+            content: "Test message".to_string(),
+            target_region: None, // Should default to "conversation"
+            priority: 0,
+        });
+
+        let entity = world
+            .spawn((
+                make_agent_state("agent-1", AgentStatus::Active),
+                inbox,
+                window,
+            ))
+            .id();
+
+        let mut schedule = Schedule::default();
+        schedule.add_systems(message_delivery_system);
+        schedule.run(&mut world);
+
+        let window = world.get::<ContextWindow>(entity).unwrap();
+        let conv = window.get_region("conversation").unwrap();
+        assert!(conv
+            .content
+            .iter()
+            .any(|e| e.content.contains("Test message")));
     }
 }

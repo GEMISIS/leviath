@@ -955,4 +955,615 @@ mod tests {
             AgentDisplayStatus::Error(_)
         ));
     }
+
+    #[test]
+    fn process_events_log() {
+        let mut dash = make_test_dashboard();
+        dash.log.clear(); // Clear seeded log entries
+        let tx = dash.event_tx.clone();
+        tx.send(AgentEvent::Log("test log message".to_string()))
+            .unwrap();
+        dash.process_events();
+        assert!(!dash.log.is_empty());
+        assert!(dash
+            .log
+            .iter()
+            .any(|e| e.message.contains("test log message")));
+    }
+
+    #[test]
+    fn process_events_needs_input() {
+        let mut dash = make_test_dashboard();
+        dash.agents
+            .push(make_test_agent("run-1", AgentDisplayStatus::Active));
+        dash.update_display_indices();
+        let tx = dash.event_tx.clone();
+        tx.send(AgentEvent::NeedsInput {
+            agent_id: "run-1".to_string(),
+            prompt: "What should I do?".to_string(),
+        })
+        .unwrap();
+        dash.process_events();
+        assert!(matches!(dash.agents[0].status, AgentDisplayStatus::Waiting));
+        assert_eq!(
+            dash.agents[0].waiting_prompt.as_deref(),
+            Some("What should I do?")
+        );
+    }
+
+    #[test]
+    fn process_events_tool_called() {
+        let mut dash = make_test_dashboard();
+        dash.log.clear(); // Clear seeded log entries
+        dash.agents
+            .push(make_test_agent("run-1", AgentDisplayStatus::Active));
+        dash.update_display_indices();
+        let tx = dash.event_tx.clone();
+        tx.send(AgentEvent::ToolCalled {
+            agent_id: "run-1".to_string(),
+            tool: "bash".to_string(),
+            args: r#"{"cmd": "ls"}"#.to_string(),
+        })
+        .unwrap();
+        dash.process_events();
+        assert!(dash.log.iter().any(|e| e.message.contains("bash")));
+    }
+
+    #[test]
+    fn process_events_inference_complete() {
+        let mut dash = make_test_dashboard();
+        dash.agents
+            .push(make_test_agent("run-1", AgentDisplayStatus::Active));
+        dash.update_display_indices();
+        let tx = dash.event_tx.clone();
+        tx.send(AgentEvent::InferenceComplete {
+            agent_id: "run-1".to_string(),
+            content: "done".to_string(),
+            tokens_used: 100,
+            tokens_prompt: 50,
+        })
+        .unwrap();
+        dash.process_events();
+        assert_eq!(dash.agents[0].iteration, 1);
+    }
+
+    #[test]
+    fn process_events_status_changed() {
+        let mut dash = make_test_dashboard();
+        dash.agents
+            .push(make_test_agent("run-1", AgentDisplayStatus::Active));
+        dash.update_display_indices();
+        let tx = dash.event_tx.clone();
+        tx.send(AgentEvent::StatusChanged {
+            agent_id: "run-1".to_string(),
+            status: AgentDisplayStatus::Complete,
+        })
+        .unwrap();
+        dash.process_events();
+        assert!(matches!(
+            dash.agents[0].status,
+            AgentDisplayStatus::Complete
+        ));
+    }
+
+    #[test]
+    fn selected_stage_can_respond_with_prompt_matching_stage() {
+        let mut dash = make_test_dashboard();
+        let mut agent = make_test_agent("run-1", AgentDisplayStatus::Waiting);
+        agent.waiting_prompt = Some("Review this".to_string());
+        agent.pending_request = Some(crate::interaction::InteractionRequest::free_text(
+            "req-1",
+            "Review this",
+            "main",
+            true,
+        ));
+        agent.stage_index = 0;
+        agent.stages = vec![crate::runstate::StageRecord::new("main".to_string(), 0)];
+        dash.agents.push(agent);
+        dash.update_display_indices();
+        dash.selected_stage = 0;
+        assert!(dash.selected_stage_can_respond());
+    }
+
+    #[test]
+    fn selected_stage_can_respond_wrong_stage_selected() {
+        let mut dash = make_test_dashboard();
+        let mut agent = make_test_agent("run-1", AgentDisplayStatus::Waiting);
+        agent.waiting_prompt = Some("Review this".to_string());
+        agent.pending_request = Some(crate::interaction::InteractionRequest::free_text(
+            "req-1",
+            "Review this",
+            "main",
+            true,
+        ));
+        agent.stage_index = 0;
+        agent.num_stages = 2;
+        agent.stages = vec![
+            crate::runstate::StageRecord::new("main".to_string(), 0),
+            crate::runstate::StageRecord::new("code".to_string(), 1),
+        ];
+        dash.agents.push(agent);
+        dash.update_display_indices();
+        dash.selected_stage = 1; // Wrong stage
+        assert!(!dash.selected_stage_can_respond());
+    }
+
+    #[test]
+    fn build_tree_order_multiple_children() {
+        let mut dash = make_test_dashboard();
+        dash.agents
+            .push(make_test_agent("parent", AgentDisplayStatus::Active));
+        let mut child1 = make_test_agent("child1", AgentDisplayStatus::Active);
+        child1.parent_id = Some("parent".to_string());
+        let mut child2 = make_test_agent("child2", AgentDisplayStatus::Active);
+        child2.parent_id = Some("parent".to_string());
+        dash.agents.push(child1);
+        dash.agents.push(child2);
+
+        let tree = dash.build_tree_order();
+        assert_eq!(tree.len(), 3);
+        assert_eq!(tree[0].0, 0); // parent
+        assert!(tree[0].1.is_empty()); // root has no prefix
+                                       // First child
+        assert_eq!(tree[1].0, 1);
+        assert!(tree[1].1.contains("├─")); // not last child
+                                           // Second child (last)
+        assert_eq!(tree[2].0, 2);
+        assert!(tree[2].1.contains("└─")); // last child
+    }
+
+    #[test]
+    fn build_tree_order_grandchildren() {
+        let mut dash = make_test_dashboard();
+        dash.agents
+            .push(make_test_agent("root", AgentDisplayStatus::Active));
+        let mut child = make_test_agent("child", AgentDisplayStatus::Active);
+        child.parent_id = Some("root".to_string());
+        dash.agents.push(child);
+        let mut grandchild = make_test_agent("grandchild", AgentDisplayStatus::Active);
+        grandchild.parent_id = Some("child".to_string());
+        dash.agents.push(grandchild);
+
+        let tree = dash.build_tree_order();
+        assert_eq!(tree.len(), 3);
+        assert_eq!(tree[0].0, 0); // root
+        assert_eq!(tree[1].0, 1); // child
+        assert_eq!(tree[2].0, 2); // grandchild
+    }
+
+    #[test]
+    fn update_display_indices_filter_by_status() {
+        let mut dash = make_test_dashboard();
+        dash.agents
+            .push(make_test_agent("run-1", AgentDisplayStatus::Active));
+        dash.agents.push(make_test_agent(
+            "run-2",
+            AgentDisplayStatus::Error("err".to_string()),
+        ));
+        dash.list_search_query = "error".to_string();
+        dash.update_display_indices();
+        // Only the error agent should match (status contains "error")
+        assert_eq!(dash.display_indices.len(), 1);
+    }
+
+    #[test]
+    fn update_display_indices_filter_by_title() {
+        let mut dash = make_test_dashboard();
+        let mut a1 = make_test_agent("run-1", AgentDisplayStatus::Active);
+        a1.title = Some("Deploy pipeline".to_string());
+        let mut a2 = make_test_agent("run-2", AgentDisplayStatus::Active);
+        a2.title = Some("Code review".to_string());
+        dash.agents.push(a1);
+        dash.agents.push(a2);
+        dash.list_search_query = "deploy".to_string();
+        dash.update_display_indices();
+        assert_eq!(dash.display_indices.len(), 1);
+    }
+
+    #[test]
+    fn update_display_indices_filter_by_task() {
+        let mut dash = make_test_dashboard();
+        let mut a1 = make_test_agent("run-1", AgentDisplayStatus::Active);
+        a1.task = "Write unit tests".to_string();
+        let mut a2 = make_test_agent("run-2", AgentDisplayStatus::Active);
+        a2.task = "Fix bug in parser".to_string();
+        dash.agents.push(a1);
+        dash.agents.push(a2);
+        dash.list_search_query = "unit test".to_string();
+        dash.update_display_indices();
+        assert_eq!(dash.display_indices.len(), 1);
+    }
+
+    #[test]
+    fn selected_agent_accepts_messages_not_accepting() {
+        let mut dash = make_test_dashboard();
+        let mut agent = make_test_agent("run-1", AgentDisplayStatus::Active);
+        agent.accepts_messages = false;
+        dash.agents.push(agent);
+        dash.update_display_indices();
+        assert!(!dash.selected_agent_accepts_messages());
+    }
+
+    #[test]
+    fn add_log_trims_to_200() {
+        let mut dash = make_test_dashboard();
+        dash.log.clear(); // Clear any seeded log entries
+        for i in 0..250 {
+            dash.add_log(format!("msg {}", i));
+        }
+        assert!(dash.log.len() <= 200);
+    }
+
+    #[test]
+    fn selected_agent_raw_idx_empty() {
+        let dash = make_test_dashboard();
+        assert_eq!(dash.selected_agent_raw_idx(), None);
+    }
+
+    // ─── sync_agent_state_from_world ──────────────────────────────────────
+
+    #[test]
+    fn sync_agent_state_from_world_updates_in_process_agents() {
+        let mut dash = make_test_dashboard();
+        let mut engine = AgentEngine::new();
+
+        // Spawn an entity with known state
+        let entity = engine
+            .world_mut()
+            .spawn((
+                AgentState {
+                    agent_id: "in-proc-1".to_string(),
+                    current_stage: "analyze".to_string(),
+                    iteration: 5,
+                    status: AgentStatus::Active,
+                    spawned_children_ids: Vec::new(),
+                    pending_wait: None,
+                    accepts_messages: true,
+                },
+                ContextWindow::new(10000),
+            ))
+            .id();
+
+        // Add an in-process agent with this entity
+        let mut agent = make_test_agent("in-proc-1", AgentDisplayStatus::Idle);
+        agent.is_run_state = false;
+        agent.entity = entity;
+        dash.agents.push(agent);
+        dash.update_display_indices();
+
+        dash.sync_agent_state_from_world(&engine);
+
+        assert_eq!(dash.agents[0].iteration, 5);
+        assert_eq!(dash.agents[0].stage, "analyze");
+        assert!(matches!(dash.agents[0].status, AgentDisplayStatus::Active));
+        assert!(dash.agents[0].accepts_messages);
+    }
+
+    #[test]
+    fn sync_agent_state_from_world_skips_run_state_agents() {
+        let mut dash = make_test_dashboard();
+        let engine = AgentEngine::new();
+
+        let mut agent = make_test_agent("run-state-1", AgentDisplayStatus::Active);
+        agent.is_run_state = true;
+        agent.iteration = 99;
+        dash.agents.push(agent);
+        dash.update_display_indices();
+
+        dash.sync_agent_state_from_world(&engine);
+
+        // Should not change because it's run-state
+        assert_eq!(dash.agents[0].iteration, 99);
+    }
+
+    #[test]
+    fn sync_agent_state_from_world_maps_all_statuses() {
+        let mut dash = make_test_dashboard();
+        let mut engine = AgentEngine::new();
+
+        // Test each AgentStatus variant
+        let statuses = [
+            (AgentStatus::Active, AgentDisplayStatus::Active),
+            (AgentStatus::Waiting, AgentDisplayStatus::Waiting),
+            (AgentStatus::Complete, AgentDisplayStatus::Complete),
+            (AgentStatus::Cancelled, AgentDisplayStatus::Cancelled),
+            (AgentStatus::Idle, AgentDisplayStatus::Idle),
+            (
+                AgentStatus::Error {
+                    message: "oops".to_string(),
+                },
+                AgentDisplayStatus::Error("oops".to_string()),
+            ),
+        ];
+
+        for (i, (ecs_status, _expected_display)) in statuses.iter().enumerate() {
+            let entity = engine
+                .world_mut()
+                .spawn(AgentState {
+                    agent_id: format!("agent-{}", i),
+                    current_stage: "main".to_string(),
+                    iteration: 0,
+                    status: ecs_status.clone(),
+                    spawned_children_ids: Vec::new(),
+                    pending_wait: None,
+                    accepts_messages: false,
+                })
+                .id();
+
+            let mut agent = make_test_agent(&format!("agent-{}", i), AgentDisplayStatus::Idle);
+            agent.is_run_state = false;
+            agent.entity = entity;
+            dash.agents.push(agent);
+        }
+        dash.update_display_indices();
+
+        dash.sync_agent_state_from_world(&engine);
+
+        // Verify each status was mapped correctly
+        assert!(matches!(dash.agents[0].status, AgentDisplayStatus::Active));
+        assert!(matches!(dash.agents[1].status, AgentDisplayStatus::Waiting));
+        assert!(matches!(
+            dash.agents[2].status,
+            AgentDisplayStatus::Complete
+        ));
+        assert!(matches!(
+            dash.agents[3].status,
+            AgentDisplayStatus::Cancelled
+        ));
+        assert!(matches!(dash.agents[4].status, AgentDisplayStatus::Idle));
+        assert!(matches!(
+            dash.agents[5].status,
+            AgentDisplayStatus::Error(_)
+        ));
+    }
+
+    #[test]
+    fn sync_agent_state_from_world_reads_context_tokens() {
+        let mut dash = make_test_dashboard();
+        let mut engine = AgentEngine::new();
+
+        let mut window = ContextWindow::new(50000);
+        window.current_tokens = 12345;
+        let entity = engine
+            .world_mut()
+            .spawn((
+                AgentState {
+                    agent_id: "ctx-agent".to_string(),
+                    current_stage: "main".to_string(),
+                    iteration: 0,
+                    status: AgentStatus::Active,
+                    spawned_children_ids: Vec::new(),
+                    pending_wait: None,
+                    accepts_messages: true,
+                },
+                window,
+            ))
+            .id();
+
+        let mut agent = make_test_agent("ctx-agent", AgentDisplayStatus::Idle);
+        agent.is_run_state = false;
+        agent.entity = entity;
+        dash.agents.push(agent);
+        dash.update_display_indices();
+
+        dash.sync_agent_state_from_world(&engine);
+
+        assert_eq!(dash.agents[0].context_tokens, (12345, 50000));
+    }
+
+    #[test]
+    fn sync_agent_state_from_world_reads_parent_ref() {
+        let mut dash = make_test_dashboard();
+        let mut engine = AgentEngine::new();
+
+        let entity = engine
+            .world_mut()
+            .spawn((
+                AgentState {
+                    agent_id: "child-agent".to_string(),
+                    current_stage: "main".to_string(),
+                    iteration: 0,
+                    status: AgentStatus::Active,
+                    spawned_children_ids: Vec::new(),
+                    pending_wait: None,
+                    accepts_messages: true,
+                },
+                leviath_runtime::ParentRef {
+                    parent_entity: bevy_ecs::prelude::Entity::from_raw(0),
+                    parent_agent_id: "parent-agent".to_string(),
+                    depth: 2,
+                },
+            ))
+            .id();
+
+        let mut agent = make_test_agent("child-agent", AgentDisplayStatus::Idle);
+        agent.is_run_state = false;
+        agent.entity = entity;
+        dash.agents.push(agent);
+        dash.update_display_indices();
+
+        dash.sync_agent_state_from_world(&engine);
+
+        assert_eq!(dash.agents[0].parent_id.as_deref(), Some("parent-agent"));
+        assert_eq!(dash.agents[0].depth, 2);
+    }
+
+    // ─── build_tree_order with deeper nesting ─────────────────────────────
+
+    #[test]
+    fn build_tree_order_deep_nesting_connectors() {
+        let mut dash = make_test_dashboard();
+        dash.agents
+            .push(make_test_agent("root", AgentDisplayStatus::Active));
+        let mut child1 = make_test_agent("child1", AgentDisplayStatus::Active);
+        child1.parent_id = Some("root".to_string());
+        dash.agents.push(child1);
+        let mut child2 = make_test_agent("child2", AgentDisplayStatus::Active);
+        child2.parent_id = Some("root".to_string());
+        dash.agents.push(child2);
+        let mut gc = make_test_agent("grandchild", AgentDisplayStatus::Active);
+        gc.parent_id = Some("child1".to_string());
+        dash.agents.push(gc);
+
+        let tree = dash.build_tree_order();
+        assert_eq!(tree.len(), 4);
+        assert_eq!(tree[0].0, 0); // root
+        assert!(tree[0].1.is_empty()); // root has no prefix
+        assert_eq!(tree[1].0, 1); // child1
+        assert!(tree[1].1.contains("├─")); // not last child
+        assert_eq!(tree[2].0, 3); // grandchild (under child1)
+                                  // grandchild should have deeper connector
+        assert!(tree[2].1.len() > tree[1].1.len());
+        assert_eq!(tree[3].0, 2); // child2
+        assert!(tree[3].1.contains("└─")); // last child
+    }
+
+    // ─── build_tree_order with multiple roots ─────────────────────────────
+
+    #[test]
+    fn build_tree_order_multiple_roots() {
+        let mut dash = make_test_dashboard();
+        dash.agents
+            .push(make_test_agent("root1", AgentDisplayStatus::Active));
+        dash.agents
+            .push(make_test_agent("root2", AgentDisplayStatus::Active));
+        let mut child = make_test_agent("child-of-1", AgentDisplayStatus::Active);
+        child.parent_id = Some("root1".to_string());
+        dash.agents.push(child);
+
+        let tree = dash.build_tree_order();
+        assert_eq!(tree.len(), 3);
+        // root1 and child-of-1 should be adjacent
+        assert_eq!(tree[0].0, 0); // root1
+        assert_eq!(tree[1].0, 2); // child-of-1
+        assert_eq!(tree[2].0, 1); // root2
+    }
+
+    // ─── delete_selected_agent: non-run-state agent ───────────────────────
+
+    #[test]
+    fn delete_selected_agent_non_run_state_logs_error() {
+        let mut dash = make_test_dashboard();
+        dash.log.clear();
+        let mut agent = make_test_agent("in-proc-1", AgentDisplayStatus::Active);
+        agent.is_run_state = false;
+        dash.agents.push(agent);
+        dash.update_display_indices();
+
+        dash.delete_selected_agent();
+
+        // Should not have removed the agent
+        assert_eq!(dash.agents.len(), 1);
+        assert!(dash
+            .log
+            .iter()
+            .any(|e| e.message.contains("Can only delete")));
+    }
+
+    // ─── delete_selected_agent: no agent selected ─────────────────────────
+
+    #[test]
+    fn delete_selected_agent_empty_list_is_noop() {
+        let mut dash = make_test_dashboard();
+        dash.delete_selected_agent();
+        // Should not panic, just no-op
+    }
+
+    // ─── update_display_indices: sort priority order ──────────────────────
+
+    #[test]
+    fn update_display_indices_sort_order_comprehensive() {
+        let mut dash = make_test_dashboard();
+        dash.agents
+            .push(make_test_agent("cancelled", AgentDisplayStatus::Cancelled));
+        dash.agents
+            .push(make_test_agent("idle", AgentDisplayStatus::Idle));
+        dash.agents
+            .push(make_test_agent("active", AgentDisplayStatus::Active));
+        dash.agents
+            .push(make_test_agent("waiting", AgentDisplayStatus::Waiting));
+        dash.agents.push(make_test_agent(
+            "error",
+            AgentDisplayStatus::Error("err".to_string()),
+        ));
+        dash.agents
+            .push(make_test_agent("complete", AgentDisplayStatus::Complete));
+        dash.update_display_indices();
+
+        // Expected priority: Active(0) < Waiting(1) < Complete(3) < Error(4) < Idle(5) < Cancelled(6)
+        let ids: Vec<&str> = dash
+            .display_indices
+            .iter()
+            .map(|&i| dash.agents[i].id.as_str())
+            .collect();
+        assert_eq!(ids[0], "active");
+        assert_eq!(ids[1], "waiting");
+        assert_eq!(ids[2], "complete");
+        assert_eq!(ids[3], "error");
+        assert_eq!(ids[4], "idle");
+        assert_eq!(ids[5], "cancelled");
+    }
+
+    // ─── selected_stage_can_respond: stage_name matching ──────────────────
+
+    #[test]
+    fn selected_stage_can_respond_matches_by_stage_name() {
+        let mut dash = make_test_dashboard();
+        let mut agent = make_test_agent("run-1", AgentDisplayStatus::Waiting);
+        agent.waiting_prompt = Some("Review this".to_string());
+        agent.pending_request = Some(crate::interaction::InteractionRequest::free_text(
+            "req-1",
+            "Review this",
+            "code",
+            true,
+        ));
+        agent.stage_index = 0;
+        agent.num_stages = 3;
+        agent.stages = vec![
+            crate::runstate::StageRecord::new("plan".to_string(), 0),
+            crate::runstate::StageRecord::new("code".to_string(), 1),
+            crate::runstate::StageRecord::new("review".to_string(), 2),
+        ];
+        dash.agents.push(agent);
+        dash.update_display_indices();
+
+        // stage_name is "code" which is at index 1
+        dash.selected_stage = 1;
+        assert!(dash.selected_stage_can_respond());
+
+        // Wrong stage selected
+        dash.selected_stage = 0;
+        assert!(!dash.selected_stage_can_respond());
+    }
+
+    // ─── selected_stage_can_respond: empty stage_name falls back ──────────
+
+    #[test]
+    fn selected_stage_can_respond_empty_stage_name_uses_stage_index() {
+        let mut dash = make_test_dashboard();
+        let mut agent = make_test_agent("run-1", AgentDisplayStatus::Waiting);
+        agent.waiting_prompt = Some("prompt".to_string());
+        agent.pending_request = Some(crate::interaction::InteractionRequest {
+            id: "req-1".to_string(),
+            kind: crate::interaction::InteractionKind::FreeText,
+            prompt: "prompt".to_string(),
+            options: vec![],
+            tool_name: None,
+            tool_arguments: None,
+            required: true,
+            stage_name: String::new(), // empty
+            body: None,
+            body_format: crate::interaction::BodyFormat::Plain,
+        });
+        agent.stage_index = 2;
+        agent.num_stages = 3;
+        dash.agents.push(agent);
+        dash.update_display_indices();
+
+        // Empty stage_name -> uses agent.stage_index which is 2
+        dash.selected_stage = 2;
+        assert!(dash.selected_stage_can_respond());
+        dash.selected_stage = 0;
+        assert!(!dash.selected_stage_can_respond());
+    }
 }

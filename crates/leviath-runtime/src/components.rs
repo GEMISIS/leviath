@@ -1037,4 +1037,320 @@ mod tests {
             "Temporary regions should never get cache breakpoints"
         );
     }
+
+    // ── Additional coverage tests ──────────────────────────────────────────
+
+    #[test]
+    fn test_context_window_get_region() {
+        let mut window = ContextWindow::new(10000);
+        let region = Region::new("test".to_string(), RegionKind::Pinned, 1000);
+        window.add_region(region);
+
+        assert!(window.get_region("test").is_some());
+        assert!(window.get_region("nonexistent").is_none());
+    }
+
+    #[test]
+    fn test_context_window_get_region_mut() {
+        let mut window = ContextWindow::new(10000);
+        let region = Region::new("test".to_string(), RegionKind::Temporary, 1000);
+        window.add_region(region);
+
+        let region = window.get_region_mut("test").unwrap();
+        region.add_entry("new content".to_string(), 50).unwrap();
+        assert_eq!(region.content.len(), 1);
+
+        assert!(window.get_region_mut("nonexistent").is_none());
+    }
+
+    #[test]
+    fn test_context_window_add_to_region_success() {
+        let mut window = ContextWindow::new(10000);
+        let region = Region::new("conv".to_string(), RegionKind::Temporary, 5000);
+        window.add_region(region);
+
+        let result = window.add_to_region("conv", "Hello".to_string(), 10);
+        assert!(result.is_ok());
+        assert_eq!(window.current_tokens, 10);
+    }
+
+    #[test]
+    fn test_context_window_add_to_region_not_found() {
+        let mut window = ContextWindow::new(10000);
+        let result = window.add_to_region("nonexistent", "Hello".to_string(), 10);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_context_window_calculate_tokens() {
+        let mut window = ContextWindow::new(10000);
+        let mut r1 = Region::new("a".to_string(), RegionKind::Pinned, 5000);
+        r1.add_entry("x".to_string(), 100).unwrap();
+        let mut r2 = Region::new("b".to_string(), RegionKind::Temporary, 5000);
+        r2.add_entry("y".to_string(), 200).unwrap();
+        window.add_region(r1);
+        window.add_region(r2);
+
+        assert_eq!(window.calculate_tokens(), 300);
+    }
+
+    #[test]
+    fn test_context_window_needs_eviction_boundary() {
+        let mut window = ContextWindow::new(100);
+        // Exactly 90% → should trigger at 0.9 threshold
+        window.current_tokens = 90;
+        assert!(window.needs_eviction(0.9));
+
+        // Just below 90%
+        window.current_tokens = 89;
+        assert!(!window.needs_eviction(0.9));
+    }
+
+    #[test]
+    fn test_eviction_result_default_fields() {
+        let result = EvictionResult {
+            tokens_freed: 0,
+            needs_compaction: Vec::new(),
+        };
+        assert_eq!(result.tokens_freed, 0);
+        assert!(result.needs_compaction.is_empty());
+    }
+
+    #[test]
+    fn test_cancellation_token_default() {
+        let token = CancellationToken::default();
+        assert!(!token.is_cancelled());
+    }
+
+    #[test]
+    fn test_cancellation_token_cancel_idempotent() {
+        let token = CancellationToken::new();
+        token.cancel();
+        token.cancel();
+        assert!(token.is_cancelled());
+    }
+
+    #[test]
+    fn test_message_inbox_default() {
+        let inbox = MessageInbox::default();
+        assert!(inbox.messages.is_empty());
+    }
+
+    #[test]
+    fn test_message_inbox_drain_all_empties() {
+        let mut inbox = MessageInbox::new();
+        inbox.push(AgentMessage {
+            agent_id: "a".to_string(),
+            content: "msg".to_string(),
+            target_region: None,
+            priority: 0,
+        });
+        let _ = inbox.drain_all();
+        assert!(inbox.messages.is_empty());
+        // Drain again should return empty vec
+        let result = inbox.drain_all();
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_agent_message_clone() {
+        let msg = AgentMessage {
+            agent_id: "agent-1".to_string(),
+            content: "hello".to_string(),
+            target_region: Some("conv".to_string()),
+            priority: 5,
+        };
+        let cloned = msg.clone();
+        assert_eq!(cloned.agent_id, "agent-1");
+        assert_eq!(cloned.content, "hello");
+        assert_eq!(cloned.target_region, Some("conv".to_string()));
+        assert_eq!(cloned.priority, 5);
+    }
+
+    #[test]
+    fn test_agent_status_serialization() {
+        let status = AgentStatus::Active;
+        let json = serde_json::to_string(&status).unwrap();
+        assert!(json.contains("Active"));
+
+        let error_status = AgentStatus::Error {
+            message: "boom".to_string(),
+        };
+        let json = serde_json::to_string(&error_status).unwrap();
+        assert!(json.contains("boom"));
+    }
+
+    #[test]
+    fn test_tool_call_serialization() {
+        let tc = ToolCall {
+            tool_id: "tool-1".to_string(),
+            name: "search".to_string(),
+            arguments: serde_json::json!({"query": "rust"}),
+        };
+        let json = serde_json::to_string(&tc).unwrap();
+        assert!(json.contains("search"));
+        assert!(json.contains("rust"));
+    }
+
+    #[test]
+    fn test_assemble_messages_empty_regions() {
+        let window = ContextWindow::new(10000);
+        let msgs = window.assemble_messages();
+        // Should have at least the default "Begin." user message
+        assert!(msgs
+            .iter()
+            .any(|m| m.role == "user" && m.content == "Begin."));
+    }
+
+    #[test]
+    fn test_assemble_messages_clearable_region() {
+        let mut window = ContextWindow::new(10000);
+        let mut region = Region::new("scratch".to_string(), RegionKind::Clearable, 5000);
+        region.add_entry("scratch data".to_string(), 100).unwrap();
+        window.add_region(region);
+
+        let msgs = window.assemble_messages();
+        assert!(msgs
+            .iter()
+            .any(|m| m.role == "user" && m.content.contains("[scratch]")));
+    }
+
+    #[test]
+    fn test_assemble_messages_temporary_region() {
+        let mut window = ContextWindow::new(10000);
+        let mut region = Region::new("tools".to_string(), RegionKind::Temporary, 5000);
+        region.add_entry("tool output".to_string(), 100).unwrap();
+        window.add_region(region);
+
+        let msgs = window.assemble_messages();
+        assert!(msgs
+            .iter()
+            .any(|m| m.role == "user" && m.content.contains("[Tool results from tools]")));
+    }
+
+    #[test]
+    fn test_assemble_messages_compact_history() {
+        let mut window = ContextWindow::new(10000);
+        let mut region = Region::new(
+            "history".to_string(),
+            RegionKind::CompactHistory {
+                source_region: "conv".to_string(),
+            },
+            5000,
+        );
+        region
+            .add_entry("compressed knowledge".to_string(), 100)
+            .unwrap();
+        window.add_region(region);
+
+        let msgs = window.assemble_messages();
+        assert!(msgs
+            .iter()
+            .any(|m| m.role == "system" && m.content.contains("compressed knowledge")));
+    }
+
+    #[test]
+    fn test_assemble_messages_compacting_region_parses_roles() {
+        let mut window = ContextWindow::new(10000);
+        let mut region = Region::new(
+            "impl".to_string(),
+            RegionKind::Compacting {
+                threshold_tokens: 5000,
+            },
+            5000,
+        );
+        region.add_entry("User: Tell me".to_string(), 50).unwrap();
+        region
+            .add_entry("Assistant: Sure!".to_string(), 50)
+            .unwrap();
+        region.add_entry("plain content".to_string(), 50).unwrap();
+        window.add_region(region);
+
+        let msgs = window.assemble_messages();
+        assert!(msgs
+            .iter()
+            .any(|m| m.role == "user" && m.content == "Tell me"));
+        assert!(msgs
+            .iter()
+            .any(|m| m.role == "assistant" && m.content == "Sure!"));
+        assert!(msgs
+            .iter()
+            .any(|m| m.role == "user" && m.content == "plain content"));
+    }
+
+    #[test]
+    fn test_assemble_prompt_includes_roles() {
+        let mut window = ContextWindow::new(10000);
+        let mut region = Region::new("sys".to_string(), RegionKind::Pinned, 1000);
+        region.add_entry("Be helpful".to_string(), 50).unwrap();
+        window.add_region(region);
+
+        let prompt = window.assemble_prompt();
+        assert!(prompt.contains("[system]: Be helpful"));
+    }
+
+    #[test]
+    fn test_eviction_with_only_pinned_region_frees_nothing() {
+        // When the only region is Pinned (within budget), eviction frees nothing.
+        let mut window = ContextWindow::new(10000);
+        let mut pinned = Region::new("pinned".to_string(), RegionKind::Pinned, 5000);
+        pinned
+            .add_entry("important data".to_string(), 2000)
+            .unwrap();
+        window.add_region(pinned);
+
+        let result = window.try_evict(500).unwrap();
+        assert_eq!(result.tokens_freed, 0);
+        assert!(result.needs_compaction.is_empty());
+    }
+
+    #[test]
+    fn test_task_assignment_fields() {
+        let ta = TaskAssignment {
+            task_id: "task-1".to_string(),
+            prompt: "Do something".to_string(),
+            priority: 5,
+            assigned_at: 12345,
+        };
+        assert_eq!(ta.task_id, "task-1");
+        assert_eq!(ta.priority, 5);
+        assert_eq!(ta.assigned_at, 12345);
+    }
+
+    #[test]
+    fn test_inference_result_fields() {
+        let ir = InferenceResult {
+            response: "Hello".to_string(),
+            tool_calls: vec![ToolCall {
+                tool_id: "t1".to_string(),
+                name: "search".to_string(),
+                arguments: serde_json::json!({}),
+            }],
+            tokens_used: 100,
+            timestamp: 99999,
+        };
+        assert_eq!(ir.response, "Hello");
+        assert_eq!(ir.tool_calls.len(), 1);
+        assert_eq!(ir.tokens_used, 100);
+    }
+
+    #[test]
+    fn test_needs_compaction_clone() {
+        let nc = NeedsCompaction {
+            regions: vec!["a".to_string(), "b".to_string()],
+        };
+        let cloned = nc.clone();
+        assert_eq!(cloned.regions.len(), 2);
+    }
+
+    #[test]
+    fn test_sub_agent_children_clone() {
+        let children = SubAgentChildren {
+            children: vec![Entity::from_raw(1)],
+            max_child_depth: 2,
+        };
+        let cloned = children.clone();
+        assert_eq!(cloned.children.len(), 1);
+        assert_eq!(cloned.max_child_depth, 2);
+    }
 }

@@ -219,3 +219,159 @@ pub(super) async fn validate_blueprint(
         }),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn agents_dir_is_under_home() {
+        let dir = agents_dir();
+        let path_str = dir.to_string_lossy();
+        assert!(path_str.contains(".leviath"));
+        assert!(path_str.ends_with("agents"));
+    }
+
+    #[test]
+    fn read_blueprint_info_from_valid_manifest() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest_path = dir.path().join("agent.leviath");
+        let content = r#"
+[agent]
+name = "test-bp"
+version = "1.0.0"
+description = "A test blueprint"
+
+[stages.plan]
+prompt = "Plan the work"
+"#;
+        std::fs::write(&manifest_path, content).unwrap();
+
+        let info = read_blueprint_info(&manifest_path, dir.path()).unwrap();
+        assert_eq!(info.name, "test-bp");
+        assert_eq!(info.version, "1.0.0");
+        assert_eq!(info.description, "A test blueprint");
+        assert_eq!(info.stages, vec!["plan"]);
+        assert_eq!(info.path, dir.path().to_string_lossy());
+    }
+
+    #[test]
+    fn read_blueprint_info_nonexistent_file_returns_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest_path = dir.path().join("nonexistent.leviath");
+        let result = read_blueprint_info(&manifest_path, dir.path());
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn read_blueprint_info_invalid_toml_returns_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest_path = dir.path().join("agent.leviath");
+        std::fs::write(&manifest_path, "not valid toml [[[").unwrap();
+        let result = read_blueprint_info(&manifest_path, dir.path());
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn read_blueprint_info_multiple_stages() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest_path = dir.path().join("agent.leviath");
+        let content = r#"
+[agent]
+name = "multi-stage"
+version = "0.2.0"
+description = "Multi-stage"
+
+[stages.plan]
+prompt = "Plan"
+
+[stages.implement]
+prompt = "Implement"
+
+[stages.review]
+prompt = "Review"
+"#;
+        std::fs::write(&manifest_path, content).unwrap();
+
+        let info = read_blueprint_info(&manifest_path, dir.path()).unwrap();
+        assert_eq!(info.name, "multi-stage");
+        assert_eq!(info.stages.len(), 3);
+    }
+
+    #[test]
+    fn discover_blueprints_with_custom_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let agent_dir = dir.path().join("my-agent");
+        std::fs::create_dir_all(&agent_dir).unwrap();
+
+        let content = r#"
+[agent]
+name = "discovered"
+version = "1.0.0"
+description = "Should be discovered"
+
+[stages.work]
+prompt = "Do work"
+"#;
+        std::fs::write(agent_dir.join("agent.leviath"), content).unwrap();
+
+        let config = crate::config::Config {
+            agent_paths: vec![dir.path().to_path_buf()],
+            ..Default::default()
+        };
+
+        let blueprints = discover_blueprints(&config);
+        let found = blueprints.iter().find(|b| b.name == "discovered");
+        assert!(found.is_some(), "should discover agent in custom path");
+    }
+
+    #[test]
+    fn discover_blueprints_empty_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = crate::config::Config {
+            agent_paths: vec![dir.path().to_path_buf()],
+            ..Default::default()
+        };
+        // Should not panic even with empty dirs
+        let blueprints = discover_blueprints(&config);
+        // May include blueprints from ~/.leviath/agents, but no crash
+        let _ = blueprints;
+    }
+
+    #[test]
+    fn discover_blueprints_nonexistent_path_is_skipped() {
+        let config = crate::config::Config {
+            agent_paths: vec![PathBuf::from("/nonexistent/path/unlikely_to_exist_12345")],
+            ..Default::default()
+        };
+        // Should not panic
+        let _ = discover_blueprints(&config);
+    }
+
+    #[test]
+    fn discover_blueprints_direct_manifest_in_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let content = r#"
+[agent]
+name = "direct"
+version = "0.1.0"
+description = "Directly in scan dir"
+
+[stages.run]
+prompt = "Run"
+"#;
+        std::fs::write(dir.path().join("agent.leviath"), content).unwrap();
+
+        let config = crate::config::Config {
+            agent_paths: vec![dir.path().to_path_buf()],
+            ..Default::default()
+        };
+
+        let blueprints = discover_blueprints(&config);
+        let found = blueprints.iter().find(|b| b.name == "direct");
+        assert!(
+            found.is_some(),
+            "should discover agent.leviath directly in scan dir"
+        );
+    }
+}

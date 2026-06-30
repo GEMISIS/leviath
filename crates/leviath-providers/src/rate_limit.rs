@@ -280,4 +280,81 @@ mod tests {
         limiter.record_tokens(200).await;
         assert!(!limiter.check_tpm().await); // 1100 >= 1000
     }
+
+    // ── Additional coverage tests ──────────────────────────────────────────
+
+    #[tokio::test]
+    async fn handle_rate_limit_with_retry_after() {
+        let limiter = RateLimiter::new(&RateLimitConfig {
+            requests_per_minute: 60,
+            tokens_per_minute: 100_000,
+        });
+        // retry_after = 0 should return almost immediately
+        let start = std::time::Instant::now();
+        limiter.handle_rate_limit(Some(0)).await;
+        assert!(start.elapsed().as_secs() < 2);
+    }
+
+    #[tokio::test]
+    async fn handle_rate_limit_exponential_backoff_increments() {
+        let limiter = RateLimiter::new(&RateLimitConfig {
+            requests_per_minute: 60,
+            tokens_per_minute: 100_000,
+        });
+        // Calling handle_rate_limit multiple times with None increments the counter
+        // Use retry_after=0 to avoid actual sleep
+        limiter.handle_rate_limit(Some(0)).await;
+        limiter.handle_rate_limit(Some(0)).await;
+        limiter.handle_rate_limit(Some(0)).await;
+        {
+            let state = limiter.state.lock().await;
+            assert_eq!(state.consecutive_429s, 3);
+        }
+    }
+
+    #[tokio::test]
+    async fn clone_shares_rpm_and_tpm() {
+        let limiter = RateLimiter::new(&RateLimitConfig {
+            requests_per_minute: 42,
+            tokens_per_minute: 12345,
+        });
+        let clone = limiter.clone();
+        assert_eq!(clone.rpm_limit, 42);
+        assert_eq!(clone.tpm_limit, 12345);
+    }
+
+    #[tokio::test]
+    async fn record_tokens_zero() {
+        let limiter = RateLimiter::new(&RateLimitConfig {
+            requests_per_minute: 60,
+            tokens_per_minute: 100,
+        });
+        limiter.record_tokens(0).await;
+        assert!(limiter.check_tpm().await);
+    }
+
+    #[tokio::test]
+    async fn with_defaults_rpm_and_tpm() {
+        let limiter = RateLimiter::with_defaults();
+        assert_eq!(limiter.rpm_limit, 60);
+        assert_eq!(limiter.tpm_limit, 100_000);
+    }
+
+    #[tokio::test]
+    async fn acquire_records_timestamp() {
+        let limiter = RateLimiter::new(&RateLimitConfig {
+            requests_per_minute: 100,
+            tokens_per_minute: 100_000,
+        });
+        limiter.acquire().await.unwrap();
+        {
+            let state = limiter.state.lock().await;
+            assert_eq!(state.request_timestamps.len(), 1);
+        }
+        limiter.acquire().await.unwrap();
+        {
+            let state = limiter.state.lock().await;
+            assert_eq!(state.request_timestamps.len(), 2);
+        }
+    }
 }

@@ -232,3 +232,143 @@ pub async fn execute(args: RunArgs) -> anyhow::Result<()> {
 pub async fn execute_worker(args: WorkerArgs) -> anyhow::Result<()> {
     worker::execute_worker(args).await
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn run_args_defaults() {
+        let args = RunArgs {
+            path: None,
+            task: None,
+            model: None,
+            foreground: false,
+            yolo: false,
+            allow: vec![],
+            ask: vec![],
+            deny: vec![],
+            max_depth: None,
+            count: 1,
+        };
+        assert!(args.path.is_none());
+        assert!(args.task.is_none());
+        assert!(args.model.is_none());
+        assert!(!args.foreground);
+        assert!(!args.yolo);
+        assert!(args.allow.is_empty());
+        assert!(args.ask.is_empty());
+        assert!(args.deny.is_empty());
+        assert!(args.max_depth.is_none());
+        assert_eq!(args.count, 1);
+    }
+
+    #[test]
+    fn run_args_with_values() {
+        let args = RunArgs {
+            path: Some("./my-agent".to_string()),
+            task: Some("build something".to_string()),
+            model: Some("claude-sonnet-4-6".to_string()),
+            foreground: true,
+            yolo: true,
+            allow: vec!["read_file".to_string(), "bash".to_string()],
+            ask: vec!["write_file".to_string()],
+            deny: vec!["shell".to_string()],
+            max_depth: Some(3),
+            count: 5,
+        };
+        assert_eq!(args.path.unwrap(), "./my-agent");
+        assert_eq!(args.task.unwrap(), "build something");
+        assert!(args.foreground);
+        assert!(args.yolo);
+        assert_eq!(args.allow.len(), 2);
+        assert_eq!(args.ask.len(), 1);
+        assert_eq!(args.deny.len(), 1);
+        assert_eq!(args.max_depth, Some(3));
+        assert_eq!(args.count, 5);
+    }
+
+    #[test]
+    fn worker_args_construction() {
+        let args = WorkerArgs {
+            path: "/path/to/agent".to_string(),
+            task: "do the thing".to_string(),
+            run_id: "run-abc-123".to_string(),
+            model: Some("gpt-4".to_string()),
+            yolo: false,
+            allow: vec![],
+            ask: vec![],
+            deny: vec![],
+            max_depth: None,
+        };
+        assert_eq!(args.path, "/path/to/agent");
+        assert_eq!(args.task, "do the thing");
+        assert_eq!(args.run_id, "run-abc-123");
+        assert_eq!(args.model.unwrap(), "gpt-4");
+        assert!(!args.yolo);
+    }
+
+    #[test]
+    fn parse_manifest_public_with_valid_manifest() {
+        let manifest = r#"
+[agent]
+name = "test-agent"
+version = "1.0.0"
+description = "A test agent"
+
+[stages.plan]
+mode = "autonomous"
+prompt = "Plan the work"
+"#;
+        let bp = parse_manifest_public(manifest).unwrap();
+        assert_eq!(bp.name, "test-agent");
+        assert_eq!(bp.version, "1.0.0");
+        assert_eq!(bp.description, "A test agent");
+        assert!(!bp.stages.is_empty());
+    }
+
+    #[test]
+    fn parse_manifest_public_with_invalid_toml() {
+        let result = parse_manifest_public("not valid toml [[[");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn parse_manifest_public_missing_agent_section() {
+        let result = parse_manifest_public("[stages.plan]\nprompt = \"x\"\n");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn parse_manifest_public_minimal() {
+        let manifest = r#"
+[agent]
+name = "minimal"
+
+[stages.default]
+prompt = "do something"
+"#;
+        let bp = parse_manifest_public(manifest).unwrap();
+        assert_eq!(bp.name, "minimal");
+    }
+
+    #[test]
+    fn parse_manifest_public_multiple_stages() {
+        let manifest = r#"
+[agent]
+name = "multi"
+version = "0.1.0"
+description = "Multi-stage agent"
+
+[stages.plan]
+mode = "autonomous"
+prompt = "Plan"
+
+[stages.implement]
+mode = "autonomous"
+prompt = "Implement"
+"#;
+        let bp = parse_manifest_public(manifest).unwrap();
+        assert_eq!(bp.stages.len(), 2);
+    }
+}

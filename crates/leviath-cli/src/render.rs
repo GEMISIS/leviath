@@ -553,4 +553,231 @@ mod tests {
         assert!(all.contains("item one"), "got: {}", all);
         assert!(all.contains("item two"), "got: {}", all);
     }
+
+    // ─── Empty input ───────────────────────────────────────────────────────
+
+    #[test]
+    fn empty_input_returns_empty() {
+        let text = markdown_to_text("", 80);
+        // Empty input should produce no lines or only empty lines
+        let all: String = text
+            .lines
+            .iter()
+            .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
+            .collect::<String>();
+        assert!(all.is_empty() || all.trim().is_empty(), "got: {:?}", all);
+    }
+
+    // ─── Inline styles ────────────────────────────────────────────────────
+
+    #[test]
+    fn bold_text_rendered() {
+        let text = markdown_to_text("**bold text**", 80);
+        let all: String = text
+            .lines
+            .iter()
+            .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
+            .collect::<String>();
+        assert!(all.contains("bold text"), "got: {}", all);
+    }
+
+    #[test]
+    fn italic_text_rendered() {
+        let text = markdown_to_text("*italic text*", 80);
+        let all: String = text
+            .lines
+            .iter()
+            .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
+            .collect::<String>();
+        assert!(all.contains("italic text"), "got: {}", all);
+    }
+
+    #[test]
+    fn strikethrough_text_rendered() {
+        let text = markdown_to_text("~~deleted~~", 80);
+        let all: String = text
+            .lines
+            .iter()
+            .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
+            .collect::<String>();
+        assert!(all.contains("deleted"), "got: {}", all);
+    }
+
+    #[test]
+    fn inline_code_rendered() {
+        let text = markdown_to_text("use `println!()`", 80);
+        let all: String = text
+            .lines
+            .iter()
+            .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
+            .collect::<String>();
+        assert!(all.contains("println!()"), "got: {}", all);
+    }
+
+    // ─── Headings ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn h2_heading_rendered() {
+        let text = markdown_to_text("## Second Level", 80);
+        let all: String = text
+            .lines
+            .iter()
+            .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
+            .collect::<String>();
+        assert!(all.contains("Second Level"), "got: {}", all);
+    }
+
+    #[test]
+    fn h3_heading_rendered() {
+        let text = markdown_to_text("### Third Level", 80);
+        let all: String = text
+            .lines
+            .iter()
+            .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
+            .collect::<String>();
+        assert!(all.contains("Third Level"), "got: {}", all);
+    }
+
+    #[test]
+    fn h1_heading_produces_underline_rule() {
+        let text = markdown_to_text("# Heading", 80);
+        let all: String = text
+            .lines
+            .iter()
+            .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
+            .collect::<String>();
+        // H1 should produce a horizontal rule line underneath
+        assert!(
+            all.contains("\u{2500}"),
+            "H1 should have underline rule, got: {}",
+            all
+        );
+    }
+
+    // ─── Horizontal rule ───────────────────────────────────────────────────
+
+    #[test]
+    fn horizontal_rule_rendered() {
+        let text = markdown_to_text("above\n\n---\n\nbelow", 80);
+        let all: String = text
+            .lines
+            .iter()
+            .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
+            .collect::<String>();
+        assert!(all.contains("above"), "got: {}", all);
+        assert!(all.contains("below"), "got: {}", all);
+        assert!(
+            all.contains("\u{2500}"),
+            "Expected horizontal rule char, got: {}",
+            all
+        );
+    }
+
+    // ─── Blockquote ────────────────────────────────────────────────────────
+
+    #[test]
+    fn blockquote_rendered() {
+        let text = markdown_to_text("> quoted text", 80);
+        let all: String = text
+            .lines
+            .iter()
+            .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
+            .collect::<String>();
+        assert!(all.contains("quoted text"), "got: {}", all);
+    }
+
+    // ─── Ordered list ──────────────────────────────────────────────────────
+
+    #[test]
+    fn ordered_list_rendered() {
+        let md = "1. first\n2. second\n3. third";
+        let text = markdown_to_text(md, 80);
+        let all: String = text
+            .lines
+            .iter()
+            .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
+            .collect::<String>();
+        assert!(all.contains("first"), "got: {}", all);
+        assert!(all.contains("second"), "got: {}", all);
+        assert!(all.contains("third"), "got: {}", all);
+    }
+
+    // ─── Code block without language ───────────────────────────────────────
+
+    #[test]
+    fn code_block_without_language() {
+        let md = "```\nplain code\n```";
+        let text = markdown_to_text(md, 80);
+        let all: String = text
+            .lines
+            .iter()
+            .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
+            .collect::<String>();
+        assert!(all.contains("plain code"), "got: {}", all);
+        // Should show "code" as the default language label
+        assert!(all.contains("code"), "got: {}", all);
+    }
+
+    // ─── Link rendering ───────────────────────────────────────────────────
+
+    #[test]
+    fn link_rendered() {
+        let md = "[click here](https://example.com)";
+        let text = markdown_to_text(md, 80);
+        let all: String = text
+            .lines
+            .iter()
+            .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
+            .collect::<String>();
+        assert!(all.contains("click here"), "got: {}", all);
+    }
+
+    // ─── Narrow width ──────────────────────────────────────────────────────
+
+    #[test]
+    fn narrow_width_does_not_panic() {
+        // Very narrow width should not cause panics
+        let text = markdown_to_text("# Heading\n\n---\n\nSome content", 5);
+        assert!(!text.lines.is_empty());
+    }
+
+    #[test]
+    fn zero_width_does_not_panic() {
+        let text = markdown_to_text("# Heading\n\n---", 0);
+        assert!(!text.lines.is_empty());
+    }
+
+    // ─── InlineStyle ───────────────────────────────────────────────────────
+
+    #[test]
+    fn inline_style_default_produces_white_text() {
+        let style = InlineStyle::default();
+        let ratatui_style = style.to_ratatui_style();
+        assert_eq!(ratatui_style.fg, Some(C_WHITE));
+    }
+
+    #[test]
+    fn inline_style_code_overrides_color() {
+        let style = InlineStyle {
+            code: true,
+            ..Default::default()
+        };
+        let ratatui_style = style.to_ratatui_style();
+        // Code should have a specific fg color, not white
+        assert_ne!(ratatui_style.fg, Some(C_WHITE));
+    }
+
+    // ─── Multiple paragraphs ───────────────────────────────────────────────
+
+    #[test]
+    fn multiple_paragraphs_have_blank_lines() {
+        let md = "First paragraph.\n\nSecond paragraph.";
+        let text = markdown_to_text(md, 80);
+        // Should have more than 2 lines (paragraphs + blank separators)
+        assert!(
+            text.lines.len() >= 3,
+            "Expected at least 3 lines, got {}",
+            text.lines.len()
+        );
+    }
 }

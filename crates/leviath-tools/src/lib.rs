@@ -524,3 +524,386 @@ impl BuiltinTools {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    fn make_tools(dir: &std::path::Path) -> BuiltinTools {
+        BuiltinTools::new(ToolContext::new(dir.to_path_buf()))
+    }
+
+    // ── Tool definitions ──────────────────────────────────────────────────
+
+    #[test]
+    fn tool_defs_returns_six_tools() {
+        let dir = std::env::temp_dir();
+        let tools = make_tools(&dir);
+        let defs = tools.tool_defs();
+        assert_eq!(defs.len(), 6);
+    }
+
+    #[test]
+    fn tool_defs_names_are_correct() {
+        let dir = std::env::temp_dir();
+        let tools = make_tools(&dir);
+        let names: Vec<String> = tools.tool_defs().iter().map(|t| t.name.clone()).collect();
+        assert!(names.contains(&"read_file".to_string()));
+        assert!(names.contains(&"write_file".to_string()));
+        assert!(names.contains(&"edit_file".to_string()));
+        assert!(names.contains(&"list_dir".to_string()));
+        assert!(names.contains(&"shell".to_string()));
+        assert!(names.contains(&"present_for_review".to_string()));
+    }
+
+    #[test]
+    fn tool_defs_have_descriptions() {
+        let dir = std::env::temp_dir();
+        let tools = make_tools(&dir);
+        for def in tools.tool_defs() {
+            assert!(
+                !def.description.is_empty(),
+                "tool {} has empty description",
+                def.name
+            );
+        }
+    }
+
+    #[test]
+    fn tool_defs_have_parameters() {
+        let dir = std::env::temp_dir();
+        let tools = make_tools(&dir);
+        for def in tools.tool_defs() {
+            assert!(
+                def.parameters.is_object(),
+                "tool {} has non-object params",
+                def.name
+            );
+        }
+    }
+
+    // ── names() ───────────────────────────────────────────────────────────
+
+    #[test]
+    fn names_includes_bash_alias() {
+        let dir = std::env::temp_dir();
+        let tools = make_tools(&dir);
+        let names = tools.names();
+        assert!(names.contains(&"bash".to_string()));
+        assert!(names.contains(&"shell".to_string()));
+    }
+
+    #[test]
+    fn names_returns_seven_entries() {
+        let dir = std::env::temp_dir();
+        let tools = make_tools(&dir);
+        assert_eq!(tools.names().len(), 7);
+    }
+
+    // ── Sub-agent tool definitions ────────────────────────────────────────
+
+    #[test]
+    fn subagent_tool_defs_returns_five_tools() {
+        let defs = BuiltinTools::subagent_tool_defs();
+        assert_eq!(defs.len(), 5);
+    }
+
+    #[test]
+    fn subagent_tool_names_returns_five_names() {
+        let names = BuiltinTools::subagent_tool_names();
+        assert_eq!(names.len(), 5);
+        assert!(names.contains(&"spawn_agent".to_string()));
+        assert!(names.contains(&"check_agent".to_string()));
+        assert!(names.contains(&"wait_for_agent".to_string()));
+        assert!(names.contains(&"send_to_agent".to_string()));
+        assert!(names.contains(&"kill_agent".to_string()));
+    }
+
+    #[test]
+    fn subagent_tool_defs_names_match_subagent_tool_names() {
+        let defs = BuiltinTools::subagent_tool_defs();
+        let names = BuiltinTools::subagent_tool_names();
+        let def_names: Vec<String> = defs.iter().map(|d| d.name.clone()).collect();
+        assert_eq!(def_names, names);
+    }
+
+    // ── resolve() ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn resolve_relative_path() {
+        let dir = std::env::temp_dir();
+        let tools = make_tools(&dir);
+        let result = tools.resolve("hello.txt").unwrap();
+        assert!(result.starts_with(&tools.ctx.workdir));
+        assert!(result.ends_with("hello.txt"));
+    }
+
+    #[test]
+    fn resolve_rejects_path_escape() {
+        let dir = std::env::temp_dir().join("leviath_test_sandbox");
+        fs::create_dir_all(&dir).ok();
+        let tools = make_tools(&dir);
+        let result = tools.resolve("../../etc/passwd");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn resolve_dot_stays_in_workdir() {
+        let dir = std::env::temp_dir();
+        let tools = make_tools(&dir);
+        let result = tools.resolve("./foo/./bar.txt").unwrap();
+        assert!(result.starts_with(&tools.ctx.workdir));
+        assert!(result.ends_with("foo/bar.txt"));
+    }
+
+    // ── execute() with file I/O (async) ───────────────────────────────────
+
+    #[tokio::test]
+    async fn execute_unknown_tool_returns_error() {
+        let dir = std::env::temp_dir();
+        let tools = make_tools(&dir);
+        let result = tools.execute("nonexistent", json!({})).await;
+        assert!(result.contains("[error]"));
+        assert!(result.contains("Unknown built-in tool"));
+    }
+
+    #[tokio::test]
+    async fn read_file_missing_path_arg() {
+        let dir = std::env::temp_dir();
+        let tools = make_tools(&dir);
+        let result = tools.execute("read_file", json!({})).await;
+        assert!(result.contains("[error]"));
+        assert!(result.contains("missing 'path'"));
+    }
+
+    #[tokio::test]
+    async fn write_and_read_file_roundtrip() {
+        let dir = tempfile::tempdir().unwrap();
+        let tools = make_tools(dir.path());
+
+        let write_result = tools
+            .execute(
+                "write_file",
+                json!({"path": "test.txt", "content": "hello world"}),
+            )
+            .await;
+        assert!(write_result.contains("Successfully wrote"));
+        assert!(write_result.contains("11 bytes"));
+
+        let read_result = tools
+            .execute("read_file", json!({"path": "test.txt"}))
+            .await;
+        assert_eq!(read_result, "hello world");
+    }
+
+    #[tokio::test]
+    async fn write_file_creates_parent_dirs() {
+        let dir = tempfile::tempdir().unwrap();
+        let tools = make_tools(dir.path());
+
+        let result = tools
+            .execute(
+                "write_file",
+                json!({"path": "sub/dir/file.txt", "content": "nested"}),
+            )
+            .await;
+        assert!(result.contains("Successfully wrote"));
+        assert!(dir.path().join("sub/dir/file.txt").exists());
+    }
+
+    #[tokio::test]
+    async fn write_file_missing_content_arg() {
+        let dir = tempfile::tempdir().unwrap();
+        let tools = make_tools(dir.path());
+        let result = tools.execute("write_file", json!({"path": "f.txt"})).await;
+        assert!(result.contains("missing 'content'"));
+    }
+
+    #[tokio::test]
+    async fn edit_file_successful_replacement() {
+        let dir = tempfile::tempdir().unwrap();
+        let tools = make_tools(dir.path());
+
+        tools
+            .execute(
+                "write_file",
+                json!({"path": "e.txt", "content": "foo bar baz"}),
+            )
+            .await;
+
+        let result = tools
+            .execute(
+                "edit_file",
+                json!({"path": "e.txt", "old_str": "bar", "new_str": "qux"}),
+            )
+            .await;
+        assert!(result.contains("Successfully edited"));
+
+        let content = tools.execute("read_file", json!({"path": "e.txt"})).await;
+        assert_eq!(content, "foo qux baz");
+    }
+
+    #[tokio::test]
+    async fn edit_file_string_not_found() {
+        let dir = tempfile::tempdir().unwrap();
+        let tools = make_tools(dir.path());
+
+        tools
+            .execute("write_file", json!({"path": "e.txt", "content": "abc"}))
+            .await;
+
+        let result = tools
+            .execute(
+                "edit_file",
+                json!({"path": "e.txt", "old_str": "xyz", "new_str": "123"}),
+            )
+            .await;
+        assert!(result.contains("String not found"));
+    }
+
+    #[tokio::test]
+    async fn edit_file_multiple_occurrences() {
+        let dir = tempfile::tempdir().unwrap();
+        let tools = make_tools(dir.path());
+
+        tools
+            .execute("write_file", json!({"path": "e.txt", "content": "aaa aaa"}))
+            .await;
+
+        let result = tools
+            .execute(
+                "edit_file",
+                json!({"path": "e.txt", "old_str": "aaa", "new_str": "bbb"}),
+            )
+            .await;
+        assert!(result.contains("2 occurrences"));
+        assert!(result.contains("must be unique"));
+    }
+
+    #[tokio::test]
+    async fn edit_file_missing_args() {
+        let dir = tempfile::tempdir().unwrap();
+        let tools = make_tools(dir.path());
+
+        let r1 = tools.execute("edit_file", json!({})).await;
+        assert!(r1.contains("missing 'path'"));
+
+        let r2 = tools.execute("edit_file", json!({"path": "f.txt"})).await;
+        assert!(r2.contains("missing 'old_str'"));
+
+        let r3 = tools
+            .execute("edit_file", json!({"path": "f.txt", "old_str": "x"}))
+            .await;
+        assert!(r3.contains("missing 'new_str'"));
+    }
+
+    #[tokio::test]
+    async fn list_dir_contents() {
+        let dir = tempfile::tempdir().unwrap();
+        let tools = make_tools(dir.path());
+
+        fs::write(dir.path().join("a.txt"), "hello").unwrap();
+        fs::create_dir(dir.path().join("subdir")).unwrap();
+
+        let result = tools.execute("list_dir", json!({})).await;
+        assert!(result.contains("a.txt"));
+        assert!(result.contains("subdir/"));
+    }
+
+    #[tokio::test]
+    async fn list_dir_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let tools = make_tools(dir.path());
+        let result = tools.execute("list_dir", json!({})).await;
+        assert!(result.contains("empty directory"));
+    }
+
+    #[tokio::test]
+    async fn list_dir_with_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let tools = make_tools(dir.path());
+
+        fs::create_dir(dir.path().join("sub")).unwrap();
+        fs::write(dir.path().join("sub/inner.txt"), "data").unwrap();
+
+        let result = tools.execute("list_dir", json!({"path": "sub"})).await;
+        assert!(result.contains("inner.txt"));
+    }
+
+    #[tokio::test]
+    async fn read_file_nonexistent() {
+        let dir = tempfile::tempdir().unwrap();
+        let tools = make_tools(dir.path());
+        let result = tools
+            .execute("read_file", json!({"path": "nope.txt"}))
+            .await;
+        assert!(result.contains("[error]"));
+        assert!(result.contains("Failed to read"));
+    }
+
+    #[tokio::test]
+    async fn shell_echo_command() {
+        let dir = tempfile::tempdir().unwrap();
+        let tools = make_tools(dir.path());
+        let result = tools
+            .execute("shell", json!({"command": "echo hello"}))
+            .await;
+        assert!(result.trim().contains("hello"));
+    }
+
+    #[tokio::test]
+    async fn bash_alias_works() {
+        let dir = tempfile::tempdir().unwrap();
+        let tools = make_tools(dir.path());
+        let result = tools
+            .execute("bash", json!({"command": "echo alias_test"}))
+            .await;
+        assert!(result.contains("alias_test"));
+    }
+
+    #[tokio::test]
+    async fn shell_missing_command_arg() {
+        let dir = tempfile::tempdir().unwrap();
+        let tools = make_tools(dir.path());
+        let result = tools.execute("shell", json!({})).await;
+        assert!(result.contains("missing 'command'"));
+    }
+
+    #[tokio::test]
+    async fn shell_failing_command() {
+        let dir = tempfile::tempdir().unwrap();
+        let tools = make_tools(dir.path());
+        let result = tools.execute("shell", json!({"command": "false"})).await;
+        assert!(result.contains("[exit code"));
+    }
+
+    // ── ToolContext ────────────────────────────────────────────────────────
+
+    #[test]
+    fn tool_context_new_canonicalizes() {
+        let dir = std::env::temp_dir();
+        let ctx = ToolContext::new(dir.clone());
+        // Canonicalized path should be absolute
+        assert!(ctx.workdir.is_absolute());
+    }
+
+    #[test]
+    fn tool_context_new_with_nonexistent_dir() {
+        let ctx = ToolContext::new(PathBuf::from("/nonexistent/path/unlikely"));
+        // Falls back to the original path when canonicalization fails
+        assert_eq!(ctx.workdir, PathBuf::from("/nonexistent/path/unlikely"));
+    }
+
+    // ── detect_shell ──────────────────────────────────────────────────────
+
+    #[test]
+    fn detect_shell_returns_valid_shell() {
+        let (shell, flag) = BuiltinTools::detect_shell();
+        assert!(!shell.is_empty());
+        assert!(!flag.is_empty());
+        // On unix, flag should be "-c"
+        #[cfg(not(windows))]
+        assert_eq!(flag, "-c");
+    }
+}

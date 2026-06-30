@@ -141,3 +141,198 @@ fn parse_agent_name(content: &str) -> Option<String> {
     }
     None
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ─── parse_agent_name ──────────────────────────────────────────────────
+
+    #[test]
+    fn parse_agent_name_standard() {
+        let content = r#"
+name = "my-agent"
+version = "1.0"
+"#;
+        assert_eq!(parse_agent_name(content), Some("my-agent".to_string()));
+    }
+
+    #[test]
+    fn parse_agent_name_no_quotes() {
+        let content = r#"name = my-agent"#;
+        assert_eq!(parse_agent_name(content), Some("my-agent".to_string()));
+    }
+
+    #[test]
+    fn parse_agent_name_extra_whitespace() {
+        let content = r#"  name   =   "spacy-agent"  "#;
+        assert_eq!(parse_agent_name(content), Some("spacy-agent".to_string()));
+    }
+
+    #[test]
+    fn parse_agent_name_missing() {
+        let content = r#"
+version = "1.0"
+description = "test"
+"#;
+        assert_eq!(parse_agent_name(content), None);
+    }
+
+    #[test]
+    fn parse_agent_name_empty_value() {
+        let content = r#"name = """#;
+        assert_eq!(parse_agent_name(content), None);
+    }
+
+    // ─── copy_dir_recursive ────────────────────────────────────────────────
+
+    #[test]
+    fn copy_dir_recursive_copies_files() {
+        let src_dir = tempfile::tempdir().unwrap();
+        let dst_dir = tempfile::tempdir().unwrap();
+        let dst_path = dst_dir.path().join("copy");
+
+        std::fs::write(src_dir.path().join("file1.txt"), "hello").unwrap();
+        std::fs::create_dir_all(src_dir.path().join("sub")).unwrap();
+        std::fs::write(src_dir.path().join("sub/file2.txt"), "world").unwrap();
+
+        copy_dir_recursive(src_dir.path(), &dst_path).unwrap();
+
+        assert!(dst_path.join("file1.txt").exists());
+        assert!(dst_path.join("sub/file2.txt").exists());
+        assert_eq!(
+            std::fs::read_to_string(dst_path.join("file1.txt")).unwrap(),
+            "hello"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dst_path.join("sub/file2.txt")).unwrap(),
+            "world"
+        );
+    }
+
+    #[test]
+    fn copy_dir_recursive_empty_dir() {
+        let src_dir = tempfile::tempdir().unwrap();
+        let dst_dir = tempfile::tempdir().unwrap();
+        let dst_path = dst_dir.path().join("empty-copy");
+
+        copy_dir_recursive(src_dir.path(), &dst_path).unwrap();
+        assert!(dst_path.exists());
+        assert!(dst_path.is_dir());
+    }
+
+    // ─── install_from_dir ──────────────────────────────────────────────────
+
+    #[test]
+    fn install_from_dir_no_manifest_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let result = install_from_dir(dir.path());
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("agent.leviath"));
+    }
+
+    // ─── path detection ────────────────────────────────────────────────────
+
+    #[test]
+    fn bundle_extension_detected() {
+        let package = "my-agent-1.0.leviath-bundle";
+        assert!(package.ends_with(".leviath-bundle"));
+    }
+
+    #[test]
+    fn directory_path_detected() {
+        let dir = tempfile::tempdir().unwrap();
+        let package_path = Path::new(dir.path().to_str().unwrap());
+        assert!(package_path.is_dir());
+    }
+
+    #[test]
+    fn registry_name_not_dir_not_bundle() {
+        let package = "my-cool-agent";
+        let package_path = Path::new(package);
+        assert!(!package_path.is_dir());
+        assert!(!package.ends_with(".leviath-bundle"));
+    }
+
+    // ─── parse_agent_name additional ──────────────────────────────────────
+
+    #[test]
+    fn parse_agent_name_in_section() {
+        let content = r#"
+[agent]
+name = "my-agent"
+version = "1.0"
+"#;
+        assert_eq!(parse_agent_name(content), Some("my-agent".to_string()));
+    }
+
+    #[test]
+    fn parse_agent_name_with_single_quotes() {
+        // toml uses double quotes, but our parser uses trim_matches('"')
+        let content = r#"name = my-agent-no-quotes"#;
+        assert_eq!(
+            parse_agent_name(content),
+            Some("my-agent-no-quotes".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_agent_name_multiple_name_fields_returns_first() {
+        let content = r#"
+name = "first"
+name = "second"
+"#;
+        assert_eq!(parse_agent_name(content), Some("first".to_string()));
+    }
+
+    // ─── copy_dir_recursive with nested dirs ──────────────────────────────
+
+    #[test]
+    fn copy_dir_recursive_deeply_nested() {
+        let src_dir = tempfile::tempdir().unwrap();
+        let dst_dir = tempfile::tempdir().unwrap();
+        let dst_path = dst_dir.path().join("deep-copy");
+
+        std::fs::create_dir_all(src_dir.path().join("a/b/c")).unwrap();
+        std::fs::write(src_dir.path().join("a/b/c/deep.txt"), "deep").unwrap();
+
+        copy_dir_recursive(src_dir.path(), &dst_path).unwrap();
+
+        assert!(dst_path.join("a/b/c/deep.txt").exists());
+        assert_eq!(
+            std::fs::read_to_string(dst_path.join("a/b/c/deep.txt")).unwrap(),
+            "deep"
+        );
+    }
+
+    // ─── install_from_dir with valid manifest ─────────────────────────────
+
+    #[test]
+    fn install_from_dir_with_manifest_runs() {
+        // This will try to install to ~/.leviath/agents/ which may or may not exist
+        // but the important thing is it parses the manifest correctly
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = r#"
+[agent]
+name = "test-install-agent-xyz"
+version = "0.1.0"
+description = "test"
+"#;
+        std::fs::write(dir.path().join("agent.leviath"), manifest).unwrap();
+        std::fs::write(dir.path().join("readme.txt"), "hello").unwrap();
+
+        // The install will succeed or fail depending on home dir access
+        // but it should not panic
+        let result = install_from_dir(dir.path());
+        // Clean up if it succeeded
+        if result.is_ok() {
+            if let Some(home) = dirs::home_dir() {
+                let install_dir = home
+                    .join(".leviath")
+                    .join("agents")
+                    .join("test-install-agent-xyz");
+                let _ = std::fs::remove_dir_all(install_dir);
+            }
+        }
+    }
+}

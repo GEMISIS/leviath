@@ -667,4 +667,126 @@ mod tests {
         // Invalid JSON line is skipped; no valid data line follows → None
         assert!(parse_openai_sse_event(&mut buf).is_none());
     }
+
+    // ── Additional coverage tests ──────────────────────────────────────────
+
+    #[test]
+    fn build_request_body_empty_messages() {
+        let req = InferenceRequest {
+            messages: vec![],
+            model: "gpt-4".into(),
+            max_tokens: 100,
+            temperature: 0.0,
+            tools: vec![],
+            extra: serde_json::json!({}),
+        };
+        let body = build_openai_request_body(&req);
+        assert_eq!(body["messages"].as_array().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn parse_response_multiple_tool_calls() {
+        let body = serde_json::json!({
+            "choices": [{
+                "message": {
+                    "content": "",
+                    "tool_calls": [
+                        {
+                            "id": "call_1",
+                            "function": { "name": "search", "arguments": "{}" }
+                        },
+                        {
+                            "id": "call_2",
+                            "function": { "name": "write", "arguments": "{\"file\":\"a.txt\"}" }
+                        }
+                    ]
+                },
+                "finish_reason": "tool_calls"
+            }],
+            "usage": {"prompt_tokens": 10, "completion_tokens": 5}
+        });
+        let resp = parse_openai_response(&body).unwrap();
+        assert_eq!(resp.tool_calls.len(), 2);
+        assert_eq!(resp.tool_calls[0].name, "search");
+        assert_eq!(resp.tool_calls[1].name, "write");
+        assert_eq!(resp.tool_calls[1].arguments["file"], "a.txt");
+    }
+
+    #[test]
+    fn parse_response_malformed_tool_arguments_defaults_to_empty_object() {
+        let body = serde_json::json!({
+            "choices": [{
+                "message": {
+                    "content": "",
+                    "tool_calls": [{
+                        "id": "call_1",
+                        "function": { "name": "test", "arguments": "not-valid-json" }
+                    }]
+                },
+                "finish_reason": "tool_calls"
+            }],
+            "usage": {"prompt_tokens": 5, "completion_tokens": 5}
+        });
+        let resp = parse_openai_response(&body).unwrap();
+        assert_eq!(resp.tool_calls.len(), 1);
+        assert!(resp.tool_calls[0].arguments.is_object());
+    }
+
+    #[test]
+    fn sse_event_empty_buffer() {
+        let mut buf = String::new();
+        assert!(parse_openai_sse_event(&mut buf).is_none());
+    }
+
+    #[test]
+    fn sse_event_consumes_only_first_event() {
+        let mut buf = format!(
+            "data: {}\n\ndata: [DONE]\n\n",
+            serde_json::json!({"choices": [{"delta": {"content": "X"}}]})
+        );
+        let chunk = parse_openai_sse_event(&mut buf).unwrap().unwrap();
+        assert_eq!(chunk.delta, "X");
+        // Buffer should still have the [DONE] event
+        assert!(buf.contains("[DONE]"));
+    }
+
+    #[test]
+    fn sse_event_no_data_prefix_skipped() {
+        // Event with no "data: " prefix line
+        let mut buf = "event: something\n\n".to_string();
+        assert!(parse_openai_sse_event(&mut buf).is_none());
+    }
+
+    #[test]
+    fn sse_event_tool_call_delta_no_id() {
+        let mut buf = format!(
+            "data: {}\n\n",
+            serde_json::json!({
+                "choices": [{
+                    "delta": {
+                        "tool_calls": [{
+                            "index": 1,
+                            "function": {
+                                "arguments": "\"val\"}"
+                            }
+                        }]
+                    }
+                }]
+            })
+        );
+        let chunk = parse_openai_sse_event(&mut buf).unwrap().unwrap();
+        assert_eq!(chunk.tool_calls.len(), 1);
+        assert_eq!(chunk.tool_calls[0].index, 1);
+        assert!(chunk.tool_calls[0].id.is_none());
+        assert!(chunk.tool_calls[0].name.is_none());
+    }
+
+    #[test]
+    fn sse_event_no_choices_no_usage_continues() {
+        let mut buf = format!("data: {}\n\n", serde_json::json!({"id": "chatcmpl-123"}));
+        // No choices and no usage → should continue, effectively None since
+        // no data line produces a result
+        let result = parse_openai_sse_event(&mut buf);
+        assert!(result.is_none() || matches!(result, Some(None)));
+    }
 }

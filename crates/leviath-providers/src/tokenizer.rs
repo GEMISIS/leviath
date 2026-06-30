@@ -74,4 +74,85 @@ mod tests {
         assert!(count > 0);
         assert!(count < text.len());
     }
+
+    // ── Additional coverage tests ──────────────────────────────────────────
+
+    #[test]
+    fn test_empty_string() {
+        assert_eq!(count_tokens("", "gpt-5.4-mini"), 0);
+        assert_eq!(count_tokens("", "claude-sonnet-4-6"), 0);
+        assert_eq!(count_tokens("", "unknown-model"), 0);
+    }
+
+    #[test]
+    fn test_approximate_count_empty() {
+        assert_eq!(approximate_count(""), 0);
+    }
+
+    #[test]
+    fn test_approximate_count_exact_multiple() {
+        // 8 chars / 4 = 2 tokens
+        assert_eq!(approximate_count("12345678"), 2);
+    }
+
+    #[test]
+    fn test_approximate_count_non_multiple() {
+        // 9 chars / 4 = 2.25 → ceil = 3
+        assert_eq!(approximate_count("123456789"), 3);
+    }
+
+    #[test]
+    fn test_approximate_count_single_char() {
+        assert_eq!(approximate_count("a"), 1);
+    }
+
+    #[test]
+    fn test_gpt_model_uses_tiktoken() {
+        let count = count_tokens("Hello", "gpt-5.5");
+        assert!(count > 0);
+    }
+
+    #[test]
+    fn test_o3_model_uses_tiktoken() {
+        let count = count_tokens("Hello", "o3-mini");
+        assert!(count > 0);
+    }
+
+    #[test]
+    fn test_o4_model_uses_tiktoken() {
+        let count = count_tokens("Hello", "o4-mini");
+        assert!(count > 0);
+    }
+
+    #[test]
+    fn test_claude_model_uses_anthropic_approx() {
+        // "Hello" = 5 chars, 5/3.5 = 1.43, ceil = 2
+        let count = count_tokens("Hello", "claude-sonnet-4-6");
+        assert_eq!(count, 2);
+    }
+
+    #[test]
+    fn test_unknown_model_uses_general_approx() {
+        // "Hello" = 5 chars, 5/4 = 1.25, ceil = 2
+        let count = count_tokens("Hello", "unknown-model");
+        assert_eq!(count, 2);
+    }
+
+    #[test]
+    fn test_anthropic_approximation_rounding() {
+        // 7 chars / 3.5 = 2.0 exactly
+        let count = count_tokens("1234567", "claude-opus-4-8");
+        assert_eq!(count, 2);
+    }
+
+    #[test]
+    fn test_long_string() {
+        let text = "a".repeat(10000);
+        let gpt_count = count_tokens(&text, "gpt-5.4-mini");
+        let claude_count = count_tokens(&text, "claude-sonnet-4-6");
+        let unknown_count = count_tokens(&text, "unknown");
+        assert!(gpt_count > 0);
+        assert!(claude_count > 0);
+        assert!(unknown_count > 0);
+    }
 }

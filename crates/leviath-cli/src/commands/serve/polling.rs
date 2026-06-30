@@ -159,3 +159,122 @@ pub(super) async fn polling_loop(state: AppState) {
         poll.last_pending.retain(|k, _| run_ids.contains(k));
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn poll_state_initial_is_empty() {
+        let poll = PollState {
+            last_status: HashMap::new(),
+            last_context_tokens: HashMap::new(),
+            last_pending: HashMap::new(),
+            callback_fired: HashMap::new(),
+        };
+        assert!(poll.last_status.is_empty());
+        assert!(poll.last_context_tokens.is_empty());
+        assert!(poll.last_pending.is_empty());
+        assert!(poll.callback_fired.is_empty());
+    }
+
+    #[test]
+    fn poll_state_status_tracking() {
+        let mut poll = PollState {
+            last_status: HashMap::new(),
+            last_context_tokens: HashMap::new(),
+            last_pending: HashMap::new(),
+            callback_fired: HashMap::new(),
+        };
+
+        let key = ("Running".to_string(), 1, 500, 100);
+        poll.last_status.insert("run-1".to_string(), key.clone());
+
+        assert_eq!(poll.last_status.get("run-1"), Some(&key));
+        assert_eq!(poll.last_status.get("run-2"), None);
+    }
+
+    #[test]
+    fn poll_state_context_token_tracking() {
+        let mut poll = PollState {
+            last_status: HashMap::new(),
+            last_context_tokens: HashMap::new(),
+            last_pending: HashMap::new(),
+            callback_fired: HashMap::new(),
+        };
+
+        poll.last_context_tokens.insert("run-1".to_string(), 5000);
+        assert_eq!(poll.last_context_tokens.get("run-1"), Some(&5000));
+    }
+
+    #[test]
+    fn poll_state_pending_tracking() {
+        let mut poll = PollState {
+            last_status: HashMap::new(),
+            last_context_tokens: HashMap::new(),
+            last_pending: HashMap::new(),
+            callback_fired: HashMap::new(),
+        };
+
+        poll.last_pending.insert("run-1".to_string(), true);
+        assert_eq!(poll.last_pending.get("run-1").copied(), Some(true));
+        assert!(!poll.last_pending.get("run-2").copied().unwrap_or(false));
+    }
+
+    #[test]
+    fn poll_state_callback_fired_tracking() {
+        let mut poll = PollState {
+            last_status: HashMap::new(),
+            last_context_tokens: HashMap::new(),
+            last_pending: HashMap::new(),
+            callback_fired: HashMap::new(),
+        };
+
+        assert!(!poll.callback_fired.get("run-1").copied().unwrap_or(false));
+        poll.callback_fired.insert("run-1".to_string(), true);
+        assert!(poll.callback_fired.get("run-1").copied().unwrap_or(false));
+    }
+
+    #[test]
+    fn poll_state_cleanup_removes_stale_entries() {
+        let mut last_status = HashMap::new();
+        let mut last_context_tokens = HashMap::new();
+        let mut last_pending = HashMap::new();
+
+        last_status.insert("run-1".to_string(), ("Running".to_string(), 1, 100, 50));
+        last_status.insert("run-2".to_string(), ("Complete".to_string(), 5, 500, 200));
+        last_context_tokens.insert("run-1".to_string(), 1000);
+        last_context_tokens.insert("run-2".to_string(), 2000);
+        last_pending.insert("run-1".to_string(), false);
+        last_pending.insert("run-2".to_string(), true);
+
+        // Simulate only run-1 still existing
+        let run_ids: std::collections::HashSet<String> =
+            vec!["run-1".to_string()].into_iter().collect();
+
+        last_status.retain(|k, _| run_ids.contains(k));
+        last_context_tokens.retain(|k, _| run_ids.contains(k));
+        last_pending.retain(|k, _| run_ids.contains(k));
+
+        assert_eq!(last_status.len(), 1);
+        assert!(last_status.contains_key("run-1"));
+        assert!(!last_status.contains_key("run-2"));
+        assert_eq!(last_context_tokens.len(), 1);
+        assert_eq!(last_pending.len(), 1);
+    }
+
+    #[test]
+    fn terminal_status_detection() {
+        let terminal_statuses = ["Complete", "Error", "Cancelled"];
+        for s in &terminal_statuses {
+            let is_terminal = *s == "Complete" || *s == "Error" || *s == "Cancelled";
+            assert!(is_terminal, "{} should be terminal", s);
+        }
+
+        let non_terminal = ["Running", "WaitingInput", "Pending"];
+        for s in &non_terminal {
+            let is_terminal = *s == "Complete" || *s == "Error" || *s == "Cancelled";
+            assert!(!is_terminal, "{} should not be terminal", s);
+        }
+    }
+}

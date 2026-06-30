@@ -177,4 +177,97 @@ mod tests {
         assert_eq!(cloned.entry_stage, "start");
         assert_eq!(cloned.stage_names.len(), 2);
     }
+
+    // ── Additional coverage tests ──────────────────────────────────────────
+
+    #[test]
+    fn graph_edge_all_fields() {
+        let edge = GraphEdge {
+            target: "review".to_string(),
+            hint: Some("when done".to_string()),
+            condition: "llm_choice".to_string(),
+            transform: "compact".to_string(),
+        };
+        assert_eq!(edge.target, "review");
+        assert_eq!(edge.hint, Some("when done".to_string()));
+        assert_eq!(edge.condition, "llm_choice");
+        assert_eq!(edge.transform, "compact");
+    }
+
+    #[test]
+    fn graph_edge_no_hint() {
+        let edge = GraphEdge {
+            target: "next".to_string(),
+            hint: None,
+            condition: "always".to_string(),
+            transform: "direct".to_string(),
+        };
+        assert!(edge.hint.is_none());
+    }
+
+    #[test]
+    fn graph_transition_info_entry_stage() {
+        let info = GraphTransitionInfo {
+            edges: std::collections::HashMap::new(),
+            entry_stage: "analyze".to_string(),
+            stage_names: vec!["analyze".to_string(), "implement".to_string()],
+        };
+        assert_eq!(info.entry_stage, "analyze");
+    }
+
+    #[test]
+    fn load_graph_info_empty_dir() {
+        let dir = std::env::temp_dir().join("leviath_test_empty_graph");
+        let _ = std::fs::create_dir_all(&dir);
+        let result = load_graph_info(dir.to_str().unwrap());
+        assert!(result.is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn graph_transition_info_debug_format() {
+        let info = GraphTransitionInfo {
+            edges: std::collections::HashMap::new(),
+            entry_stage: "start".to_string(),
+            stage_names: vec!["start".to_string()],
+        };
+        let dbg = format!("{:?}", info);
+        assert!(dbg.contains("start"));
+    }
+
+    #[test]
+    fn graph_edge_multiple_edges_from_same_source() {
+        let mut edges = std::collections::HashMap::new();
+        edges.insert(
+            "plan".to_string(),
+            vec![
+                GraphEdge {
+                    target: "implement".to_string(),
+                    hint: Some("go ahead".to_string()),
+                    condition: "llm_choice".to_string(),
+                    transform: "direct".to_string(),
+                },
+                GraphEdge {
+                    target: "abort".to_string(),
+                    hint: Some("too complex".to_string()),
+                    condition: "llm_choice".to_string(),
+                    transform: "clear".to_string(),
+                },
+            ],
+        );
+
+        let info = GraphTransitionInfo {
+            edges,
+            entry_stage: "plan".to_string(),
+            stage_names: vec![
+                "plan".to_string(),
+                "implement".to_string(),
+                "abort".to_string(),
+            ],
+        };
+        let plan_edges = info.edges.get("plan").unwrap();
+        assert_eq!(plan_edges.len(), 2);
+        assert_eq!(plan_edges[0].target, "implement");
+        assert_eq!(plan_edges[1].target, "abort");
+    }
 }

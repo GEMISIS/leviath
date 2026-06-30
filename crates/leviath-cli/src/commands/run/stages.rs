@@ -816,4 +816,123 @@ mod tests {
             io.outputs
         );
     }
+
+    #[tokio::test]
+    async fn interactive_stage_with_tools_works() {
+        let bp = make_blueprint(vec![make_stage("main")]);
+        let (mut engine, _pool, entity) = make_engine_and_entity(&bp, "Tool response");
+        let mut io = MockIO::new().with_inputs(vec!["/quit".to_string()]);
+
+        // Provide a tool so the tool-path is taken
+        let tools = vec![leviath_providers::Tool {
+            name: "test_tool".to_string(),
+            description: "a test tool".to_string(),
+            parameters: serde_json::json!({}),
+        }];
+
+        run_interactive_stage(
+            &mut engine,
+            entity,
+            "mock",
+            "test-model",
+            10,
+            &tools,
+            None,
+            "main",
+            &mut io,
+            &mut noop_exec,
+        )
+        .await
+        .unwrap();
+
+        // Should have gotten output from the tool-path
+        let all_output: String = io.outputs.join("");
+        assert!(
+            all_output.contains("Tool response"),
+            "Expected tool response in outputs: {:?}",
+            io.outputs
+        );
+    }
+
+    #[tokio::test]
+    async fn interactive_stage_exit_ends_session() {
+        let bp = make_blueprint(vec![make_stage("main")]);
+        let (mut engine, _pool, entity) = make_engine_and_entity(&bp, "Response");
+        let mut io = MockIO::new().with_inputs(vec!["/exit".to_string()]);
+
+        run_interactive_stage(
+            &mut engine,
+            entity,
+            "mock",
+            "test-model",
+            10,
+            &[],
+            None,
+            "main",
+            &mut io,
+            &mut noop_exec,
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            io.outputs.iter().any(|o| o.contains("[Session ended]")),
+            "Expected session ended message: {:?}",
+            io.outputs
+        );
+    }
+
+    #[tokio::test]
+    async fn autonomous_stage_no_errors() {
+        let bp = make_blueprint(vec![make_stage("main")]);
+        let (mut engine, _pool, entity) = make_engine_and_entity(&bp, "OK");
+        let mut io = MockIO::new();
+
+        let result = run_autonomous_stage(
+            &mut engine,
+            entity,
+            "mock",
+            "test-model",
+            5,
+            &[],
+            None,
+            None,
+            &mut io,
+            &mut noop_exec,
+        )
+        .await;
+
+        assert!(result.is_ok());
+        assert!(io.errors.is_empty());
+    }
+
+    #[tokio::test]
+    async fn interactive_stage_multiple_turns() {
+        let bp = make_blueprint(vec![make_stage("main")]);
+        let (mut engine, _pool, entity) = make_engine_and_entity(&bp, "Reply");
+        let mut io =
+            MockIO::new().with_inputs(vec!["first question".to_string(), "/quit".to_string()]);
+
+        run_interactive_stage(
+            &mut engine,
+            entity,
+            "mock",
+            "test-model",
+            10,
+            &[],
+            None,
+            "main",
+            &mut io,
+            &mut noop_exec,
+        )
+        .await
+        .unwrap();
+
+        // Should have multiple outputs (at least 2: response + session ended)
+        assert!(
+            io.outputs.len() >= 2,
+            "Expected at least 2 outputs: {:?}",
+            io.outputs
+        );
+    }
 }

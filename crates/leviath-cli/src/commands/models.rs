@@ -700,4 +700,255 @@ mod tests {
             }
         }
     }
+
+    // ─── print_model_detail ─────────────────────────────────────────────────
+
+    #[test]
+    fn print_model_detail_does_not_panic() {
+        let caps = ModelCapabilities {
+            supports_temperature: true,
+            supports_streaming: true,
+            supports_tools: true,
+            supports_system_prompt: true,
+            max_context_tokens: 100_000,
+            max_output_tokens: 8_192,
+        };
+        // Should not panic
+        print_model_detail("test-model", Some("Test Model"), "test", &caps, false);
+        print_model_detail("test-model", None, "test", &caps, true);
+    }
+
+    // ─── fmt_tokens edge cases ──────────────────────────────────────────────
+
+    #[test]
+    fn fmt_tokens_exact_boundary() {
+        assert_eq!(fmt_tokens(999), "999");
+        assert_eq!(fmt_tokens(999_999), "999K");
+    }
+
+    #[test]
+    fn fmt_tokens_large_millions() {
+        assert_eq!(fmt_tokens(10_000_000), "10M");
+    }
+
+    // ─── builtin_table provider coverage ────────────────────────────────────
+
+    #[test]
+    fn builtin_table_claude_opus_no_temperature() {
+        let table = builtin_table();
+        for entry in &table {
+            if entry.model_id == "claude-opus-4-8" || entry.model_id == "claude-opus-4-7" {
+                assert!(
+                    !entry.caps.supports_temperature,
+                    "{} should not support temperature",
+                    entry.model_id
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn builtin_table_claude_sonnet_supports_temperature() {
+        let table = builtin_table();
+        let sonnet = table
+            .iter()
+            .find(|e| e.model_id == "claude-sonnet-4-6")
+            .expect("claude-sonnet-4-6 should be in table");
+        assert!(sonnet.caps.supports_temperature);
+    }
+
+    #[test]
+    fn builtin_table_has_display_names() {
+        let table = builtin_table();
+        for entry in &table {
+            assert!(
+                !entry.display_name.is_empty(),
+                "model {} has empty display name",
+                entry.model_id
+            );
+        }
+    }
+
+    #[test]
+    fn builtin_table_context_larger_than_output() {
+        let table = builtin_table();
+        for entry in &table {
+            assert!(
+                entry.caps.max_context_tokens >= entry.caps.max_output_tokens,
+                "model {} has output > context",
+                entry.model_id
+            );
+        }
+    }
+
+    // ─── bool_icon edge ─────────────────────────────────────────────────────
+
+    #[test]
+    fn bool_icon_returns_unicode() {
+        assert!(!bool_icon(true).is_empty());
+        assert!(!bool_icon(false).is_empty());
+        assert_ne!(bool_icon(true), bool_icon(false));
+    }
+
+    // ─── builtin_table model coverage ───────────────────────────────────
+
+    #[test]
+    fn builtin_table_openai_models_support_temperature() {
+        let table = builtin_table();
+        for entry in &table {
+            if entry.provider == "openai" {
+                assert!(
+                    entry.caps.supports_temperature,
+                    "OpenAI model {} should support temperature",
+                    entry.model_id
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn builtin_table_gemini_flash_models_exist() {
+        let table = builtin_table();
+        let flash: Vec<_> = table
+            .iter()
+            .filter(|e| e.model_id.contains("gemini") && e.model_id.contains("flash"))
+            .collect();
+        assert!(
+            !flash.is_empty(),
+            "Expected at least one Gemini Flash model"
+        );
+    }
+
+    #[test]
+    fn builtin_table_deepseek_r1_no_temperature() {
+        let table = builtin_table();
+        for entry in &table {
+            if entry.model_id.contains("deepseek-r1") {
+                assert!(
+                    !entry.caps.supports_temperature,
+                    "DeepSeek R1 {} should not support temperature",
+                    entry.model_id
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn builtin_table_qwen_models_exist() {
+        let table = builtin_table();
+        let qwen: Vec<_> = table
+            .iter()
+            .filter(|e| e.model_id.contains("qwen"))
+            .collect();
+        assert!(!qwen.is_empty(), "Expected Qwen models in table");
+    }
+
+    #[test]
+    fn builtin_table_mistral_models_exist() {
+        let table = builtin_table();
+        let mistral: Vec<_> = table
+            .iter()
+            .filter(|e| e.model_id.contains("mistral"))
+            .collect();
+        assert!(!mistral.is_empty(), "Expected Mistral models in table");
+    }
+
+    #[test]
+    fn builtin_table_all_entries_have_provider() {
+        let table = builtin_table();
+        for entry in &table {
+            assert!(
+                !entry.provider.is_empty(),
+                "model {} has empty provider",
+                entry.model_id
+            );
+        }
+    }
+
+    #[test]
+    fn builtin_table_all_entries_have_model_id() {
+        let table = builtin_table();
+        for entry in &table {
+            assert!(
+                !entry.model_id.is_empty(),
+                "entry has empty model_id for provider {}",
+                entry.provider
+            );
+        }
+    }
+
+    // ─── builtin_table as ModelInfo conversion ──────────────────────────
+
+    #[test]
+    fn builtin_table_to_model_info_preserves_data() {
+        let table = builtin_table();
+        let infos: Vec<ModelInfo> = table
+            .into_iter()
+            .map(|e| ModelInfo {
+                id: e.model_id.to_string(),
+                display_name: Some(e.display_name.to_string()),
+                provider: e.provider.to_string(),
+                capabilities: e.caps,
+            })
+            .collect();
+
+        assert!(!infos.is_empty());
+        for info in &infos {
+            assert!(!info.id.is_empty());
+            assert!(info.display_name.is_some());
+            assert!(!info.provider.is_empty());
+        }
+    }
+
+    // ─── print_model_detail coverage ────────────────────────────────────
+
+    #[test]
+    fn print_model_detail_with_no_tools_no_temp() {
+        let caps = ModelCapabilities {
+            supports_temperature: false,
+            supports_streaming: false,
+            supports_tools: false,
+            supports_system_prompt: false,
+            max_context_tokens: 1000,
+            max_output_tokens: 500,
+        };
+        // Should not panic with all features disabled
+        print_model_detail("test-model", Some("Test"), "test", &caps, false);
+    }
+
+    #[test]
+    fn print_model_detail_user_override_source() {
+        let caps = ModelCapabilities::default();
+        // Should not panic with user override flag set
+        print_model_detail("override-model", None, "custom", &caps, true);
+    }
+
+    // ─── fmt_tokens additional ──────────────────────────────────────────
+
+    #[test]
+    fn fmt_tokens_just_below_thousand() {
+        assert_eq!(fmt_tokens(999), "999");
+    }
+
+    #[test]
+    fn fmt_tokens_just_at_thousand() {
+        assert_eq!(fmt_tokens(1000), "1K");
+    }
+
+    #[test]
+    fn fmt_tokens_just_below_million() {
+        assert_eq!(fmt_tokens(999_999), "999K");
+    }
+
+    #[test]
+    fn fmt_tokens_just_at_million() {
+        assert_eq!(fmt_tokens(1_000_000), "1M");
+    }
+
+    #[test]
+    fn fmt_tokens_non_round_thousands() {
+        // Integer division: 1500 / 1000 = 1
+        assert_eq!(fmt_tokens(1500), "1K");
+        assert_eq!(fmt_tokens(65_536), "65K");
+    }
 }

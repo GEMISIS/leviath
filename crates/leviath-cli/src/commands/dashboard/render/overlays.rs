@@ -307,3 +307,156 @@ impl Dashboard {
         frame.render_widget(widget, popup);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::commands::dashboard::types::*;
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+    use tokio::sync::mpsc;
+
+    fn make_test_dashboard() -> Dashboard {
+        let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
+        Dashboard::new(cmd_tx)
+    }
+
+    fn make_test_agent(id: &str, status: AgentDisplayStatus) -> DashboardAgent {
+        DashboardAgent {
+            id: id.to_string(),
+            blueprint_name: "test-agent".to_string(),
+            agent_path: "/path".to_string(),
+            stage: "main".to_string(),
+            stage_index: 0,
+            num_stages: 1,
+            status,
+            tokens_in: 100,
+            tokens_out: 50,
+            cached_tokens: 10,
+            context_tokens: (500, 8000),
+            iteration: 3,
+            waiting_prompt: None,
+            pending_request: None,
+            last_answered_request_id: None,
+            context_snapshot: None,
+            stages: vec![],
+            entity: bevy_ecs::prelude::Entity::from_raw(0),
+            is_run_state: true,
+            pid: 0,
+            workdir: "/tmp/test".to_string(),
+            task: "test task".to_string(),
+            title: Some("My Test".to_string()),
+            model: None,
+            parent_id: None,
+            depth: 0,
+            started_at: chrono::Utc::now().timestamp() - 60,
+            active_until: None,
+            waiting_secs: 0,
+            graph_info: None,
+            accepts_messages: true,
+        }
+    }
+
+    #[test]
+    fn draw_toasts_empty() {
+        let backend = TestBackend::new(120, 40);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let dash = make_test_dashboard();
+        terminal
+            .draw(|f| {
+                dash.draw_toasts(f);
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn draw_toasts_info() {
+        let backend = TestBackend::new(120, 40);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut dash = make_test_dashboard();
+        dash.toasts.push(Toast {
+            message: "Agent completed".to_string(),
+            remaining_ticks: 25,
+            level: ToastLevel::Info,
+        });
+        terminal
+            .draw(|f| {
+                dash.draw_toasts(f);
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn draw_toasts_warning_and_error() {
+        let backend = TestBackend::new(120, 40);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut dash = make_test_dashboard();
+        dash.toasts.push(Toast {
+            message: "Needs input".to_string(),
+            remaining_ticks: 25,
+            level: ToastLevel::Warning,
+        });
+        dash.toasts.push(Toast {
+            message: "Agent failed".to_string(),
+            remaining_ticks: 25,
+            level: ToastLevel::Error,
+        });
+        terminal
+            .draw(|f| {
+                dash.draw_toasts(f);
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn draw_help_overlay_renders() {
+        let backend = TestBackend::new(120, 50);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let dash = make_test_dashboard();
+        terminal
+            .draw(|f| {
+                dash.draw_help_overlay(f);
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn draw_help_overlay_small_terminal() {
+        let backend = TestBackend::new(40, 20);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let dash = make_test_dashboard();
+        terminal
+            .draw(|f| {
+                dash.draw_help_overlay(f);
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn draw_confirm_popup_with_agent() {
+        let backend = TestBackend::new(120, 40);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut dash = make_test_dashboard();
+        dash.agents
+            .push(make_test_agent("run-del-123", AgentDisplayStatus::Complete));
+        dash.update_display_indices();
+        dash.confirm_delete = true;
+        terminal
+            .draw(|f| {
+                dash.draw_confirm_popup(f);
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn draw_confirm_popup_no_agent() {
+        let backend = TestBackend::new(120, 40);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let dash = make_test_dashboard();
+        terminal
+            .draw(|f| {
+                dash.draw_confirm_popup(f);
+            })
+            .unwrap();
+    }
+}

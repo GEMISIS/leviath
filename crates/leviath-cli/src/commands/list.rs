@@ -255,4 +255,110 @@ system = {{ kind = "pinned", max_tokens = 1000 }}
         };
         assert_eq!(args.filter, "all");
     }
+
+    // ─── read_agent_info: description and version ───────────────────────
+
+    #[test]
+    fn read_agent_info_extracts_description() {
+        let dir = tempfile::tempdir().unwrap();
+        write_manifest(dir.path(), "my-agent");
+        let info = read_agent_info(&dir.path().join("agent.leviath")).unwrap();
+        assert_eq!(info.description, "Test agent");
+        assert_eq!(info.version, "1.0.0");
+    }
+
+    // ─── scan_directory: nested but not deep ────────────────────────────
+
+    #[test]
+    fn scan_directory_with_both_direct_and_subdirs() {
+        let dir = tempfile::tempdir().unwrap();
+        // Direct manifest
+        write_manifest(dir.path(), "root-agent");
+        // Subdirectory with manifest
+        let sub = dir.path().join("child");
+        fs::create_dir_all(&sub).unwrap();
+        write_manifest(&sub, "child-agent");
+
+        let agents = scan_directory_for_agents(dir.path());
+        assert_eq!(agents.len(), 2);
+        let names: Vec<&str> = agents.iter().map(|a| a.1.name.as_str()).collect();
+        assert!(names.contains(&"root-agent"));
+        assert!(names.contains(&"child-agent"));
+    }
+
+    // ─── scan_directory: empty directory ────────────────────────────────
+
+    #[test]
+    fn scan_directory_empty_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let agents = scan_directory_for_agents(dir.path());
+        assert!(agents.is_empty());
+    }
+
+    // ─── scan_directory: subdirectory with invalid manifest ─────────────
+
+    #[test]
+    fn scan_directory_subdir_with_invalid_manifest() {
+        let dir = tempfile::tempdir().unwrap();
+        let sub = dir.path().join("bad-agent");
+        fs::create_dir_all(&sub).unwrap();
+        fs::write(sub.join("agent.leviath"), "invalid toml {{{{").unwrap();
+
+        let agents = scan_directory_for_agents(dir.path());
+        assert!(agents.is_empty());
+    }
+
+    // ─── get_agents_dir ────────────────────────────────────────────────
+
+    #[test]
+    fn get_agents_dir_returns_path_with_agents() {
+        let dir = get_agents_dir().unwrap();
+        assert!(dir.to_str().unwrap().contains(".leviath"));
+        assert!(dir.to_str().unwrap().ends_with("agents"));
+    }
+
+    // ─── read_agent_info: minimal manifest ──────────────────────────────
+
+    #[test]
+    fn read_agent_info_minimal_manifest() {
+        let dir = tempfile::tempdir().unwrap();
+        let content = r#"[agent]
+name = "minimal"
+version = "0.0.1"
+description = ""
+
+[stages.main]
+mode = "autonomous"
+model = { provider = "anthropic", model = "claude-sonnet-4-6" }
+description = "Main"
+max_iterations = 5
+
+[context.regions]
+system = { kind = "pinned", max_tokens = 1000 }
+"#;
+        fs::write(dir.path().join("agent.leviath"), content).unwrap();
+        let info = read_agent_info(&dir.path().join("agent.leviath")).unwrap();
+        assert_eq!(info.name, "minimal");
+        assert_eq!(info.description, "");
+    }
+
+    // ─── scan_directory: multiple subdirs with mixed manifests ──────────
+
+    #[test]
+    fn scan_directory_mixed_valid_and_invalid() {
+        let dir = tempfile::tempdir().unwrap();
+        let good = dir.path().join("good");
+        let bad = dir.path().join("bad");
+        let empty = dir.path().join("empty");
+        fs::create_dir_all(&good).unwrap();
+        fs::create_dir_all(&bad).unwrap();
+        fs::create_dir_all(&empty).unwrap();
+
+        write_manifest(&good, "good-agent");
+        fs::write(bad.join("agent.leviath"), "bad {{ toml").unwrap();
+
+        let agents = scan_directory_for_agents(dir.path());
+        assert_eq!(agents.len(), 1);
+        assert_eq!(agents[0].1.name, "good-agent");
+    }
 }

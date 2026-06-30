@@ -198,4 +198,228 @@ mod tests {
         assert!(bundler.should_exclude("config.toml"));
         assert!(bundler.should_exclude(".leviath"));
     }
+
+    // ─── AgentBundler::default ──────────────────────────────────────────
+
+    #[test]
+    fn test_bundler_default() {
+        let bundler = AgentBundler::default();
+        // Default should have exclusion patterns
+        assert!(bundler.should_exclude(".git"));
+        assert!(bundler.should_exclude(".env"));
+    }
+
+    // ─── with_exclude ───────────────────────────────────────────────────
+
+    #[test]
+    fn test_with_exclude_adds_pattern() {
+        let bundler = AgentBundler::new().with_exclude("*.log".to_string());
+        assert!(bundler.should_exclude("app.log"));
+        assert!(bundler.should_exclude("error.log"));
+        assert!(!bundler.should_exclude("readme.txt"));
+    }
+
+    #[test]
+    fn test_with_exclude_chaining() {
+        let bundler = AgentBundler::new()
+            .with_exclude("*.log".to_string())
+            .with_exclude("*.tmp".to_string())
+            .with_exclude("node_modules".to_string());
+        assert!(bundler.should_exclude("app.log"));
+        assert!(bundler.should_exclude("test.tmp"));
+        assert!(bundler.should_exclude("node_modules"));
+    }
+
+    // ─── should_exclude: edge cases ─────────────────────────────────────
+
+    #[test]
+    fn test_should_exclude_empty_filename() {
+        let bundler = AgentBundler::new();
+        assert!(!bundler.should_exclude(""));
+    }
+
+    #[test]
+    fn test_should_exclude_dot_files() {
+        let bundler = AgentBundler::new();
+        // .git is excluded but .gitignore is not
+        assert!(bundler.should_exclude(".git"));
+        assert!(!bundler.should_exclude(".gitignore"));
+    }
+
+    #[test]
+    fn test_should_exclude_wildcard_multiple_dots() {
+        let bundler = AgentBundler::new();
+        assert!(bundler.should_exclude("server.private.key"));
+        assert!(bundler.should_exclude("my.cert.pem"));
+    }
+
+    // ─── bundle: not a directory ────────────────────────────────────────
+
+    #[test]
+    fn test_bundle_not_a_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("not_a_dir.txt");
+        fs::write(&file, "content").unwrap();
+
+        let bundler = AgentBundler::new();
+        let result = bundler.bundle(&file);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("not a directory"));
+    }
+
+    // ─── bundle: missing manifest ───────────────────────────────────────
+
+    #[test]
+    fn test_bundle_missing_manifest() {
+        let dir = tempfile::tempdir().unwrap();
+        let bundler = AgentBundler::new();
+        let result = bundler.bundle(dir.path());
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("agent.leviath"));
+    }
+
+    // ─── bundle: valid project ──────────────────────────────────────────
+
+    #[test]
+    fn test_bundle_valid_project() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path();
+
+        // Create minimal agent project
+        fs::write(
+            project.join("agent.leviath"),
+            "[agent]\nname = \"test\"\nversion = \"1.0.0\"\ndescription = \"test\"\n",
+        )
+        .unwrap();
+        fs::write(project.join("README.md"), "# Test Agent").unwrap();
+
+        let bundler = AgentBundler::new();
+        let result = bundler.bundle(project);
+        assert!(result.is_ok());
+        let data = result.unwrap();
+        assert!(!data.is_empty());
+    }
+
+    // ─── bundle: excludes sensitive files ───────────────────────────────
+
+    #[test]
+    fn test_bundle_excludes_sensitive_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path();
+
+        fs::write(
+            project.join("agent.leviath"),
+            "[agent]\nname = \"test\"\nversion = \"1.0.0\"\ndescription = \"test\"\n",
+        )
+        .unwrap();
+        fs::write(project.join(".env"), "SECRET=123").unwrap();
+        fs::write(project.join("server.key"), "private key").unwrap();
+        fs::write(project.join("cert.pem"), "certificate").unwrap();
+        fs::write(project.join("safe.txt"), "this is fine").unwrap();
+
+        let bundler = AgentBundler::new();
+        let data = bundler.bundle(project).unwrap();
+
+        // Decompress and check: .env, server.key, cert.pem should not be in the archive
+        let decoder = flate2::read::GzDecoder::new(&data[..]);
+        let mut archive = tar::Archive::new(decoder);
+        let names: Vec<String> = archive
+            .entries()
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.path().unwrap().to_string_lossy().to_string())
+            .collect();
+
+        assert!(names.iter().any(|n| n.contains("agent.leviath")));
+        assert!(names.iter().any(|n| n.contains("safe.txt")));
+        assert!(!names.iter().any(|n| n.contains(".env")));
+        assert!(!names.iter().any(|n| n.contains("server.key")));
+        assert!(!names.iter().any(|n| n.contains("cert.pem")));
+    }
+
+    // ─── bundle_to_file ─────────────────────────────────────────────────
+
+    #[test]
+    fn test_bundle_to_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path().join("project");
+        fs::create_dir_all(&project).unwrap();
+        fs::write(
+            project.join("agent.leviath"),
+            "[agent]\nname = \"test\"\nversion = \"1.0.0\"\ndescription = \"test\"\n",
+        )
+        .unwrap();
+
+        let output = dir.path().join("output.leviath-bundle");
+        let bundler = AgentBundler::new();
+        let result = bundler.bundle_to_file(&project, &output);
+        assert!(result.is_ok());
+        assert!(output.exists());
+        let file_size = fs::metadata(&output).unwrap().len();
+        assert!(file_size > 0);
+    }
+
+    // ─── bundle: with subdirectories ────────────────────────────────────
+
+    #[test]
+    fn test_bundle_with_subdirectories() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path();
+
+        fs::write(
+            project.join("agent.leviath"),
+            "[agent]\nname = \"test\"\nversion = \"1.0.0\"\ndescription = \"test\"\n",
+        )
+        .unwrap();
+        let sub = project.join("scripts");
+        fs::create_dir_all(&sub).unwrap();
+        fs::write(sub.join("init.rhai"), "// init script").unwrap();
+
+        let bundler = AgentBundler::new();
+        let data = bundler.bundle(project).unwrap();
+        assert!(!data.is_empty());
+
+        // Verify subdirectory file is included
+        let decoder = flate2::read::GzDecoder::new(&data[..]);
+        let mut archive = tar::Archive::new(decoder);
+        let names: Vec<String> = archive
+            .entries()
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.path().unwrap().to_string_lossy().to_string())
+            .collect();
+
+        assert!(names.iter().any(|n| n.contains("init.rhai")));
+    }
+
+    // ─── bundle: excluded subdirectory ──────────────────────────────────
+
+    #[test]
+    fn test_bundle_excludes_git_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path();
+
+        fs::write(
+            project.join("agent.leviath"),
+            "[agent]\nname = \"test\"\nversion = \"1.0.0\"\ndescription = \"test\"\n",
+        )
+        .unwrap();
+        let git = project.join(".git");
+        fs::create_dir_all(&git).unwrap();
+        fs::write(git.join("HEAD"), "ref: refs/heads/main").unwrap();
+
+        let bundler = AgentBundler::new();
+        let data = bundler.bundle(project).unwrap();
+
+        let decoder = flate2::read::GzDecoder::new(&data[..]);
+        let mut archive = tar::Archive::new(decoder);
+        let names: Vec<String> = archive
+            .entries()
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.path().unwrap().to_string_lossy().to_string())
+            .collect();
+
+        assert!(!names.iter().any(|n| n.contains(".git")));
+    }
 }

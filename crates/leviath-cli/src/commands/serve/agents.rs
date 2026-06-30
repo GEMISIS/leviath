@@ -314,3 +314,129 @@ pub(super) async fn kill_agent(
 
     Ok(StatusCode::NO_CONTENT)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn spawn_agent_req_deserialization_minimal() {
+        let json = r#"{
+            "blueprint": "coder",
+            "task": "write a hello world"
+        }"#;
+        let req: SpawnAgentReq = serde_json::from_str(json).unwrap();
+        assert_eq!(req.blueprint, "coder");
+        assert_eq!(req.task, "write a hello world");
+        assert!(req.model.is_none());
+        assert!(req.workdir.is_none());
+        assert!(!req.yolo);
+        assert!(req.allow.is_empty());
+        assert!(req.max_depth.is_none());
+        assert!(req.metadata.is_empty());
+        assert!(req.callback_url.is_none());
+    }
+
+    #[test]
+    fn spawn_agent_req_deserialization_full() {
+        let json = r#"{
+            "blueprint": "coder",
+            "task": "build app",
+            "model": "claude-sonnet-4-6",
+            "max_depth": 3,
+            "yolo": true,
+            "allow": ["read_file", "bash"],
+            "workdir": "/tmp/work",
+            "metadata": {"project": "test"},
+            "callback_url": "https://example.com/hook"
+        }"#;
+        let req: SpawnAgentReq = serde_json::from_str(json).unwrap();
+        assert_eq!(req.blueprint, "coder");
+        assert_eq!(req.model.unwrap(), "claude-sonnet-4-6");
+        assert_eq!(req.max_depth, Some(3));
+        assert!(req.yolo);
+        assert_eq!(req.allow.len(), 2);
+        assert_eq!(req.workdir.unwrap(), "/tmp/work");
+        assert_eq!(req.metadata.get("project").unwrap(), "test");
+        assert_eq!(req.callback_url.unwrap(), "https://example.com/hook");
+    }
+
+    #[test]
+    fn spawn_agent_resp_serialization() {
+        let resp = SpawnAgentResp {
+            agent_id: "coder".to_string(),
+            run_id: "run-abc-123".to_string(),
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        assert!(json.contains("\"agent_id\":\"coder\""));
+        assert!(json.contains("\"run_id\":\"run-abc-123\""));
+    }
+
+    #[test]
+    fn list_agents_query_deserialization_empty() {
+        let json = "{}";
+        let query: ListAgentsQuery = serde_json::from_str(json).unwrap();
+        assert!(query.status.is_none());
+    }
+
+    #[test]
+    fn list_agents_query_deserialization_with_status() {
+        let json = r#"{"status": "running,complete"}"#;
+        let query: ListAgentsQuery = serde_json::from_str(json).unwrap();
+        assert_eq!(query.status.unwrap(), "running,complete");
+    }
+
+    #[test]
+    fn agent_result_resp_serialization() {
+        let resp = AgentResultResp {
+            run_id: "run-123".to_string(),
+            status: "complete".to_string(),
+            output: "done!".to_string(),
+            error: None,
+            prompt_tokens: 5000,
+            completion_tokens: 1200,
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        assert!(json.contains("\"run_id\":\"run-123\""));
+        assert!(json.contains("\"status\":\"complete\""));
+        assert!(json.contains("\"prompt_tokens\":5000"));
+        assert!(json.contains("\"completion_tokens\":1200"));
+    }
+
+    #[test]
+    fn agent_result_resp_with_error() {
+        let resp = AgentResultResp {
+            run_id: "run-err".to_string(),
+            status: "error".to_string(),
+            output: String::new(),
+            error: Some("something went wrong".to_string()),
+            prompt_tokens: 100,
+            completion_tokens: 0,
+        };
+        let json = serde_json::to_string(&resp).unwrap();
+        assert!(json.contains("something went wrong"));
+    }
+
+    #[test]
+    fn logs_query_deserialization() {
+        let json = r#"{"tail": 8192}"#;
+        let query: LogsQuery = serde_json::from_str(json).unwrap();
+        assert_eq!(query.tail, Some(8192));
+    }
+
+    #[test]
+    fn logs_query_deserialization_empty() {
+        let json = "{}";
+        let query: LogsQuery = serde_json::from_str(json).unwrap();
+        assert!(query.tail.is_none());
+    }
+
+    #[test]
+    fn error_response_serialization() {
+        let err = ErrorResponse {
+            error: "not found".to_string(),
+        };
+        let json = serde_json::to_string(&err).unwrap();
+        assert!(json.contains("\"error\":\"not found\""));
+    }
+}

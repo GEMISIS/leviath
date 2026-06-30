@@ -924,4 +924,490 @@ mod tests {
         )
         .await;
     }
+
+    // ─── apply_edge_transform Custom ────────────────────────────────────────
+
+    #[tokio::test]
+    async fn apply_edge_transform_custom_clears_specified_regions() {
+        let bp = make_blueprint(vec![make_stage("a"), make_stage("b")]);
+        let (mut engine, entity) = make_engine_and_entity(&bp);
+
+        // Add content to conversation
+        if let Some(mut window) = engine.world_mut().get_mut::<ContextWindow>(entity) {
+            let _ = window.add_to_region("conversation", "conv content".to_string(), 5);
+        }
+
+        let edge = TransitionEdge {
+            target: "b".to_string(),
+            condition: TransitionCondition::Always,
+            hint: None,
+            transform: EdgeTransform::Custom {
+                carry: vec!["system".to_string()],
+                compact: vec![],
+                clear: vec!["conversation".to_string()],
+                compact_prompt: None,
+            },
+        };
+        let visit_counts = HashMap::new();
+
+        apply_edge_transform(
+            &edge,
+            &visit_counts,
+            &mut engine,
+            entity,
+            "anthropic",
+            "test",
+            None,
+        )
+        .await;
+
+        let window = engine.world().get::<ContextWindow>(entity).unwrap();
+        let conv = window.get_region("conversation").unwrap();
+        assert!(conv.content.is_empty(), "conversation should be cleared");
+    }
+
+    // ─── is_graph_mode additional ───────────────────────────────────────────
+
+    #[test]
+    fn is_graph_mode_empty_stages() {
+        let bp = make_blueprint(vec![]);
+        assert!(!is_graph_mode(&bp));
+    }
+
+    #[test]
+    fn is_graph_mode_multiple_stages_none_with_transitions() {
+        let bp = make_blueprint(vec![make_stage("a"), make_stage("b"), make_stage("c")]);
+        assert!(!is_graph_mode(&bp));
+    }
+
+    // ─── resolve_transition additional ───────────────────────────────────────
+
+    #[tokio::test]
+    async fn resolve_transition_linear_middle_stage() {
+        let bp = make_blueprint(vec![make_stage("a"), make_stage("b"), make_stage("c")]);
+        let (mut engine, entity) = make_engine_and_entity(&bp);
+        let visit_counts = HashMap::new();
+
+        // From middle stage, should advance to next
+        let result = resolve_transition(
+            &bp.stages[1],
+            1,
+            &bp,
+            &visit_counts,
+            &StageResult::Success,
+            &mut engine,
+            entity,
+            "anthropic",
+            "claude-sonnet-4-6",
+        )
+        .await;
+
+        let (edge, idx) = result.unwrap();
+        assert_eq!(edge.target, "c");
+        assert_eq!(idx, 2);
+    }
+
+    #[tokio::test]
+    async fn resolve_transition_linear_last_stage_is_terminal() {
+        let bp = make_blueprint(vec![make_stage("a"), make_stage("b")]);
+        let (mut engine, entity) = make_engine_and_entity(&bp);
+        let visit_counts = HashMap::new();
+
+        let result = resolve_transition(
+            &bp.stages[1],
+            1,
+            &bp,
+            &visit_counts,
+            &StageResult::Success,
+            &mut engine,
+            entity,
+            "anthropic",
+            "claude-sonnet-4-6",
+        )
+        .await;
+
+        assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn resolve_transition_unknown_target_skipped() {
+        let mut stage_a = make_stage("a");
+        let mut transitions = HashMap::new();
+        transitions.insert(
+            "nonexistent".to_string(),
+            TransitionEdge {
+                target: "nonexistent".to_string(),
+                condition: TransitionCondition::Always,
+                hint: None,
+                transform: EdgeTransform::Direct,
+            },
+        );
+        stage_a.transitions = Some(transitions);
+
+        let bp = make_blueprint(vec![stage_a]);
+        let (mut engine, entity) = make_engine_and_entity(&bp);
+        let visit_counts = HashMap::new();
+
+        let result = resolve_transition(
+            &bp.stages[0],
+            0,
+            &bp,
+            &visit_counts,
+            &StageResult::Success,
+            &mut engine,
+            entity,
+            "anthropic",
+            "claude-sonnet-4-6",
+        )
+        .await;
+
+        // Unknown target should be filtered out
+        assert!(result.is_none());
+    }
+
+    // ─── apply_compact_transform with no provider ───────────────────────────
+
+    #[tokio::test]
+    async fn apply_compact_transform_no_provider_does_not_panic() {
+        let bp = make_blueprint(vec![make_stage("a")]);
+        let (mut engine, entity) = make_engine_and_entity(&bp);
+
+        // No provider registered, should silently return
+        apply_compact_transform(
+            &mut engine,
+            entity,
+            "nonexistent",
+            "model",
+            "Summarize",
+            None,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn apply_compact_transform_empty_content_does_not_panic() {
+        let bp = make_blueprint(vec![make_stage("a")]);
+        let (mut engine, entity) = make_engine_and_entity(&bp);
+
+        // Even with no provider, empty content returns early
+        apply_compact_transform(
+            &mut engine,
+            entity,
+            "nonexistent",
+            "model",
+            "Summarize",
+            None,
+        )
+        .await;
+    }
+
+    // ─── resolve_transition: error condition with Success result ─────────
+
+    #[tokio::test]
+    async fn resolve_transition_error_edge_ignored_on_success() {
+        let mut stage_a = make_stage("a");
+        let stage_b = make_stage("b");
+        let stage_err = make_stage("error_handler");
+        let mut transitions = HashMap::new();
+        transitions.insert(
+            "b".to_string(),
+            TransitionEdge {
+                target: "b".to_string(),
+                condition: TransitionCondition::Always,
+                hint: None,
+                transform: EdgeTransform::Direct,
+            },
+        );
+        transitions.insert(
+            "error_handler".to_string(),
+            TransitionEdge {
+                target: "error_handler".to_string(),
+                condition: TransitionCondition::Error,
+                hint: None,
+                transform: EdgeTransform::Direct,
+            },
+        );
+        stage_a.transitions = Some(transitions);
+
+        let bp = make_blueprint(vec![stage_a, stage_b, stage_err]);
+        let (mut engine, entity) = make_engine_and_entity(&bp);
+        let visit_counts = HashMap::new();
+
+        // On Success, error handler edge should be filtered out, picking "b"
+        let result = resolve_transition(
+            &bp.stages[0],
+            0,
+            &bp,
+            &visit_counts,
+            &StageResult::Success,
+            &mut engine,
+            entity,
+            "anthropic",
+            "claude-sonnet-4-6",
+        )
+        .await;
+
+        let (edge, _idx) = result.unwrap();
+        assert_eq!(edge.target, "b");
+    }
+
+    #[tokio::test]
+    async fn resolve_transition_max_iterations_edge_ignored_on_success() {
+        let mut stage_a = make_stage("a");
+        let stage_b = make_stage("b");
+        let stage_timeout = make_stage("timeout");
+        let mut transitions = HashMap::new();
+        transitions.insert(
+            "b".to_string(),
+            TransitionEdge {
+                target: "b".to_string(),
+                condition: TransitionCondition::Always,
+                hint: None,
+                transform: EdgeTransform::Direct,
+            },
+        );
+        transitions.insert(
+            "timeout".to_string(),
+            TransitionEdge {
+                target: "timeout".to_string(),
+                condition: TransitionCondition::MaxIterations,
+                hint: None,
+                transform: EdgeTransform::Direct,
+            },
+        );
+        stage_a.transitions = Some(transitions);
+
+        let bp = make_blueprint(vec![stage_a, stage_b, stage_timeout]);
+        let (mut engine, entity) = make_engine_and_entity(&bp);
+        let visit_counts = HashMap::new();
+
+        // On Success, MaxIterations edge should be filtered out
+        let result = resolve_transition(
+            &bp.stages[0],
+            0,
+            &bp,
+            &visit_counts,
+            &StageResult::Success,
+            &mut engine,
+            entity,
+            "anthropic",
+            "claude-sonnet-4-6",
+        )
+        .await;
+
+        let (edge, _idx) = result.unwrap();
+        assert_eq!(edge.target, "b");
+    }
+
+    // ─── resolve_transition: only error/maxiter edges → terminal ────────
+
+    #[tokio::test]
+    async fn resolve_transition_only_conditional_edges_is_terminal_on_success() {
+        let mut stage_a = make_stage("a");
+        let stage_err = make_stage("error_handler");
+        let mut transitions = HashMap::new();
+        transitions.insert(
+            "error_handler".to_string(),
+            TransitionEdge {
+                target: "error_handler".to_string(),
+                condition: TransitionCondition::Error,
+                hint: None,
+                transform: EdgeTransform::Direct,
+            },
+        );
+        stage_a.transitions = Some(transitions);
+
+        let bp = make_blueprint(vec![stage_a, stage_err]);
+        let (mut engine, entity) = make_engine_and_entity(&bp);
+        let visit_counts = HashMap::new();
+
+        let result = resolve_transition(
+            &bp.stages[0],
+            0,
+            &bp,
+            &visit_counts,
+            &StageResult::Success,
+            &mut engine,
+            entity,
+            "anthropic",
+            "claude-sonnet-4-6",
+        )
+        .await;
+
+        // No Always or LlmChoice edges available → terminal
+        assert!(result.is_none());
+    }
+
+    // ─── apply_edge_transform: Custom with compact (no provider) ────────
+
+    #[tokio::test]
+    async fn apply_edge_transform_custom_with_compact_no_panic() {
+        let bp = make_blueprint(vec![make_stage("a"), make_stage("b")]);
+        let (mut engine, entity) = make_engine_and_entity(&bp);
+
+        if let Some(mut window) = engine.world_mut().get_mut::<ContextWindow>(entity) {
+            let _ = window.add_to_region("conversation", "some content".to_string(), 5);
+        }
+
+        let edge = TransitionEdge {
+            target: "b".to_string(),
+            condition: TransitionCondition::Always,
+            hint: None,
+            transform: EdgeTransform::Custom {
+                carry: vec!["system".to_string()],
+                compact: vec!["conversation".to_string()],
+                clear: vec![],
+                compact_prompt: Some("Summarize this".to_string()),
+            },
+        };
+        let visit_counts = HashMap::new();
+
+        // Should not panic even without provider
+        apply_edge_transform(
+            &edge,
+            &visit_counts,
+            &mut engine,
+            entity,
+            "nonexistent",
+            "model",
+            None,
+        )
+        .await;
+    }
+
+    // ─── apply_edge_transform: Compact with compaction config ───────────
+
+    #[tokio::test]
+    async fn apply_edge_transform_compact_explicit_with_config() {
+        let bp = make_blueprint(vec![make_stage("a"), make_stage("b")]);
+        let (mut engine, entity) = make_engine_and_entity(&bp);
+
+        let edge = TransitionEdge {
+            target: "b".to_string(),
+            condition: TransitionCondition::Always,
+            hint: None,
+            transform: EdgeTransform::Compact {
+                prompt: Some("Custom compact prompt".to_string()),
+            },
+        };
+        let visit_counts = HashMap::new();
+
+        let compaction_config = CompactionConfig {
+            provider: "nonexistent".to_string(),
+            model: "test-model".to_string(),
+            max_summary_tokens: 500,
+            temperature: 0.1,
+            system_prompt: None,
+            user_prompt_template: None,
+        };
+
+        // Should not panic — compact fails silently with no provider
+        apply_edge_transform(
+            &edge,
+            &visit_counts,
+            &mut engine,
+            entity,
+            "anthropic",
+            "test",
+            Some(&compaction_config),
+        )
+        .await;
+    }
+
+    // ─── resolve_transition: max_revisits zero blocks first visit ───────
+
+    #[tokio::test]
+    async fn resolve_transition_max_revisits_zero_blocks_second_visit() {
+        let mut stage_a = make_stage("a");
+        let mut stage_b = make_stage("b");
+        stage_b.max_revisits = Some(0); // only allow first visit
+
+        let mut transitions = HashMap::new();
+        transitions.insert(
+            "b".to_string(),
+            TransitionEdge {
+                target: "b".to_string(),
+                condition: TransitionCondition::Always,
+                hint: None,
+                transform: EdgeTransform::Direct,
+            },
+        );
+        stage_a.transitions = Some(transitions);
+
+        let bp = make_blueprint(vec![stage_a, stage_b]);
+        let (mut engine, entity) = make_engine_and_entity(&bp);
+
+        // First visit ok (visits = 0 <= max_revisits = 0)
+        let mut visit_counts = HashMap::new();
+        let result = resolve_transition(
+            &bp.stages[0],
+            0,
+            &bp,
+            &visit_counts,
+            &StageResult::Success,
+            &mut engine,
+            entity,
+            "anthropic",
+            "claude-sonnet-4-6",
+        )
+        .await;
+        assert!(result.is_some());
+
+        // Second visit blocked (visits = 1 > max_revisits = 0)
+        visit_counts.insert("b".to_string(), 1);
+        let result = resolve_transition(
+            &bp.stages[0],
+            0,
+            &bp,
+            &visit_counts,
+            &StageResult::Success,
+            &mut engine,
+            entity,
+            "anthropic",
+            "claude-sonnet-4-6",
+        )
+        .await;
+        assert!(result.is_none());
+    }
+
+    // ─── resolve_transition: LlmChoice edge with single edge (acts like Always)
+
+    #[tokio::test]
+    async fn resolve_transition_single_llm_choice_edge() {
+        let mut stage_a = make_stage("a");
+        let stage_b = make_stage("b");
+        let mut transitions = HashMap::new();
+        transitions.insert(
+            "b".to_string(),
+            TransitionEdge {
+                target: "b".to_string(),
+                condition: TransitionCondition::LlmChoice,
+                hint: Some("Go to b".to_string()),
+                transform: EdgeTransform::Direct,
+            },
+        );
+        stage_a.transitions = Some(transitions);
+
+        let bp = make_blueprint(vec![stage_a, stage_b]);
+        let (mut engine, entity) = make_engine_and_entity(&bp);
+        let visit_counts = HashMap::new();
+
+        let result = resolve_transition(
+            &bp.stages[0],
+            0,
+            &bp,
+            &visit_counts,
+            &StageResult::Success,
+            &mut engine,
+            entity,
+            "anthropic",
+            "claude-sonnet-4-6",
+        )
+        .await;
+
+        // Single LlmChoice edge → auto-selected
+        let (edge, idx) = result.unwrap();
+        assert_eq!(edge.target, "b");
+        assert_eq!(idx, 1);
+    }
 }

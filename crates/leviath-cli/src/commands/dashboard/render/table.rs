@@ -439,3 +439,395 @@ impl Dashboard {
         Line::from(spans)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+    use tokio::sync::mpsc;
+
+    fn make_test_dashboard() -> Dashboard {
+        let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
+        Dashboard::new(cmd_tx)
+    }
+
+    fn make_test_agent(id: &str, status: AgentDisplayStatus) -> DashboardAgent {
+        DashboardAgent {
+            id: id.to_string(),
+            blueprint_name: "test-agent".to_string(),
+            agent_path: "/path".to_string(),
+            stage: "main".to_string(),
+            stage_index: 0,
+            num_stages: 2,
+            status,
+            tokens_in: 100,
+            tokens_out: 50,
+            cached_tokens: 10,
+            context_tokens: (500, 8000),
+            iteration: 3,
+            waiting_prompt: None,
+            pending_request: None,
+            last_answered_request_id: None,
+            context_snapshot: None,
+            stages: vec![],
+            entity: bevy_ecs::prelude::Entity::from_raw(0),
+            is_run_state: true,
+            pid: 0,
+            workdir: "/tmp/test".to_string(),
+            task: "test task".to_string(),
+            title: Some("My Test".to_string()),
+            model: Some("claude-sonnet-4-20250514".to_string()),
+            parent_id: None,
+            depth: 0,
+            started_at: chrono::Utc::now().timestamp() - 60,
+            active_until: None,
+            waiting_secs: 0,
+            graph_info: None,
+            accepts_messages: true,
+        }
+    }
+
+    #[test]
+    fn draw_agent_table_empty() {
+        let backend = TestBackend::new(120, 40);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut dash = make_test_dashboard();
+        terminal
+            .draw(|f| {
+                let area = f.area();
+                dash.draw_agent_table(f, area);
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn draw_agent_table_filter_no_match() {
+        let backend = TestBackend::new(120, 40);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut dash = make_test_dashboard();
+        dash.agents
+            .push(make_test_agent("run-1", AgentDisplayStatus::Active));
+        dash.list_search_query = "nonexistent".to_string();
+        dash.update_display_indices();
+        terminal
+            .draw(|f| {
+                let area = f.area();
+                dash.draw_agent_table(f, area);
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn draw_agent_table_multiple_agents() {
+        let backend = TestBackend::new(120, 40);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut dash = make_test_dashboard();
+        dash.agents
+            .push(make_test_agent("run-1", AgentDisplayStatus::Active));
+        dash.agents
+            .push(make_test_agent("run-2", AgentDisplayStatus::Complete));
+        dash.agents
+            .push(make_test_agent("run-3", AgentDisplayStatus::Waiting));
+        dash.update_display_indices();
+        terminal
+            .draw(|f| {
+                let area = f.area();
+                dash.draw_agent_table(f, area);
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn draw_agent_table_non_run_state() {
+        let backend = TestBackend::new(120, 40);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut dash = make_test_dashboard();
+        let mut agent = make_test_agent("run-ecs", AgentDisplayStatus::Active);
+        agent.is_run_state = false;
+        agent.context_tokens = (4000, 8000);
+        dash.agents.push(agent);
+        dash.update_display_indices();
+        terminal
+            .draw(|f| {
+                let area = f.area();
+                dash.draw_agent_table(f, area);
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn draw_agent_table_with_list_search_mode() {
+        let backend = TestBackend::new(120, 40);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut dash = make_test_dashboard();
+        dash.agents
+            .push(make_test_agent("run-1", AgentDisplayStatus::Active));
+        dash.update_display_indices();
+        dash.list_search_mode = true;
+        terminal
+            .draw(|f| {
+                let area = f.area();
+                dash.draw_agent_table(f, area);
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn draw_log_panel_empty() {
+        let backend = TestBackend::new(120, 40);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut dash = make_test_dashboard();
+        dash.log.clear();
+        terminal
+            .draw(|f| {
+                let area = f.area();
+                dash.draw_log_panel(f, area);
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn draw_log_panel_with_entries() {
+        let backend = TestBackend::new(120, 40);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut dash = make_test_dashboard();
+        dash.log.clear();
+        dash.log.push(LogEntry {
+            timestamp: "12:00:00".to_string(),
+            message: "Agent started".to_string(),
+        });
+        dash.log.push(LogEntry {
+            timestamp: "12:00:01".to_string(),
+            message: "Stage changed to implement".to_string(),
+        });
+        terminal
+            .draw(|f| {
+                let area = f.area();
+                dash.draw_log_panel(f, area);
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn draw_help_bar_main_list_mode() {
+        let backend = TestBackend::new(120, 2);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let dash = make_test_dashboard();
+        terminal
+            .draw(|f| {
+                let area = Rect::new(0, 0, 120, 1);
+                dash.draw_help_bar(f, area);
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn draw_help_bar_detail_view() {
+        let backend = TestBackend::new(120, 2);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut dash = make_test_dashboard();
+        dash.detail_view = true;
+        terminal
+            .draw(|f| {
+                let area = Rect::new(0, 0, 120, 1);
+                dash.draw_help_bar(f, area);
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn draw_help_bar_input_mode_freetext() {
+        let backend = TestBackend::new(120, 2);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut dash = make_test_dashboard();
+        dash.detail_view = true;
+        dash.input_mode = true;
+        // No pending request means FreeText fallback
+        terminal
+            .draw(|f| {
+                let area = Rect::new(0, 0, 120, 1);
+                dash.draw_help_bar(f, area);
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn draw_help_bar_input_mode_choice() {
+        let backend = TestBackend::new(120, 2);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut dash = make_test_dashboard();
+        let mut agent = make_test_agent("run-choice", AgentDisplayStatus::Waiting);
+        agent.pending_request = Some(interaction::InteractionRequest {
+            id: "req-1".to_string(),
+            kind: interaction::InteractionKind::MultipleChoice,
+            prompt: "Pick one".to_string(),
+            options: vec!["A".to_string(), "B".to_string()],
+            tool_name: None,
+            tool_arguments: None,
+            required: true,
+            stage_name: "main".to_string(),
+            body: None,
+            body_format: interaction::BodyFormat::Plain,
+        });
+        agent.waiting_prompt = Some("Pick one".to_string());
+        dash.agents.push(agent);
+        dash.update_display_indices();
+        dash.detail_view = true;
+        dash.input_mode = true;
+        terminal
+            .draw(|f| {
+                let area = Rect::new(0, 0, 120, 1);
+                dash.draw_help_bar(f, area);
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn draw_help_bar_search_mode() {
+        let backend = TestBackend::new(120, 2);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut dash = make_test_dashboard();
+        dash.detail_view = true;
+        dash.search_mode = true;
+        dash.search_query = "hello".to_string();
+        terminal
+            .draw(|f| {
+                let area = Rect::new(0, 0, 120, 1);
+                dash.draw_help_bar(f, area);
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn draw_help_bar_search_active_not_mode() {
+        let backend = TestBackend::new(120, 2);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut dash = make_test_dashboard();
+        dash.detail_view = true;
+        dash.search_mode = false;
+        dash.search_query = "test".to_string();
+        terminal
+            .draw(|f| {
+                let area = Rect::new(0, 0, 120, 1);
+                dash.draw_help_bar(f, area);
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn draw_help_bar_confirm_delete() {
+        let backend = TestBackend::new(120, 2);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut dash = make_test_dashboard();
+        dash.confirm_delete = true;
+        terminal
+            .draw(|f| {
+                let area = Rect::new(0, 0, 120, 1);
+                dash.draw_help_bar(f, area);
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn draw_help_bar_list_search_mode() {
+        let backend = TestBackend::new(120, 2);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut dash = make_test_dashboard();
+        dash.list_search_mode = true;
+        dash.list_search_query = "cod".to_string();
+        terminal
+            .draw(|f| {
+                let area = Rect::new(0, 0, 120, 1);
+                dash.draw_help_bar(f, area);
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn draw_help_bar_list_filter_active() {
+        let backend = TestBackend::new(120, 2);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut dash = make_test_dashboard();
+        dash.list_search_mode = false;
+        dash.list_search_query = "coder".to_string();
+        dash.agents
+            .push(make_test_agent("run-1", AgentDisplayStatus::Active));
+        dash.update_display_indices();
+        terminal
+            .draw(|f| {
+                let area = Rect::new(0, 0, 120, 1);
+                dash.draw_help_bar(f, area);
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn build_detail_help_bar_with_can_respond() {
+        let mut dash = make_test_dashboard();
+        let mut agent = make_test_agent("run-resp", AgentDisplayStatus::Waiting);
+        agent.waiting_prompt = Some("Do something".to_string());
+        dash.agents.push(agent);
+        dash.update_display_indices();
+        dash.selected_stage = 0;
+        let line = dash.build_detail_help_bar();
+        let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(text.contains("respond"));
+    }
+
+    #[test]
+    fn build_detail_help_bar_with_can_kill() {
+        let mut dash = make_test_dashboard();
+        dash.agents
+            .push(make_test_agent("run-kill", AgentDisplayStatus::Active));
+        dash.update_display_indices();
+        let line = dash.build_detail_help_bar();
+        let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(text.contains("kill"));
+    }
+
+    #[test]
+    fn build_detail_help_bar_complete_no_kill() {
+        let mut dash = make_test_dashboard();
+        dash.agents
+            .push(make_test_agent("run-done", AgentDisplayStatus::Complete));
+        dash.update_display_indices();
+        let line = dash.build_detail_help_bar();
+        let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(!text.contains("kill"));
+    }
+
+    #[test]
+    fn build_main_list_help_bar_basic() {
+        let dash = make_test_dashboard();
+        let line = dash.build_main_list_help_bar();
+        let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(text.contains("select"));
+        assert!(text.contains("detail"));
+        assert!(text.contains("quit"));
+    }
+
+    #[test]
+    fn build_main_list_help_bar_with_killable() {
+        let mut dash = make_test_dashboard();
+        dash.agents
+            .push(make_test_agent("run-k", AgentDisplayStatus::Active));
+        dash.update_display_indices();
+        let line = dash.build_main_list_help_bar();
+        let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(text.contains("kill"));
+        assert!(text.contains("cancel"));
+    }
+
+    #[test]
+    fn build_detail_help_bar_with_accepts_messages() {
+        let mut dash = make_test_dashboard();
+        let mut agent = make_test_agent("run-msg", AgentDisplayStatus::Active);
+        agent.accepts_messages = true;
+        dash.agents.push(agent);
+        dash.update_display_indices();
+        let line = dash.build_detail_help_bar();
+        let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(text.contains("message"));
+    }
+}

@@ -493,4 +493,331 @@ mod tests {
         let body = provider.build_request_body(&request);
         assert_eq!(body["model"], "anthropic/claude-sonnet-4");
     }
+
+    // ── Additional coverage tests ──────────────────────────────────────────
+
+    #[test]
+    fn test_name() {
+        let provider = OpenRouterProvider::new("key".to_string());
+        assert_eq!(provider.name(), "openrouter");
+    }
+
+    #[test]
+    fn test_count_tokens() {
+        let provider = OpenRouterProvider::new("key".to_string());
+        let tokens = provider.count_tokens("Hello, world!", "any-model");
+        assert_eq!(tokens, 3); // 13 / 4 = 3
+    }
+
+    #[test]
+    fn test_count_tokens_empty() {
+        let provider = OpenRouterProvider::new("key".to_string());
+        assert_eq!(provider.count_tokens("", "any-model"), 0);
+    }
+
+    #[test]
+    fn test_max_context_tokens() {
+        let provider = OpenRouterProvider::new("key".to_string());
+        assert_eq!(provider.max_context_tokens("any-model"), 128_000);
+    }
+
+    #[test]
+    fn test_with_config_default_url() {
+        let config = ProviderConfig {
+            api_key: "key".to_string(),
+            base_url: None,
+            rate_limit: None,
+        };
+        let provider = OpenRouterProvider::with_config(config);
+        assert_eq!(provider.base_url, "https://openrouter.ai/api/v1");
+    }
+
+    #[test]
+    fn test_with_config_custom_url() {
+        let config = ProviderConfig {
+            api_key: "key".to_string(),
+            base_url: Some("https://custom.openrouter.ai".to_string()),
+            rate_limit: None,
+        };
+        let provider = OpenRouterProvider::with_config(config);
+        assert_eq!(provider.base_url, "https://custom.openrouter.ai");
+    }
+
+    #[test]
+    fn test_with_overrides() {
+        let mut overrides = HashMap::new();
+        overrides.insert(
+            "custom/model".to_string(),
+            ModelCapabilities {
+                supports_temperature: false,
+                supports_streaming: false,
+                supports_tools: false,
+                supports_system_prompt: false,
+                max_context_tokens: 99,
+                max_output_tokens: 10,
+            },
+        );
+        let provider = OpenRouterProvider::with_overrides("key".to_string(), overrides);
+        let caps = provider.capabilities("custom/model");
+        assert_eq!(caps.max_context_tokens, 99);
+    }
+
+    #[test]
+    fn test_capabilities_google_gemini() {
+        let provider = OpenRouterProvider::new("key".to_string());
+        let caps = provider.capabilities("google/gemini-3.5-flash");
+        assert!(caps.supports_temperature);
+        assert_eq!(caps.max_context_tokens, 1_048_576);
+        assert_eq!(caps.max_output_tokens, 65_536);
+    }
+
+    #[test]
+    fn test_capabilities_llama4_scout() {
+        let provider = OpenRouterProvider::new("key".to_string());
+        let caps = provider.capabilities("meta-llama/llama-4-scout-17b");
+        assert_eq!(caps.max_context_tokens, 10_000_000);
+    }
+
+    #[test]
+    fn test_capabilities_llama4_maverick() {
+        let provider = OpenRouterProvider::new("key".to_string());
+        let caps = provider.capabilities("meta-llama/llama-4-maverick");
+        assert_eq!(caps.max_context_tokens, 1_048_576);
+    }
+
+    #[test]
+    fn test_capabilities_deepseek_r1() {
+        let provider = OpenRouterProvider::new("key".to_string());
+        let caps = provider.capabilities("deepseek/deepseek-r1");
+        assert!(!caps.supports_temperature);
+        assert!(!caps.supports_tools);
+        assert_eq!(caps.max_context_tokens, 163_840);
+    }
+
+    #[test]
+    fn test_capabilities_deepseek_v4_pro() {
+        let provider = OpenRouterProvider::new("key".to_string());
+        let caps = provider.capabilities("deepseek/deepseek-v4-pro");
+        assert_eq!(caps.max_context_tokens, 1_048_576);
+        assert_eq!(caps.max_output_tokens, 393_216);
+    }
+
+    #[test]
+    fn test_capabilities_deepseek_v_series() {
+        let provider = OpenRouterProvider::new("key".to_string());
+        let caps = provider.capabilities("deepseek/deepseek-v3");
+        assert_eq!(caps.max_context_tokens, 1_048_576);
+        assert_eq!(caps.max_output_tokens, 65_536);
+    }
+
+    #[test]
+    fn test_capabilities_mistral_large() {
+        let provider = OpenRouterProvider::new("key".to_string());
+        let caps = provider.capabilities("mistralai/mistral-large-latest");
+        assert_eq!(caps.max_context_tokens, 262_144);
+    }
+
+    #[test]
+    fn test_capabilities_mistralai_general() {
+        let provider = OpenRouterProvider::new("key".to_string());
+        let caps = provider.capabilities("mistralai/mistral-small-latest");
+        assert_eq!(caps.max_context_tokens, 131_072);
+    }
+
+    #[test]
+    fn test_capabilities_qwen36() {
+        let provider = OpenRouterProvider::new("key".to_string());
+        let caps = provider.capabilities("qwen/qwen3.6-235b");
+        assert_eq!(caps.max_context_tokens, 1_048_576);
+    }
+
+    #[test]
+    fn test_capabilities_qwen3_coder() {
+        let provider = OpenRouterProvider::new("key".to_string());
+        let caps = provider.capabilities("qwen/qwen3-coder-plus");
+        assert_eq!(caps.max_context_tokens, 1_048_576);
+    }
+
+    #[test]
+    fn test_capabilities_qwen_general() {
+        let provider = OpenRouterProvider::new("key".to_string());
+        let caps = provider.capabilities("qwen/qwen3-32b");
+        assert_eq!(caps.max_context_tokens, 131_072);
+    }
+
+    #[test]
+    fn test_capabilities_anthropic_via_openrouter() {
+        let provider = OpenRouterProvider::new("key".to_string());
+        let caps = provider.capabilities("anthropic/claude-sonnet-4-6");
+        assert!(caps.supports_temperature);
+        assert_eq!(caps.max_context_tokens, 1_000_000);
+        assert_eq!(caps.max_output_tokens, 128_000);
+    }
+
+    #[test]
+    fn test_capabilities_anthropic_no_temp() {
+        let provider = OpenRouterProvider::new("key".to_string());
+        let caps = provider.capabilities("anthropic/claude-opus-4-8");
+        assert!(!caps.supports_temperature);
+    }
+
+    #[test]
+    fn test_capabilities_anthropic_fable5_no_temp() {
+        let provider = OpenRouterProvider::new("key".to_string());
+        let caps = provider.capabilities("anthropic/claude-fable-5");
+        assert!(!caps.supports_temperature);
+    }
+
+    #[test]
+    fn test_capabilities_openai_o_series() {
+        let provider = OpenRouterProvider::new("key".to_string());
+        let caps = provider.capabilities("openai/o3-mini");
+        assert!(!caps.supports_temperature);
+        assert_eq!(caps.max_context_tokens, 200_000);
+    }
+
+    #[test]
+    fn test_capabilities_openai_gpt5() {
+        let provider = OpenRouterProvider::new("key".to_string());
+        let caps = provider.capabilities("openai/gpt-5.4-mini");
+        assert!(caps.supports_temperature);
+        assert_eq!(caps.max_context_tokens, 1_050_000);
+    }
+
+    #[test]
+    fn test_capabilities_unknown_fallback() {
+        let provider = OpenRouterProvider::new("key".to_string());
+        let caps = provider.capabilities("totally/unknown-model");
+        assert!(caps.supports_temperature);
+        assert!(caps.supports_tools);
+        assert_eq!(caps.max_context_tokens, 128_000);
+        assert_eq!(caps.max_output_tokens, 8_192);
+    }
+
+    #[test]
+    fn test_build_request_body_anthropic_cache_breakpoint() {
+        let provider = OpenRouterProvider::new("key".to_string());
+        let request = InferenceRequest {
+            messages: vec![
+                crate::provider::Message {
+                    role: "user".to_string(),
+                    content: "First".to_string(),
+                    cache_breakpoint: true,
+                },
+                crate::provider::Message {
+                    role: "user".to_string(),
+                    content: "Second".to_string(),
+                    cache_breakpoint: false,
+                },
+            ],
+            model: "anthropic/claude-sonnet-4-6".to_string(),
+            max_tokens: 1024,
+            temperature: 0.7,
+            tools: vec![],
+            extra: serde_json::Value::Null,
+        };
+
+        let body = provider.build_request_body(&request);
+        let msgs = body["messages"].as_array().unwrap();
+        // First message should have cache_control in content block (anthropic model)
+        assert!(msgs[0]["content"].is_array());
+        assert_eq!(msgs[0]["content"][0]["cache_control"]["type"], "ephemeral");
+        // Second message should be simple string content
+        assert!(msgs[1]["content"].is_string());
+    }
+
+    #[test]
+    fn test_build_request_body_non_anthropic_no_cache_breakpoint() {
+        let provider = OpenRouterProvider::new("key".to_string());
+        let request = InferenceRequest {
+            messages: vec![crate::provider::Message {
+                role: "user".to_string(),
+                content: "Hello".to_string(),
+                cache_breakpoint: true,
+            }],
+            model: "openai/gpt-5.4-mini".to_string(),
+            max_tokens: 1024,
+            temperature: 0.7,
+            tools: vec![],
+            extra: serde_json::Value::Null,
+        };
+
+        let body = provider.build_request_body(&request);
+        let msgs = body["messages"].as_array().unwrap();
+        // Non-anthropic model should not get cache_control blocks
+        assert!(msgs[0]["content"].is_string());
+    }
+
+    #[test]
+    fn test_build_request_body_max_4_breakpoints() {
+        let provider = OpenRouterProvider::new("key".to_string());
+        let messages: Vec<crate::provider::Message> = (0..6)
+            .map(|i| crate::provider::Message {
+                role: "user".to_string(),
+                content: format!("msg {}", i),
+                cache_breakpoint: true,
+            })
+            .collect();
+
+        let request = InferenceRequest {
+            messages,
+            model: "anthropic/claude-sonnet-4-6".to_string(),
+            max_tokens: 1024,
+            temperature: 0.7,
+            tools: vec![],
+            extra: serde_json::Value::Null,
+        };
+
+        let body = provider.build_request_body(&request);
+        let msgs = body["messages"].as_array().unwrap();
+        let bp_count = msgs.iter().filter(|m| m["content"].is_array()).count();
+        assert_eq!(bp_count, 4);
+    }
+
+    #[test]
+    fn test_build_request_body_with_tools() {
+        let provider = OpenRouterProvider::new("key".to_string());
+        let request = InferenceRequest {
+            messages: vec![crate::provider::Message {
+                role: "user".to_string(),
+                content: "Search".to_string(),
+                cache_breakpoint: false,
+            }],
+            model: "openai/gpt-5.4-mini".to_string(),
+            max_tokens: 512,
+            temperature: 0.5,
+            tools: vec![crate::provider::Tool {
+                name: "search".to_string(),
+                description: "Search the web".to_string(),
+                parameters: serde_json::json!({"type": "object"}),
+            }],
+            extra: serde_json::Value::Null,
+        };
+
+        let body = provider.build_request_body(&request);
+        let tools = body["tools"].as_array().unwrap();
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0]["function"]["name"], "search");
+    }
+
+    #[test]
+    fn test_build_request_body_no_temp_for_deepseek_r1() {
+        let provider = OpenRouterProvider::new("key".to_string());
+        let request = InferenceRequest {
+            messages: vec![crate::provider::Message {
+                role: "user".to_string(),
+                content: "Think".to_string(),
+                cache_breakpoint: false,
+            }],
+            model: "deepseek/deepseek-r1".to_string(),
+            max_tokens: 512,
+            temperature: 0.5,
+            tools: vec![],
+            extra: serde_json::Value::Null,
+        };
+
+        let body = provider.build_request_body(&request);
+        // deepseek-r1 doesn't support temperature
+        assert!(body.get("temperature").is_none());
+    }
 }

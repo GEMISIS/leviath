@@ -206,3 +206,330 @@ impl Dashboard {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::commands::dashboard::state::Dashboard;
+    use crate::commands::dashboard::types::{Toast, ToastLevel};
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+    use tokio::sync::mpsc;
+
+    fn make_test_dashboard() -> Dashboard {
+        let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
+        Dashboard::new(cmd_tx)
+    }
+
+    fn make_test_agent(id: &str, status: AgentDisplayStatus) -> DashboardAgent {
+        DashboardAgent {
+            id: id.to_string(),
+            blueprint_name: "test-agent".to_string(),
+            agent_path: "/path".to_string(),
+            stage: "main".to_string(),
+            stage_index: 0,
+            num_stages: 1,
+            status,
+            tokens_in: 100,
+            tokens_out: 50,
+            cached_tokens: 10,
+            context_tokens: (500, 8000),
+            iteration: 3,
+            waiting_prompt: None,
+            pending_request: None,
+            last_answered_request_id: None,
+            context_snapshot: None,
+            stages: vec![],
+            entity: bevy_ecs::prelude::Entity::from_raw(0),
+            is_run_state: false,
+            pid: 0,
+            workdir: "/tmp/test".to_string(),
+            task: "test task".to_string(),
+            title: Some("My Test".to_string()),
+            model: Some("claude-sonnet-4-20250514".to_string()),
+            parent_id: None,
+            depth: 0,
+            started_at: chrono::Utc::now().timestamp() - 60,
+            active_until: None,
+            waiting_secs: 0,
+            graph_info: None,
+            accepts_messages: true,
+        }
+    }
+
+    #[test]
+    fn draw_normal_mode_no_agents() {
+        let backend = TestBackend::new(120, 40);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut dash = make_test_dashboard();
+        terminal.draw(|f| dash.draw(f)).unwrap();
+    }
+
+    #[test]
+    fn draw_normal_mode_with_agents() {
+        let backend = TestBackend::new(120, 40);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut dash = make_test_dashboard();
+        dash.agents
+            .push(make_test_agent("run-1", AgentDisplayStatus::Active));
+        dash.agents
+            .push(make_test_agent("run-2", AgentDisplayStatus::Complete));
+        dash.update_display_indices();
+        terminal.draw(|f| dash.draw(f)).unwrap();
+    }
+
+    #[test]
+    fn draw_detail_view() {
+        let backend = TestBackend::new(120, 40);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut dash = make_test_dashboard();
+        dash.agents
+            .push(make_test_agent("run-det", AgentDisplayStatus::Active));
+        dash.update_display_indices();
+        dash.detail_view = true;
+        terminal.draw(|f| dash.draw(f)).unwrap();
+    }
+
+    #[test]
+    fn draw_with_show_help() {
+        let backend = TestBackend::new(120, 50);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut dash = make_test_dashboard();
+        dash.show_help = true;
+        terminal.draw(|f| dash.draw(f)).unwrap();
+    }
+
+    #[test]
+    fn draw_with_confirm_delete() {
+        let backend = TestBackend::new(120, 40);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut dash = make_test_dashboard();
+        dash.agents
+            .push(make_test_agent("run-del", AgentDisplayStatus::Complete));
+        dash.update_display_indices();
+        dash.confirm_delete = true;
+        terminal.draw(|f| dash.draw(f)).unwrap();
+    }
+
+    #[test]
+    fn draw_with_toasts() {
+        let backend = TestBackend::new(120, 40);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut dash = make_test_dashboard();
+        dash.toasts.push(Toast {
+            message: "Hello".to_string(),
+            remaining_ticks: 25,
+            level: ToastLevel::Info,
+        });
+        terminal.draw(|f| dash.draw(f)).unwrap();
+    }
+
+    #[test]
+    fn draw_detail_panel_no_agent() {
+        let backend = TestBackend::new(120, 40);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut dash = make_test_dashboard();
+        terminal
+            .draw(|f| {
+                let area = f.area();
+                dash.draw_detail_panel(f, area);
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn draw_detail_panel_active_agent() {
+        let backend = TestBackend::new(120, 40);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut dash = make_test_dashboard();
+        dash.agents
+            .push(make_test_agent("run-dp", AgentDisplayStatus::Active));
+        dash.update_display_indices();
+        terminal
+            .draw(|f| {
+                let area = f.area();
+                dash.draw_detail_panel(f, area);
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn draw_detail_panel_waiting_agent() {
+        let backend = TestBackend::new(120, 40);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut dash = make_test_dashboard();
+        let mut agent = make_test_agent("run-wait", AgentDisplayStatus::Waiting);
+        agent.waiting_prompt = Some("What should I do?".to_string());
+        agent.pending_request = Some(crate::interaction::InteractionRequest {
+            id: "req-1".to_string(),
+            kind: crate::interaction::InteractionKind::FreeText,
+            prompt: "What should I do?".to_string(),
+            options: vec![],
+            tool_name: None,
+            tool_arguments: None,
+            required: true,
+            stage_name: "main".to_string(),
+            body: None,
+            body_format: crate::interaction::BodyFormat::Plain,
+        });
+        dash.agents.push(agent);
+        dash.update_display_indices();
+        terminal
+            .draw(|f| {
+                let area = f.area();
+                dash.draw_detail_panel(f, area);
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn draw_detail_panel_error_agent() {
+        let backend = TestBackend::new(120, 40);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut dash = make_test_dashboard();
+        dash.agents.push(make_test_agent(
+            "run-err",
+            AgentDisplayStatus::Error("something broke".to_string()),
+        ));
+        dash.update_display_indices();
+        terminal
+            .draw(|f| {
+                let area = f.area();
+                dash.draw_detail_panel(f, area);
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn draw_detail_panel_complete_interactive() {
+        let backend = TestBackend::new(120, 40);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut dash = make_test_dashboard();
+        let mut agent = make_test_agent("run-ci", AgentDisplayStatus::CompleteInteractive);
+        agent.waiting_prompt = Some("Anything else?".to_string());
+        dash.agents.push(agent);
+        dash.update_display_indices();
+        terminal
+            .draw(|f| {
+                let area = f.area();
+                dash.draw_detail_panel(f, area);
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn draw_detail_panel_with_context_snapshot() {
+        let backend = TestBackend::new(120, 40);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut dash = make_test_dashboard();
+        let mut agent = make_test_agent("run-cs", AgentDisplayStatus::Active);
+        agent.context_snapshot = Some(crate::runstate::ContextSnapshot {
+            stage_name: "main".to_string(),
+            total_tokens: 4000,
+            max_tokens: 8000,
+            regions: vec![],
+        });
+        dash.agents.push(agent);
+        dash.update_display_indices();
+        terminal
+            .draw(|f| {
+                let area = f.area();
+                dash.draw_detail_panel(f, area);
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn draw_detail_panel_with_review_body() {
+        let backend = TestBackend::new(120, 50);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut dash = make_test_dashboard();
+        let mut agent = make_test_agent("run-rv", AgentDisplayStatus::Waiting);
+        agent.waiting_prompt = Some("Review this plan".to_string());
+        agent.pending_request = Some(crate::interaction::InteractionRequest {
+            id: "req-rv".to_string(),
+            kind: crate::interaction::InteractionKind::FreeText,
+            prompt: "Review this plan".to_string(),
+            options: vec![],
+            tool_name: None,
+            tool_arguments: None,
+            required: true,
+            stage_name: "main".to_string(),
+            body: Some("# Plan\n\n- Step 1\n- Step 2\n- Step 3\n\nDo you approve?".to_string()),
+            body_format: crate::interaction::BodyFormat::Markdown,
+        });
+        dash.agents.push(agent);
+        dash.update_display_indices();
+        terminal
+            .draw(|f| {
+                let area = f.area();
+                dash.draw_detail_panel(f, area);
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn draw_detail_panel_with_stages() {
+        let backend = TestBackend::new(120, 40);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut dash = make_test_dashboard();
+        let mut agent = make_test_agent("run-stg", AgentDisplayStatus::Active);
+        agent.num_stages = 3;
+        agent.stages = vec![
+            crate::runstate::StageRecord {
+                name: "plan".to_string(),
+                index: 0,
+                status: crate::runstate::StageRunStatus::Complete,
+                prompt_tokens: 100,
+                completion_tokens: 50,
+                cached_tokens: 0,
+                started_at: Some(chrono::Utc::now().timestamp() - 60),
+                ended_at: Some(chrono::Utc::now().timestamp() - 30),
+            },
+            crate::runstate::StageRecord {
+                name: "implement".to_string(),
+                index: 1,
+                status: crate::runstate::StageRunStatus::Active,
+                prompt_tokens: 200,
+                completion_tokens: 80,
+                cached_tokens: 0,
+                started_at: Some(chrono::Utc::now().timestamp() - 30),
+                ended_at: None,
+            },
+            crate::runstate::StageRecord {
+                name: "review".to_string(),
+                index: 2,
+                status: crate::runstate::StageRunStatus::Pending,
+                prompt_tokens: 0,
+                completion_tokens: 0,
+                cached_tokens: 0,
+                started_at: None,
+                ended_at: None,
+            },
+        ];
+        dash.agents.push(agent);
+        dash.update_display_indices();
+        terminal
+            .draw(|f| {
+                let area = f.area();
+                dash.draw_detail_panel(f, area);
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn draw_detail_panel_cancelled_agent() {
+        let backend = TestBackend::new(120, 40);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut dash = make_test_dashboard();
+        dash.agents
+            .push(make_test_agent("run-can", AgentDisplayStatus::Cancelled));
+        dash.update_display_indices();
+        terminal
+            .draw(|f| {
+                let area = f.area();
+                dash.draw_detail_panel(f, area);
+            })
+            .unwrap();
+    }
+}

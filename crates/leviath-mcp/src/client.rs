@@ -390,4 +390,487 @@ mod tests {
         let filtered = MCPClient::filter_env(&vars);
         assert_eq!(filtered.len(), 3);
     }
+
+    // ── Additional coverage tests ──────────────────────────────────────────
+
+    #[test]
+    fn test_filter_env_empty_input() {
+        let vars: Vec<(String, String)> = vec![];
+        let filtered = MCPClient::filter_env(&vars);
+        assert!(filtered.is_empty());
+    }
+
+    #[test]
+    fn test_filter_env_case_insensitive_matching() {
+        let vars = vec![
+            ("my_api_key".to_string(), "secret".to_string()),
+            ("My_Password".to_string(), "pass".to_string()),
+        ];
+        let filtered = MCPClient::filter_env(&vars);
+        assert!(filtered.is_empty());
+    }
+
+    #[test]
+    fn test_filter_env_partial_match() {
+        // "API_KEY" pattern should match anything containing it
+        let vars = vec![
+            ("CUSTOM_API_KEY_VALUE".to_string(), "val".to_string()),
+            ("SAFE_VAR".to_string(), "ok".to_string()),
+        ];
+        let filtered = MCPClient::filter_env(&vars);
+        assert_eq!(filtered.len(), 1);
+        assert!(filtered.contains_key("SAFE_VAR"));
+    }
+
+    #[test]
+    fn test_server_capabilities_default() {
+        let caps = ServerCapabilities::default();
+        assert!(caps.tools.is_none());
+    }
+
+    #[test]
+    fn test_tools_capability_default() {
+        let cap = ToolsCapability::default();
+        assert!(cap.list_changed.is_none());
+    }
+
+    #[test]
+    fn test_server_capabilities_serialization() {
+        let caps = ServerCapabilities {
+            tools: Some(ToolsCapability {
+                list_changed: Some(true),
+            }),
+        };
+        let json = serde_json::to_string(&caps).unwrap();
+        assert!(json.contains("listChanged"));
+        assert!(json.contains("true"));
+
+        let deserialized: ServerCapabilities = serde_json::from_str(&json).unwrap();
+        assert!(deserialized.tools.unwrap().list_changed.unwrap());
+    }
+
+    #[test]
+    fn test_tool_result_serialization() {
+        let result = ToolResult {
+            content: vec![ToolResultContent::Text {
+                text: "Hello".to_string(),
+            }],
+            is_error: false,
+        };
+        let json = serde_json::to_string(&result).unwrap();
+        assert!(json.contains("Hello"));
+        assert!(json.contains("\"is_error\":false"));
+    }
+
+    #[test]
+    fn test_tool_result_with_error() {
+        let result = ToolResult {
+            content: vec![ToolResultContent::Text {
+                text: "Something went wrong".to_string(),
+            }],
+            is_error: true,
+        };
+        assert!(result.is_error);
+        assert_eq!(result.content.len(), 1);
+    }
+
+    #[test]
+    fn test_tool_result_content_text() {
+        let content = ToolResultContent::Text {
+            text: "result text".to_string(),
+        };
+        let json = serde_json::to_string(&content).unwrap();
+        assert!(json.contains("result text"));
+        assert!(json.contains("\"type\":\"text\""));
+    }
+
+    #[test]
+    fn test_tool_result_content_image() {
+        let content = ToolResultContent::Image {
+            data: "base64data".to_string(),
+            mime_type: "image/png".to_string(),
+        };
+        let json = serde_json::to_string(&content).unwrap();
+        assert!(json.contains("base64data"));
+        assert!(json.contains("image/png"));
+    }
+
+    #[test]
+    fn test_tool_result_content_resource() {
+        let content = ToolResultContent::Resource {
+            uri: "file:///tmp/test.txt".to_string(),
+            text: Some("file contents".to_string()),
+        };
+        let json = serde_json::to_string(&content).unwrap();
+        assert!(json.contains("file:///tmp/test.txt"));
+        assert!(json.contains("file contents"));
+    }
+
+    #[test]
+    fn test_tool_result_content_resource_no_text() {
+        let content = ToolResultContent::Resource {
+            uri: "file:///tmp/test.txt".to_string(),
+            text: None,
+        };
+        let json = serde_json::to_string(&content).unwrap();
+        assert!(json.contains("file:///tmp/test.txt"));
+    }
+
+    #[test]
+    fn test_tool_result_deserialization() {
+        let json = r#"{"content":[{"type":"text","text":"Hello"}],"is_error":false}"#;
+        let result: ToolResult = serde_json::from_str(json).unwrap();
+        assert!(!result.is_error);
+        assert_eq!(result.content.len(), 1);
+    }
+
+    #[test]
+    fn test_tool_result_deserialization_missing_is_error() {
+        let json = r#"{"content":[{"type":"text","text":"Hello"}]}"#;
+        let result: ToolResult = serde_json::from_str(json).unwrap();
+        assert!(!result.is_error); // defaults to false
+    }
+
+    #[test]
+    fn test_tool_result_multiple_content() {
+        let result = ToolResult {
+            content: vec![
+                ToolResultContent::Text {
+                    text: "line 1".to_string(),
+                },
+                ToolResultContent::Text {
+                    text: "line 2".to_string(),
+                },
+            ],
+            is_error: false,
+        };
+        assert_eq!(result.content.len(), 2);
+    }
+
+    #[test]
+    fn test_tool_result_clone() {
+        let result = ToolResult {
+            content: vec![ToolResultContent::Text {
+                text: "test".to_string(),
+            }],
+            is_error: true,
+        };
+        let cloned = result.clone();
+        assert!(cloned.is_error);
+        assert_eq!(cloned.content.len(), 1);
+    }
+
+    #[test]
+    fn test_server_capabilities_clone() {
+        let caps = ServerCapabilities {
+            tools: Some(ToolsCapability {
+                list_changed: Some(true),
+            }),
+        };
+        let cloned = caps.clone();
+        assert!(cloned.tools.unwrap().list_changed.unwrap());
+    }
+
+    // ─── ToolResult additional tests ──────────────────────────────────────
+
+    #[test]
+    fn test_tool_result_empty_content() {
+        let result = ToolResult {
+            content: vec![],
+            is_error: false,
+        };
+        assert!(result.content.is_empty());
+        assert!(!result.is_error);
+    }
+
+    #[test]
+    fn test_tool_result_mixed_content_types() {
+        let result = ToolResult {
+            content: vec![
+                ToolResultContent::Text {
+                    text: "hello".to_string(),
+                },
+                ToolResultContent::Image {
+                    data: "base64".to_string(),
+                    mime_type: "image/jpeg".to_string(),
+                },
+                ToolResultContent::Resource {
+                    uri: "file:///test".to_string(),
+                    text: Some("content".to_string()),
+                },
+            ],
+            is_error: false,
+        };
+        assert_eq!(result.content.len(), 3);
+        let json = serde_json::to_string(&result).unwrap();
+        let back: ToolResult = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.content.len(), 3);
+    }
+
+    // ─── ServerCapabilities deserialization ────────────────────────────────
+
+    #[test]
+    fn test_server_capabilities_from_empty_json() {
+        let caps: ServerCapabilities = serde_json::from_str("{}").unwrap();
+        assert!(caps.tools.is_none());
+    }
+
+    #[test]
+    fn test_server_capabilities_with_tools() {
+        let json = r#"{"tools":{"listChanged":false}}"#;
+        let caps: ServerCapabilities = serde_json::from_str(json).unwrap();
+        let tools = caps.tools.unwrap();
+        assert_eq!(tools.list_changed, Some(false));
+    }
+
+    #[test]
+    fn test_server_capabilities_with_null_tools() {
+        let json = r#"{"tools":null}"#;
+        let caps: ServerCapabilities = serde_json::from_str(json).unwrap();
+        assert!(caps.tools.is_none());
+    }
+
+    // ─── ToolsCapability serde ────────────────────────────────────────────
+
+    #[test]
+    fn test_tools_capability_with_list_changed_true() {
+        let cap = ToolsCapability {
+            list_changed: Some(true),
+        };
+        let json = serde_json::to_string(&cap).unwrap();
+        assert!(json.contains("true"));
+        let back: ToolsCapability = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.list_changed, Some(true));
+    }
+
+    #[test]
+    fn test_tools_capability_no_list_changed() {
+        let cap = ToolsCapability { list_changed: None };
+        let json = serde_json::to_string(&cap).unwrap();
+        let back: ToolsCapability = serde_json::from_str(&json).unwrap();
+        assert!(back.list_changed.is_none());
+    }
+
+    // ─── ToolResultContent deserialization ─────────────────────────────────
+
+    #[test]
+    fn test_tool_result_content_text_deserialization() {
+        let json = r#"{"type":"text","text":"hello world"}"#;
+        let content: ToolResultContent = serde_json::from_str(json).unwrap();
+        match content {
+            ToolResultContent::Text { text } => assert_eq!(text, "hello world"),
+            _ => panic!("Expected Text variant"),
+        }
+    }
+
+    #[test]
+    fn test_tool_result_content_image_deserialization() {
+        let json = r#"{"type":"image","data":"abc123","mime_type":"image/png"}"#;
+        let content: ToolResultContent = serde_json::from_str(json).unwrap();
+        match content {
+            ToolResultContent::Image { data, mime_type } => {
+                assert_eq!(data, "abc123");
+                assert_eq!(mime_type, "image/png");
+            }
+            _ => panic!("Expected Image variant"),
+        }
+    }
+
+    #[test]
+    fn test_tool_result_content_resource_deserialization() {
+        let json = r#"{"type":"resource","uri":"file:///tmp/x","text":"data"}"#;
+        let content: ToolResultContent = serde_json::from_str(json).unwrap();
+        match content {
+            ToolResultContent::Resource { uri, text } => {
+                assert_eq!(uri, "file:///tmp/x");
+                assert_eq!(text, Some("data".to_string()));
+            }
+            _ => panic!("Expected Resource variant"),
+        }
+    }
+
+    // ─── filter_env additional ────────────────────────────────────────────
+
+    #[test]
+    fn test_filter_env_preserves_path_and_home() {
+        let vars = vec![
+            ("PATH".to_string(), "/usr/bin:/bin".to_string()),
+            ("HOME".to_string(), "/Users/test".to_string()),
+            ("SHELL".to_string(), "/bin/zsh".to_string()),
+            ("TERM".to_string(), "xterm-256color".to_string()),
+        ];
+        let filtered = MCPClient::filter_env(&vars);
+        assert_eq!(filtered.len(), 4);
+    }
+
+    #[test]
+    fn test_filter_env_all_sensitive() {
+        let vars = vec![
+            ("API_KEY".to_string(), "key".to_string()),
+            ("API_SECRET".to_string(), "secret".to_string()),
+            ("SECRET_KEY".to_string(), "sk".to_string()),
+            ("ACCESS_TOKEN".to_string(), "at".to_string()),
+            ("AUTH_TOKEN".to_string(), "auth".to_string()),
+            ("PRIVATE_KEY".to_string(), "pk".to_string()),
+            ("PASSWORD".to_string(), "pass".to_string()),
+        ];
+        let filtered = MCPClient::filter_env(&vars);
+        assert!(filtered.is_empty());
+    }
+
+    // ─── JsonRpcRequest serialization ───────────────────────────────────
+
+    #[test]
+    fn test_jsonrpc_request_serialization_with_id() {
+        let req = JsonRpcRequest {
+            jsonrpc: "2.0",
+            id: Some(42),
+            method: "tools/list".to_string(),
+            params: Some(serde_json::json!({})),
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        assert!(json.contains("\"jsonrpc\":\"2.0\""));
+        assert!(json.contains("\"id\":42"));
+        assert!(json.contains("\"method\":\"tools/list\""));
+    }
+
+    #[test]
+    fn test_jsonrpc_request_notification_no_id() {
+        let req = JsonRpcRequest {
+            jsonrpc: "2.0",
+            id: None,
+            method: "notifications/initialized".to_string(),
+            params: Some(serde_json::json!({})),
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        assert!(!json.contains("\"id\""));
+    }
+
+    #[test]
+    fn test_jsonrpc_request_no_params() {
+        let req = JsonRpcRequest {
+            jsonrpc: "2.0",
+            id: Some(1),
+            method: "test".to_string(),
+            params: None,
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        assert!(!json.contains("\"params\""));
+    }
+
+    // ─── JsonRpcResponse deserialization ─────────────────────────────────
+
+    #[test]
+    fn test_jsonrpc_response_with_result() {
+        let json = r#"{"jsonrpc":"2.0","id":1,"result":{"tools":[]}}"#;
+        let resp: JsonRpcResponse = serde_json::from_str(json).unwrap();
+        assert!(resp.result.is_some());
+        assert!(resp.error.is_none());
+    }
+
+    #[test]
+    fn test_jsonrpc_response_with_error() {
+        let json =
+            r#"{"jsonrpc":"2.0","id":1,"error":{"code":-32600,"message":"Invalid request"}}"#;
+        let resp: JsonRpcResponse = serde_json::from_str(json).unwrap();
+        assert!(resp.result.is_none());
+        assert!(resp.error.is_some());
+        assert_eq!(resp.error.unwrap().message, "Invalid request");
+    }
+
+    #[test]
+    fn test_jsonrpc_response_null_id() {
+        let json = r#"{"jsonrpc":"2.0","id":null,"result":"ok"}"#;
+        let resp: JsonRpcResponse = serde_json::from_str(json).unwrap();
+        assert!(resp.result.is_some());
+    }
+
+    // ─── ToolResult complex cases ───────────────────────────────────────
+
+    #[test]
+    fn test_tool_result_json_roundtrip() {
+        let result = ToolResult {
+            content: vec![
+                ToolResultContent::Text {
+                    text: "line1".to_string(),
+                },
+                ToolResultContent::Image {
+                    data: "abc".to_string(),
+                    mime_type: "image/png".to_string(),
+                },
+                ToolResultContent::Resource {
+                    uri: "file:///x".to_string(),
+                    text: Some("data".to_string()),
+                },
+            ],
+            is_error: false,
+        };
+        let json = serde_json::to_string(&result).unwrap();
+        let back: ToolResult = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.content.len(), 3);
+        assert!(!back.is_error);
+    }
+
+    // ─── filter_env: mixed sensitive and safe ───────────────────────────
+
+    #[test]
+    fn test_filter_env_mixed_with_duplicates() {
+        let vars = vec![
+            ("SAFE_VAR".to_string(), "safe".to_string()),
+            ("MY_API_KEY".to_string(), "secret".to_string()),
+            ("ANOTHER_SAFE".to_string(), "ok".to_string()),
+            ("DB_PASSWORD".to_string(), "pass".to_string()),
+            ("THIRD_SAFE".to_string(), "fine".to_string()),
+        ];
+        let filtered = MCPClient::filter_env(&vars);
+        assert_eq!(filtered.len(), 3);
+        assert!(filtered.contains_key("SAFE_VAR"));
+        assert!(filtered.contains_key("ANOTHER_SAFE"));
+        assert!(filtered.contains_key("THIRD_SAFE"));
+    }
+
+    // ─── ServerCapabilities with empty tools ────────────────────────────
+
+    #[test]
+    fn test_server_capabilities_empty_tools_object() {
+        let json = r#"{"tools":{}}"#;
+        let caps: ServerCapabilities = serde_json::from_str(json).unwrap();
+        let tools = caps.tools.unwrap();
+        assert!(tools.list_changed.is_none());
+    }
+
+    // ─── ToolResultContent: edge cases ──────────────────────────────────
+
+    #[test]
+    fn test_tool_result_content_text_empty() {
+        let content = ToolResultContent::Text {
+            text: "".to_string(),
+        };
+        let json = serde_json::to_string(&content).unwrap();
+        let back: ToolResultContent = serde_json::from_str(&json).unwrap();
+        match back {
+            ToolResultContent::Text { text } => assert_eq!(text, ""),
+            _ => panic!("Expected Text"),
+        }
+    }
+
+    #[test]
+    fn test_tool_result_content_image_empty_data() {
+        let content = ToolResultContent::Image {
+            data: "".to_string(),
+            mime_type: "".to_string(),
+        };
+        let json = serde_json::to_string(&content).unwrap();
+        assert!(json.contains("\"type\":\"image\""));
+    }
+
+    #[test]
+    fn test_tool_result_content_resource_empty_uri() {
+        let content = ToolResultContent::Resource {
+            uri: "".to_string(),
+            text: None,
+        };
+        let json = serde_json::to_string(&content).unwrap();
+        assert!(json.contains("\"type\":\"resource\""));
+    }
 }

@@ -229,4 +229,227 @@ max_iterations = 5
         };
         assert_eq!(args.path, ".");
     }
+
+    // ─── print_warnings: unreachable stage ──────────────────────────────
+
+    #[test]
+    fn print_warnings_unreachable_stage_no_panic() {
+        let toml = make_blueprint_toml(
+            r#"
+[stages.a]
+mode = "autonomous"
+model = { provider = "anthropic", model = "claude-sonnet-4-6" }
+description = "Stage A"
+max_iterations = 5
+entry = true
+[stages.a.transitions]
+b = "true"
+
+[stages.b]
+mode = "autonomous"
+model = { provider = "anthropic", model = "claude-sonnet-4-6" }
+description = "Stage B"
+max_iterations = 5
+
+[stages.orphan]
+mode = "autonomous"
+model = { provider = "anthropic", model = "claude-sonnet-4-6" }
+description = "Unreachable stage"
+max_iterations = 5
+"#,
+        );
+        let bp = parse(&toml);
+        // Should not panic; orphan stage is unreachable
+        print_warnings(&bp);
+    }
+
+    // ─── print_warnings: cycle without max_revisits ─────────────────────
+
+    #[test]
+    fn print_warnings_cycle_without_max_revisits_no_panic() {
+        let toml = make_blueprint_toml(
+            r#"
+[stages.a]
+mode = "autonomous"
+model = { provider = "anthropic", model = "claude-sonnet-4-6" }
+description = "Stage A"
+max_iterations = 5
+entry = true
+[stages.a.transitions]
+b = "true"
+
+[stages.b]
+mode = "autonomous"
+model = { provider = "anthropic", model = "claude-sonnet-4-6" }
+description = "Stage B"
+max_iterations = 5
+[stages.b.transitions]
+a = "true"
+"#,
+        );
+        let bp = parse(&toml);
+        // Should print warning about cycle but not panic
+        print_warnings(&bp);
+    }
+
+    // ─── print_warnings: cycle with max_revisits set ────────────────────
+
+    #[test]
+    fn print_warnings_cycle_with_max_revisits_no_panic() {
+        let toml = make_blueprint_toml(
+            r#"
+[stages.a]
+mode = "autonomous"
+model = { provider = "anthropic", model = "claude-sonnet-4-6" }
+description = "Stage A"
+max_iterations = 5
+entry = true
+[stages.a.transitions]
+b = "true"
+
+[stages.b]
+mode = "autonomous"
+model = { provider = "anthropic", model = "claude-sonnet-4-6" }
+description = "Stage B"
+max_iterations = 5
+max_revisits = 3
+[stages.b.transitions]
+a = "true"
+"#,
+        );
+        let bp = parse(&toml);
+        print_warnings(&bp);
+    }
+
+    // ─── print_warnings: terminal stage with empty transitions ──────────
+
+    #[test]
+    fn print_warnings_terminal_stage_no_panic() {
+        let toml = make_blueprint_toml(
+            r#"
+[stages.a]
+mode = "autonomous"
+model = { provider = "anthropic", model = "claude-sonnet-4-6" }
+description = "Stage A"
+max_iterations = 5
+entry = true
+[stages.a.transitions]
+b = "true"
+
+[stages.b]
+mode = "autonomous"
+model = { provider = "anthropic", model = "claude-sonnet-4-6" }
+description = "Terminal stage"
+max_iterations = 5
+[stages.b.transitions]
+"#,
+        );
+        let bp = parse(&toml);
+        print_warnings(&bp);
+    }
+
+    // ─── execute: no manifest ──────────────────────────────────────────
+
+    #[tokio::test]
+    async fn execute_no_manifest_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let args = ValidateArgs {
+            path: dir.path().to_str().unwrap().to_string(),
+        };
+        let result = execute(args).await;
+        assert!(result.is_err());
+    }
+
+    // ─── execute: with file path pointing to manifest ───────────────────
+
+    #[tokio::test]
+    async fn execute_valid_manifest_file_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = r#"
+[agent]
+name = "test-agent"
+version = "0.1.0"
+description = "A test agent"
+
+[stages.main]
+mode = "autonomous"
+model = { provider = "anthropic", model = "claude-sonnet-4-6" }
+description = "Main"
+max_iterations = 5
+
+[context.regions]
+system = { kind = "pinned", max_tokens = 1000 }
+"#;
+        let manifest_path = dir.path().join("agent.leviath");
+        std::fs::write(&manifest_path, manifest).unwrap();
+
+        let args = ValidateArgs {
+            path: manifest_path.to_str().unwrap().to_string(),
+        };
+        let result = execute(args).await;
+        assert!(result.is_ok());
+    }
+
+    // ─── execute: with directory path ───────────────────────────────────
+
+    #[tokio::test]
+    async fn execute_valid_manifest_directory_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = r#"
+[agent]
+name = "dir-agent"
+version = "0.2.0"
+description = "A directory agent"
+
+[stages.main]
+mode = "autonomous"
+model = { provider = "anthropic", model = "claude-sonnet-4-6" }
+description = "Main"
+max_iterations = 5
+
+[context.regions]
+system = { kind = "pinned", max_tokens = 1000 }
+"#;
+        std::fs::write(dir.path().join("agent.leviath"), manifest).unwrap();
+
+        let args = ValidateArgs {
+            path: dir.path().to_str().unwrap().to_string(),
+        };
+        let result = execute(args).await;
+        assert!(result.is_ok());
+    }
+
+    // ─── print_warnings: multiple stages all reachable ──────────────────
+
+    #[test]
+    fn print_warnings_chain_all_reachable() {
+        let toml = make_blueprint_toml(
+            r#"
+[stages.a]
+mode = "autonomous"
+model = { provider = "anthropic", model = "claude-sonnet-4-6" }
+description = "A"
+max_iterations = 5
+entry = true
+[stages.a.transitions]
+b = "true"
+
+[stages.b]
+mode = "autonomous"
+model = { provider = "anthropic", model = "claude-sonnet-4-6" }
+description = "B"
+max_iterations = 5
+[stages.b.transitions]
+c = "true"
+
+[stages.c]
+mode = "autonomous"
+model = { provider = "anthropic", model = "claude-sonnet-4-6" }
+description = "C"
+max_iterations = 5
+"#,
+        );
+        let bp = parse(&toml);
+        print_warnings(&bp);
+    }
 }

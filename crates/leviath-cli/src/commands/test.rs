@@ -400,3 +400,559 @@ fn truncate_str(s: &str, max: usize) -> String {
         format!("{}...", &s[..max])
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ─── validate_test_case ────────────────────────────────────────────────
+
+    #[test]
+    fn validate_test_case_valid_with_expect_contains() {
+        let tc = TestCase {
+            name: "basic".to_string(),
+            input: "hello".to_string(),
+            expect_contains: Some("world".to_string()),
+            expect_tool_call: None,
+            max_tokens: None,
+        };
+        assert!(validate_test_case(&tc));
+    }
+
+    #[test]
+    fn validate_test_case_valid_with_expect_tool_call() {
+        let tc = TestCase {
+            name: "tool_test".to_string(),
+            input: "do something".to_string(),
+            expect_contains: None,
+            expect_tool_call: Some("bash".to_string()),
+            max_tokens: None,
+        };
+        assert!(validate_test_case(&tc));
+    }
+
+    #[test]
+    fn validate_test_case_valid_with_both_assertions() {
+        let tc = TestCase {
+            name: "both".to_string(),
+            input: "test".to_string(),
+            expect_contains: Some("output".to_string()),
+            expect_tool_call: Some("read_file".to_string()),
+            max_tokens: Some(100),
+        };
+        assert!(validate_test_case(&tc));
+    }
+
+    #[test]
+    fn validate_test_case_empty_name_fails() {
+        let tc = TestCase {
+            name: String::new(),
+            input: "hello".to_string(),
+            expect_contains: Some("world".to_string()),
+            expect_tool_call: None,
+            max_tokens: None,
+        };
+        assert!(!validate_test_case(&tc));
+    }
+
+    #[test]
+    fn validate_test_case_empty_input_fails() {
+        let tc = TestCase {
+            name: "test".to_string(),
+            input: String::new(),
+            expect_contains: Some("world".to_string()),
+            expect_tool_call: None,
+            max_tokens: None,
+        };
+        assert!(!validate_test_case(&tc));
+    }
+
+    #[test]
+    fn validate_test_case_no_assertions_fails() {
+        let tc = TestCase {
+            name: "test".to_string(),
+            input: "hello".to_string(),
+            expect_contains: None,
+            expect_tool_call: None,
+            max_tokens: None,
+        };
+        assert!(!validate_test_case(&tc));
+    }
+
+    // ─── truncate_str ──────────────────────────────────────────────────────
+
+    #[test]
+    fn truncate_str_short() {
+        assert_eq!(truncate_str("hello", 10), "hello");
+    }
+
+    #[test]
+    fn truncate_str_exact() {
+        assert_eq!(truncate_str("hello", 5), "hello");
+    }
+
+    #[test]
+    fn truncate_str_long() {
+        assert_eq!(truncate_str("hello world", 5), "hello...");
+    }
+
+    #[test]
+    fn truncate_str_empty() {
+        assert_eq!(truncate_str("", 5), "");
+    }
+
+    // ─── TestFile TOML parsing ─────────────────────────────────────────────
+
+    #[test]
+    fn parse_test_file_toml() {
+        let toml_content = r#"
+[[test]]
+name = "greeting"
+input = "Say hello"
+expect_contains = "hello"
+
+[[test]]
+name = "tool_use"
+input = "Read file.txt"
+expect_tool_call = "read_file"
+max_tokens = 500
+"#;
+        let test_file: TestFile = toml::from_str(toml_content).unwrap();
+        assert_eq!(test_file.test.len(), 2);
+        assert_eq!(test_file.test[0].name, "greeting");
+        assert_eq!(test_file.test[0].input, "Say hello");
+        assert_eq!(test_file.test[0].expect_contains.as_deref(), Some("hello"));
+        assert!(test_file.test[0].expect_tool_call.is_none());
+        assert!(test_file.test[0].max_tokens.is_none());
+
+        assert_eq!(test_file.test[1].name, "tool_use");
+        assert_eq!(
+            test_file.test[1].expect_tool_call.as_deref(),
+            Some("read_file")
+        );
+        assert_eq!(test_file.test[1].max_tokens, Some(500));
+    }
+
+    #[test]
+    fn parse_test_file_minimal() {
+        let toml_content = r#"
+[[test]]
+name = "min"
+input = "test"
+expect_contains = "ok"
+"#;
+        let test_file: TestFile = toml::from_str(toml_content).unwrap();
+        assert_eq!(test_file.test.len(), 1);
+    }
+
+    #[test]
+    fn parse_test_file_invalid_toml_errors() {
+        let result: Result<TestFile, _> = toml::from_str("not valid toml {{{{");
+        assert!(result.is_err());
+    }
+
+    // ─── dry_run flag ──────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn dry_run_with_temp_project() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path();
+
+        // Create minimal agent.leviath
+        let manifest = r#"
+[agent]
+name = "test-agent"
+version = "0.1.0"
+description = "test"
+
+[stages.main]
+model = { provider = "anthropic", model = "claude-sonnet-4-6" }
+"#;
+        std::fs::write(project.join("agent.leviath"), manifest).unwrap();
+
+        // Create tests directory with a test file
+        let tests_dir = project.join("tests");
+        std::fs::create_dir_all(&tests_dir).unwrap();
+        let test_toml = r#"
+[[test]]
+name = "valid_test"
+input = "hello"
+expect_contains = "world"
+"#;
+        std::fs::write(tests_dir.join("basic.toml"), test_toml).unwrap();
+
+        let args = TestArgs {
+            path: Some(project.to_str().unwrap().to_string()),
+            filter: None,
+            dry_run: true,
+        };
+
+        let result = execute(args).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn dry_run_no_tests_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path();
+
+        let manifest = r#"
+[agent]
+name = "test-agent"
+version = "0.1.0"
+description = "test"
+
+[stages.main]
+model = { provider = "anthropic", model = "claude-sonnet-4-6" }
+"#;
+        std::fs::write(project.join("agent.leviath"), manifest).unwrap();
+
+        let args = TestArgs {
+            path: Some(project.to_str().unwrap().to_string()),
+            filter: None,
+            dry_run: true,
+        };
+
+        // Should succeed but report no tests found
+        let result = execute(args).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn execute_no_manifest_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let args = TestArgs {
+            path: Some(dir.path().to_str().unwrap().to_string()),
+            filter: None,
+            dry_run: true,
+        };
+        let result = execute(args).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("agent.leviath"));
+    }
+
+    // ─── TestCase struct construction ──────────────────────────────────────
+
+    #[test]
+    fn test_case_all_fields_from_toml() {
+        let toml_content = r#"
+[[test]]
+name = "full_test"
+input = "full input"
+expect_contains = "expected"
+expect_tool_call = "bash"
+max_tokens = 1000
+"#;
+        let test_file: TestFile = toml::from_str(toml_content).unwrap();
+        let tc = &test_file.test[0];
+        assert_eq!(tc.name, "full_test");
+        assert_eq!(tc.input, "full input");
+        assert_eq!(tc.expect_contains.as_deref(), Some("expected"));
+        assert_eq!(tc.expect_tool_call.as_deref(), Some("bash"));
+        assert_eq!(tc.max_tokens, Some(1000));
+    }
+
+    #[test]
+    fn test_case_minimal_from_toml() {
+        let toml_content = r#"
+[[test]]
+name = "min"
+input = "hello"
+expect_contains = "world"
+"#;
+        let test_file: TestFile = toml::from_str(toml_content).unwrap();
+        let tc = &test_file.test[0];
+        assert!(tc.expect_tool_call.is_none());
+        assert!(tc.max_tokens.is_none());
+    }
+
+    #[test]
+    fn test_file_multiple_cases() {
+        let toml_content = r#"
+[[test]]
+name = "case1"
+input = "a"
+expect_contains = "b"
+
+[[test]]
+name = "case2"
+input = "c"
+expect_tool_call = "read_file"
+
+[[test]]
+name = "case3"
+input = "d"
+expect_contains = "e"
+expect_tool_call = "bash"
+max_tokens = 500
+"#;
+        let test_file: TestFile = toml::from_str(toml_content).unwrap();
+        assert_eq!(test_file.test.len(), 3);
+    }
+
+    // ─── validate_test_case edge cases ────────────────────────────────────
+
+    #[test]
+    fn validate_test_case_whitespace_name_passes() {
+        // A whitespace-only name is technically non-empty
+        let tc = TestCase {
+            name: " ".to_string(),
+            input: "hello".to_string(),
+            expect_contains: Some("world".to_string()),
+            expect_tool_call: None,
+            max_tokens: None,
+        };
+        assert!(validate_test_case(&tc));
+    }
+
+    // ─── truncate_str edge cases ──────────────────────────────────────────
+
+    #[test]
+    fn truncate_str_one_char_max() {
+        assert_eq!(truncate_str("hello", 1), "h...");
+    }
+
+    #[test]
+    fn truncate_str_unicode() {
+        // Non-ASCII content should still work (might truncate mid-char for simple impl)
+        let s = "abcde";
+        assert_eq!(truncate_str(s, 3), "abc...");
+    }
+
+    // ─── dry_run with filter ──────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn dry_run_with_filter_matches() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path();
+        let manifest = r#"
+[agent]
+name = "test-agent"
+version = "0.1.0"
+description = "test"
+
+[stages.main]
+model = { provider = "anthropic", model = "claude-sonnet-4-6" }
+"#;
+        std::fs::write(project.join("agent.leviath"), manifest).unwrap();
+        let tests_dir = project.join("tests");
+        std::fs::create_dir_all(&tests_dir).unwrap();
+        let test_toml = r#"
+[[test]]
+name = "alpha_test"
+input = "hello"
+expect_contains = "world"
+
+[[test]]
+name = "beta_test"
+input = "hello"
+expect_contains = "world"
+"#;
+        std::fs::write(tests_dir.join("basic.toml"), test_toml).unwrap();
+
+        let args = TestArgs {
+            path: Some(project.to_str().unwrap().to_string()),
+            filter: Some("alpha".to_string()),
+            dry_run: true,
+        };
+        let result = execute(args).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn dry_run_failing_test_case() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path();
+        let manifest = r#"
+[agent]
+name = "test-agent"
+version = "0.1.0"
+description = "test"
+
+[stages.main]
+model = { provider = "anthropic", model = "claude-sonnet-4-6" }
+"#;
+        std::fs::write(project.join("agent.leviath"), manifest).unwrap();
+        let tests_dir = project.join("tests");
+        std::fs::create_dir_all(&tests_dir).unwrap();
+        // No assertions = fails validation
+        let test_toml = r#"
+[[test]]
+name = "bad_test"
+input = "hello"
+"#;
+        std::fs::write(tests_dir.join("fail.toml"), test_toml).unwrap();
+
+        let args = TestArgs {
+            path: Some(project.to_str().unwrap().to_string()),
+            filter: None,
+            dry_run: true,
+        };
+        let result = execute(args).await;
+        assert!(result.is_err()); // Should report failures
+    }
+
+    // ─── validate_test_case more cases ───────────────────────────────────
+
+    #[test]
+    fn validate_test_case_with_max_tokens_only_and_no_assertion_fails() {
+        let tc = TestCase {
+            name: "has-max-tokens".to_string(),
+            input: "test".to_string(),
+            expect_contains: None,
+            expect_tool_call: None,
+            max_tokens: Some(500),
+        };
+        assert!(!validate_test_case(&tc));
+    }
+
+    #[test]
+    fn validate_test_case_with_only_tool_call_assertion() {
+        let tc = TestCase {
+            name: "tool-only".to_string(),
+            input: "do it".to_string(),
+            expect_contains: None,
+            expect_tool_call: Some("write_file".to_string()),
+            max_tokens: None,
+        };
+        assert!(validate_test_case(&tc));
+    }
+
+    // ─── truncate_str additional ─────────────────────────────────────────
+
+    #[test]
+    fn truncate_str_zero_max() {
+        assert_eq!(truncate_str("hello", 0), "...");
+    }
+
+    #[test]
+    fn truncate_str_large_max() {
+        let s = "short";
+        assert_eq!(truncate_str(s, 1000), "short");
+    }
+
+    // ─── TestFile TOML parsing edge cases ────────────────────────────────
+
+    #[test]
+    fn parse_test_file_empty_tests_array() {
+        let toml_content = r#"
+test = []
+"#;
+        let test_file: TestFile = toml::from_str(toml_content).unwrap();
+        assert!(test_file.test.is_empty());
+    }
+
+    #[test]
+    fn parse_test_file_missing_test_key_errors() {
+        let result: Result<TestFile, _> = toml::from_str("something_else = 42");
+        assert!(result.is_err());
+    }
+
+    // ─── dry_run with no matching filter ─────────────────────────────────
+
+    #[tokio::test]
+    async fn dry_run_with_filter_no_match() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path();
+        let manifest = r#"
+[agent]
+name = "test-agent"
+version = "0.1.0"
+description = "test"
+
+[stages.main]
+model = { provider = "anthropic", model = "claude-sonnet-4-6" }
+"#;
+        std::fs::write(project.join("agent.leviath"), manifest).unwrap();
+        let tests_dir = project.join("tests");
+        std::fs::create_dir_all(&tests_dir).unwrap();
+        let test_toml = r#"
+[[test]]
+name = "alpha_test"
+input = "hello"
+expect_contains = "world"
+"#;
+        std::fs::write(tests_dir.join("basic.toml"), test_toml).unwrap();
+
+        let args = TestArgs {
+            path: Some(project.to_str().unwrap().to_string()),
+            filter: Some("nonexistent_filter".to_string()),
+            dry_run: true,
+        };
+        // All tests filtered out = 0 total, no failures
+        let result = execute(args).await;
+        assert!(result.is_ok());
+    }
+
+    // ─── dry_run with multiple test files ────────────────────────────────
+
+    #[tokio::test]
+    async fn dry_run_with_multiple_test_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path();
+        let manifest = r#"
+[agent]
+name = "test-agent"
+version = "0.1.0"
+description = "test"
+
+[stages.main]
+model = { provider = "anthropic", model = "claude-sonnet-4-6" }
+"#;
+        std::fs::write(project.join("agent.leviath"), manifest).unwrap();
+        let tests_dir = project.join("tests");
+        std::fs::create_dir_all(&tests_dir).unwrap();
+
+        let test1 = r#"
+[[test]]
+name = "test_a"
+input = "hello"
+expect_contains = "world"
+"#;
+        let test2 = r#"
+[[test]]
+name = "test_b"
+input = "foo"
+expect_tool_call = "bar"
+"#;
+        std::fs::write(tests_dir.join("file1.toml"), test1).unwrap();
+        std::fs::write(tests_dir.join("file2.toml"), test2).unwrap();
+
+        let args = TestArgs {
+            path: Some(project.to_str().unwrap().to_string()),
+            filter: None,
+            dry_run: true,
+        };
+        let result = execute(args).await;
+        assert!(result.is_ok());
+    }
+
+    // ─── dry_run with invalid TOML file ──────────────────────────────────
+
+    #[tokio::test]
+    async fn dry_run_with_invalid_toml_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path();
+        let manifest = r#"
+[agent]
+name = "test-agent"
+version = "0.1.0"
+description = "test"
+
+[stages.main]
+model = { provider = "anthropic", model = "claude-sonnet-4-6" }
+"#;
+        std::fs::write(project.join("agent.leviath"), manifest).unwrap();
+        let tests_dir = project.join("tests");
+        std::fs::create_dir_all(&tests_dir).unwrap();
+        std::fs::write(tests_dir.join("bad.toml"), "not valid {{{ toml").unwrap();
+
+        let args = TestArgs {
+            path: Some(project.to_str().unwrap().to_string()),
+            filter: None,
+            dry_run: true,
+        };
+        let result = execute(args).await;
+        assert!(result.is_err());
+    }
+}

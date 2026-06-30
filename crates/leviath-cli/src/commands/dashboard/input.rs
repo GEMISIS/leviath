@@ -1052,4 +1052,934 @@ mod tests {
         assert!(!dash.list_search_mode);
         assert_eq!(dash.list_search_query, "test"); // preserved
     }
+
+    // ─── handle_input_mode_key for choice navigation ──────────────────────
+
+    #[test]
+    fn input_mode_choice_up_down() {
+        let mut dash = make_test_dashboard();
+        let mut agent = make_test_agent("run-1", AgentDisplayStatus::Waiting);
+        agent.pending_request = Some(crate::interaction::InteractionRequest::multiple_choice(
+            "mc1",
+            "Pick one",
+            vec!["A".into(), "B".into(), "C".into()],
+            "main",
+        ));
+        agent.waiting_prompt = Some("Pick one".to_string());
+        dash.agents.push(agent);
+        dash.update_display_indices();
+        dash.detail_view = true;
+        dash.input_mode = true;
+        dash.choice_selected = 0;
+
+        // Down
+        dash.handle_key(key(KeyCode::Down));
+        assert_eq!(dash.choice_selected, 1);
+        dash.handle_key(key(KeyCode::Down));
+        assert_eq!(dash.choice_selected, 2);
+        // Down at bottom stays
+        dash.handle_key(key(KeyCode::Down));
+        assert_eq!(dash.choice_selected, 2);
+
+        // Up
+        dash.handle_key(key(KeyCode::Up));
+        assert_eq!(dash.choice_selected, 1);
+        dash.handle_key(key(KeyCode::Up));
+        assert_eq!(dash.choice_selected, 0);
+        // Up at top stays
+        dash.handle_key(key(KeyCode::Up));
+        assert_eq!(dash.choice_selected, 0);
+    }
+
+    #[test]
+    fn input_mode_esc_exits() {
+        let mut dash = make_test_dashboard();
+        let mut agent = make_test_agent("run-1", AgentDisplayStatus::Waiting);
+        agent.pending_request = Some(crate::interaction::InteractionRequest::free_text(
+            "ft1", "prompt", "main", true,
+        ));
+        agent.waiting_prompt = Some("prompt".to_string());
+        dash.agents.push(agent);
+        dash.update_display_indices();
+        dash.detail_view = true;
+        dash.input_mode = true;
+
+        dash.handle_key(key(KeyCode::Esc));
+        assert!(!dash.input_mode);
+    }
+
+    #[test]
+    fn input_mode_esc_on_choice_resets() {
+        let mut dash = make_test_dashboard();
+        let mut agent = make_test_agent("run-1", AgentDisplayStatus::Waiting);
+        agent.pending_request = Some(crate::interaction::InteractionRequest::multiple_choice(
+            "mc1",
+            "Pick",
+            vec!["A".into(), "B".into()],
+            "main",
+        ));
+        agent.waiting_prompt = Some("Pick".to_string());
+        dash.agents.push(agent);
+        dash.update_display_indices();
+        dash.detail_view = true;
+        dash.input_mode = true;
+        dash.choice_selected = 1;
+
+        dash.handle_key(key(KeyCode::Esc));
+        assert!(!dash.input_mode);
+        assert_eq!(dash.choice_selected, 0);
+    }
+
+    // ─── handle_cancel_from_list ──────────────────────────────────────────
+
+    #[test]
+    fn cancel_from_list_active_agent() {
+        let mut dash = make_test_dashboard();
+        dash.agents
+            .push(make_test_agent("run-1", AgentDisplayStatus::Active));
+        dash.update_display_indices();
+        dash.handle_key(key(KeyCode::Char('c')));
+        // Agent should be cancelled (is_run_state = true, pid = 0)
+        assert!(matches!(
+            dash.agents[0].status,
+            AgentDisplayStatus::Cancelled
+        ));
+    }
+
+    #[test]
+    fn cancel_from_list_complete_agent_no_op() {
+        let mut dash = make_test_dashboard();
+        dash.agents
+            .push(make_test_agent("run-1", AgentDisplayStatus::Complete));
+        dash.update_display_indices();
+        dash.handle_key(key(KeyCode::Char('c')));
+        // Should remain Complete
+        assert!(matches!(
+            dash.agents[0].status,
+            AgentDisplayStatus::Complete
+        ));
+    }
+
+    // ─── handle_kill_from_list ─────────────────────────────────────────────
+
+    #[test]
+    fn kill_from_list_active_agent() {
+        let mut dash = make_test_dashboard();
+        dash.agents
+            .push(make_test_agent("run-1", AgentDisplayStatus::Active));
+        dash.update_display_indices();
+        dash.handle_key(key(KeyCode::Char('k')));
+        assert!(matches!(
+            dash.agents[0].status,
+            AgentDisplayStatus::Cancelled
+        ));
+    }
+
+    #[test]
+    fn kill_from_list_waiting_agent() {
+        let mut dash = make_test_dashboard();
+        let mut agent = make_test_agent("run-1", AgentDisplayStatus::Waiting);
+        agent.waiting_prompt = Some("prompt".to_string());
+        dash.agents.push(agent);
+        dash.update_display_indices();
+        dash.handle_key(key(KeyCode::Char('k')));
+        assert!(matches!(
+            dash.agents[0].status,
+            AgentDisplayStatus::Cancelled
+        ));
+        assert!(dash.agents[0].waiting_prompt.is_none());
+    }
+
+    // ─── handle_kill_from_detail ──────────────────────────────────────────
+
+    #[test]
+    fn kill_from_detail_active_agent() {
+        let mut dash = make_test_dashboard();
+        dash.agents
+            .push(make_test_agent("run-1", AgentDisplayStatus::Active));
+        dash.update_display_indices();
+        dash.detail_view = true;
+        dash.handle_key(key(KeyCode::Char('k')));
+        assert!(matches!(
+            dash.agents[0].status,
+            AgentDisplayStatus::Cancelled
+        ));
+    }
+
+    #[test]
+    fn kill_from_detail_complete_agent_no_op() {
+        let mut dash = make_test_dashboard();
+        dash.agents
+            .push(make_test_agent("run-1", AgentDisplayStatus::Complete));
+        dash.update_display_indices();
+        dash.detail_view = true;
+        dash.handle_key(key(KeyCode::Char('k')));
+        // Should remain complete
+        assert!(matches!(
+            dash.agents[0].status,
+            AgentDisplayStatus::Complete
+        ));
+    }
+
+    // ─── detail view: search n/N ──────────────────────────────────────────
+
+    #[test]
+    fn detail_view_search_n_increments_match() {
+        let mut dash = make_test_dashboard();
+        dash.agents
+            .push(make_test_agent("run-1", AgentDisplayStatus::Active));
+        dash.update_display_indices();
+        dash.detail_view = true;
+        dash.search_query = "test".to_string();
+        dash.search_match_idx = 0;
+        dash.handle_key(key(KeyCode::Char('n')));
+        assert_eq!(dash.search_match_idx, 1);
+        dash.handle_key(key(KeyCode::Char('n')));
+        assert_eq!(dash.search_match_idx, 2);
+    }
+
+    #[test]
+    fn detail_view_search_shift_n_decrements_match() {
+        let mut dash = make_test_dashboard();
+        dash.agents
+            .push(make_test_agent("run-1", AgentDisplayStatus::Active));
+        dash.update_display_indices();
+        dash.detail_view = true;
+        dash.search_query = "test".to_string();
+        dash.search_match_idx = 5;
+        dash.handle_key(key(KeyCode::Char('N')));
+        assert_eq!(dash.search_match_idx, 4);
+    }
+
+    #[test]
+    fn detail_view_search_n_no_query_no_op() {
+        let mut dash = make_test_dashboard();
+        dash.agents
+            .push(make_test_agent("run-1", AgentDisplayStatus::Active));
+        dash.update_display_indices();
+        dash.detail_view = true;
+        dash.search_query.clear();
+        dash.search_match_idx = 0;
+        dash.handle_key(key(KeyCode::Char('n')));
+        assert_eq!(dash.search_match_idx, 0);
+    }
+
+    // ─── detail view: i and m keys ────────────────────────────────────────
+
+    #[test]
+    fn detail_view_i_enters_input_when_can_respond() {
+        let mut dash = make_test_dashboard();
+        let mut agent = make_test_agent("run-1", AgentDisplayStatus::Waiting);
+        agent.waiting_prompt = Some("prompt".to_string());
+        agent.pending_request = Some(crate::interaction::InteractionRequest::free_text(
+            "ft1", "prompt", "main", true,
+        ));
+        agent.stage_index = 0;
+        agent.stages = vec![crate::runstate::StageRecord::new("main".to_string(), 0)];
+        dash.agents.push(agent);
+        dash.update_display_indices();
+        dash.detail_view = true;
+        dash.selected_stage = 0;
+
+        dash.handle_key(key(KeyCode::Char('i')));
+        assert!(dash.input_mode);
+    }
+
+    #[test]
+    fn detail_view_m_enters_input_for_active_accepting_agent() {
+        let mut dash = make_test_dashboard();
+        let mut agent = make_test_agent("run-1", AgentDisplayStatus::Active);
+        agent.accepts_messages = true;
+        dash.agents.push(agent);
+        dash.update_display_indices();
+        dash.detail_view = true;
+
+        dash.handle_key(key(KeyCode::Char('m')));
+        assert!(dash.input_mode);
+    }
+
+    #[test]
+    fn detail_view_m_no_effect_when_not_accepting() {
+        let mut dash = make_test_dashboard();
+        let mut agent = make_test_agent("run-1", AgentDisplayStatus::Active);
+        agent.accepts_messages = false;
+        dash.agents.push(agent);
+        dash.update_display_indices();
+        dash.detail_view = true;
+
+        dash.handle_key(key(KeyCode::Char('m')));
+        assert!(!dash.input_mode);
+    }
+
+    // ─── detail view: d key for delete ────────────────────────────────────
+
+    #[test]
+    fn main_list_d_opens_confirm_delete() {
+        let mut dash = make_test_dashboard();
+        dash.agents
+            .push(make_test_agent("run-1", AgentDisplayStatus::Active));
+        dash.update_display_indices();
+        dash.handle_key(key(KeyCode::Char('d')));
+        assert!(dash.confirm_delete);
+    }
+
+    #[test]
+    fn main_list_d_non_run_state_agent_no_confirm() {
+        let mut dash = make_test_dashboard();
+        let mut agent = make_test_agent("run-1", AgentDisplayStatus::Active);
+        agent.is_run_state = false;
+        dash.agents.push(agent);
+        dash.update_display_indices();
+        dash.handle_key(key(KeyCode::Char('d')));
+        assert!(!dash.confirm_delete);
+    }
+
+    // ─── detail view: review scroll ───────────────────────────────────────
+
+    #[test]
+    fn detail_view_scroll_with_review_body() {
+        let mut dash = make_test_dashboard();
+        let mut agent = make_test_agent("run-1", AgentDisplayStatus::Waiting);
+        agent.pending_request = Some(crate::interaction::InteractionRequest::review(
+            "rev1",
+            "Review",
+            "# Long markdown body\n\nSome content here.",
+            "main",
+        ));
+        agent.waiting_prompt = Some("Review".to_string());
+        dash.agents.push(agent);
+        dash.update_display_indices();
+        dash.detail_view = true;
+
+        // Up should scroll review_scroll (not detail_scroll)
+        dash.handle_key(key(KeyCode::Up));
+        assert_eq!(dash.review_scroll, 1);
+        assert_eq!(dash.detail_scroll, 0);
+
+        dash.handle_key(key(KeyCode::Down));
+        assert_eq!(dash.review_scroll, 0);
+
+        dash.handle_key(key(KeyCode::PageUp));
+        assert_eq!(dash.review_scroll, 10);
+
+        dash.handle_key(key(KeyCode::PageDown));
+        assert_eq!(dash.review_scroll, 0);
+    }
+
+    // ─── handle_input_mode_key for ToolApproval ──────────────────────────
+
+    #[test]
+    fn input_mode_tool_approval_up_down() {
+        let mut dash = make_test_dashboard();
+        let mut agent = make_test_agent("run-1", AgentDisplayStatus::Waiting);
+        agent.pending_request = Some(crate::interaction::InteractionRequest::tool_approval(
+            "ta1",
+            "bash",
+            serde_json::json!({"cmd": "ls"}),
+            "main",
+        ));
+        agent.waiting_prompt = Some("Allow tool?".to_string());
+        dash.agents.push(agent);
+        dash.update_display_indices();
+        dash.detail_view = true;
+        dash.input_mode = true;
+        dash.choice_selected = 0;
+
+        // Down through 3 options
+        dash.handle_key(key(KeyCode::Down));
+        assert_eq!(dash.choice_selected, 1);
+        dash.handle_key(key(KeyCode::Down));
+        assert_eq!(dash.choice_selected, 2);
+        // Can't go past last
+        dash.handle_key(key(KeyCode::Down));
+        assert_eq!(dash.choice_selected, 2);
+
+        // Up back
+        dash.handle_key(key(KeyCode::Up));
+        assert_eq!(dash.choice_selected, 1);
+    }
+
+    #[test]
+    fn input_mode_tool_approval_esc_resets() {
+        let mut dash = make_test_dashboard();
+        let mut agent = make_test_agent("run-1", AgentDisplayStatus::Waiting);
+        agent.pending_request = Some(crate::interaction::InteractionRequest::tool_approval(
+            "ta1",
+            "bash",
+            serde_json::json!({"cmd": "ls"}),
+            "main",
+        ));
+        agent.waiting_prompt = Some("Allow tool?".to_string());
+        dash.agents.push(agent);
+        dash.update_display_indices();
+        dash.detail_view = true;
+        dash.input_mode = true;
+        dash.choice_selected = 2;
+
+        dash.handle_key(key(KeyCode::Esc));
+        assert!(!dash.input_mode);
+        assert_eq!(dash.choice_selected, 0);
+    }
+
+    // ─── submit_input for FreeText ───────────────────────────────────────
+
+    #[test]
+    fn submit_input_free_text() {
+        let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
+        let mut dash = Dashboard::new(cmd_tx);
+        let mut agent = make_test_agent("run-1", AgentDisplayStatus::Waiting);
+        agent.is_run_state = false;
+        agent.pending_request = Some(crate::interaction::InteractionRequest::free_text(
+            "ft1", "What?", "main", true,
+        ));
+        agent.waiting_prompt = Some("What?".to_string());
+        dash.agents.push(agent);
+        dash.update_display_indices();
+        dash.detail_view = true;
+        dash.input_mode = true;
+
+        // Type something into the textarea
+        dash.input_textarea.insert_str("my answer");
+
+        dash.submit_input();
+
+        assert!(!dash.input_mode);
+        assert!(dash.agents[0].pending_request.is_none());
+        assert!(dash.agents[0].waiting_prompt.is_none());
+        assert!(matches!(dash.agents[0].status, AgentDisplayStatus::Active));
+    }
+
+    // ─── submit_input for FreeText with /quit ─────────────────────────────
+
+    #[test]
+    fn submit_input_free_text_quit() {
+        let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
+        let mut dash = Dashboard::new(cmd_tx);
+        let mut agent = make_test_agent("run-1", AgentDisplayStatus::Waiting);
+        agent.is_run_state = false; // use cmd_tx path to avoid disk I/O
+        agent.pending_request = Some(crate::interaction::InteractionRequest::free_text(
+            "ft1", "What?", "main", true,
+        ));
+        agent.waiting_prompt = Some("What?".to_string());
+        dash.agents.push(agent);
+        dash.update_display_indices();
+        dash.detail_view = true;
+        dash.input_mode = true;
+
+        dash.input_textarea.insert_str("/quit");
+
+        dash.submit_input();
+
+        assert!(!dash.input_mode);
+        // Agent status should be Active (resumed)
+        assert!(matches!(dash.agents[0].status, AgentDisplayStatus::Active));
+    }
+
+    // ─── submit_input for MultipleChoice ──────────────────────────────────
+
+    #[test]
+    fn submit_input_multiple_choice() {
+        let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
+        let mut dash = Dashboard::new(cmd_tx);
+        let mut agent = make_test_agent("run-1", AgentDisplayStatus::Waiting);
+        agent.is_run_state = false;
+        agent.pending_request = Some(crate::interaction::InteractionRequest::multiple_choice(
+            "mc1",
+            "Pick",
+            vec!["A".into(), "B".into(), "C".into()],
+            "main",
+        ));
+        agent.waiting_prompt = Some("Pick".to_string());
+        dash.agents.push(agent);
+        dash.update_display_indices();
+        dash.detail_view = true;
+        dash.input_mode = true;
+        dash.choice_selected = 1; // Select "B"
+
+        dash.submit_input();
+
+        assert!(!dash.input_mode);
+        assert_eq!(dash.choice_selected, 0); // reset
+        assert!(dash.agents[0].pending_request.is_none());
+    }
+
+    // ─── submit_input for ToolApproval with different indices ─────────────
+
+    #[test]
+    fn submit_input_tool_approval_allow_once() {
+        let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
+        let mut dash = Dashboard::new(cmd_tx);
+        let mut agent = make_test_agent("run-1", AgentDisplayStatus::Waiting);
+        agent.is_run_state = false;
+        agent.pending_request = Some(crate::interaction::InteractionRequest::tool_approval(
+            "ta1",
+            "bash",
+            serde_json::json!({"cmd": "ls"}),
+            "main",
+        ));
+        agent.waiting_prompt = Some("Allow tool?".to_string());
+        dash.agents.push(agent);
+        dash.update_display_indices();
+        dash.detail_view = true;
+        dash.input_mode = true;
+        dash.choice_selected = 0; // "Allow once"
+
+        dash.submit_input();
+        assert!(!dash.input_mode);
+        assert!(dash.agents[0].pending_request.is_none());
+    }
+
+    #[test]
+    fn submit_input_tool_approval_allow_session() {
+        let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
+        let mut dash = Dashboard::new(cmd_tx);
+        let mut agent = make_test_agent("run-1", AgentDisplayStatus::Waiting);
+        agent.is_run_state = false;
+        agent.pending_request = Some(crate::interaction::InteractionRequest::tool_approval(
+            "ta1",
+            "bash",
+            serde_json::json!({"cmd": "ls"}),
+            "main",
+        ));
+        agent.waiting_prompt = Some("Allow tool?".to_string());
+        dash.agents.push(agent);
+        dash.update_display_indices();
+        dash.detail_view = true;
+        dash.input_mode = true;
+        dash.choice_selected = 1; // "Allow for this session"
+
+        dash.submit_input();
+        assert!(!dash.input_mode);
+        assert!(dash.agents[0].pending_request.is_none());
+    }
+
+    #[test]
+    fn submit_input_tool_approval_deny() {
+        let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
+        let mut dash = Dashboard::new(cmd_tx);
+        let mut agent = make_test_agent("run-1", AgentDisplayStatus::Waiting);
+        agent.is_run_state = false;
+        agent.pending_request = Some(crate::interaction::InteractionRequest::tool_approval(
+            "ta1",
+            "bash",
+            serde_json::json!({"cmd": "ls"}),
+            "main",
+        ));
+        agent.waiting_prompt = Some("Allow tool?".to_string());
+        dash.agents.push(agent);
+        dash.update_display_indices();
+        dash.detail_view = true;
+        dash.input_mode = true;
+        dash.choice_selected = 2; // "Deny"
+
+        dash.submit_input();
+        assert!(!dash.input_mode);
+        assert!(dash.agents[0].pending_request.is_none());
+    }
+
+    // ─── submit_input for Confirm ─────────────────────────────────────────
+
+    #[test]
+    fn submit_input_confirm_yes() {
+        let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
+        let mut dash = Dashboard::new(cmd_tx);
+        let mut agent = make_test_agent("run-1", AgentDisplayStatus::Waiting);
+        agent.is_run_state = false;
+        agent.pending_request = Some(crate::interaction::InteractionRequest::confirm(
+            "c1", "Proceed?", "main",
+        ));
+        agent.waiting_prompt = Some("Proceed?".to_string());
+        dash.agents.push(agent);
+        dash.update_display_indices();
+        dash.detail_view = true;
+        dash.input_mode = true;
+        dash.choice_selected = 0; // "Yes"
+
+        dash.submit_input();
+        assert!(!dash.input_mode);
+        assert!(dash.agents[0].pending_request.is_none());
+    }
+
+    #[test]
+    fn submit_input_confirm_no() {
+        let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
+        let mut dash = Dashboard::new(cmd_tx);
+        let mut agent = make_test_agent("run-1", AgentDisplayStatus::Waiting);
+        agent.is_run_state = false;
+        agent.pending_request = Some(crate::interaction::InteractionRequest::confirm(
+            "c1", "Proceed?", "main",
+        ));
+        agent.waiting_prompt = Some("Proceed?".to_string());
+        dash.agents.push(agent);
+        dash.update_display_indices();
+        dash.detail_view = true;
+        dash.input_mode = true;
+        dash.choice_selected = 1; // "No"
+
+        dash.submit_input();
+        assert!(!dash.input_mode);
+        assert!(dash.agents[0].pending_request.is_none());
+    }
+
+    // ─── submit_input for in-process agent (cmd_tx path) ──────────────────
+
+    #[test]
+    fn submit_input_in_process_agent() {
+        let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
+        let mut dash = Dashboard::new(cmd_tx);
+        let mut agent = make_test_agent("run-1", AgentDisplayStatus::Waiting);
+        agent.is_run_state = false; // in-process
+        agent.pending_request = Some(crate::interaction::InteractionRequest::free_text(
+            "ft1", "What?", "main", true,
+        ));
+        agent.waiting_prompt = Some("What?".to_string());
+        dash.agents.push(agent);
+        dash.update_display_indices();
+        dash.detail_view = true;
+        dash.input_mode = true;
+
+        dash.input_textarea.insert_str("in-process answer");
+
+        dash.submit_input();
+
+        assert!(!dash.input_mode);
+        // Should have sent EngineCommand::SendInput
+        let cmd = cmd_rx.try_recv();
+        assert!(cmd.is_ok());
+    }
+
+    // ─── submit_input with no pending request (mid-run message) ───────────
+
+    #[test]
+    fn submit_input_no_pending_request() {
+        let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
+        let mut dash = Dashboard::new(cmd_tx);
+        let mut agent = make_test_agent("run-1", AgentDisplayStatus::Active);
+        agent.is_run_state = false;
+        agent.pending_request = None;
+        agent.waiting_prompt = None;
+        dash.agents.push(agent);
+        dash.update_display_indices();
+        dash.detail_view = true;
+        dash.input_mode = true;
+
+        dash.input_textarea.insert_str("hello mid-run");
+
+        dash.submit_input();
+
+        assert!(!dash.input_mode);
+    }
+
+    // ─── submit_input with no pending request /exit ───────────────────────
+
+    #[test]
+    fn submit_input_no_pending_request_exit() {
+        let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
+        let mut dash = Dashboard::new(cmd_tx);
+        let mut agent = make_test_agent("run-1", AgentDisplayStatus::Active);
+        agent.is_run_state = false;
+        agent.pending_request = None;
+        dash.agents.push(agent);
+        dash.update_display_indices();
+        dash.detail_view = true;
+        dash.input_mode = true;
+
+        dash.input_textarea.insert_str("/exit");
+        dash.submit_input();
+
+        assert!(!dash.input_mode);
+    }
+
+    // ─── process_events for InferenceComplete ─────────────────────────────
+
+    #[test]
+    fn process_events_inference_complete_increments_iteration() {
+        let mut dash = make_test_dashboard();
+        dash.agents
+            .push(make_test_agent("run-1", AgentDisplayStatus::Active));
+        dash.update_display_indices();
+        let tx = dash.event_tx.clone();
+        tx.send(AgentEvent::InferenceComplete {
+            agent_id: "run-1".to_string(),
+            content: "analysis complete".to_string(),
+            tokens_used: 200,
+            tokens_prompt: 100,
+        })
+        .unwrap();
+        dash.process_events();
+        assert_eq!(dash.agents[0].iteration, 1);
+    }
+
+    // ─── process_events for NeedsInput ────────────────────────────────────
+
+    #[test]
+    fn process_events_needs_input_sets_waiting() {
+        let mut dash = make_test_dashboard();
+        dash.agents
+            .push(make_test_agent("run-1", AgentDisplayStatus::Active));
+        dash.update_display_indices();
+        let tx = dash.event_tx.clone();
+        tx.send(AgentEvent::NeedsInput {
+            agent_id: "run-1".to_string(),
+            prompt: "Please provide input".to_string(),
+        })
+        .unwrap();
+        dash.process_events();
+        assert!(matches!(dash.agents[0].status, AgentDisplayStatus::Waiting));
+        assert_eq!(
+            dash.agents[0].waiting_prompt.as_deref(),
+            Some("Please provide input")
+        );
+    }
+
+    // ─── process_events AgentDone doesn't override Error/Cancelled ────────
+
+    #[test]
+    fn process_events_agent_done_does_not_override_error() {
+        let mut dash = make_test_dashboard();
+        dash.agents.push(make_test_agent(
+            "run-1",
+            AgentDisplayStatus::Error("failed".to_string()),
+        ));
+        dash.update_display_indices();
+        let tx = dash.event_tx.clone();
+        tx.send(AgentEvent::AgentDone {
+            agent_id: "run-1".to_string(),
+        })
+        .unwrap();
+        dash.process_events();
+        // Should still be Error, not Complete
+        assert!(matches!(
+            dash.agents[0].status,
+            AgentDisplayStatus::Error(_)
+        ));
+    }
+
+    #[test]
+    fn process_events_agent_done_does_not_override_cancelled() {
+        let mut dash = make_test_dashboard();
+        dash.agents
+            .push(make_test_agent("run-1", AgentDisplayStatus::Cancelled));
+        dash.update_display_indices();
+        let tx = dash.event_tx.clone();
+        tx.send(AgentEvent::AgentDone {
+            agent_id: "run-1".to_string(),
+        })
+        .unwrap();
+        dash.process_events();
+        assert!(matches!(
+            dash.agents[0].status,
+            AgentDisplayStatus::Cancelled
+        ));
+    }
+
+    // ─── handle_kill_from_detail for in-process agent ─────────────────────
+
+    #[test]
+    fn kill_from_detail_in_process_agent_sends_command() {
+        let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
+        let mut dash = Dashboard::new(cmd_tx);
+        let mut agent = make_test_agent("run-1", AgentDisplayStatus::Active);
+        agent.is_run_state = false;
+        dash.agents.push(agent);
+        dash.update_display_indices();
+        dash.detail_view = true;
+
+        dash.handle_key(key(KeyCode::Char('k')));
+
+        assert!(matches!(
+            dash.agents[0].status,
+            AgentDisplayStatus::Cancelled
+        ));
+
+        // Should have sent CancelAgent command
+        let cmd = cmd_rx.try_recv();
+        assert!(cmd.is_ok());
+    }
+
+    // ─── handle_cancel_from_list for in-process agent ─────────────────────
+
+    #[test]
+    fn cancel_from_list_in_process_agent_sends_command() {
+        let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
+        let mut dash = Dashboard::new(cmd_tx);
+        let mut agent = make_test_agent("run-1", AgentDisplayStatus::Active);
+        agent.is_run_state = false;
+        dash.agents.push(agent);
+        dash.update_display_indices();
+
+        dash.handle_key(key(KeyCode::Char('c')));
+
+        // Should have sent CancelAgent command (no status change for in-process cancel)
+        let cmd = cmd_rx.try_recv();
+        assert!(cmd.is_ok());
+    }
+
+    // ─── handle_kill_from_list for in-process agent ───────────────────────
+
+    #[test]
+    fn kill_from_list_in_process_agent_sends_command() {
+        let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
+        let mut dash = Dashboard::new(cmd_tx);
+        let mut agent = make_test_agent("run-1", AgentDisplayStatus::Active);
+        agent.is_run_state = false;
+        dash.agents.push(agent);
+        dash.update_display_indices();
+
+        dash.handle_key(key(KeyCode::Char('k')));
+
+        assert!(matches!(
+            dash.agents[0].status,
+            AgentDisplayStatus::Cancelled
+        ));
+
+        let cmd = cmd_rx.try_recv();
+        assert!(cmd.is_ok());
+    }
+
+    // ─── handle_yank generates toast for run-state agent ──────────────────
+
+    #[test]
+    fn yank_generates_toast_for_empty_content() {
+        let mut dash = make_test_dashboard();
+        let agent = make_test_agent("run-1", AgentDisplayStatus::Active);
+        dash.agents.push(agent);
+        dash.update_display_indices();
+        dash.detail_view = true;
+        dash.stage_content_mode = StageContentMode::Output;
+
+        dash.handle_key(key(KeyCode::Char('y')));
+
+        // Should have generated a toast (either "No Output content" or clipboard result)
+        assert!(!dash.toasts.is_empty());
+    }
+
+    // ─── d key from main list for non-run-state agent ─────────────────────
+
+    #[test]
+    fn main_list_d_for_non_run_state_logs_message() {
+        let mut dash = make_test_dashboard();
+        dash.log.clear();
+        let mut agent = make_test_agent("run-1", AgentDisplayStatus::Active);
+        agent.is_run_state = false;
+        dash.agents.push(agent);
+        dash.update_display_indices();
+
+        dash.handle_key(key(KeyCode::Char('d')));
+
+        assert!(!dash.confirm_delete);
+        assert!(dash
+            .log
+            .iter()
+            .any(|e| e.message.contains("Only background runs")));
+    }
+
+    // ─── input_mode_key: FreeText Enter submits ───────────────────────────
+
+    #[test]
+    fn input_mode_free_text_enter_submits() {
+        let mut dash = make_test_dashboard();
+        let mut agent = make_test_agent("run-1", AgentDisplayStatus::Waiting);
+        agent.pending_request = Some(crate::interaction::InteractionRequest::free_text(
+            "ft1", "prompt", "main", true,
+        ));
+        agent.waiting_prompt = Some("prompt".to_string());
+        dash.agents.push(agent);
+        dash.update_display_indices();
+        dash.detail_view = true;
+        dash.input_mode = true;
+
+        dash.input_textarea.insert_str("answer");
+
+        // Enter with no modifiers should submit
+        dash.handle_key(key(KeyCode::Enter));
+        assert!(!dash.input_mode);
+    }
+
+    // ─── input_mode_key: MultipleChoice Enter submits ─────────────────────
+
+    #[test]
+    fn input_mode_multiple_choice_enter_submits() {
+        let mut dash = make_test_dashboard();
+        let mut agent = make_test_agent("run-1", AgentDisplayStatus::Waiting);
+        agent.pending_request = Some(crate::interaction::InteractionRequest::multiple_choice(
+            "mc1",
+            "Pick",
+            vec!["A".into(), "B".into()],
+            "main",
+        ));
+        agent.waiting_prompt = Some("Pick".to_string());
+        dash.agents.push(agent);
+        dash.update_display_indices();
+        dash.detail_view = true;
+        dash.input_mode = true;
+        dash.choice_selected = 0;
+
+        dash.handle_key(key(KeyCode::Enter));
+        assert!(!dash.input_mode);
+        assert!(dash.log.iter().any(|e| e.message.contains("A")));
+    }
+
+    // ─── Multiple events processed in sequence ────────────────────────────
+
+    #[test]
+    fn process_multiple_events_in_sequence() {
+        let mut dash = make_test_dashboard();
+        dash.log.clear();
+        dash.agents
+            .push(make_test_agent("run-1", AgentDisplayStatus::Active));
+        dash.agents
+            .push(make_test_agent("run-2", AgentDisplayStatus::Active));
+        dash.update_display_indices();
+        let tx = dash.event_tx.clone();
+        tx.send(AgentEvent::StageChanged {
+            agent_id: "run-1".to_string(),
+            stage: "code".to_string(),
+        })
+        .unwrap();
+        tx.send(AgentEvent::InferenceComplete {
+            agent_id: "run-2".to_string(),
+            content: "done".to_string(),
+            tokens_used: 50,
+            tokens_prompt: 25,
+        })
+        .unwrap();
+        tx.send(AgentEvent::AgentDone {
+            agent_id: "run-1".to_string(),
+        })
+        .unwrap();
+
+        dash.process_events();
+
+        assert_eq!(dash.agents[0].stage, "code");
+        assert!(matches!(
+            dash.agents[0].status,
+            AgentDisplayStatus::Complete
+        ));
+        assert_eq!(dash.agents[1].iteration, 1);
+    }
+
+    // ─── submit_input last_answered_request_id tracking ───────────────────
+
+    #[test]
+    fn submit_input_tracks_last_answered_request_id() {
+        let mut dash = make_test_dashboard();
+        let mut agent = make_test_agent("run-1", AgentDisplayStatus::Waiting);
+        agent.pending_request = Some(crate::interaction::InteractionRequest::free_text(
+            "req-42", "What?", "main", true,
+        ));
+        agent.waiting_prompt = Some("What?".to_string());
+        dash.agents.push(agent);
+        dash.update_display_indices();
+        dash.detail_view = true;
+        dash.input_mode = true;
+
+        dash.input_textarea.insert_str("answer");
+        dash.submit_input();
+
+        assert_eq!(
+            dash.agents[0].last_answered_request_id.as_deref(),
+            Some("req-42")
+        );
+    }
 }
