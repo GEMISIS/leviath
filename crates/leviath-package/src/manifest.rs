@@ -90,3 +90,127 @@ impl PackageManifest {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use leviath_core::blueprint::{ModelConfig, Stage};
+    use leviath_core::layout::RegionDefinition;
+    use leviath_core::region::RegionKind;
+    use leviath_core::{Blueprint, ContextLayout};
+
+    fn make_blueprint() -> Blueprint {
+        let regions = vec![RegionDefinition::new(
+            "test".to_string(),
+            RegionKind::Pinned,
+            5000,
+        )];
+        let layout = ContextLayout::new(regions, 10000);
+        let stages = vec![Stage::new(
+            "analyze".to_string(),
+            ModelConfig::new("anthropic".to_string(), "claude-sonnet-4-6".to_string()),
+        )];
+        Blueprint::new(
+            "test-agent".to_string(),
+            "A test agent".to_string(),
+            stages,
+            layout,
+        )
+    }
+
+    fn make_valid_manifest() -> PackageManifest {
+        PackageManifest {
+            package: PackageMetadata {
+                name: "my-agent".to_string(),
+                version: "1.0.0".to_string(),
+                description: "A useful agent".to_string(),
+                authors: vec!["Alice <alice@example.com>".to_string()],
+                license: "MIT".to_string(),
+            },
+            blueprint: make_blueprint(),
+        }
+    }
+
+    #[test]
+    fn valid_manifest_passes_validation() {
+        let manifest = make_valid_manifest();
+        assert!(manifest.validate().is_ok());
+    }
+
+    #[test]
+    fn empty_name_fails_validation() {
+        let mut manifest = make_valid_manifest();
+        manifest.package.name = String::new();
+        let err = manifest.validate().unwrap_err();
+        assert!(
+            err.to_string().contains("empty"),
+            "expected empty name error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn name_too_long_fails_validation() {
+        let mut manifest = make_valid_manifest();
+        manifest.package.name = "a".repeat(65);
+        let err = manifest.validate().unwrap_err();
+        assert!(
+            err.to_string().contains("64"),
+            "expected max-length error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn name_with_invalid_chars_fails_validation() {
+        let mut manifest = make_valid_manifest();
+        manifest.package.name = "my_agent!".to_string();
+        let err = manifest.validate().unwrap_err();
+        assert!(
+            err.to_string().contains("alphanumeric"),
+            "expected invalid-chars error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn invalid_semver_fails_validation() {
+        let mut manifest = make_valid_manifest();
+        manifest.package.version = "1.0".to_string();
+        let err = manifest.validate().unwrap_err();
+        assert!(
+            err.to_string().contains("semver"),
+            "expected semver error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn empty_description_fails_validation() {
+        let mut manifest = make_valid_manifest();
+        manifest.package.description = String::new();
+        let err = manifest.validate().unwrap_err();
+        assert!(
+            err.to_string().contains("description"),
+            "expected description error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn no_authors_fails_validation() {
+        let mut manifest = make_valid_manifest();
+        manifest.package.authors = Vec::new();
+        let err = manifest.validate().unwrap_err();
+        assert!(
+            err.to_string().contains("author"),
+            "expected authors error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn empty_license_fails_validation() {
+        let mut manifest = make_valid_manifest();
+        manifest.package.license = String::new();
+        let err = manifest.validate().unwrap_err();
+        assert!(
+            err.to_string().contains("license"),
+            "expected license error, got: {err}"
+        );
+    }
+}

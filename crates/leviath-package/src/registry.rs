@@ -137,3 +137,50 @@ impl PackageRegistry {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn package_info_serde_roundtrip() {
+        let info = PackageInfo {
+            name: "my-agent".to_string(),
+            version: "1.2.3".to_string(),
+            description: "A cool agent".to_string(),
+            authors: vec!["Alice".to_string(), "Bob".to_string()],
+            downloads: 42,
+        };
+
+        let json = serde_json::to_string(&info).expect("should serialize");
+        let deserialized: PackageInfo = serde_json::from_str(&json).expect("should deserialize");
+
+        assert_eq!(deserialized.name, "my-agent");
+        assert_eq!(deserialized.version, "1.2.3");
+        assert_eq!(deserialized.description, "A cool agent");
+        assert_eq!(deserialized.authors, vec!["Alice", "Bob"]);
+        assert_eq!(deserialized.downloads, 42);
+    }
+
+    #[test]
+    fn package_info_default_fields() {
+        // authors and downloads have #[serde(default)], so they should
+        // deserialize to empty vec and 0 when omitted.
+        let json = r#"{
+            "name": "minimal",
+            "version": "0.1.0",
+            "description": "Minimal package"
+        }"#;
+        let info: PackageInfo = serde_json::from_str(json).expect("should deserialize");
+
+        assert_eq!(info.name, "minimal");
+        assert!(info.authors.is_empty());
+        assert_eq!(info.downloads, 0);
+    }
+
+    #[test]
+    fn package_registry_new_creates_instance() {
+        let registry = PackageRegistry::new("https://registry.example.com".to_string());
+        assert_eq!(registry.url, "https://registry.example.com");
+    }
+}

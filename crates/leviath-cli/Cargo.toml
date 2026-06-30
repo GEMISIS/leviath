@@ -47,3 +47,6 @@ axum = { workspace = true }
 tower-http = { workspace = true }
 reqwest = { workspace = true }
 tower = { version = "0.5", features = ["util"] }
+
+[dev-dependencies]
+tempfile = "3"

@@ -143,3 +143,83 @@ scratch      = {{ kind = "clearable",      max_tokens = 5000 }}
         ),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_template_is_valid_toml() {
+        let manifest = create_manifest("test-agent", "software-engineer");
+        let parsed: toml::Value = toml::from_str(&manifest).unwrap();
+        let agent = parsed.get("agent").expect("should have [agent] section");
+        assert_eq!(agent.get("name").unwrap().as_str().unwrap(), "test-agent");
+        assert_eq!(agent.get("version").unwrap().as_str().unwrap(), "0.1.0");
+    }
+
+    #[test]
+    fn coder_template_is_valid_toml() {
+        let manifest = create_manifest("my-coder", "coder");
+        let parsed: toml::Value = toml::from_str(&manifest).unwrap();
+        let agent = parsed.get("agent").unwrap();
+        assert_eq!(agent.get("name").unwrap().as_str().unwrap(), "my-coder");
+        assert!(parsed.get("stages").is_some());
+    }
+
+    #[test]
+    fn researcher_template_is_valid_toml() {
+        let manifest = create_manifest("my-researcher", "researcher");
+        let parsed: toml::Value = toml::from_str(&manifest).unwrap();
+        let agent = parsed.get("agent").unwrap();
+        assert_eq!(
+            agent.get("name").unwrap().as_str().unwrap(),
+            "my-researcher"
+        );
+    }
+
+    #[test]
+    fn unknown_template_falls_back_to_default() {
+        let manifest = create_manifest("x", "nonexistent-template");
+        let parsed: toml::Value = toml::from_str(&manifest).unwrap();
+        let stages = parsed.get("stages").unwrap().as_table().unwrap();
+        // Default template has a single "main" stage
+        assert!(stages.contains_key("main"));
+    }
+
+    #[test]
+    fn coder_template_has_analyze_and_implement_stages() {
+        let manifest = create_manifest("x", "coder");
+        let parsed: toml::Value = toml::from_str(&manifest).unwrap();
+        let stages = parsed.get("stages").unwrap().as_table().unwrap();
+        assert!(stages.contains_key("analyze"));
+        assert!(stages.contains_key("implement"));
+    }
+
+    #[test]
+    fn researcher_template_has_gather_and_synthesize_stages() {
+        let manifest = create_manifest("x", "researcher");
+        let parsed: toml::Value = toml::from_str(&manifest).unwrap();
+        let stages = parsed.get("stages").unwrap().as_table().unwrap();
+        assert!(stages.contains_key("gather"));
+        assert!(stages.contains_key("synthesize"));
+    }
+
+    #[test]
+    fn template_embeds_agent_name() {
+        let manifest = create_manifest("special-name-123", "coder");
+        assert!(manifest.contains("special-name-123"));
+    }
+
+    #[test]
+    fn all_templates_have_context_regions() {
+        for template in &["software-engineer", "coder", "researcher"] {
+            let manifest = create_manifest("test", template);
+            let parsed: toml::Value = toml::from_str(&manifest).unwrap();
+            assert!(
+                parsed.get("context").is_some(),
+                "template '{}' missing [context]",
+                template
+            );
+        }
+    }
+}

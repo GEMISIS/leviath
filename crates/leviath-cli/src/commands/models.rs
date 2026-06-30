@@ -583,3 +583,121 @@ fn print_model_detail(
         fmt_tokens(caps.max_output_tokens)
     );
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ─── fmt_tokens ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn fmt_tokens_millions() {
+        assert_eq!(fmt_tokens(1_000_000), "1M");
+        assert_eq!(fmt_tokens(2_000_000), "2M");
+    }
+
+    #[test]
+    fn fmt_tokens_thousands() {
+        assert_eq!(fmt_tokens(128_000), "128K");
+        assert_eq!(fmt_tokens(4_096), "4K");
+        assert_eq!(fmt_tokens(1_000), "1K");
+    }
+
+    #[test]
+    fn fmt_tokens_small() {
+        assert_eq!(fmt_tokens(512), "512");
+        assert_eq!(fmt_tokens(0), "0");
+    }
+
+    // ─── bool_icon ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn bool_icon_values() {
+        assert_eq!(bool_icon(true), "✓");
+        assert_eq!(bool_icon(false), "✗");
+    }
+
+    // ─── builtin_table ──────────────────────────────────────────────────────
+
+    #[test]
+    fn builtin_table_is_not_empty() {
+        let table = builtin_table();
+        assert!(!table.is_empty());
+    }
+
+    #[test]
+    fn builtin_table_has_anthropic_models() {
+        let table = builtin_table();
+        let anthropic: Vec<_> = table.iter().filter(|e| e.provider == "anthropic").collect();
+        assert!(!anthropic.is_empty());
+    }
+
+    #[test]
+    fn builtin_table_has_openai_models() {
+        let table = builtin_table();
+        let openai: Vec<_> = table.iter().filter(|e| e.provider == "openai").collect();
+        assert!(!openai.is_empty());
+    }
+
+    #[test]
+    fn builtin_table_has_openrouter_models() {
+        let table = builtin_table();
+        let openrouter: Vec<_> = table
+            .iter()
+            .filter(|e| e.provider == "openrouter")
+            .collect();
+        assert!(!openrouter.is_empty());
+    }
+
+    #[test]
+    fn builtin_entries_have_valid_capabilities() {
+        for entry in builtin_table() {
+            assert!(
+                entry.caps.max_context_tokens > 0,
+                "model {} has zero context tokens",
+                entry.model_id
+            );
+            assert!(
+                entry.caps.max_output_tokens > 0,
+                "model {} has zero output tokens",
+                entry.model_id
+            );
+            assert!(
+                entry.caps.supports_streaming,
+                "model {} doesn't support streaming",
+                entry.model_id
+            );
+            assert!(
+                entry.caps.supports_system_prompt,
+                "model {} doesn't support system prompt",
+                entry.model_id
+            );
+        }
+    }
+
+    #[test]
+    fn builtin_entries_have_unique_model_ids() {
+        let table = builtin_table();
+        let ids: Vec<&str> = table.iter().map(|e| e.model_id).collect();
+        let unique: std::collections::HashSet<&str> = ids.iter().copied().collect();
+        assert_eq!(
+            ids.len(),
+            unique.len(),
+            "duplicate model IDs in builtin table"
+        );
+    }
+
+    #[test]
+    fn deepseek_r1_models_no_tools() {
+        let table = builtin_table();
+        for entry in &table {
+            if entry.model_id.contains("deepseek-r1") {
+                assert!(
+                    !entry.caps.supports_tools,
+                    "DeepSeek R1 model {} should not support tools",
+                    entry.model_id
+                );
+            }
+        }
+    }
+}

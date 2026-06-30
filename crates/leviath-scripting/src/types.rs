@@ -73,3 +73,197 @@ pub fn register_types(engine: &mut Engine) {
         },
     );
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rhai::Engine;
+
+    fn engine() -> Engine {
+        let mut e = Engine::new();
+        register_types(&mut e);
+        e
+    }
+
+    // --- region constructors ---
+
+    #[test]
+    fn region_pinned_returns_pinned() {
+        let e = engine();
+        let result: String = e.eval("region_pinned()").unwrap();
+        assert_eq!(result, "pinned");
+    }
+
+    #[test]
+    fn region_temporary_returns_temporary() {
+        let e = engine();
+        let result: String = e.eval("region_temporary()").unwrap();
+        assert_eq!(result, "temporary");
+    }
+
+    #[test]
+    fn region_clearable_returns_clearable() {
+        let e = engine();
+        let result: String = e.eval("region_clearable()").unwrap();
+        assert_eq!(result, "clearable");
+    }
+
+    // --- region_sliding_window ---
+
+    #[test]
+    fn region_sliding_window_returns_map_with_kind_and_max_items() {
+        let e = engine();
+        let result: rhai::Map = e.eval("region_sliding_window(10)").unwrap();
+        assert_eq!(
+            result.get("kind").unwrap().clone_cast::<String>(),
+            "sliding_window"
+        );
+        assert_eq!(result.get("max_items").unwrap().clone_cast::<i64>(), 10);
+    }
+
+    #[test]
+    fn region_sliding_window_zero() {
+        let e = engine();
+        let result: rhai::Map = e.eval("region_sliding_window(0)").unwrap();
+        assert_eq!(result.get("max_items").unwrap().clone_cast::<i64>(), 0);
+    }
+
+    // --- region_compacting ---
+
+    #[test]
+    fn region_compacting_returns_map_with_kind_and_threshold() {
+        let e = engine();
+        let result: rhai::Map = e.eval("region_compacting(5000)").unwrap();
+        assert_eq!(
+            result.get("kind").unwrap().clone_cast::<String>(),
+            "compacting"
+        );
+        assert_eq!(
+            result.get("threshold_tokens").unwrap().clone_cast::<i64>(),
+            5000
+        );
+    }
+
+    // --- region_entry ---
+
+    #[test]
+    fn region_entry_returns_map_with_content_and_tokens() {
+        let e = engine();
+        let result: rhai::Map = e.eval(r#"region_entry("content", 42)"#).unwrap();
+        assert_eq!(
+            result.get("content").unwrap().clone_cast::<String>(),
+            "content"
+        );
+        assert_eq!(result.get("tokens").unwrap().clone_cast::<i64>(), 42);
+    }
+
+    #[test]
+    fn region_entry_empty_content() {
+        let e = engine();
+        let result: rhai::Map = e.eval(r#"region_entry("", 0)"#).unwrap();
+        assert_eq!(result.get("content").unwrap().clone_cast::<String>(), "");
+        assert_eq!(result.get("tokens").unwrap().clone_cast::<i64>(), 0);
+    }
+
+    // --- content_format ---
+
+    #[test]
+    fn content_format_valid_formats() {
+        let e = engine();
+        for fmt in &["text", "json", "mermaid", "markdown", "code"] {
+            let script = format!(r#"content_format("{fmt}")"#);
+            let result: String = e.eval(&script).unwrap();
+            assert_eq!(result, *fmt);
+        }
+    }
+
+    #[test]
+    fn content_format_invalid_falls_back_to_text() {
+        let e = engine();
+        let result: String = e.eval(r#"content_format("invalid")"#).unwrap();
+        assert_eq!(result, "text");
+    }
+
+    #[test]
+    fn content_format_empty_falls_back_to_text() {
+        let e = engine();
+        let result: String = e.eval(r#"content_format("")"#).unwrap();
+        assert_eq!(result, "text");
+    }
+
+    // --- tokens_remaining ---
+
+    #[test]
+    fn tokens_remaining_basic() {
+        let e = engine();
+        let result: i64 = e.eval("tokens_remaining(100, 30)").unwrap();
+        assert_eq!(result, 70);
+    }
+
+    #[test]
+    fn tokens_remaining_zero_used() {
+        let e = engine();
+        let result: i64 = e.eval("tokens_remaining(100, 0)").unwrap();
+        assert_eq!(result, 100);
+    }
+
+    #[test]
+    fn tokens_remaining_all_used() {
+        let e = engine();
+        let result: i64 = e.eval("tokens_remaining(100, 100)").unwrap();
+        assert_eq!(result, 0);
+    }
+
+    // --- usage_ratio ---
+
+    #[test]
+    fn usage_ratio_half() {
+        let e = engine();
+        let result: f64 = e.eval("usage_ratio(100, 50)").unwrap();
+        assert!((result - 0.5).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn usage_ratio_zero_max_returns_one() {
+        let e = engine();
+        let result: f64 = e.eval("usage_ratio(0, 50)").unwrap();
+        assert!((result - 1.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn usage_ratio_none_used() {
+        let e = engine();
+        let result: f64 = e.eval("usage_ratio(100, 0)").unwrap();
+        assert!((result - 0.0).abs() < f64::EPSILON);
+    }
+
+    // --- needs_eviction ---
+
+    #[test]
+    fn needs_eviction_above_threshold() {
+        let e = engine();
+        let result: bool = e.eval("needs_eviction(100, 90, 0.8)").unwrap();
+        assert!(result);
+    }
+
+    #[test]
+    fn needs_eviction_below_threshold() {
+        let e = engine();
+        let result: bool = e.eval("needs_eviction(100, 50, 0.8)").unwrap();
+        assert!(!result);
+    }
+
+    #[test]
+    fn needs_eviction_at_exact_threshold() {
+        let e = engine();
+        let result: bool = e.eval("needs_eviction(100, 80, 0.8)").unwrap();
+        assert!(result);
+    }
+
+    #[test]
+    fn needs_eviction_zero_max_returns_true() {
+        let e = engine();
+        let result: bool = e.eval("needs_eviction(0, 0, 0.8)").unwrap();
+        assert!(result);
+    }
+}

@@ -228,3 +228,173 @@ impl Default for AgentInstaller {
         Self::new()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use flate2::write::GzEncoder;
+    use flate2::Compression;
+
+    /// Create a minimal tar.gz bundle with an agent.leviath manifest.
+    fn make_bundle(name: &str, version: &str, description: &str) -> Vec<u8> {
+        let manifest = format!(
+            r#"[agent]
+name = "{}"
+version = "{}"
+description = "{}"
+"#,
+            name, version, description
+        );
+
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::fast());
+        {
+            let mut archive = tar::Builder::new(&mut encoder);
+            let manifest_bytes = manifest.as_bytes();
+            let mut header = tar::Header::new_gnu();
+            header.set_size(manifest_bytes.len() as u64);
+            header.set_mode(0o644);
+            header.set_cksum();
+            archive
+                .append_data(&mut header, "agent.leviath", manifest_bytes)
+                .unwrap();
+            archive.finish().unwrap();
+        }
+        encoder.finish().unwrap()
+    }
+
+    #[test]
+    fn with_install_dir_sets_dir() {
+        let dir = PathBuf::from("/tmp/test-installer");
+        let installer = AgentInstaller::with_install_dir(dir.clone());
+        assert_eq!(installer.install_dir, dir);
+    }
+
+    #[test]
+    fn install_from_bytes_creates_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let installer = AgentInstaller::with_install_dir(dir.path().to_path_buf());
+
+        let bundle = make_bundle("test-agent", "1.0.0", "A test agent");
+        let result = installer.install_from_bytes("test-agent", &bundle).unwrap();
+
+        assert_eq!(result.name, "test-agent");
+        assert_eq!(result.version, "1.0.0");
+        assert_eq!(result.description, "A test agent");
+        assert!(result.path.exists());
+        assert!(result.path.join("agent.leviath").exists());
+    }
+
+    #[test]
+    fn install_from_bytes_no_manifest_defaults() {
+        let dir = tempfile::tempdir().unwrap();
+        let installer = AgentInstaller::with_install_dir(dir.path().to_path_buf());
+
+        // Create a bundle with no agent.leviath
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::fast());
+        {
+            let mut archive = tar::Builder::new(&mut encoder);
+            let data = b"hello";
+            let mut header = tar::Header::new_gnu();
+            header.set_size(data.len() as u64);
+            header.set_mode(0o644);
+            header.set_cksum();
+            archive
+                .append_data(&mut header, "readme.txt", &data[..])
+                .unwrap();
+            archive.finish().unwrap();
+        }
+        let bundle = encoder.finish().unwrap();
+
+        let result = installer
+            .install_from_bytes("no-manifest", &bundle)
+            .unwrap();
+        assert_eq!(result.version, "0.0.0");
+        assert_eq!(result.description, "");
+    }
+
+    #[test]
+    fn uninstall_removes_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let installer = AgentInstaller::with_install_dir(dir.path().to_path_buf());
+
+        let bundle = make_bundle("to-remove", "1.0.0", "remove me");
+        installer.install_from_bytes("to-remove", &bundle).unwrap();
+
+        assert!(dir.path().join("to-remove").exists());
+        installer.uninstall("to-remove").unwrap();
+        assert!(!dir.path().join("to-remove").exists());
+    }
+
+    #[test]
+    fn uninstall_nonexistent_returns_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let installer = AgentInstaller::with_install_dir(dir.path().to_path_buf());
+
+        let err = installer.uninstall("no-such-agent").unwrap_err();
+        assert!(err.to_string().contains("not installed"));
+    }
+
+    #[test]
+    fn list_installed_empty_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let installer = AgentInstaller::with_install_dir(dir.path().to_path_buf());
+        let agents = installer.list_installed().unwrap();
+        assert!(agents.is_empty());
+    }
+
+    #[test]
+    fn list_installed_nonexistent_dir() {
+        let installer =
+            AgentInstaller::with_install_dir(PathBuf::from("/tmp/nonexistent-leviath-test-dir"));
+        let agents = installer.list_installed().unwrap();
+        assert!(agents.is_empty());
+    }
+
+    #[test]
+    fn list_installed_returns_installed_agents() {
+        let dir = tempfile::tempdir().unwrap();
+        let installer = AgentInstaller::with_install_dir(dir.path().to_path_buf());
+
+        let bundle1 = make_bundle("agent-a", "1.0.0", "Agent A");
+        let bundle2 = make_bundle("agent-b", "2.0.0", "Agent B");
+        installer.install_from_bytes("agent-a", &bundle1).unwrap();
+        installer.install_from_bytes("agent-b", &bundle2).unwrap();
+
+        let agents = installer.list_installed().unwrap();
+        assert_eq!(agents.len(), 2);
+        let names: Vec<&str> = agents.iter().map(|a| a.name.as_str()).collect();
+        assert!(names.contains(&"agent-a"));
+        assert!(names.contains(&"agent-b"));
+    }
+
+    #[test]
+    fn get_installed_found() {
+        let dir = tempfile::tempdir().unwrap();
+        let installer = AgentInstaller::with_install_dir(dir.path().to_path_buf());
+
+        let bundle = make_bundle("findme", "3.2.1", "Find this agent");
+        installer.install_from_bytes("findme", &bundle).unwrap();
+
+        let agent = installer.get_installed("findme").unwrap().unwrap();
+        assert_eq!(agent.name, "findme");
+        assert_eq!(agent.version, "3.2.1");
+        assert_eq!(agent.description, "Find this agent");
+    }
+
+    #[test]
+    fn get_installed_not_found() {
+        let dir = tempfile::tempdir().unwrap();
+        let installer = AgentInstaller::with_install_dir(dir.path().to_path_buf());
+        assert!(installer.get_installed("nope").unwrap().is_none());
+    }
+
+    #[test]
+    fn get_installed_dir_exists_but_no_manifest() {
+        let dir = tempfile::tempdir().unwrap();
+        let installer = AgentInstaller::with_install_dir(dir.path().to_path_buf());
+
+        // Create directory but no agent.leviath
+        fs::create_dir_all(dir.path().join("empty-agent")).unwrap();
+        assert!(installer.get_installed("empty-agent").unwrap().is_none());
+    }
+}

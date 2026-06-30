@@ -153,3 +153,80 @@ fn print_warnings(blueprint: &leviath_core::Blueprint) {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Helper to create a minimal valid blueprint TOML with given stages.
+    fn make_blueprint_toml(stages_toml: &str) -> String {
+        format!(
+            r#"
+[agent]
+name = "test"
+version = "0.1.0"
+description = "test blueprint"
+
+{}
+
+[context.regions]
+system = {{ kind = "pinned", max_tokens = 1000 }}
+"#,
+            stages_toml
+        )
+    }
+
+    fn parse(toml: &str) -> leviath_core::Blueprint {
+        super::super::run::parse_manifest_public(toml).unwrap()
+    }
+
+    #[test]
+    fn print_warnings_linear_mode_no_panic() {
+        let toml = make_blueprint_toml(
+            r#"
+[stages.main]
+mode = "autonomous"
+model = { provider = "anthropic", model = "claude-sonnet-4-6" }
+description = "Main stage"
+max_iterations = 10
+"#,
+        );
+        let bp = parse(&toml);
+        // Should not panic even though there's no graph
+        print_warnings(&bp);
+    }
+
+    #[test]
+    fn print_warnings_graph_all_reachable() {
+        let toml = make_blueprint_toml(
+            r#"
+[stages.a]
+mode = "autonomous"
+model = { provider = "anthropic", model = "claude-sonnet-4-6" }
+description = "Stage A"
+max_iterations = 5
+entry = true
+[stages.a.transitions]
+b = "true"
+
+[stages.b]
+mode = "autonomous"
+model = { provider = "anthropic", model = "claude-sonnet-4-6" }
+description = "Stage B"
+max_iterations = 5
+"#,
+        );
+        let bp = parse(&toml);
+        // No unreachable stages — should run without issues
+        print_warnings(&bp);
+    }
+
+    #[test]
+    fn validate_args_default_path() {
+        // ValidateArgs can be constructed with default path
+        let args = ValidateArgs {
+            path: ".".to_string(),
+        };
+        assert_eq!(args.path, ".");
+    }
+}

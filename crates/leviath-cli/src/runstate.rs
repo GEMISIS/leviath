@@ -486,3 +486,428 @@ pub fn tail_stage_output(run_id: &str, stage_idx: usize, max_bytes: u64) -> Stri
 pub fn tail_stage_log(run_id: &str, stage_idx: usize, max_bytes: u64) -> String {
     tail_file(&stage_dir(run_id, stage_idx).join("logs.log"), max_bytes)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ─── RunStatus ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn run_status_serde_roundtrip() {
+        for status in [
+            RunStatus::Starting,
+            RunStatus::Running,
+            RunStatus::WaitingInput,
+            RunStatus::Complete,
+            RunStatus::CompleteInteractive,
+            RunStatus::Error,
+            RunStatus::Cancelled,
+        ] {
+            let json = serde_json::to_string(&status).unwrap();
+            let back: RunStatus = serde_json::from_str(&json).unwrap();
+            assert_eq!(status, back);
+        }
+    }
+
+    #[test]
+    fn run_status_display() {
+        assert_eq!(RunStatus::Starting.to_string(), "Starting");
+        assert_eq!(RunStatus::Running.to_string(), "Running");
+        assert_eq!(RunStatus::WaitingInput.to_string(), "WaitingInput");
+        assert_eq!(RunStatus::Complete.to_string(), "Complete");
+        assert_eq!(RunStatus::CompleteInteractive.to_string(), "CompleteInteractive");
+        assert_eq!(RunStatus::Error.to_string(), "Error");
+        assert_eq!(RunStatus::Cancelled.to_string(), "Cancelled");
+    }
+
+    #[test]
+    fn run_status_snake_case_serialization() {
+        let json = serde_json::to_string(&RunStatus::WaitingInput).unwrap();
+        assert_eq!(json, "\"waiting_input\"");
+        let json = serde_json::to_string(&RunStatus::CompleteInteractive).unwrap();
+        assert_eq!(json, "\"complete_interactive\"");
+    }
+
+    // ─── StageRunStatus ─────────────────────────────────────────────────────
+
+    #[test]
+    fn stage_run_status_serde_roundtrip() {
+        for status in [
+            StageRunStatus::Pending,
+            StageRunStatus::Active,
+            StageRunStatus::WaitingInput,
+            StageRunStatus::Complete,
+            StageRunStatus::Error,
+        ] {
+            let json = serde_json::to_string(&status).unwrap();
+            let back: StageRunStatus = serde_json::from_str(&json).unwrap();
+            assert_eq!(status, back);
+        }
+    }
+
+    #[test]
+    fn stage_run_status_display() {
+        assert_eq!(StageRunStatus::Pending.to_string(), "Pending");
+        assert_eq!(StageRunStatus::Active.to_string(), "Active");
+        assert_eq!(StageRunStatus::WaitingInput.to_string(), "WaitingInput");
+        assert_eq!(StageRunStatus::Complete.to_string(), "Complete");
+        assert_eq!(StageRunStatus::Error.to_string(), "Error");
+    }
+
+    // ─── RunMeta ────────────────────────────────────────────────────────────
+
+    #[test]
+    fn run_meta_new_defaults() {
+        let meta = RunMeta::new(
+            "run-1".into(),
+            "agent".into(),
+            "/path".into(),
+            "do stuff".into(),
+            Some("gpt-4".into()),
+            "/work".into(),
+            3,
+        );
+        assert_eq!(meta.run_id, "run-1");
+        assert_eq!(meta.agent_name, "agent");
+        assert_eq!(meta.task, "do stuff");
+        assert_eq!(meta.model.as_deref(), Some("gpt-4"));
+        assert_eq!(meta.num_stages, 3);
+        assert_eq!(meta.status, RunStatus::Starting);
+        assert_eq!(meta.pid, 0);
+        assert_eq!(meta.stage_index, 0);
+        assert!(meta.error.is_none());
+        assert!(meta.title.is_none());
+        assert!(meta.metadata.is_empty());
+        assert!(meta.callback_url.is_none());
+        assert!(meta.parent_run_id.is_none());
+    }
+
+    #[test]
+    fn run_meta_serde_roundtrip() {
+        let meta = RunMeta::new(
+            "test-run".into(),
+            "test-agent".into(),
+            "/agents/test".into(),
+            "run tests".into(),
+            None,
+            "/tmp".into(),
+            2,
+        );
+        let json = serde_json::to_string_pretty(&meta).unwrap();
+        let back: RunMeta = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.run_id, "test-run");
+        assert_eq!(back.agent_name, "test-agent");
+        assert_eq!(back.num_stages, 2);
+        assert!(back.model.is_none());
+    }
+
+    #[test]
+    fn run_meta_touch_updates_timestamp() {
+        let mut meta = RunMeta::new(
+            "r".into(), "a".into(), "/p".into(), "t".into(), None, "/w".into(), 1,
+        );
+        let before = meta.updated_at;
+        // Touch should update (or at least not decrease) updated_at
+        meta.touch();
+        assert!(meta.updated_at >= before);
+    }
+
+    #[test]
+    fn run_meta_optional_fields_deserialize() {
+        // Simulate a meta.json without optional fields (e.g., from older version)
+        let json = serde_json::json!({
+            "run_id": "r1",
+            "agent_name": "a",
+            "agent_path": "/p",
+            "task": "t",
+            "model": null,
+            "pid": 123,
+            "status": "running",
+            "current_stage": "init",
+            "stage_index": 0,
+            "num_stages": 1,
+            "iteration": 0,
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "workdir": "/w",
+            "started_at": 1000,
+            "updated_at": 1000,
+            "error": null
+        });
+        let meta: RunMeta = serde_json::from_value(json).unwrap();
+        assert_eq!(meta.cached_tokens, 0);
+        assert!(meta.title.is_none());
+        assert!(meta.metadata.is_empty());
+        assert!(meta.callback_url.is_none());
+        assert!(meta.parent_run_id.is_none());
+    }
+
+    // ─── StageRecord ────────────────────────────────────────────────────────
+
+    #[test]
+    fn stage_record_new_defaults() {
+        let rec = StageRecord::new("analyze".into(), 2);
+        assert_eq!(rec.name, "analyze");
+        assert_eq!(rec.index, 2);
+        assert_eq!(rec.status, StageRunStatus::Pending);
+        assert_eq!(rec.prompt_tokens, 0);
+        assert_eq!(rec.completion_tokens, 0);
+        assert_eq!(rec.cached_tokens, 0);
+        assert!(rec.started_at.is_none());
+        assert!(rec.ended_at.is_none());
+    }
+
+    #[test]
+    fn stage_record_serde_roundtrip() {
+        let mut rec = StageRecord::new("build".into(), 0);
+        rec.status = StageRunStatus::Complete;
+        rec.prompt_tokens = 100;
+        rec.started_at = Some(1000);
+        rec.ended_at = Some(2000);
+
+        let json = serde_json::to_string(&rec).unwrap();
+        let back: StageRecord = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.name, "build");
+        assert_eq!(back.status, StageRunStatus::Complete);
+        assert_eq!(back.prompt_tokens, 100);
+        assert_eq!(back.started_at, Some(1000));
+    }
+
+    // ─── RegionSnapshot / ContextSnapshot ───────────────────────────────────
+
+    #[test]
+    fn region_snapshot_serde_roundtrip() {
+        let snap = RegionSnapshot {
+            name: "system".into(),
+            kind: "pinned".into(),
+            current_tokens: 100,
+            max_tokens: 500,
+            entries: vec![RegionEntrySnapshot {
+                content: "You are helpful".into(),
+                tokens: 3,
+                metadata: None,
+            }],
+        };
+        let json = serde_json::to_string(&snap).unwrap();
+        let back: RegionSnapshot = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.name, "system");
+        assert_eq!(back.entries.len(), 1);
+        assert_eq!(back.entries[0].content, "You are helpful");
+    }
+
+    #[test]
+    fn region_snapshot_empty_entries_omitted() {
+        let snap = RegionSnapshot {
+            name: "empty".into(),
+            kind: "temporary".into(),
+            current_tokens: 0,
+            max_tokens: 100,
+            entries: vec![],
+        };
+        let json = serde_json::to_value(&snap).unwrap();
+        assert!(json.get("entries").is_none());
+    }
+
+    #[test]
+    fn context_snapshot_serde_roundtrip() {
+        let snap = ContextSnapshot {
+            stage_name: "analyze".into(),
+            total_tokens: 500,
+            max_tokens: 8192,
+            regions: vec![RegionSnapshot {
+                name: "history".into(),
+                kind: "sliding".into(),
+                current_tokens: 300,
+                max_tokens: 2000,
+                entries: vec![],
+            }],
+        };
+        let json = serde_json::to_string(&snap).unwrap();
+        let back: ContextSnapshot = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.stage_name, "analyze");
+        assert_eq!(back.total_tokens, 500);
+        assert_eq!(back.regions.len(), 1);
+    }
+
+    // ─── tail_file ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn tail_file_nonexistent_returns_empty() {
+        let path = std::path::Path::new("/tmp/nonexistent-leviath-test-file.txt");
+        assert_eq!(tail_file(path, 1024), "");
+    }
+
+    #[test]
+    fn tail_file_small_file_returns_all() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("small.txt");
+        std::fs::write(&path, "line1\nline2\nline3\n").unwrap();
+        let result = tail_file(&path, 1024);
+        assert_eq!(result, "line1\nline2\nline3\n");
+    }
+
+    #[test]
+    fn tail_file_large_file_returns_tail() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("large.txt");
+        let content = "abcdefghij\n".repeat(100); // 1100 bytes
+        std::fs::write(&path, &content).unwrap();
+        let result = tail_file(&path, 50);
+        // Should be less than 50 bytes, starting from a line boundary
+        assert!(result.len() <= 50);
+        assert!(result.ends_with('\n'));
+    }
+
+    // ─── new_run_id ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn new_run_id_contains_agent_name() {
+        let id = new_run_id("my-agent");
+        assert!(id.starts_with("my-agent-"));
+    }
+
+    #[test]
+    fn new_run_id_sanitizes_special_chars() {
+        let id = new_run_id("agent with spaces!");
+        assert!(!id.contains(' '));
+        assert!(!id.contains('!'));
+    }
+
+    // ─── write_meta / read_meta roundtrip ───────────────────────────────────
+
+    #[test]
+    fn write_and_read_meta_roundtrip() {
+        // Use the real runs_dir so write_meta/read_meta work
+        let meta = RunMeta::new(
+            "test-roundtrip-unit".into(),
+            "test-agent".into(),
+            "/agents/test".into(),
+            "unit test".into(),
+            Some("model-x".into()),
+            "/tmp".into(),
+            2,
+        );
+
+        create_run(&meta).unwrap();
+        let back = read_meta(&meta.run_id).unwrap();
+        assert_eq!(back.run_id, "test-roundtrip-unit");
+        assert_eq!(back.agent_name, "test-agent");
+        assert_eq!(back.task, "unit test");
+        assert_eq!(back.model.as_deref(), Some("model-x"));
+
+        // Cleanup
+        let _ = std::fs::remove_dir_all(run_dir(&meta.run_id));
+    }
+
+    // ─── write_stages_index / read_stages_index roundtrip ───────────────────
+
+    #[test]
+    fn write_and_read_stages_index_roundtrip() {
+        let run_id = "test-stages-idx-unit";
+        let dir = run_dir(run_id);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let stages = vec![
+            StageRecord::new("init".into(), 0),
+            StageRecord::new("process".into(), 1),
+        ];
+        write_stages_index(run_id, &stages).unwrap();
+        let back = read_stages_index(run_id);
+        assert_eq!(back.len(), 2);
+        assert_eq!(back[0].name, "init");
+        assert_eq!(back[1].name, "process");
+
+        // Cleanup
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn read_stages_index_missing_returns_empty() {
+        let back = read_stages_index("nonexistent-run-12345");
+        assert!(back.is_empty());
+    }
+
+    // ─── write/read context snapshot ────────────────────────────────────────
+
+    #[test]
+    fn write_and_read_context_snapshot_roundtrip() {
+        let run_id = "test-ctx-snap-unit";
+        let dir = run_dir(run_id);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let snap = ContextSnapshot {
+            stage_name: "test".into(),
+            total_tokens: 42,
+            max_tokens: 8192,
+            regions: vec![],
+        };
+        write_context_snapshot(run_id, &snap).unwrap();
+        let back = read_context_snapshot(run_id).unwrap();
+        assert_eq!(back.stage_name, "test");
+        assert_eq!(back.total_tokens, 42);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn read_context_snapshot_missing_returns_none() {
+        assert!(read_context_snapshot("nonexistent-ctx-run").is_none());
+    }
+
+    // ─── stage_dir / append_stage_output / append_stage_log ─────────────────
+
+    #[test]
+    fn stage_dir_path_structure() {
+        let path = stage_dir("run-abc", 2);
+        assert!(path.ends_with("stages/2"));
+        assert!(path.to_str().unwrap().contains("run-abc"));
+    }
+
+    #[test]
+    fn append_and_tail_stage_output() {
+        let run_id = "test-stage-output-unit";
+        append_stage_output(run_id, 0, "line 1");
+        append_stage_output(run_id, 0, "line 2");
+        let output = tail_stage_output(run_id, 0, 4096);
+        assert!(output.contains("line 1"));
+        assert!(output.contains("line 2"));
+
+        let _ = std::fs::remove_dir_all(run_dir(run_id));
+    }
+
+    #[test]
+    fn append_and_tail_stage_log() {
+        let run_id = "test-stage-log-unit";
+        append_stage_log(run_id, 0, "event A");
+        append_stage_log(run_id, 0, "event B");
+        let log = tail_stage_log(run_id, 0, 4096);
+        assert!(log.contains("event A"));
+        assert!(log.contains("event B"));
+
+        let _ = std::fs::remove_dir_all(run_dir(run_id));
+    }
+
+    // ─── write/read stage context ───────────────────────────────────────────
+
+    #[test]
+    fn write_and_read_stage_context_roundtrip() {
+        let run_id = "test-stage-ctx-unit";
+        let snap = ContextSnapshot {
+            stage_name: "stage-0".into(),
+            total_tokens: 100,
+            max_tokens: 4096,
+            regions: vec![],
+        };
+        write_stage_context(run_id, 0, &snap).unwrap();
+        let back = read_stage_context(run_id, 0).unwrap();
+        assert_eq!(back.stage_name, "stage-0");
+
+        let _ = std::fs::remove_dir_all(run_dir(run_id));
+    }
+
+    #[test]
+    fn read_stage_context_missing_returns_none() {
+        assert!(read_stage_context("nonexistent-run", 99).is_none());
+    }
+}

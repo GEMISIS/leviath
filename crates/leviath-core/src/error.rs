@@ -79,3 +79,131 @@ pub enum Error {
     #[error("{0}")]
     Other(String),
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ─── ValidationError Display ────────────────────────────────────────────
+
+    #[test]
+    fn validation_error_blueprint() {
+        let e = ValidationError::Blueprint("missing name".into());
+        assert_eq!(e.to_string(), "Invalid blueprint: missing name");
+    }
+
+    #[test]
+    fn validation_error_stage() {
+        let e = ValidationError::Stage {
+            stage: "init".into(),
+            message: "no prompt".into(),
+        };
+        assert_eq!(e.to_string(), "Invalid stage 'init': no prompt");
+    }
+
+    #[test]
+    fn validation_error_region() {
+        let e = ValidationError::Region {
+            region: "context".into(),
+            message: "too large".into(),
+        };
+        assert_eq!(e.to_string(), "Invalid region 'context': too large");
+    }
+
+    #[test]
+    fn validation_error_layout() {
+        let e = ValidationError::Layout("overlapping regions".into());
+        assert_eq!(e.to_string(), "Invalid layout: overlapping regions");
+    }
+
+    #[test]
+    fn validation_error_graph() {
+        let e = ValidationError::Graph("cycle detected".into());
+        assert_eq!(e.to_string(), "Invalid graph: cycle detected");
+    }
+
+    #[test]
+    fn validation_error_transition() {
+        let e = ValidationError::Transition {
+            from: "A".into(),
+            to: "B".into(),
+            message: "missing condition".into(),
+        };
+        assert_eq!(
+            e.to_string(),
+            "Invalid transition from 'A' to 'B': missing condition"
+        );
+    }
+
+    // ─── Error Display ──────────────────────────────────────────────────────
+
+    #[test]
+    fn error_region_not_found() {
+        let e = Error::RegionNotFound("history".into());
+        assert_eq!(e.to_string(), "Region not found: history");
+    }
+
+    #[test]
+    fn error_validation_failed() {
+        let e = Error::ValidationFailed("bad input".into());
+        assert_eq!(e.to_string(), "Region validation failed: bad input");
+    }
+
+    #[test]
+    fn error_token_budget_exceeded() {
+        let e = Error::TokenBudgetExceeded { used: 500, max: 100 };
+        assert_eq!(e.to_string(), "Content exceeds token budget: 500 > 100");
+    }
+
+    #[test]
+    fn error_pinned_regions_over_budget() {
+        let e = Error::PinnedRegionsOverBudget {
+            pinned_tokens: 2000,
+            total_budget: 1000,
+        };
+        assert_eq!(
+            e.to_string(),
+            "Pinned regions (2000) exceed total budget (1000)"
+        );
+    }
+
+    #[test]
+    fn error_blueprint_invalid() {
+        let e = Error::BlueprintInvalid("parse error".into());
+        assert_eq!(e.to_string(), "Blueprint validation failed: parse error");
+    }
+
+    #[test]
+    fn error_layout_invalid() {
+        let e = Error::LayoutInvalid("bad layout".into());
+        assert_eq!(e.to_string(), "Layout validation failed: bad layout");
+    }
+
+    #[test]
+    fn error_transform_failed() {
+        let e = Error::TransformFailed("script error".into());
+        assert_eq!(e.to_string(), "Context transform failed: script error");
+    }
+
+    #[test]
+    fn error_other() {
+        let e = Error::Other("misc".into());
+        assert_eq!(e.to_string(), "misc");
+    }
+
+    #[test]
+    fn error_from_serde_json() {
+        let json_err = serde_json::from_str::<serde_json::Value>("invalid").unwrap_err();
+        let e = Error::from(json_err);
+        assert!(e.to_string().contains("Serialization error"));
+    }
+
+    // ─── Clone for ValidationError ──────────────────────────────────────────
+
+    #[test]
+    fn validation_error_is_cloneable() {
+        let e = ValidationError::Graph("cycle".into());
+        let cloned = e.clone();
+        assert_eq!(e.to_string(), cloned.to_string());
+    }
+}

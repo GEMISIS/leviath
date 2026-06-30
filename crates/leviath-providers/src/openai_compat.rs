@@ -321,3 +321,338 @@ pub fn parse_openai_sse_event(buffer: &mut String) -> Option<Option<StreamChunk>
 
     None
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::provider::{InferenceRequest, Message, Tool};
+
+    fn sample_request() -> InferenceRequest {
+        InferenceRequest {
+            messages: vec![
+                Message {
+                    role: "system".into(),
+                    content: "You are helpful".into(),
+                    cache_breakpoint: false,
+                },
+                Message {
+                    role: "user".into(),
+                    content: "Hello".into(),
+                    cache_breakpoint: false,
+                },
+            ],
+            model: "gpt-4".into(),
+            max_tokens: 1024,
+            temperature: 0.5,
+            tools: vec![],
+            extra: serde_json::json!({}),
+        }
+    }
+
+    // ─── build_openai_request_body ──────────────────────────────────────────
+
+    #[test]
+    fn build_request_body_basic() {
+        let req = sample_request();
+        let body = build_openai_request_body(&req);
+        assert_eq!(body["model"], "gpt-4");
+        assert_eq!(body["max_tokens"], 1024);
+        assert_eq!(body["temperature"], 0.5);
+        let messages = body["messages"].as_array().unwrap();
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0]["role"], "system");
+        assert_eq!(messages[1]["content"], "Hello");
+    }
+
+    #[test]
+    fn build_request_body_no_tools_omits_tools_key() {
+        let req = sample_request();
+        let body = build_openai_request_body(&req);
+        assert!(body.get("tools").is_none());
+    }
+
+    #[test]
+    fn build_request_body_with_tools() {
+        let mut req = sample_request();
+        req.tools = vec![Tool {
+            name: "search".into(),
+            description: "Search the web".into(),
+            parameters: serde_json::json!({"type": "object", "properties": {}}),
+        }];
+        let body = build_openai_request_body(&req);
+        let tools = body["tools"].as_array().unwrap();
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0]["type"], "function");
+        assert_eq!(tools[0]["function"]["name"], "search");
+        assert_eq!(tools[0]["function"]["description"], "Search the web");
+    }
+
+    #[test]
+    fn build_request_body_multiple_tools() {
+        let mut req = sample_request();
+        req.tools = vec![
+            Tool {
+                name: "tool_a".into(),
+                description: "A".into(),
+                parameters: serde_json::json!({}),
+            },
+            Tool {
+                name: "tool_b".into(),
+                description: "B".into(),
+                parameters: serde_json::json!({}),
+            },
+        ];
+        let body = build_openai_request_body(&req);
+        assert_eq!(body["tools"].as_array().unwrap().len(), 2);
+    }
+
+    // ─── parse_openai_response ──────────────────────────────────────────────
+
+    #[test]
+    fn parse_response_basic() {
+        let body = serde_json::json!({
+            "choices": [{
+                "message": {
+                    "content": "Hello there!"
+                },
+                "finish_reason": "stop"
+            }],
+            "usage": {
+                "prompt_tokens": 10,
+                "completion_tokens": 5
+            }
+        });
+        let resp = parse_openai_response(&body).unwrap();
+        assert_eq!(resp.content, "Hello there!");
+        assert!(resp.tool_calls.is_empty());
+        assert_eq!(resp.tokens_used.prompt_tokens, 10);
+        assert_eq!(resp.tokens_used.completion_tokens, 5);
+        assert_eq!(resp.tokens_used.total_tokens, 15);
+        assert!(matches!(resp.finish_reason, crate::provider::FinishReason::Complete));
+    }
+
+    #[test]
+    fn parse_response_no_choices_returns_error() {
+        let body = serde_json::json!({});
+        let err = parse_openai_response(&body).unwrap_err();
+        assert!(err.to_string().contains("No choices"));
+    }
+
+    #[test]
+    fn parse_response_no_message_returns_error() {
+        let body = serde_json::json!({
+            "choices": [{}]
+        });
+        let err = parse_openai_response(&body).unwrap_err();
+        assert!(err.to_string().contains("No message"));
+    }
+
+    #[test]
+    fn parse_response_with_tool_calls() {
+        let body = serde_json::json!({
+            "choices": [{
+                "message": {
+                    "content": null,
+                    "tool_calls": [{
+                        "id": "call_1",
+                        "function": {
+                            "name": "get_weather",
+                            "arguments": "{\"city\":\"NYC\"}"
+                        }
+                    }]
+                },
+                "finish_reason": "tool_calls"
+            }],
+            "usage": {"prompt_tokens": 20, "completion_tokens": 10}
+        });
+        let resp = parse_openai_response(&body).unwrap();
+        assert_eq!(resp.content, "");
+        assert_eq!(resp.tool_calls.len(), 1);
+        assert_eq!(resp.tool_calls[0].id, "call_1");
+        assert_eq!(resp.tool_calls[0].name, "get_weather");
+        assert_eq!(resp.tool_calls[0].arguments["city"], "NYC");
+        assert!(matches!(resp.finish_reason, crate::provider::FinishReason::ToolCall));
+    }
+
+    #[test]
+    fn parse_response_cached_tokens() {
+        let body = serde_json::json!({
+            "choices": [{
+                "message": {"content": "ok"},
+                "finish_reason": "stop"
+            }],
+            "usage": {
+                "prompt_tokens": 100,
+                "completion_tokens": 10,
+                "prompt_tokens_details": {
+                    "cached_tokens": 80
+                }
+            }
+        });
+        let resp = parse_openai_response(&body).unwrap();
+        assert_eq!(resp.tokens_used.cached_tokens, 80);
+    }
+
+    #[test]
+    fn parse_response_missing_usage_defaults_to_zero() {
+        let body = serde_json::json!({
+            "choices": [{
+                "message": {"content": "hi"},
+                "finish_reason": "stop"
+            }]
+        });
+        let resp = parse_openai_response(&body).unwrap();
+        assert_eq!(resp.tokens_used.prompt_tokens, 0);
+        assert_eq!(resp.tokens_used.completion_tokens, 0);
+    }
+
+    #[test]
+    fn parse_response_finish_reason_length() {
+        let body = serde_json::json!({
+            "choices": [{
+                "message": {"content": "truncated"},
+                "finish_reason": "length"
+            }],
+            "usage": {"prompt_tokens": 5, "completion_tokens": 5}
+        });
+        let resp = parse_openai_response(&body).unwrap();
+        assert!(matches!(resp.finish_reason, crate::provider::FinishReason::TokenLimit));
+    }
+
+    // ─── parse_openai_sse_event ─────────────────────────────────────────────
+
+    #[test]
+    fn sse_event_incomplete_returns_none() {
+        let mut buf = "data: {\"choices\":[".to_string();
+        assert!(parse_openai_sse_event(&mut buf).is_none());
+    }
+
+    #[test]
+    fn sse_event_done_returns_stream_end() {
+        let mut buf = "data: [DONE]\n\n".to_string();
+        let result = parse_openai_sse_event(&mut buf);
+        assert!(matches!(result, Some(None)));
+        assert!(buf.is_empty());
+    }
+
+    #[test]
+    fn sse_event_content_delta() {
+        let mut buf = format!(
+            "data: {}\n\n",
+            serde_json::json!({
+                "choices": [{
+                    "delta": {"content": "Hello"},
+                    "finish_reason": null
+                }]
+            })
+        );
+        let result = parse_openai_sse_event(&mut buf);
+        let chunk = result.unwrap().unwrap();
+        assert_eq!(chunk.delta, "Hello");
+        assert!(chunk.finish_reason.is_none());
+        assert!(chunk.tool_calls.is_empty());
+    }
+
+    #[test]
+    fn sse_event_with_finish_reason() {
+        let mut buf = format!(
+            "data: {}\n\n",
+            serde_json::json!({
+                "choices": [{
+                    "delta": {"content": ""},
+                    "finish_reason": "stop"
+                }]
+            })
+        );
+        let chunk = parse_openai_sse_event(&mut buf).unwrap().unwrap();
+        assert!(matches!(chunk.finish_reason, Some(crate::provider::FinishReason::Complete)));
+    }
+
+    #[test]
+    fn sse_event_tool_call_delta() {
+        let mut buf = format!(
+            "data: {}\n\n",
+            serde_json::json!({
+                "choices": [{
+                    "delta": {
+                        "tool_calls": [{
+                            "index": 0,
+                            "id": "call_abc",
+                            "function": {
+                                "name": "search",
+                                "arguments": "{\"q\":"
+                            }
+                        }]
+                    }
+                }]
+            })
+        );
+        let chunk = parse_openai_sse_event(&mut buf).unwrap().unwrap();
+        assert_eq!(chunk.tool_calls.len(), 1);
+        assert_eq!(chunk.tool_calls[0].index, 0);
+        assert_eq!(chunk.tool_calls[0].id.as_deref(), Some("call_abc"));
+        assert_eq!(chunk.tool_calls[0].name.as_deref(), Some("search"));
+        assert_eq!(chunk.tool_calls[0].arguments_delta, "{\"q\":");
+    }
+
+    #[test]
+    fn sse_event_usage_only_chunk() {
+        let mut buf = format!(
+            "data: {}\n\n",
+            serde_json::json!({
+                "usage": {
+                    "prompt_tokens": 50,
+                    "completion_tokens": 25,
+                    "prompt_tokens_details": {"cached_tokens": 10}
+                }
+            })
+        );
+        let chunk = parse_openai_sse_event(&mut buf).unwrap().unwrap();
+        assert_eq!(chunk.delta, "");
+        let tokens = chunk.tokens.unwrap();
+        assert_eq!(tokens.prompt_tokens, 50);
+        assert_eq!(tokens.completion_tokens, 25);
+        assert_eq!(tokens.cached_tokens, 10);
+    }
+
+    #[test]
+    fn sse_event_multiple_events_in_buffer() {
+        let mut buf = format!(
+            "data: {}\n\ndata: {}\n\n",
+            serde_json::json!({"choices": [{"delta": {"content": "A"}}]}),
+            serde_json::json!({"choices": [{"delta": {"content": "B"}}]})
+        );
+        let chunk1 = parse_openai_sse_event(&mut buf).unwrap().unwrap();
+        assert_eq!(chunk1.delta, "A");
+
+        let chunk2 = parse_openai_sse_event(&mut buf).unwrap().unwrap();
+        assert_eq!(chunk2.delta, "B");
+    }
+
+    #[test]
+    fn sse_event_with_usage_in_choice_chunk() {
+        let mut buf = format!(
+            "data: {}\n\n",
+            serde_json::json!({
+                "choices": [{"delta": {"content": "X"}, "finish_reason": "stop"}],
+                "usage": {
+                    "prompt_tokens": 100,
+                    "completion_tokens": 50,
+                    "prompt_tokens_details": {"cached_tokens": 30}
+                }
+            })
+        );
+        let chunk = parse_openai_sse_event(&mut buf).unwrap().unwrap();
+        assert_eq!(chunk.delta, "X");
+        let tokens = chunk.tokens.unwrap();
+        assert_eq!(tokens.prompt_tokens, 100);
+        assert_eq!(tokens.cached_tokens, 30);
+    }
+
+    #[test]
+    fn sse_event_invalid_json_skipped() {
+        let mut buf = "data: not-json\n\n".to_string();
+        // Invalid JSON line is skipped; no valid data line follows → None
+        assert!(parse_openai_sse_event(&mut buf).is_none());
+    }
+}

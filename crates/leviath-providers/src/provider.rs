@@ -388,3 +388,241 @@ mod stream_once {
         Once { item: Some(item) }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ─── ProviderError Display ──────────────────────────────────────────────
+
+    #[test]
+    fn provider_error_request_failed_display() {
+        let err = ProviderError::RequestFailed("timeout".into());
+        assert_eq!(err.to_string(), "Request failed: timeout");
+    }
+
+    #[test]
+    fn provider_error_api_error_display() {
+        let err = ProviderError::ApiError("bad request".into());
+        assert_eq!(err.to_string(), "API error: bad request");
+    }
+
+    #[test]
+    fn provider_error_rate_limit_display() {
+        let err = ProviderError::RateLimitExceeded;
+        assert_eq!(err.to_string(), "Rate limit exceeded");
+    }
+
+    #[test]
+    fn provider_error_invalid_response_display() {
+        let err = ProviderError::InvalidResponse("missing field".into());
+        assert_eq!(err.to_string(), "Invalid response: missing field");
+    }
+
+    #[test]
+    fn provider_error_token_limit_display() {
+        let err = ProviderError::TokenLimitExceeded { used: 500, max: 100 };
+        assert_eq!(err.to_string(), "Token limit exceeded: 500 > 100");
+    }
+
+    #[test]
+    fn provider_error_other_display() {
+        let err = ProviderError::Other("something went wrong".into());
+        assert_eq!(err.to_string(), "something went wrong");
+    }
+
+    // ─── ModelCapabilities default ──────────────────────────────────────────
+
+    #[test]
+    fn model_capabilities_default() {
+        let caps = ModelCapabilities::default();
+        assert!(caps.supports_temperature);
+        assert!(caps.supports_streaming);
+        assert!(caps.supports_tools);
+        assert!(caps.supports_system_prompt);
+        assert_eq!(caps.max_context_tokens, 8192);
+        assert_eq!(caps.max_output_tokens, 4096);
+    }
+
+    // ─── parse_openai_finish_reason ─────────────────────────────────────────
+
+    #[test]
+    fn parse_finish_reason_stop() {
+        assert!(matches!(parse_openai_finish_reason("stop"), FinishReason::Complete));
+    }
+
+    #[test]
+    fn parse_finish_reason_tool_calls() {
+        assert!(matches!(parse_openai_finish_reason("tool_calls"), FinishReason::ToolCall));
+    }
+
+    #[test]
+    fn parse_finish_reason_length() {
+        assert!(matches!(parse_openai_finish_reason("length"), FinishReason::TokenLimit));
+    }
+
+    #[test]
+    fn parse_finish_reason_unknown_defaults_to_complete() {
+        assert!(matches!(parse_openai_finish_reason("unknown"), FinishReason::Complete));
+    }
+
+    // ─── Serialization round-trips ──────────────────────────────────────────
+
+    #[test]
+    fn token_usage_serde_roundtrip() {
+        let usage = TokenUsage {
+            prompt_tokens: 100,
+            completion_tokens: 50,
+            total_tokens: 150,
+            cached_tokens: 20,
+            cache_write_tokens: 10,
+        };
+        let json = serde_json::to_string(&usage).unwrap();
+        let back: TokenUsage = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.prompt_tokens, 100);
+        assert_eq!(back.completion_tokens, 50);
+        assert_eq!(back.total_tokens, 150);
+        assert_eq!(back.cached_tokens, 20);
+        assert_eq!(back.cache_write_tokens, 10);
+    }
+
+    #[test]
+    fn token_usage_cached_defaults_to_zero() {
+        let json = r#"{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15}"#;
+        let usage: TokenUsage = serde_json::from_str(json).unwrap();
+        assert_eq!(usage.cached_tokens, 0);
+        assert_eq!(usage.cache_write_tokens, 0);
+    }
+
+    #[test]
+    fn message_cache_breakpoint_skipped_when_false() {
+        let msg = Message {
+            role: "user".into(),
+            content: "hello".into(),
+            cache_breakpoint: false,
+        };
+        let json = serde_json::to_value(&msg).unwrap();
+        assert!(json.get("cache_breakpoint").is_none());
+    }
+
+    #[test]
+    fn message_cache_breakpoint_included_when_true() {
+        let msg = Message {
+            role: "system".into(),
+            content: "you are helpful".into(),
+            cache_breakpoint: true,
+        };
+        let json = serde_json::to_value(&msg).unwrap();
+        assert_eq!(json["cache_breakpoint"], true);
+    }
+
+    #[test]
+    fn inference_request_serde_roundtrip() {
+        let req = InferenceRequest {
+            messages: vec![Message {
+                role: "user".into(),
+                content: "hi".into(),
+                cache_breakpoint: false,
+            }],
+            model: "gpt-4".into(),
+            max_tokens: 100,
+            temperature: 0.7,
+            tools: vec![Tool {
+                name: "search".into(),
+                description: "Search the web".into(),
+                parameters: serde_json::json!({"type": "object"}),
+            }],
+            extra: serde_json::json!({}),
+        };
+        let json = serde_json::to_string(&req).unwrap();
+        let back: InferenceRequest = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.model, "gpt-4");
+        assert_eq!(back.messages.len(), 1);
+        assert_eq!(back.tools.len(), 1);
+        assert_eq!(back.tools[0].name, "search");
+    }
+
+    #[test]
+    fn tool_call_serde_roundtrip() {
+        let tc = ToolCall {
+            id: "call_123".into(),
+            name: "get_weather".into(),
+            arguments: serde_json::json!({"city": "NYC"}),
+        };
+        let json = serde_json::to_string(&tc).unwrap();
+        let back: ToolCall = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.id, "call_123");
+        assert_eq!(back.name, "get_weather");
+        assert_eq!(back.arguments["city"], "NYC");
+    }
+
+    #[test]
+    fn finish_reason_serde_roundtrip() {
+        for reason in [FinishReason::Complete, FinishReason::TokenLimit, FinishReason::ToolCall, FinishReason::Stop] {
+            let json = serde_json::to_string(&reason).unwrap();
+            let back: FinishReason = serde_json::from_str(&json).unwrap();
+            assert_eq!(format!("{:?}", reason), format!("{:?}", back));
+        }
+    }
+
+    #[test]
+    fn rate_limit_config_serde() {
+        let cfg = RateLimitConfig {
+            requests_per_minute: 60,
+            tokens_per_minute: 100_000,
+        };
+        let json = serde_json::to_string(&cfg).unwrap();
+        let back: RateLimitConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.requests_per_minute, 60);
+        assert_eq!(back.tokens_per_minute, 100_000);
+    }
+
+    #[test]
+    fn provider_config_serde_roundtrip() {
+        let cfg = ProviderConfig {
+            api_key: "sk-test".into(),
+            base_url: Some("https://api.example.com".into()),
+            rate_limit: Some(RateLimitConfig {
+                requests_per_minute: 30,
+                tokens_per_minute: 50_000,
+            }),
+        };
+        let json = serde_json::to_string(&cfg).unwrap();
+        let back: ProviderConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.api_key, "sk-test");
+        assert_eq!(back.base_url.as_deref(), Some("https://api.example.com"));
+        assert!(back.rate_limit.is_some());
+    }
+
+    #[test]
+    fn provider_config_optional_fields_default_to_none() {
+        let json = r#"{"api_key":"sk-test"}"#;
+        let cfg: ProviderConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(cfg.api_key, "sk-test");
+        assert!(cfg.base_url.is_none());
+        assert!(cfg.rate_limit.is_none());
+    }
+
+    // ─── stream_once ────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn stream_once_yields_single_item() {
+        use futures_core::Stream;
+        use std::pin::Pin;
+        use std::task::{Context, Poll, Waker};
+
+        let mut stream = stream_once::once(42);
+        let waker = Waker::noop();
+        let mut cx = Context::from_waker(waker);
+
+        match Pin::new(&mut stream).poll_next(&mut cx) {
+            Poll::Ready(Some(val)) => assert_eq!(val, 42),
+            other => panic!("Expected Ready(Some(42)), got {:?}", other),
+        }
+
+        match Pin::new(&mut stream).poll_next(&mut cx) {
+            Poll::Ready(None) => {}
+            other => panic!("Expected Ready(None), got {:?}", other),
+        }
+    }
+}
