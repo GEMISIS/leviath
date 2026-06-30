@@ -24,13 +24,18 @@ description = "Explore the codebase and produce a step-by-step implementation pl
 available_tools = ["read_file", "list_dir"]
 max_iterations = 20
 max_revisits = 6
+# Lets the run end here (via the "DONE" response — see transition_prompt)
+# when the user chooses to abort instead of forcing a transition.
+allow_complete = true
 transition_prompt = """
 You've shown the plan to the user and asked them to approve it, request
 revisions, expand a section, or abort.
 
 - If they approved the plan, transition to 'implement'.
-- If they asked for revisions, more detail, or chose to abort, transition
-  back to 'plan' and address their feedback before asking again.
+- If they asked for revisions or more detail, transition back to 'plan',
+  address their specific feedback (see the "detail" message in context),
+  and produce an updated plan before asking again.
+- If they chose to abort, respond DONE — do not implement anything.
 """
 system_prompt = """
 You are the planning stage of a code assistant.
@@ -61,7 +66,11 @@ list_dir  = "allow"
 hint = "Plan approved — proceed to implementation"
 
 [stages.plan.transitions.plan]
-hint = "User asked for revisions, more detail, or chose to abort — keep planning"
+hint = "User asked for revisions or more detail — keep planning"
+
+[stages.plan.transitions.error_recovery]
+condition = "error"
+transform = "direct"
 
 [[stages.plan.interaction_points]]
 name     = "plan_approval"
@@ -69,6 +78,13 @@ prompt   = "Review the plan above. What would you like to do?"
 required = true
 style    = "multiple_choice"
 options  = ["Approve — proceed to implementation", "Revise — I'll describe changes", "Add detail — expand a section", "Abort — cancel this run"]
+
+# Picking "Revise" or "Add detail" alone only carries the static option label —
+# ask the user to actually describe what they want so the plan revision is
+# grounded in their real feedback instead of a generic label.
+[stages.plan.interaction_points.followups]
+"Revise — I'll describe changes" = "What would you like to change about the plan?"
+"Add detail — expand a section" = "Which section would you like expanded, and what should it cover?"
 
 # ─── Stage 2: Implement ──────────────────────────────────────────────────────
 # Executes the approved plan. Write/edit/bash require tool-approval unless
@@ -105,8 +121,9 @@ condition = "error"
 transform = "direct"
 
 # ─── Stage 3: Review ─────────────────────────────────────────────────────────
-# Autonomous review. Transitions back to implement if issues found,
-# or completes (no outgoing transitions left) when code is clean.
+# Autonomous review. Transitions back to implement if issues found, ends the
+# run (allow_complete + "DONE") when the code is clean, or routes to
+# error_recovery if the review itself errors out.
 
 [stages.review]
 mode = "autonomous"
@@ -114,10 +131,13 @@ model = { provider = "anthropic", model = "claude-opus-4-8" }
 description = "Review the implementation and evaluate code quality"
 available_tools = ["read_file", "list_dir"]
 max_revisits = 3
+# Lets the run end here (via "DONE") when the review approves the work,
+# instead of being forced down the only declared edge back to implement.
+allow_complete = true
 transition_prompt = """
 Review complete. Based on your findings:
-- If there are issues that need fixing, transition to 'implement'
-- If the code is clean and correct, the task is done (no transition needed)
+- If there are issues that need fixing, respond with: implement
+- If the code is clean and correct, respond with: DONE
 
 Minor style issues don't warrant another implementation pass.
 """
@@ -147,6 +167,10 @@ carry = ["task", "codebase"]
 compact = ["conversation"]
 clear = ["scratch"]
 compact_prompt = "Summarize review findings as a numbered list of required fixes."
+
+[stages.review.transitions.error_recovery]
+condition = "error"
+transform = "direct"
 
 # ─── Stage 4: Error Recovery ────────────────────────────────────────────────
 # Only reachable via error condition edges — invisible during normal flow.

@@ -293,6 +293,18 @@ pub struct InteractionPoint {
     /// Options for MultipleChoice style
     #[serde(default)]
     pub options: Vec<String>,
+
+    /// Follow-up free-text prompts, keyed by option label.
+    ///
+    /// When the user picks an option present in this map (e.g. "Revise — I'll
+    /// describe changes"), a second `FreeText` interaction is requested using
+    /// the mapped prompt so the user can actually describe what they want —
+    /// otherwise only the static option label ever reaches the model, and
+    /// the user's intent is lost. After the follow-up is answered, the stage
+    /// runs another inference segment and re-prompts the same interaction
+    /// point (bounded by a retry cap) instead of falling through.
+    #[serde(default)]
+    pub followups: HashMap<String, String>,
 }
 
 /// Configuration for routing tool results to specific context window regions.
@@ -386,6 +398,15 @@ pub struct Stage {
     /// between inference calls. Default: true.
     #[serde(default = "default_true")]
     pub accepts_messages: bool,
+
+    /// Whether the LLM may end the run at this stage instead of naming a
+    /// transition target — e.g. a review stage that approves the work
+    /// needs no further stage. When true, `prompt_llm_transition`'s query
+    /// offers an explicit "DONE" response that resolves to a terminal
+    /// (no-transition) outcome instead of forcing the single/first
+    /// available edge.
+    #[serde(default)]
+    pub allow_complete: bool,
 }
 
 /// Default value for bool fields that should default to true.
@@ -412,6 +433,7 @@ impl Stage {
             max_revisits: None,
             transition_prompt: None,
             accepts_messages: true,
+            allow_complete: false,
         }
     }
 
@@ -687,6 +709,92 @@ mod tests {
             ModelConfig::new("anthropic".to_string(), "claude-sonnet-4-6".to_string()),
         );
         assert!(empty_stage.validate().is_err());
+    }
+
+    #[test]
+    fn test_stage_allow_complete_defaults_false() {
+        let stage = Stage::new("review".to_string(), make_model());
+        assert!(!stage.allow_complete);
+    }
+
+    #[test]
+    fn test_stage_allow_complete_serde_default_when_missing() {
+        // A serialized stage from before allow_complete existed must still
+        // deserialize, defaulting to false.
+        let json = r#"{
+            "name": "review",
+            "description": null,
+            "model": {"provider": "anthropic", "model": "claude-sonnet-4-6", "parameters": {}},
+            "available_tools": [],
+            "max_iterations": null,
+            "context_layout": null,
+            "config": {},
+            "tool_result_routing": null,
+            "transitions": null,
+            "max_revisits": null,
+            "transition_prompt": null
+        }"#;
+        let stage: Stage = serde_json::from_str(json).unwrap();
+        assert!(!stage.allow_complete);
+        assert!(stage.accepts_messages);
+    }
+
+    #[test]
+    fn test_stage_allow_complete_roundtrip() {
+        let mut stage = Stage::new("review".to_string(), make_model());
+        stage.allow_complete = true;
+        let json = serde_json::to_string(&stage).unwrap();
+        let back: Stage = serde_json::from_str(&json).unwrap();
+        assert!(back.allow_complete);
+    }
+
+    #[test]
+    fn test_interaction_point_followups_default_empty() {
+        let point = InteractionPoint {
+            name: "plan_approval".to_string(),
+            prompt: "Approve?".to_string(),
+            required: true,
+            style: InteractionStyle::MultipleChoice,
+            options: vec!["Approve".to_string(), "Revise".to_string()],
+            followups: HashMap::new(),
+        };
+        assert!(point.followups.is_empty());
+    }
+
+    #[test]
+    fn test_interaction_point_followups_roundtrip() {
+        let mut followups = HashMap::new();
+        followups.insert(
+            "Revise".to_string(),
+            "What would you like to change?".to_string(),
+        );
+        let point = InteractionPoint {
+            name: "plan_approval".to_string(),
+            prompt: "Approve?".to_string(),
+            required: true,
+            style: InteractionStyle::MultipleChoice,
+            options: vec!["Approve".to_string(), "Revise".to_string()],
+            followups,
+        };
+        let json = serde_json::to_string(&point).unwrap();
+        let back: InteractionPoint = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            back.followups.get("Revise").map(|s| s.as_str()),
+            Some("What would you like to change?")
+        );
+    }
+
+    #[test]
+    fn test_interaction_point_followups_serde_default_when_missing() {
+        let json = r#"{
+            "name": "plan_approval",
+            "prompt": "Approve?",
+            "required": true,
+            "style": "multiple_choice",
+            "options": ["Approve", "Revise"]
+        }"#;
+        let point: InteractionPoint = serde_json::from_str(json).unwrap();
+        assert!(point.followups.is_empty());
     }
 
     #[test]

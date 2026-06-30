@@ -295,71 +295,85 @@ where
     let iterations_per_segment = max_iterations / segments;
     let mut remaining_iterations = max_iterations;
 
-    for (pt_idx, point) in points.iter().enumerate() {
-        let iters = iterations_per_segment.min(remaining_iterations);
-        if iters > 0 {
-            let response = engine
-                .run_inference_loop_filtered(
-                    entity,
-                    provider_name,
-                    model_name,
-                    tools.to_vec(),
-                    iters,
-                    None,
-                    routing,
-                    compaction_config,
-                    executor,
-                )
-                .await;
+    // Cap how many times a single interaction point can loop back on itself
+    // via a followup (e.g. repeatedly picking "Revise"). Bounded independently
+    // of the iteration budget so a chatty user can't spin forever.
+    const MAX_REVISION_ROUNDS: usize = 4;
 
-            if let Ok(resp) = response {
-                if !resp.content.is_empty() {
-                    io.on_output(&resp.content).await;
-                    // Route agent response to the per-stage output file so the dashboard can display it
-                    if let (Some(run_id), Some(ref m)) = (&run_id_owned, &meta_holder) {
-                        record_stage_output(run_id, m.stage_index, &resp.content);
+    for (pt_idx, point) in points.iter().enumerate() {
+        let mut revision_round = 0usize;
+
+        'point: loop {
+            let iters = iterations_per_segment.min(remaining_iterations);
+            if iters > 0 {
+                let response = engine
+                    .run_inference_loop_filtered(
+                        entity,
+                        provider_name,
+                        model_name,
+                        tools.to_vec(),
+                        iters,
+                        None,
+                        routing,
+                        compaction_config,
+                        executor,
+                    )
+                    .await;
+
+                if let Ok(resp) = response {
+                    if !resp.content.is_empty() {
+                        io.on_output(&resp.content).await;
+                        // Route agent response to the per-stage output file so the dashboard can display it
+                        if let (Some(run_id), Some(ref m)) = (&run_id_owned, &meta_holder) {
+                            record_stage_output(run_id, m.stage_index, &resp.content);
+                        }
+                    }
+                    // Update token counts in meta so the dashboard shows them before WaitingInput
+                    if let Some(ref mut m) = meta_holder {
+                        let token_line = format!(
+                            "[Tokens: {} in, {} out]",
+                            resp.tokens_used.prompt_tokens, resp.tokens_used.completion_tokens
+                        );
+                        record_stage_log(&m.run_id, m.stage_index, &token_line);
+                        m.prompt_tokens += resp.tokens_used.prompt_tokens;
+                        m.completion_tokens += resp.tokens_used.completion_tokens;
+                        m.cached_tokens += resp.tokens_used.cached_tokens;
+                        m.touch();
+                        let _ = runstate::write_meta(m);
                     }
                 }
-                // Update token counts in meta so the dashboard shows them before WaitingInput
-                if let Some(ref mut m) = meta_holder {
-                    let token_line = format!(
-                        "[Tokens: {} in, {} out]",
-                        resp.tokens_used.prompt_tokens, resp.tokens_used.completion_tokens
-                    );
-                    record_stage_log(&m.run_id, m.stage_index, &token_line);
-                    m.prompt_tokens += resp.tokens_used.prompt_tokens;
-                    m.completion_tokens += resp.tokens_used.completion_tokens;
-                    m.cached_tokens += resp.tokens_used.cached_tokens;
-                    m.touch();
-                    let _ = runstate::write_meta(m);
+                remaining_iterations = remaining_iterations.saturating_sub(iters);
+            }
+
+            // Build the interaction request with the right style / options
+            let req_id = make_interaction_id(pt_idx, revision_round * 2);
+            let bp_style = &point.style;
+            let ipc_req = match bp_style {
+                leviath_core::blueprint::InteractionStyle::MultipleChoice => {
+                    InteractionRequest::multiple_choice(
+                        req_id,
+                        &point.prompt,
+                        point.options.clone(),
+                        &point.name,
+                    )
                 }
-            }
-            remaining_iterations = remaining_iterations.saturating_sub(iters);
-        }
+                leviath_core::blueprint::InteractionStyle::Confirm => {
+                    InteractionRequest::confirm(req_id, &point.prompt, &point.name)
+                }
+                leviath_core::blueprint::InteractionStyle::FreeText => {
+                    InteractionRequest::free_text(
+                        req_id,
+                        &point.prompt,
+                        &point.name,
+                        point.required,
+                    )
+                }
+            };
 
-        // Build the interaction request with the right style / options
-        let req_id = make_interaction_id(pt_idx, 0);
-        let bp_style = &point.style;
-        let ipc_req = match bp_style {
-            leviath_core::blueprint::InteractionStyle::MultipleChoice => {
-                InteractionRequest::multiple_choice(
-                    req_id,
-                    &point.prompt,
-                    point.options.clone(),
-                    &point.name,
-                )
-            }
-            leviath_core::blueprint::InteractionStyle::Confirm => {
-                InteractionRequest::confirm(req_id, &point.prompt, &point.name)
-            }
-            leviath_core::blueprint::InteractionStyle::FreeText => {
-                InteractionRequest::free_text(req_id, &point.prompt, &point.name, point.required)
-            }
-        };
-
-        // Dispatch via file IPC or stdin
-        let user_text =
-            if let (Some(run_id), Some(ref mut meta)) = (&run_id_owned, &mut meta_holder) {
+            // Dispatch via file IPC or stdin
+            let user_text = if let (Some(run_id), Some(ref mut meta)) =
+                (&run_id_owned, &mut meta_holder)
+            {
                 let resp = request_interaction_async(run_id, meta, ipc_req.clone(), None).await?;
                 match bp_style {
                     leviath_core::blueprint::InteractionStyle::MultipleChoice
@@ -385,12 +399,45 @@ where
                 }
             };
 
-        if !user_text.is_empty() {
-            if let Some(mut window) = engine.world_mut().get_mut::<ContextWindow>(entity) {
-                let tokens = user_text.len() / 4 + 1;
-                let content = format!("User [{}]: {}", point.name, user_text);
-                let _ = window.add_to_region("conversation", content, tokens);
+            if !user_text.is_empty() {
+                if let Some(mut window) = engine.world_mut().get_mut::<ContextWindow>(entity) {
+                    let tokens = user_text.len() / 4 + 1;
+                    let content = format!("User [{}]: {}", point.name, user_text);
+                    let _ = window.add_to_region("conversation", content, tokens);
+                }
             }
+
+            // If the chosen option has a configured followup, ask the user to
+            // actually describe what they want instead of letting the model
+            // act on the bare option label alone, then loop back and re-ask
+            // the same point so the user can review what changed.
+            let Some(followup_prompt) = point.followups.get(&user_text) else {
+                break 'point;
+            };
+            if revision_round + 1 >= MAX_REVISION_ROUNDS || remaining_iterations == 0 {
+                break 'point;
+            }
+
+            let followup_req_id = make_interaction_id(pt_idx, revision_round * 2 + 1);
+            let followup_req =
+                InteractionRequest::free_text(followup_req_id, followup_prompt, &point.name, true);
+            let followup_text =
+                if let (Some(run_id), Some(ref mut meta)) = (&run_id_owned, &mut meta_holder) {
+                    let resp = request_interaction_async(run_id, meta, followup_req, None).await?;
+                    response_as_text(&resp)
+                } else {
+                    response_as_text(&request_interaction_stdin(&followup_req))
+                };
+
+            if !followup_text.is_empty() {
+                if let Some(mut window) = engine.world_mut().get_mut::<ContextWindow>(entity) {
+                    let tokens = followup_text.len() / 4 + 1;
+                    let content = format!("User [{}] detail: {}", point.name, followup_text);
+                    let _ = window.add_to_region("conversation", content, tokens);
+                }
+            }
+
+            revision_round += 1;
         }
     }
 
@@ -945,6 +992,7 @@ mod tests {
             required: false,
             style: leviath_core::blueprint::InteractionStyle::FreeText,
             options: vec![],
+            followups: std::collections::HashMap::new(),
         }
     }
 
@@ -959,6 +1007,23 @@ mod tests {
             required: false,
             style: leviath_core::blueprint::InteractionStyle::MultipleChoice,
             options,
+            followups: std::collections::HashMap::new(),
+        }
+    }
+
+    fn make_multiple_choice_point_with_followups(
+        name: &str,
+        prompt: &str,
+        options: Vec<String>,
+        followups: std::collections::HashMap<String, String>,
+    ) -> leviath_core::blueprint::InteractionPoint {
+        leviath_core::blueprint::InteractionPoint {
+            name: name.to_string(),
+            prompt: prompt.to_string(),
+            required: false,
+            style: leviath_core::blueprint::InteractionStyle::MultipleChoice,
+            options,
+            followups,
         }
     }
 
@@ -969,6 +1034,7 @@ mod tests {
             required: false,
             style: leviath_core::blueprint::InteractionStyle::Confirm,
             options: vec![],
+            followups: std::collections::HashMap::new(),
         }
     }
 
@@ -1112,6 +1178,105 @@ mod tests {
         .unwrap();
 
         responder.abort();
+        let _ = std::fs::remove_dir_all(runstate::run_dir(&run_id));
+    }
+
+    // ─── Regression: a choice with a configured followup must ask for ─────
+    // elaboration and loop back to re-prompt the same point, instead of the
+    // chosen option's bare label (e.g. "Revise") being the only thing that
+    // ever reaches the model.
+    #[tokio::test]
+    async fn interactive_points_choice_with_followup_loops_back_for_revision() {
+        use crate::interaction::InteractionResponse;
+
+        let bp = make_blueprint(vec![make_stage("main")]);
+        let (mut engine, _pool, entity) = make_engine_and_entity(&bp, "Agent response");
+        let mut io = MockIO::new();
+
+        let run_id = format!(
+            "test-ip-mc-followup-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .subsec_nanos()
+        );
+        let mut meta = RunMeta::new(
+            run_id.clone(),
+            "test".into(),
+            "/p".into(),
+            "t".into(),
+            None,
+            "/tmp".into(),
+            1,
+        );
+        runstate::create_run(&meta).unwrap();
+
+        let mut followups = std::collections::HashMap::new();
+        followups.insert(
+            "Revise".to_string(),
+            "What would you like to change?".to_string(),
+        );
+        let points = vec![make_multiple_choice_point_with_followups(
+            "plan_approval",
+            "Approve the plan?",
+            vec!["Approve".to_string(), "Revise".to_string()],
+            followups,
+        )];
+
+        // Round 1: pick "Revise" (choice_index 1) → must trigger a followup
+        // FreeText request. Answer it. Round 2: pick "Approve" (choice_index 0,
+        // no followup) → the point loop must end after this.
+        let responder = spawn_interaction_responder(
+            run_id.clone(),
+            vec![
+                InteractionResponse::choice("", 1),
+                InteractionResponse::text("", "please add error handling"),
+                InteractionResponse::choice("", 0),
+            ],
+        );
+
+        run_interactive_points_stage(
+            &mut engine,
+            entity,
+            "mock",
+            "test-model",
+            8,
+            &[],
+            None,
+            None,
+            &points,
+            Some((&run_id, &mut meta)),
+            &mut io,
+            &mut noop_exec,
+        )
+        .await
+        .unwrap();
+
+        responder.abort();
+
+        // The elaboration text must have made it into the agent's context —
+        // proof the user's actual feedback (not just the option label) was
+        // surfaced to the model.
+        let window = engine
+            .world()
+            .get::<leviath_runtime::ContextWindow>(entity)
+            .unwrap();
+        let conversation = window.get_region("conversation").unwrap();
+        let all_content: String = conversation
+            .content
+            .iter()
+            .map(|e| e.content.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            all_content.contains("please add error handling"),
+            "expected the followup elaboration in context, got: {}",
+            all_content
+        );
+        assert!(all_content.contains("Revise"));
+        assert!(all_content.contains("Approve"));
+
         let _ = std::fs::remove_dir_all(runstate::run_dir(&run_id));
     }
 

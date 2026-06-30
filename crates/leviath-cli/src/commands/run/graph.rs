@@ -117,7 +117,11 @@ pub async fn resolve_transition(
 
             match choosable.len() {
                 0 => None, // terminal
-                1 => {
+                // A single edge is normally auto-followed (no LLM call needed)
+                // — UNLESS the stage explicitly allows ending here instead
+                // (e.g. a review stage that approves the work), in which case
+                // the LLM must still be asked so it can say "DONE".
+                1 if !stage.allow_complete => {
                     let (_, edge) = choosable[0];
                     let target_idx = blueprint
                         .stages
@@ -127,7 +131,8 @@ pub async fn resolve_transition(
                     Some((edge.clone(), target_idx))
                 }
                 _ => {
-                    // Multiple edges: prompt LLM to choose
+                    // Multiple edges (or a single edge the stage may decline):
+                    // prompt the LLM to choose.
                     let chosen = prompt_llm_transition(
                         stage,
                         &choosable,
@@ -147,7 +152,7 @@ pub async fn resolve_transition(
                             Some((edge, target_idx))
                         }
                         None => {
-                            // LLM didn't pick a valid target — treat as terminal
+                            // LLM said DONE (or didn't pick a valid target) — terminal
                             None
                         }
                     }
@@ -177,7 +182,16 @@ pub async fn prompt_llm_transition(
             }
             p.push('\n');
         }
-        p.push_str("\nRespond with ONLY the stage name you want to transition to, nothing else.");
+        if stage.allow_complete {
+            p.push_str(
+                "\nRespond with ONLY the stage name you want to transition to, or ONLY the \
+                 word DONE if no further stage is needed and the run should end here.",
+            );
+        } else {
+            p.push_str(
+                "\nRespond with ONLY the stage name you want to transition to, nothing else.",
+            );
+        }
         p
     } else {
         let mut p = format!(
@@ -191,7 +205,14 @@ pub async fn prompt_llm_transition(
             }
             p.push('\n');
         }
-        p.push_str("\nWhich stage should run next? Respond with ONLY the stage name.");
+        if stage.allow_complete {
+            p.push_str(
+                "\nWhich stage should run next? Respond with ONLY the stage name, or ONLY the \
+                 word DONE if no further stage is needed and the run should end here.",
+            );
+        } else {
+            p.push_str("\nWhich stage should run next? Respond with ONLY the stage name.");
+        }
         p
     };
 
@@ -233,6 +254,12 @@ pub async fn prompt_llm_transition(
             format!("Assistant: Transitioning to: {}", choice),
             tokens,
         );
+    }
+
+    // The stage explicitly allows ending here instead of transitioning —
+    // honor an unambiguous "DONE" before attempting any edge-name match.
+    if stage.allow_complete && choice.eq_ignore_ascii_case("done") {
+        return None;
     }
 
     // Match the response to an available edge
@@ -1409,6 +1436,183 @@ mod tests {
         let (edge, idx) = result.unwrap();
         assert_eq!(edge.target, "b");
         assert_eq!(idx, 1);
+    }
+
+    // ─── resolve_transition: allow_complete lets the LLM end at a stage
+    // with only one outgoing edge (e.g. an approving review), instead of
+    // blindly auto-following it like the LlmChoice-single-edge case above.
+
+    #[tokio::test]
+    async fn resolve_transition_allow_complete_single_edge_consults_llm() {
+        let mut stage_a = make_stage("review");
+        stage_a.allow_complete = true;
+        let stage_b = make_stage("implement");
+        let mut transitions = HashMap::new();
+        transitions.insert(
+            "implement".to_string(),
+            TransitionEdge {
+                target: "implement".to_string(),
+                condition: TransitionCondition::Always,
+                hint: Some("issues found".to_string()),
+                transform: EdgeTransform::Direct,
+            },
+        );
+        stage_a.transitions = Some(transitions);
+
+        let bp = make_blueprint(vec![stage_a, stage_b]);
+        // Mock provider says DONE — review approved the work, no transition needed.
+        let (mut engine, entity) = make_engine_with_mock_provider(&bp, "DONE");
+        let visit_counts = HashMap::new();
+
+        let result = resolve_transition(
+            &bp.stages[0],
+            0,
+            &bp,
+            &visit_counts,
+            &StageResult::Success,
+            &mut engine,
+            entity,
+            "mock",
+            "test",
+        )
+        .await;
+
+        assert!(
+            result.is_none(),
+            "allow_complete stage must be able to terminate via DONE instead of \
+             being forced down its only edge"
+        );
+    }
+
+    #[tokio::test]
+    async fn resolve_transition_allow_complete_single_edge_still_transitions_when_named() {
+        let mut stage_a = make_stage("review");
+        stage_a.allow_complete = true;
+        let stage_b = make_stage("implement");
+        let mut transitions = HashMap::new();
+        transitions.insert(
+            "implement".to_string(),
+            TransitionEdge {
+                target: "implement".to_string(),
+                condition: TransitionCondition::Always,
+                hint: Some("issues found".to_string()),
+                transform: EdgeTransform::Direct,
+            },
+        );
+        stage_a.transitions = Some(transitions);
+
+        let bp = make_blueprint(vec![stage_a, stage_b]);
+        // Mock provider names the real edge — issues were found, go fix them.
+        let (mut engine, entity) = make_engine_with_mock_provider(&bp, "implement");
+        let visit_counts = HashMap::new();
+
+        let result = resolve_transition(
+            &bp.stages[0],
+            0,
+            &bp,
+            &visit_counts,
+            &StageResult::Success,
+            &mut engine,
+            entity,
+            "mock",
+            "test",
+        )
+        .await;
+
+        let (edge, idx) = result.expect("naming the real edge must still transition");
+        assert_eq!(edge.target, "implement");
+        assert_eq!(idx, 1);
+    }
+
+    #[tokio::test]
+    async fn resolve_transition_without_allow_complete_single_edge_ignores_done() {
+        // Same setup, but allow_complete = false (default) — a stray "DONE"
+        // from the model must NOT terminate the run; the single edge is
+        // still auto-followed without even consulting the LLM.
+        let stage_a = make_stage("plan"); // allow_complete defaults to false
+        let stage_b = make_stage("implement");
+        let mut transitions = HashMap::new();
+        transitions.insert(
+            "implement".to_string(),
+            TransitionEdge {
+                target: "implement".to_string(),
+                condition: TransitionCondition::Always,
+                hint: None,
+                transform: EdgeTransform::Direct,
+            },
+        );
+        let mut stage_a = stage_a;
+        stage_a.transitions = Some(transitions);
+
+        let bp = make_blueprint(vec![stage_a, stage_b]);
+        // No provider registered at all — if this auto-transitions without
+        // consulting the LLM (as expected when allow_complete = false), the
+        // missing provider is never even touched.
+        let (mut engine, entity) = make_engine_and_entity(&bp);
+        let visit_counts = HashMap::new();
+
+        let result = resolve_transition(
+            &bp.stages[0],
+            0,
+            &bp,
+            &visit_counts,
+            &StageResult::Success,
+            &mut engine,
+            entity,
+            "mock",
+            "test",
+        )
+        .await;
+
+        let (edge, idx) = result.expect("single edge without allow_complete must auto-transition");
+        assert_eq!(edge.target, "implement");
+        assert_eq!(idx, 1);
+    }
+
+    // ─── prompt_llm_transition: DONE sentinel ─────────────────────────────
+
+    #[tokio::test]
+    async fn prompt_llm_transition_allow_complete_done_returns_none() {
+        let mut stage = make_stage("review");
+        stage.allow_complete = true;
+        let bp = make_blueprint(vec![stage.clone(), make_stage("implement")]);
+        let (mut engine, entity) = make_engine_with_mock_provider(&bp, "DONE");
+
+        let edge = TransitionEdge {
+            target: "implement".to_string(),
+            condition: TransitionCondition::Always,
+            hint: Some("issues found".to_string()),
+            transform: EdgeTransform::Direct,
+        };
+        let name = "implement".to_string();
+        let edges: Vec<(&String, &TransitionEdge)> = vec![(&name, &edge)];
+
+        let result =
+            prompt_llm_transition(&stage, &edges, &mut engine, entity, "mock", "test").await;
+        assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn prompt_llm_transition_without_allow_complete_done_falls_back_to_edge() {
+        // allow_complete = false: a "DONE" response isn't a recognized
+        // sentinel, so it falls through to the existing fuzzy-match/first-
+        // edge fallback rather than being treated as terminal.
+        let stage = make_stage("plan"); // allow_complete defaults to false
+        let bp = make_blueprint(vec![stage.clone(), make_stage("implement")]);
+        let (mut engine, entity) = make_engine_with_mock_provider(&bp, "DONE");
+
+        let edge = TransitionEdge {
+            target: "implement".to_string(),
+            condition: TransitionCondition::Always,
+            hint: None,
+            transform: EdgeTransform::Direct,
+        };
+        let name = "implement".to_string();
+        let edges: Vec<(&String, &TransitionEdge)> = vec![(&name, &edge)];
+
+        let result =
+            prompt_llm_transition(&stage, &edges, &mut engine, entity, "mock", "test").await;
+        assert_eq!(result.unwrap().target, "implement");
     }
 
     // ─── Helpers for mock provider ────────────────────────────────────────────

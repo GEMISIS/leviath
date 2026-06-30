@@ -153,12 +153,27 @@ pub fn parse_manifest(content: &str) -> anyhow::Result<Blueprint> {
                                             .collect()
                                     })
                                     .unwrap_or_default();
+                                // Follow-up free-text prompts, keyed by option label:
+                                // [stages.<name>.interaction_points.followups]
+                                // "Revise — I'll describe changes" = "What would you like to change?"
+                                let pt_followups: std::collections::HashMap<String, String> = pt
+                                    .get("followups")
+                                    .and_then(|v| v.as_table())
+                                    .map(|tbl| {
+                                        tbl.iter()
+                                            .filter_map(|(k, v)| {
+                                                v.as_str().map(|s| (k.clone(), s.to_string()))
+                                            })
+                                            .collect()
+                                    })
+                                    .unwrap_or_default();
                                 points.push(leviath_core::blueprint::InteractionPoint {
                                     name: pt_name,
                                     prompt: pt_prompt,
                                     required: pt_required,
                                     style: pt_style,
                                     options: pt_options,
+                                    followups: pt_followups,
                                 });
                             }
                         }
@@ -229,6 +244,13 @@ pub fn parse_manifest(content: &str) -> anyhow::Result<Blueprint> {
                 .and_then(|v| v.as_bool())
             {
                 stage.requires_children = rc;
+            }
+
+            // Parse allow_complete flag: lets the LLM end the run at this
+            // stage (e.g. an approving review) instead of being forced down
+            // its only/first transition edge.
+            if let Some(ac) = stage_value.get("allow_complete").and_then(|v| v.as_bool()) {
+                stage.allow_complete = ac;
             }
 
             // Parse per-stage tool permissions: [stages.<name>.tool_permissions]
@@ -839,6 +861,92 @@ style = "confirm"
     }
 
     #[test]
+    fn parse_manifest_interaction_point_followups() {
+        let toml = r#"
+[agent]
+name = "followup-test"
+
+[stages.plan]
+mode = "interactive_points"
+
+[[stages.plan.interaction_points]]
+name     = "plan_approval"
+prompt   = "Approve?"
+required = true
+style    = "multiple_choice"
+options  = ["Approve", "Revise", "Abort"]
+followups = { "Revise" = "What would you like to change?" }
+"#;
+        let bp = parse_manifest(toml).unwrap();
+        let stage = bp.find_stage("plan").unwrap();
+        match &stage.mode {
+            StageMode::InteractivePoints { points } => {
+                assert_eq!(points.len(), 1);
+                assert_eq!(
+                    points[0].followups.get("Revise").map(|s| s.as_str()),
+                    Some("What would you like to change?")
+                );
+                assert!(!points[0].followups.contains_key("Approve"));
+                assert!(!points[0].followups.contains_key("Abort"));
+            }
+            _ => panic!("Expected InteractivePoints mode"),
+        }
+    }
+
+    #[test]
+    fn parse_manifest_interaction_point_no_followups_defaults_empty() {
+        let toml = r#"
+[agent]
+name = "no-followup-test"
+
+[stages.main]
+mode = "interactive_points"
+
+[[stages.main.interaction_points]]
+name     = "confirm"
+prompt   = "Proceed?"
+style    = "confirm"
+"#;
+        let bp = parse_manifest(toml).unwrap();
+        let stage = bp.find_stage("main").unwrap();
+        match &stage.mode {
+            StageMode::InteractivePoints { points } => {
+                assert!(points[0].followups.is_empty());
+            }
+            _ => panic!("Expected InteractivePoints mode"),
+        }
+    }
+
+    #[test]
+    fn parse_manifest_stage_allow_complete() {
+        let toml = r#"
+[agent]
+name = "allow-complete-test"
+
+[stages.review]
+mode = "autonomous"
+allow_complete = true
+"#;
+        let bp = parse_manifest(toml).unwrap();
+        let stage = bp.find_stage("review").unwrap();
+        assert!(stage.allow_complete);
+    }
+
+    #[test]
+    fn parse_manifest_stage_allow_complete_defaults_false() {
+        let toml = r#"
+[agent]
+name = "allow-complete-default-test"
+
+[stages.review]
+mode = "autonomous"
+"#;
+        let bp = parse_manifest(toml).unwrap();
+        let stage = bp.find_stage("review").unwrap();
+        assert!(!stage.allow_complete);
+    }
+
+    #[test]
     fn parse_manifest_with_compaction_config() {
         let toml = r#"
 [agent]
@@ -1141,5 +1249,114 @@ version = "1.0.0"
                 "self-looping 'plan' stage must cap max_revisits"
             );
         }
+    }
+
+    #[test]
+    fn software_engineer_plan_stage_has_error_edge_and_can_abort() {
+        let manifest_content =
+            include_str!("../../../../../agents/software-engineer/agent.leviath");
+        let bp = parse_manifest(manifest_content).unwrap();
+        let plan = bp.find_stage("plan").unwrap();
+        let transitions = plan.transitions.as_ref().unwrap();
+
+        assert!(
+            transitions
+                .get("error_recovery")
+                .map(|e| e.condition == leviath_core::blueprint::TransitionCondition::Error)
+                .unwrap_or(false),
+            "plan stage should route errors to error_recovery, like implement/review do"
+        );
+
+        // allow_complete lets the model respond DONE (e.g. when the user
+        // chose "Abort") instead of being forced into 'implement' or 'plan'.
+        assert!(
+            plan.allow_complete,
+            "plan stage must allow_complete so 'Abort' can actually end the run"
+        );
+    }
+
+    #[test]
+    fn software_engineer_plan_approval_has_followups_for_non_terminal_choices() {
+        let manifest_content =
+            include_str!("../../../../../agents/software-engineer/agent.leviath");
+        let bp = parse_manifest(manifest_content).unwrap();
+        let plan = bp.find_stage("plan").unwrap();
+        let points = match &plan.mode {
+            StageMode::InteractivePoints { points } => points,
+            _ => panic!("plan stage should be interactive_points"),
+        };
+        let approval = points
+            .iter()
+            .find(|p| p.name == "plan_approval")
+            .expect("plan_approval interaction point must exist");
+
+        // "Revise" and "Add detail" promise the user a chance to describe
+        // what they want — without a followup prompt, only the static label
+        // ever reaches the model and the user's actual feedback is lost.
+        let revise_key = approval
+            .options
+            .iter()
+            .find(|o| o.starts_with("Revise"))
+            .expect("a Revise option must exist");
+        let detail_key = approval
+            .options
+            .iter()
+            .find(|o| o.starts_with("Add detail"))
+            .expect("an Add detail option must exist");
+        assert!(
+            approval.followups.contains_key(revise_key),
+            "Revise option must have a followup prompt asking what to change"
+        );
+        assert!(
+            approval.followups.contains_key(detail_key),
+            "Add detail option must have a followup prompt asking which section"
+        );
+
+        // Approve/Abort are terminal/decisive — they must NOT have followups
+        // (no further elaboration needed).
+        for opt in &approval.options {
+            if opt.starts_with("Approve") || opt.starts_with("Abort") {
+                assert!(
+                    !approval.followups.contains_key(opt),
+                    "terminal option '{}' should not have a followup",
+                    opt
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn software_engineer_review_stage_can_complete_and_routes_errors() {
+        let manifest_content =
+            include_str!("../../../../../agents/software-engineer/agent.leviath");
+        let bp = parse_manifest(manifest_content).unwrap();
+        let review = bp.find_stage("review").unwrap();
+
+        assert!(
+            review.allow_complete,
+            "review stage must allow_complete — an approving review has no \
+             real next stage and must not be forced back into 'implement'"
+        );
+
+        let transitions = review
+            .transitions
+            .as_ref()
+            .expect("review stage must declare transitions");
+        assert!(
+            transitions
+                .get("error_recovery")
+                .map(|e| e.condition == leviath_core::blueprint::TransitionCondition::Error)
+                .unwrap_or(false),
+            "review stage should route errors to error_recovery, like implement does"
+        );
+    }
+
+    #[test]
+    fn software_engineer_blueprint_passes_full_validation() {
+        let manifest_content =
+            include_str!("../../../../../agents/software-engineer/agent.leviath");
+        let bp = parse_manifest(manifest_content).unwrap();
+        bp.validate()
+            .expect("shipped software-engineer blueprint must pass Blueprint::validate()");
     }
 }
