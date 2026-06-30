@@ -1,0 +1,434 @@
+//! Shared helper functions: title generation, context window setup, snapshots.
+
+use leviath_core::{Blueprint, ContextLayout, Region, RegionKind};
+use leviath_runtime::{AgentEngine, ContextWindow};
+
+use crate::config::Config;
+use crate::runstate;
+
+/// Return the cheapest fast model for a given provider, used for title generation.
+pub fn default_title_model(provider: &str) -> &'static str {
+    match provider {
+        "anthropic" | "claude-code" => "claude-haiku-4-5-20251001",
+        "openai" => "gpt-5.4-mini",
+        "google" => "gemini-3.5-flash",
+        "openrouter" => "anthropic/claude-haiku-4-5",
+        // For Ollama and unknown providers, fall through to the caller's
+        // logic which will prefer config.default_model or the run model.
+        _ => "",
+    }
+}
+
+/// Attempt to generate a short title from the task prompt using a cheap model.
+///
+/// Best-effort: any failure is logged and silently ignored — a missing title
+/// must never prevent the run from starting.  Token usage from this call is
+/// intentionally excluded from the run's prompt/completion accumulators.
+pub async fn generate_title(
+    task: &str,
+    config: &Config,
+    registry: &leviath_runtime::ProviderRegistry,
+    fallback_model: Option<&str>,
+) -> Option<String> {
+    let provider_name = config
+        .title
+        .provider
+        .as_deref()
+        .unwrap_or(&config.default_provider);
+
+    let provider = registry.get(provider_name)?;
+
+    let model = config
+        .title
+        .model
+        .as_deref()
+        .map(|s| s.to_string())
+        .or_else(|| {
+            let m = default_title_model(provider_name);
+            if m.is_empty() {
+                fallback_model.map(|s| s.to_string())
+            } else {
+                Some(m.to_string())
+            }
+        })?;
+
+    let request = leviath_providers::InferenceRequest {
+        messages: vec![
+            leviath_providers::Message {
+                role: "system".to_string(),
+                content: "Write a terse 3-6 word title summarising the task. \
+                          No quotes, no punctuation at the end, no markdown."
+                    .to_string(),
+                cache_breakpoint: false,
+            },
+            leviath_providers::Message {
+                role: "user".to_string(),
+                content: task.to_string(),
+                cache_breakpoint: false,
+            },
+        ],
+        model,
+        max_tokens: 20,
+        temperature: 0.0,
+        tools: vec![],
+        extra: serde_json::Value::Null,
+    };
+
+    match provider.infer(request).await {
+        Ok(resp) => {
+            let raw = resp.content.trim().lines().next()?.trim().to_string();
+            // Strip leading # heading markers, backtick code formatting, surrounding quotes
+            let title = raw
+                .trim_start_matches('#')
+                .trim()
+                .trim_start_matches('`')
+                .trim_end_matches('`')
+                .trim_start_matches('"')
+                .trim_end_matches('"')
+                .trim_start_matches('\'')
+                .trim_end_matches('\'')
+                .trim()
+                .to_string();
+            if title.is_empty() {
+                None
+            } else {
+                Some(title)
+            }
+        }
+        Err(e) => {
+            println!("Warning: title generation failed ({})", e);
+            None
+        }
+    }
+}
+
+/// Initialize context window regions on an entity from the blueprint.
+pub fn initialize_context_window(
+    engine: &mut AgentEngine,
+    entity: bevy_ecs::prelude::Entity,
+    blueprint: &Blueprint,
+    task: &str,
+) {
+    if let Some(mut window) = engine.world_mut().get_mut::<ContextWindow>(entity) {
+        for region_def in &blueprint.context_layout.regions {
+            let region = Region::new(
+                region_def.name.clone(),
+                region_def.kind.clone(),
+                region_def.max_tokens,
+            );
+            window.add_region(region);
+        }
+
+        if window.get_region("tool_results").is_none() {
+            let tool_region = Region::new("tool_results".to_string(), RegionKind::Temporary, 5000);
+            window.add_region(tool_region);
+        }
+
+        if window.get_region("conversation").is_none() {
+            let conv_region = Region::new(
+                "conversation".to_string(),
+                RegionKind::SlidingWindow { max_items: 50 },
+                10000,
+            );
+            window.add_region(conv_region);
+        }
+
+        let system_region_name = blueprint
+            .context_layout
+            .regions
+            .iter()
+            .find(|r| matches!(r.kind, RegionKind::Pinned))
+            .map(|r| r.name.clone());
+
+        if let Some(region_name) = system_region_name {
+            let task_tokens = task.len() / 4 + 1;
+            let _ = window.add_to_region(&region_name, task.to_string(), task_tokens);
+        }
+    }
+}
+
+/// Swap context layout to a stage-specific layout (preserving existing content where possible).
+pub fn swap_context_layout(
+    engine: &mut AgentEngine,
+    entity: bevy_ecs::prelude::Entity,
+    layout: &ContextLayout,
+) {
+    if let Some(mut window) = engine.world_mut().get_mut::<ContextWindow>(entity) {
+        let mut new_regions = Vec::new();
+        for region_def in &layout.regions {
+            let mut new_region = Region::new(
+                region_def.name.clone(),
+                region_def.kind.clone(),
+                region_def.max_tokens,
+            );
+
+            if let Some(existing) = window.get_region(&region_def.name) {
+                for entry in &existing.content {
+                    let _ = new_region.add_entry(entry.content.clone(), entry.tokens);
+                }
+            }
+
+            new_regions.push(new_region);
+        }
+
+        window.regions = new_regions;
+        window.current_tokens = window.calculate_tokens();
+    }
+}
+
+/// Snapshot the current context window to `context.json` for the background dashboard.
+/// No-op when running in foreground mode (run_id is None).
+pub fn write_context_snapshot_if_bg(
+    engine: &AgentEngine,
+    entity: bevy_ecs::prelude::Entity,
+    stage_name: &str,
+    run_id: &Option<String>,
+) {
+    let Some(ref rid) = run_id else { return };
+    let Some(snap) = build_context_snapshot(engine, entity, stage_name) else {
+        return;
+    };
+    let _ = runstate::write_context_snapshot(rid, &snap);
+}
+
+/// Build a ContextSnapshot from the current engine state (reused by legacy and per-stage writes).
+pub fn build_context_snapshot(
+    engine: &AgentEngine,
+    entity: bevy_ecs::prelude::Entity,
+    stage_name: &str,
+) -> Option<runstate::ContextSnapshot> {
+    let window = engine.world().get::<ContextWindow>(entity)?;
+    let regions = window
+        .regions
+        .iter()
+        .map(|r| {
+            let entries = r
+                .content
+                .iter()
+                .map(|e| runstate::RegionEntrySnapshot {
+                    content: e.content.clone(),
+                    tokens: e.tokens,
+                    metadata: e.metadata.clone(),
+                })
+                .collect();
+            runstate::RegionSnapshot {
+                name: r.name.clone(),
+                kind: match &r.kind {
+                    RegionKind::Pinned => "pinned",
+                    RegionKind::Temporary => "temporary",
+                    RegionKind::Clearable => "clearable",
+                    RegionKind::SlidingWindow { .. } => "sliding",
+                    RegionKind::Compacting { .. } => "compacting",
+                    RegionKind::CompactHistory { .. } => "history",
+                }
+                .to_string(),
+                current_tokens: r.current_tokens,
+                max_tokens: r.max_tokens,
+                entries,
+            }
+        })
+        .collect();
+    Some(runstate::ContextSnapshot {
+        stage_name: stage_name.to_string(),
+        total_tokens: window.current_tokens,
+        max_tokens: window.max_tokens,
+        regions,
+    })
+}
+
+/// Write a line to the per-stage readable output (agent responses).
+pub fn record_stage_output(run_id: &str, idx: usize, text: &str) {
+    runstate::append_stage_output(run_id, idx, text);
+}
+
+/// Write a line to the per-stage operational/tool log.
+pub fn record_stage_log(run_id: &str, idx: usize, text: &str) {
+    runstate::append_stage_log(run_id, idx, text);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use leviath_core::blueprint::ModelConfig;
+    use leviath_core::layout::RegionDefinition;
+    use leviath_runtime::{AgentPool, ProviderRegistry};
+
+    fn make_blueprint_with_regions(regions: Vec<RegionDefinition>) -> leviath_core::Blueprint {
+        let total = regions.iter().map(|r| r.max_tokens).sum();
+        let layout = ContextLayout::new(regions, total);
+        leviath_core::Blueprint::new(
+            "test".to_string(),
+            "test agent".to_string(),
+            vec![leviath_core::Stage::new(
+                "main".to_string(),
+                ModelConfig::new("anthropic".to_string(), "claude-sonnet-4-6".to_string()),
+            )],
+            layout,
+        )
+    }
+
+    fn make_engine_and_entity(
+        blueprint: &leviath_core::Blueprint,
+    ) -> (AgentEngine, bevy_ecs::prelude::Entity) {
+        let registry = ProviderRegistry::new();
+        let mut engine = AgentEngine::with_providers(registry);
+        let mut pool = AgentPool::new(blueprint.clone());
+        let agent_id = pool.spawn_agent(engine.world_mut());
+        let entity = pool.get_agent(&agent_id).unwrap();
+        (engine, entity)
+    }
+
+    #[test]
+    fn initialize_context_window_creates_regions_from_blueprint() {
+        let bp = make_blueprint_with_regions(vec![
+            RegionDefinition::new("system".to_string(), RegionKind::Pinned, 2000),
+            RegionDefinition::new(
+                "conversation".to_string(),
+                RegionKind::SlidingWindow { max_items: 10 },
+                10000,
+            ),
+        ]);
+        let (mut engine, entity) = make_engine_and_entity(&bp);
+
+        initialize_context_window(&mut engine, entity, &bp, "my test task");
+
+        let window = engine.world().get::<ContextWindow>(entity).unwrap();
+        // Should have the 2 defined regions + tool_results (auto-added)
+        assert!(window.get_region("system").is_some());
+        assert!(window.get_region("conversation").is_some());
+        assert!(window.get_region("tool_results").is_some());
+
+        // Task should be injected into the pinned region
+        let sys = window.get_region("system").unwrap();
+        assert_eq!(sys.content.len(), 1);
+        assert!(sys.content[0].content.contains("my test task"));
+    }
+
+    #[test]
+    fn initialize_context_window_adds_default_regions_if_missing() {
+        // Blueprint with only a custom region (no conversation, no tool_results)
+        let bp = make_blueprint_with_regions(vec![RegionDefinition::new(
+            "custom".to_string(),
+            RegionKind::Temporary,
+            5000,
+        )]);
+        let (mut engine, entity) = make_engine_and_entity(&bp);
+
+        initialize_context_window(&mut engine, entity, &bp, "task");
+
+        let window = engine.world().get::<ContextWindow>(entity).unwrap();
+        // Should auto-add conversation and tool_results
+        assert!(window.get_region("tool_results").is_some());
+        assert!(window.get_region("conversation").is_some());
+    }
+
+    #[test]
+    fn swap_context_layout_preserves_existing_content() {
+        let bp = make_blueprint_with_regions(vec![
+            RegionDefinition::new("system".to_string(), RegionKind::Pinned, 2000),
+            RegionDefinition::new(
+                "conversation".to_string(),
+                RegionKind::SlidingWindow { max_items: 10 },
+                10000,
+            ),
+        ]);
+        let (mut engine, entity) = make_engine_and_entity(&bp);
+        initialize_context_window(&mut engine, entity, &bp, "task");
+
+        // Add some content
+        if let Some(mut window) = engine.world_mut().get_mut::<ContextWindow>(entity) {
+            let _ = window.add_to_region("conversation", "existing content".to_string(), 5);
+        }
+
+        // Swap to a new layout that keeps conversation but adds scratch
+        let new_layout = ContextLayout::new(
+            vec![
+                RegionDefinition::new("system".to_string(), RegionKind::Pinned, 3000),
+                RegionDefinition::new(
+                    "conversation".to_string(),
+                    RegionKind::SlidingWindow { max_items: 20 },
+                    15000,
+                ),
+                RegionDefinition::new("scratch".to_string(), RegionKind::Clearable, 5000),
+            ],
+            23000,
+        );
+
+        swap_context_layout(&mut engine, entity, &new_layout);
+
+        let window = engine.world().get::<ContextWindow>(entity).unwrap();
+        // conversation content should be preserved
+        let conv = window.get_region("conversation").unwrap();
+        assert!(conv.content.iter().any(|e| e.content == "existing content"));
+
+        // new region should exist
+        assert!(window.get_region("scratch").is_some());
+
+        // old tool_results should be gone (not in new layout)
+        assert!(window.get_region("tool_results").is_none());
+    }
+
+    #[test]
+    fn default_title_model_returns_correct_models() {
+        assert_eq!(
+            default_title_model("anthropic"),
+            "claude-haiku-4-5-20251001"
+        );
+        assert_eq!(
+            default_title_model("claude-code"),
+            "claude-haiku-4-5-20251001"
+        );
+        assert_eq!(default_title_model("openai"), "gpt-5.4-mini");
+        assert_eq!(default_title_model("google"), "gemini-3.5-flash");
+        assert_eq!(
+            default_title_model("openrouter"),
+            "anthropic/claude-haiku-4-5"
+        );
+        assert_eq!(default_title_model("ollama"), "");
+        assert_eq!(default_title_model("unknown"), "");
+    }
+
+    #[test]
+    fn build_context_snapshot_captures_state() {
+        let bp = make_blueprint_with_regions(vec![
+            RegionDefinition::new("system".to_string(), RegionKind::Pinned, 2000),
+            RegionDefinition::new(
+                "conversation".to_string(),
+                RegionKind::SlidingWindow { max_items: 10 },
+                10000,
+            ),
+        ]);
+        let (mut engine, entity) = make_engine_and_entity(&bp);
+        initialize_context_window(&mut engine, entity, &bp, "task");
+
+        if let Some(mut window) = engine.world_mut().get_mut::<ContextWindow>(entity) {
+            let _ = window.add_to_region("conversation", "hello".to_string(), 2);
+        }
+
+        let snap = build_context_snapshot(&engine, entity, "main").unwrap();
+        assert_eq!(snap.stage_name, "main");
+        assert!(snap.regions.len() >= 2);
+        // Find conversation region in snapshot
+        let conv_snap = snap
+            .regions
+            .iter()
+            .find(|r| r.name == "conversation")
+            .unwrap();
+        assert_eq!(conv_snap.kind, "sliding");
+        assert!(conv_snap.entries.iter().any(|e| e.content == "hello"));
+    }
+
+    #[test]
+    fn write_context_snapshot_if_bg_is_noop_for_foreground() {
+        let bp = make_blueprint_with_regions(vec![RegionDefinition::new(
+            "system".to_string(),
+            RegionKind::Pinned,
+            2000,
+        )]);
+        let (mut engine, entity) = make_engine_and_entity(&bp);
+        initialize_context_window(&mut engine, entity, &bp, "task");
+
+        // Should not panic or error with None run_id
+        write_context_snapshot_if_bg(&engine, entity, "main", &None);
+    }
+}

@@ -6,6 +6,10 @@ edition.workspace = true
 license.workspace = true
 authors.workspace = true
 
+[lib]
+name = "leviath_cli"
+path = "src/lib.rs"
+
 [[bin]]
 name = "lev"
 path = "src/main.rs"
@@ -35,6 +39,7 @@ tokio-stream = { workspace = true }
 futures = { workspace = true }
 dotenvy = { workspace = true }
 leviath-tools = { workspace = true }
+async-trait = { workspace = true }
 libc = "0.2"
 pulldown-cmark = { workspace = true }
 tui-textarea = { workspace = true }

@@ -1,14 +1,8 @@
 //! Leviath CLI - `lev` command-line interface.
 
 use clap::{Parser, Subcommand};
+use leviath_cli::commands;
 use tracing::info;
-
-mod commands;
-mod config;
-mod interaction;
-mod render;
-mod runstate;
-mod tools;
 
 /// Leviath CLI - Agent framework with structured context windows
 #[derive(Parser)]
