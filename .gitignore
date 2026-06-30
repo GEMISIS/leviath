@@ -25,3 +25,4 @@ Thumbs.db
 # Environment specific stuff
 .env
 
+tarpaulin-report.json
