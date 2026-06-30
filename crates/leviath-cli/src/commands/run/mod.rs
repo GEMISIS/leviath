@@ -10,6 +10,7 @@
 //! - `foreground`: Foreground (inline, blocking) run mode
 //! - `worker`: Background worker run mode
 
+pub mod executor;
 mod foreground;
 mod graph;
 mod helpers;

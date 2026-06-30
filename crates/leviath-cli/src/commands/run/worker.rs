@@ -1,8 +1,9 @@
 //! Background worker run mode.
 
-use leviath_core::blueprint::{StageMode, StageResult};
-use leviath_runtime::{AgentPool, AgentState, ContextWindow};
-use std::collections::HashMap;
+use async_trait::async_trait;
+use leviath_core::blueprint::StageResult;
+use leviath_providers::InferenceResponse;
+use leviath_runtime::{AgentPool, AgentState, ContextWindow, ToolResultRoutingConfig};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
@@ -10,18 +11,292 @@ use crate::config::{Config, ToolPolicy};
 use crate::runstate::{self, RunMeta, RunStatus, StageRecord, StageRunStatus};
 use crate::tools::{resolve_policy, ToolRegistry};
 
-use super::graph::{apply_edge_transform, is_graph_mode, resolve_transition};
+use super::executor::{run_stage_loop, StageCallbacks, StageContext};
 use super::helpers::{
     build_context_snapshot, generate_title, initialize_context_window, record_stage_log,
-    record_stage_output, swap_context_layout, write_context_snapshot_if_bg,
+    record_stage_output, write_context_snapshot_if_bg,
 };
 use super::manifest::{find_manifest, parse_manifest};
 use super::session::build_provider_registry;
-use super::stages::{run_interactive_points_stage, run_interactive_stage};
 use super::WorkerArgs;
 
 /// Tracks the current stage index for tool-activity logging from the executor closure.
 type CurrentStageIdx = Arc<Mutex<usize>>;
+
+/// Worker-specific callbacks for the unified stage loop.
+struct WorkerCallbacks<'a> {
+    run_id: String,
+    meta: &'a mut RunMeta,
+    blueprint_stages_len: usize,
+}
+
+impl<'a> WorkerCallbacks<'a> {
+    fn now_secs() -> i64 {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0)
+    }
+}
+
+#[async_trait]
+impl<'a> StageCallbacks for WorkerCallbacks<'a> {
+    async fn on_provider_missing(&mut self, provider: &str, stage_idx: usize) -> bool {
+        let msg = format!("Provider '{}' is not configured", provider);
+        println!("\n{}", msg);
+        record_stage_log(&self.run_id, stage_idx, &format!("[error] {}", msg));
+        {
+            let mut stages = runstate::read_stages_index(&self.run_id);
+            if let Some(r) = stages.get_mut(stage_idx) {
+                r.status = StageRunStatus::Error;
+            }
+            let _ = runstate::write_stages_index(&self.run_id, &stages);
+        }
+        self.meta.status = RunStatus::Error;
+        self.meta.error = Some(msg);
+        self.meta.touch();
+        let _ = runstate::write_meta(self.meta);
+        true // abort run
+    }
+
+    async fn on_stage_enter(
+        &mut self,
+        stage_name: &str,
+        stage_idx: usize,
+        provider: &str,
+        model: &str,
+        visit_label: &str,
+    ) {
+        let stage_header = format!(
+            "Stage {}: {} ({}:{}){}",
+            stage_idx + 1,
+            stage_name,
+            provider,
+            model,
+            visit_label,
+        );
+        println!("\n--- {} ---", stage_header);
+        record_stage_log(
+            &self.run_id,
+            stage_idx,
+            &format!("--- {} ---", stage_header),
+        );
+
+        // Mark stage as active and update stages.json
+        let stage_started_at = Self::now_secs();
+        {
+            let mut stages = runstate::read_stages_index(&self.run_id);
+            if let Some(r) = stages.get_mut(stage_idx) {
+                r.status = StageRunStatus::Active;
+                r.started_at = Some(stage_started_at);
+            }
+            let _ = runstate::write_stages_index(&self.run_id, &stages);
+        }
+
+        self.meta.current_stage = stage_name.to_string();
+        self.meta.stage_index = stage_idx;
+        self.meta.status = RunStatus::Running;
+        self.meta.touch();
+        let _ = runstate::write_meta(self.meta);
+    }
+
+    async fn on_claude_code_warning(&mut self, stage_idx: usize) {
+        let warn = "\u{26a0}\u{fe0f}  Using claude-code provider: tool routing, per-stage filtering, and prompt caching are not available.";
+        println!("{}", warn);
+        record_stage_log(&self.run_id, stage_idx, warn);
+    }
+
+    fn start_message_reader(
+        &mut self,
+        _engine: &leviath_runtime::AgentEngine,
+        _agent_id: &str,
+        _accepts: bool,
+    ) -> Option<tokio::task::JoinHandle<()>> {
+        None // worker: messages come from dashboard
+    }
+
+    fn get_run_context(&mut self) -> Option<(&str, &mut RunMeta)> {
+        Some((&self.run_id, self.meta))
+    }
+
+    async fn run_autonomous<F, Fut>(
+        &mut self,
+        engine: &mut leviath_runtime::AgentEngine,
+        entity: bevy_ecs::prelude::Entity,
+        provider: &str,
+        model: &str,
+        max_iterations: usize,
+        tools: Vec<leviath_providers::Tool>,
+        routing: Option<&ToolResultRoutingConfig>,
+        compaction: Option<&leviath_core::lifecycle::CompactionConfig>,
+        executor: &mut F,
+    ) -> anyhow::Result<(StageResult, Option<InferenceResponse>)>
+    where
+        F: FnMut(Vec<leviath_providers::ToolCall>) -> Fut + Send,
+        Fut: std::future::Future<Output = Vec<(String, String)>> + Send,
+    {
+        // Worker calls engine.run_inference_loop_filtered directly (not run_autonomous_stage)
+        let response = engine
+            .run_inference_loop_filtered(
+                entity,
+                provider,
+                model,
+                tools,
+                max_iterations,
+                None,
+                routing,
+                compaction,
+                executor,
+            )
+            .await
+            .map_err(|e| anyhow::anyhow!("{}", e))?;
+
+        Ok((StageResult::Success, Some(response)))
+    }
+
+    async fn on_stage_result(
+        &mut self,
+        stage_name: &str,
+        stage_idx: usize,
+        _result: &StageResult,
+        response: Option<&InferenceResponse>,
+        engine: &mut leviath_runtime::AgentEngine,
+        entity: bevy_ecs::prelude::Entity,
+    ) {
+        let stage_ended_at = Self::now_secs();
+
+        if let Some(resp) = response {
+            // Print + record response content
+            println!("{}", resp.content);
+            record_stage_output(&self.run_id, stage_idx, &resp.content);
+
+            // Token line
+            let token_line = format!(
+                "[Tokens: {} in, {} out]",
+                resp.tokens_used.prompt_tokens, resp.tokens_used.completion_tokens
+            );
+            println!("\n{}", token_line);
+            record_stage_log(&self.run_id, stage_idx, &token_line);
+
+            // Update meta token counts
+            self.meta.prompt_tokens += resp.tokens_used.prompt_tokens;
+            self.meta.completion_tokens += resp.tokens_used.completion_tokens;
+            self.meta.cached_tokens += resp.tokens_used.cached_tokens;
+
+            // Carry the final response forward so the next stage sees the previous stage's output
+            if !resp.content.is_empty() {
+                if let Some(mut window) = engine.world_mut().get_mut::<ContextWindow>(entity) {
+                    let tokens = resp.content.len() / 4 + 1;
+                    let _ = window.add_to_region(
+                        "conversation",
+                        format!("Assistant ({}): {}", stage_name, resp.content),
+                        tokens,
+                    );
+                }
+            }
+        }
+
+        // Determine if max_iterations was hit — re-check the stage result
+        // (the caller already set it, but we need to update stages.json)
+
+        // Mark stage complete
+        {
+            let mut stages = runstate::read_stages_index(&self.run_id);
+            if let Some(r) = stages.get_mut(stage_idx) {
+                r.status = StageRunStatus::Complete;
+                r.ended_at = Some(stage_ended_at);
+                r.prompt_tokens = self.meta.prompt_tokens;
+                r.completion_tokens = self.meta.completion_tokens;
+                r.cached_tokens = self.meta.cached_tokens;
+            }
+            let _ = runstate::write_stages_index(&self.run_id, &stages);
+        }
+    }
+
+    async fn on_stage_error(
+        &mut self,
+        stage_name: &str,
+        stage_idx: usize,
+        error: &anyhow::Error,
+        is_graph_mode: bool,
+    ) -> Option<StageResult> {
+        let stage_ended_at = Self::now_secs();
+
+        if is_graph_mode {
+            let msg = format!(
+                "Stage '{}' error: {} \u{2014} checking error transitions",
+                stage_name, error
+            );
+            println!("{}", msg);
+            record_stage_log(&self.run_id, stage_idx, &format!("[error] {}", msg));
+
+            // Mark stage as errored but don't abort
+            {
+                let mut stages = runstate::read_stages_index(&self.run_id);
+                if let Some(r) = stages.get_mut(stage_idx) {
+                    r.status = StageRunStatus::Error;
+                    r.ended_at = Some(stage_ended_at);
+                }
+                let _ = runstate::write_stages_index(&self.run_id, &stages);
+            }
+            Some(StageResult::Error)
+        } else {
+            let msg = format!("Stage '{}' inference error: {}", stage_name, error);
+            println!("{}", msg);
+            record_stage_log(&self.run_id, stage_idx, &format!("[error] {}", msg));
+            // Mark stage error
+            {
+                let mut stages = runstate::read_stages_index(&self.run_id);
+                if let Some(r) = stages.get_mut(stage_idx) {
+                    r.status = StageRunStatus::Error;
+                    r.ended_at = Some(stage_ended_at);
+                }
+                let _ = runstate::write_stages_index(&self.run_id, &stages);
+            }
+            self.meta.status = RunStatus::Error;
+            self.meta.error = Some(msg);
+            self.meta.touch();
+            let _ = runstate::write_meta(self.meta);
+            None // propagate — caller returns Ok(()) after setting meta
+        }
+    }
+
+    async fn on_transition(&mut self, from_stage: &str, to_stage: &str, stage_idx: usize) {
+        let marker = format!(
+            "[Stage complete: {}, transitioning to: {}]",
+            from_stage, to_stage
+        );
+        record_stage_log(&self.run_id, stage_idx, &marker);
+    }
+
+    async fn on_complete(&mut self, last_stage_idx: usize) {
+        let done_msg = "[All stages complete]";
+        println!("\n{}", done_msg);
+        if self.blueprint_stages_len > 0 {
+            record_stage_log(&self.run_id, last_stage_idx, done_msg);
+        }
+    }
+
+    async fn on_post_stage(
+        &mut self,
+        engine: &leviath_runtime::AgentEngine,
+        entity: bevy_ecs::prelude::Entity,
+        stage_name: &str,
+    ) {
+        if let Some(state) = engine.world().get::<AgentState>(entity) {
+            self.meta.iteration = state.iteration;
+        }
+        self.meta.touch();
+        let _ = runstate::write_meta(self.meta);
+
+        // Write context snapshot to both legacy path and per-stage path
+        write_context_snapshot_if_bg(engine, entity, stage_name, &Some(self.run_id.clone()));
+        if let Some(snap) = build_context_snapshot(engine, entity, stage_name) {
+            let _ = runstate::write_stage_context(&self.run_id, self.meta.stage_index, &snap);
+        }
+    }
+}
 
 /// Background worker entrypoint: runs stages and writes progress to run-state dir.
 pub async fn execute_worker(args: WorkerArgs) -> anyhow::Result<()> {
@@ -201,7 +476,7 @@ async fn run_worker_inner(args: &WorkerArgs, meta: &mut RunMeta) -> anyhow::Resu
                         &run_id,
                         stage_idx,
                         &format!(
-                            "[tool] present_for_review → waiting for user review: {}",
+                            "[tool] present_for_review \u{2192} waiting for user review: {}",
                             title
                         ),
                     );
@@ -224,7 +499,11 @@ async fn run_worker_inner(args: &WorkerArgs, meta: &mut RunMeta) -> anyhow::Resu
                     } else {
                         format!("User feedback: {}", user_feedback)
                     };
-                    record_stage_log(&run_id, stage_idx, "[tool] present_for_review → done");
+                    record_stage_log(
+                        &run_id,
+                        stage_idx,
+                        "[tool] present_for_review \u{2192} done",
+                    );
                     out.push((tc.id.clone(), result));
                     continue;
                 }
@@ -251,7 +530,7 @@ async fn run_worker_inner(args: &WorkerArgs, meta: &mut RunMeta) -> anyhow::Resu
                         record_stage_log(
                             &run_id,
                             stage_idx,
-                            &format!("[tool] {} → denied", tc.name),
+                            &format!("[tool] {} \u{2192} denied", tc.name),
                         );
                         msg
                     }
@@ -279,21 +558,21 @@ async fn run_worker_inner(args: &WorkerArgs, meta: &mut RunMeta) -> anyhow::Resu
                                 }
                             };
                             let short_result = if result.len() > 120 {
-                                format!("{}…", &result[..120])
+                                format!("{}\u{2026}", &result[..120])
                             } else {
                                 result.clone()
                             };
                             record_stage_log(
                                 &run_id,
                                 stage_idx,
-                                &format!("[tool] {} → {}", tc.name, short_result),
+                                &format!("[tool] {} \u{2192} {}", tc.name, short_result),
                             );
                             result
                         } else {
                             record_stage_log(
                                 &run_id,
                                 stage_idx,
-                                &format!("[tool] {} → declined by user", tc.name),
+                                &format!("[tool] {} \u{2192} declined by user", tc.name),
                             );
                             format!("[denied] User declined tool call '{}'.", tc.name)
                         }
@@ -310,14 +589,14 @@ async fn run_worker_inner(args: &WorkerArgs, meta: &mut RunMeta) -> anyhow::Resu
                             }
                         };
                         let short_result = if result.len() > 120 {
-                            format!("{}…", &result[..120])
+                            format!("{}\u{2026}", &result[..120])
                         } else {
                             result.clone()
                         };
                         record_stage_log(
                             &run_id,
                             stage_idx,
-                            &format!("[tool] {} → {}", tc.name, short_result),
+                            &format!("[tool] {} \u{2192} {}", tc.name, short_result),
                         );
                         result
                     }
@@ -346,379 +625,29 @@ async fn run_worker_inner(args: &WorkerArgs, meta: &mut RunMeta) -> anyhow::Resu
         let _ = runstate::write_stages_index(&args.run_id, &initial_stages);
     }
 
-    // ─── Graph stage loop (worker) ──────────────────────────────────────────
-    let entry_name = blueprint.resolve_entry_stage_name();
-    let mut current_stage_name_val = entry_name;
-    let mut current_stage_idx_val = blueprint
-        .stages
-        .iter()
-        .position(|s| s.name == current_stage_name_val)
-        .unwrap_or(0);
-    let mut visit_counts: HashMap<String, usize> = HashMap::new();
+    let blueprint_stages_len = blueprint.stages.len();
 
-    loop {
-        let stage = blueprint
-            .find_stage(&current_stage_name_val)
-            .ok_or_else(|| anyhow::anyhow!("Stage '{}' not found", current_stage_name_val))?;
+    let mut callbacks = WorkerCallbacks {
+        run_id: args.run_id.clone(),
+        meta,
+        blueprint_stages_len,
+    };
 
-        let stage_idx = current_stage_idx_val;
-        let provider_name = &stage.model.provider;
-        let model_name = args.model.as_deref().unwrap_or(&stage.model.model);
+    let mut ctx = StageContext {
+        blueprint: &blueprint,
+        engine: &mut engine,
+        entity,
+        pool: &mut pool,
+        tool_registry: &tool_registry,
+        current_stage_name: current_stage_name.clone(),
+        current_stage_perms: current_stage_perms.clone(),
+        current_stage_idx: current_stage_idx.clone(),
+        model_override: args.model.clone(),
+        compaction_ref,
+    };
 
-        // Update current stage permissions + index + name for the executor closure
-        {
-            let mut sp = current_stage_perms.lock().await;
-            *sp = stage.tool_permissions.clone();
-        }
-        {
-            let mut si = current_stage_idx.lock().await;
-            *si = stage_idx;
-        }
-        {
-            let mut sn = current_stage_name.lock().await;
-            *sn = stage.name.clone();
-        }
+    run_stage_loop(&mut ctx, &mut callbacks, &agent_id, &mut exec).await?;
 
-        if !engine.providers().has(provider_name) {
-            let msg = format!("Provider '{}' is not configured", provider_name);
-            println!("\n{}", msg);
-            record_stage_log(&args.run_id, stage_idx, &format!("[error] {}", msg));
-            {
-                let mut stages = runstate::read_stages_index(&args.run_id);
-                if let Some(r) = stages.get_mut(stage_idx) {
-                    r.status = StageRunStatus::Error;
-                }
-                let _ = runstate::write_stages_index(&args.run_id, &stages);
-            }
-            meta.status = RunStatus::Error;
-            meta.error = Some(msg);
-            meta.touch();
-            let _ = runstate::write_meta(meta);
-            return Ok(());
-        }
-
-        let visit_num = visit_counts.get(&stage.name).copied().unwrap_or(0);
-        let visit_label = if visit_num > 0 {
-            format!(" (visit {})", visit_num + 1)
-        } else {
-            String::new()
-        };
-        let stage_header = format!(
-            "Stage {}: {} ({}:{}){}",
-            stage_idx + 1,
-            stage.name,
-            provider_name,
-            model_name,
-            visit_label,
-        );
-        println!("\n--- {} ---", stage_header);
-        record_stage_log(
-            &args.run_id,
-            stage_idx,
-            &format!("--- {} ---", stage_header),
-        );
-
-        if provider_name == "claude-code" {
-            let warn = "⚠️  Using claude-code provider: tool routing, per-stage filtering, and prompt caching are not available.";
-            println!("{}", warn);
-            record_stage_log(&args.run_id, stage_idx, warn);
-        }
-
-        // Mark stage as active and update stages.json
-        let stage_started_at = {
-            use std::time::{SystemTime, UNIX_EPOCH};
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .map(|d| d.as_secs() as i64)
-                .unwrap_or(0)
-        };
-        {
-            let mut stages = runstate::read_stages_index(&args.run_id);
-            if let Some(r) = stages.get_mut(stage_idx) {
-                r.status = StageRunStatus::Active;
-                r.started_at = Some(stage_started_at);
-            }
-            let _ = runstate::write_stages_index(&args.run_id, &stages);
-        }
-
-        meta.current_stage = stage.name.clone();
-        meta.stage_index = stage_idx;
-        meta.status = RunStatus::Running;
-        meta.touch();
-        let _ = runstate::write_meta(meta);
-
-        // Update accepts_messages on the agent state for this stage
-        if let Some(mut state) = engine.world_mut().get_mut::<AgentState>(entity) {
-            state.accepts_messages = stage.accepts_messages;
-        }
-
-        if let Some(ref stage_layout) = stage.context_layout {
-            swap_context_layout(&mut engine, entity, stage_layout);
-        }
-
-        // Inject per-stage system prompt into context
-        if let Some(sp) = stage.config.get("system_prompt").and_then(|v| v.as_str()) {
-            if let Some(mut window) = engine.world_mut().get_mut::<ContextWindow>(entity) {
-                let tokens = sp.len() / 4 + 1;
-                let _ = window.add_to_region(
-                    "conversation",
-                    format!("[Stage instructions: {}]", sp),
-                    tokens,
-                );
-            }
-        }
-
-        let all_tools = tool_registry.all_tool_defs();
-        let effective_tools: Vec<leviath_providers::Tool> = if stage.available_tools.is_empty() {
-            Vec::new()
-        } else {
-            all_tools
-                .into_iter()
-                .filter(|t| stage.available_tools.iter().any(|f| f == &t.name))
-                .collect()
-        };
-
-        let routing_config =
-            stage
-                .tool_result_routing
-                .as_ref()
-                .map(|r| leviath_runtime::ToolResultRoutingConfig {
-                    default_region: r.default_region.clone(),
-                    tool_overrides: r.tool_overrides.clone(),
-                    persist: r.persist,
-                    max_result_tokens: r.max_result_tokens,
-                });
-        let routing_ref = routing_config.as_ref();
-        let max_iterations = stage.max_iterations.unwrap_or(20);
-
-        // Determine stage result for transition condition evaluation
-        let stage_result_val: StageResult;
-
-        // Workers now support interactive stage modes via the file-based IPC channel.
-        let stage_run_result: anyhow::Result<Option<leviath_providers::InferenceResponse>> =
-            match &stage.mode {
-                StageMode::Interactive => run_interactive_stage(
-                    &mut engine,
-                    entity,
-                    provider_name,
-                    model_name,
-                    max_iterations,
-                    &effective_tools,
-                    Some((&args.run_id, meta)),
-                    &stage.name,
-                    &mut exec,
-                )
-                .await
-                .map(|_| None),
-                StageMode::InteractivePoints { points } => {
-                    let pts = points.clone();
-                    run_interactive_points_stage(
-                        &mut engine,
-                        entity,
-                        provider_name,
-                        model_name,
-                        max_iterations,
-                        &effective_tools,
-                        routing_ref,
-                        compaction_ref,
-                        &pts,
-                        Some((&args.run_id, meta)),
-                        &mut exec,
-                    )
-                    .await
-                    .map(|_| None)
-                }
-                StageMode::Autonomous => engine
-                    .run_inference_loop_filtered(
-                        entity,
-                        provider_name,
-                        model_name,
-                        effective_tools,
-                        max_iterations,
-                        None,
-                        routing_ref,
-                        compaction_ref,
-                        &mut exec,
-                    )
-                    .await
-                    .map(Some)
-                    .map_err(|e| anyhow::anyhow!("{}", e)),
-            };
-
-        let stage_ended_at = {
-            use std::time::{SystemTime, UNIX_EPOCH};
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .map(|d| d.as_secs() as i64)
-                .unwrap_or(0)
-        };
-
-        match stage_run_result {
-            Ok(resp_opt) => {
-                if let Some(resp) = resp_opt {
-                    // Route the readable agent response to both stdout (legacy) and per-stage output
-                    println!("{}", resp.content);
-                    record_stage_output(&args.run_id, stage_idx, &resp.content);
-
-                    let token_line = format!(
-                        "[Tokens: {} in, {} out]",
-                        resp.tokens_used.prompt_tokens, resp.tokens_used.completion_tokens
-                    );
-                    println!("\n{}", token_line);
-                    record_stage_log(&args.run_id, stage_idx, &token_line);
-
-                    meta.prompt_tokens += resp.tokens_used.prompt_tokens;
-                    meta.completion_tokens += resp.tokens_used.completion_tokens;
-                    meta.cached_tokens += resp.tokens_used.cached_tokens;
-
-                    // Carry the final response forward so the next stage sees the previous stage's output
-                    if !resp.content.is_empty() {
-                        if let Some(mut window) =
-                            engine.world_mut().get_mut::<ContextWindow>(entity)
-                        {
-                            let tokens = resp.content.len() / 4 + 1;
-                            let _ = window.add_to_region(
-                                "conversation",
-                                format!("Assistant ({}): {}", stage.name, resp.content),
-                                tokens,
-                            );
-                        }
-                    }
-                }
-
-                // Determine if max_iterations was hit
-                if let Some(state) = engine.world().get::<AgentState>(entity) {
-                    if stage.max_iterations.is_some() && state.iteration >= max_iterations {
-                        stage_result_val = StageResult::MaxIterations;
-                    } else {
-                        stage_result_val = StageResult::Success;
-                    }
-                } else {
-                    stage_result_val = StageResult::Success;
-                }
-
-                // Mark stage complete
-                {
-                    let mut stages = runstate::read_stages_index(&args.run_id);
-                    if let Some(r) = stages.get_mut(stage_idx) {
-                        r.status = StageRunStatus::Complete;
-                        r.ended_at = Some(stage_ended_at);
-                        r.prompt_tokens = meta.prompt_tokens;
-                        r.completion_tokens = meta.completion_tokens;
-                        r.cached_tokens = meta.cached_tokens;
-                    }
-                    let _ = runstate::write_stages_index(&args.run_id, &stages);
-                }
-            }
-            Err(e) => {
-                // In graph mode, errors can route to error-handler stages
-                if is_graph_mode(&blueprint) {
-                    let msg = format!(
-                        "Stage '{}' error: {} — checking error transitions",
-                        stage.name, e
-                    );
-                    println!("{}", msg);
-                    record_stage_log(&args.run_id, stage_idx, &format!("[error] {}", msg));
-                    stage_result_val = StageResult::Error;
-
-                    // Mark stage as errored but don't abort
-                    {
-                        let mut stages = runstate::read_stages_index(&args.run_id);
-                        if let Some(r) = stages.get_mut(stage_idx) {
-                            r.status = StageRunStatus::Error;
-                            r.ended_at = Some(stage_ended_at);
-                        }
-                        let _ = runstate::write_stages_index(&args.run_id, &stages);
-                    }
-                } else {
-                    let msg = format!("Stage '{}' inference error: {}", stage.name, e);
-                    println!("{}", msg);
-                    record_stage_log(&args.run_id, stage_idx, &format!("[error] {}", msg));
-                    // Mark stage error
-                    {
-                        let mut stages = runstate::read_stages_index(&args.run_id);
-                        if let Some(r) = stages.get_mut(stage_idx) {
-                            r.status = StageRunStatus::Error;
-                            r.ended_at = Some(stage_ended_at);
-                        }
-                        let _ = runstate::write_stages_index(&args.run_id, &stages);
-                    }
-                    meta.status = RunStatus::Error;
-                    meta.error = Some(msg);
-                    meta.touch();
-                    let _ = runstate::write_meta(meta);
-                    return Ok(());
-                }
-            }
-        }
-
-        *visit_counts.entry(stage.name.clone()).or_default() += 1;
-
-        if let Some(state) = engine.world().get::<AgentState>(entity) {
-            meta.iteration = state.iteration;
-        }
-        meta.touch();
-        let _ = runstate::write_meta(meta);
-        // Write context snapshot to both legacy path and per-stage path
-        write_context_snapshot_if_bg(&engine, entity, &stage.name, &Some(args.run_id.clone()));
-        if let Some(snap) = build_context_snapshot(&engine, entity, &stage.name) {
-            let _ = runstate::write_stage_context(&args.run_id, stage_idx, &snap);
-        }
-
-        // Resolve the next transition
-        let stage_name_owned = current_stage_name_val.clone();
-        let stage_ref = blueprint.find_stage(&stage_name_owned).unwrap();
-        let transition = resolve_transition(
-            stage_ref,
-            current_stage_idx_val,
-            &blueprint,
-            &visit_counts,
-            &stage_result_val,
-            &mut engine,
-            entity,
-            provider_name,
-            model_name,
-        )
-        .await;
-
-        match transition {
-            Some((edge, next_idx)) => {
-                let next_name = edge.target.clone();
-                let marker = format!(
-                    "[Stage complete: {}, transitioning to: {}]",
-                    stage_name_owned, next_name
-                );
-                record_stage_log(&args.run_id, stage_idx, &marker);
-                if let Some(mut window) = engine.world_mut().get_mut::<ContextWindow>(entity) {
-                    let tokens = marker.len() / 4 + 1;
-                    let _ = window.add_to_region("conversation", marker, tokens);
-                }
-
-                // Apply edge transform
-                apply_edge_transform(
-                    &edge,
-                    &visit_counts,
-                    &mut engine,
-                    entity,
-                    provider_name,
-                    model_name,
-                    compaction_ref,
-                )
-                .await;
-
-                current_stage_name_val = next_name;
-                current_stage_idx_val = next_idx;
-            }
-            None => break, // terminal: no valid transitions
-        }
-    }
-
-    let done_msg = "[All stages complete]";
-    println!("\n{}", done_msg);
-    // Log the completion message to the last stage's log
-    if !blueprint.stages.is_empty() {
-        record_stage_log(&args.run_id, current_stage_idx_val, done_msg);
-    }
     tool_registry.shutdown().await;
     Ok(())
 }
