@@ -976,19 +976,6 @@ mod tests {
     }
 
     /// Clean up stale test-* run directories from previous test runs.
-    fn cleanup_stale_test_runs() {
-        let runs_dir = runstate::runs_dir();
-        if let Ok(entries) = std::fs::read_dir(&runs_dir) {
-            for entry in entries.flatten() {
-                if let Some(name) = entry.file_name().to_str() {
-                    if name.starts_with("test-") {
-                        let _ = std::fs::remove_dir_all(entry.path());
-                    }
-                }
-            }
-        }
-    }
-
     /// Helper: spawn a background task that watches for pending.json and writes a response.
     /// Returns a JoinHandle that should be awaited or aborted after the test.
     fn spawn_interaction_responder(
@@ -1030,7 +1017,6 @@ mod tests {
         let mut meta = RunMeta::new(
             run_id.clone(), "test".into(), "/p".into(), "t".into(), None, "/tmp".into(), 1,
         );
-        cleanup_stale_test_runs();
         runstate::create_run(&meta).unwrap();
 
         let points = vec![make_free_text_point("feedback", "What do you think?")];
@@ -1073,7 +1059,6 @@ mod tests {
         let mut meta = RunMeta::new(
             run_id.clone(), "test".into(), "/p".into(), "t".into(), None, "/tmp".into(), 1,
         );
-        cleanup_stale_test_runs();
         runstate::create_run(&meta).unwrap();
 
         let points = vec![make_multiple_choice_point(
@@ -1121,7 +1106,6 @@ mod tests {
         let mut meta = RunMeta::new(
             run_id.clone(), "test".into(), "/p".into(), "t".into(), None, "/tmp".into(), 1,
         );
-        cleanup_stale_test_runs();
         runstate::create_run(&meta).unwrap();
 
         let points = vec![make_confirm_point("confirm_step", "Are you sure?")];
@@ -1164,7 +1148,6 @@ mod tests {
         let mut meta = RunMeta::new(
             run_id.clone(), "test".into(), "/p".into(), "t".into(), None, "/tmp".into(), 1,
         );
-        cleanup_stale_test_runs();
         runstate::create_run(&meta).unwrap();
 
         let points = vec![
@@ -1221,7 +1204,6 @@ mod tests {
         let mut meta = RunMeta::new(
             run_id.clone(), "test".into(), "/p".into(), "t".into(), None, "/tmp".into(), 1,
         );
-        cleanup_stale_test_runs();
         runstate::create_run(&meta).unwrap();
 
         let points = vec![
@@ -1271,7 +1253,6 @@ mod tests {
         let mut meta = RunMeta::new(
             run_id.clone(), "test".into(), "/p".into(), "t".into(), None, "/tmp".into(), 1,
         );
-        cleanup_stale_test_runs();
         runstate::create_run(&meta).unwrap();
 
         let points = vec![make_free_text_point("ask", "Say something")];
