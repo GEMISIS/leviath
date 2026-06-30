@@ -23,7 +23,15 @@ model = { provider = "anthropic", model = "claude-sonnet-4-6" }
 description = "Explore the codebase and produce a step-by-step implementation plan"
 available_tools = ["read_file", "list_dir"]
 max_iterations = 20
-transition_prompt = "You've produced a plan. Ready to implement?"
+max_revisits = 6
+transition_prompt = """
+You've shown the plan to the user and asked them to approve it, request
+revisions, expand a section, or abort.
+
+- If they approved the plan, transition to 'implement'.
+- If they asked for revisions, more detail, or chose to abort, transition
+  back to 'plan' and address their feedback before asking again.
+"""
 system_prompt = """
 You are the planning stage of a code assistant.
 
@@ -50,7 +58,10 @@ read_file = "allow"
 list_dir  = "allow"
 
 [stages.plan.transitions.implement]
-hint = "Plan approved, start coding"
+hint = "Plan approved — proceed to implementation"
+
+[stages.plan.transitions.plan]
+hint = "User asked for revisions, more detail, or chose to abort — keep planning"
 
 [[stages.plan.interaction_points]]
 name     = "plan_approval"

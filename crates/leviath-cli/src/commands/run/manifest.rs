@@ -1097,4 +1097,49 @@ version = "1.0.0"
         assert_eq!(bp.name, "public-test");
         assert_eq!(bp.version, "1.0.0");
     }
+
+    // ─── Regression: shipped software-engineer agent must branch on plan_approval ──
+    //
+    // The "plan" stage's plan_approval interaction point lets the user pick
+    // Approve / Revise / Add detail / Abort. If "plan" only has a single
+    // outgoing transition edge, resolve_transition() auto-follows it without
+    // ever consulting the LLM — so anything other than "Approve" is silently
+    // ignored and the run proceeds to "implement" anyway. Guard against that
+    // regressing by requiring at least two outgoing edges (forcing the
+    // LLM-consultation path in resolve_transition / prompt_llm_transition).
+    #[test]
+    fn software_engineer_plan_stage_branches_on_choice() {
+        let manifest_content =
+            include_str!("../../../../../agents/software-engineer/agent.leviath");
+        let bp = parse_manifest(manifest_content).unwrap();
+        let plan = bp.find_stage("plan").unwrap();
+
+        let transitions = plan
+            .transitions
+            .as_ref()
+            .expect("plan stage must declare transitions");
+        assert!(
+            transitions.len() >= 2,
+            "plan stage must have >=2 outgoing edges so the user's plan_approval \
+             choice (Revise/Add detail/Abort) actually changes behavior instead \
+             of being silently ignored by a single-edge auto-transition; got {:?}",
+            transitions.keys().collect::<Vec<_>>()
+        );
+        assert!(transitions.contains_key("implement"));
+
+        // A self-loop (or other non-"implement" edge) must exist so revising/
+        // aborting doesn't fall through to implementation.
+        assert!(
+            transitions.keys().any(|t| t != "implement"),
+            "plan stage needs an edge other than 'implement' for non-approval choices"
+        );
+
+        // The self-loop must be revisit-capped to avoid an infinite planning loop.
+        if transitions.contains_key("plan") {
+            assert!(
+                plan.max_revisits.is_some(),
+                "self-looping 'plan' stage must cap max_revisits"
+            );
+        }
+    }
 }
