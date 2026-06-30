@@ -564,6 +564,10 @@ pub fn default_tool_policy(tool_name: &str, is_builtin: bool) -> ToolPolicy {
     match tool_name {
         "read_file" | "list_dir" => ToolPolicy::Allow,
         "write_file" | "edit_file" | "bash" => ToolPolicy::Ask,
+        // These tools ARE the human-in-the-loop mechanism — gating them behind
+        // a separate tool-approval prompt would mean asking the user "may I
+        // ask you something?" before actually asking them.
+        "ask_user_text" | "ask_user_choice" | "ask_user_confirm" => ToolPolicy::Allow,
         _ => {
             // All other tools (built-in or MCP) default to Ask
             let _ = is_builtin;
@@ -639,6 +643,24 @@ mod policy_tests {
         assert_eq!(default_tool_policy("write_file", true), ToolPolicy::Ask);
         assert_eq!(default_tool_policy("edit_file", true), ToolPolicy::Ask);
         assert_eq!(default_tool_policy("bash", true), ToolPolicy::Ask);
+    }
+
+    #[test]
+    fn test_default_policy_ask_user_tools_allow_by_default() {
+        // These tools ARE the human-in-the-loop mechanism — they must not
+        // require a separate approval prompt before asking the user.
+        assert_eq!(
+            default_tool_policy("ask_user_text", true),
+            ToolPolicy::Allow
+        );
+        assert_eq!(
+            default_tool_policy("ask_user_choice", true),
+            ToolPolicy::Allow
+        );
+        assert_eq!(
+            default_tool_policy("ask_user_confirm", true),
+            ToolPolicy::Allow
+        );
     }
 
     #[test]

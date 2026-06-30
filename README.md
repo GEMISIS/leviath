@@ -104,6 +104,8 @@ scratch      = { kind = "clearable", max_tokens = 5000 }       # wipes clean bet
 
 **💬 Mid-Run Collaboration** — Send messages to agents while they work. Type in the terminal or use the dashboard — your input is injected between inference calls so the agent sees it naturally. Redirect an implementation, answer a question, or add constraints without restarting. Enabled by default on all stages.
 
+**🙋 Two Ways to Put a Human in the Loop** — `interaction_points` in a stage's config force a checkpoint every time that stage runs (with optional `followups` so a multiple-choice answer like "Revise" can prompt for the actual details, not just a label). For input the *agent* decides it needs, grant it the `ask_user_text` / `ask_user_choice` / `ask_user_confirm` built-in tools via `available_tools` — it calls them on its own judgment, mid-reasoning, instead of guessing. Both are gated by the same `tool_permissions`/`available_tools` allow-or-deny rules as every other tool, so you decide per-stage which mechanism (forced checkpoint, agent's own judgment, or both) applies.
+
 ## Benchmarks
 
 <!-- ⚠️ Numbers below are targets — replace with actuals from benchmark runs before launch -->

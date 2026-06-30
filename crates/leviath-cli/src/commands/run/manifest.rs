@@ -1359,4 +1359,29 @@ version = "1.0.0"
         bp.validate()
             .expect("shipped software-engineer blueprint must pass Blueprint::validate()");
     }
+
+    #[test]
+    fn software_engineer_plan_and_implement_can_ask_the_user_dynamically() {
+        // Beyond the static plan_approval checkpoint, plan/implement should
+        // be able to decide for themselves, mid-reasoning, that they need
+        // human input — via the ask_user_* tools, not just the forced
+        // interaction_points.
+        let manifest_content =
+            include_str!("../../../../../agents/software-engineer/agent.leviath");
+        let bp = parse_manifest(manifest_content).unwrap();
+
+        let plan = bp.find_stage("plan").unwrap();
+        assert!(plan.available_tools.contains(&"ask_user_text".to_string()));
+        assert!(plan
+            .available_tools
+            .contains(&"ask_user_choice".to_string()));
+
+        let implement = bp.find_stage("implement").unwrap();
+        assert!(implement
+            .available_tools
+            .contains(&"ask_user_text".to_string()));
+        assert!(implement
+            .available_tools
+            .contains(&"ask_user_confirm".to_string()));
+    }
 }

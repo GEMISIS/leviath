@@ -136,6 +136,53 @@ impl BuiltinTools {
                     "required": ["title", "markdown"]
                 }),
             },
+            Tool {
+                name: "ask_user_text".to_string(),
+                description: "Ask the user a free-form question and wait for their written answer. The run pauses until they respond. Use this when you need clarification, missing information, or a specific detail only the user knows — decide for yourself when this is necessary; don't ask about things you can figure out on your own.".to_string(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "prompt": {
+                            "type": "string",
+                            "description": "The question to ask the user"
+                        }
+                    },
+                    "required": ["prompt"]
+                }),
+            },
+            Tool {
+                name: "ask_user_choice".to_string(),
+                description: "Ask the user to pick one option from a list and wait for their answer. The run pauses until they respond. Use this when you have a small number of distinct paths forward and want the user to decide which one, rather than guessing yourself.".to_string(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "prompt": {
+                            "type": "string",
+                            "description": "The question to ask the user"
+                        },
+                        "options": {
+                            "type": "array",
+                            "items": { "type": "string" },
+                            "description": "At least two options for the user to choose from"
+                        }
+                    },
+                    "required": ["prompt", "options"]
+                }),
+            },
+            Tool {
+                name: "ask_user_confirm".to_string(),
+                description: "Ask the user a yes/no question and wait for their answer. The run pauses until they respond. Use this for a quick go/no-go decision before doing something significant or hard to undo.".to_string(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "prompt": {
+                            "type": "string",
+                            "description": "The yes/no question to ask the user"
+                        }
+                    },
+                    "required": ["prompt"]
+                }),
+            },
         ]
     }
 
@@ -264,6 +311,9 @@ impl BuiltinTools {
             "shell".to_string(),
             "bash".to_string(), // Alias for backward compatibility
             "present_for_review".to_string(),
+            "ask_user_text".to_string(),
+            "ask_user_choice".to_string(),
+            "ask_user_confirm".to_string(),
         ]
     }
 
@@ -537,11 +587,11 @@ mod tests {
     // ── Tool definitions ──────────────────────────────────────────────────
 
     #[test]
-    fn tool_defs_returns_six_tools() {
+    fn tool_defs_returns_nine_tools() {
         let dir = std::env::temp_dir();
         let tools = make_tools(&dir);
         let defs = tools.tool_defs();
-        assert_eq!(defs.len(), 6);
+        assert_eq!(defs.len(), 9);
     }
 
     #[test]
@@ -555,6 +605,36 @@ mod tests {
         assert!(names.contains(&"list_dir".to_string()));
         assert!(names.contains(&"shell".to_string()));
         assert!(names.contains(&"present_for_review".to_string()));
+        assert!(names.contains(&"ask_user_text".to_string()));
+        assert!(names.contains(&"ask_user_choice".to_string()));
+        assert!(names.contains(&"ask_user_confirm".to_string()));
+    }
+
+    #[test]
+    fn tool_defs_ask_user_choice_has_options_array() {
+        let dir = std::env::temp_dir();
+        let tools = make_tools(&dir);
+        let def = tools
+            .tool_defs()
+            .into_iter()
+            .find(|t| t.name == "ask_user_choice")
+            .unwrap();
+        let required = def.parameters["required"].as_array().unwrap();
+        assert!(required.iter().any(|v| v == "prompt"));
+        assert!(required.iter().any(|v| v == "options"));
+        assert_eq!(def.parameters["properties"]["options"]["type"], "array");
+    }
+
+    #[tokio::test]
+    async fn ask_user_tools_not_handled_by_builtin_execute() {
+        // ask_user_* tools are intercepted upstream (worker.rs/foreground.rs),
+        // exactly like present_for_review — execute() must never run them.
+        let dir = std::env::temp_dir();
+        let tools = make_tools(&dir);
+        for name in ["ask_user_text", "ask_user_choice", "ask_user_confirm"] {
+            let result = tools.execute(name, serde_json::json!({})).await;
+            assert!(result.contains("Unknown built-in tool"));
+        }
     }
 
     #[test]
@@ -595,10 +675,10 @@ mod tests {
     }
 
     #[test]
-    fn names_returns_seven_entries() {
+    fn names_returns_ten_entries() {
         let dir = std::env::temp_dir();
         let tools = make_tools(&dir);
-        assert_eq!(tools.names().len(), 7);
+        assert_eq!(tools.names().len(), 10);
     }
 
     // ── Sub-agent tool definitions ────────────────────────────────────────

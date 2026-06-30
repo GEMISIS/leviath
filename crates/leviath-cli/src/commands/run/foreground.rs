@@ -331,6 +331,106 @@ pub async fn run_foreground(args: RunArgs) -> anyhow::Result<()> {
                     continue;
                 }
 
+                // ── ask_user_*: agent-initiated dynamic interaction tools ──────
+                // Unlike `interaction_points` (declared statically in the
+                // blueprint and always shown), these let the model itself
+                // decide, mid-reasoning, that it needs human input.
+                if tc.name == "ask_user_text" {
+                    use crate::interaction::{
+                        request_interaction_stdin, response_as_text, InteractionRequest,
+                    };
+                    let prompt = tc
+                        .arguments
+                        .get("prompt")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    let stage_name = stage_nm.lock().await.clone();
+                    let req = InteractionRequest::free_text(
+                        format!("fg-ask-{}", tc.id),
+                        &prompt,
+                        &stage_name,
+                        true,
+                    );
+                    let resp = request_interaction_stdin(&req);
+                    let answer = response_as_text(&resp);
+                    let result = if answer.trim().is_empty() {
+                        "User provided no answer.".to_string()
+                    } else {
+                        format!("User: {}", answer)
+                    };
+                    out.push((tc.id.clone(), result));
+                    continue;
+                }
+
+                if tc.name == "ask_user_choice" {
+                    use crate::interaction::{
+                        request_interaction_stdin, response_as_choice, response_as_text,
+                        InteractionRequest,
+                    };
+                    let prompt = tc
+                        .arguments
+                        .get("prompt")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    let options: Vec<String> = tc
+                        .arguments
+                        .get("options")
+                        .and_then(|v| v.as_array())
+                        .map(|arr| {
+                            arr.iter()
+                                .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    if options.len() < 2 {
+                        out.push((
+                            tc.id.clone(),
+                            "[error] ask_user_choice requires at least 2 options".to_string(),
+                        ));
+                        continue;
+                    }
+                    let stage_name = stage_nm.lock().await.clone();
+                    let req = InteractionRequest::multiple_choice(
+                        format!("fg-ask-{}", tc.id),
+                        &prompt,
+                        options.clone(),
+                        &stage_name,
+                    );
+                    let resp = request_interaction_stdin(&req);
+                    let choice = response_as_choice(&resp, &options)
+                        .cloned()
+                        .unwrap_or_else(|| response_as_text(&resp));
+                    out.push((tc.id.clone(), format!("User chose: {}", choice)));
+                    continue;
+                }
+
+                if tc.name == "ask_user_confirm" {
+                    use crate::interaction::{
+                        request_interaction_stdin, response_approved, InteractionRequest,
+                    };
+                    let prompt = tc
+                        .arguments
+                        .get("prompt")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    let stage_name = stage_nm.lock().await.clone();
+                    let req = InteractionRequest::confirm(
+                        format!("fg-ask-{}", tc.id),
+                        &prompt,
+                        &stage_name,
+                    );
+                    let resp = request_interaction_stdin(&req);
+                    let approved = response_approved(&resp);
+                    out.push((
+                        tc.id.clone(),
+                        format!("User answered: {}", if approved { "Yes" } else { "No" }),
+                    ));
+                    continue;
+                }
+
                 let is_builtin = builtin_names.contains(&tc.name);
                 let session_has = session_al.lock().await.contains(&tc.name);
                 let policy = if session_has {

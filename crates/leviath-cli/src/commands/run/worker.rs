@@ -510,6 +510,114 @@ async fn run_worker_inner(args: &WorkerArgs, meta: &mut RunMeta) -> anyhow::Resu
                     continue;
                 }
 
+                // ── ask_user_*: agent-initiated dynamic interaction tools ──────
+                // Unlike `interaction_points` (declared statically in the
+                // blueprint and always shown), these let the model itself
+                // decide, mid-reasoning, that it needs human input.
+                if tc.name == "ask_user_text" {
+                    let prompt = tc
+                        .arguments
+                        .get("prompt")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    record_stage_log(
+                        &run_id,
+                        stage_idx,
+                        &format!("[tool] ask_user_text \u{2192} waiting: {}", prompt),
+                    );
+                    let req = crate::interaction::InteractionRequest::free_text(
+                        format!("ask-{}", tc.id),
+                        &prompt,
+                        &stage_name,
+                        true,
+                    );
+                    let resp =
+                        crate::interaction::request_interaction_bg_review(&run_id, req).await;
+                    let answer = crate::interaction::response_as_text(&resp);
+                    record_stage_log(&run_id, stage_idx, "[tool] ask_user_text \u{2192} done");
+                    let result = if answer.trim().is_empty() {
+                        "User provided no answer.".to_string()
+                    } else {
+                        format!("User: {}", answer)
+                    };
+                    out.push((tc.id.clone(), result));
+                    continue;
+                }
+
+                if tc.name == "ask_user_choice" {
+                    let prompt = tc
+                        .arguments
+                        .get("prompt")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    let options: Vec<String> = tc
+                        .arguments
+                        .get("options")
+                        .and_then(|v| v.as_array())
+                        .map(|arr| {
+                            arr.iter()
+                                .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                                .collect()
+                        })
+                        .unwrap_or_default();
+                    if options.len() < 2 {
+                        out.push((
+                            tc.id.clone(),
+                            "[error] ask_user_choice requires at least 2 options".to_string(),
+                        ));
+                        continue;
+                    }
+                    record_stage_log(
+                        &run_id,
+                        stage_idx,
+                        &format!("[tool] ask_user_choice \u{2192} waiting: {}", prompt),
+                    );
+                    let req = crate::interaction::InteractionRequest::multiple_choice(
+                        format!("ask-{}", tc.id),
+                        &prompt,
+                        options.clone(),
+                        &stage_name,
+                    );
+                    let resp =
+                        crate::interaction::request_interaction_bg_review(&run_id, req).await;
+                    let choice = crate::interaction::response_as_choice(&resp, &options)
+                        .cloned()
+                        .unwrap_or_else(|| crate::interaction::response_as_text(&resp));
+                    record_stage_log(&run_id, stage_idx, "[tool] ask_user_choice \u{2192} done");
+                    out.push((tc.id.clone(), format!("User chose: {}", choice)));
+                    continue;
+                }
+
+                if tc.name == "ask_user_confirm" {
+                    let prompt = tc
+                        .arguments
+                        .get("prompt")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    record_stage_log(
+                        &run_id,
+                        stage_idx,
+                        &format!("[tool] ask_user_confirm \u{2192} waiting: {}", prompt),
+                    );
+                    let req = crate::interaction::InteractionRequest::confirm(
+                        format!("ask-{}", tc.id),
+                        &prompt,
+                        &stage_name,
+                    );
+                    let resp =
+                        crate::interaction::request_interaction_bg_review(&run_id, req).await;
+                    let approved = crate::interaction::response_approved(&resp);
+                    record_stage_log(&run_id, stage_idx, "[tool] ask_user_confirm \u{2192} done");
+                    out.push((
+                        tc.id.clone(),
+                        format!("User answered: {}", if approved { "Yes" } else { "No" }),
+                    ));
+                    continue;
+                }
+
                 let is_builtin = builtin_names.contains(&tc.name);
                 let session_has = session_al.lock().await.contains(&tc.name);
                 let policy = if session_has {

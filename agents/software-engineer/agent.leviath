@@ -21,7 +21,7 @@ bash       = "ask"
 mode = "interactive_points"
 model = { provider = "anthropic", model = "claude-sonnet-4-6" }
 description = "Explore the codebase and produce a step-by-step implementation plan"
-available_tools = ["read_file", "list_dir"]
+available_tools = ["read_file", "list_dir", "ask_user_text", "ask_user_choice"]
 max_iterations = 20
 max_revisits = 6
 # Lets the run end here (via the "DONE" response — see transition_prompt)
@@ -48,6 +48,12 @@ Your job:
    - What each change does
    - Key decisions and trade-offs
 
+If the task is genuinely ambiguous (e.g. missing requirements, or a real
+fork in approach you can't resolve yourself), use ask_user_text or
+ask_user_choice to ask BEFORE producing the plan — don't guess on things
+only the user can answer. Don't ask about things you can reasonably decide
+yourself.
+
 Be specific — the implement stage will execute exactly what you write here.
 End with:
 
@@ -61,6 +67,8 @@ End with:
 [stages.plan.tool_permissions]
 read_file = "allow"
 list_dir  = "allow"
+ask_user_text   = "allow"
+ask_user_choice = "allow"
 
 [stages.plan.transitions.implement]
 hint = "Plan approved — proceed to implementation"
@@ -94,7 +102,7 @@ options  = ["Approve — proceed to implementation", "Revise — I'll describe c
 mode = "autonomous"
 model = { provider = "anthropic", model = "claude-sonnet-4-6" }
 description = "Write code according to the approved plan"
-available_tools = ["write_file", "read_file", "edit_file", "list_dir", "bash"]
+available_tools = ["write_file", "read_file", "edit_file", "list_dir", "bash", "ask_user_text", "ask_user_confirm"]
 max_iterations = 50
 max_revisits = 5
 system_prompt = """
@@ -103,6 +111,11 @@ Execute the plan step by step:
 - Use write_file to create new files.
 - Use edit_file to modify existing files.
 - Use bash to run tests or verify the build after writing.
+
+If you hit a genuine ambiguity the plan didn't resolve (e.g. conflicting
+requirements, or a destructive/hard-to-reverse action you're unsure about),
+use ask_user_text or ask_user_confirm to check before proceeding — don't
+silently guess on something the user would want a say in.
 
 Work methodically through each plan step. After completing all steps, provide a concise
 summary of what was created/modified and whether tests passed.
