@@ -105,7 +105,7 @@ fn all_builtin_agents_transition_targets_exist() {
 
         for stage in &blueprint.stages {
             if let Some(ref transitions) = stage.transitions {
-                for (target_name, _edge) in transitions {
+                for target_name in transitions.keys() {
                     assert!(
                         blueprint.find_stage(target_name).is_some(),
                         "Agent '{}', stage '{}': transition target '{}' not found",
