@@ -139,6 +139,14 @@ impl Dashboard {
     ) -> Line<'static> {
         use crate::commands::dashboard::helpers::{elapsed_str, elapsed_str_until};
 
+        // Only the tab matching the agent's current stage index may show live
+        // (spinner / ticking-duration) treatment. A stage record can be left
+        // stuck at `Active` (e.g. a prior stage whose completion was never
+        // recorded) even though the run has moved on — render those as
+        // Complete instead of animating a spinner on a stage that isn't
+        // actually running.
+        let is_current_tab = i == agent.stage_index;
+
         // Compute stage duration string
         let dur_str = match (s.started_at, s.ended_at) {
             (Some(start), Some(end)) => {
@@ -149,7 +157,7 @@ impl Dashboard {
                     format!(" {}m{}s", secs / 60, secs % 60)
                 }
             }
-            (Some(start), None) if s.status == StageRunStatus::Active => {
+            (Some(start), None) if s.status == StageRunStatus::Active && is_current_tab => {
                 let effective_start = start + agent.waiting_secs as i64;
                 let dur = if let Some(until) = agent.active_until {
                     elapsed_str_until(effective_start, until)
@@ -171,7 +179,7 @@ impl Dashboard {
                         | AgentDisplayStatus::Cancelled
                         | AgentDisplayStatus::Error(_)
                 );
-                if run_done {
+                if run_done || !is_current_tab {
                     (GLYPH_COMPLETE, Style::default().fg(C_SUCCESS))
                 } else {
                     let spin = SPINNER[(self.tick_count as usize) % SPINNER.len()];
@@ -818,5 +826,54 @@ mod tests {
         let record = make_stage_record("implement", StageRunStatus::Active);
         let line = dash.build_stage_tab_title(0, &record, &agent);
         assert!(!line.spans.is_empty());
+    }
+
+    // ─── Regression: stale Active stage record on a non-live tab ───────────
+    //
+    // A stage record can be left stuck at StageRunStatus::Active (e.g. a
+    // prior interactive/interactive_points stage whose completion was never
+    // recorded) even though the run has moved on to a later stage. Only the
+    // tab matching agent.stage_index should ever show the spinner/live
+    // marker — every other tab must render as Complete instead.
+
+    #[test]
+    fn build_stage_tab_title_stale_active_on_non_current_tab_shows_complete() {
+        let dash = make_test_dashboard();
+        let mut agent = make_test_agent("run-stale", AgentDisplayStatus::Active);
+        agent.stage_index = 1; // run has moved on to stage 1 ("implement")
+                               // Stage 0 ("plan") record is stuck Active — simulating the bug where
+                               // on_stage_result was never called for an Interactive/InteractivePoints
+                               // stage.
+        let stale_plan = make_stage_record("plan", StageRunStatus::Active);
+        let line = dash.build_stage_tab_title(0, &stale_plan, &agent);
+
+        let rendered: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(
+            rendered.contains(GLYPH_COMPLETE),
+            "stale Active stage on a non-current tab must render as Complete, got: {:?}",
+            rendered
+        );
+        for spin in SPINNER.iter() {
+            assert!(
+                !rendered.contains(spin),
+                "stale Active stage on a non-current tab must not show a spinner, got: {:?}",
+                rendered
+            );
+        }
+        assert!(
+            !rendered.contains('*'),
+            "stale Active stage on a non-current tab must not show the live marker, got: {:?}",
+            rendered
+        );
+
+        // The actually-live tab (index == agent.stage_index) should still spin.
+        let live_implement = make_stage_record("implement", StageRunStatus::Active);
+        let live_line = dash.build_stage_tab_title(1, &live_implement, &agent);
+        let live_rendered: String = live_line.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(
+            SPINNER.iter().any(|spin| live_rendered.contains(spin)),
+            "the actually-live tab must still show a spinner, got: {:?}",
+            live_rendered
+        );
     }
 }

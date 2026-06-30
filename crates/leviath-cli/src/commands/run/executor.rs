@@ -295,6 +295,15 @@ where
                 )
                 .await?;
                 stage_result_val = StageResult::Success;
+                cb.on_stage_result(
+                    &stage_name_owned,
+                    stage_idx,
+                    &stage_result_val,
+                    None,
+                    ctx.engine,
+                    ctx.entity,
+                )
+                .await;
             }
             StageMode::InteractivePoints { points } => {
                 let pts = points.clone();
@@ -315,6 +324,15 @@ where
                 )
                 .await?;
                 stage_result_val = StageResult::Success;
+                cb.on_stage_result(
+                    &stage_name_owned,
+                    stage_idx,
+                    &stage_result_val,
+                    None,
+                    ctx.engine,
+                    ctx.entity,
+                )
+                .await;
             }
             StageMode::Autonomous => {
                 match cb
@@ -627,6 +645,62 @@ mod tests {
         let config = crate::config::Config::default();
         let workdir = std::env::current_dir().unwrap();
         Arc::new(ToolRegistry::build(workdir, &config).await)
+    }
+
+    /// A mock provider that returns a canned response — used to exercise the
+    /// Interactive/InteractivePoints stage paths, which call real engine
+    /// inference (unlike MockCallbacks::run_autonomous, which fakes it).
+    struct CannedProvider;
+
+    #[async_trait]
+    impl leviath_providers::Provider for CannedProvider {
+        async fn infer(
+            &self,
+            _request: leviath_providers::InferenceRequest,
+        ) -> Result<leviath_providers::InferenceResponse, leviath_providers::ProviderError>
+        {
+            Ok(leviath_providers::InferenceResponse {
+                content: "canned response".to_string(),
+                tool_calls: vec![],
+                tokens_used: leviath_providers::TokenUsage {
+                    prompt_tokens: 1,
+                    completion_tokens: 1,
+                    total_tokens: 2,
+                    cached_tokens: 0,
+                    cache_write_tokens: 0,
+                },
+                finish_reason: leviath_providers::FinishReason::Complete,
+            })
+        }
+
+        fn count_tokens(&self, text: &str, _model: &str) -> usize {
+            text.len() / 4
+        }
+
+        fn max_context_tokens(&self, _model: &str) -> usize {
+            100_000
+        }
+
+        fn name(&self) -> &str {
+            "canned"
+        }
+
+        fn capabilities(&self, _model: &str) -> leviath_providers::ModelCapabilities {
+            leviath_providers::ModelCapabilities::default()
+        }
+    }
+
+    fn make_engine_and_entity_with_provider(
+        blueprint: &Blueprint,
+    ) -> (AgentEngine, AgentPool, bevy_ecs::prelude::Entity) {
+        let mut registry = ProviderRegistry::new();
+        registry.register("anthropic".to_string(), Arc::new(CannedProvider));
+        let mut engine = AgentEngine::with_providers(registry);
+        let mut pool = AgentPool::new(blueprint.clone());
+        let agent_id = pool.spawn_agent(engine.world_mut());
+        let entity = pool.get_agent(&agent_id).unwrap();
+        initialize_context_window(&mut engine, entity, blueprint, "test task");
+        (engine, pool, entity)
     }
 
     fn noop_exec(
@@ -1147,5 +1221,100 @@ mod tests {
         assert_eq!(cb.labels[1], ("b".to_string(), "".to_string()));
         assert_eq!(cb.labels[2], ("a".to_string(), " (visit 2)".to_string()));
         assert_eq!(cb.labels[3], ("b".to_string(), " (visit 2)".to_string()));
+    }
+
+    // ─── on_stage_result must fire for Interactive/InteractivePoints too ────
+    //
+    // Regression test: previously only the Autonomous branch called
+    // cb.on_stage_result(), so the stage record for Interactive/
+    // InteractivePoints stages was never marked Complete — it stayed stuck
+    // at StageRunStatus::Active forever (confirmed via real run-state data:
+    // a "plan" stage with mode = interactive_points stuck at status "active",
+    // ended_at: null, long after the run had moved on to later stages). That
+    // made the dashboard keep showing a spinner on a stage tab that wasn't
+    // actually running anymore.
+
+    #[tokio::test]
+    async fn interactive_stage_fires_on_stage_result() {
+        let mut stage = make_stage("plan");
+        stage.mode = StageMode::Interactive;
+        stage.max_iterations = Some(1);
+        let bp = make_blueprint(vec![stage]);
+        let (mut engine, mut pool, entity) = make_engine_and_entity_with_provider(&bp);
+        let tool_registry = make_tool_registry().await;
+        let mut cb = MockCallbacks::new();
+
+        let mut ctx = StageContext {
+            blueprint: &bp,
+            engine: &mut engine,
+            entity,
+            pool: &mut pool,
+            tool_registry: &tool_registry,
+            current_stage_name: Arc::new(Mutex::new(String::new())),
+            current_stage_perms: Arc::new(Mutex::new(HashMap::new())),
+            current_stage_idx: Arc::new(Mutex::new(0)),
+            model_override: None,
+            compaction_ref: None,
+        };
+
+        // No stdin input queued — `get_user_input` returns None, which the
+        // interactive loop treats as empty input and ends the session.
+        run_stage_loop(
+            &mut ctx,
+            &mut cb,
+            "agent-1",
+            &mut MockIO::new(),
+            &mut noop_exec,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            cb.stage_results,
+            vec![("plan".to_string(), StageResult::Success)],
+            "Interactive stage must report on_stage_result so its stage record is marked Complete"
+        );
+        assert_eq!(cb.completed_at, Some(0));
+    }
+
+    #[tokio::test]
+    async fn interactive_points_stage_fires_on_stage_result() {
+        let mut stage = make_stage("plan");
+        stage.mode = StageMode::InteractivePoints { points: vec![] };
+        stage.max_iterations = Some(1);
+        let bp = make_blueprint(vec![stage]);
+        let (mut engine, mut pool, entity) = make_engine_and_entity_with_provider(&bp);
+        let tool_registry = make_tool_registry().await;
+        let mut cb = MockCallbacks::new();
+
+        let mut ctx = StageContext {
+            blueprint: &bp,
+            engine: &mut engine,
+            entity,
+            pool: &mut pool,
+            tool_registry: &tool_registry,
+            current_stage_name: Arc::new(Mutex::new(String::new())),
+            current_stage_perms: Arc::new(Mutex::new(HashMap::new())),
+            current_stage_idx: Arc::new(Mutex::new(0)),
+            model_override: None,
+            compaction_ref: None,
+        };
+
+        run_stage_loop(
+            &mut ctx,
+            &mut cb,
+            "agent-1",
+            &mut MockIO::new(),
+            &mut noop_exec,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            cb.stage_results,
+            vec![("plan".to_string(), StageResult::Success)],
+            "InteractivePoints stage must report on_stage_result so its stage record is marked Complete"
+        );
+        assert_eq!(cb.completed_at, Some(0));
     }
 }
