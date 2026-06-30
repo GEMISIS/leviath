@@ -73,7 +73,34 @@ impl Dashboard {
         };
         frame.render_widget(Clear, popup);
 
-        let lines: Vec<Line> = vec![
+        // Only show keybindings relevant to the page the user is currently on.
+        let mut lines = if self.detail_view {
+            self.detail_view_help_lines()
+        } else {
+            self.main_list_help_lines()
+        };
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            "  Any key to dismiss",
+            Style::default().fg(C_DIM),
+        )));
+
+        let widget = Paragraph::new(lines).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
+                .border_style(Style::default().fg(C_ACCENT))
+                .title(Span::styled(
+                    " Help  ? ",
+                    Style::default().fg(C_ACCENT).add_modifier(Modifier::BOLD),
+                ))
+                .padding(Padding::uniform(0)),
+        );
+        frame.render_widget(widget, popup);
+    }
+
+    fn main_list_help_lines(&self) -> Vec<Line<'static>> {
+        vec![
             Line::from(Span::styled(
                 "  Main list",
                 Style::default().fg(C_ACCENT).add_modifier(Modifier::BOLD),
@@ -121,7 +148,11 @@ impl Dashboard {
                 ),
                 Span::raw("Clear filter / Quit"),
             ]),
-            Line::from(""),
+        ]
+    }
+
+    fn detail_view_help_lines(&self) -> Vec<Line<'static>> {
+        vec![
             Line::from(Span::styled(
                 "  Detail view",
                 Style::default().fg(C_ACCENT).add_modifier(Modifier::BOLD),
@@ -195,7 +226,7 @@ impl Dashboard {
                     "  i        ",
                     Style::default().fg(C_WHITE).add_modifier(Modifier::BOLD),
                 ),
-                Span::raw("Respond (when input needed)"),
+                Span::raw("Respond / provide input (when supported)"),
             ]),
             Line::from(vec![
                 Span::styled(
@@ -213,7 +244,7 @@ impl Dashboard {
             ]),
             Line::from(""),
             Line::from(Span::styled(
-                "  Input (text response)",
+                "  Input",
                 Style::default().fg(C_ACCENT).add_modifier(Modifier::BOLD),
             )),
             Line::from(""),
@@ -222,7 +253,7 @@ impl Dashboard {
                     "  Enter    ",
                     Style::default().fg(C_WHITE).add_modifier(Modifier::BOLD),
                 ),
-                Span::raw("Send response"),
+                Span::raw("Send response / message"),
             ]),
             Line::from(vec![
                 Span::styled(
@@ -238,25 +269,7 @@ impl Dashboard {
                 ),
                 Span::raw("Cancel input"),
             ]),
-            Line::from(""),
-            Line::from(Span::styled(
-                "  Any key to dismiss",
-                Style::default().fg(C_DIM),
-            )),
-        ];
-
-        let widget = Paragraph::new(lines).block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_type(BorderType::Rounded)
-                .border_style(Style::default().fg(C_ACCENT))
-                .title(Span::styled(
-                    " Help  ? ",
-                    Style::default().fg(C_ACCENT).add_modifier(Modifier::BOLD),
-                ))
-                .padding(Padding::uniform(0)),
-        );
-        frame.render_widget(widget, popup);
+        ]
     }
 
     pub(in crate::commands::dashboard) fn draw_confirm_popup(&self, frame: &mut Frame) {
@@ -458,5 +471,58 @@ mod tests {
                 dash.draw_confirm_popup(f);
             })
             .unwrap();
+    }
+
+    // ─── Regression: help overlay must scope to the current page ──────────
+    //
+    // draw_help_overlay() used to always render both the "Main list" and
+    // "Detail view"/"Input" sections regardless of self.detail_view, so the
+    // user always saw keybindings for a page they weren't even on.
+
+    fn rendered_buffer(terminal: &Terminal<TestBackend>) -> String {
+        terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|c| c.symbol())
+            .collect()
+    }
+
+    #[test]
+    fn draw_help_overlay_main_list_omits_detail_view_section() {
+        let backend = TestBackend::new(120, 50);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut dash = make_test_dashboard();
+        dash.detail_view = false;
+        terminal
+            .draw(|f| {
+                dash.draw_help_overlay(f);
+            })
+            .unwrap();
+
+        let rendered = rendered_buffer(&terminal);
+        assert!(rendered.contains("Main list"));
+        assert!(!rendered.contains("Detail view"));
+        assert!(!rendered.contains("Switch stage tab"));
+    }
+
+    #[test]
+    fn draw_help_overlay_detail_view_omits_main_list_section() {
+        let backend = TestBackend::new(120, 50);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut dash = make_test_dashboard();
+        dash.detail_view = true;
+        terminal
+            .draw(|f| {
+                dash.draw_help_overlay(f);
+            })
+            .unwrap();
+
+        let rendered = rendered_buffer(&terminal);
+        assert!(rendered.contains("Detail view"));
+        assert!(rendered.contains("Switch stage tab"));
+        assert!(!rendered.contains("Main list"));
+        assert!(!rendered.contains("Select agent"));
     }
 }
