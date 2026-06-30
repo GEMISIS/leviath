@@ -33,131 +33,138 @@ pub(super) async fn polling_loop(state: AppState) {
 
     loop {
         tokio::time::sleep(Duration::from_millis(200)).await;
-
         let runs = runstate::list_runs();
+        poll_once(&state, &mut poll, &client, &runs);
+    }
+}
 
-        for meta in &runs {
-            let status_str = format!("{}", meta.status);
-            let key = (
-                status_str.clone(),
-                meta.iteration,
-                meta.prompt_tokens,
-                meta.completion_tokens,
-            );
+/// Process one poll cycle for a given set of runs. Extracted from polling_loop
+/// so tests can call it directly with synthetic RunMeta without depending on
+/// the global ~/.leviath/runs/ directory.
+fn poll_once(
+    state: &AppState,
+    poll: &mut PollState,
+    client: &reqwest::Client,
+    runs: &[runstate::RunMeta],
+) {
+    for meta in runs {
+        let status_str = format!("{}", meta.status);
+        let key = (
+            status_str.clone(),
+            meta.iteration,
+            meta.prompt_tokens,
+            meta.completion_tokens,
+        );
 
-            // Detect meta.json changes
-            if poll.last_status.get(&meta.run_id) != Some(&key) {
-                let _ = state.event_tx.send(ServerEvent::AgentStatus {
+        // Detect meta.json changes
+        if poll.last_status.get(&meta.run_id) != Some(&key) {
+            let _ = state.event_tx.send(ServerEvent::AgentStatus {
+                agent_id: meta.agent_name.clone(),
+                run_id: meta.run_id.clone(),
+                status: status_str.clone(),
+                stage: meta.current_stage.clone(),
+                iteration: meta.iteration,
+                accepts_messages: true,
+            });
+
+            let _ = state.event_tx.send(ServerEvent::Tokens {
+                agent_id: meta.agent_name.clone(),
+                run_id: meta.run_id.clone(),
+                prompt_tokens: meta.prompt_tokens,
+                completion_tokens: meta.completion_tokens,
+            });
+
+            let was_terminal = poll
+                .last_status
+                .get(&meta.run_id)
+                .map(|(s, _, _, _)| s == "Complete" || s == "Error" || s == "Cancelled")
+                .unwrap_or(false);
+
+            if !was_terminal
+                && (meta.status == RunStatus::Complete || meta.status == RunStatus::Error)
+            {
+                let _ = state.event_tx.send(ServerEvent::AgentCompleted {
                     agent_id: meta.agent_name.clone(),
                     run_id: meta.run_id.clone(),
                     status: status_str.clone(),
-                    stage: meta.current_stage.clone(),
-                    iteration: meta.iteration,
-                    accepts_messages: true, // default; stage-level control via agent state
+                    result: meta.error.clone(),
                 });
 
-                // Token update
-                let _ = state.event_tx.send(ServerEvent::Tokens {
-                    agent_id: meta.agent_name.clone(),
-                    run_id: meta.run_id.clone(),
-                    prompt_tokens: meta.prompt_tokens,
-                    completion_tokens: meta.completion_tokens,
-                });
-
-                // Detect completion
-                let was_terminal = poll
-                    .last_status
-                    .get(&meta.run_id)
-                    .map(|(s, _, _, _)| s == "Complete" || s == "Error" || s == "Cancelled")
-                    .unwrap_or(false);
-
-                if !was_terminal
-                    && (meta.status == RunStatus::Complete || meta.status == RunStatus::Error)
-                {
-                    let _ = state.event_tx.send(ServerEvent::AgentCompleted {
-                        agent_id: meta.agent_name.clone(),
-                        run_id: meta.run_id.clone(),
-                        status: status_str.clone(),
-                        result: meta.error.clone(),
-                    });
-
-                    // Fire webhook callback if configured
-                    if let Some(ref url) = meta.callback_url {
-                        if !poll
-                            .callback_fired
-                            .get(&meta.run_id)
-                            .copied()
-                            .unwrap_or(false)
-                        {
-                            poll.callback_fired.insert(meta.run_id.clone(), true);
-                            let payload = serde_json::json!({
-                                "event": "agent_completed",
-                                "run_id": meta.run_id,
-                                "agent_id": meta.agent_name,
-                                "status": status_str,
-                                "result": meta.error,
-                                "metadata": meta.metadata,
-                                "tokens": {
-                                    "prompt": meta.prompt_tokens,
-                                    "completion": meta.completion_tokens,
-                                }
-                            });
-                            let client = client.clone();
-                            let url = url.clone();
-                            tokio::spawn(async move {
-                                if let Err(e) = client.post(&url).json(&payload).send().await {
-                                    error!(url = %url, error = %e, "Webhook callback failed");
-                                }
-                            });
-                        }
+                if let Some(ref url) = meta.callback_url {
+                    if !poll
+                        .callback_fired
+                        .get(&meta.run_id)
+                        .copied()
+                        .unwrap_or(false)
+                    {
+                        poll.callback_fired.insert(meta.run_id.clone(), true);
+                        let payload = serde_json::json!({
+                            "event": "agent_completed",
+                            "run_id": meta.run_id,
+                            "agent_id": meta.agent_name,
+                            "status": status_str,
+                            "result": meta.error,
+                            "metadata": meta.metadata,
+                            "tokens": {
+                                "prompt": meta.prompt_tokens,
+                                "completion": meta.completion_tokens,
+                            }
+                        });
+                        let client = client.clone();
+                        let url = url.clone();
+                        tokio::spawn(async move {
+                            if let Err(e) = client.post(&url).json(&payload).send().await {
+                                error!(url = %url, error = %e, "Webhook callback failed");
+                            }
+                        });
                     }
                 }
-
-                poll.last_status.insert(meta.run_id.clone(), key);
             }
 
-            // Detect context.json changes
-            if let Some(ctx) = runstate::read_context_snapshot(&meta.run_id) {
-                let prev = poll.last_context_tokens.get(&meta.run_id).copied();
-                if prev != Some(ctx.total_tokens) {
-                    let _ = state.event_tx.send(ServerEvent::ContextUpdate {
-                        agent_id: meta.agent_name.clone(),
-                        run_id: meta.run_id.clone(),
-                        total_tokens: ctx.total_tokens,
-                        max_tokens: ctx.max_tokens,
-                    });
-                    poll.last_context_tokens
-                        .insert(meta.run_id.clone(), ctx.total_tokens);
-                }
-            }
-
-            // Detect pending.json
-            let has_pending = interaction::read_request(&meta.run_id).is_some();
-            let had_pending = poll
-                .last_pending
-                .get(&meta.run_id)
-                .copied()
-                .unwrap_or(false);
-            if has_pending && !had_pending {
-                if let Some(req) = interaction::read_request(&meta.run_id) {
-                    let val = serde_json::to_value(&req).unwrap_or(serde_json::Value::Null);
-                    let _ = state.event_tx.send(ServerEvent::InteractionNeeded {
-                        agent_id: meta.agent_name.clone(),
-                        run_id: meta.run_id.clone(),
-                        request: val,
-                    });
-                }
-            }
-            poll.last_pending.insert(meta.run_id.clone(), has_pending);
+            poll.last_status.insert(meta.run_id.clone(), key);
         }
 
-        // Clean up old entries for runs that no longer exist
-        let run_ids: std::collections::HashSet<String> =
-            runs.iter().map(|r| r.run_id.clone()).collect();
-        poll.last_status.retain(|k, _| run_ids.contains(k));
-        poll.last_context_tokens.retain(|k, _| run_ids.contains(k));
-        poll.last_pending.retain(|k, _| run_ids.contains(k));
+        // Detect context.json changes
+        if let Some(ctx) = runstate::read_context_snapshot(&meta.run_id) {
+            let prev = poll.last_context_tokens.get(&meta.run_id).copied();
+            if prev != Some(ctx.total_tokens) {
+                let _ = state.event_tx.send(ServerEvent::ContextUpdate {
+                    agent_id: meta.agent_name.clone(),
+                    run_id: meta.run_id.clone(),
+                    total_tokens: ctx.total_tokens,
+                    max_tokens: ctx.max_tokens,
+                });
+                poll.last_context_tokens
+                    .insert(meta.run_id.clone(), ctx.total_tokens);
+            }
+        }
+
+        // Detect pending.json
+        let has_pending = interaction::read_request(&meta.run_id).is_some();
+        let had_pending = poll
+            .last_pending
+            .get(&meta.run_id)
+            .copied()
+            .unwrap_or(false);
+        if has_pending && !had_pending {
+            if let Some(req) = interaction::read_request(&meta.run_id) {
+                let val = serde_json::to_value(&req).unwrap_or(serde_json::Value::Null);
+                let _ = state.event_tx.send(ServerEvent::InteractionNeeded {
+                    agent_id: meta.agent_name.clone(),
+                    run_id: meta.run_id.clone(),
+                    request: val,
+                });
+            }
+        }
+        poll.last_pending.insert(meta.run_id.clone(), has_pending);
     }
+
+    // Clean up old entries for runs that no longer exist
+    let run_ids: std::collections::HashSet<String> =
+        runs.iter().map(|r| r.run_id.clone()).collect();
+    poll.last_status.retain(|k, _| run_ids.contains(k));
+    poll.last_context_tokens.retain(|k, _| run_ids.contains(k));
+    poll.last_pending.retain(|k, _| run_ids.contains(k));
 }
 
 #[cfg(test)]
@@ -414,180 +421,107 @@ mod tests {
         assert_eq!(prev, Some(5000)); // no change
     }
 
-    /// Helper: wait for a specific event on the broadcast channel, with timeout.
-    /// Returns true if the event was found before the deadline.
-    async fn wait_for_event<F>(
-        rx: &mut tokio::sync::broadcast::Receiver<ServerEvent>,
-        timeout: std::time::Duration,
-        mut matcher: F,
-    ) -> bool
-    where
-        F: FnMut(&ServerEvent) -> bool,
-    {
-        let deadline = tokio::time::Instant::now() + timeout;
-        loop {
-            match tokio::time::timeout_at(deadline, rx.recv()).await {
-                Ok(Ok(ev)) => {
-                    if matcher(&ev) {
-                        return true;
-                    }
-                }
-                Ok(Err(_)) => return false, // channel closed
-                Err(_) => return false,      // timeout
+    /// Helper: create a test AppState with a broadcast channel.
+    fn make_test_state() -> (AppState, tokio::sync::broadcast::Receiver<ServerEvent>) {
+        use std::sync::Arc;
+        use crate::config::Config;
+        let (tx, rx) = tokio::sync::broadcast::channel::<ServerEvent>(128);
+        let state = AppState {
+            config: Arc::new(Config::default()),
+            event_tx: tx,
+        };
+        (state, rx)
+    }
+
+    // ─── poll_once tests ──────────────────────────────────────────────────
+    // These call poll_once() directly with synthetic RunMeta, bypassing
+    // list_runs() and the filesystem entirely. No timing, no flakiness.
+
+    #[test]
+    fn polling_loop_runs_and_sends_events() {
+        use crate::runstate::{RunMeta, RunStatus};
+
+        let (state, mut rx) = make_test_state();
+        let mut poll = PollState {
+            last_status: HashMap::new(),
+            last_context_tokens: HashMap::new(),
+            last_pending: HashMap::new(),
+            callback_fired: HashMap::new(),
+        };
+        let client = reqwest::Client::new();
+
+        let mut meta = RunMeta::new(
+            "run-status-1".into(), "agent".into(), "/p".into(),
+            "task".into(), None, "/tmp".into(), 1,
+        );
+        meta.status = RunStatus::Running;
+
+        poll_once(&state, &mut poll, &client, &[meta]);
+
+        let mut got_status = false;
+        while let Ok(ev) = rx.try_recv() {
+            if matches!(&ev, ServerEvent::AgentStatus { run_id, .. } if run_id == "run-status-1") {
+                got_status = true;
             }
         }
+        assert!(got_status, "poll_once should have emitted AgentStatus event");
     }
 
-    #[tokio::test]
-    async fn polling_loop_runs_and_sends_events() {
-        use std::sync::Arc;
-        use tokio::sync::broadcast;
+    #[test]
+    fn polling_loop_emits_completion_event() {
+        use crate::runstate::{RunMeta, RunStatus};
 
-        use crate::config::Config;
-        use crate::runstate::{create_run, RunMeta, RunStatus};
-
-        let (tx, mut rx) = broadcast::channel::<ServerEvent>(64);
-        let state = AppState {
-            config: Arc::new(Config::default()),
-            event_tx: tx.clone(),
+        let (state, mut rx) = make_test_state();
+        let mut poll = PollState {
+            last_status: HashMap::new(),
+            last_context_tokens: HashMap::new(),
+            last_pending: HashMap::new(),
+            callback_fired: HashMap::new(),
         };
+        let client = reqwest::Client::new();
 
-        let run_id = format!(
-            "test-poll-loop-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .subsec_nanos()
-        );
+        // First poll: Running
         let mut meta = RunMeta::new(
-            run_id.clone(),
-            "test-agent".to_string(),
-            "/path".to_string(),
-            "task".to_string(),
-            None,
-            "/tmp".to_string(),
-            1,
+            "run-complete-1".into(), "agent".into(), "/p".into(),
+            "task".into(), None, "/tmp".into(), 1,
         );
         meta.status = RunStatus::Running;
-        create_run(&meta).unwrap();
+        poll_once(&state, &mut poll, &client, &[meta.clone()]);
 
-        let poll_state = state.clone();
-        let handle = tokio::spawn(async move {
-            polling_loop(poll_state).await;
-        });
+        // Drain Running events
+        while rx.try_recv().is_ok() {}
 
-        let target = run_id.clone();
-        let got_status = wait_for_event(
-            &mut rx,
-            std::time::Duration::from_secs(10),
-            |ev| matches!(ev, ServerEvent::AgentStatus { run_id: eid, .. } if eid == &target),
-        )
-        .await;
+        // Second poll: Complete
+        meta.status = RunStatus::Complete;
+        meta.touch();
+        poll_once(&state, &mut poll, &client, &[meta]);
 
-        handle.abort();
-        let _ = std::fs::remove_dir_all(crate::runstate::run_dir(&run_id));
-        assert!(got_status, "polling loop should have emitted AgentStatus event");
+        let mut got_completed = false;
+        while let Ok(ev) = rx.try_recv() {
+            if matches!(&ev, ServerEvent::AgentCompleted { run_id, .. } if run_id == "run-complete-1") {
+                got_completed = true;
+            }
+        }
+        assert!(got_completed, "poll_once should have emitted AgentCompleted event");
     }
 
-    #[tokio::test]
-    async fn polling_loop_emits_completion_event() {
-        use std::sync::Arc;
-        use tokio::sync::broadcast;
-
-        use crate::config::Config;
-        use crate::runstate::{create_run, write_meta, RunMeta, RunStatus};
-
-        let (tx, mut rx) = broadcast::channel::<ServerEvent>(128);
-        let state = AppState {
-            config: Arc::new(Config::default()),
-            event_tx: tx.clone(),
-        };
-
-        let run_id = format!(
-            "test-poll-complete-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .subsec_nanos()
-        );
-        let mut meta = RunMeta::new(
-            run_id.clone(),
-            "test-agent".to_string(),
-            "/path".to_string(),
-            "task".to_string(),
-            None,
-            "/tmp".to_string(),
-            1,
-        );
-        meta.status = RunStatus::Running;
-        create_run(&meta).unwrap();
-
-        let poll_state = state.clone();
-        let handle = tokio::spawn(async move {
-            polling_loop(poll_state).await;
-        });
-
-        // Wait for polling loop to see Running state first
-        let target = run_id.clone();
-        let _ = wait_for_event(
-            &mut rx,
-            std::time::Duration::from_secs(10),
-            |ev| matches!(ev, ServerEvent::AgentStatus { run_id: eid, .. } if eid == &target),
-        )
-        .await;
-
-        // Now transition to Complete
-        let mut meta2 = meta.clone();
-        meta2.status = RunStatus::Complete;
-        meta2.touch();
-        write_meta(&meta2).unwrap();
-
-        // Wait for AgentCompleted event
-        let target2 = run_id.clone();
-        let got_completed = wait_for_event(
-            &mut rx,
-            std::time::Duration::from_secs(10),
-            |ev| matches!(ev, ServerEvent::AgentCompleted { run_id: eid, .. } if eid == &target2),
-        )
-        .await;
-
-        handle.abort();
-        let _ = std::fs::remove_dir_all(crate::runstate::run_dir(&run_id));
-        assert!(got_completed, "polling loop should have emitted AgentCompleted event");
-    }
-
-    #[tokio::test]
-    async fn polling_loop_emits_context_update() {
-        use std::sync::Arc;
-        use tokio::sync::broadcast;
-
-        use crate::config::Config;
+    #[test]
+    fn polling_loop_emits_context_update() {
         use crate::runstate::{create_run, write_context_snapshot, ContextSnapshot, RunMeta};
 
-        let (tx, mut rx) = broadcast::channel::<ServerEvent>(128);
-        let state = AppState {
-            config: Arc::new(Config::default()),
-            event_tx: tx.clone(),
+        let (state, mut rx) = make_test_state();
+        let mut poll = PollState {
+            last_status: HashMap::new(),
+            last_context_tokens: HashMap::new(),
+            last_pending: HashMap::new(),
+            callback_fired: HashMap::new(),
         };
+        let client = reqwest::Client::new();
 
-        let run_id = format!(
-            "test-poll-ctx-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .subsec_nanos()
-        );
+        let run_id = format!("test-poll-ctx-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().subsec_nanos());
         let meta = RunMeta::new(
-            run_id.clone(),
-            "test-agent".to_string(),
-            "/path".to_string(),
-            "task".to_string(),
-            None,
-            "/tmp".to_string(),
-            1,
+            run_id.clone(), "agent".into(), "/p".into(),
+            "task".into(), None, "/tmp".into(), 1,
         );
         create_run(&meta).unwrap();
 
@@ -599,76 +533,51 @@ mod tests {
         };
         write_context_snapshot(&run_id, &snap).unwrap();
 
-        let poll_state = state.clone();
-        let handle = tokio::spawn(async move {
-            polling_loop(poll_state).await;
-        });
+        poll_once(&state, &mut poll, &client, &[meta]);
 
-        let target = run_id.clone();
-        let got_context_update = wait_for_event(
-            &mut rx,
-            std::time::Duration::from_secs(10),
-            |ev| matches!(ev, ServerEvent::ContextUpdate { run_id: eid, total_tokens, .. } if eid == &target && *total_tokens == 7500),
-        )
-        .await;
-
-        handle.abort();
+        let mut got_context = false;
+        while let Ok(ev) = rx.try_recv() {
+            if matches!(&ev, ServerEvent::ContextUpdate { run_id: eid, total_tokens, .. } if eid == &run_id && *total_tokens == 7500) {
+                got_context = true;
+            }
+        }
         let _ = std::fs::remove_dir_all(crate::runstate::run_dir(&run_id));
-        assert!(got_context_update, "polling loop should have emitted ContextUpdate event");
+        assert!(got_context, "poll_once should have emitted ContextUpdate event");
     }
 
-    #[tokio::test]
-    async fn polling_loop_emits_interaction_needed() {
-        use std::sync::Arc;
-        use tokio::sync::broadcast;
-
-        use crate::config::Config;
+    #[test]
+    fn polling_loop_emits_interaction_needed() {
         use crate::interaction::{self, InteractionRequest};
         use crate::runstate::{create_run, RunMeta};
 
-        let (tx, mut rx) = broadcast::channel::<ServerEvent>(128);
-        let state = AppState {
-            config: Arc::new(Config::default()),
-            event_tx: tx.clone(),
+        let (state, mut rx) = make_test_state();
+        let mut poll = PollState {
+            last_status: HashMap::new(),
+            last_context_tokens: HashMap::new(),
+            last_pending: HashMap::new(),
+            callback_fired: HashMap::new(),
         };
+        let client = reqwest::Client::new();
 
-        let run_id = format!(
-            "test-poll-int-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .subsec_nanos()
-        );
+        let run_id = format!("test-poll-int-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().subsec_nanos());
         let meta = RunMeta::new(
-            run_id.clone(),
-            "test-agent".to_string(),
-            "/path".to_string(),
-            "task".to_string(),
-            None,
-            "/tmp".to_string(),
-            1,
+            run_id.clone(), "agent".into(), "/p".into(),
+            "task".into(), None, "/tmp".into(), 1,
         );
         create_run(&meta).unwrap();
 
-        let req = InteractionRequest::free_text("req-poll-001", "What next?", "plan", true);
+        let req = InteractionRequest::free_text("req-001", "What next?", "plan", true);
         interaction::write_request(&run_id, &req).unwrap();
 
-        let poll_state = state.clone();
-        let handle = tokio::spawn(async move {
-            polling_loop(poll_state).await;
-        });
+        poll_once(&state, &mut poll, &client, &[meta]);
 
-        let target = run_id.clone();
-        let got_interaction = wait_for_event(
-            &mut rx,
-            std::time::Duration::from_secs(10),
-            |ev| matches!(ev, ServerEvent::InteractionNeeded { run_id: eid, .. } if eid == &target),
-        )
-        .await;
-
-        handle.abort();
+        let mut got_interaction = false;
+        while let Ok(ev) = rx.try_recv() {
+            if matches!(&ev, ServerEvent::InteractionNeeded { run_id: eid, .. } if eid == &run_id) {
+                got_interaction = true;
+            }
+        }
         let _ = std::fs::remove_dir_all(crate::runstate::run_dir(&run_id));
-        assert!(got_interaction, "polling loop should have emitted InteractionNeeded event");
+        assert!(got_interaction, "poll_once should have emitted InteractionNeeded event");
     }
 }
