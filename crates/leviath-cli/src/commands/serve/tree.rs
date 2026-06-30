@@ -1,0 +1,221 @@
+//! Agent hierarchy tree building and endpoints.
+
+use axum::extract::Path as AxumPath;
+use axum::http::StatusCode;
+use axum::response::Json;
+
+use super::types::*;
+use crate::runstate::{self, RunMeta};
+
+pub(super) fn build_tree(runs: &[RunMeta], parent_id: Option<&str>) -> Vec<AgentTreeNode> {
+    runs.iter()
+        .filter(|r| r.parent_run_id.as_deref() == parent_id)
+        .map(|r| {
+            let children = build_tree(runs, Some(&r.run_id));
+            AgentTreeNode {
+                run_id: r.run_id.clone(),
+                agent_name: r.agent_name.clone(),
+                status: format!("{}", r.status),
+                stage: r.current_stage.clone(),
+                iteration: r.iteration,
+                prompt_tokens: r.prompt_tokens,
+                completion_tokens: r.completion_tokens,
+                children,
+            }
+        })
+        .collect()
+}
+
+pub(super) fn build_tree_status(runs: &[RunMeta], parent_id: Option<&str>) -> Vec<TreeStatusNode> {
+    runs.iter()
+        .filter(|r| r.parent_run_id.as_deref() == parent_id)
+        .map(|r| {
+            let children = build_tree_status(runs, Some(&r.run_id));
+            let subtree_prompt: usize = r.prompt_tokens
+                + children
+                    .iter()
+                    .map(|c| c.subtree_prompt_tokens)
+                    .sum::<usize>();
+            let subtree_completion: usize = r.completion_tokens
+                + children
+                    .iter()
+                    .map(|c| c.subtree_completion_tokens)
+                    .sum::<usize>();
+            TreeStatusNode {
+                run_id: r.run_id.clone(),
+                agent_name: r.agent_name.clone(),
+                status: format!("{}", r.status),
+                stage: r.current_stage.clone(),
+                prompt_tokens: r.prompt_tokens,
+                completion_tokens: r.completion_tokens,
+                subtree_prompt_tokens: subtree_prompt,
+                subtree_completion_tokens: subtree_completion,
+                children,
+            }
+        })
+        .collect()
+}
+
+pub(super) async fn agents_tree() -> Json<Vec<AgentTreeNode>> {
+    let runs = runstate::list_runs();
+    let tree = build_tree(&runs, None);
+    Json(tree)
+}
+
+pub(super) async fn agent_tree_status(
+    AxumPath(id): AxumPath<String>,
+) -> Result<Json<TreeStatusNode>, (StatusCode, Json<ErrorResponse>)> {
+    let runs = runstate::list_runs();
+    let root = runs.iter().find(|r| r.run_id == id).ok_or((
+        StatusCode::NOT_FOUND,
+        Json(ErrorResponse {
+            error: format!("Agent run '{}' not found", id),
+        }),
+    ))?;
+
+    let children = build_tree_status(&runs, Some(&id));
+    let subtree_prompt: usize = root.prompt_tokens
+        + children
+            .iter()
+            .map(|c| c.subtree_prompt_tokens)
+            .sum::<usize>();
+    let subtree_completion: usize = root.completion_tokens
+        + children
+            .iter()
+            .map(|c| c.subtree_completion_tokens)
+            .sum::<usize>();
+
+    Ok(Json(TreeStatusNode {
+        run_id: root.run_id.clone(),
+        agent_name: root.agent_name.clone(),
+        status: format!("{}", root.status),
+        stage: root.current_stage.clone(),
+        prompt_tokens: root.prompt_tokens,
+        completion_tokens: root.completion_tokens,
+        subtree_prompt_tokens: subtree_prompt,
+        subtree_completion_tokens: subtree_completion,
+        children,
+    }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_meta(id: &str, name: &str, parent: Option<&str>) -> RunMeta {
+        let mut meta = RunMeta::new(
+            id.to_string(),
+            name.to_string(),
+            "/path".to_string(),
+            "task".to_string(),
+            None,
+            "/work".to_string(),
+            1,
+        );
+        meta.parent_run_id = parent.map(|s| s.to_string());
+        meta
+    }
+
+    #[test]
+    fn build_tree_empty() {
+        let runs: Vec<RunMeta> = vec![];
+        let tree = build_tree(&runs, None);
+        assert!(tree.is_empty());
+    }
+
+    #[test]
+    fn build_tree_single_root() {
+        let runs = vec![make_meta("run-1", "agent-a", None)];
+        let tree = build_tree(&runs, None);
+        assert_eq!(tree.len(), 1);
+        assert_eq!(tree[0].run_id, "run-1");
+        assert!(tree[0].children.is_empty());
+    }
+
+    #[test]
+    fn build_tree_parent_child() {
+        let runs = vec![
+            make_meta("parent", "agent-a", None),
+            make_meta("child", "agent-b", Some("parent")),
+        ];
+        let tree = build_tree(&runs, None);
+        assert_eq!(tree.len(), 1);
+        assert_eq!(tree[0].run_id, "parent");
+        assert_eq!(tree[0].children.len(), 1);
+        assert_eq!(tree[0].children[0].run_id, "child");
+    }
+
+    #[test]
+    fn build_tree_multiple_roots() {
+        let runs = vec![
+            make_meta("root-1", "a", None),
+            make_meta("root-2", "b", None),
+        ];
+        let tree = build_tree(&runs, None);
+        assert_eq!(tree.len(), 2);
+    }
+
+    #[test]
+    fn build_tree_nested() {
+        let runs = vec![
+            make_meta("r", "a", None),
+            make_meta("c1", "b", Some("r")),
+            make_meta("c2", "c", Some("r")),
+            make_meta("gc", "d", Some("c1")),
+        ];
+        let tree = build_tree(&runs, None);
+        assert_eq!(tree.len(), 1);
+        assert_eq!(tree[0].children.len(), 2);
+        let c1 = &tree[0].children[0];
+        assert_eq!(c1.run_id, "c1");
+        assert_eq!(c1.children.len(), 1);
+        assert_eq!(c1.children[0].run_id, "gc");
+    }
+
+    #[test]
+    fn build_tree_status_empty() {
+        let runs: Vec<RunMeta> = vec![];
+        let tree = build_tree_status(&runs, None);
+        assert!(tree.is_empty());
+    }
+
+    #[test]
+    fn build_tree_status_aggregates_tokens() {
+        let mut parent = make_meta("p", "a", None);
+        parent.prompt_tokens = 10;
+        parent.completion_tokens = 5;
+        let mut child = make_meta("c", "b", Some("p"));
+        child.prompt_tokens = 100;
+        child.completion_tokens = 50;
+        let runs = vec![parent, child];
+        let tree = build_tree_status(&runs, None);
+        assert_eq!(tree.len(), 1);
+        assert_eq!(tree[0].subtree_prompt_tokens, 110); // 10 + 100
+        assert_eq!(tree[0].subtree_completion_tokens, 55); // 5 + 50
+    }
+
+    #[test]
+    fn build_tree_status_deep_aggregation() {
+        let mut root = make_meta("r", "a", None);
+        root.prompt_tokens = 10;
+        let mut child = make_meta("c", "b", Some("r"));
+        child.prompt_tokens = 20;
+        let mut grandchild = make_meta("gc", "c", Some("c"));
+        grandchild.prompt_tokens = 30;
+        let runs = vec![root, child, grandchild];
+        let tree = build_tree_status(&runs, None);
+        assert_eq!(tree[0].subtree_prompt_tokens, 60); // 10 + 20 + 30
+    }
+
+    #[test]
+    fn build_tree_from_subtree() {
+        let runs = vec![
+            make_meta("r", "a", None),
+            make_meta("c1", "b", Some("r")),
+            make_meta("c2", "c", Some("r")),
+        ];
+        // Build from a specific parent
+        let subtree = build_tree(&runs, Some("r"));
+        assert_eq!(subtree.len(), 2);
+    }
+}
