@@ -983,10 +983,17 @@ mod tests {
     ) -> tokio::task::JoinHandle<()> {
         tokio::spawn(async move {
             let mut resp_iter = responses.into_iter();
+            let mut last_req_id = String::new();
             loop {
                 tokio::time::sleep(std::time::Duration::from_millis(50)).await;
                 if let Some(req) = crate::interaction::read_request(&run_id) {
+                    // Skip if this is the same request we already responded to
+                    // (waiting for the main task to consume it)
+                    if req.id == last_req_id {
+                        continue;
+                    }
                     if let Some(mut resp) = resp_iter.next() {
+                        last_req_id = req.id.clone();
                         resp.request_id = req.id.clone();
                         crate::interaction::write_response(&run_id, &resp).unwrap();
                     } else {
