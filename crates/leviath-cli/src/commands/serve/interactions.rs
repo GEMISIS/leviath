@@ -149,8 +149,7 @@ mod tests {
 
     #[tokio::test]
     async fn get_interaction_run_not_found_returns_404() {
-        let app = Router::new()
-            .route("/api/agents/{id}/interaction", get(get_interaction));
+        let app = Router::new().route("/api/agents/{id}/interaction", get(get_interaction));
         let req = Request::builder()
             .uri("/api/agents/nonexistent-run-interact/interaction")
             .body(Body::empty())
@@ -165,8 +164,7 @@ mod tests {
         let meta = make_run(&run_id);
         create_run(&meta).unwrap();
 
-        let app = Router::new()
-            .route("/api/agents/{id}/interaction", get(get_interaction));
+        let app = Router::new().route("/api/agents/{id}/interaction", get(get_interaction));
         let req = Request::builder()
             .uri(format!("/api/agents/{}/interaction", run_id))
             .body(Body::empty())
@@ -192,8 +190,7 @@ mod tests {
         );
         interaction::write_request(&run_id, &req_val).unwrap();
 
-        let app = Router::new()
-            .route("/api/agents/{id}/interaction", get(get_interaction));
+        let app = Router::new().route("/api/agents/{id}/interaction", get(get_interaction));
         let req = Request::builder()
             .uri(format!("/api/agents/{}/interaction", run_id))
             .body(Body::empty())
@@ -213,8 +210,7 @@ mod tests {
 
     #[tokio::test]
     async fn submit_interaction_run_not_found_returns_404() {
-        let app = Router::new()
-            .route("/api/agents/{id}/interaction", post(submit_interaction));
+        let app = Router::new().route("/api/agents/{id}/interaction", post(submit_interaction));
         let body = serde_json::json!({"request_id": "req-001"});
         let req = Request::builder()
             .method("POST")
@@ -232,8 +228,7 @@ mod tests {
         let meta = make_run(&run_id);
         create_run(&meta).unwrap();
 
-        let app = Router::new()
-            .route("/api/agents/{id}/interaction", post(submit_interaction));
+        let app = Router::new().route("/api/agents/{id}/interaction", post(submit_interaction));
         let body = serde_json::json!({
             "request_id": "req-001",
             "value": "yes",
@@ -258,8 +253,7 @@ mod tests {
         let meta = make_run(&run_id);
         create_run(&meta).unwrap();
 
-        let app = Router::new()
-            .route("/api/agents/{id}/interaction", post(submit_interaction));
+        let app = Router::new().route("/api/agents/{id}/interaction", post(submit_interaction));
         let body = serde_json::json!({
             "request_id": "req-002",
             "approved": true,
@@ -283,8 +277,7 @@ mod tests {
         let meta = make_run(&run_id);
         create_run(&meta).unwrap();
 
-        let app = Router::new()
-            .route("/api/agents/{id}/interaction", post(submit_interaction));
+        let app = Router::new().route("/api/agents/{id}/interaction", post(submit_interaction));
         let body = serde_json::json!({
             "request_id": "req-003",
             "value": "do it"
@@ -305,8 +298,7 @@ mod tests {
 
     #[tokio::test]
     async fn send_message_run_not_found_returns_404() {
-        let app = Router::new()
-            .route("/api/agents/{id}/message", post(send_message));
+        let app = Router::new().route("/api/agents/{id}/message", post(send_message));
         let body = serde_json::json!({"message": "hello"});
         let req = Request::builder()
             .method("POST")
@@ -325,8 +317,7 @@ mod tests {
         meta.status = RunStatus::Running;
         create_run(&meta).unwrap();
 
-        let app = Router::new()
-            .route("/api/agents/{id}/message", post(send_message));
+        let app = Router::new().route("/api/agents/{id}/message", post(send_message));
         let body = serde_json::json!({"message": "keep going"});
         let req = Request::builder()
             .method("POST")
@@ -356,8 +347,7 @@ mod tests {
         );
         interaction::write_request(&run_id, &req_val).unwrap();
 
-        let app = Router::new()
-            .route("/api/agents/{id}/message", post(send_message));
+        let app = Router::new().route("/api/agents/{id}/message", post(send_message));
         let body = serde_json::json!({"message": "do the thing"});
         let req = Request::builder()
             .method("POST")
@@ -392,8 +382,7 @@ mod tests {
         );
         interaction::write_request(&run_id, &req_val).unwrap();
 
-        let app = Router::new()
-            .route("/api/agents/{id}/message", post(send_message));
+        let app = Router::new().route("/api/agents/{id}/message", post(send_message));
         let body = serde_json::json!({"message": "no thanks"});
         let req = Request::builder()
             .method("POST")
@@ -415,8 +404,7 @@ mod tests {
         // No pending request written
         create_run(&meta).unwrap();
 
-        let app = Router::new()
-            .route("/api/agents/{id}/message", post(send_message));
+        let app = Router::new().route("/api/agents/{id}/message", post(send_message));
         let body = serde_json::json!({"message": "hello there"});
         let req = Request::builder()
             .method("POST")

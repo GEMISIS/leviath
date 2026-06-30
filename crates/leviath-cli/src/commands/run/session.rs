@@ -518,7 +518,11 @@ mod tests {
         let file = dir.join("real.txt");
         std::fs::write(&file, "Implement a REST API server\nwith authentication\n").unwrap();
 
-        let result = resolve_task(&Some(file.to_str().unwrap().to_string()), "api-agent", Some("API agent"));
+        let result = resolve_task(
+            &Some(file.to_str().unwrap().to_string()),
+            "api-agent",
+            Some("API agent"),
+        );
         let task = result.unwrap();
         assert!(task.contains("Implement a REST API server"));
         assert!(task.contains("with authentication"));

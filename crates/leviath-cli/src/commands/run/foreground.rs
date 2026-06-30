@@ -581,7 +581,10 @@ mod tests {
         let engine = leviath_runtime::AgentEngine::with_providers(registry);
         // When accepts=true, a JoinHandle is spawned for stdin reading
         let handle = cb.start_message_reader(&engine, "agent-1", true);
-        assert!(handle.is_some(), "Should return Some(JoinHandle) when accepts is true");
+        assert!(
+            handle.is_some(),
+            "Should return Some(JoinHandle) when accepts is true"
+        );
         // Abort it immediately to avoid blocking
         if let Some(h) = handle {
             h.abort();
@@ -596,7 +599,10 @@ mod tests {
         assert!(cb.on_stage_error("plan", 0, &err, false).await.is_none());
         assert!(cb.on_stage_error("code", 1, &err, false).await.is_none());
         // Graph mode: returns Some(Error)
-        assert_eq!(cb.on_stage_error("review", 2, &err, true).await, Some(StageResult::Error));
+        assert_eq!(
+            cb.on_stage_error("review", 2, &err, true).await,
+            Some(StageResult::Error)
+        );
     }
 
     #[tokio::test]
@@ -604,7 +610,8 @@ mod tests {
         let mut cb = ForegroundCallbacks {};
 
         // Simulate a complete stage lifecycle
-        cb.on_stage_enter("plan", 0, "anthropic", "claude-sonnet-4-6", "").await;
+        cb.on_stage_enter("plan", 0, "anthropic", "claude-sonnet-4-6", "")
+            .await;
         cb.on_claude_code_warning(0).await;
 
         let registry = leviath_runtime::ProviderRegistry::new();
@@ -618,10 +625,13 @@ mod tests {
         let agent_id = pool.spawn_agent(engine.world_mut());
         let entity = pool.get_agent(&agent_id).unwrap();
 
-        cb.on_stage_result("plan", 0, &StageResult::Success, None, &mut engine, entity).await;
+        cb.on_stage_result("plan", 0, &StageResult::Success, None, &mut engine, entity)
+            .await;
         cb.on_transition("plan", "code", 0).await;
-        cb.on_stage_enter("code", 1, "anthropic", "claude-sonnet-4-6", "").await;
-        cb.on_stage_result("code", 1, &StageResult::Success, None, &mut engine, entity).await;
+        cb.on_stage_enter("code", 1, "anthropic", "claude-sonnet-4-6", "")
+            .await;
+        cb.on_stage_result("code", 1, &StageResult::Success, None, &mut engine, entity)
+            .await;
         cb.on_complete(1).await;
         cb.on_post_stage(&engine, entity, "code").await;
     }

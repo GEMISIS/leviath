@@ -1206,7 +1206,10 @@ mod tests {
         let provider = OllamaProvider::with_base_url("http://127.0.0.1:19998".to_string());
         let result = provider.list_models().await;
         assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), ProviderError::RequestFailed(_)));
+        assert!(matches!(
+            result.unwrap_err(),
+            ProviderError::RequestFailed(_)
+        ));
     }
 
     // ─── with_base_url: invalid URL pattern triggers warning ─────────────
@@ -1220,10 +1223,8 @@ mod tests {
 
     #[test]
     fn test_with_overrides_invalid_protocol_does_not_panic() {
-        let provider = OllamaProvider::with_overrides(
-            "ftp://invalid:11434".to_string(),
-            HashMap::new(),
-        );
+        let provider =
+            OllamaProvider::with_overrides("ftp://invalid:11434".to_string(), HashMap::new());
         assert_eq!(provider.base_url, "ftp://invalid:11434");
     }
 
@@ -1285,7 +1286,9 @@ mod tests {
         }
 
         // Build a test NDJSON stream with one non-done and one done message
-        let chunk1 = b"{\"message\":{\"role\":\"assistant\",\"content\":\"Hello \"},\"done\":false}\n".to_vec();
+        let chunk1 =
+            b"{\"message\":{\"role\":\"assistant\",\"content\":\"Hello \"},\"done\":false}\n"
+                .to_vec();
         let chunk2 = b"{\"message\":{\"role\":\"assistant\",\"content\":\"world\"},\"done\":true,\"eval_count\":10,\"prompt_eval_count\":20}\n".to_vec();
 
         let static_stream = StaticStream {
@@ -1388,7 +1391,9 @@ mod tests {
         }
 
         // Send data WITHOUT trailing newline — it's in the remaining buffer
-        let chunk1 = b"{\"message\":{\"role\":\"assistant\",\"content\":\"leftover\"},\"done\":false}".to_vec();
+        let chunk1 =
+            b"{\"message\":{\"role\":\"assistant\",\"content\":\"leftover\"},\"done\":false}"
+                .to_vec();
         let static_stream = StaticStream {
             data: vec![chunk1],
             idx: 0,
@@ -1435,7 +1440,9 @@ mod tests {
         }
 
         // Empty line followed by real data
-        let chunk1 = b"\n{\"message\":{\"role\":\"assistant\",\"content\":\"hi\"},\"done\":false}\n".to_vec();
+        let chunk1 =
+            b"\n{\"message\":{\"role\":\"assistant\",\"content\":\"hi\"},\"done\":false}\n"
+                .to_vec();
         let static_stream = StaticStream {
             data: vec![chunk1],
             idx: 0,

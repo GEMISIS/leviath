@@ -55,8 +55,8 @@ mod tests {
     use tokio::sync::broadcast;
     use tower::ServiceExt;
 
-    use crate::config::Config;
     use crate::commands::serve::types::ServerEvent;
+    use crate::config::Config;
 
     fn test_state() -> AppState {
         let (tx, _) = broadcast::channel::<ServerEvent>(64);

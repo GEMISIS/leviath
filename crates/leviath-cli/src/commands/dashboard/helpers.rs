@@ -371,7 +371,11 @@ mod tests {
             .unwrap_or(0);
         // 30 seconds ago → "30s ago"
         let result = relative_time(now - 30);
-        assert!(result.ends_with("s ago"), "expected 'Xs ago', got '{}'", result);
+        assert!(
+            result.ends_with("s ago"),
+            "expected 'Xs ago', got '{}'",
+            result
+        );
     }
 
     #[test]
@@ -383,7 +387,11 @@ mod tests {
             .unwrap_or(0);
         // 5 minutes ago → "5m ago"
         let result = relative_time(now - 300);
-        assert!(result.ends_with("m ago"), "expected 'Xm ago', got '{}'", result);
+        assert!(
+            result.ends_with("m ago"),
+            "expected 'Xm ago', got '{}'",
+            result
+        );
     }
 
     #[test]

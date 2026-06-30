@@ -972,7 +972,10 @@ sys.stdout.close()
         let mut client = spawn_stub_client(STUB_INIT_LIST_CALL).await;
         client.connect().await.unwrap();
 
-        let tools = client.list_tools().await.expect("list_tools should succeed");
+        let tools = client
+            .list_tools()
+            .await
+            .expect("list_tools should succeed");
         assert_eq!(tools.len(), 1);
         assert_eq!(tools[0].name, "echo");
 
@@ -1012,7 +1015,10 @@ sys.stdout.close()
     async fn test_mcp_client_shutdown_with_dead_process() {
         let mut client = spawn_stub_client(STUB_CLOSE_IMMEDIATELY).await;
         // Process closed stdout immediately; shutdown should still succeed
-        client.shutdown().await.expect("shutdown should be graceful");
+        client
+            .shutdown()
+            .await
+            .expect("shutdown should be graceful");
     }
 
     #[tokio::test]
@@ -1039,10 +1045,7 @@ sys.stdout.close()
 "#;
         let mut client = spawn_stub_client(script).await;
         let err = client.connect().await;
-        assert!(
-            err.is_err(),
-            "Expected error when server closes connection"
-        );
+        assert!(err.is_err(), "Expected error when server closes connection");
     }
 
     #[tokio::test]
@@ -1134,8 +1137,14 @@ for line in sys.stdin:
 "#;
         let mut client = spawn_stub_client(script).await;
         client.connect().await.unwrap();
-        let tools = client.list_tools().await.expect("list_tools should succeed");
-        assert!(tools.is_empty(), "Expected empty list when tools key absent");
+        let tools = client
+            .list_tools()
+            .await
+            .expect("list_tools should succeed");
+        assert!(
+            tools.is_empty(),
+            "Expected empty list when tools key absent"
+        );
     }
 
     #[tokio::test]

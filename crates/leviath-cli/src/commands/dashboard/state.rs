@@ -1547,7 +1547,11 @@ mod tests {
         assert!(dash.log.last().unwrap().message == "hello from test");
         // Timestamp should look like HH:MM:SS
         let ts = &dash.log.last().unwrap().timestamp;
-        assert!(ts.contains(':'), "timestamp should contain ':', got '{}'", ts);
+        assert!(
+            ts.contains(':'),
+            "timestamp should contain ':', got '{}'",
+            ts
+        );
     }
 
     #[test]

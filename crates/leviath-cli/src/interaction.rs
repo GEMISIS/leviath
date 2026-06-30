@@ -1433,7 +1433,10 @@ mod tests {
             "stage_name": "stage"
         }"#;
         let req: InteractionRequest = serde_json::from_str(json).unwrap();
-        assert!(req.required, "required should default to true via default_true()");
+        assert!(
+            req.required,
+            "required should default to true via default_true()"
+        );
     }
 
     // ─── request_interaction (synchronous) ───────────────────────────────
@@ -1496,12 +1499,7 @@ mod tests {
 
         let req = InteractionRequest::free_text("sync-timeout", "What?", "plan", true);
         // Timeout of 200ms — no response will be written
-        let result = request_interaction(
-            run_id,
-            &mut meta,
-            req,
-            Some(Duration::from_millis(200)),
-        );
+        let result = request_interaction(run_id, &mut meta, req, Some(Duration::from_millis(200)));
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("timed out"));
 
@@ -1535,8 +1533,7 @@ mod tests {
 
         // required: false → CompleteInteractive status branch
         let req = InteractionRequest::free_text("not-req-1", "Optional?", "plan", false);
-        let result =
-            request_interaction(run_id, &mut meta, req, Some(Duration::from_secs(5)));
+        let result = request_interaction(run_id, &mut meta, req, Some(Duration::from_secs(5)));
         assert!(result.is_ok());
 
         let _ = std::fs::remove_dir_all(&dir);
@@ -1573,8 +1570,7 @@ mod tests {
         });
 
         let req = InteractionRequest::free_text("target-req", "What?", "plan", true);
-        let result =
-            request_interaction(run_id, &mut meta, req, Some(Duration::from_secs(5)));
+        let result = request_interaction(run_id, &mut meta, req, Some(Duration::from_secs(5)));
         assert!(result.is_ok());
         let resp = result.unwrap();
         assert_eq!(resp.value.as_deref(), Some("correct answer"));
@@ -1609,18 +1605,10 @@ mod tests {
         });
 
         let req = InteractionRequest::free_text("async-req-1", "Async?", "plan", true);
-        let result = request_interaction_async(
-            run_id,
-            &mut meta,
-            req,
-            Some(Duration::from_secs(5)),
-        )
-        .await;
+        let result =
+            request_interaction_async(run_id, &mut meta, req, Some(Duration::from_secs(5))).await;
         assert!(result.is_ok());
-        assert_eq!(
-            result.unwrap().value.as_deref(),
-            Some("async answer")
-        );
+        assert_eq!(result.unwrap().value.as_deref(), Some("async answer"));
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1643,13 +1631,9 @@ mod tests {
         crate::runstate::create_run(&meta).unwrap();
 
         let req = InteractionRequest::free_text("async-timeout", "Async?", "plan", true);
-        let result = request_interaction_async(
-            run_id,
-            &mut meta,
-            req,
-            Some(Duration::from_millis(200)),
-        )
-        .await;
+        let result =
+            request_interaction_async(run_id, &mut meta, req, Some(Duration::from_millis(200)))
+                .await;
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("timed out"));
 
@@ -1682,13 +1666,8 @@ mod tests {
 
         // required: false → CompleteInteractive status branch
         let req = InteractionRequest::free_text("async-not-req", "Optional?", "plan", false);
-        let result = request_interaction_async(
-            run_id,
-            &mut meta,
-            req,
-            Some(Duration::from_secs(5)),
-        )
-        .await;
+        let result =
+            request_interaction_async(run_id, &mut meta, req, Some(Duration::from_secs(5))).await;
         assert!(result.is_ok());
 
         let _ = std::fs::remove_dir_all(&dir);
@@ -1723,15 +1702,9 @@ mod tests {
             write_response(&run_id_clone, &correct).ok();
         });
 
-        let req =
-            InteractionRequest::free_text("async-stale-target", "Async?", "plan", true);
-        let result = request_interaction_async(
-            run_id,
-            &mut meta,
-            req,
-            Some(Duration::from_secs(5)),
-        )
-        .await;
+        let req = InteractionRequest::free_text("async-stale-target", "Async?", "plan", true);
+        let result =
+            request_interaction_async(run_id, &mut meta, req, Some(Duration::from_secs(5))).await;
         assert!(result.is_ok());
         assert_eq!(result.unwrap().value.as_deref(), Some("correct"));
 
@@ -1765,12 +1738,8 @@ mod tests {
             write_response(&run_id_clone, &resp).ok();
         });
 
-        let req = InteractionRequest::review(
-            "bg-rev-1",
-            "Review this",
-            "# Plan\n\nDetails here",
-            "plan",
-        );
+        let req =
+            InteractionRequest::review("bg-rev-1", "Review this", "# Plan\n\nDetails here", "plan");
         let resp = request_interaction_bg_review(run_id, req).await;
         assert_eq!(resp.value.as_deref(), Some("reviewed"));
         assert_eq!(resp.request_id, "bg-rev-1");
@@ -1818,8 +1787,7 @@ mod tests {
             write_response(&run_id_clone, &correct).ok();
         });
 
-        let req =
-            InteractionRequest::free_text("bg-rev-target", "Review?", "plan", true);
+        let req = InteractionRequest::free_text("bg-rev-target", "Review?", "plan", true);
         let resp = request_interaction_bg_review(run_id, req).await;
         assert_eq!(resp.value.as_deref(), Some("ok"));
 
@@ -1856,8 +1824,7 @@ mod tests {
         let req_id_clone = req_id.clone();
         tokio::spawn(async move {
             tokio::time::sleep(Duration::from_millis(150)).await;
-            let resp =
-                InteractionResponse::approval(&req_id_clone, true, ApprovalScope::Once);
+            let resp = InteractionResponse::approval(&req_id_clone, true, ApprovalScope::Once);
             write_response(&run_id_clone, &resp).ok();
         });
 
@@ -1887,8 +1854,7 @@ mod tests {
         let req_id_clone = req_id.clone();
         tokio::spawn(async move {
             tokio::time::sleep(Duration::from_millis(150)).await;
-            let resp =
-                InteractionResponse::approval(&req_id_clone, false, ApprovalScope::Once);
+            let resp = InteractionResponse::approval(&req_id_clone, false, ApprovalScope::Once);
             write_response(&run_id_clone, &resp).ok();
         });
 
@@ -1928,8 +1894,7 @@ mod tests {
         let req_id_clone = req_id.clone();
         tokio::spawn(async move {
             tokio::time::sleep(Duration::from_millis(150)).await;
-            let resp =
-                InteractionResponse::approval(&req_id_clone, true, ApprovalScope::Session);
+            let resp = InteractionResponse::approval(&req_id_clone, true, ApprovalScope::Session);
             write_response(&run_id_clone, &resp).ok();
         });
 
@@ -1963,8 +1928,7 @@ mod tests {
             write_response(&run_id_clone, &stale).ok();
             tokio::time::sleep(Duration::from_millis(200)).await;
             // Write the correct response
-            let correct =
-                InteractionResponse::approval(&req_id_clone, false, ApprovalScope::Once);
+            let correct = InteractionResponse::approval(&req_id_clone, false, ApprovalScope::Once);
             write_response(&run_id_clone, &correct).ok();
         });
 

@@ -962,10 +962,7 @@ mod tests {
         }
     }
 
-    fn make_confirm_point(
-        name: &str,
-        prompt: &str,
-    ) -> leviath_core::blueprint::InteractionPoint {
+    fn make_confirm_point(name: &str, prompt: &str) -> leviath_core::blueprint::InteractionPoint {
         leviath_core::blueprint::InteractionPoint {
             name: name.to_string(),
             prompt: prompt.to_string(),
@@ -1013,9 +1010,22 @@ mod tests {
         let (mut engine, _pool, entity) = make_engine_and_entity(&bp, "Agent answer");
         let mut io = MockIO::new();
 
-        let run_id = format!("test-ip-ft-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().subsec_nanos());
+        let run_id = format!(
+            "test-ip-ft-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .subsec_nanos()
+        );
         let mut meta = RunMeta::new(
-            run_id.clone(), "test".into(), "/p".into(), "t".into(), None, "/tmp".into(), 1,
+            run_id.clone(),
+            "test".into(),
+            "/p".into(),
+            "t".into(),
+            None,
+            "/tmp".into(),
+            1,
         );
         runstate::create_run(&meta).unwrap();
 
@@ -1055,9 +1065,22 @@ mod tests {
         let (mut engine, _pool, entity) = make_engine_and_entity(&bp, "Agent response");
         let mut io = MockIO::new();
 
-        let run_id = format!("test-ip-mc-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().subsec_nanos());
+        let run_id = format!(
+            "test-ip-mc-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .subsec_nanos()
+        );
         let mut meta = RunMeta::new(
-            run_id.clone(), "test".into(), "/p".into(), "t".into(), None, "/tmp".into(), 1,
+            run_id.clone(),
+            "test".into(),
+            "/p".into(),
+            "t".into(),
+            None,
+            "/tmp".into(),
+            1,
         );
         runstate::create_run(&meta).unwrap();
 
@@ -1068,10 +1091,8 @@ mod tests {
         )];
 
         // choice_index 1 = "Option B" (0-based)
-        let responder = spawn_interaction_responder(
-            run_id.clone(),
-            vec![InteractionResponse::choice("", 1)],
-        );
+        let responder =
+            spawn_interaction_responder(run_id.clone(), vec![InteractionResponse::choice("", 1)]);
 
         run_interactive_points_stage(
             &mut engine,
@@ -1102,18 +1123,29 @@ mod tests {
         let (mut engine, _pool, entity) = make_engine_and_entity(&bp, "Agent response");
         let mut io = MockIO::new();
 
-        let run_id = format!("test-ip-cf-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().subsec_nanos());
+        let run_id = format!(
+            "test-ip-cf-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .subsec_nanos()
+        );
         let mut meta = RunMeta::new(
-            run_id.clone(), "test".into(), "/p".into(), "t".into(), None, "/tmp".into(), 1,
+            run_id.clone(),
+            "test".into(),
+            "/p".into(),
+            "t".into(),
+            None,
+            "/tmp".into(),
+            1,
         );
         runstate::create_run(&meta).unwrap();
 
         let points = vec![make_confirm_point("confirm_step", "Are you sure?")];
 
-        let responder = spawn_interaction_responder(
-            run_id.clone(),
-            vec![InteractionResponse::text("", "yes")],
-        );
+        let responder =
+            spawn_interaction_responder(run_id.clone(), vec![InteractionResponse::text("", "yes")]);
 
         run_interactive_points_stage(
             &mut engine,
@@ -1144,19 +1176,28 @@ mod tests {
         let (mut engine, _pool, entity) = make_engine_and_entity(&bp, "Mid-stage response");
         let mut io = MockIO::new();
 
-        let run_id = format!("test-ip-mp-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().subsec_nanos());
+        let run_id = format!(
+            "test-ip-mp-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .subsec_nanos()
+        );
         let mut meta = RunMeta::new(
-            run_id.clone(), "test".into(), "/p".into(), "t".into(), None, "/tmp".into(), 1,
+            run_id.clone(),
+            "test".into(),
+            "/p".into(),
+            "t".into(),
+            None,
+            "/tmp".into(),
+            1,
         );
         runstate::create_run(&meta).unwrap();
 
         let points = vec![
             make_free_text_point("step1", "Tell me about step 1"),
-            make_multiple_choice_point(
-                "step2",
-                "Pick one",
-                vec!["A".to_string(), "B".to_string()],
-            ),
+            make_multiple_choice_point("step2", "Pick one", vec!["A".to_string(), "B".to_string()]),
             make_confirm_point("step3", "Confirm?"),
         ];
 
@@ -1200,9 +1241,22 @@ mod tests {
         let (mut engine, _pool, entity) = make_engine_and_entity(&bp, "Response");
         let mut io = MockIO::new();
 
-        let run_id = format!("test-ip-zero-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().subsec_nanos());
+        let run_id = format!(
+            "test-ip-zero-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .subsec_nanos()
+        );
         let mut meta = RunMeta::new(
-            run_id.clone(), "test".into(), "/p".into(), "t".into(), None, "/tmp".into(), 1,
+            run_id.clone(),
+            "test".into(),
+            "/p".into(),
+            "t".into(),
+            None,
+            "/tmp".into(),
+            1,
         );
         runstate::create_run(&meta).unwrap();
 
@@ -1249,19 +1303,30 @@ mod tests {
         let (mut engine, _pool, entity) = make_engine_and_entity(&bp, "Response");
         let mut io = MockIO::new();
 
-        let run_id = format!("test-ip-empty-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().subsec_nanos());
+        let run_id = format!(
+            "test-ip-empty-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .subsec_nanos()
+        );
         let mut meta = RunMeta::new(
-            run_id.clone(), "test".into(), "/p".into(), "t".into(), None, "/tmp".into(), 1,
+            run_id.clone(),
+            "test".into(),
+            "/p".into(),
+            "t".into(),
+            None,
+            "/tmp".into(),
+            1,
         );
         runstate::create_run(&meta).unwrap();
 
         let points = vec![make_free_text_point("ask", "Say something")];
 
         // Respond with empty text
-        let responder = spawn_interaction_responder(
-            run_id.clone(),
-            vec![InteractionResponse::text("", "")],
-        );
+        let responder =
+            spawn_interaction_responder(run_id.clone(), vec![InteractionResponse::text("", "")]);
 
         run_interactive_points_stage(
             &mut engine,

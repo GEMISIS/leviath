@@ -1500,11 +1500,7 @@ mod tests {
     #[tokio::test]
     async fn prompt_llm_transition_returns_matching_edge() {
         // LLM returns "b" which matches edge "b"
-        let bp = make_blueprint(vec![
-            make_stage("a"),
-            make_stage("b"),
-            make_stage("c"),
-        ]);
+        let bp = make_blueprint(vec![make_stage("a"), make_stage("b"), make_stage("c")]);
         let (mut engine, entity) = make_engine_with_mock_provider(&bp, "b");
 
         let stage = &bp.stages[0];
@@ -1522,11 +1518,10 @@ mod tests {
         };
         let name_b = "b".to_string();
         let name_c = "c".to_string();
-        let edges: Vec<(&String, &TransitionEdge)> =
-            vec![(&name_b, &edge_b), (&name_c, &edge_c)];
+        let edges: Vec<(&String, &TransitionEdge)> = vec![(&name_b, &edge_b), (&name_c, &edge_c)];
 
-        let result = prompt_llm_transition(stage, &edges, &mut engine, entity, "mock", "test")
-            .await;
+        let result =
+            prompt_llm_transition(stage, &edges, &mut engine, entity, "mock", "test").await;
 
         assert!(result.is_some(), "Expected a transition edge");
         assert_eq!(result.unwrap().target, "b");
@@ -1535,11 +1530,7 @@ mod tests {
     #[tokio::test]
     async fn prompt_llm_transition_with_custom_prompt() {
         // Stage has a custom transition_prompt — exercises the custom prompt branch
-        let bp = make_blueprint(vec![
-            make_stage("a"),
-            make_stage("b"),
-            make_stage("c"),
-        ]);
+        let bp = make_blueprint(vec![make_stage("a"), make_stage("b"), make_stage("c")]);
         let (mut engine, entity) = make_engine_with_mock_provider(&bp, "c");
 
         let mut stage = bp.stages[0].clone();
@@ -1559,11 +1550,10 @@ mod tests {
         };
         let name_b = "b".to_string();
         let name_c = "c".to_string();
-        let edges: Vec<(&String, &TransitionEdge)> =
-            vec![(&name_b, &edge_b), (&name_c, &edge_c)];
+        let edges: Vec<(&String, &TransitionEdge)> = vec![(&name_b, &edge_b), (&name_c, &edge_c)];
 
-        let result = prompt_llm_transition(&stage, &edges, &mut engine, entity, "mock", "test")
-            .await;
+        let result =
+            prompt_llm_transition(&stage, &edges, &mut engine, entity, "mock", "test").await;
 
         assert!(result.is_some());
         // Provider returns "c", which matches edge_c
@@ -1601,8 +1591,8 @@ mod tests {
         let edges: Vec<(&String, &TransitionEdge)> =
             vec![(&name_alpha, &edge_alpha), (&name_beta, &edge_beta)];
 
-        let result = prompt_llm_transition(stage, &edges, &mut engine, entity, "mock", "test")
-            .await;
+        let result =
+            prompt_llm_transition(stage, &edges, &mut engine, entity, "mock", "test").await;
 
         assert!(result.is_some());
         // Fallback picks the first edge in the slice (edge_alpha)
@@ -1924,7 +1914,9 @@ mod tests {
         let window = engine.world().get::<ContextWindow>(entity).unwrap();
         let conv = window.get_region("conversation").unwrap();
         assert!(
-            conv.content.iter().any(|e| e.content == "preserved content"),
+            conv.content
+                .iter()
+                .any(|e| e.content == "preserved content"),
             "Content should be preserved"
         );
     }

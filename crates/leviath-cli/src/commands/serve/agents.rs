@@ -724,7 +724,10 @@ mod tests {
             .unwrap();
         let result: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(result["run_id"].as_str().unwrap(), run_id);
-        assert!(result["output"].as_str().unwrap().contains("stage output here"));
+        assert!(result["output"]
+            .as_str()
+            .unwrap()
+            .contains("stage output here"));
 
         let _ = std::fs::remove_dir_all(runstate::run_dir(&run_id));
     }

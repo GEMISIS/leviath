@@ -506,8 +506,10 @@ mod tests {
 
         // We test apply_flags instead since prompt_secret reads from stdin.
         // Verify that applying None keys doesn't overwrite.
-        let mut config = Config::default();
-        config.openrouter_api_key = Some("existing-or-key".to_string());
+        let mut config = Config {
+            openrouter_api_key: Some("existing-or-key".to_string()),
+            ..Config::default()
+        };
         let args = SetupArgs {
             non_interactive: true,
             anthropic_key: None,
@@ -518,7 +520,10 @@ mod tests {
             default_model: None,
         };
         apply_flags(&mut config, &args);
-        assert_eq!(config.openrouter_api_key.as_deref(), Some("existing-or-key"));
+        assert_eq!(
+            config.openrouter_api_key.as_deref(),
+            Some("existing-or-key")
+        );
     }
 
     // ─── redact edge ──────────────────────────────────────────────────────

@@ -243,11 +243,11 @@ impl SubAgentExecutor {
 
         // Spawn the child agent entity
         let child_agent_id = {
+            let mut engine = self.engine.write().await;
             let mut pools = self.pools.write().unwrap();
             let pool = pools
                 .entry(blueprint_name.clone())
                 .or_insert_with(|| AgentPool::new(blueprint.clone()));
-            let mut engine = self.engine.write().await;
             pool.spawn_agent(engine.world_mut())
         };
 
@@ -1550,8 +1550,10 @@ mod policy_tests {
             args: vec![],
             env: StdHashMap::new(),
         };
-        let mut config = Config::default();
-        config.mcp_servers = vec![bad_server];
+        let config = Config {
+            mcp_servers: vec![bad_server],
+            ..Config::default()
+        };
 
         let workdir = std::env::current_dir().unwrap();
         // Should not panic; the error branch is non-fatal (just a tracing::warn)

@@ -962,7 +962,11 @@ model = { provider = "anthropic", model = "claude-sonnet-4-6" }
         std::fs::create_dir_all(&tests_dir).unwrap();
 
         // Write a Rhai script that throws an error
-        std::fs::write(tests_dir.join("error_test.rhai"), "throw \"intentional error\"").unwrap();
+        std::fs::write(
+            tests_dir.join("error_test.rhai"),
+            "throw \"intentional error\"",
+        )
+        .unwrap();
 
         let args = TestArgs {
             path: Some(project.to_str().unwrap().to_string()),

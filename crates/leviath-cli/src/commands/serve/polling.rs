@@ -351,20 +351,12 @@ mod tests {
         };
 
         // First completion → fire callback
-        let already_fired = poll
-            .callback_fired
-            .get("run-1")
-            .copied()
-            .unwrap_or(false);
+        let already_fired = poll.callback_fired.get("run-1").copied().unwrap_or(false);
         assert!(!already_fired);
         poll.callback_fired.insert("run-1".to_string(), true);
 
         // Second check → should NOT fire again
-        let already_fired = poll
-            .callback_fired
-            .get("run-1")
-            .copied()
-            .unwrap_or(false);
+        let already_fired = poll.callback_fired.get("run-1").copied().unwrap_or(false);
         assert!(already_fired);
     }
 
@@ -379,22 +371,17 @@ mod tests {
 
         // First time seeing pending → should emit event (has_pending && !had_pending)
         let has_pending = true;
-        let had_pending = poll
-            .last_pending
-            .get("run-1")
-            .copied()
-            .unwrap_or(false);
-        assert!(has_pending && !had_pending, "should trigger on first pending");
+        let had_pending = poll.last_pending.get("run-1").copied().unwrap_or(false);
+        assert!(
+            has_pending && !had_pending,
+            "should trigger on first pending"
+        );
         poll.last_pending.insert("run-1".to_string(), has_pending);
 
         // Second time → had_pending is now true, should NOT emit again
-        let had_pending = poll
-            .last_pending
-            .get("run-1")
-            .copied()
-            .unwrap_or(false);
+        let had_pending = poll.last_pending.get("run-1").copied().unwrap_or(false);
         assert!(
-            !(has_pending && !had_pending),
+            !has_pending || had_pending,
             "should not trigger when already pending"
         );
     }
@@ -423,8 +410,8 @@ mod tests {
 
     /// Helper: create a test AppState with a broadcast channel.
     fn make_test_state() -> (AppState, tokio::sync::broadcast::Receiver<ServerEvent>) {
-        use std::sync::Arc;
         use crate::config::Config;
+        use std::sync::Arc;
         let (tx, rx) = tokio::sync::broadcast::channel::<ServerEvent>(128);
         let state = AppState {
             config: Arc::new(Config::default()),
@@ -451,8 +438,13 @@ mod tests {
         let client = reqwest::Client::new();
 
         let mut meta = RunMeta::new(
-            "run-status-1".into(), "agent".into(), "/p".into(),
-            "task".into(), None, "/tmp".into(), 1,
+            "run-status-1".into(),
+            "agent".into(),
+            "/p".into(),
+            "task".into(),
+            None,
+            "/tmp".into(),
+            1,
         );
         meta.status = RunStatus::Running;
 
@@ -464,7 +456,10 @@ mod tests {
                 got_status = true;
             }
         }
-        assert!(got_status, "poll_once should have emitted AgentStatus event");
+        assert!(
+            got_status,
+            "poll_once should have emitted AgentStatus event"
+        );
     }
 
     #[test]
@@ -482,8 +477,13 @@ mod tests {
 
         // First poll: Running
         let mut meta = RunMeta::new(
-            "run-complete-1".into(), "agent".into(), "/p".into(),
-            "task".into(), None, "/tmp".into(), 1,
+            "run-complete-1".into(),
+            "agent".into(),
+            "/p".into(),
+            "task".into(),
+            None,
+            "/tmp".into(),
+            1,
         );
         meta.status = RunStatus::Running;
         poll_once(&state, &mut poll, &client, &[meta.clone()]);
@@ -498,11 +498,15 @@ mod tests {
 
         let mut got_completed = false;
         while let Ok(ev) = rx.try_recv() {
-            if matches!(&ev, ServerEvent::AgentCompleted { run_id, .. } if run_id == "run-complete-1") {
+            if matches!(&ev, ServerEvent::AgentCompleted { run_id, .. } if run_id == "run-complete-1")
+            {
                 got_completed = true;
             }
         }
-        assert!(got_completed, "poll_once should have emitted AgentCompleted event");
+        assert!(
+            got_completed,
+            "poll_once should have emitted AgentCompleted event"
+        );
     }
 
     #[test]
@@ -518,10 +522,22 @@ mod tests {
         };
         let client = reqwest::Client::new();
 
-        let run_id = format!("test-poll-ctx-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().subsec_nanos());
+        let run_id = format!(
+            "test-poll-ctx-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .subsec_nanos()
+        );
         let meta = RunMeta::new(
-            run_id.clone(), "agent".into(), "/p".into(),
-            "task".into(), None, "/tmp".into(), 1,
+            run_id.clone(),
+            "agent".into(),
+            "/p".into(),
+            "task".into(),
+            None,
+            "/tmp".into(),
+            1,
         );
         create_run(&meta).unwrap();
 
@@ -537,12 +553,16 @@ mod tests {
 
         let mut got_context = false;
         while let Ok(ev) = rx.try_recv() {
-            if matches!(&ev, ServerEvent::ContextUpdate { run_id: eid, total_tokens, .. } if eid == &run_id && *total_tokens == 7500) {
+            if matches!(&ev, ServerEvent::ContextUpdate { run_id: eid, total_tokens, .. } if eid == &run_id && *total_tokens == 7500)
+            {
                 got_context = true;
             }
         }
         let _ = std::fs::remove_dir_all(crate::runstate::run_dir(&run_id));
-        assert!(got_context, "poll_once should have emitted ContextUpdate event");
+        assert!(
+            got_context,
+            "poll_once should have emitted ContextUpdate event"
+        );
     }
 
     #[test]
@@ -559,10 +579,22 @@ mod tests {
         };
         let client = reqwest::Client::new();
 
-        let run_id = format!("test-poll-int-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().subsec_nanos());
+        let run_id = format!(
+            "test-poll-int-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .subsec_nanos()
+        );
         let meta = RunMeta::new(
-            run_id.clone(), "agent".into(), "/p".into(),
-            "task".into(), None, "/tmp".into(), 1,
+            run_id.clone(),
+            "agent".into(),
+            "/p".into(),
+            "task".into(),
+            None,
+            "/tmp".into(),
+            1,
         );
         create_run(&meta).unwrap();
 
@@ -578,6 +610,9 @@ mod tests {
             }
         }
         let _ = std::fs::remove_dir_all(crate::runstate::run_dir(&run_id));
-        assert!(got_interaction, "poll_once should have emitted InteractionNeeded event");
+        assert!(
+            got_interaction,
+            "poll_once should have emitted InteractionNeeded event"
+        );
     }
 }

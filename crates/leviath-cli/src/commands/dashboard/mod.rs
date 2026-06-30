@@ -240,11 +240,8 @@ mod tests {
             .unwrap();
 
         // The loop should process it and send back a StatusChanged event
-        let event = tokio::time::timeout(
-            std::time::Duration::from_millis(500),
-            event_rx.recv(),
-        )
-        .await;
+        let event =
+            tokio::time::timeout(std::time::Duration::from_millis(500), event_rx.recv()).await;
         assert!(event.is_ok(), "timed out waiting for StatusChanged event");
         let ev = event.unwrap();
         assert!(ev.is_some());
@@ -289,12 +286,11 @@ mod tests {
         drop(cmd_tx);
 
         // The loop should exit because the channel is closed
-        let result = tokio::time::timeout(
-            std::time::Duration::from_millis(500),
-            handle,
-        )
-        .await;
-        assert!(result.is_ok(), "engine_background_loop should exit when channel is closed");
+        let result = tokio::time::timeout(std::time::Duration::from_millis(500), handle).await;
+        assert!(
+            result.is_ok(),
+            "engine_background_loop should exit when channel is closed"
+        );
     }
 
     // ─── Dashboard basic integration ──────────────────────────────────────

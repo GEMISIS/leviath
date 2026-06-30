@@ -1531,7 +1531,10 @@ mod tests {
         };
         let result = provider.infer(request).await;
         assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), ProviderError::RequestFailed(_)));
+        assert!(matches!(
+            result.unwrap_err(),
+            ProviderError::RequestFailed(_)
+        ));
     }
 
     #[tokio::test]
@@ -1574,14 +1577,19 @@ mod tests {
         };
         let result = provider.list_models().await;
         assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), ProviderError::RequestFailed(_)));
+        assert!(matches!(
+            result.unwrap_err(),
+            ProviderError::RequestFailed(_)
+        ));
     }
 
     // ─── parse_sse_event: message_delta without usage ─────────────────────
 
     #[test]
     fn test_parse_sse_event_message_delta_no_usage() {
-        let mut buffer = "event: message_delta\ndata: {\"delta\":{\"stop_reason\":\"end_turn\"}}\n\n".to_string();
+        let mut buffer =
+            "event: message_delta\ndata: {\"delta\":{\"stop_reason\":\"end_turn\"}}\n\n"
+                .to_string();
         let mut tool_index = 0usize;
         let chunk = parse_sse_event(&mut buffer, &mut tool_index).unwrap();
         assert!(matches!(chunk.finish_reason, Some(FinishReason::Complete)));
@@ -1599,7 +1607,8 @@ mod tests {
             "data: {\"delta\":{\"type\":\"text_delta\",\"text\":\"Hello\"}}\n\n",
             "event: content_block_delta\n",
             "data: {\"delta\":{\"type\":\"text_delta\",\"text\":\" world\"}}\n\n"
-        ).to_string();
+        )
+        .to_string();
         let mut tool_index = 0usize;
 
         // First event

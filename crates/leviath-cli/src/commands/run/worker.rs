@@ -676,8 +676,12 @@ mod tests {
 
     fn make_engine_with_agent(
         meta: &mut RunMeta,
-    ) -> (leviath_runtime::AgentEngine, leviath_runtime::AgentPool, String, bevy_ecs::prelude::Entity)
-    {
+    ) -> (
+        leviath_runtime::AgentEngine,
+        leviath_runtime::AgentPool,
+        String,
+        bevy_ecs::prelude::Entity,
+    ) {
         let registry = leviath_runtime::ProviderRegistry::new();
         let mut engine = leviath_runtime::AgentEngine::with_providers(registry);
         let blueprint = leviath_core::Blueprint::new(
@@ -1394,7 +1398,7 @@ model = "claude-sonnet-4-6"
             model: None,
             yolo: true, // tests the yolo → launch_overrides branch
             allow: vec!["read_file".to_string()], // tests --allow branch
-            ask: vec!["bash".to_string()],        // tests --ask branch
+            ask: vec!["bash".to_string()], // tests --ask branch
             deny: vec!["write_file".to_string()], // tests --deny branch
             max_depth: None,
         };
@@ -1486,9 +1490,7 @@ mode = "autonomous"
         // Use a raw entity (no context window) to force an error
         let entity = bevy_ecs::prelude::Entity::from_raw(9999);
 
-        let mut exec = |_calls: Vec<leviath_providers::ToolCall>| async move {
-            vec![]
-        };
+        let mut exec = |_calls: Vec<leviath_providers::ToolCall>| async move { vec![] };
 
         let result = cb
             .run_autonomous(

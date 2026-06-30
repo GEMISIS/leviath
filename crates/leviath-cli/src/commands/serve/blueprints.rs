@@ -301,7 +301,9 @@ prompt = "Plan the work"
             .unwrap();
         let blueprints: Vec<serde_json::Value> = serde_json::from_slice(&body).unwrap();
         assert!(
-            blueprints.iter().any(|b| b["name"].as_str() == Some("test-bp")),
+            blueprints
+                .iter()
+                .any(|b| b["name"].as_str() == Some("test-bp")),
             "test-bp should be listed"
         );
     }
@@ -352,8 +354,7 @@ prompt = "Plan the work"
 
     #[tokio::test]
     async fn create_blueprint_invalid_manifest_returns_400() {
-        let app = Router::new()
-            .route("/api/blueprints", post(create_blueprint));
+        let app = Router::new().route("/api/blueprints", post(create_blueprint));
         let body = serde_json::json!({
             "name": "bad-agent",
             "manifest": "not valid toml [[[{"
@@ -374,8 +375,7 @@ prompt = "Plan the work"
     async fn update_blueprint_invalid_manifest_returns_400() {
         use axum::routing::put;
 
-        let app = Router::new()
-            .route("/api/blueprints/{name}", put(update_blueprint));
+        let app = Router::new().route("/api/blueprints/{name}", put(update_blueprint));
         let body = serde_json::json!({
             "manifest": "not valid toml {{{"
         });
@@ -393,8 +393,7 @@ prompt = "Plan the work"
     async fn update_blueprint_not_found_returns_404() {
         use axum::routing::put;
 
-        let app = Router::new()
-            .route("/api/blueprints/{name}", put(update_blueprint));
+        let app = Router::new().route("/api/blueprints/{name}", put(update_blueprint));
         let body = serde_json::json!({
             "manifest": r#"
 [agent]
@@ -422,8 +421,7 @@ prompt = "Run"
     async fn delete_blueprint_not_found_returns_404() {
         use axum::routing::delete;
 
-        let app = Router::new()
-            .route("/api/blueprints/{name}", delete(delete_blueprint));
+        let app = Router::new().route("/api/blueprints/{name}", delete(delete_blueprint));
         let req = Request::builder()
             .method("DELETE")
             .uri("/api/blueprints/nonexistent-xyz")
@@ -437,8 +435,7 @@ prompt = "Run"
 
     #[tokio::test]
     async fn validate_blueprint_valid_manifest_returns_ok_valid_true() {
-        let app = Router::new()
-            .route("/api/blueprints/validate", post(validate_blueprint));
+        let app = Router::new().route("/api/blueprints/validate", post(validate_blueprint));
         let body = serde_json::json!({"manifest": test_manifest()});
         let req = Request::builder()
             .method("POST")
@@ -458,8 +455,7 @@ prompt = "Run"
 
     #[tokio::test]
     async fn validate_blueprint_invalid_manifest_returns_ok_valid_false() {
-        let app = Router::new()
-            .route("/api/blueprints/validate", post(validate_blueprint));
+        let app = Router::new().route("/api/blueprints/validate", post(validate_blueprint));
         let body = serde_json::json!({"manifest": "not toml at all [[[{"});
         let req = Request::builder()
             .method("POST")
