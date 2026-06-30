@@ -76,7 +76,18 @@ pub async fn generate_title(
 
     match provider.infer(request).await {
         Ok(resp) => {
-            let raw = resp.content.trim().lines().next()?.trim().to_string();
+            let trimmed = resp.content.trim();
+            // If the model wrapped its answer in a fenced code block (``` or
+            // ```lang), the opening fence line is just a delimiter/language
+            // tag — unwrap it first so it isn't mistaken for the title itself
+            // (e.g. ```python\nWeb Page Downloader\n``` must not become "python").
+            let content = if trimmed.starts_with("```") {
+                let rest: String = trimmed.lines().skip(1).collect::<Vec<_>>().join("\n");
+                rest.trim().trim_end_matches("```").trim().to_string()
+            } else {
+                trimmed.to_string()
+            };
+            let raw = content.lines().next()?.trim().to_string();
             // Strip leading # heading markers, backtick code formatting, surrounding quotes
             let title = raw
                 .trim_start_matches('#')
@@ -249,9 +260,79 @@ pub fn record_stage_log(run_id: &str, idx: usize, text: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use async_trait::async_trait;
     use leviath_core::blueprint::ModelConfig;
     use leviath_core::layout::RegionDefinition;
+    use leviath_providers::{
+        FinishReason, InferenceRequest, InferenceResponse, ModelCapabilities, Provider,
+        ProviderError, TokenUsage,
+    };
     use leviath_runtime::{AgentPool, ProviderRegistry};
+
+    /// A mock provider returning a fixed canned response, used to exercise
+    /// generate_title()'s response-parsing logic without a real network call.
+    struct CannedTitleProvider {
+        content: String,
+    }
+
+    #[async_trait]
+    impl Provider for CannedTitleProvider {
+        async fn infer(
+            &self,
+            _request: InferenceRequest,
+        ) -> Result<InferenceResponse, ProviderError> {
+            Ok(InferenceResponse {
+                content: self.content.clone(),
+                tool_calls: vec![],
+                tokens_used: TokenUsage {
+                    prompt_tokens: 1,
+                    completion_tokens: 1,
+                    total_tokens: 2,
+                    cached_tokens: 0,
+                    cache_write_tokens: 0,
+                },
+                finish_reason: FinishReason::Complete,
+            })
+        }
+
+        fn count_tokens(&self, text: &str, _model: &str) -> usize {
+            text.len() / 4
+        }
+
+        fn max_context_tokens(&self, _model: &str) -> usize {
+            100_000
+        }
+
+        fn name(&self) -> &str {
+            "mock"
+        }
+
+        fn capabilities(&self, _model: &str) -> ModelCapabilities {
+            ModelCapabilities::default()
+        }
+    }
+
+    fn make_title_registry(content: &str) -> ProviderRegistry {
+        let mut registry = ProviderRegistry::new();
+        registry.register(
+            "mock".to_string(),
+            std::sync::Arc::new(CannedTitleProvider {
+                content: content.to_string(),
+            }),
+        );
+        registry
+    }
+
+    fn make_title_config() -> Config {
+        Config {
+            title: crate::config::TitleConfig {
+                enabled: true,
+                provider: Some("mock".to_string()),
+                model: Some("mock-model".to_string()),
+            },
+            ..Config::default()
+        }
+    }
 
     fn make_blueprint_with_regions(regions: Vec<RegionDefinition>) -> leviath_core::Blueprint {
         let total = regions.iter().map(|r| r.max_tokens).sum();
@@ -574,5 +655,70 @@ mod tests {
         let sys = window.get_region("system").unwrap();
         // Empty task still gets added
         assert_eq!(sys.content.len(), 1);
+    }
+
+    // ─── generate_title: fenced-code-block regression ───────────────────
+    //
+    // When the model wraps its answer in a markdown fence, taking only the
+    // first line of the response used to grab the fence/language-tag line
+    // itself (e.g. "```python") instead of the actual title on the next
+    // line — confirmed via real run-state data showing title: "python" for
+    // a task about downloading webpages, instead of a real title.
+
+    #[tokio::test]
+    async fn generate_title_unwraps_fenced_code_block_with_language_tag() {
+        let registry = make_title_registry("```python\nWeb Page Downloader\n```");
+        let config = make_title_config();
+        let title = generate_title("download a webpage", &config, &registry, None).await;
+        assert_eq!(title, Some("Web Page Downloader".to_string()));
+    }
+
+    #[tokio::test]
+    async fn generate_title_unwraps_fenced_code_block_without_language_tag() {
+        let registry = make_title_registry("```\nDownload Webpage Tool\n```");
+        let config = make_title_config();
+        let title = generate_title("download a webpage", &config, &registry, None).await;
+        assert_eq!(title, Some("Download Webpage Tool".to_string()));
+    }
+
+    #[tokio::test]
+    async fn generate_title_fenced_block_with_no_real_content_returns_none() {
+        // Just a fence + language tag, no actual title text on a second line.
+        let registry = make_title_registry("```python");
+        let config = make_title_config();
+        let title = generate_title("download a webpage", &config, &registry, None).await;
+        assert_eq!(title, None);
+    }
+
+    #[tokio::test]
+    async fn generate_title_plain_response_unaffected() {
+        let registry = make_title_registry("Web Page Downloader Script");
+        let config = make_title_config();
+        let title = generate_title("download a webpage", &config, &registry, None).await;
+        assert_eq!(title, Some("Web Page Downloader Script".to_string()));
+    }
+
+    #[tokio::test]
+    async fn generate_title_strips_markdown_heading_and_quotes() {
+        let registry = make_title_registry("# \"Web Page Downloader\"");
+        let config = make_title_config();
+        let title = generate_title("download a webpage", &config, &registry, None).await;
+        assert_eq!(title, Some("Web Page Downloader".to_string()));
+    }
+
+    #[tokio::test]
+    async fn generate_title_empty_response_returns_none() {
+        let registry = make_title_registry("");
+        let config = make_title_config();
+        let title = generate_title("download a webpage", &config, &registry, None).await;
+        assert_eq!(title, None);
+    }
+
+    #[tokio::test]
+    async fn generate_title_missing_provider_returns_none() {
+        let registry = ProviderRegistry::new(); // "mock" not registered
+        let config = make_title_config();
+        let title = generate_title("download a webpage", &config, &registry, None).await;
+        assert_eq!(title, None);
     }
 }
