@@ -240,10 +240,13 @@ graph TD
 ```bash
 git clone https://github.com/GEMISIS/leviath.git
 cd leviath
+git config core.hooksPath .githooks
 cargo build
 cargo test --workspace
 cargo clippy --workspace
 ```
+
+The `git config` line is a one-time step per clone. It points git at the `.githooks/` directory where the pre-commit hook lives. The hook enforces formatting, clippy (warnings-as-errors), all tests passing, and ≥75% line coverage via `cargo-llvm-cov`. CI enforces the same rules.
 
 ## License
 
