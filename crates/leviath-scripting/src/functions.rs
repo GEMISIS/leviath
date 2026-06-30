@@ -264,7 +264,9 @@ mod tests {
     #[test]
     fn is_mermaid_with_sequence_diagram() {
         let e = engine();
-        let result: bool = e.eval(r#"is_mermaid("sequenceDiagram\nA->>B: Hi")"#).unwrap();
+        let result: bool = e
+            .eval(r#"is_mermaid("sequenceDiagram\nA->>B: Hi")"#)
+            .unwrap();
         assert!(result);
     }
 
@@ -370,9 +372,7 @@ mod tests {
     #[test]
     fn extract_modified_updated_marker() {
         let e = engine();
-        let result: rhai::Array = e
-            .eval(r#"extract_modified("updated: file.txt")"#)
-            .unwrap();
+        let result: rhai::Array = e.eval(r#"extract_modified("updated: file.txt")"#).unwrap();
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].clone_cast::<String>(), "updated: file.txt");
     }

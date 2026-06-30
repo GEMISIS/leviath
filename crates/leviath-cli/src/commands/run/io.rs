@@ -56,6 +56,64 @@ pub trait RunIO: Send {
     fn write_context_snapshot(&mut self, snapshot: &RegionSnapshot);
 }
 
+/// Console I/O implementation: prints to stdout, reads from stdin.
+/// Used by both foreground and worker modes at runtime.
+pub struct ConsoleIO;
+
+#[async_trait]
+impl RunIO for ConsoleIO {
+    async fn on_stage_enter(
+        &mut self,
+        _stage: &Stage,
+        _visit_num: usize,
+        _provider: &str,
+        _model: &str,
+    ) {
+    }
+
+    async fn on_stage_complete(
+        &mut self,
+        _stage_name: &str,
+        _result: &StageResult,
+        _next_stage: Option<&str>,
+    ) {
+    }
+
+    async fn on_output(&mut self, text: &str) {
+        print!("{}", text);
+        use std::io::Write;
+        std::io::stdout().flush().ok();
+    }
+
+    async fn on_tokens(&mut self, prompt: usize, completion: usize, _cached: usize) {
+        println!("\n[Tokens: {} in, {} out]", prompt, completion);
+    }
+
+    async fn on_tool_call(&mut self, _tool_name: &str, _tool_id: &str, _result: &str) {}
+
+    async fn get_user_input(&mut self, prompt: &str) -> Option<String> {
+        use std::io::Write;
+        println!("{}", prompt);
+        print!("You: ");
+        std::io::stdout().flush().ok();
+        let mut buf = String::new();
+        std::io::stdin().read_line(&mut buf).ok()?;
+        Some(buf.trim().to_string())
+    }
+
+    async fn on_error(&mut self, error: &str) {
+        eprintln!("{}", error);
+    }
+
+    async fn on_provider_missing(&mut self, _provider: &str) {}
+
+    fn is_background(&self) -> bool {
+        false
+    }
+
+    fn write_context_snapshot(&mut self, _snapshot: &RegionSnapshot) {}
+}
+
 #[cfg(test)]
 pub mod mock {
     use super::*;

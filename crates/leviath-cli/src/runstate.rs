@@ -516,7 +516,10 @@ mod tests {
         assert_eq!(RunStatus::Running.to_string(), "Running");
         assert_eq!(RunStatus::WaitingInput.to_string(), "WaitingInput");
         assert_eq!(RunStatus::Complete.to_string(), "Complete");
-        assert_eq!(RunStatus::CompleteInteractive.to_string(), "CompleteInteractive");
+        assert_eq!(
+            RunStatus::CompleteInteractive.to_string(),
+            "CompleteInteractive"
+        );
         assert_eq!(RunStatus::Error.to_string(), "Error");
         assert_eq!(RunStatus::Cancelled.to_string(), "Cancelled");
     }
@@ -605,7 +608,13 @@ mod tests {
     #[test]
     fn run_meta_touch_updates_timestamp() {
         let mut meta = RunMeta::new(
-            "r".into(), "a".into(), "/p".into(), "t".into(), None, "/w".into(), 1,
+            "r".into(),
+            "a".into(),
+            "/p".into(),
+            "t".into(),
+            None,
+            "/w".into(),
+            1,
         );
         let before = meta.updated_at;
         // Touch should update (or at least not decrease) updated_at

@@ -428,7 +428,10 @@ mod tests {
         assert_eq!(resp.tokens_used.prompt_tokens, 10);
         assert_eq!(resp.tokens_used.completion_tokens, 5);
         assert_eq!(resp.tokens_used.total_tokens, 15);
-        assert!(matches!(resp.finish_reason, crate::provider::FinishReason::Complete));
+        assert!(matches!(
+            resp.finish_reason,
+            crate::provider::FinishReason::Complete
+        ));
     }
 
     #[test]
@@ -471,7 +474,10 @@ mod tests {
         assert_eq!(resp.tool_calls[0].id, "call_1");
         assert_eq!(resp.tool_calls[0].name, "get_weather");
         assert_eq!(resp.tool_calls[0].arguments["city"], "NYC");
-        assert!(matches!(resp.finish_reason, crate::provider::FinishReason::ToolCall));
+        assert!(matches!(
+            resp.finish_reason,
+            crate::provider::FinishReason::ToolCall
+        ));
     }
 
     #[test]
@@ -516,7 +522,10 @@ mod tests {
             "usage": {"prompt_tokens": 5, "completion_tokens": 5}
         });
         let resp = parse_openai_response(&body).unwrap();
-        assert!(matches!(resp.finish_reason, crate::provider::FinishReason::TokenLimit));
+        assert!(matches!(
+            resp.finish_reason,
+            crate::provider::FinishReason::TokenLimit
+        ));
     }
 
     // ─── parse_openai_sse_event ─────────────────────────────────────────────
@@ -565,7 +574,10 @@ mod tests {
             })
         );
         let chunk = parse_openai_sse_event(&mut buf).unwrap().unwrap();
-        assert!(matches!(chunk.finish_reason, Some(crate::provider::FinishReason::Complete)));
+        assert!(matches!(
+            chunk.finish_reason,
+            Some(crate::provider::FinishReason::Complete)
+        ));
     }
 
     #[test]

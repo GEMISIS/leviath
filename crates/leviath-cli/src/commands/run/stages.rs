@@ -8,12 +8,13 @@ use crate::runstate::{self, RunMeta};
 use super::helpers::record_stage_log;
 use super::helpers::record_stage_output;
 use super::inference::stream_inference;
+use super::io::RunIO;
 
 /// Run an interactive stage.
 ///
 /// `run_context`: if `Some((run_id, meta))`, interaction is handled via the
 /// file-based IPC channel (background worker). If `None`, stdin is used
-/// (foreground).
+/// (foreground) via `io.get_user_input()`.
 #[allow(clippy::too_many_arguments)]
 pub async fn run_interactive_stage<F, Fut>(
     engine: &mut AgentEngine,
@@ -24,6 +25,7 @@ pub async fn run_interactive_stage<F, Fut>(
     tools: &[leviath_providers::Tool],
     run_context: Option<(&str, &mut RunMeta)>,
     stage_name: &str,
+    io: &mut dyn RunIO,
     executor: &mut F,
 ) -> anyhow::Result<()>
 where
@@ -50,7 +52,7 @@ where
 
     loop {
         if turn >= max_iterations {
-            println!("\n[Max turns reached]");
+            io.on_output("\n[Max turns reached]\n").await;
             break;
         }
 
@@ -71,14 +73,20 @@ where
                 .await
                 .map_err(|e| anyhow::anyhow!("Inference error: {}", e))?;
 
-            println!("\nAssistant: {}", response.content);
+            io.on_output(&format!("\nAssistant: {}", response.content))
+                .await;
+            io.on_tokens(
+                response.tokens_used.prompt_tokens,
+                response.tokens_used.completion_tokens,
+                response.tokens_used.cached_tokens,
+            )
+            .await;
+
+            // Route to per-stage files so the dashboard can display them.
             let token_line = format!(
                 "[Tokens: {} in, {} out]",
                 response.tokens_used.prompt_tokens, response.tokens_used.completion_tokens
             );
-            println!("\n{}", token_line);
-
-            // Route to per-stage files so the dashboard can display them.
             if let (Some(run_id), Some(ref m)) = (&run_id_owned, &meta_holder) {
                 record_stage_output(run_id, m.stage_index, &response.content);
                 record_stage_log(run_id, m.stage_index, &token_line);
@@ -103,25 +111,32 @@ where
                 );
             }
         } else {
-            let response = match stream_inference(engine, entity, provider_name, model_name, None)
-                .await
-            {
-                Ok(r) => r,
-                Err(e) => {
-                    tracing::debug!("Streaming unavailable, falling back: {}", e);
-                    let r = engine
-                        .run_inference_filtered(entity, provider_name, model_name, Vec::new(), None)
-                        .await
-                        .map_err(|e| anyhow::anyhow!("Inference error: {}", e))?;
-                    println!("\nAssistant: {}", r.content);
-                    r
-                }
-            };
+            let response =
+                match stream_inference(engine, entity, provider_name, model_name, None, io).await {
+                    Ok(r) => r,
+                    Err(e) => {
+                        tracing::debug!("Streaming unavailable, falling back: {}", e);
+                        let r = engine
+                            .run_inference_filtered(
+                                entity,
+                                provider_name,
+                                model_name,
+                                Vec::new(),
+                                None,
+                            )
+                            .await
+                            .map_err(|e| anyhow::anyhow!("Inference error: {}", e))?;
+                        io.on_output(&format!("\nAssistant: {}", r.content)).await;
+                        r
+                    }
+                };
 
-            println!(
-                "\n[Tokens: {} in, {} out]",
-                response.tokens_used.prompt_tokens, response.tokens_used.completion_tokens
-            );
+            io.on_tokens(
+                response.tokens_used.prompt_tokens,
+                response.tokens_used.completion_tokens,
+                response.tokens_used.cached_tokens,
+            )
+            .await;
 
             if let Some(ref mut m) = meta_holder {
                 m.prompt_tokens += response.tokens_used.prompt_tokens;
@@ -153,18 +168,14 @@ where
             let resp = request_interaction_async(run_id, meta, req, None).await?;
             response_as_text(&resp)
         } else {
-            crate::interaction::request_interaction_stdin(&req);
-            // For stdin, we need to actually read in the FreeText path
-            use std::io::Write;
-            print!("\nYou: ");
-            std::io::stdout().flush().ok();
-            let mut buf = String::new();
-            std::io::stdin().read_line(&mut buf)?;
-            buf.trim().to_string()
+            // Foreground path: use RunIO for user input
+            io.get_user_input("Your response (leave empty or /quit to end):")
+                .await
+                .unwrap_or_default()
         };
 
         if input.is_empty() || input == "/quit" || input == "/exit" {
-            println!("\n[Session ended]");
+            io.on_output("\n[Session ended]\n").await;
             break;
         }
 
@@ -190,6 +201,7 @@ pub async fn run_autonomous_stage<F, Fut>(
     tools: &[leviath_providers::Tool],
     routing: Option<&leviath_runtime::ToolResultRoutingConfig>,
     compaction_config: Option<&CompactionConfig>,
+    io: &mut dyn RunIO,
     executor: &mut F,
 ) -> anyhow::Result<()>
 where
@@ -212,14 +224,16 @@ where
 
     match response {
         Ok(resp) => {
-            println!("{}", resp.content);
-            println!(
-                "\n[Tokens used: {} input, {} output]",
-                resp.tokens_used.prompt_tokens, resp.tokens_used.completion_tokens
-            );
+            io.on_output(&resp.content).await;
+            io.on_tokens(
+                resp.tokens_used.prompt_tokens,
+                resp.tokens_used.completion_tokens,
+                resp.tokens_used.cached_tokens,
+            )
+            .await;
         }
         Err(e) => {
-            println!("Inference error: {}", e);
+            io.on_error(&format!("Inference error: {}", e)).await;
         }
     }
     Ok(())
@@ -242,6 +256,7 @@ pub async fn run_interactive_points_stage<F, Fut>(
     compaction_config: Option<&CompactionConfig>,
     points: &[leviath_core::blueprint::InteractionPoint],
     run_context: Option<(&str, &mut RunMeta)>,
+    io: &mut dyn RunIO,
     executor: &mut F,
 ) -> anyhow::Result<()>
 where
@@ -264,6 +279,7 @@ where
             tools,
             routing,
             compaction_config,
+            io,
             executor,
         )
         .await;
@@ -298,7 +314,7 @@ where
 
             if let Ok(resp) = response {
                 if !resp.content.is_empty() {
-                    println!("{}", resp.content);
+                    io.on_output(&resp.content).await;
                     // Route agent response to the per-stage output file so the dashboard can display it
                     if let (Some(run_id), Some(ref m)) = (&run_id_owned, &meta_holder) {
                         record_stage_output(run_id, m.stage_index, &resp.content);
@@ -395,21 +411,409 @@ where
 
         if let Ok(resp) = response {
             if !resp.content.is_empty() {
-                println!("{}", resp.content);
+                io.on_output(&resp.content).await;
                 if let (Some(run_id), Some(ref m)) = (&run_id_owned, &meta_holder) {
                     record_stage_output(run_id, m.stage_index, &resp.content);
                 }
             }
-            let token_line = format!(
-                "[Tokens used: {} input, {} output]",
-                resp.tokens_used.prompt_tokens, resp.tokens_used.completion_tokens
-            );
-            println!("\n{}", token_line);
+            io.on_tokens(
+                resp.tokens_used.prompt_tokens,
+                resp.tokens_used.completion_tokens,
+                resp.tokens_used.cached_tokens,
+            )
+            .await;
             if let (Some(_), Some(ref m)) = (&run_id_owned, &meta_holder) {
+                let token_line = format!(
+                    "[Tokens used: {} input, {} output]",
+                    resp.tokens_used.prompt_tokens, resp.tokens_used.completion_tokens
+                );
                 record_stage_log(&m.run_id, m.stage_index, &token_line);
             }
         }
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::helpers::initialize_context_window;
+    use super::super::io::mock::MockIO;
+    use super::*;
+    use async_trait::async_trait;
+    use leviath_core::blueprint::ModelConfig;
+    use leviath_core::layout::RegionDefinition;
+    use leviath_core::{Blueprint, ContextLayout, RegionKind, Stage};
+    use leviath_providers::{
+        FinishReason, InferenceRequest, InferenceResponse, ModelCapabilities, ModelInfo, Provider,
+        ProviderError, TokenUsage,
+    };
+    use leviath_runtime::{AgentPool, ProviderRegistry};
+    use std::sync::Arc;
+
+    /// A mock provider that returns canned responses for testing.
+    struct MockProvider {
+        response_content: String,
+    }
+
+    impl MockProvider {
+        fn new(content: &str) -> Self {
+            Self {
+                response_content: content.to_string(),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl Provider for MockProvider {
+        async fn infer(
+            &self,
+            _request: InferenceRequest,
+        ) -> Result<InferenceResponse, ProviderError> {
+            Ok(InferenceResponse {
+                content: self.response_content.clone(),
+                tool_calls: vec![],
+                tokens_used: TokenUsage {
+                    prompt_tokens: 10,
+                    completion_tokens: 5,
+                    total_tokens: 15,
+                    cached_tokens: 2,
+                    cache_write_tokens: 0,
+                },
+                finish_reason: FinishReason::Complete,
+            })
+        }
+
+        fn count_tokens(&self, text: &str, _model: &str) -> usize {
+            text.len() / 4
+        }
+
+        fn max_context_tokens(&self, _model: &str) -> usize {
+            100_000
+        }
+
+        fn name(&self) -> &str {
+            "mock"
+        }
+
+        fn capabilities(&self, _model: &str) -> ModelCapabilities {
+            ModelCapabilities::default()
+        }
+
+        async fn list_models(&self) -> Result<Vec<ModelInfo>, ProviderError> {
+            Ok(vec![])
+        }
+    }
+
+    fn make_blueprint(stages: Vec<Stage>) -> Blueprint {
+        let layout = ContextLayout::new(
+            vec![
+                RegionDefinition::new("system".to_string(), RegionKind::Pinned, 2000),
+                RegionDefinition::new(
+                    "conversation".to_string(),
+                    RegionKind::SlidingWindow { max_items: 50 },
+                    10000,
+                ),
+            ],
+            12000,
+        );
+        Blueprint::new("test".to_string(), "test agent".to_string(), stages, layout)
+    }
+
+    fn make_stage(name: &str) -> Stage {
+        Stage::new(
+            name.to_string(),
+            ModelConfig::new("mock".to_string(), "test-model".to_string()),
+        )
+    }
+
+    fn make_engine_and_entity(
+        blueprint: &Blueprint,
+        provider_content: &str,
+    ) -> (
+        leviath_runtime::AgentEngine,
+        AgentPool,
+        bevy_ecs::prelude::Entity,
+    ) {
+        let mut registry = ProviderRegistry::new();
+        registry.register(
+            "mock".to_string(),
+            Arc::new(MockProvider::new(provider_content)),
+        );
+        let mut engine = leviath_runtime::AgentEngine::with_providers(registry);
+        let mut pool = AgentPool::new(blueprint.clone());
+        let agent_id = pool.spawn_agent(engine.world_mut());
+        let entity = pool.get_agent(&agent_id).unwrap();
+        initialize_context_window(&mut engine, entity, blueprint, "test task");
+        (engine, pool, entity)
+    }
+
+    fn noop_exec(
+        _calls: Vec<leviath_providers::ToolCall>,
+    ) -> std::future::Ready<Vec<(String, String)>> {
+        std::future::ready(vec![])
+    }
+
+    // ─── Tests ──────────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn interactive_stage_max_turns_outputs_message() {
+        let bp = make_blueprint(vec![make_stage("main")]);
+        let (mut engine, _pool, entity) = make_engine_and_entity(&bp, "Hello from assistant");
+        let mut io = MockIO::new();
+
+        // max_iterations=0 means it immediately hits the limit
+        run_interactive_stage(
+            &mut engine,
+            entity,
+            "mock",
+            "test-model",
+            0, // max_iterations
+            &[],
+            None,
+            "main",
+            &mut io,
+            &mut noop_exec,
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            io.outputs.iter().any(|o| o.contains("[Max turns reached]")),
+            "Expected max turns message in outputs: {:?}",
+            io.outputs
+        );
+    }
+
+    #[tokio::test]
+    async fn interactive_stage_quit_ends_session() {
+        let bp = make_blueprint(vec![make_stage("main")]);
+        let (mut engine, _pool, entity) = make_engine_and_entity(&bp, "Hello from assistant");
+        let mut io = MockIO::new().with_inputs(vec!["/quit".to_string()]);
+
+        run_interactive_stage(
+            &mut engine,
+            entity,
+            "mock",
+            "test-model",
+            10,
+            &[], // no tools → uses stream_inference path
+            None,
+            "main",
+            &mut io,
+            &mut noop_exec,
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            io.outputs.iter().any(|o| o.contains("[Session ended]")),
+            "Expected session ended message in outputs: {:?}",
+            io.outputs
+        );
+    }
+
+    #[tokio::test]
+    async fn interactive_stage_empty_input_ends_session() {
+        let bp = make_blueprint(vec![make_stage("main")]);
+        let (mut engine, _pool, entity) = make_engine_and_entity(&bp, "Hi");
+        // MockIO returns None when inputs are exhausted → unwrap_or_default → empty string → quit
+        let mut io = MockIO::new();
+
+        run_interactive_stage(
+            &mut engine,
+            entity,
+            "mock",
+            "test-model",
+            10,
+            &[],
+            None,
+            "main",
+            &mut io,
+            &mut noop_exec,
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            io.outputs.iter().any(|o| o.contains("[Session ended]")),
+            "Expected session ended in outputs: {:?}",
+            io.outputs
+        );
+    }
+
+    #[tokio::test]
+    async fn interactive_stage_streams_assistant_output() {
+        let bp = make_blueprint(vec![make_stage("main")]);
+        let (mut engine, _pool, entity) = make_engine_and_entity(&bp, "Test response content");
+        let mut io = MockIO::new().with_inputs(vec!["/quit".to_string()]);
+
+        run_interactive_stage(
+            &mut engine,
+            entity,
+            "mock",
+            "test-model",
+            10,
+            &[],
+            None,
+            "main",
+            &mut io,
+            &mut noop_exec,
+        )
+        .await
+        .unwrap();
+
+        // The streaming path outputs the response content via io
+        let all_output: String = io.outputs.join("");
+        assert!(
+            all_output.contains("Test response content"),
+            "Expected assistant output in: {:?}",
+            io.outputs
+        );
+    }
+
+    #[tokio::test]
+    async fn interactive_stage_reports_tokens() {
+        let bp = make_blueprint(vec![make_stage("main")]);
+        let (mut engine, _pool, entity) = make_engine_and_entity(&bp, "Response");
+        let mut io = MockIO::new().with_inputs(vec!["/quit".to_string()]);
+
+        run_interactive_stage(
+            &mut engine,
+            entity,
+            "mock",
+            "test-model",
+            10,
+            &[],
+            None,
+            "main",
+            &mut io,
+            &mut noop_exec,
+        )
+        .await
+        .unwrap();
+
+        // Token records should have been reported
+        assert!(
+            !io.token_records.is_empty(),
+            "Expected token records to be reported"
+        );
+    }
+
+    #[tokio::test]
+    async fn autonomous_stage_outputs_response() {
+        let bp = make_blueprint(vec![make_stage("main")]);
+        let (mut engine, _pool, entity) = make_engine_and_entity(&bp, "Autonomous result");
+        let mut io = MockIO::new();
+
+        run_autonomous_stage(
+            &mut engine,
+            entity,
+            "mock",
+            "test-model",
+            1,
+            &[],
+            None,
+            None,
+            &mut io,
+            &mut noop_exec,
+        )
+        .await
+        .unwrap();
+
+        let all_output: String = io.outputs.join("");
+        assert!(
+            all_output.contains("Autonomous result"),
+            "Expected response content in outputs: {:?}",
+            io.outputs
+        );
+    }
+
+    #[tokio::test]
+    async fn autonomous_stage_reports_tokens() {
+        let bp = make_blueprint(vec![make_stage("main")]);
+        let (mut engine, _pool, entity) = make_engine_and_entity(&bp, "Response");
+        let mut io = MockIO::new();
+
+        run_autonomous_stage(
+            &mut engine,
+            entity,
+            "mock",
+            "test-model",
+            1,
+            &[],
+            None,
+            None,
+            &mut io,
+            &mut noop_exec,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(io.token_records.len(), 1);
+        let (prompt, completion, cached) = io.token_records[0];
+        assert_eq!(prompt, 10);
+        assert_eq!(completion, 5);
+        assert_eq!(cached, 2);
+    }
+
+    #[tokio::test]
+    async fn autonomous_stage_error_uses_io() {
+        let bp = make_blueprint(vec![make_stage("main")]);
+        let (mut engine, _pool, entity) = make_engine_and_entity(&bp, "unused");
+        let mut io = MockIO::new();
+
+        run_autonomous_stage(
+            &mut engine,
+            entity,
+            "nonexistent", // provider doesn't exist
+            "test-model",
+            1,
+            &[],
+            None,
+            None,
+            &mut io,
+            &mut noop_exec,
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            io.errors.iter().any(|e| e.contains("Inference error")),
+            "Expected inference error in errors: {:?}",
+            io.errors
+        );
+    }
+
+    #[tokio::test]
+    async fn interactive_points_empty_delegates_to_autonomous() {
+        let bp = make_blueprint(vec![make_stage("main")]);
+        let (mut engine, _pool, entity) = make_engine_and_entity(&bp, "Points result");
+        let mut io = MockIO::new();
+
+        // Empty points → delegates to run_autonomous_stage
+        run_interactive_points_stage(
+            &mut engine,
+            entity,
+            "mock",
+            "test-model",
+            1,
+            &[],
+            None,
+            None,
+            &[], // empty points
+            None,
+            &mut io,
+            &mut noop_exec,
+        )
+        .await
+        .unwrap();
+
+        let all_output: String = io.outputs.join("");
+        assert!(
+            all_output.contains("Points result"),
+            "Expected autonomous output: {:?}",
+            io.outputs
+        );
+    }
 }

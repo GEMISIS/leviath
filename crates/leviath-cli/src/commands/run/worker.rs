@@ -16,6 +16,7 @@ use super::helpers::{
     build_context_snapshot, generate_title, initialize_context_window, record_stage_log,
     record_stage_output, write_context_snapshot_if_bg,
 };
+use super::io::{ConsoleIO, RunIO};
 use super::manifest::{find_manifest, parse_manifest};
 use super::session::build_provider_registry;
 use super::WorkerArgs;
@@ -130,6 +131,7 @@ impl<'a> StageCallbacks for WorkerCallbacks<'a> {
         tools: Vec<leviath_providers::Tool>,
         routing: Option<&ToolResultRoutingConfig>,
         compaction: Option<&leviath_core::lifecycle::CompactionConfig>,
+        _io: &mut dyn RunIO,
         executor: &mut F,
     ) -> anyhow::Result<(StageResult, Option<InferenceResponse>)>
     where
@@ -632,6 +634,7 @@ async fn run_worker_inner(args: &WorkerArgs, meta: &mut RunMeta) -> anyhow::Resu
         meta,
         blueprint_stages_len,
     };
+    let mut io = ConsoleIO;
 
     let mut ctx = StageContext {
         blueprint: &blueprint,
@@ -646,7 +649,7 @@ async fn run_worker_inner(args: &WorkerArgs, meta: &mut RunMeta) -> anyhow::Resu
         compaction_ref,
     };
 
-    run_stage_loop(&mut ctx, &mut callbacks, &agent_id, &mut exec).await?;
+    run_stage_loop(&mut ctx, &mut callbacks, &agent_id, &mut io, &mut exec).await?;
 
     tool_registry.shutdown().await;
     Ok(())

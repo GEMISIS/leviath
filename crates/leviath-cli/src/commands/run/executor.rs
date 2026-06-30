@@ -18,6 +18,7 @@ use crate::tools::ToolRegistry;
 
 use super::graph::{apply_edge_transform, is_graph_mode, resolve_transition};
 use super::helpers::swap_context_layout;
+use super::io::RunIO;
 use super::stages::{run_interactive_points_stage, run_interactive_stage};
 
 use crate::runstate::RunMeta;
@@ -97,6 +98,7 @@ pub trait StageCallbacks: Send {
         tools: Vec<leviath_providers::Tool>,
         routing: Option<&ToolResultRoutingConfig>,
         compaction: Option<&CompactionConfig>,
+        io: &mut dyn RunIO,
         executor: &mut F,
     ) -> anyhow::Result<(StageResult, Option<InferenceResponse>)>
     where
@@ -146,6 +148,7 @@ pub async fn run_stage_loop<CB, F, Fut>(
     ctx: &mut StageContext<'_>,
     cb: &mut CB,
     agent_id: &str,
+    io: &mut dyn RunIO,
     exec: &mut F,
 ) -> anyhow::Result<()>
 where
@@ -287,6 +290,7 @@ where
                     &effective_tools,
                     run_context,
                     &stage_name_owned,
+                    io,
                     exec,
                 )
                 .await?;
@@ -306,6 +310,7 @@ where
                     ctx.compaction_ref,
                     &pts,
                     run_context,
+                    io,
                     exec,
                 )
                 .await?;
@@ -322,6 +327,7 @@ where
                         effective_tools,
                         routing_ref,
                         ctx.compaction_ref,
+                        io,
                         exec,
                     )
                     .await
@@ -520,6 +526,7 @@ mod tests {
             _tools: Vec<leviath_providers::Tool>,
             _routing: Option<&ToolResultRoutingConfig>,
             _compaction: Option<&CompactionConfig>,
+            _io: &mut dyn RunIO,
             _executor: &mut F,
         ) -> anyhow::Result<(StageResult, Option<InferenceResponse>)>
         where
@@ -579,6 +586,8 @@ mod tests {
     }
 
     // ─── Test helpers ───────────────────────────────────────────────────────
+
+    use super::super::io::mock::MockIO;
 
     fn make_blueprint(stages: Vec<Stage>) -> Blueprint {
         let layout = ContextLayout::new(
@@ -648,9 +657,15 @@ mod tests {
             compaction_ref: None,
         };
 
-        run_stage_loop(&mut ctx, &mut cb, "agent-1", &mut noop_exec)
-            .await
-            .unwrap();
+        run_stage_loop(
+            &mut ctx,
+            &mut cb,
+            "agent-1",
+            &mut MockIO::new(),
+            &mut noop_exec,
+        )
+        .await
+        .unwrap();
 
         assert_eq!(cb.stage_entries.len(), 1);
         assert_eq!(cb.stage_entries[0].0, "main");
@@ -685,9 +700,15 @@ mod tests {
             compaction_ref: None,
         };
 
-        run_stage_loop(&mut ctx, &mut cb, "agent-1", &mut noop_exec)
-            .await
-            .unwrap();
+        run_stage_loop(
+            &mut ctx,
+            &mut cb,
+            "agent-1",
+            &mut MockIO::new(),
+            &mut noop_exec,
+        )
+        .await
+        .unwrap();
 
         // All 3 stages entered
         assert_eq!(cb.stage_entries.len(), 3);
@@ -734,9 +755,15 @@ mod tests {
             compaction_ref: None,
         };
 
-        run_stage_loop(&mut ctx, &mut cb, "agent-1", &mut noop_exec)
-            .await
-            .unwrap();
+        run_stage_loop(
+            &mut ctx,
+            &mut cb,
+            "agent-1",
+            &mut MockIO::new(),
+            &mut noop_exec,
+        )
+        .await
+        .unwrap();
 
         assert_eq!(cb.provider_missing, vec!["nonexistent"]);
         // No stages should have been entered
@@ -770,9 +797,15 @@ mod tests {
             compaction_ref: None,
         };
 
-        run_stage_loop(&mut ctx, &mut cb, "agent-1", &mut noop_exec)
-            .await
-            .unwrap();
+        run_stage_loop(
+            &mut ctx,
+            &mut cb,
+            "agent-1",
+            &mut MockIO::new(),
+            &mut noop_exec,
+        )
+        .await
+        .unwrap();
 
         // claude-code warning should have fired for stage 0
         assert_eq!(cb.claude_code_warnings, vec![0]);
@@ -799,9 +832,15 @@ mod tests {
             compaction_ref: None,
         };
 
-        run_stage_loop(&mut ctx, &mut cb, "agent-1", &mut noop_exec)
-            .await
-            .unwrap();
+        run_stage_loop(
+            &mut ctx,
+            &mut cb,
+            "agent-1",
+            &mut MockIO::new(),
+            &mut noop_exec,
+        )
+        .await
+        .unwrap();
 
         // After the loop, stage_idx should reflect the last stage
         let final_idx = *stage_idx.lock().await;
@@ -829,9 +868,15 @@ mod tests {
             compaction_ref: None,
         };
 
-        run_stage_loop(&mut ctx, &mut cb, "agent-1", &mut noop_exec)
-            .await
-            .unwrap();
+        run_stage_loop(
+            &mut ctx,
+            &mut cb,
+            "agent-1",
+            &mut MockIO::new(),
+            &mut noop_exec,
+        )
+        .await
+        .unwrap();
 
         let final_name = stage_name.lock().await.clone();
         assert_eq!(final_name, "beta");
@@ -885,6 +930,7 @@ mod tests {
                 _t: Vec<leviath_providers::Tool>,
                 _r: Option<&ToolResultRoutingConfig>,
                 _c: Option<&CompactionConfig>,
+                _io: &mut dyn RunIO,
                 _ex: &mut F,
             ) -> anyhow::Result<(StageResult, Option<InferenceResponse>)>
             where
@@ -938,9 +984,15 @@ mod tests {
             compaction_ref: None,
         };
 
-        run_stage_loop(&mut ctx, &mut cb, "agent-1", &mut noop_exec)
-            .await
-            .unwrap();
+        run_stage_loop(
+            &mut ctx,
+            &mut cb,
+            "agent-1",
+            &mut MockIO::new(),
+            &mut noop_exec,
+        )
+        .await
+        .unwrap();
 
         assert_eq!(cb.models, vec!["my-custom-model"]);
     }
@@ -1024,6 +1076,7 @@ mod tests {
                 _t: Vec<leviath_providers::Tool>,
                 _r: Option<&ToolResultRoutingConfig>,
                 _c: Option<&CompactionConfig>,
+                _io: &mut dyn RunIO,
                 _ex: &mut F,
             ) -> anyhow::Result<(StageResult, Option<InferenceResponse>)>
             where
@@ -1077,9 +1130,15 @@ mod tests {
             compaction_ref: None,
         };
 
-        run_stage_loop(&mut ctx, &mut cb, "agent-1", &mut noop_exec)
-            .await
-            .unwrap();
+        run_stage_loop(
+            &mut ctx,
+            &mut cb,
+            "agent-1",
+            &mut MockIO::new(),
+            &mut noop_exec,
+        )
+        .await
+        .unwrap();
 
         // Should visit: a (first), b (first), a (revisit 2), b (visit 2)
         // Then b→a is blocked (a has max_revisits=1, visits=2 > 1), so b is terminal.

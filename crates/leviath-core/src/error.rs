@@ -151,7 +151,10 @@ mod tests {
 
     #[test]
     fn error_token_budget_exceeded() {
-        let e = Error::TokenBudgetExceeded { used: 500, max: 100 };
+        let e = Error::TokenBudgetExceeded {
+            used: 500,
+            max: 100,
+        };
         assert_eq!(e.to_string(), "Content exceeds token budget: 500 > 100");
     }
 

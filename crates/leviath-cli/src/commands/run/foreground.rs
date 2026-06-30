@@ -13,6 +13,7 @@ use crate::tools::{resolve_policy, ToolRegistry};
 
 use super::executor::{run_stage_loop, StageCallbacks, StageContext};
 use super::helpers::initialize_context_window;
+use super::io::{ConsoleIO, RunIO};
 use super::manifest::{find_manifest, parse_manifest};
 use super::session::{build_provider_registry, resolve_task};
 use super::stages::run_autonomous_stage;
@@ -108,6 +109,7 @@ impl StageCallbacks for ForegroundCallbacks {
         tools: Vec<leviath_providers::Tool>,
         routing: Option<&ToolResultRoutingConfig>,
         compaction: Option<&leviath_core::lifecycle::CompactionConfig>,
+        io: &mut dyn RunIO,
         executor: &mut F,
     ) -> anyhow::Result<(StageResult, Option<InferenceResponse>)>
     where
@@ -123,6 +125,7 @@ impl StageCallbacks for ForegroundCallbacks {
             &tools,
             routing,
             compaction,
+            io,
             executor,
         )
         .await?;
@@ -402,6 +405,7 @@ pub async fn run_foreground(args: RunArgs) -> anyhow::Result<()> {
     let compaction_ref = compaction_config.as_ref();
 
     let mut callbacks = ForegroundCallbacks {};
+    let mut io = ConsoleIO;
 
     let mut ctx = StageContext {
         blueprint: &blueprint,
@@ -416,7 +420,7 @@ pub async fn run_foreground(args: RunArgs) -> anyhow::Result<()> {
         compaction_ref,
     };
 
-    run_stage_loop(&mut ctx, &mut callbacks, &agent_id, &mut exec).await?;
+    run_stage_loop(&mut ctx, &mut callbacks, &agent_id, &mut io, &mut exec).await?;
 
     tool_registry.shutdown().await;
     Ok(())

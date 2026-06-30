@@ -421,7 +421,10 @@ mod tests {
 
     #[test]
     fn provider_error_token_limit_display() {
-        let err = ProviderError::TokenLimitExceeded { used: 500, max: 100 };
+        let err = ProviderError::TokenLimitExceeded {
+            used: 500,
+            max: 100,
+        };
         assert_eq!(err.to_string(), "Token limit exceeded: 500 > 100");
     }
 
@@ -448,22 +451,34 @@ mod tests {
 
     #[test]
     fn parse_finish_reason_stop() {
-        assert!(matches!(parse_openai_finish_reason("stop"), FinishReason::Complete));
+        assert!(matches!(
+            parse_openai_finish_reason("stop"),
+            FinishReason::Complete
+        ));
     }
 
     #[test]
     fn parse_finish_reason_tool_calls() {
-        assert!(matches!(parse_openai_finish_reason("tool_calls"), FinishReason::ToolCall));
+        assert!(matches!(
+            parse_openai_finish_reason("tool_calls"),
+            FinishReason::ToolCall
+        ));
     }
 
     #[test]
     fn parse_finish_reason_length() {
-        assert!(matches!(parse_openai_finish_reason("length"), FinishReason::TokenLimit));
+        assert!(matches!(
+            parse_openai_finish_reason("length"),
+            FinishReason::TokenLimit
+        ));
     }
 
     #[test]
     fn parse_finish_reason_unknown_defaults_to_complete() {
-        assert!(matches!(parse_openai_finish_reason("unknown"), FinishReason::Complete));
+        assert!(matches!(
+            parse_openai_finish_reason("unknown"),
+            FinishReason::Complete
+        ));
     }
 
     // ─── Serialization round-trips ──────────────────────────────────────────
@@ -558,7 +573,12 @@ mod tests {
 
     #[test]
     fn finish_reason_serde_roundtrip() {
-        for reason in [FinishReason::Complete, FinishReason::TokenLimit, FinishReason::ToolCall, FinishReason::Stop] {
+        for reason in [
+            FinishReason::Complete,
+            FinishReason::TokenLimit,
+            FinishReason::ToolCall,
+            FinishReason::Stop,
+        ] {
             let json = serde_json::to_string(&reason).unwrap();
             let back: FinishReason = serde_json::from_str(&json).unwrap();
             assert_eq!(format!("{:?}", reason), format!("{:?}", back));
