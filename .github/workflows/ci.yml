@@ -62,7 +62,7 @@ jobs:
         with:
           auth: ${{ secrets.GIST_TOKEN }}
           gistID: ${{ vars.COVERAGE_GIST_ID }}
-          filename: coverage.json
+          filename: leviath-coverage.json
           label: coverage
           message: ${{ steps.cov.outputs.pct }}%
           valColorRange: ${{ steps.cov.outputs.pct }}
