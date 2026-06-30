@@ -1900,8 +1900,9 @@ mod tests {
 
     #[test]
     fn input_mode_multiple_choice_enter_submits() {
+        let run_id = format!("test-mc-enter-{}", std::process::id());
         let mut dash = make_test_dashboard();
-        let mut agent = make_test_agent("run-1", AgentDisplayStatus::Waiting);
+        let mut agent = make_test_agent(&run_id, AgentDisplayStatus::Waiting);
         agent.pending_request = Some(crate::interaction::InteractionRequest::multiple_choice(
             "mc1",
             "Pick",
@@ -1915,9 +1916,18 @@ mod tests {
         dash.input_mode = true;
         dash.choice_selected = 0;
 
+        // Ensure the run directory exists so write_response succeeds
+        let _ = std::fs::create_dir_all(crate::runstate::run_dir(&run_id));
+
         dash.handle_key(key(KeyCode::Enter));
         assert!(!dash.input_mode);
-        assert!(dash.log.iter().any(|e| e.message.contains("A")));
+        assert!(
+            dash.log.iter().any(|e| e.message.contains("A")),
+            "expected log entry containing 'A', got: {:?}",
+            dash.log.iter().map(|e| &e.message).collect::<Vec<_>>()
+        );
+
+        let _ = std::fs::remove_dir_all(crate::runstate::run_dir(&run_id));
     }
 
     // ─── Multiple events processed in sequence ────────────────────────────
