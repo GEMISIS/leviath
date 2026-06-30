@@ -92,6 +92,9 @@ impl Dashboard {
             && (pending_req.is_some() || agent.waiting_prompt.is_some())
             && !matches!(agent.status, AgentDisplayStatus::Cancelled)
             && self.selected_stage_can_respond();
+        // Agent is Active (not waiting on anything) but its current stage
+        // supports mid-run messages — same 'i' key, same input pane.
+        let accepts_messages = self.selected_agent_accepts_messages();
 
         let header_h: u16 = 1; // compact breadcrumb line
         let info_h: u16 = 4; // task + workdir/stats strip (2 content + 2 border lines)
@@ -124,23 +127,25 @@ impl Dashboard {
             (review_lines.len() + 2).min(max_review) as u16
         };
 
-        let prompt_height: u16 =
-            if has_prompt || (self.input_mode && is_waiting && self.selected_stage_can_respond()) {
-                let n = options.len() as u16;
-                if self.input_mode {
-                    match &kind {
-                        Some(InteractionKind::FreeText) | None => 11,
-                        _ => (n + 4).min(14),
-                    }
-                } else {
-                    match &kind {
-                        Some(InteractionKind::FreeText) | None => 6,
-                        _ => (n + 5).min(14),
-                    }
+        let prompt_height: u16 = if has_prompt
+            || (self.input_mode && is_waiting && self.selected_stage_can_respond())
+            || (self.input_mode && accepts_messages)
+        {
+            let n = options.len() as u16;
+            if self.input_mode {
+                match &kind {
+                    Some(InteractionKind::FreeText) | None => 11,
+                    _ => (n + 4).min(14),
                 }
             } else {
-                0
-            };
+                match &kind {
+                    Some(InteractionKind::FreeText) | None => 6,
+                    _ => (n + 5).min(14),
+                }
+            }
+        } else {
+            0
+        };
 
         let mut constraints = vec![
             Constraint::Length(header_h),
@@ -288,6 +293,41 @@ mod tests {
         dash.update_display_indices();
         dash.detail_view = true;
         terminal.draw(|f| dash.draw(f)).unwrap();
+    }
+
+    // ─── Regression: mid-run message input pane must actually render ──────
+    //
+    // Pressing 'i' (formerly 'm') on an Active agent that accepts mid-run
+    // messages sets input_mode = true, but prompt_height used to only
+    // account for the `is_waiting` case — so the input pane never actually
+    // got laid out or rendered for an Active, non-waiting agent. Verify the
+    // textarea's hint text actually appears in the rendered buffer.
+    #[test]
+    fn draw_detail_view_renders_input_pane_for_accepts_messages_while_active() {
+        let backend = TestBackend::new(120, 40);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut dash = make_test_dashboard();
+        let agent = make_test_agent("run-msg", AgentDisplayStatus::Active);
+        assert!(agent.accepts_messages);
+        dash.agents.push(agent);
+        dash.update_display_indices();
+        dash.detail_view = true;
+        dash.input_mode = true;
+
+        terminal.draw(|f| dash.draw(f)).unwrap();
+
+        let rendered: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|c| c.symbol())
+            .collect();
+        assert!(
+            rendered.contains("Provide input while this is running"),
+            "expected the mid-run message input pane to render, got buffer: {:?}",
+            rendered
+        );
     }
 
     #[test]

@@ -214,15 +214,9 @@ impl Dashboard {
                 self.detail_scroll = 0;
             }
             KeyCode::Char('i') => {
-                if self.selected_stage_can_respond() {
-                    self.input_mode = true;
-                    self.choice_selected = 0;
-                    self.input_textarea = tui_textarea::TextArea::default();
-                }
-            }
-            KeyCode::Char('m') => {
-                // Send a mid-run message to any active agent (regardless of interaction state)
-                if self.selected_agent_accepts_messages() {
+                // Respond to a pending interaction, or send a mid-run message to
+                // any active agent that accepts them — same key, same input area.
+                if self.selected_stage_can_respond() || self.selected_agent_accepts_messages() {
                     self.input_mode = true;
                     self.choice_selected = 0;
                     self.input_textarea = tui_textarea::TextArea::default();
@@ -1264,7 +1258,7 @@ mod tests {
         assert_eq!(dash.search_match_idx, 0);
     }
 
-    // ─── detail view: i and m keys ────────────────────────────────────────
+    // ─── detail view: unified i key (respond + mid-run message) ───────────
 
     #[test]
     fn detail_view_i_enters_input_when_can_respond() {
@@ -1286,7 +1280,7 @@ mod tests {
     }
 
     #[test]
-    fn detail_view_m_enters_input_for_active_accepting_agent() {
+    fn detail_view_i_enters_input_for_active_accepting_agent() {
         let mut dash = make_test_dashboard();
         let mut agent = make_test_agent("run-1", AgentDisplayStatus::Active);
         agent.accepts_messages = true;
@@ -1294,15 +1288,30 @@ mod tests {
         dash.update_display_indices();
         dash.detail_view = true;
 
-        dash.handle_key(key(KeyCode::Char('m')));
+        dash.handle_key(key(KeyCode::Char('i')));
         assert!(dash.input_mode);
     }
 
     #[test]
-    fn detail_view_m_no_effect_when_not_accepting() {
+    fn detail_view_i_no_effect_when_not_accepting_and_cannot_respond() {
         let mut dash = make_test_dashboard();
         let mut agent = make_test_agent("run-1", AgentDisplayStatus::Active);
         agent.accepts_messages = false;
+        dash.agents.push(agent);
+        dash.update_display_indices();
+        dash.detail_view = true;
+
+        dash.handle_key(key(KeyCode::Char('i')));
+        assert!(!dash.input_mode);
+    }
+
+    #[test]
+    fn detail_view_m_key_no_longer_bound() {
+        // 'm' used to be a separate "send message" keybinding; it has been
+        // unified into 'i'. Pressing 'm' must no longer enter input mode.
+        let mut dash = make_test_dashboard();
+        let mut agent = make_test_agent("run-1", AgentDisplayStatus::Active);
+        agent.accepts_messages = true;
         dash.agents.push(agent);
         dash.update_display_indices();
         dash.detail_view = true;

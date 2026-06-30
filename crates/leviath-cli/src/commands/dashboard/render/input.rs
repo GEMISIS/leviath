@@ -95,7 +95,15 @@ impl Dashboard {
 
         if self.input_mode && matches!(kind, Some(InteractionKind::FreeText) | None) {
             // ── FreeText: render the multi-line tui-textarea widget ──────────
-            let hint = " Response  [Enter] send  [Alt+↵] newline  [Esc] cancel ";
+            // No pending interaction request/prompt means this is a mid-run
+            // message to a still-running agent rather than a response to a
+            // specific question — label it accordingly for consistent UX.
+            let is_message_mode = pending_req.is_none() && agent.waiting_prompt.is_none();
+            let hint = if is_message_mode {
+                " Provide input while this is running  [Enter] send  [Alt+↵] newline  [Esc] cancel "
+            } else {
+                " Response  [Enter] send  [Alt+↵] newline  [Esc] cancel "
+            };
             self.input_textarea.set_block(
                 Block::default()
                     .borders(Borders::ALL)

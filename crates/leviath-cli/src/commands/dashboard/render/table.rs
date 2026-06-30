@@ -327,6 +327,7 @@ impl Dashboard {
 
     fn build_detail_help_bar(&self) -> Line<'static> {
         let can_respond = self.selected_stage_can_respond();
+        let accepts_messages = self.selected_agent_accepts_messages();
         let can_kill = self
             .selected_agent()
             .map(|a| {
@@ -351,19 +352,16 @@ impl Dashboard {
             Span::styled("[l/o/c]", Style::default().add_modifier(Modifier::BOLD)),
             Span::raw(" logs/out/ctx  "),
         ];
-        if can_respond {
+        if can_respond || accepts_messages {
             spans.push(Span::styled(
                 "[i]",
                 Style::default().fg(C_WARN).add_modifier(Modifier::BOLD),
             ));
-            spans.push(Span::raw(" respond  "));
-        }
-        if self.selected_agent_accepts_messages() {
-            spans.push(Span::styled(
-                "[m]",
-                Style::default().fg(C_ACCENT).add_modifier(Modifier::BOLD),
-            ));
-            spans.push(Span::raw(" message  "));
+            spans.push(Span::raw(if can_respond {
+                " respond  "
+            } else {
+                " input  "
+            }));
         }
         if can_kill {
             spans.push(Span::styled(
@@ -828,6 +826,39 @@ mod tests {
         dash.update_display_indices();
         let line = dash.build_detail_help_bar();
         let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
-        assert!(text.contains("message"));
+        assert!(text.contains("input"));
+        assert!(text.contains("[i]"));
+        // 'm' was unified into 'i' — no separate [m] hint should remain.
+        assert!(!text.contains("[m]"));
+    }
+
+    #[test]
+    fn build_detail_help_bar_can_respond_shows_respond_label() {
+        let mut dash = make_test_dashboard();
+        let mut agent = make_test_agent("run-resp", AgentDisplayStatus::Waiting);
+        agent.waiting_prompt = Some("prompt".to_string());
+        agent.pending_request = Some(crate::interaction::InteractionRequest::free_text(
+            "ft1", "prompt", "main", true,
+        ));
+        agent.stage_index = 0;
+        agent.stages = vec![crate::runstate::StageRecord::new("main".to_string(), 0)];
+        dash.agents.push(agent);
+        dash.update_display_indices();
+        let line = dash.build_detail_help_bar();
+        let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(text.contains("[i]"));
+        assert!(text.contains("respond"));
+    }
+
+    #[test]
+    fn build_detail_help_bar_no_input_hint_when_neither() {
+        let mut dash = make_test_dashboard();
+        let mut agent = make_test_agent("run-none", AgentDisplayStatus::Active);
+        agent.accepts_messages = false;
+        dash.agents.push(agent);
+        dash.update_display_indices();
+        let line = dash.build_detail_help_bar();
+        let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(!text.contains("[i]"));
     }
 }
