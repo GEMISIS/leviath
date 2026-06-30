@@ -1652,7 +1652,7 @@ mod policy_tests {
 
     #[tokio::test]
     async fn test_subagent_executor_check_registered_agent() {
-        use leviath_runtime::{AgentPool, AgentState};
+        use leviath_runtime::AgentPool;
 
         let registry = leviath_runtime::ProviderRegistry::new();
         let engine = leviath_runtime::AgentEngine::with_providers(registry);

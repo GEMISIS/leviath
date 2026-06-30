@@ -1293,7 +1293,7 @@ mod tests {
             idx: 0,
         };
 
-        let mut ndjson_stream = OllamaNdjsonStream::new(static_stream);
+        let ndjson_stream = OllamaNdjsonStream::new(static_stream);
 
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
@@ -1348,7 +1348,7 @@ mod tests {
             idx: 0,
         };
 
-        let mut ndjson_stream = OllamaNdjsonStream::new(static_stream);
+        let ndjson_stream = OllamaNdjsonStream::new(static_stream);
 
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
@@ -1394,7 +1394,7 @@ mod tests {
             idx: 0,
         };
 
-        let mut ndjson_stream = OllamaNdjsonStream::new(static_stream);
+        let ndjson_stream = OllamaNdjsonStream::new(static_stream);
 
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
@@ -1441,7 +1441,7 @@ mod tests {
             idx: 0,
         };
 
-        let mut ndjson_stream = OllamaNdjsonStream::new(static_stream);
+        let ndjson_stream = OllamaNdjsonStream::new(static_stream);
 
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {

@@ -414,6 +414,30 @@ mod tests {
         assert_eq!(prev, Some(5000)); // no change
     }
 
+    /// Helper: wait for a specific event on the broadcast channel, with timeout.
+    /// Returns true if the event was found before the deadline.
+    async fn wait_for_event<F>(
+        rx: &mut tokio::sync::broadcast::Receiver<ServerEvent>,
+        timeout: std::time::Duration,
+        mut matcher: F,
+    ) -> bool
+    where
+        F: FnMut(&ServerEvent) -> bool,
+    {
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            match tokio::time::timeout_at(deadline, rx.recv()).await {
+                Ok(Ok(ev)) => {
+                    if matcher(&ev) {
+                        return true;
+                    }
+                }
+                Ok(Err(_)) => return false, // channel closed
+                Err(_) => return false,      // timeout
+            }
+        }
+    }
+
     #[tokio::test]
     async fn polling_loop_runs_and_sends_events() {
         use std::sync::Arc;
@@ -428,7 +452,6 @@ mod tests {
             event_tx: tx.clone(),
         };
 
-        // Create a run that the polling loop should pick up
         let run_id = format!(
             "test-poll-loop-{}-{}",
             std::process::id(),
@@ -449,28 +472,22 @@ mod tests {
         meta.status = RunStatus::Running;
         create_run(&meta).unwrap();
 
-        // Run the polling loop for a short time
         let poll_state = state.clone();
         let handle = tokio::spawn(async move {
             polling_loop(poll_state).await;
         });
 
-        // Wait long enough for multiple poll iterations (200ms interval)
-        tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+        let target = run_id.clone();
+        let got_status = wait_for_event(
+            &mut rx,
+            std::time::Duration::from_secs(10),
+            |ev| matches!(ev, ServerEvent::AgentStatus { run_id: eid, .. } if eid == &target),
+        )
+        .await;
+
         handle.abort();
-
-        // Should have received at least one AgentStatus event for our run
-        let mut got_status = false;
-        while let Ok(ev) = rx.try_recv() {
-            if let ServerEvent::AgentStatus { run_id: eid, .. } = &ev {
-                if eid == &run_id {
-                    got_status = true;
-                }
-            }
-        }
-        assert!(got_status, "polling loop should have emitted AgentStatus event");
-
         let _ = std::fs::remove_dir_all(crate::runstate::run_dir(&run_id));
+        assert!(got_status, "polling loop should have emitted AgentStatus event");
     }
 
     #[tokio::test]
@@ -495,7 +512,6 @@ mod tests {
                 .unwrap()
                 .subsec_nanos()
         );
-        // Start as Running, then transition to Complete
         let mut meta = RunMeta::new(
             run_id.clone(),
             "test-agent".to_string(),
@@ -508,40 +524,38 @@ mod tests {
         meta.status = RunStatus::Running;
         create_run(&meta).unwrap();
 
-        let run_id2 = run_id.clone();
         let poll_state = state.clone();
         let handle = tokio::spawn(async move {
             polling_loop(poll_state).await;
         });
 
-        // Let polling loop see the Running state first
-        tokio::time::sleep(std::time::Duration::from_millis(800)).await;
+        // Wait for polling loop to see Running state first
+        let target = run_id.clone();
+        let _ = wait_for_event(
+            &mut rx,
+            std::time::Duration::from_secs(10),
+            |ev| matches!(ev, ServerEvent::AgentStatus { run_id: eid, .. } if eid == &target),
+        )
+        .await;
 
-        // Now update to Complete
+        // Now transition to Complete
         let mut meta2 = meta.clone();
         meta2.status = RunStatus::Complete;
         meta2.touch();
         write_meta(&meta2).unwrap();
 
-        // Wait for polling loop to detect the change
-        tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+        // Wait for AgentCompleted event
+        let target2 = run_id.clone();
+        let got_completed = wait_for_event(
+            &mut rx,
+            std::time::Duration::from_secs(10),
+            |ev| matches!(ev, ServerEvent::AgentCompleted { run_id: eid, .. } if eid == &target2),
+        )
+        .await;
+
         handle.abort();
-
-        // Drain events to find AgentCompleted
-        let mut got_completed = false;
-        while let Ok(ev) = rx.try_recv() {
-            if let ServerEvent::AgentCompleted { run_id: eid, .. } = &ev {
-                if eid == &run_id2 {
-                    got_completed = true;
-                }
-            }
-        }
-        assert!(
-            got_completed,
-            "polling loop should have emitted AgentCompleted event"
-        );
-
-        let _ = std::fs::remove_dir_all(crate::runstate::run_dir(&run_id2));
+        let _ = std::fs::remove_dir_all(crate::runstate::run_dir(&run_id));
+        assert!(got_completed, "polling loop should have emitted AgentCompleted event");
     }
 
     #[tokio::test]
@@ -577,7 +591,6 @@ mod tests {
         );
         create_run(&meta).unwrap();
 
-        // Write a context snapshot
         let snap = ContextSnapshot {
             stage_name: "plan".to_string(),
             total_tokens: 7500,
@@ -586,34 +599,22 @@ mod tests {
         };
         write_context_snapshot(&run_id, &snap).unwrap();
 
-        let run_id2 = run_id.clone();
         let poll_state = state.clone();
         let handle = tokio::spawn(async move {
             polling_loop(poll_state).await;
         });
 
-        tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+        let target = run_id.clone();
+        let got_context_update = wait_for_event(
+            &mut rx,
+            std::time::Duration::from_secs(10),
+            |ev| matches!(ev, ServerEvent::ContextUpdate { run_id: eid, total_tokens, .. } if eid == &target && *total_tokens == 7500),
+        )
+        .await;
+
         handle.abort();
-
-        let mut got_context_update = false;
-        while let Ok(ev) = rx.try_recv() {
-            if let ServerEvent::ContextUpdate {
-                run_id: eid,
-                total_tokens,
-                ..
-            } = &ev
-            {
-                if eid == &run_id2 && *total_tokens == 7500 {
-                    got_context_update = true;
-                }
-            }
-        }
-        assert!(
-            got_context_update,
-            "polling loop should have emitted ContextUpdate event"
-        );
-
-        let _ = std::fs::remove_dir_all(crate::runstate::run_dir(&run_id2));
+        let _ = std::fs::remove_dir_all(crate::runstate::run_dir(&run_id));
+        assert!(got_context_update, "polling loop should have emitted ContextUpdate event");
     }
 
     #[tokio::test]
@@ -650,32 +651,24 @@ mod tests {
         );
         create_run(&meta).unwrap();
 
-        // Write a pending interaction
         let req = InteractionRequest::free_text("req-poll-001", "What next?", "plan", true);
         interaction::write_request(&run_id, &req).unwrap();
 
-        let run_id2 = run_id.clone();
         let poll_state = state.clone();
         let handle = tokio::spawn(async move {
             polling_loop(poll_state).await;
         });
 
-        tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+        let target = run_id.clone();
+        let got_interaction = wait_for_event(
+            &mut rx,
+            std::time::Duration::from_secs(10),
+            |ev| matches!(ev, ServerEvent::InteractionNeeded { run_id: eid, .. } if eid == &target),
+        )
+        .await;
+
         handle.abort();
-
-        let mut got_interaction = false;
-        while let Ok(ev) = rx.try_recv() {
-            if let ServerEvent::InteractionNeeded { run_id: eid, .. } = &ev {
-                if eid == &run_id2 {
-                    got_interaction = true;
-                }
-            }
-        }
-        assert!(
-            got_interaction,
-            "polling loop should have emitted InteractionNeeded event"
-        );
-
-        let _ = std::fs::remove_dir_all(crate::runstate::run_dir(&run_id2));
+        let _ = std::fs::remove_dir_all(crate::runstate::run_dir(&run_id));
+        assert!(got_interaction, "polling loop should have emitted InteractionNeeded event");
     }
 }
