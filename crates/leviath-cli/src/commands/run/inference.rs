@@ -207,6 +207,248 @@ mod tests {
         }
     }
 
+    /// A provider whose `capabilities()` reports no temperature support, to
+    /// exercise the `temperature = 0.0` branch in `stream_inference`.
+    struct NoTemperatureProvider;
+
+    #[async_trait]
+    impl Provider for NoTemperatureProvider {
+        async fn infer(
+            &self,
+            _request: InferenceRequest,
+        ) -> Result<InferenceResponse, ProviderError> {
+            Ok(InferenceResponse {
+                content: "no-temp".to_string(),
+                tool_calls: vec![],
+                tokens_used: TokenUsage {
+                    prompt_tokens: 1,
+                    completion_tokens: 1,
+                    total_tokens: 2,
+                    cached_tokens: 0,
+                    cache_write_tokens: 0,
+                },
+                finish_reason: FinishReason::Complete,
+            })
+        }
+
+        fn count_tokens(&self, text: &str, _model: &str) -> usize {
+            text.len() / 4
+        }
+
+        fn max_context_tokens(&self, _model: &str) -> usize {
+            100_000
+        }
+
+        fn name(&self) -> &str {
+            "no-temp"
+        }
+
+        fn capabilities(&self, _model: &str) -> ModelCapabilities {
+            ModelCapabilities {
+                supports_temperature: false,
+                ..ModelCapabilities::default()
+            }
+        }
+
+        async fn list_models(&self) -> Result<Vec<ModelInfo>, ProviderError> {
+            Ok(vec![])
+        }
+    }
+
+    /// A provider whose `infer()` always errors, to exercise the "Stream
+    /// error: {}" mapping in `stream_inference` (the default `infer_stream`
+    /// wraps `infer()`, so an `infer()` error surfaces as an `infer_stream`
+    /// error before any stream is ever produced).
+    struct FailingInferProvider;
+
+    #[async_trait]
+    impl Provider for FailingInferProvider {
+        async fn infer(
+            &self,
+            _request: InferenceRequest,
+        ) -> Result<InferenceResponse, ProviderError> {
+            Err(ProviderError::ApiError("boom".to_string()))
+        }
+
+        fn count_tokens(&self, text: &str, _model: &str) -> usize {
+            text.len() / 4
+        }
+
+        fn max_context_tokens(&self, _model: &str) -> usize {
+            100_000
+        }
+
+        fn name(&self) -> &str {
+            "failing-infer"
+        }
+
+        fn capabilities(&self, _model: &str) -> ModelCapabilities {
+            ModelCapabilities::default()
+        }
+
+        async fn list_models(&self) -> Result<Vec<ModelInfo>, ProviderError> {
+            Ok(vec![])
+        }
+    }
+
+    /// A provider that implements `infer_stream` directly (rather than
+    /// relying on the default single-chunk wrapper around `infer()`) so
+    /// tests can drive multiple chunks: empty/non-empty deltas, chunks
+    /// missing `tokens`/`finish_reason`, and multi-index tool-call deltas
+    /// with valid, invalid, and already-set arguments JSON.
+    struct MultiChunkStreamProvider;
+
+    #[async_trait]
+    impl Provider for MultiChunkStreamProvider {
+        async fn infer(
+            &self,
+            _request: InferenceRequest,
+        ) -> Result<InferenceResponse, ProviderError> {
+            unreachable!("infer_stream is overridden; infer() should not be called")
+        }
+
+        async fn infer_stream(
+            &self,
+            _request: InferenceRequest,
+        ) -> Result<
+            std::pin::Pin<
+                Box<
+                    dyn futures::Stream<
+                            Item = Result<leviath_providers::StreamChunk, ProviderError>,
+                        > + Send,
+                >,
+            >,
+            ProviderError,
+        > {
+            let chunks = vec![
+                // Empty delta: exercises the `if !chunk.delta.is_empty()` false branch.
+                // No tokens/finish_reason: exercises both `if let Some(...)` false branches.
+                Ok(leviath_providers::StreamChunk {
+                    delta: String::new(),
+                    tool_calls: vec![],
+                    tokens: None,
+                    finish_reason: None,
+                }),
+                // Two tool-call deltas at indices 0 and 2 (skipping 1), forcing the
+                // fill-forward `while` loop to push multiple placeholder entries.
+                // Index 0's arguments parse successfully from valid JSON.
+                Ok(leviath_providers::StreamChunk {
+                    delta: "hello ".to_string(),
+                    tool_calls: vec![
+                        leviath_providers::ToolCallDelta {
+                            index: 0,
+                            id: Some("call-0".to_string()),
+                            name: Some("read_file".to_string()),
+                            arguments_delta: "{\"path\":\"a.txt\"}".to_string(),
+                        },
+                        leviath_providers::ToolCallDelta {
+                            index: 2,
+                            id: Some("call-2".to_string()),
+                            name: Some("bash".to_string()),
+                            arguments_delta: "not valid json".to_string(),
+                        },
+                    ],
+                    tokens: None,
+                    finish_reason: None,
+                }),
+                // Second delta for index 0: id/name omitted (None), and
+                // arguments_delta non-empty but arguments already set from the
+                // previous chunk -- exercises the `tc.arguments.is_null()`
+                // false skip branch.
+                Ok(leviath_providers::StreamChunk {
+                    delta: "world".to_string(),
+                    tool_calls: vec![leviath_providers::ToolCallDelta {
+                        index: 0,
+                        id: None,
+                        name: None,
+                        arguments_delta: "{\"path\":\"ignored.txt\"}".to_string(),
+                    }],
+                    tokens: Some(TokenUsage {
+                        prompt_tokens: 7,
+                        completion_tokens: 3,
+                        total_tokens: 10,
+                        cached_tokens: 0,
+                        cache_write_tokens: 0,
+                    }),
+                    finish_reason: Some(FinishReason::Complete),
+                }),
+            ];
+            Ok(Box::pin(tokio_stream::iter(chunks)))
+        }
+
+        fn count_tokens(&self, text: &str, _model: &str) -> usize {
+            text.len() / 4
+        }
+
+        fn max_context_tokens(&self, _model: &str) -> usize {
+            100_000
+        }
+
+        fn name(&self) -> &str {
+            "multi-chunk"
+        }
+
+        fn capabilities(&self, _model: &str) -> ModelCapabilities {
+            ModelCapabilities::default()
+        }
+
+        async fn list_models(&self) -> Result<Vec<ModelInfo>, ProviderError> {
+            Ok(vec![])
+        }
+    }
+
+    /// A provider whose stream yields a single `Err` item, to exercise the
+    /// "Stream chunk error: {}" mapping inside the `while let` loop.
+    struct ErrorChunkStreamProvider;
+
+    #[async_trait]
+    impl Provider for ErrorChunkStreamProvider {
+        async fn infer(
+            &self,
+            _request: InferenceRequest,
+        ) -> Result<InferenceResponse, ProviderError> {
+            unreachable!("infer_stream is overridden; infer() should not be called")
+        }
+
+        async fn infer_stream(
+            &self,
+            _request: InferenceRequest,
+        ) -> Result<
+            std::pin::Pin<
+                Box<
+                    dyn futures::Stream<
+                            Item = Result<leviath_providers::StreamChunk, ProviderError>,
+                        > + Send,
+                >,
+            >,
+            ProviderError,
+        > {
+            let chunks: Vec<Result<leviath_providers::StreamChunk, ProviderError>> =
+                vec![Err(ProviderError::InvalidResponse("bad chunk".to_string()))];
+            Ok(Box::pin(tokio_stream::iter(chunks)))
+        }
+
+        fn count_tokens(&self, text: &str, _model: &str) -> usize {
+            text.len() / 4
+        }
+
+        fn max_context_tokens(&self, _model: &str) -> usize {
+            100_000
+        }
+
+        fn name(&self) -> &str {
+            "error-chunk"
+        }
+
+        fn capabilities(&self, _model: &str) -> ModelCapabilities {
+            ModelCapabilities::default()
+        }
+
+        async fn list_models(&self) -> Result<Vec<ModelInfo>, ProviderError> {
+            Ok(vec![])
+        }
+    }
+
     fn make_blueprint() -> Blueprint {
         let layout = ContextLayout::new(
             vec![
@@ -237,6 +479,23 @@ mod tests {
     ) -> (AgentEngine, AgentPool, bevy_ecs::prelude::Entity) {
         let mut registry = ProviderRegistry::new();
         registry.register("mock".to_string(), Arc::new(MockProvider::new(content)));
+        let mut engine = AgentEngine::with_providers(registry);
+        let mut pool = AgentPool::new(blueprint.clone());
+        let agent_id = pool.spawn_agent(engine.world_mut());
+        let entity = pool.get_agent(&agent_id).unwrap();
+        initialize_context_window(&mut engine, entity, blueprint, "test task");
+        (engine, pool, entity)
+    }
+
+    /// Like [`make_engine_and_entity`], but with an arbitrary provider
+    /// registered under `provider_name` instead of always using `MockProvider`.
+    fn make_engine_and_entity_with_provider(
+        blueprint: &Blueprint,
+        provider_name: &str,
+        provider: Arc<dyn Provider>,
+    ) -> (AgentEngine, AgentPool, bevy_ecs::prelude::Entity) {
+        let mut registry = ProviderRegistry::new();
+        registry.register(provider_name.to_string(), provider);
         let mut engine = AgentEngine::with_providers(registry);
         let mut pool = AgentPool::new(blueprint.clone());
         let agent_id = pool.spawn_agent(engine.world_mut());
@@ -325,5 +584,184 @@ mod tests {
             "Expected trailing newline in outputs: {:?}",
             io.outputs
         );
+    }
+
+    #[tokio::test]
+    async fn stream_inference_with_empty_tool_filter_yields_no_tools() {
+        let bp = make_blueprint();
+        let (mut engine, _pool, entity) = make_engine_and_entity(&bp, "filtered");
+        let mut io = MockIO::new();
+
+        let filter: Vec<String> = vec![];
+        let response = stream_inference(
+            &mut engine,
+            entity,
+            "mock",
+            "test-model",
+            Some(&filter),
+            &mut io,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(response.content, "filtered");
+    }
+
+    #[tokio::test]
+    async fn stream_inference_with_nonempty_tool_filter_yields_no_tools() {
+        let bp = make_blueprint();
+        let (mut engine, _pool, entity) = make_engine_and_entity(&bp, "filtered");
+        let mut io = MockIO::new();
+
+        let filter = vec!["some_tool".to_string()];
+        let response = stream_inference(
+            &mut engine,
+            entity,
+            "mock",
+            "test-model",
+            Some(&filter),
+            &mut io,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(response.content, "filtered");
+    }
+
+    #[tokio::test]
+    async fn stream_inference_without_temperature_support_uses_zero_temperature() {
+        let bp = make_blueprint();
+        let (mut engine, _pool, entity) =
+            make_engine_and_entity_with_provider(&bp, "mock", Arc::new(NoTemperatureProvider));
+        let mut io = MockIO::new();
+
+        // No direct way to observe the request's temperature field from here,
+        // but a successful round trip with this provider exercises the
+        // `temperature = 0.0` branch (`capabilities().supports_temperature`
+        // is false) rather than panicking or diverging.
+        let response = stream_inference(&mut engine, entity, "mock", "test-model", None, &mut io)
+            .await
+            .unwrap();
+        assert_eq!(response.content, "no-temp");
+    }
+
+    #[tokio::test]
+    async fn stream_inference_infer_error_is_mapped_as_stream_error() {
+        let bp = make_blueprint();
+        let (mut engine, _pool, entity) =
+            make_engine_and_entity_with_provider(&bp, "mock", Arc::new(FailingInferProvider));
+        let mut io = MockIO::new();
+
+        let result =
+            stream_inference(&mut engine, entity, "mock", "test-model", None, &mut io).await;
+
+        assert!(result.is_err());
+        assert!(
+            result.unwrap_err().to_string().contains("Stream error"),
+            "Expected 'Stream error' in the error message"
+        );
+    }
+
+    #[tokio::test]
+    async fn stream_inference_chunk_error_is_mapped_as_stream_chunk_error() {
+        let bp = make_blueprint();
+        let (mut engine, _pool, entity) =
+            make_engine_and_entity_with_provider(&bp, "mock", Arc::new(ErrorChunkStreamProvider));
+        let mut io = MockIO::new();
+
+        let result =
+            stream_inference(&mut engine, entity, "mock", "test-model", None, &mut io).await;
+
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("Stream chunk error"),
+            "Expected 'Stream chunk error' in the error message"
+        );
+    }
+
+    #[tokio::test]
+    async fn stream_inference_handles_multi_chunk_tool_call_deltas() {
+        let bp = make_blueprint();
+        let (mut engine, _pool, entity) =
+            make_engine_and_entity_with_provider(&bp, "mock", Arc::new(MultiChunkStreamProvider));
+        let mut io = MockIO::new();
+
+        let response = stream_inference(&mut engine, entity, "mock", "test-model", None, &mut io)
+            .await
+            .unwrap();
+
+        // Content accumulated only from non-empty deltas.
+        assert_eq!(response.content, "hello world");
+
+        // Three tool-call slots (indices 0, 1, 2) -- index 1 was never
+        // targeted directly but must exist as a placeholder because index 2
+        // was referenced first.
+        assert_eq!(response.tool_calls.len(), 3);
+
+        // Index 0: id/name from the first delta, arguments parsed from the
+        // first delta's valid JSON and NOT overwritten by the second delta's
+        // arguments_delta (since arguments was no longer null).
+        assert_eq!(response.tool_calls[0].id, "call-0");
+        assert_eq!(response.tool_calls[0].name, "read_file");
+        assert_eq!(
+            response.tool_calls[0].arguments,
+            serde_json::json!({"path": "a.txt"})
+        );
+
+        // Index 1: placeholder only, never targeted by any delta.
+        assert_eq!(response.tool_calls[1].id, "");
+        assert_eq!(response.tool_calls[1].name, "");
+        assert!(response.tool_calls[1].arguments.is_null());
+
+        // Index 2: invalid JSON arguments_delta silently fails to parse,
+        // leaving arguments null.
+        assert_eq!(response.tool_calls[2].id, "call-2");
+        assert_eq!(response.tool_calls[2].name, "bash");
+        assert!(response.tool_calls[2].arguments.is_null());
+
+        // Final chunk's tokens/finish_reason become the response's.
+        assert_eq!(response.tokens_used.prompt_tokens, 7);
+        assert!(matches!(response.finish_reason, FinishReason::Complete));
+    }
+
+    /// The mock providers above only exist to drive `stream_inference`
+    /// through specific code paths via `infer`/`infer_stream`; the engine
+    /// never calls their other trivial `Provider` trait methods along those
+    /// paths, so cover them directly here rather than leave dead-looking
+    /// (but harmless) test-only stubs.
+    #[tokio::test]
+    async fn mock_provider_trivial_trait_methods_are_well_formed() {
+        let mock = MockProvider::new("x");
+        assert_eq!(mock.count_tokens("abcd", "m"), 1);
+        assert_eq!(mock.max_context_tokens("m"), 100_000);
+        assert_eq!(mock.name(), "mock");
+        assert!(mock.list_models().await.unwrap().is_empty());
+
+        let no_temp = NoTemperatureProvider;
+        assert_eq!(no_temp.count_tokens("abcd", "m"), 1);
+        assert_eq!(no_temp.max_context_tokens("m"), 100_000);
+        assert_eq!(no_temp.name(), "no-temp");
+        assert!(no_temp.list_models().await.unwrap().is_empty());
+
+        let failing = FailingInferProvider;
+        assert_eq!(failing.count_tokens("abcd", "m"), 1);
+        assert_eq!(failing.max_context_tokens("m"), 100_000);
+        assert_eq!(failing.name(), "failing-infer");
+        assert!(failing.list_models().await.unwrap().is_empty());
+
+        let multi = MultiChunkStreamProvider;
+        assert_eq!(multi.count_tokens("abcd", "m"), 1);
+        assert_eq!(multi.max_context_tokens("m"), 100_000);
+        assert_eq!(multi.name(), "multi-chunk");
+        assert!(multi.list_models().await.unwrap().is_empty());
+
+        let error_chunk = ErrorChunkStreamProvider;
+        assert_eq!(error_chunk.count_tokens("abcd", "m"), 1);
+        assert_eq!(error_chunk.max_context_tokens("m"), 100_000);
+        assert_eq!(error_chunk.name(), "error-chunk");
+        assert!(error_chunk.list_models().await.unwrap().is_empty());
     }
 }

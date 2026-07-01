@@ -440,6 +440,160 @@ prompt = "Implement"
         assert_eq!(args.max_depth, Some(5));
     }
 
+    // ─── execute() background happy path ───────────────────────────────────
+    //
+    // These drive `execute()` all the way through manifest loading, task
+    // resolution, run-state creation, and worker-process spawning. The
+    // spawned "worker" is genuinely `std::env::current_exe()` — i.e. this
+    // very test binary re-invoked with `__run-worker` args it doesn't
+    // understand — but `execute()` never waits on it (`cmd.spawn()`, not
+    // `.status()`/`.output()`), so its eventual (harmless, logged-to-a-tempfile)
+    // failure has no bearing on these assertions. This mirrors the existing
+    // convention elsewhere in this crate (e.g. `worker.rs`'s tests) of writing
+    // real, uniquely-named entries under the real run-state directory and
+    // cleaning them up afterward, rather than mocking process spawning.
+
+    fn write_valid_manifest(dir: &std::path::Path, agent_name: &str) {
+        let manifest_content = format!(
+            r#"
+[agent]
+name = "{agent_name}"
+version = "1.0.0"
+description = "Test agent"
+
+[stages.main]
+mode = "autonomous"
+prompt = "Do the thing"
+"#
+        );
+        std::fs::write(dir.join("agent.leviath"), manifest_content).unwrap();
+    }
+
+    /// Removes every run directory whose id starts with `agent_name-`,
+    /// wherever `execute()` actually wrote them (respects `LEVIATH_RUNS_DIR`
+    /// if set, same as `runstate::run_dir` itself).
+    fn cleanup_runs_with_prefix(agent_name: &str) {
+        let dir = runstate::runs_dir();
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            return;
+        };
+        let prefix = format!("{agent_name}-");
+        for entry in entries.flatten() {
+            if entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with(prefix.as_str())
+            {
+                let _ = std::fs::remove_dir_all(entry.path());
+            }
+        }
+    }
+
+    /// RAII guard that runs [`cleanup_runs_with_prefix`] on drop, so a
+    /// mid-test assertion failure can't leak real run directories under
+    /// `~/.leviath/runs` (as happened once while developing these tests,
+    /// before this guard existed).
+    struct RunPrefixCleanup<'a>(&'a str);
+    impl Drop for RunPrefixCleanup<'_> {
+        fn drop(&mut self) {
+            cleanup_runs_with_prefix(self.0);
+        }
+    }
+
+    #[tokio::test]
+    async fn execute_background_happy_path_spawns_single_worker() {
+        let agent_name = "test-execute-bg-happy-single";
+        let _cleanup = RunPrefixCleanup(agent_name);
+        let temp_dir = std::env::temp_dir().join(agent_name);
+        let _ = std::fs::create_dir_all(&temp_dir);
+        write_valid_manifest(&temp_dir, agent_name);
+
+        let args = RunArgs {
+            path: Some(temp_dir.to_string_lossy().to_string()),
+            task: Some("test task".to_string()),
+            model: Some("claude-sonnet-4-6".to_string()),
+            foreground: false,
+            yolo: true,
+            allow: vec!["read_file".to_string()],
+            ask: vec!["bash".to_string()],
+            deny: vec!["write_file".to_string()],
+            max_depth: Some(2),
+            count: 1,
+        };
+
+        let result = execute(args).await;
+        assert!(
+            result.is_ok(),
+            "expected background execute to succeed, got: {:?}",
+            result.err()
+        );
+
+        let runs = runstate::list_runs();
+        assert!(
+            runs.iter().any(|m| m.agent_name == agent_name),
+            "expected a run to have been created for {agent_name}"
+        );
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[tokio::test]
+    async fn execute_background_happy_path_spawns_multiple_workers() {
+        let agent_name = "test-execute-bg-happy-multi";
+        let _cleanup = RunPrefixCleanup(agent_name);
+        let temp_dir = std::env::temp_dir().join(agent_name);
+        let _ = std::fs::create_dir_all(&temp_dir);
+        write_valid_manifest(&temp_dir, agent_name);
+
+        let args = RunArgs {
+            path: Some(temp_dir.to_string_lossy().to_string()),
+            task: Some("test task".to_string()),
+            model: None,
+            foreground: false,
+            yolo: false,
+            allow: vec![],
+            ask: vec![],
+            deny: vec![],
+            max_depth: None,
+            count: 3,
+        };
+
+        let result = execute(args).await;
+        assert!(
+            result.is_ok(),
+            "expected multi-count background execute to succeed, got: {:?}",
+            result.err()
+        );
+
+        let runs = runstate::list_runs();
+        let matching = runs.iter().filter(|m| m.agent_name == agent_name).count();
+        assert_eq!(matching, 3, "expected 3 runs to have been created");
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[tokio::test]
+    async fn execute_worker_thin_wrapper_delegates_to_worker_module() {
+        // `execute_worker` (the public re-export) is a one-line delegation to
+        // `worker::execute_worker` -- exercised end-to-end (not mocked) by
+        // `worker.rs`'s own test suite. This just proves the delegation
+        // itself runs without panicking, using a path that fails fast.
+        let args = WorkerArgs {
+            path: "/nonexistent/path/for/mod-rs-delegation-test".to_string(),
+            task: "task".to_string(),
+            run_id: "test-execute-worker-delegation".to_string(),
+            model: None,
+            yolo: false,
+            allow: vec![],
+            ask: vec![],
+            deny: vec![],
+            max_depth: None,
+        };
+        let result = execute_worker(args).await;
+        assert!(result.is_err());
+        let _ = std::fs::remove_dir_all(runstate::run_dir("test-execute-worker-delegation"));
+    }
+
     // ─── RunArgs: more coverage ────────────────────────────────────────────
 
     #[test]

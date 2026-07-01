@@ -227,11 +227,22 @@ pub fn append_dashboard_log(msg: &str) {
     }
 }
 
+/// Process-wide counter mixed into [`new_run_id`]'s suffix so that multiple
+/// runs spawned in a tight loop (e.g. `lev run --count N`) within the same
+/// wall-clock second never collide. Before this, the suffix was derived
+/// purely from `now` (whole seconds), so every run in a `--count N` batch
+/// got the *same* run ID -- silently collapsing N runs into one on-disk
+/// entry and leaving N-1 worker processes writing state nobody could see.
+static RUN_ID_COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
 /// Generate a unique run ID: "<agent_name>-<timestamp>-<suffix>".
 pub fn new_run_id(agent_name: &str) -> String {
     let now = now_secs();
-    // 4-char pseudo-random suffix from the lower bits of a stack address
-    let suffix = format!("{:04x}", (now & 0xffff) ^ (now >> 16 & 0xffff));
+    let counter = RUN_ID_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed) as i64;
+    let suffix = format!(
+        "{:04x}",
+        ((now & 0xffff) ^ (now >> 16 & 0xffff) ^ counter) & 0xffff
+    );
     let safe_name = agent_name.replace(|c: char| !c.is_alphanumeric() && c != '-', "-");
     format!("{}-{}-{}", safe_name, now, suffix)
 }
@@ -784,6 +795,21 @@ mod tests {
         let id = new_run_id("agent with spaces!");
         assert!(!id.contains(' '));
         assert!(!id.contains('!'));
+    }
+
+    #[test]
+    fn new_run_id_is_unique_across_rapid_calls_in_same_second() {
+        // Regression test: `--count N` calls `new_run_id` N times in a tight
+        // loop, all within the same wall-clock second. Before the
+        // `RUN_ID_COUNTER` fix, every one of these produced the identical
+        // ID, silently collapsing N runs into a single on-disk entry.
+        let ids: std::collections::HashSet<String> =
+            (0..100).map(|_| new_run_id("same-agent")).collect();
+        assert_eq!(
+            ids.len(),
+            100,
+            "expected 100 unique run IDs, got collisions"
+        );
     }
 
     // ─── write_meta / read_meta roundtrip ───────────────────────────────────

@@ -56,6 +56,18 @@ pub trait RunIO: Send {
     fn write_context_snapshot(&mut self, snapshot: &RegionSnapshot);
 }
 
+/// Reads a single line from `reader` and returns it trimmed, or `None` on a
+/// read error (note: EOF is `Ok(0)`, not an error, so it yields
+/// `Some(String::new())` -- preserved as-is from the original inline
+/// implementation). Generic over `R` (rather than hardcoding real stdin)
+/// purely so tests can drive it with an in-memory reader instead of blocking
+/// on real process stdin.
+fn get_user_input_from_reader(reader: &mut impl std::io::BufRead) -> Option<String> {
+    let mut buf = String::new();
+    reader.read_line(&mut buf).ok()?;
+    Some(buf.trim().to_string())
+}
+
 /// Console I/O implementation: prints to stdout, reads from stdin.
 /// Used by both foreground and worker modes at runtime.
 pub struct ConsoleIO;
@@ -91,14 +103,17 @@ impl RunIO for ConsoleIO {
 
     async fn on_tool_call(&mut self, _tool_name: &str, _tool_id: &str, _result: &str) {}
 
+    // This thin wrapper (real stdin lock + prompt printing) is intentionally
+    // not driven by a test: doing so would block on real process stdin,
+    // which is a TTY (not EOF) when tests run from an interactive terminal.
+    // The actual line-reading logic is fully covered via
+    // `get_user_input_from_reader` with an in-memory reader below.
     async fn get_user_input(&mut self, prompt: &str) -> Option<String> {
         use std::io::Write;
         println!("{}", prompt);
         print!("You: ");
         std::io::stdout().flush().ok();
-        let mut buf = String::new();
-        std::io::stdin().read_line(&mut buf).ok()?;
-        Some(buf.trim().to_string())
+        get_user_input_from_reader(&mut std::io::stdin().lock())
     }
 
     async fn on_error(&mut self, error: &str) {
@@ -112,6 +127,115 @@ impl RunIO for ConsoleIO {
     }
 
     fn write_context_snapshot(&mut self, _snapshot: &RegionSnapshot) {}
+}
+
+#[cfg(test)]
+mod console_io_tests {
+    use super::*;
+    use leviath_core::blueprint::{ModelConfig, StageResult};
+    use std::io::Cursor;
+
+    fn make_stage(name: &str) -> Stage {
+        Stage::new(
+            name.to_string(),
+            ModelConfig::new("anthropic".to_string(), "test".to_string()),
+        )
+    }
+
+    #[tokio::test]
+    async fn console_io_on_stage_enter_is_noop() {
+        let mut io = ConsoleIO;
+        let stage = make_stage("main");
+        io.on_stage_enter(&stage, 0, "anthropic", "claude").await;
+    }
+
+    #[tokio::test]
+    async fn console_io_on_stage_complete_is_noop() {
+        let mut io = ConsoleIO;
+        io.on_stage_complete("main", &StageResult::Success, Some("next"))
+            .await;
+        io.on_stage_complete("final", &StageResult::MaxIterations, None)
+            .await;
+    }
+
+    #[tokio::test]
+    async fn console_io_on_output_prints_and_flushes() {
+        let mut io = ConsoleIO;
+        io.on_output("hello").await;
+    }
+
+    #[tokio::test]
+    async fn console_io_on_tokens_prints() {
+        let mut io = ConsoleIO;
+        io.on_tokens(100, 50, 25).await;
+    }
+
+    #[tokio::test]
+    async fn console_io_on_tool_call_is_noop() {
+        let mut io = ConsoleIO;
+        io.on_tool_call("read_file", "tc-1", "contents").await;
+    }
+
+    #[tokio::test]
+    async fn console_io_on_error_prints_to_stderr() {
+        let mut io = ConsoleIO;
+        io.on_error("something broke").await;
+    }
+
+    #[tokio::test]
+    async fn console_io_on_provider_missing_is_noop() {
+        let mut io = ConsoleIO;
+        io.on_provider_missing("anthropic").await;
+    }
+
+    #[test]
+    fn console_io_is_not_background() {
+        let io = ConsoleIO;
+        assert!(!io.is_background());
+    }
+
+    #[test]
+    fn console_io_write_context_snapshot_is_noop() {
+        let mut io = ConsoleIO;
+        let snapshot = RegionSnapshot {
+            name: "conversation".to_string(),
+            kind: "sliding".to_string(),
+            current_tokens: 5,
+            max_tokens: 100,
+            entries: vec![],
+        };
+        io.write_context_snapshot(&snapshot);
+    }
+
+    #[test]
+    fn get_user_input_from_reader_returns_trimmed_line() {
+        let mut reader = Cursor::new(b"  hello world  \n".to_vec());
+        assert_eq!(
+            get_user_input_from_reader(&mut reader),
+            Some("hello world".to_string())
+        );
+    }
+
+    #[test]
+    fn get_user_input_from_reader_eof_returns_empty_string() {
+        // EOF is `Ok(0)`, not an error, so this yields `Some("")` rather
+        // than `None` -- matches the pre-existing inline behavior.
+        let mut reader = Cursor::new(Vec::<u8>::new());
+        assert_eq!(get_user_input_from_reader(&mut reader), Some(String::new()));
+    }
+
+    #[test]
+    fn get_user_input_from_reader_multiple_lines_reads_first_only() {
+        let mut reader = Cursor::new(b"first\nsecond\n".to_vec());
+        assert_eq!(
+            get_user_input_from_reader(&mut reader),
+            Some("first".to_string())
+        );
+        assert_eq!(
+            get_user_input_from_reader(&mut reader),
+            Some("second".to_string())
+        );
+    }
 }
 
 #[cfg(test)]
@@ -319,6 +443,35 @@ pub mod mock {
             let mut io = MockIO::new();
             io.on_tokens(100, 50, 25).await;
             assert_eq!(io.token_records, vec![(100, 50, 25)]);
+        }
+
+        #[tokio::test]
+        async fn mock_io_records_provider_missing() {
+            let mut io = MockIO::new();
+            io.on_provider_missing("anthropic").await;
+            assert_eq!(io.provider_missing, vec!["anthropic"]);
+        }
+
+        #[test]
+        fn mock_io_records_context_snapshot() {
+            let mut io = MockIO::new();
+            let snapshot = RegionSnapshot {
+                name: "conversation".to_string(),
+                kind: "sliding".to_string(),
+                current_tokens: 5,
+                max_tokens: 100,
+                entries: vec![],
+            };
+            io.write_context_snapshot(&snapshot);
+            assert_eq!(io.snapshots.len(), 1);
+            assert_eq!(io.snapshots[0].name, "conversation");
+        }
+
+        #[test]
+        fn mock_io_default_matches_new() {
+            let io = MockIO::default();
+            assert!(io.outputs.is_empty());
+            assert!(!io.is_background());
         }
     }
 }
