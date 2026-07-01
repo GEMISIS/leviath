@@ -529,12 +529,15 @@ async fn run_worker_inner(args: &WorkerArgs, meta: &mut RunMeta) -> anyhow::Resu
                         msg
                     }
                     ToolPolicy::Ask => {
-                        use crate::interaction::{request_tool_approval_background, ApprovalScope};
+                        use crate::interaction::{
+                            request_tool_approval_background, ApprovalScope, TOOL_APPROVAL_TIMEOUT,
+                        };
                         let (approved, scope) = request_tool_approval_background(
                             &run_id,
                             &tc.name,
                             &tc.arguments,
                             "tool-call",
+                            TOOL_APPROVAL_TIMEOUT,
                         )
                         .await;
                         if approved {

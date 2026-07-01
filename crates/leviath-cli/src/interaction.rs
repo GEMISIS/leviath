@@ -444,16 +444,24 @@ pub fn make_interaction_id(stage_idx: usize, iteration: usize) -> String {
     format!("{}-{}", stage_idx, iteration)
 }
 
+/// Default timeout for [`request_tool_approval_background`] in production use.
+pub const TOOL_APPROVAL_TIMEOUT: Duration = Duration::from_secs(300);
+
 /// Request tool approval from a background worker without a live RunMeta handle.
 ///
 /// Reads `meta.json` from disk to update status, then polls for a response.
 /// Returns `true` if approved (once or session), `false` if denied.
 /// Also returns the `ApprovalScope` so callers can record session-level allows.
+///
+/// `timeout` is exposed (rather than hardcoded) so tests can exercise the
+/// timeout/auto-deny path without a real multi-minute wait; production
+/// callers should pass [`TOOL_APPROVAL_TIMEOUT`].
 pub async fn request_tool_approval_background(
     run_id: &str,
     tool_name: &str,
     arguments: &serde_json::Value,
     stage_name: &str,
+    timeout: Duration,
 ) -> (bool, ApprovalScope) {
     let req = InteractionRequest::tool_approval(
         make_interaction_id(
@@ -480,7 +488,6 @@ pub async fn request_tool_approval_background(
     }
 
     let started = Instant::now();
-    let timeout = Duration::from_secs(300); // 5 minute timeout for tool approval
 
     loop {
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -557,7 +564,25 @@ pub async fn request_interaction_bg_review(
 /// Renders the prompt and reads stdin instead of using the file-based channel.
 /// Returns the same `InteractionResponse` type for unified handling.
 pub fn request_interaction_stdin(req: &InteractionRequest) -> InteractionResponse {
-    use std::io::{self, Write};
+    let stdin = std::io::stdin();
+    request_interaction_from_reader(req, &mut stdin.lock())
+}
+
+/// Same protocol as [`request_interaction_stdin`], reading from any
+/// [`std::io::BufRead`] instead of hardcoding `io::stdin()`. This is the
+/// actual implementation — factored out so it can be exercised in tests
+/// with an in-memory reader (e.g. `Cursor<&[u8]>`) instead of blocking on
+/// real stdin.
+///
+/// If the reader hits EOF (returns `Ok(0)`) before a valid answer is given
+/// — e.g. stdin is closed/piped from `/dev/null` — returns a safe default
+/// instead of looping forever: the first option for `MultipleChoice`, and
+/// a denial for `Confirm`/`ToolApproval`.
+pub fn request_interaction_from_reader<R: std::io::BufRead>(
+    req: &InteractionRequest,
+    reader: &mut R,
+) -> InteractionResponse {
+    use std::io::Write;
 
     println!("\n[Interaction Point: {}]", req.stage_name);
 
@@ -568,9 +593,9 @@ pub fn request_interaction_stdin(req: &InteractionRequest) -> InteractionRespons
                 println!("(Press Enter to skip)");
             }
             print!("You: ");
-            io::stdout().flush().ok();
+            std::io::stdout().flush().ok();
             let mut input = String::new();
-            io::stdin().read_line(&mut input).ok();
+            reader.read_line(&mut input).ok();
             InteractionResponse::text(&req.id, input.trim())
         }
 
@@ -581,9 +606,11 @@ pub fn request_interaction_stdin(req: &InteractionRequest) -> InteractionRespons
             }
             loop {
                 print!("Choice (1-{}): ", req.options.len());
-                io::stdout().flush().ok();
+                std::io::stdout().flush().ok();
                 let mut input = String::new();
-                io::stdin().read_line(&mut input).ok();
+                if reader.read_line(&mut input).unwrap_or(0) == 0 {
+                    return InteractionResponse::choice(&req.id, 0);
+                }
                 let s = input.trim();
                 if let Ok(n) = s.parse::<usize>() {
                     if n >= 1 && n <= req.options.len() {
@@ -596,9 +623,11 @@ pub fn request_interaction_stdin(req: &InteractionRequest) -> InteractionRespons
 
         InteractionKind::Confirm => loop {
             print!("{} [y/n]: ", req.prompt);
-            io::stdout().flush().ok();
+            std::io::stdout().flush().ok();
             let mut input = String::new();
-            io::stdin().read_line(&mut input).ok();
+            if reader.read_line(&mut input).unwrap_or(0) == 0 {
+                return InteractionResponse::approval(&req.id, false, ApprovalScope::Once);
+            }
             match input.trim().to_lowercase().as_str() {
                 "y" | "yes" => {
                     return InteractionResponse::approval(&req.id, true, ApprovalScope::Once);
@@ -626,9 +655,11 @@ pub fn request_interaction_stdin(req: &InteractionRequest) -> InteractionRespons
             }
             loop {
                 print!("Choice (1-{}): ", req.options.len());
-                io::stdout().flush().ok();
+                std::io::stdout().flush().ok();
                 let mut input = String::new();
-                io::stdin().read_line(&mut input).ok();
+                if reader.read_line(&mut input).unwrap_or(0) == 0 {
+                    return InteractionResponse::approval(&req.id, false, ApprovalScope::Once);
+                }
                 match input.trim() {
                     "1" => {
                         return InteractionResponse::approval(&req.id, true, ApprovalScope::Once);
@@ -1829,8 +1860,14 @@ mod tests {
         });
 
         let args = serde_json::json!({"command": "ls"});
-        let (approved, scope) =
-            request_tool_approval_background(run_id, tool_name, &args, "code").await;
+        let (approved, scope) = request_tool_approval_background(
+            run_id,
+            tool_name,
+            &args,
+            "code",
+            TOOL_APPROVAL_TIMEOUT,
+        )
+        .await;
         assert!(approved);
         assert_eq!(scope, ApprovalScope::Once);
 
@@ -1859,8 +1896,14 @@ mod tests {
         });
 
         let args = serde_json::json!({"path": "/tmp/f.txt"});
-        let (approved, scope) =
-            request_tool_approval_background(run_id, tool_name, &args, "code").await;
+        let (approved, scope) = request_tool_approval_background(
+            run_id,
+            tool_name,
+            &args,
+            "code",
+            TOOL_APPROVAL_TIMEOUT,
+        )
+        .await;
         assert!(!approved);
         assert_eq!(scope, ApprovalScope::Once);
 
@@ -1899,8 +1942,14 @@ mod tests {
         });
 
         let args = serde_json::json!({});
-        let (approved, scope) =
-            request_tool_approval_background(run_id, tool_name, &args, "impl").await;
+        let (approved, scope) = request_tool_approval_background(
+            run_id,
+            tool_name,
+            &args,
+            "impl",
+            TOOL_APPROVAL_TIMEOUT,
+        )
+        .await;
         assert!(approved);
         assert_eq!(scope, ApprovalScope::Session);
 
@@ -1933,10 +1982,308 @@ mod tests {
         });
 
         let args = serde_json::json!({"command": "rm -rf"});
-        let (approved, _scope) =
-            request_tool_approval_background(run_id, tool_name, &args, "code").await;
+        let (approved, _scope) = request_tool_approval_background(
+            run_id,
+            tool_name,
+            &args,
+            "code",
+            TOOL_APPROVAL_TIMEOUT,
+        )
+        .await;
         assert!(!approved);
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn test_request_tool_approval_background_timeout_auto_denies() {
+        let run_id = "test-tool-approval-timeout";
+        let dir = crate::runstate::run_dir(run_id);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let meta = crate::runstate::RunMeta::new(
+            run_id.to_string(),
+            "agent".to_string(),
+            "/tmp/agent.toml".to_string(),
+            "task".to_string(),
+            None,
+            "/tmp".to_string(),
+            1,
+        );
+        crate::runstate::create_run(&meta).unwrap();
+
+        // No responder — the short timeout should fire the auto-deny path.
+        let args = serde_json::json!({"command": "rm -rf /"});
+        let (approved, scope) = request_tool_approval_background(
+            run_id,
+            "bash",
+            &args,
+            "code",
+            Duration::from_millis(150),
+        )
+        .await;
+        assert!(!approved);
+        assert_eq!(scope, ApprovalScope::Once);
+
+        // Status should be restored to Running (not left stuck WaitingInput).
+        let meta_after = crate::runstate::read_meta(run_id).unwrap();
+        assert_eq!(meta_after.status, RunStatus::Running);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ─── request_interaction_from_reader (mocked stdin) ────────────────────
+
+    use std::io::Cursor;
+
+    fn reader_from(input: &str) -> Cursor<Vec<u8>> {
+        Cursor::new(input.as_bytes().to_vec())
+    }
+
+    #[test]
+    fn stdin_free_text_reads_trimmed_line() {
+        let req = InteractionRequest::free_text("ft1", "What's up?", "plan", true);
+        let mut reader = reader_from("  hello world  \n");
+        let resp = request_interaction_from_reader(&req, &mut reader);
+        assert_eq!(resp.value.as_deref(), Some("hello world"));
+        assert_eq!(resp.request_id, "ft1");
+    }
+
+    #[test]
+    fn stdin_free_text_not_required_shows_skip_hint_and_accepts_empty() {
+        let req = InteractionRequest::free_text("ft2", "Optional?", "plan", false);
+        let mut reader = reader_from("\n");
+        let resp = request_interaction_from_reader(&req, &mut reader);
+        assert_eq!(resp.value.as_deref(), Some(""));
+    }
+
+    #[test]
+    fn stdin_free_text_eof_yields_empty_answer() {
+        let req = InteractionRequest::free_text("ft3", "Q?", "plan", true);
+        let mut reader = reader_from(""); // immediate EOF, no newline
+        let resp = request_interaction_from_reader(&req, &mut reader);
+        assert_eq!(resp.value.as_deref(), Some(""));
+    }
+
+    #[test]
+    fn stdin_multiple_choice_valid_first_try() {
+        let req = InteractionRequest::multiple_choice(
+            "mc1",
+            "Pick",
+            vec!["A".into(), "B".into(), "C".into()],
+            "plan",
+        );
+        let mut reader = reader_from("2\n");
+        let resp = request_interaction_from_reader(&req, &mut reader);
+        assert_eq!(resp.choice_index, Some(1));
+    }
+
+    #[test]
+    fn stdin_multiple_choice_retries_on_invalid_input() {
+        let req = InteractionRequest::multiple_choice(
+            "mc2",
+            "Pick",
+            vec!["A".into(), "B".into()],
+            "plan",
+        );
+        // "not a number", then out-of-range "9", then valid "1"
+        let mut reader = reader_from("not a number\n9\n1\n");
+        let resp = request_interaction_from_reader(&req, &mut reader);
+        assert_eq!(resp.choice_index, Some(0));
+    }
+
+    #[test]
+    fn stdin_multiple_choice_rejects_zero() {
+        let req = InteractionRequest::multiple_choice(
+            "mc3",
+            "Pick",
+            vec!["A".into(), "B".into()],
+            "plan",
+        );
+        let mut reader = reader_from("0\n2\n");
+        let resp = request_interaction_from_reader(&req, &mut reader);
+        assert_eq!(resp.choice_index, Some(1));
+    }
+
+    #[test]
+    fn stdin_multiple_choice_eof_defaults_to_first_option() {
+        let req = InteractionRequest::multiple_choice(
+            "mc4",
+            "Pick",
+            vec!["A".into(), "B".into()],
+            "plan",
+        );
+        let mut reader = reader_from(""); // EOF before any answer
+        let resp = request_interaction_from_reader(&req, &mut reader);
+        assert_eq!(resp.choice_index, Some(0));
+    }
+
+    #[test]
+    fn stdin_multiple_choice_eof_after_invalid_input_defaults_to_first_option() {
+        let req = InteractionRequest::multiple_choice(
+            "mc5",
+            "Pick",
+            vec!["A".into(), "B".into()],
+            "plan",
+        );
+        // One invalid line, then EOF (no trailing newline / more input)
+        let mut reader = reader_from("garbage\n");
+        let resp = request_interaction_from_reader(&req, &mut reader);
+        assert_eq!(resp.choice_index, Some(0));
+    }
+
+    #[test]
+    fn stdin_confirm_yes_variants() {
+        for input in ["y\n", "yes\n", "Y\n", "YES\n"] {
+            let req = InteractionRequest::confirm("cf1", "Sure?", "plan");
+            let mut reader = reader_from(input);
+            let resp = request_interaction_from_reader(&req, &mut reader);
+            assert_eq!(
+                resp.approved,
+                Some(true),
+                "input {:?} should approve",
+                input
+            );
+        }
+    }
+
+    #[test]
+    fn stdin_confirm_no_variants() {
+        for input in ["n\n", "no\n", "N\n", "NO\n"] {
+            let req = InteractionRequest::confirm("cf2", "Sure?", "plan");
+            let mut reader = reader_from(input);
+            let resp = request_interaction_from_reader(&req, &mut reader);
+            assert_eq!(resp.approved, Some(false), "input {:?} should deny", input);
+        }
+    }
+
+    #[test]
+    fn stdin_confirm_retries_on_invalid_input() {
+        let req = InteractionRequest::confirm("cf3", "Sure?", "plan");
+        let mut reader = reader_from("maybe\nwhat\ny\n");
+        let resp = request_interaction_from_reader(&req, &mut reader);
+        assert_eq!(resp.approved, Some(true));
+    }
+
+    #[test]
+    fn stdin_confirm_eof_defaults_to_no() {
+        let req = InteractionRequest::confirm("cf4", "Sure?", "plan");
+        let mut reader = reader_from("");
+        let resp = request_interaction_from_reader(&req, &mut reader);
+        assert_eq!(resp.approved, Some(false));
+        assert_eq!(resp.scope, Some(ApprovalScope::Once));
+    }
+
+    #[test]
+    fn stdin_tool_approval_allow_once() {
+        let req = InteractionRequest::tool_approval(
+            "ta1",
+            "bash",
+            serde_json::json!({"command": "ls"}),
+            "code",
+        );
+        let mut reader = reader_from("1\n");
+        let resp = request_interaction_from_reader(&req, &mut reader);
+        assert_eq!(resp.approved, Some(true));
+        assert_eq!(resp.scope, Some(ApprovalScope::Once));
+    }
+
+    #[test]
+    fn stdin_tool_approval_allow_session() {
+        let req = InteractionRequest::tool_approval(
+            "ta2",
+            "bash",
+            serde_json::json!({"command": "ls"}),
+            "code",
+        );
+        let mut reader = reader_from("2\n");
+        let resp = request_interaction_from_reader(&req, &mut reader);
+        assert_eq!(resp.approved, Some(true));
+        assert_eq!(resp.scope, Some(ApprovalScope::Session));
+    }
+
+    #[test]
+    fn stdin_tool_approval_deny() {
+        let req = InteractionRequest::tool_approval(
+            "ta3",
+            "bash",
+            serde_json::json!({"command": "rm -rf /"}),
+            "code",
+        );
+        let mut reader = reader_from("3\n");
+        let resp = request_interaction_from_reader(&req, &mut reader);
+        assert_eq!(resp.approved, Some(false));
+        assert_eq!(resp.scope, Some(ApprovalScope::Once));
+    }
+
+    #[test]
+    fn stdin_tool_approval_retries_on_invalid_input() {
+        let req = InteractionRequest::tool_approval(
+            "ta4",
+            "write_file",
+            serde_json::json!({"path": "x.txt"}),
+            "code",
+        );
+        let mut reader = reader_from("nope\n5\n2\n");
+        let resp = request_interaction_from_reader(&req, &mut reader);
+        assert_eq!(resp.approved, Some(true));
+        assert_eq!(resp.scope, Some(ApprovalScope::Session));
+    }
+
+    #[test]
+    fn stdin_tool_approval_eof_defaults_to_deny() {
+        let req = InteractionRequest::tool_approval(
+            "ta5",
+            "bash",
+            serde_json::json!({"command": "rm -rf /"}),
+            "code",
+        );
+        let mut reader = reader_from("");
+        let resp = request_interaction_from_reader(&req, &mut reader);
+        assert_eq!(resp.approved, Some(false));
+    }
+
+    #[test]
+    fn stdin_tool_approval_without_arguments_still_prompts() {
+        // tool_arguments is always Some(..) via the constructor, but exercise
+        // the tool_name-present/arguments-present printing path explicitly.
+        let req =
+            InteractionRequest::tool_approval("ta6", "read_file", serde_json::json!({}), "code");
+        assert!(req.tool_name.is_some());
+        assert!(req.tool_arguments.is_some());
+        let mut reader = reader_from("1\n");
+        let resp = request_interaction_from_reader(&req, &mut reader);
+        assert_eq!(resp.approved, Some(true));
+    }
+
+    #[test]
+    fn stdin_tool_approval_with_no_tool_name_or_arguments_skips_that_printing() {
+        // The `tool_approval()` builder always sets tool_name/tool_arguments,
+        // but the ToolApproval branch itself tolerates either being absent
+        // (e.g. a hand-built request) — exercise that fallback path directly.
+        let req = InteractionRequest {
+            id: "ta7".to_string(),
+            kind: InteractionKind::ToolApproval,
+            prompt: "Allow this?".to_string(),
+            options: vec!["Allow once".into(), "Allow session".into(), "Deny".into()],
+            tool_name: None,
+            tool_arguments: None,
+            required: true,
+            stage_name: "code".to_string(),
+            body: None,
+            body_format: BodyFormat::Plain,
+        };
+        let mut reader = reader_from("3\n");
+        let resp = request_interaction_from_reader(&req, &mut reader);
+        assert_eq!(resp.approved, Some(false));
+    }
+
+    #[test]
+    fn stdin_request_delegates_to_real_stdin_wrapper_type_compiles() {
+        // request_interaction_stdin() itself reads real stdin and can't be
+        // safely called in a test (would block). This just confirms the
+        // public wrapper still exists with the expected signature by
+        // referencing it as a value, without calling it.
+        let _f: fn(&InteractionRequest) -> InteractionResponse = request_interaction_stdin;
     }
 }
