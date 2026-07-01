@@ -893,4 +893,43 @@ mod tests {
         );
         assert_eq!(loaded.default_model.as_deref(), Some("my-model"));
     }
+
+    // ─── execute (real entry point) ──────────────────────────────────────
+    //
+    // `execute()`'s `--non-interactive` branch is safe to drive for real: it
+    // only touches `Config::load()`/`Config::config_path()` (isolated below
+    // via `isolate_config_path_for_test` so it can't read or overwrite a
+    // real `~/.leviath/config.toml`) and delegates to the already-tested
+    // `run_non_interactive_setup`. The interactive branch
+    // (`io::stdin().lock()` handed straight to `run_interactive_setup`) is
+    // NOT exercised here -- that's a real, blocking stdin read with no
+    // injection seam at this call site, the same class of genuine,
+    // irreducible boundary as `interaction.rs`'s `request_interaction_stdin`
+    // wrapper and `foreground.rs`'s `ForegroundInteractionBackend::ask`.
+
+    #[tokio::test]
+    async fn execute_non_interactive_applies_flags_and_saves_to_isolated_path() {
+        let _guard = crate::config::isolate_config_path_for_test("setup-execute-non-interactive");
+
+        let args = SetupArgs {
+            non_interactive: true,
+            anthropic_key: Some("sk-ant-execute-test".to_string()),
+            openai_key: None,
+            google_key: None,
+            openrouter_key: None,
+            ollama_url: None,
+            default_model: None,
+        };
+
+        let result = execute(args).await;
+        assert!(result.is_ok(), "expected Ok, got {:?}", result);
+
+        // Config::load() re-reads via the same (isolated) LEVIATH_CONFIG_PATH,
+        // proving execute() actually wrote through Config::config_path().
+        let reloaded = Config::load().unwrap();
+        assert_eq!(
+            reloaded.providers.anthropic_api_key.as_deref(),
+            Some("sk-ant-execute-test")
+        );
+    }
 }
