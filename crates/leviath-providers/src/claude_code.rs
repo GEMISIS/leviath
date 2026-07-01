@@ -881,4 +881,203 @@ mod tests {
             assert_eq!(model.provider, "claude-code");
         }
     }
+
+    // ─── infer()/infer_stream(): stub `claude` binary via with_binary_path ──
+    //
+    // ClaudeCodeProvider shells out to a real subprocess, so exercising
+    // infer()/infer_stream() means substituting a fake "claude" binary — a
+    // small shell script that ignores its args and prints canned output —
+    // via the existing `with_binary_path` test seam.
+
+    fn write_stub_script(tag: &str, body: &str) -> std::path::PathBuf {
+        use std::io::Write;
+        let path = std::env::temp_dir().join(format!(
+            "lev-claude-stub-{}-{}.sh",
+            tag,
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let mut f = std::fs::File::create(&path).unwrap();
+        writeln!(f, "#!/bin/sh").unwrap();
+        f.write_all(body.as_bytes()).unwrap();
+        drop(f);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        path
+    }
+
+    fn make_request() -> InferenceRequest {
+        InferenceRequest {
+            messages: vec![Message {
+                role: "user".to_string(),
+                content: "hi".to_string(),
+                cache_breakpoint: false,
+            }],
+            model: "claude-sonnet-4-6".to_string(),
+            max_tokens: 100,
+            temperature: 0.0,
+            tools: vec![],
+            extra: serde_json::Value::Null,
+        }
+    }
+
+    #[tokio::test]
+    async fn infer_success_parses_response() {
+        let script = write_stub_script(
+            "infer-ok",
+            "echo '{\"result\": \"hello from stub\", \"usage\": {\"input_tokens\": 3, \"output_tokens\": 2}}'\n",
+        );
+        let provider = ClaudeCodeProvider::with_binary_path(script.to_str().unwrap().to_string());
+        let resp = provider.infer(make_request()).await.unwrap();
+        assert_eq!(resp.content, "hello from stub");
+        let _ = std::fs::remove_file(&script);
+    }
+
+    #[tokio::test]
+    async fn infer_is_error_response_returns_api_error() {
+        let script = write_stub_script(
+            "infer-err",
+            "echo '{\"is_error\": true, \"result\": \"bad request\"}'\n",
+        );
+        let provider = ClaudeCodeProvider::with_binary_path(script.to_str().unwrap().to_string());
+        let err = provider.infer(make_request()).await.unwrap_err();
+        assert!(matches!(err, ProviderError::ApiError(_)));
+        assert!(err.to_string().contains("bad request"));
+        let _ = std::fs::remove_file(&script);
+    }
+
+    #[tokio::test]
+    async fn infer_nonzero_exit_returns_request_failed() {
+        let script = write_stub_script("infer-fail", "echo 'boom' >&2\nexit 1\n");
+        let provider = ClaudeCodeProvider::with_binary_path(script.to_str().unwrap().to_string());
+        let err = provider.infer(make_request()).await.unwrap_err();
+        assert!(matches!(err, ProviderError::RequestFailed(_)));
+        assert!(err.to_string().contains("boom"));
+        let _ = std::fs::remove_file(&script);
+    }
+
+    #[tokio::test]
+    async fn infer_spawn_failure_returns_request_failed() {
+        let provider = ClaudeCodeProvider::with_binary_path(
+            "/nonexistent/definitely/not/a/real/binary".to_string(),
+        );
+        let err = provider.infer(make_request()).await.unwrap_err();
+        assert!(matches!(err, ProviderError::RequestFailed(_)));
+        assert!(err.to_string().contains("Is Claude Code installed?"));
+    }
+
+    #[tokio::test]
+    async fn infer_with_system_prompt_and_tools_still_succeeds() {
+        let script = write_stub_script("infer-tools", "echo '{\"result\": \"ok\"}'\n");
+        let provider = ClaudeCodeProvider::with_binary_path(script.to_str().unwrap().to_string());
+        let mut req = make_request();
+        req.messages.insert(
+            0,
+            Message {
+                role: "system".to_string(),
+                content: "be nice".to_string(),
+                cache_breakpoint: false,
+            },
+        );
+        req.tools = vec![Tool {
+            name: "bash".to_string(),
+            description: "run bash".to_string(),
+            parameters: serde_json::json!({}),
+        }];
+        let resp = provider.infer(req).await.unwrap();
+        assert_eq!(resp.content, "ok");
+        let _ = std::fs::remove_file(&script);
+    }
+
+    #[tokio::test]
+    async fn infer_stream_yields_chunks_from_ndjson() {
+        let script = write_stub_script(
+            "stream-ok",
+            "echo '{\"type\": \"assistant\", \"content\": \"Hello\"}'\n\
+             echo '{\"type\": \"assistant\", \"content\": \" world\"}'\n",
+        );
+        let provider = ClaudeCodeProvider::with_binary_path(script.to_str().unwrap().to_string());
+        let mut stream = provider.infer_stream(make_request()).await.unwrap();
+        use tokio_stream::StreamExt;
+        let first = stream.next().await.unwrap().unwrap();
+        assert_eq!(first.delta, "Hello");
+        let second = stream.next().await.unwrap().unwrap();
+        assert_eq!(second.delta, " world");
+        assert!(stream.next().await.is_none());
+        let _ = std::fs::remove_file(&script);
+    }
+
+    #[tokio::test]
+    async fn infer_stream_with_system_prompt_and_tools_still_succeeds() {
+        let script = write_stub_script(
+            "stream-tools",
+            "echo '{\"type\": \"assistant\", \"content\": \"ok\"}'\n",
+        );
+        let provider = ClaudeCodeProvider::with_binary_path(script.to_str().unwrap().to_string());
+        let mut req = make_request();
+        req.messages.insert(
+            0,
+            Message {
+                role: "system".to_string(),
+                content: "be nice".to_string(),
+                cache_breakpoint: false,
+            },
+        );
+        req.tools = vec![Tool {
+            name: "bash".to_string(),
+            description: "run bash".to_string(),
+            parameters: serde_json::json!({}),
+        }];
+        let mut stream = provider.infer_stream(req).await.unwrap();
+        use tokio_stream::StreamExt;
+        let chunk = stream.next().await.unwrap().unwrap();
+        assert_eq!(chunk.delta, "ok");
+        let _ = std::fs::remove_file(&script);
+    }
+
+    #[tokio::test]
+    async fn infer_stream_content_block_delta_variant() {
+        let script = write_stub_script(
+            "stream-cbd",
+            "echo '{\"type\": \"content_block_delta\", \"delta\": {\"text\": \"partial\"}}'\n",
+        );
+        let provider = ClaudeCodeProvider::with_binary_path(script.to_str().unwrap().to_string());
+        let mut stream = provider.infer_stream(make_request()).await.unwrap();
+        use tokio_stream::StreamExt;
+        let chunk = stream.next().await.unwrap().unwrap();
+        assert_eq!(chunk.delta, "partial");
+        let _ = std::fs::remove_file(&script);
+    }
+
+    #[tokio::test]
+    async fn infer_stream_skips_blank_and_unparseable_lines() {
+        let script = write_stub_script(
+            "stream-skip",
+            "echo ''\n\
+             echo 'not json'\n\
+             echo '{\"type\": \"assistant\", \"content\": \"real\"}'\n",
+        );
+        let provider = ClaudeCodeProvider::with_binary_path(script.to_str().unwrap().to_string());
+        let mut stream = provider.infer_stream(make_request()).await.unwrap();
+        use tokio_stream::StreamExt;
+        let chunk = stream.next().await.unwrap().unwrap();
+        assert_eq!(chunk.delta, "real");
+        let _ = std::fs::remove_file(&script);
+    }
+
+    #[tokio::test]
+    async fn infer_stream_spawn_failure_returns_error() {
+        let provider = ClaudeCodeProvider::with_binary_path(
+            "/nonexistent/definitely/not/a/real/binary".to_string(),
+        );
+        match provider.infer_stream(make_request()).await {
+            Err(ProviderError::RequestFailed(_)) => {}
+            _ => panic!("expected RequestFailed"),
+        }
+    }
 }
