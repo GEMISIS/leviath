@@ -307,7 +307,7 @@ mod tests {
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(
-            err.contains("Failed to search") || err.contains("error"),
+            err.contains("Failed to search"),
             "Expected search error, got: {}",
             err
         );
@@ -320,7 +320,7 @@ mod tests {
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(
-            err.contains("Failed to download") || err.contains("error"),
+            err.contains("Failed to download"),
             "Expected download error, got: {}",
             err
         );
@@ -333,7 +333,7 @@ mod tests {
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(
-            err.contains("Failed to get package info") || err.contains("error"),
+            err.contains("Failed to get package info"),
             "Expected get_info error, got: {}",
             err
         );
@@ -347,7 +347,7 @@ mod tests {
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(
-            err.contains("Failed to publish") || err.contains("error"),
+            err.contains("Failed to publish"),
             "Expected publish error, got: {}",
             err
         );
@@ -388,8 +388,78 @@ mod tests {
         format!("http://{}", addr)
     }
 
+    /// Like `spawn_mock_server`, but declares a `Content-Length` larger than
+    /// the bytes actually sent before closing the connection -- forces a
+    /// genuine mid-body I/O error on `.bytes()`/`.text()`/`.json()`, as
+    /// opposed to a well-formed-but-wrong body.
+    async fn spawn_mock_server_truncated_body(status: u16, reason: &str, body: &[u8]) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let declared_len = body.len() + 4096;
+        let response = format!(
+            "HTTP/1.1 {} {}\r\nContent-Type: application/octet-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            status, reason, declared_len
+        )
+        .into_bytes();
+        let body = body.to_vec();
+
+        tokio::spawn(async move {
+            if let Ok((mut socket, _)) = listener.accept().await {
+                let mut buf = [0u8; 8192];
+                let _ = socket.read(&mut buf).await;
+                let _ = socket.write_all(&response).await;
+                let _ = socket.write_all(&body).await;
+                let _ = socket.flush().await;
+                // Close without ever sending the remaining declared bytes.
+                let _ = socket.shutdown().await;
+            }
+        });
+
+        format!("http://{}", addr)
+    }
+
+    /// llvm-cov reports `tracing::info!(...)` call sites' field-expression
+    /// sub-regions as uncovered when no `tracing::Subscriber` is registered
+    /// during tests -- the macro short-circuits field evaluation before the
+    /// "is this level enabled" check even runs, even though the surrounding
+    /// branch genuinely executes. Setting this as the default subscriber for
+    /// a test's duration makes those field expressions actually evaluate.
+    struct AlwaysOnSubscriber;
+    impl tracing::Subscriber for AlwaysOnSubscriber {
+        fn enabled(&self, _metadata: &tracing::Metadata<'_>) -> bool {
+            true
+        }
+        fn new_span(&self, _span: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+            tracing::span::Id::from_u64(1)
+        }
+        fn record(&self, _span: &tracing::span::Id, _values: &tracing::span::Record<'_>) {}
+        fn record_follows_from(&self, _span: &tracing::span::Id, _follows: &tracing::span::Id) {}
+        fn event(&self, _event: &tracing::Event<'_>) {}
+        fn enter(&self, _span: &tracing::span::Id) {}
+        fn exit(&self, _span: &tracing::span::Id) {}
+    }
+
+    fn always_on_tracing_guard() -> tracing::subscriber::DefaultGuard {
+        tracing::subscriber::set_default(AlwaysOnSubscriber)
+    }
+
+    #[test]
+    fn always_on_subscriber_span_methods_are_all_no_ops() {
+        let _guard = always_on_tracing_guard();
+        let span = tracing::info_span!("test-span", field = 1);
+        span.record("field", 2);
+        span.follows_from(&span);
+        span.in_scope(|| {
+            tracing::info!("inside span");
+        });
+    }
+
     #[tokio::test]
     async fn search_success_returns_packages() {
+        let _guard = always_on_tracing_guard();
         let body = br#"[{"name":"pkg-a","version":"1.0.0","description":"desc"}]"#;
         let url = spawn_mock_server(200, "OK", body).await;
         let registry = PackageRegistry::new(url);
@@ -416,10 +486,23 @@ mod tests {
 
     #[tokio::test]
     async fn download_success_returns_bytes() {
+        let _guard = always_on_tracing_guard();
         let url = spawn_mock_server(200, "OK", b"binary bundle content").await;
         let registry = PackageRegistry::new(url);
         let bytes = registry.download("pkg-a", "1.0.0").await.unwrap();
         assert_eq!(bytes, b"binary bundle content");
+    }
+
+    #[tokio::test]
+    async fn download_body_read_error_returns_error() {
+        // A truncated body (declared Content-Length exceeds what's actually
+        // sent) forces `.bytes()` itself to fail, exercising the
+        // `map_err(|e| ... "Failed to read package bytes" ...)` arm --
+        // distinct from a non-success status or a well-formed-but-wrong body.
+        let url = spawn_mock_server_truncated_body(200, "OK", b"partial").await;
+        let registry = PackageRegistry::new(url);
+        let err = registry.download("pkg-a", "1.0.0").await.unwrap_err();
+        assert!(err.to_string().contains("Failed to read package bytes"));
     }
 
     #[tokio::test]
@@ -432,6 +515,7 @@ mod tests {
 
     #[tokio::test]
     async fn get_info_success_returns_info() {
+        let _guard = always_on_tracing_guard();
         let body = br#"{"name":"pkg-a","version":"1.0.0","description":"desc"}"#;
         let url = spawn_mock_server(200, "OK", body).await;
         let registry = PackageRegistry::new(url);
@@ -458,6 +542,7 @@ mod tests {
 
     #[tokio::test]
     async fn publish_success_returns_ok() {
+        let _guard = always_on_tracing_guard();
         let url = spawn_mock_server(200, "OK", b"").await;
         let registry = PackageRegistry::new(url);
         let result = registry.publish(b"bundle bytes", "token").await;
