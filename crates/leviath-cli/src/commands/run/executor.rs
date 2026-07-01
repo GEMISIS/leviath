@@ -480,6 +480,8 @@ mod tests {
         abort_on_provider_missing: bool,
         /// If true, on_stage_error returns Some(Error) for graph mode.
         graph_error_result: bool,
+        /// If true, run_autonomous returns Err instead of Ok.
+        run_autonomous_should_error: bool,
     }
 
     impl MockCallbacks {
@@ -495,6 +497,7 @@ mod tests {
                 errors: Vec::new(),
                 abort_on_provider_missing: false,
                 graph_error_result: true,
+                run_autonomous_should_error: false,
             }
         }
     }
@@ -525,9 +528,16 @@ mod tests {
             &mut self,
             _engine: &AgentEngine,
             _agent_id: &str,
-            _accepts: bool,
+            accepts: bool,
         ) -> Option<tokio::task::JoinHandle<()>> {
-            None
+            // Mirrors the real foreground/worker implementations, which only
+            // spawn a reader task (and therefore return `Some`) when the
+            // stage actually accepts messages.
+            if accepts {
+                Some(tokio::spawn(async {}))
+            } else {
+                None
+            }
         }
 
         fn get_run_context(&mut self) -> Option<(&str, &mut RunMeta)> {
@@ -551,6 +561,9 @@ mod tests {
             F: FnMut(Vec<leviath_providers::ToolCall>) -> Fut + Send,
             Fut: std::future::Future<Output = Vec<(String, String)>> + Send,
         {
+            if self.run_autonomous_should_error {
+                return Err(anyhow::anyhow!("simulated autonomous failure"));
+            }
             // Simulate successful autonomous completion
             Ok((StageResult::Success, None))
         }
@@ -886,6 +899,174 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn autonomous_stage_error_graph_mode_records_error_and_continues() {
+        // A single stage with an (empty) `transitions` map is graph mode by
+        // `is_graph_mode`'s definition, and has no outgoing edges, so the
+        // run terminates right after the error is recorded.
+        let mut stage = make_stage("main");
+        stage.transitions = Some(HashMap::new());
+        stage.accepts_messages = true; // exercise the stdin-reader Some(handle) path too
+        let bp = make_blueprint(vec![stage]);
+        let (mut engine, mut pool, entity) = make_engine_and_entity(&bp);
+        let tool_registry = make_tool_registry().await;
+        let mut cb = MockCallbacks::new();
+        cb.run_autonomous_should_error = true;
+
+        let mut ctx = StageContext {
+            blueprint: &bp,
+            engine: &mut engine,
+            entity,
+            pool: &mut pool,
+            tool_registry: &tool_registry,
+            current_stage_name: Arc::new(Mutex::new(String::new())),
+            current_stage_perms: Arc::new(Mutex::new(HashMap::new())),
+            current_stage_idx: Arc::new(Mutex::new(0)),
+            model_override: None,
+            compaction_ref: None,
+        };
+
+        let result = run_stage_loop(
+            &mut ctx,
+            &mut cb,
+            "agent-1",
+            &mut MockIO::new(),
+            &mut noop_exec,
+        )
+        .await;
+
+        assert!(
+            result.is_ok(),
+            "graph mode should recover from the error via on_stage_error, not propagate it"
+        );
+        assert_eq!(cb.errors.len(), 1);
+        assert_eq!(cb.errors[0].0, "main");
+        assert!(cb.errors[0].1.contains("simulated autonomous failure"));
+        // No transition edges -> terminal after the error is handled.
+        assert_eq!(cb.completed_at, Some(0));
+    }
+
+    #[tokio::test]
+    async fn autonomous_stage_error_linear_mode_propagates_and_aborts_stdin_reader() {
+        // No `transitions` set -> linear mode -> on_stage_error returns None
+        // -> the error propagates out of run_stage_loop.
+        let mut stage = make_stage("main");
+        stage.accepts_messages = true; // exercise the stdin-reader abort-before-return path
+        let bp = make_blueprint(vec![stage]);
+        let (mut engine, mut pool, entity) = make_engine_and_entity(&bp);
+        let tool_registry = make_tool_registry().await;
+        let mut cb = MockCallbacks::new();
+        cb.run_autonomous_should_error = true;
+
+        let mut ctx = StageContext {
+            blueprint: &bp,
+            engine: &mut engine,
+            entity,
+            pool: &mut pool,
+            tool_registry: &tool_registry,
+            current_stage_name: Arc::new(Mutex::new(String::new())),
+            current_stage_perms: Arc::new(Mutex::new(HashMap::new())),
+            current_stage_idx: Arc::new(Mutex::new(0)),
+            model_override: None,
+            compaction_ref: None,
+        };
+
+        let result = run_stage_loop(
+            &mut ctx,
+            &mut cb,
+            "agent-1",
+            &mut MockIO::new(),
+            &mut noop_exec,
+        )
+        .await;
+
+        assert!(result.is_err(), "linear mode must propagate the error");
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("simulated autonomous failure"));
+        assert_eq!(cb.errors.len(), 1);
+        // on_complete is never reached when the error propagates.
+        assert!(cb.completed_at.is_none());
+    }
+
+    #[tokio::test]
+    async fn stage_with_layout_prompt_tool_filter_and_routing_completes() {
+        // Exercises the per-stage context_layout swap, system_prompt
+        // injection, non-empty available_tools filter, and
+        // tool_result_routing construction -- all otherwise-untouched by
+        // every other test in this file, which use `make_stage`'s defaults
+        // (no layout override, no system_prompt, empty available_tools,
+        // no routing).
+        let mut stage = make_stage("main");
+        stage.context_layout = Some(ContextLayout::new(
+            vec![RegionDefinition::new(
+                "conversation".to_string(),
+                RegionKind::SlidingWindow { max_items: 10 },
+                5000,
+            )],
+            5000,
+        ));
+        stage
+            .config
+            .insert("system_prompt".to_string(), serde_json::json!("Be terse."));
+        stage.available_tools = vec!["read_file".to_string()];
+        stage.tool_result_routing = Some(leviath_core::blueprint::ToolResultRouting::default());
+
+        let bp = make_blueprint(vec![stage]);
+        let (mut engine, mut pool, entity) = make_engine_and_entity(&bp);
+        let tool_registry = make_tool_registry().await;
+        let mut cb = MockCallbacks::new();
+
+        let mut ctx = StageContext {
+            blueprint: &bp,
+            engine: &mut engine,
+            entity,
+            pool: &mut pool,
+            tool_registry: &tool_registry,
+            current_stage_name: Arc::new(Mutex::new(String::new())),
+            current_stage_perms: Arc::new(Mutex::new(HashMap::new())),
+            current_stage_idx: Arc::new(Mutex::new(0)),
+            model_override: None,
+            compaction_ref: None,
+        };
+
+        run_stage_loop(
+            &mut ctx,
+            &mut cb,
+            "agent-1",
+            &mut MockIO::new(),
+            &mut noop_exec,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            cb.stage_results,
+            vec![("main".to_string(), StageResult::Success)]
+        );
+        assert_eq!(cb.completed_at, Some(0));
+    }
+
+    #[tokio::test]
+    async fn noop_exec_returns_empty_vec() {
+        assert_eq!(noop_exec(vec![]).await, Vec::<(String, String)>::new());
+    }
+
+    #[tokio::test]
+    async fn canned_provider_trivial_trait_methods() {
+        let provider = CannedProvider;
+        assert_eq!(
+            leviath_providers::Provider::count_tokens(&provider, "abcd", "m"),
+            1
+        );
+        assert_eq!(
+            leviath_providers::Provider::max_context_tokens(&provider, "m"),
+            100_000
+        );
+        assert_eq!(leviath_providers::Provider::name(&provider), "canned");
+    }
+
+    #[tokio::test]
     async fn stage_idx_lock_updated_per_stage() {
         let bp = make_blueprint(vec![make_stage("a"), make_stage("b")]);
         let (mut engine, mut pool, entity) = make_engine_and_entity(&bp);
@@ -1069,6 +1250,21 @@ mod tests {
         .unwrap();
 
         assert_eq!(cb.models, vec!["my-custom-model"]);
+
+        // Exercise this narrow test double's remaining trait methods, which
+        // this particular scenario (model-override propagation) never
+        // reaches on its own -- the same production behavior for each is
+        // already covered via `MockCallbacks` elsewhere in this file.
+        cb.on_claude_code_warning(0).await;
+        assert!(cb.start_message_reader(&engine, "agent-1", false).is_none());
+        assert!(cb.get_run_context().is_none());
+        assert!(cb
+            .on_stage_error("main", 0, &anyhow::anyhow!("e"), false)
+            .await
+            .is_none());
+        cb.on_transition("a", "b", 0).await;
+        cb.on_complete(0).await;
+        cb.on_post_stage(&engine, entity, "main").await;
     }
 
     #[tokio::test]
@@ -1221,6 +1417,21 @@ mod tests {
         assert_eq!(cb.labels[1], ("b".to_string(), "".to_string()));
         assert_eq!(cb.labels[2], ("a".to_string(), " (visit 2)".to_string()));
         assert_eq!(cb.labels[3], ("b".to_string(), " (visit 2)".to_string()));
+
+        // Exercise this narrow test double's remaining trait methods, which
+        // this particular scenario (visit-label formatting) never reaches on
+        // its own -- the same production behavior for each is already
+        // covered via `MockCallbacks` elsewhere in this file.
+        cb.on_claude_code_warning(0).await;
+        assert!(cb.start_message_reader(&engine, "agent-1", false).is_none());
+        assert!(cb.get_run_context().is_none());
+        assert_eq!(
+            cb.on_stage_error("a", 0, &anyhow::anyhow!("e"), true).await,
+            Some(StageResult::Error)
+        );
+        cb.on_transition("a", "b", 0).await;
+        cb.on_complete(0).await;
+        cb.on_post_stage(&engine, entity, "a").await;
     }
 
     // ─── on_stage_result must fire for Interactive/InteractivePoints too ────

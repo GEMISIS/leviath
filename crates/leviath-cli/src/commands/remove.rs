@@ -97,4 +97,22 @@ mod tests {
 
         assert!(installer.get_installed("my-agent").unwrap().is_none());
     }
+
+    // ─── execute() ───────────────────────────────────────────────────────
+    //
+    // `execute()` always constructs a real `AgentInstaller::new()` pointed at
+    // the developer's real `~/.leviath/agents` -- there's no env-var seam for
+    // it (unlike `Config`'s `LEVIATH_CONFIG_PATH`), so this can't be driven
+    // through a real install/uninstall round trip without touching that real
+    // directory. It's still safe to exercise the not-installed error path:
+    // `get_installed` only *reads* that directory, and an agent name this
+    // specific is never going to exist there for real.
+    #[tokio::test]
+    async fn execute_with_nonexistent_agent_returns_error() {
+        let args = RemoveArgs {
+            name: "definitely-nonexistent-agent-for-lev-remove-coverage-xyz".to_string(),
+        };
+        let err = execute(args).await.unwrap_err();
+        assert!(err.to_string().contains("is not installed"));
+    }
 }

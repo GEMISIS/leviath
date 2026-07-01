@@ -48,8 +48,8 @@ pub struct ShowArgs {
 
 pub async fn execute(args: ModelsArgs) -> anyhow::Result<()> {
     match args.command {
-        ModelsCommand::List(a) => list(a).await,
-        ModelsCommand::Show(a) => show(a).await,
+        ModelsCommand::List(a) => list_with_registry(a, build_provider_registry).await,
+        ModelsCommand::Show(a) => show_with_registry(a, build_provider_registry).await,
     }
 }
 
@@ -333,7 +333,15 @@ fn builtin_table() -> Vec<BuiltinEntry> {
 
 // ─── list ─────────────────────────────────────────────────────────────────────
 
-async fn list(args: ListArgs) -> anyhow::Result<()> {
+/// Core of [`list`], with provider-registry construction injected so tests
+/// can drive the `--remote` merge/override/error paths with a
+/// [`Provider`](leviath_providers::Provider) mock instead of hitting a real
+/// network endpoint (ollama) or spawning a real subprocess (claude-code) --
+/// both of which [`build_provider_registry`] always registers.
+async fn list_with_registry(
+    args: ListArgs,
+    build_registry: impl FnOnce(&Config) -> leviath_runtime::ProviderRegistry,
+) -> anyhow::Result<()> {
     let config = Config::load()?;
     for warning in config.validate_keys() {
         eprintln!("Warning: {}", warning);
@@ -352,7 +360,7 @@ async fn list(args: ListArgs) -> anyhow::Result<()> {
 
     // --remote: fetch live model lists and merge (remote wins on same ID).
     if args.remote {
-        let registry = build_provider_registry(&config);
+        let registry = build_registry(&config);
         for provider_name in registry.provider_names() {
             // If the caller filtered to a specific provider, skip others.
             if let Some(ref filter) = args.provider {
@@ -444,7 +452,12 @@ async fn list(args: ListArgs) -> anyhow::Result<()> {
 
 // ─── show ─────────────────────────────────────────────────────────────────────
 
-async fn show(args: ShowArgs) -> anyhow::Result<()> {
+/// Core of [`show`], with provider-registry construction injected -- see
+/// [`list_with_registry`] for why.
+async fn show_with_registry(
+    args: ShowArgs,
+    build_registry: impl FnOnce(&Config) -> leviath_runtime::ProviderRegistry,
+) -> anyhow::Result<()> {
     let config = Config::load()?;
     for warning in config.validate_keys() {
         eprintln!("Warning: {}", warning);
@@ -474,7 +487,7 @@ async fn show(args: ShowArgs) -> anyhow::Result<()> {
     // 3. Optionally fetch from provider API if --remote and --provider are both given.
     if args.remote {
         if let Some(ref provider_name) = args.provider {
-            let registry = build_provider_registry(&config);
+            let registry = build_registry(&config);
             if let Some(provider) = registry.get(provider_name) {
                 match provider.list_models().await {
                     Ok(models) => {
@@ -1117,12 +1130,9 @@ mod tests {
     //
     // Config::load() gracefully falls back to defaults when
     // ~/.leviath/config.toml doesn't exist, so these are safe to call
-    // directly without touching the real environment. The --remote branches
-    // (real network calls to provider list_models() APIs) are intentionally
-    // not covered here — list()/show() build their own ProviderRegistry
-    // internally from Config::load(), with no injection seam, and exercising
-    // them would mean either real API keys or refactoring both functions to
-    // accept an injectable registry purely for this test.
+    // directly without touching the real environment. `list`/`show` are thin
+    // wrappers around `list_with_registry`/`show_with_registry` (see below
+    // for the --remote-path tests using a mock registry).
 
     #[tokio::test]
     async fn list_builtin_no_filter_succeeds() {
@@ -1130,7 +1140,7 @@ mod tests {
             remote: false,
             provider: None,
         };
-        let result = list(args).await;
+        let result = list_with_registry(args, build_provider_registry).await;
         assert!(result.is_ok());
     }
 
@@ -1140,7 +1150,7 @@ mod tests {
             remote: false,
             provider: Some("anthropic".to_string()),
         };
-        let result = list(args).await;
+        let result = list_with_registry(args, build_provider_registry).await;
         assert!(result.is_ok());
     }
 
@@ -1151,7 +1161,7 @@ mod tests {
             provider: Some("no-such-provider".to_string()),
         };
         // Should print "No models found." and still succeed, not error.
-        let result = list(args).await;
+        let result = list_with_registry(args, build_provider_registry).await;
         assert!(result.is_ok());
     }
 
@@ -1164,7 +1174,7 @@ mod tests {
             remote: false,
             provider: None,
         };
-        let result = show(args).await;
+        let result = show_with_registry(args, build_provider_registry).await;
         assert!(result.is_ok());
     }
 
@@ -1176,7 +1186,7 @@ mod tests {
             provider: None,
         };
         // Falls through all lookup tiers; must not error even when not found.
-        let result = show(args).await;
+        let result = show_with_registry(args, build_provider_registry).await;
         assert!(result.is_ok());
     }
 
@@ -1189,7 +1199,272 @@ mod tests {
             remote: true,
             provider: None,
         };
-        let result = show(args).await;
+        let result = show_with_registry(args, build_provider_registry).await;
         assert!(result.is_ok());
+    }
+
+    // ─── list()/show() --remote paths, with a mock provider ────────────────
+    //
+    // `build_provider_registry` always registers real `ollama`/`claude-code`
+    // providers regardless of config, so these can't safely be exercised via
+    // the real registry (a real network call to localhost:11434, or spawning
+    // a real `claude` subprocess). `list_with_registry`/`show_with_registry`
+    // take an injectable registry builder for exactly this reason: tests
+    // register a `MockProvider` under a name of their choosing and filter to
+    // just that provider via `--provider`, so no real ollama/claude-code
+    // provider is ever touched.
+
+    struct MockProvider {
+        models: Vec<ModelInfo>,
+        fail: bool,
+    }
+
+    #[async_trait::async_trait]
+    impl leviath_providers::Provider for MockProvider {
+        async fn infer(
+            &self,
+            _request: leviath_providers::InferenceRequest,
+        ) -> Result<leviath_providers::InferenceResponse, leviath_providers::ProviderError>
+        {
+            unreachable!("models command never calls infer()")
+        }
+
+        fn count_tokens(&self, text: &str, _model: &str) -> usize {
+            text.len() / 4
+        }
+
+        fn max_context_tokens(&self, _model: &str) -> usize {
+            100_000
+        }
+
+        fn name(&self) -> &str {
+            "mock"
+        }
+
+        fn capabilities(&self, _model: &str) -> ModelCapabilities {
+            ModelCapabilities::default()
+        }
+
+        async fn list_models(&self) -> Result<Vec<ModelInfo>, leviath_providers::ProviderError> {
+            if self.fail {
+                Err(leviath_providers::ProviderError::Other(
+                    "mock provider failure".to_string(),
+                ))
+            } else {
+                Ok(self.models.clone())
+            }
+        }
+    }
+
+    fn mock_registry(
+        provider_name: &'static str,
+        models: Vec<ModelInfo>,
+        fail: bool,
+    ) -> impl FnOnce(&Config) -> leviath_runtime::ProviderRegistry {
+        move |_config: &Config| {
+            let mut registry = leviath_runtime::ProviderRegistry::new();
+            registry.register(
+                provider_name.to_string(),
+                std::sync::Arc::new(MockProvider { models, fail }),
+            );
+            registry
+        }
+    }
+
+    #[tokio::test]
+    async fn list_remote_merges_new_model_from_provider() {
+        let args = ListArgs {
+            remote: true,
+            provider: Some("mock".to_string()),
+        };
+        let new_model = ModelInfo {
+            id: "mock-brand-new-model".to_string(),
+            display_name: Some("Mock Brand New Model".to_string()),
+            provider: "mock".to_string(),
+            capabilities: ModelCapabilities::default(),
+        };
+        let result = list_with_registry(args, mock_registry("mock", vec![new_model], false)).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn list_remote_overrides_builtin_entry_with_same_id() {
+        let known_id = builtin_table()[0].model_id.to_string();
+        let args = ListArgs {
+            remote: true,
+            provider: Some("mock".to_string()),
+        };
+        let overriding_model = ModelInfo {
+            id: known_id,
+            display_name: Some("Overridden".to_string()),
+            provider: "mock".to_string(),
+            capabilities: ModelCapabilities::default(),
+        };
+        let result =
+            list_with_registry(args, mock_registry("mock", vec![overriding_model], false)).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn list_remote_provider_error_warns_and_continues() {
+        let args = ListArgs {
+            remote: true,
+            provider: Some("mock".to_string()),
+        };
+        let result = list_with_registry(args, mock_registry("mock", vec![], true)).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn list_remote_skips_providers_not_matching_filter() {
+        // provider filter is "mock-other", but the registry only has "mock"
+        // registered -> the `if filter != provider_name { continue; }`
+        // branch is exercised, and the mock is never queried.
+        let args = ListArgs {
+            remote: true,
+            provider: Some("mock-other".to_string()),
+        };
+        let result = list_with_registry(args, mock_registry("mock", vec![], false)).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn show_remote_finds_model_from_provider() {
+        let args = ShowArgs {
+            model: "mock-remote-model".to_string(),
+            remote: true,
+            provider: Some("mock".to_string()),
+        };
+        let remote_model = ModelInfo {
+            id: "mock-remote-model".to_string(),
+            display_name: Some("Mock Remote Model".to_string()),
+            provider: "mock".to_string(),
+            capabilities: ModelCapabilities::default(),
+        };
+        let result =
+            show_with_registry(args, mock_registry("mock", vec![remote_model], false)).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn show_remote_model_not_found_in_provider_list_falls_through() {
+        let args = ShowArgs {
+            model: "totally-unknown-model-xyz".to_string(),
+            remote: true,
+            provider: Some("mock".to_string()),
+        };
+        let result = show_with_registry(args, mock_registry("mock", vec![], false)).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn show_remote_provider_error_warns_and_falls_through() {
+        let args = ShowArgs {
+            model: "totally-unknown-model-xyz".to_string(),
+            remote: true,
+            provider: Some("mock".to_string()),
+        };
+        let result = show_with_registry(args, mock_registry("mock", vec![], true)).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn show_remote_unconfigured_provider_warns_and_falls_through() {
+        // provider filter names a provider that isn't in the registry at all
+        // -> the `if let Some(provider) = registry.get(...)` else branch.
+        let args = ShowArgs {
+            model: "totally-unknown-model-xyz".to_string(),
+            remote: true,
+            provider: Some("nonexistent-provider".to_string()),
+        };
+        let result = show_with_registry(args, mock_registry("mock", vec![], false)).await;
+        assert!(result.is_ok());
+    }
+
+    // ─── validate_keys() warnings + [model_capabilities] overrides ─────────
+    //
+    // `list_with_registry`/`show_with_registry` take an injectable registry
+    // builder, so a malformed API key in the isolated test config can safely
+    // exercise the `validate_keys()` warning-print branch without the
+    // registry ever actually using that key (the mock registry below ignores
+    // `_config` entirely).
+
+    #[tokio::test]
+    async fn list_prints_warning_and_applies_model_capabilities_override() {
+        let _guard = crate::config::isolate_config_path_for_test("models-list-override");
+        let known_id = builtin_table()[0].model_id.to_string();
+        let mut fake_config = Config::default();
+        fake_config.providers.anthropic_api_key = Some("not-a-real-key".to_string());
+        fake_config.model_capabilities.insert(
+            known_id,
+            ModelCapabilities {
+                supports_temperature: false,
+                supports_streaming: false,
+                supports_tools: false,
+                supports_system_prompt: false,
+                max_context_tokens: 1,
+                max_output_tokens: 1,
+            },
+        );
+        std::fs::write(
+            Config::config_path(),
+            toml::to_string(&fake_config).unwrap(),
+        )
+        .unwrap();
+
+        let args = ListArgs {
+            remote: false,
+            provider: None,
+        };
+        let result = list_with_registry(args, mock_registry("mock", vec![], false)).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn show_prints_warning_and_uses_model_capabilities_override() {
+        let _guard = crate::config::isolate_config_path_for_test("models-show-override");
+        let known_id = builtin_table()[0].model_id.to_string();
+        let mut fake_config = Config::default();
+        fake_config.providers.anthropic_api_key = Some("not-a-real-key".to_string());
+        fake_config.model_capabilities.insert(
+            known_id.clone(),
+            ModelCapabilities {
+                supports_temperature: false,
+                supports_streaming: false,
+                supports_tools: false,
+                supports_system_prompt: false,
+                max_context_tokens: 1,
+                max_output_tokens: 1,
+            },
+        );
+        std::fs::write(
+            Config::config_path(),
+            toml::to_string(&fake_config).unwrap(),
+        )
+        .unwrap();
+
+        let args = ShowArgs {
+            model: known_id,
+            remote: false,
+            provider: None,
+        };
+        let result = show_with_registry(args, mock_registry("mock", vec![], false)).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn mock_provider_trivial_trait_methods() {
+        // Covers the `Provider` trait methods that `list`/`show` never call
+        // through this file's code paths (only `list_models()` is exercised
+        // above); `infer()` is intentionally left unreachable (see its body).
+        use leviath_providers::Provider;
+        let provider = MockProvider {
+            models: vec![],
+            fail: false,
+        };
+        assert_eq!(provider.count_tokens("abcd", "mock-model"), 1);
+        assert_eq!(provider.max_context_tokens("mock-model"), 100_000);
+        assert_eq!(provider.name(), "mock");
+        let _ = provider.capabilities("mock-model");
     }
 }

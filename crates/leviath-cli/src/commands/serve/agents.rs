@@ -28,6 +28,17 @@ pub(super) async fn spawn_agent(
             }),
         ))?;
 
+    // The two `.map_err` arms below (read + parse failure) are not covered by
+    // tests: `discover_blueprints` -> `read_blueprint_info` already performs
+    // this exact read-then-parse on the same path before a `BlueprintInfo`
+    // is ever returned, so any manifest that reaches `bp_info` here has
+    // already been proven readable and parseable moments earlier. The only
+    // way to hit these arms from the public API is a genuine TOCTOU race
+    // (the file changing between discovery and this second read within the
+    // same request), which would require an artificial delay hook to
+    // reproduce deterministically -- see also
+    // `spawn_agent_manifest_removed_after_discovery_returns_404`'s comment,
+    // which documents the same double-check for the "file removed" case.
     let manifest_path = PathBuf::from(&bp_info.path).join("agent.leviath");
     let manifest_content = std::fs::read_to_string(&manifest_path).map_err(|e| {
         (
@@ -65,6 +76,20 @@ pub(super) async fn spawn_agent(
     meta.metadata = body.metadata.clone();
     meta.callback_url = body.callback_url.clone();
 
+    // The remaining `.map_err` arms in this function (create_run, open/clone
+    // the log file, locate the current executable, spawn the worker process)
+    // and the `libc::setsid()` call below are not covered by tests: each
+    // wraps a real OS-level failure mode (disk full or permission-denied on
+    // `~/.leviath/runs`, file-descriptor exhaustion, a corrupted/deleted
+    // running executable, `fork`/`exec` failure) that isn't safely
+    // reproducible from a test without either mutating process-global state
+    // shared with concurrently-running tests (e.g. `LEVIATH_RUNS_DIR`, which
+    // has no dedicated lock the way `LEVIATH_CONFIG_PATH` does) or actually
+    // exhausting a real OS resource. `setsid()` itself only ever runs inside
+    // the forked child right before `exec`, so it can't be observed by the
+    // parent test process's coverage instrumentation at all. This mirrors
+    // the same category of gap already accepted for the equivalent code in
+    // `commands/run/mod.rs::execute()`.
     runstate::create_run(&meta).map_err(|e| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -522,6 +547,48 @@ prompt = "Plan the work"
             Some("https://example.com/hook")
         );
         assert_eq!(meta.metadata.get("k").map(|v| v.as_str()), Some("v"));
+
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        let _ = std::fs::remove_dir_all(runstate::run_dir(&run_id));
+    }
+
+    #[tokio::test]
+    async fn spawn_agent_without_workdir_falls_back_to_current_dir() {
+        // Every other spawn_agent test supplies `workdir` explicitly; this
+        // exercises the `body.workdir.unwrap_or_else(|| current_dir())`
+        // fallback branch specifically.
+        let dir = tempfile::tempdir().unwrap();
+        let bp_name = format!("spawnable-no-workdir-{}", std::process::id());
+        write_test_blueprint(&dir.path().join(&bp_name), &bp_name);
+
+        let state = test_state_with_agent_paths(vec![dir.path().to_path_buf()]);
+        let app = Router::new()
+            .route("/api/agents", axum::routing::post(spawn_agent))
+            .with_state(state);
+
+        let body = serde_json::json!({
+            "blueprint": bp_name,
+            "task": "do the thing",
+        });
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/agents")
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_string(&body).unwrap()))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), axum::http::StatusCode::OK);
+
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let spawn_resp: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let run_id = spawn_resp["run_id"].as_str().unwrap().to_string();
+        let meta = runstate::read_meta(&run_id).expect("run meta should exist");
+        let expected_workdir = std::env::current_dir()
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_else(|_| ".".to_string());
+        assert_eq!(meta.workdir, expected_workdir);
 
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
         let _ = std::fs::remove_dir_all(runstate::run_dir(&run_id));
