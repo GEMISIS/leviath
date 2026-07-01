@@ -530,6 +530,26 @@ name = "second"
         );
     }
 
+    // ─── execute(): real entry point wrapper ───────────────────────────────
+
+    #[test]
+    fn execute_real_wrapper_fails_fast_without_touching_real_agents_dir() {
+        // Drives the real `execute()` (dirs::home_dir() + AgentInstaller::new()
+        // + delegation to execute_with) -- safe because a nonexistent
+        // ".leviath-bundle" path bails out in execute_with's "Package file
+        // not found" check before any real file under ~/.leviath/agents is
+        // ever touched.
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let args = AddArgs {
+                package: "definitely-not-a-real-bundle-xyz.leviath-bundle".to_string(),
+                registry: None,
+            };
+            let err = execute(args).await.unwrap_err();
+            assert!(err.to_string().contains("Package file not found"));
+        });
+    }
+
     // ─── install_from_dir with valid manifest ─────────────────────────────
 
     #[test]

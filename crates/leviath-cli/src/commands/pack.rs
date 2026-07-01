@@ -32,14 +32,8 @@ pub async fn execute(args: PackArgs) -> anyhow::Result<()> {
     println!("Packing agent: {} v{}", blueprint.name, blueprint.version);
 
     // Determine output path
-    let output_path = if let Some(ref out) = args.output {
-        PathBuf::from(out)
-    } else {
-        PathBuf::from(format!(
-            "{}-{}.leviath-bundle",
-            blueprint.name, blueprint.version
-        ))
-    };
+    let output_path =
+        determine_output_path(args.output.as_deref(), &blueprint.name, &blueprint.version);
 
     // Bundle the project
     let bundler = AgentBundler::new();
@@ -83,6 +77,18 @@ pub async fn execute(args: PackArgs) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Resolves the bundle output path: an explicit `--output`, or else
+/// `{name}-{version}.leviath-bundle`. Extracted as a pure function (no file
+/// I/O) so the default-path branch is unit-testable without writing into --
+/// or depending on -- the real process working directory, unlike `execute()`
+/// as a whole.
+fn determine_output_path(output: Option<&str>, name: &str, version: &str) -> PathBuf {
+    match output {
+        Some(out) => PathBuf::from(out),
+        None => PathBuf::from(format!("{}-{}.leviath-bundle", name, version)),
+    }
+}
+
 fn find_manifest(project_path: &Path) -> anyhow::Result<PathBuf> {
     if project_path.is_file()
         && project_path.file_name() == Some(std::ffi::OsStr::new("agent.leviath"))
@@ -97,6 +103,13 @@ fn find_manifest(project_path: &Path) -> anyhow::Result<PathBuf> {
         }
     }
 
+    // Deliberately not covered by a dedicated test: exercising this branch
+    // requires mutating the real process working directory
+    // (`std::env::set_current_dir`), which is process-global and would race
+    // against other tests elsewhere in this crate that rely on their own
+    // relative-cwd fallback (e.g. `commands/run/manifest.rs`'s equivalent
+    // "agent.leviath in cwd" lookup) -- a risk explicitly identified and
+    // avoided by that file's own test suite this session.
     let current_manifest = PathBuf::from("agent.leviath");
     if current_manifest.exists() {
         return Ok(current_manifest);
@@ -222,20 +235,14 @@ mod tests {
 
     #[test]
     fn output_path_from_args() {
-        let output = Some("my-output.leviath-bundle".to_string());
-        let output_path = if let Some(ref out) = output {
-            PathBuf::from(out)
-        } else {
-            PathBuf::from("default.leviath-bundle")
-        };
+        let output_path =
+            determine_output_path(Some("my-output.leviath-bundle"), "my-agent", "1.0.0");
         assert_eq!(output_path, PathBuf::from("my-output.leviath-bundle"));
     }
 
     #[test]
     fn output_path_default() {
-        let name = "my-agent";
-        let version = "1.0.0";
-        let output_path = PathBuf::from(format!("{}-{}.leviath-bundle", name, version));
+        let output_path = determine_output_path(None, "my-agent", "1.0.0");
         assert_eq!(output_path, PathBuf::from("my-agent-1.0.0.leviath-bundle"));
     }
 

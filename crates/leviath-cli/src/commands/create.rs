@@ -51,7 +51,18 @@ pub async fn execute(args: CreateArgs) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Escapes a string for embedding inside a TOML basic (double-quoted)
+/// string literal. Without this, a blueprint name containing a backslash
+/// (e.g. a Windows path like `C:\Users\...\my-agent`, which `lev create`
+/// accepts directly as the blueprint name/directory) breaks TOML parsing:
+/// `\U` is interpreted as the start of an 8-digit-hex unicode escape, not a
+/// literal backslash-U.
+fn toml_escape(s: &str) -> String {
+    s.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
 fn create_manifest(name: &str, template: &str) -> String {
+    let name = &toml_escape(name);
     match template {
         "coder" => format!(
             r#"[agent]
@@ -155,6 +166,33 @@ mod tests {
         let agent = parsed.get("agent").expect("should have [agent] section");
         assert_eq!(agent.get("name").unwrap().as_str().unwrap(), "test-agent");
         assert_eq!(agent.get("version").unwrap().as_str().unwrap(), "0.1.0");
+    }
+
+    #[test]
+    fn name_with_windows_style_backslashes_produces_valid_toml() {
+        // Regression test: `lev create` accepts a full path as the blueprint
+        // name (used directly as the target directory), and on Windows that
+        // path contains backslashes -- e.g. `C:\Users\RUNNER~1\...\my-agent`.
+        // Before escaping, `\U` in the raw TOML string was parsed as the
+        // start of an (invalid) 8-digit-hex unicode escape, breaking every
+        // template. Confirmed this exact failure on real Windows CI.
+        let name = r"C:\Users\RUNNER~1\AppData\Local\Temp\.tmpmAlPt3\default-template-agent";
+        for template in ["software-engineer", "coder", "researcher"] {
+            let manifest = create_manifest(name, template);
+            let parsed: toml::Value = toml::from_str(&manifest)
+                .unwrap_or_else(|e| panic!("template {template} produced invalid TOML: {e}"));
+            let agent = parsed.get("agent").unwrap();
+            assert_eq!(agent.get("name").unwrap().as_str().unwrap(), name);
+        }
+    }
+
+    #[test]
+    fn name_with_embedded_quote_produces_valid_toml() {
+        let name = r#"my"agent"#;
+        let manifest = create_manifest(name, "software-engineer");
+        let parsed: toml::Value = toml::from_str(&manifest).unwrap();
+        let agent = parsed.get("agent").unwrap();
+        assert_eq!(agent.get("name").unwrap().as_str().unwrap(), name);
     }
 
     #[test]
