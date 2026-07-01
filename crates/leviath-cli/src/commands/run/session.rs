@@ -642,6 +642,15 @@ mod tests {
 
     // ─── launch_editor: VISUAL takes priority and succeeds ───────────────
 
+    // These `launch_editor` tests point VISUAL/EDITOR at `/usr/bin/true` (or
+    // rely on PATH-starvation to prevent any editor being found) -- both
+    // assumptions are Unix-only. On Windows, `/usr/bin/true` doesn't exist,
+    // so the NotFound-branch falls through to the windows-only "notepad"
+    // candidate, which Windows resolves via its System32 search path
+    // *regardless* of $PATH -- so PATH-starvation doesn't stop it either.
+    // Either way that means launching a real, blocking GUI text editor with
+    // no timeout, which hung a Windows CI run indefinitely. Gated to `unix`.
+    #[cfg(unix)]
     #[test]
     fn launch_editor_visual_env_success() {
         let _lock = ENV_LOCK.lock().unwrap();
@@ -663,6 +672,7 @@ mod tests {
 
     // ─── launch_editor: EDITOR used when VISUAL unset ────────────────────
 
+    #[cfg(unix)]
     #[test]
     fn launch_editor_editor_env_success() {
         let _lock = ENV_LOCK.lock().unwrap();
@@ -684,6 +694,7 @@ mod tests {
 
     // ─── launch_editor: exit code (even non-zero) is treated as success ──
 
+    #[cfg(unix)]
     #[test]
     fn launch_editor_nonzero_exit_still_ok() {
         let _lock = ENV_LOCK.lock().unwrap();
@@ -706,6 +717,7 @@ mod tests {
 
     // ─── launch_editor: command with flags is split correctly ────────────
 
+    #[cfg(unix)]
     #[test]
     fn launch_editor_command_with_flags_splits_correctly() {
         let _lock = ENV_LOCK.lock().unwrap();
@@ -730,6 +742,7 @@ mod tests {
 
     // ─── launch_editor: whitespace-only VISUAL falls through, EDITOR used ─
 
+    #[cfg(unix)]
     #[test]
     fn launch_editor_whitespace_only_visual_falls_through_to_editor() {
         let _lock = ENV_LOCK.lock().unwrap();
@@ -754,6 +767,7 @@ mod tests {
 
     // ─── launch_editor: NotFound candidate is skipped, next one used ─────
 
+    #[cfg(unix)]
     #[test]
     fn launch_editor_not_found_candidate_falls_through_to_next() {
         let _lock = ENV_LOCK.lock().unwrap();
@@ -814,6 +828,12 @@ mod tests {
 
     // ─── launch_editor: no candidate resolves anywhere on PATH ────────────
 
+    // Windows resolves "notepad" via the System32 search path regardless of
+    // $PATH, so PATH-starvation can't produce a "no editor found" outcome
+    // there the way it does on Unix (breaking PATH so vim/nano/vi can't
+    // resolve) -- gated to `unix` for the same real-blocking-editor-hang
+    // reason as the tests above.
+    #[cfg(unix)]
     #[test]
     fn launch_editor_no_editor_found_when_path_has_no_candidates() {
         let _lock = ENV_LOCK.lock().unwrap();
@@ -907,6 +927,9 @@ mod tests {
         assert!(result.unwrap_err().to_string().contains("Aborting run"));
     }
 
+    // Same Windows PATH-starvation caveat as
+    // `launch_editor_no_editor_found_when_path_has_no_candidates` above.
+    #[cfg(unix)]
     #[test]
     fn resolve_task_with_editor_path_propagates_launch_editor_error() {
         let _lock = ENV_LOCK.lock().unwrap();

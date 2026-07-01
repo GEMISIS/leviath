@@ -1732,6 +1732,38 @@ mod tests {
         format!("http://{}", addr)
     }
 
+    /// Declares a `Content-Length` far larger than the bytes actually sent,
+    /// then closes the connection -- forcing a genuine I/O error when the
+    /// caller reads the (non-success) response body via `.text()`, so the
+    /// `unwrap_or_else(|_| "unknown error".to_string())` fallback in
+    /// infer()/infer_stream()/list_models() is reachable. A well-formed
+    /// (even if garbled) body can never trigger this, since `.text()`
+    /// always succeeds on any valid UTF-8 (or lossily-decoded) byte stream.
+    async fn spawn_mock_server_truncated_error_body(status: u16, reason: &str) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let response = format!(
+            "HTTP/1.1 {} {}\r\nContent-Type: application/json\r\nContent-Length: 10000\r\nConnection: close\r\n\r\nshort",
+            status, reason
+        )
+        .into_bytes();
+
+        tokio::spawn(async move {
+            if let Ok((mut socket, _)) = listener.accept().await {
+                let mut buf = [0u8; 8192];
+                let _ = socket.read(&mut buf).await;
+                let _ = socket.write_all(&response).await;
+                let _ = socket.flush().await;
+                let _ = socket.shutdown().await;
+            }
+        });
+
+        format!("http://{}", addr)
+    }
+
     async fn spawn_mock_server_with_headers(
         status: u16,
         reason: &str,
@@ -1837,6 +1869,17 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn infer_non_success_status_body_read_error_falls_back_to_unknown_error() {
+        let url = spawn_mock_server_truncated_error_body(500, "Internal Server Error").await;
+        let provider = provider_with_url(url);
+        let err = provider.infer(simple_request()).await.unwrap_err();
+        match err {
+            ProviderError::ApiError(msg) => assert!(msg.contains("unknown error")),
+            other => panic!("expected ApiError, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
     async fn infer_malformed_json_returns_invalid_response() {
         let url = spawn_mock_server(200, "OK", b"not json").await;
         let provider = provider_with_url(url);
@@ -1856,6 +1899,19 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn infer_stream_rate_limited_with_retry_after_header() {
+        let url =
+            spawn_mock_server_with_headers(429, "Too Many Requests", "retry-after: 5\r\n", b"{}")
+                .await;
+        let provider = provider_with_url(url);
+        let err = match provider.infer_stream(simple_request()).await {
+            Err(e) => e,
+            Ok(_) => panic!("expected an error"),
+        };
+        assert!(matches!(err, ProviderError::RateLimitExceeded));
+    }
+
+    #[tokio::test]
     async fn infer_stream_non_success_status_returns_api_error() {
         let url = spawn_mock_server(503, "Service Unavailable", b"down").await;
         let provider = provider_with_url(url);
@@ -1865,6 +1921,20 @@ mod tests {
         };
         match err {
             ProviderError::ApiError(msg) => assert!(msg.contains("503")),
+            other => panic!("expected ApiError, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn infer_stream_non_success_status_body_read_error_falls_back_to_unknown_error() {
+        let url = spawn_mock_server_truncated_error_body(503, "Service Unavailable").await;
+        let provider = provider_with_url(url);
+        let err = match provider.infer_stream(simple_request()).await {
+            Err(e) => e,
+            Ok(_) => panic!("expected an error"),
+        };
+        match err {
+            ProviderError::ApiError(msg) => assert!(msg.contains("unknown error")),
             other => panic!("expected ApiError, got {other:?}"),
         }
     }
@@ -1902,6 +1972,17 @@ mod tests {
                 assert!(msg.contains("401"));
                 assert!(msg.contains("bad key"));
             }
+            other => panic!("expected RequestFailed, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn list_models_non_success_status_body_read_error_falls_back_to_unknown_error() {
+        let url = spawn_mock_server_truncated_error_body(401, "Unauthorized").await;
+        let provider = provider_with_url(url);
+        let err = provider.list_models().await.unwrap_err();
+        match err {
+            ProviderError::RequestFailed(msg) => assert!(msg.contains("unknown error")),
             other => panic!("expected RequestFailed, got {other:?}"),
         }
     }
@@ -2031,5 +2112,27 @@ mod tests {
         let result = stream.next().await;
         assert!(result.is_some());
         assert!(result.unwrap().is_err());
+    }
+
+    #[tokio::test]
+    async fn sse_stream_parses_trailing_event_left_in_buffer_after_stream_end() {
+        use tokio_stream::StreamExt;
+        // Two complete "\n\n"-terminated events arrive in a single byte
+        // chunk: the first has no "data:" line (parse_sse_event consumes it
+        // but returns None), the second is a real content_block_delta. The
+        // top-of-loop parse_sse_event check consumes+discards the first
+        // event, then polls the inner stream again for more data -- which
+        // immediately reports the stream as ended (this is the only chunk).
+        // That exercises the "stream ended, try to parse any remaining
+        // data" fallback, which finds the still-buffered second event.
+        let data = b"event: ping\n\nevent: content_block_delta\ndata: {\"delta\":{\"type\":\"text_delta\",\"text\":\"hi\"}}\n\n".to_vec();
+        let stream = StaticByteStream {
+            data: vec![data],
+            idx: 0,
+        };
+        let mut sse = AnthropicSseStream::new(stream);
+        let chunk = sse.next().await.unwrap().unwrap();
+        assert_eq!(chunk.delta, "hi");
+        assert!(sse.next().await.is_none());
     }
 }

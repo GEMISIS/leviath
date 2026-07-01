@@ -948,4 +948,123 @@ mod tests {
         // content inside cells still comes through as Text events.
         assert!(all.contains('1') || all.contains('A'), "got: {}", all);
     }
+
+    // ─── Renderer state-machine edge cases ──────────────────────────────────
+    //
+    // These target `flush_line()`/inline-inheritance branches that only fire
+    // when `current_spans` (or the inline-style stack) is in a specific,
+    // non-default state at the moment a new block/inline event starts --
+    // found by probing actual `pulldown_cmark::Parser` event streams for
+    // each input (see git history) rather than guessing at markdown syntax.
+
+    #[test]
+    fn heading_as_first_content_of_list_item_flushes_pending_bullet_span() {
+        // `Start(Item)` pushes the bullet marker into `current_spans`, then
+        // `Start(Heading)` fires with no Text/other event in between --
+        // exercises the `!self.current_spans.is_empty()` flush at heading
+        // start (previously only ever empty by the time headings occurred).
+        let md = "- # nested heading in item\n- item2";
+        let text = markdown_to_text(md, 80);
+        let all: String = text
+            .lines
+            .iter()
+            .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
+            .collect();
+        assert!(all.contains("nested heading in item"), "got: {}", all);
+        assert!(all.contains("item2"), "got: {}", all);
+    }
+
+    #[test]
+    fn code_block_as_first_content_of_list_item_flushes_pending_bullet_span() {
+        // Same shape as the heading case above, but for `Start(CodeBlock)`.
+        let md = "- ```\ncode\n```";
+        let text = markdown_to_text(md, 80);
+        let all: String = text
+            .lines
+            .iter()
+            .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
+            .collect();
+        assert!(all.contains("code"), "got: {}", all);
+    }
+
+    #[test]
+    fn rule_directly_inside_blockquote_flushes_pending_quote_marker_span() {
+        // `Start(BlockQuote)` pushes the "│ " marker into `current_spans`,
+        // then `Event::Rule` fires with nothing else queued -- exercises the
+        // `!self.current_spans.is_empty()` flush at `Event::Rule` (every
+        // other rule test has an empty `current_spans` at that point).
+        let md = "> ---";
+        let text = markdown_to_text(md, 80);
+        assert!(!text.lines.is_empty());
+    }
+
+    #[test]
+    fn empty_blockquote_flushes_pending_quote_marker_span_at_end() {
+        // `Start(BlockQuote)` pushes "│ " with no inner content at all
+        // before `End(BlockQuote)` -- exercises the flush at blockquote end
+        // (every other blockquote test has real paragraph content, which
+        // flushes `current_spans` via `End(Paragraph)` first).
+        let md = ">";
+        let text = markdown_to_text(md, 80);
+        let all: String = text
+            .lines
+            .iter()
+            .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
+            .collect();
+        assert!(all.contains('│'), "got: {}", all);
+    }
+
+    #[test]
+    fn nested_strong_inside_strikethrough_inherits_strikethrough_modifier() {
+        // `push_inline` for the inner `Strong` tag inherits `strikethrough`
+        // from the `Strikethrough` parent already on the stack -- every
+        // other strikethrough test only nests plain text, never another
+        // inline tag, so `parent.strikethrough` was never true at push time.
+        let md = "~~strike **bold inside** more~~";
+        let text = markdown_to_text(md, 80);
+        let has_strikethrough_bold = text.lines.iter().any(|l| {
+            l.spans.iter().any(|s| {
+                s.content.contains("bold inside")
+                    && s.style.add_modifier.contains(Modifier::CROSSED_OUT)
+                    && s.style.add_modifier.contains(Modifier::BOLD)
+            })
+        });
+        assert!(
+            has_strikethrough_bold,
+            "expected a span with both CROSSED_OUT and BOLD modifiers for 'bold inside'"
+        );
+    }
+
+    // `push_line`'s own `if !self.current_spans.is_empty() { self.flush_line() }`
+    // guard is not reachable given how `push_line`/`blank_line` are actually
+    // called in this file: every call site (heading/paragraph/blockquote/list/
+    // rule end handlers) already flushes `current_spans` explicitly, via its
+    // own separate check, before ever calling `push_line`/`blank_line`.
+    // Confirmed by enumerating parser events for nested lists, adjacent
+    // headings, lists followed by headings/rules, and ordered lists during
+    // this pass -- no input leaves `current_spans` non-empty at a
+    // `push_line`/`blank_line` call site. This guard exists defensively, to
+    // protect a future call site that doesn't flush first, not because any
+    // current path exercises it.
+
+    // `Event::Start(Tag::Item)`'s `None => "● ".to_string()` arm (list_stack
+    // empty) is not covered and is not reachable: `Tag::Item` is only ever
+    // emitted by `pulldown_cmark` as a child of `Tag::List`, which always
+    // pushes onto `list_stack` first. Confirmed by direct inspection of
+    // actual parser event streams for numerous inputs during this pass --
+    // no input triggers `Start(Item)` without a preceding `Start(List)`.
+    //
+    // The `t.contains('\n')` branch in `Event::Text` handling (splitting a
+    // single non-code-block text run on embedded newlines) is also not
+    // reachable with this file's actual `Options` (`ENABLE_STRIKETHROUGH |
+    // ENABLE_TABLES`): every multi-line text run pulldown_cmark emits for
+    // paragraphs/emphasis/table cells is split into separate `Text` events
+    // joined by `SoftBreak`, never a single `Text` event containing a literal
+    // `\n`. The only real event with an embedded `\n` in `Text`'s payload is
+    // fenced-code-block content, which takes the *other* branch of this same
+    // `if` (`self.in_code_block`) before ever reaching this one. Confirmed by
+    // directly enumerating parser events for ~20 candidate inputs (code
+    // blocks, tables with escaped pipes/newlines, link titles, raw HTML,
+    // nested emphasis) during this pass -- none produced a non-code Text
+    // event with an embedded newline.
 }

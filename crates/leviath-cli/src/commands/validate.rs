@@ -101,24 +101,43 @@ fn print_success(blueprint: &leviath_core::Blueprint) {
     print_warnings(blueprint);
 }
 
-pub async fn execute(args: ValidateArgs) -> anyhow::Result<()> {
+/// Outcome of the real, testable logic in [`execute`]. Kept distinct from
+/// the actual `std::process::exit(1)` calls (which would kill the test
+/// process if exercised directly) so `execute_reporting_outcome` -- and
+/// therefore every branch of `check_manifest`'s error handling -- can be
+/// unit tested; only the thin `execute` wrapper below ever calls `exit`.
+enum ValidateOutcome {
+    Success,
+    ParseError(String),
+    ValidationError(String),
+}
+
+fn execute_reporting_outcome(args: &ValidateArgs) -> anyhow::Result<ValidateOutcome> {
     let path = PathBuf::from(&args.path);
 
     let blueprint = match check_manifest(&path) {
         Ok(bp) => bp,
         Err(ManifestCheckError::Io(e)) => return Err(e),
-        Err(ManifestCheckError::Parse(e)) => {
-            eprintln!("✗ Parse error: {}", e);
-            std::process::exit(1);
-        }
-        Err(ManifestCheckError::Validation(e)) => {
-            eprintln!("✗ Validation failed: {}", e);
-            std::process::exit(1);
-        }
+        Err(ManifestCheckError::Parse(e)) => return Ok(ValidateOutcome::ParseError(e)),
+        Err(ManifestCheckError::Validation(e)) => return Ok(ValidateOutcome::ValidationError(e)),
     };
 
     print_success(&blueprint);
-    Ok(())
+    Ok(ValidateOutcome::Success)
+}
+
+pub async fn execute(args: ValidateArgs) -> anyhow::Result<()> {
+    match execute_reporting_outcome(&args)? {
+        ValidateOutcome::Success => Ok(()),
+        ValidateOutcome::ParseError(e) => {
+            eprintln!("✗ Parse error: {}", e);
+            std::process::exit(1);
+        }
+        ValidateOutcome::ValidationError(e) => {
+            eprintln!("✗ Validation failed: {}", e);
+            std::process::exit(1);
+        }
+    }
 }
 
 fn print_warnings(blueprint: &leviath_core::Blueprint) {
@@ -448,6 +467,85 @@ system = { kind = "pinned", max_tokens = 1000 }
         assert!(result.is_ok());
     }
 
+    // ─── execute_reporting_outcome: Parse/Validation paths ──────────────
+    //
+    // `execute()` itself calls `std::process::exit(1)` on these two
+    // branches, which would kill the test process -- `execute_reporting_outcome`
+    // exists precisely so these can be exercised without that.
+
+    #[test]
+    fn execute_reporting_outcome_malformed_toml_is_parse_error() {
+        let dir = tempfile::tempdir().unwrap();
+        write_manifest(dir.path(), "not valid toml [[[");
+        let args = ValidateArgs {
+            path: dir.path().to_str().unwrap().to_string(),
+        };
+        let outcome = execute_reporting_outcome(&args).unwrap();
+        assert!(matches!(outcome, ValidateOutcome::ParseError(_)));
+    }
+
+    #[test]
+    fn execute_reporting_outcome_bad_entry_stage_is_validation_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = r#"
+[agent]
+name = "bad-entry-agent"
+version = "0.1.0"
+description = "Entry stage does not exist"
+entry_stage = "does-not-exist"
+
+[stages.main]
+mode = "autonomous"
+model = { provider = "anthropic", model = "claude-sonnet-4-6" }
+description = "Main"
+max_iterations = 5
+
+[context.regions]
+system = { kind = "pinned", max_tokens = 1000 }
+"#;
+        write_manifest(dir.path(), manifest);
+        let args = ValidateArgs {
+            path: dir.path().to_str().unwrap().to_string(),
+        };
+        let outcome = execute_reporting_outcome(&args).unwrap();
+        assert!(matches!(outcome, ValidateOutcome::ValidationError(_)));
+    }
+
+    #[test]
+    fn execute_reporting_outcome_missing_manifest_is_io_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let args = ValidateArgs {
+            path: dir.path().to_str().unwrap().to_string(),
+        };
+        assert!(execute_reporting_outcome(&args).is_err());
+    }
+
+    #[test]
+    fn execute_reporting_outcome_valid_manifest_is_success() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = r#"
+[agent]
+name = "ok-agent"
+version = "0.1.0"
+description = "Valid"
+
+[stages.main]
+mode = "autonomous"
+model = { provider = "anthropic", model = "claude-sonnet-4-6" }
+description = "Main"
+max_iterations = 5
+
+[context.regions]
+system = { kind = "pinned", max_tokens = 1000 }
+"#;
+        write_manifest(dir.path(), manifest);
+        let args = ValidateArgs {
+            path: dir.path().to_str().unwrap().to_string(),
+        };
+        let outcome = execute_reporting_outcome(&args).unwrap();
+        assert!(matches!(outcome, ValidateOutcome::Success));
+    }
+
     // ─── print_warnings: multiple stages all reachable ──────────────────
 
     #[test]
@@ -482,6 +580,56 @@ max_iterations = 5
         print_warnings(&bp);
     }
 
+    // ─── print_warnings: BFS revisits an already-reached node (diamond) ──
+    //
+    // `entry` transitions to both `b` and `c`, and both `b` and `c`
+    // transition to `d` -- `d` gets queued twice, so the *second* pop hits
+    // the `if !reachable.insert(name.clone()) { continue; }` early-exit that
+    // a simple linear chain or single-path graph never reaches.
+
+    #[test]
+    fn print_warnings_diamond_graph_revisits_shared_target_no_panic() {
+        let toml = make_blueprint_toml(
+            r#"
+[stages.entry]
+mode = "autonomous"
+model = { provider = "anthropic", model = "claude-sonnet-4-6" }
+description = "Entry"
+max_iterations = 5
+entry = true
+[stages.entry.transitions]
+b = "true"
+c = "true"
+
+[stages.b]
+mode = "autonomous"
+model = { provider = "anthropic", model = "claude-sonnet-4-6" }
+description = "B"
+max_iterations = 5
+[stages.b.transitions]
+d = "true"
+
+[stages.c]
+mode = "autonomous"
+model = { provider = "anthropic", model = "claude-sonnet-4-6" }
+description = "C"
+max_iterations = 5
+[stages.c.transitions]
+d = "true"
+
+[stages.d]
+mode = "autonomous"
+model = { provider = "anthropic", model = "claude-sonnet-4-6" }
+description = "D"
+max_iterations = 5
+"#,
+        );
+        let bp = parse(&toml);
+        // All 4 stages reachable, no unreachable warnings expected; the
+        // point of this test is exercising the revisit-skip branch itself.
+        print_warnings(&bp);
+    }
+
     // ─── check_manifest ──────────────────────────────────────────────────
 
     fn write_manifest(dir: &std::path::Path, content: &str) -> std::path::PathBuf {
@@ -509,6 +657,31 @@ max_iterations = 5
         let missing = dir.path().join("nonexistent-subdir");
         let err = check_manifest(&missing).unwrap_err();
         assert!(matches!(err, ManifestCheckError::Io(_)));
+    }
+
+    // Distinct from the two "file doesn't exist" IO-error cases above: this
+    // exercises `std::fs::read_to_string`'s own `Err` arm (a manifest file
+    // that *is* found via `path.is_file()`/`.exists()`, but can't actually
+    // be read), which no other test reaches.
+    #[cfg(unix)]
+    #[test]
+    fn check_manifest_permission_denied_file_is_io_error() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let manifest_path = write_manifest(dir.path(), "irrelevant content");
+        std::fs::set_permissions(&manifest_path, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+        let result = check_manifest(&manifest_path);
+
+        // Restore permissions so the tempdir can clean itself up regardless
+        // of the assertion outcome below.
+        std::fs::set_permissions(&manifest_path, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        let err = result.unwrap_err();
+        assert!(matches!(err, ManifestCheckError::Io(_)));
+        if let ManifestCheckError::Io(e) = err {
+            assert!(e.to_string().contains("Failed to read"));
+        }
     }
 
     #[test]

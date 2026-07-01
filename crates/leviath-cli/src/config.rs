@@ -461,6 +461,53 @@ pub(crate) fn isolate_config_path_for_test(unique: &str) -> ConfigPathTestGuard 
 mod tests {
     use super::*;
 
+    /// Minimal no-op `Subscriber` that reports every callsite as enabled.
+    ///
+    /// Without an active subscriber, `tracing::warn!`/`info!`/`debug!` calls
+    /// short-circuit their field-argument evaluation before ever reaching it
+    /// (no subscriber means the "is this level enabled" check fails first) --
+    /// so a multi-line `tracing::warn!(...)` call's field-list lines show as
+    /// uncovered by `cargo llvm-cov` even when the surrounding branch
+    /// genuinely executes and is asserted on. `tracing_subscriber::fmt()`'s
+    /// default builder was tried first and did *not* fix this (its default
+    /// filtering still suppressed these callsites); this bare `Subscriber`
+    /// impl is the proven-working pattern (see `leviath-runtime/src/systems.rs`).
+    struct AlwaysOnSubscriber;
+
+    impl tracing::Subscriber for AlwaysOnSubscriber {
+        fn enabled(&self, _metadata: &tracing::Metadata<'_>) -> bool {
+            true
+        }
+        fn new_span(&self, _span: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+            tracing::span::Id::from_u64(1)
+        }
+        fn record(&self, _span: &tracing::span::Id, _values: &tracing::span::Record<'_>) {}
+        fn record_follows_from(&self, _span: &tracing::span::Id, _follows: &tracing::span::Id) {}
+        fn event(&self, _event: &tracing::Event<'_>) {}
+        fn enter(&self, _span: &tracing::span::Id) {}
+        fn exit(&self, _span: &tracing::span::Id) {}
+    }
+
+    fn with_tracing<T>(f: impl FnOnce() -> T) -> T {
+        tracing::subscriber::with_default(AlwaysOnSubscriber, f)
+    }
+
+    #[test]
+    fn always_on_subscriber_span_methods_are_all_no_ops() {
+        // This file only ever uses `tracing::warn!` event macros, never
+        // `tracing::span!`, so the span-related trait methods above are
+        // otherwise dead code from `with_tracing`'s callers. Exercise them
+        // directly via a real span so they're not left uncovered themselves.
+        with_tracing(|| {
+            let span = tracing::info_span!("test-span", field = tracing::field::Empty);
+            span.record("field", 1);
+            let other = tracing::info_span!("other-span");
+            span.follows_from(&other);
+            let _enter = span.enter();
+            tracing::info!(parent: &span, "inside span");
+        });
+    }
+
     // ─── load_from_path / save_to_path (path-parameterized for testability) ─
 
     #[test]
@@ -536,6 +583,43 @@ mod tests {
         assert_eq!(mode & 0o777, 0o600);
     }
 
+    #[test]
+    fn save_to_path_write_failure_returns_error() {
+        // A directory at the exact target path forces `std::fs::write` to
+        // fail with EISDIR, exercising `save_to_path`'s write-error `map_err`
+        // arm (distinct from `save_to_path_creates_parent_directory`, which
+        // exercises the parent-dir-creation path but always succeeds).
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::create_dir_all(&path).unwrap();
+
+        let result = Config::default().save_to_path(&path);
+
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Failed to write config"));
+    }
+
+    #[test]
+    fn save_writes_to_the_real_config_path_wrapper() {
+        // Covers the thin `save()` -> `save_to_path(&Self::config_path())`
+        // wrapper itself (every other test calls `save_to_path` directly),
+        // using `LEVIATH_CONFIG_PATH` to redirect the "real" path to a
+        // tempdir instead of the developer's actual `~/.leviath/config.toml`.
+        let _guard = isolate_config_path_for_test("save-wrapper");
+        let config = Config {
+            default_provider: "openai".to_string(),
+            ..Config::default()
+        };
+
+        config.save().unwrap();
+
+        let loaded = Config::load_from_path(&Config::config_path()).unwrap();
+        assert_eq!(loaded.default_provider, "openai");
+    }
+
     // ─── check_permissions_at ────────────────────────────────────────────
 
     #[cfg(unix)]
@@ -555,7 +639,7 @@ mod tests {
         std::fs::write(&path, "").unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
 
-        check_permissions_at(&path);
+        with_tracing(|| check_permissions_at(&path));
 
         let mode = std::fs::metadata(&path).unwrap().permissions().mode();
         assert_eq!(mode & 0o777, 0o600);
@@ -923,6 +1007,51 @@ max_output_tokens = 2048
         assert!(path.to_str().unwrap().ends_with("config.toml"));
     }
 
+    #[test]
+    fn config_path_test_guard_drop_restores_previous_env_values() {
+        // Every other user of `isolate_config_path_for_test` starts from an
+        // *unset* `LEVIATH_CONFIG_PATH`/`LEVIATH_SKIP_DOTENV`, so the guard's
+        // `Drop` always takes the `None => remove_var(..)` arm. This test
+        // seeds both vars with sentinel values first, so `Drop` must take the
+        // `Some(path) => set_var(..)` arm instead, restoring them rather than
+        // removing them. The lock is held continuously (moved into the guard
+        // itself) so no concurrently-running test elsewhere in the crate can
+        // observe or clobber the sentinel values in between.
+        let lock = CONFIG_PATH_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        std::env::set_var("LEVIATH_CONFIG_PATH", "/sentinel/config-path");
+        std::env::set_var("LEVIATH_SKIP_DOTENV", "sentinel-value");
+
+        let original_config_path = std::env::var_os("LEVIATH_CONFIG_PATH");
+        let original_skip_dotenv = std::env::var_os("LEVIATH_SKIP_DOTENV");
+        let fake_dir =
+            std::env::temp_dir().join("lev-fake-config-drop-restore-previous-values-test");
+        let _ = std::fs::create_dir_all(&fake_dir);
+        std::env::set_var("LEVIATH_CONFIG_PATH", fake_dir.join("config.toml"));
+        std::env::set_var("LEVIATH_SKIP_DOTENV", "1");
+        let guard = ConfigPathTestGuard {
+            original_config_path,
+            original_skip_dotenv,
+            original_keys: vec![],
+            fake_dir: fake_dir.clone(),
+            _lock: lock,
+        };
+
+        drop(guard);
+
+        assert_eq!(
+            std::env::var("LEVIATH_CONFIG_PATH").unwrap(),
+            "/sentinel/config-path"
+        );
+        assert_eq!(
+            std::env::var("LEVIATH_SKIP_DOTENV").unwrap(),
+            "sentinel-value"
+        );
+        std::env::remove_var("LEVIATH_CONFIG_PATH");
+        std::env::remove_var("LEVIATH_SKIP_DOTENV");
+    }
+
     // ─── Config save/load roundtrip ────────────────────────────────────────
 
     #[test]
@@ -1071,6 +1200,29 @@ enabled = false
 "#;
         let config: Config = toml::from_str(toml_content).unwrap();
         assert!(!config.title.enabled);
+    }
+
+    #[test]
+    fn title_config_missing_enabled_key_uses_default_true() {
+        // Unlike `title_config_from_toml_defaults` (which omits the whole
+        // `[title]` table, falling back to `Config`'s own `#[serde(default)]`
+        // for the field -- never invoking `TitleConfig`'s own per-field
+        // parsing at all), this includes `[title]` but omits `enabled`
+        // specifically, forcing serde to deserialize `TitleConfig` field by
+        // field and fall back to `default_true()` for the missing key.
+        let toml_content = r#"
+default_provider = "anthropic"
+registries = []
+agent_paths = []
+
+[providers]
+
+[title]
+provider = "openai"
+"#;
+        let config: Config = toml::from_str(toml_content).unwrap();
+        assert!(config.title.enabled);
+        assert_eq!(config.title.provider.as_deref(), Some("openai"));
     }
 
     // ─── ToolPolicy in tool_permissions ───────────────────────────────────
