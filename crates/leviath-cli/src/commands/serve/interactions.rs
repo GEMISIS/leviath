@@ -294,6 +294,40 @@ mod tests {
         let _ = std::fs::remove_dir_all(runstate::run_dir(&run_id));
     }
 
+    #[tokio::test]
+    async fn submit_interaction_write_failure_returns_500() {
+        let run_id = unique_run_id("submit-write-fail");
+        let meta = make_run(&run_id);
+        create_run(&meta).unwrap();
+
+        // Force `interaction::write_response`'s `std::fs::write(&tmp, ...)` to
+        // fail with EISDIR by pre-creating a directory at the exact
+        // `response.json.tmp` path it would otherwise write a file to.
+        let tmp_path = interaction::response_path(&run_id).with_extension("json.tmp");
+        std::fs::create_dir_all(&tmp_path).unwrap();
+
+        let app = Router::new().route("/api/agents/{id}/interaction", post(submit_interaction));
+        let body = serde_json::json!({"request_id": "req-fail", "approved": true});
+        let req = Request::builder()
+            .method("POST")
+            .uri(format!("/api/agents/{}/interaction", run_id))
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_string(&body).unwrap()))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), axum::http::StatusCode::INTERNAL_SERVER_ERROR);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let val: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(val["error"]
+            .as_str()
+            .unwrap()
+            .contains("Failed to write interaction response"));
+
+        let _ = std::fs::remove_dir_all(runstate::run_dir(&run_id));
+    }
+
     // ─── send_message ─────────────────────────────────────────────────────────
 
     #[tokio::test]
@@ -414,6 +448,48 @@ mod tests {
             .unwrap();
         let resp = app.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), axum::http::StatusCode::ACCEPTED);
+
+        let _ = std::fs::remove_dir_all(runstate::run_dir(&run_id));
+    }
+
+    #[tokio::test]
+    async fn send_message_waiting_input_write_failure_returns_500() {
+        let run_id = unique_run_id("msg-write-fail");
+        let mut meta = make_run(&run_id);
+        meta.status = RunStatus::WaitingInput;
+        create_run(&meta).unwrap();
+
+        let req_val = interaction::InteractionRequest::free_text(
+            "req-wait-fail",
+            "What should I do?",
+            "plan",
+            true,
+        );
+        interaction::write_request(&run_id, &req_val).unwrap();
+
+        // Same EISDIR trick as submit_interaction_write_failure_returns_500,
+        // forcing send_message's own write_response call to fail.
+        let tmp_path = interaction::response_path(&run_id).with_extension("json.tmp");
+        std::fs::create_dir_all(&tmp_path).unwrap();
+
+        let app = Router::new().route("/api/agents/{id}/message", post(send_message));
+        let body = serde_json::json!({"message": "do the thing"});
+        let req = Request::builder()
+            .method("POST")
+            .uri(format!("/api/agents/{}/message", run_id))
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_string(&body).unwrap()))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), axum::http::StatusCode::INTERNAL_SERVER_ERROR);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let val: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(val["error"]
+            .as_str()
+            .unwrap()
+            .contains("Failed to write response"));
 
         let _ = std::fs::remove_dir_all(runstate::run_dir(&run_id));
     }

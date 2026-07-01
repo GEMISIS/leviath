@@ -350,6 +350,47 @@ impl MCPClient {
 mod tests {
     use super::*;
 
+    /// A no-op `tracing::Subscriber` that reports every callsite/level as
+    /// enabled. Without a registered subscriber, `tracing`'s macros
+    /// short-circuit field-expression evaluation before the "is this level
+    /// enabled" check even runs -- so a line like
+    /// `tracing::info!(command = %command, "...")` shows a nonzero hit count
+    /// (the macro call itself executes) while the `%command` field-expansion
+    /// sub-region shows zero, even though the enclosing branch genuinely
+    /// ran. Setting this as the default subscriber for a test's duration
+    /// (via the `_guard` binding kept alive across `.await` points on a
+    /// single-threaded runtime) makes those field expressions actually
+    /// evaluate.
+    struct AlwaysOnSubscriber;
+    impl tracing::Subscriber for AlwaysOnSubscriber {
+        fn enabled(&self, _metadata: &tracing::Metadata<'_>) -> bool {
+            true
+        }
+        fn new_span(&self, _span: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+            tracing::span::Id::from_u64(1)
+        }
+        fn record(&self, _span: &tracing::span::Id, _values: &tracing::span::Record<'_>) {}
+        fn record_follows_from(&self, _span: &tracing::span::Id, _follows: &tracing::span::Id) {}
+        fn event(&self, _event: &tracing::Event<'_>) {}
+        fn enter(&self, _span: &tracing::span::Id) {}
+        fn exit(&self, _span: &tracing::span::Id) {}
+    }
+
+    fn always_on_tracing_guard() -> tracing::subscriber::DefaultGuard {
+        tracing::subscriber::set_default(AlwaysOnSubscriber)
+    }
+
+    #[test]
+    fn always_on_subscriber_span_methods_are_all_no_ops() {
+        let _guard = always_on_tracing_guard();
+        let span = tracing::info_span!("test-span", field = 1);
+        span.record("field", 2);
+        span.follows_from(&span);
+        span.in_scope(|| {
+            tracing::info!("inside span");
+        });
+    }
+
     #[test]
     fn test_filter_env_strips_api_keys() {
         let vars = vec![
@@ -940,12 +981,14 @@ sys.stdout.close()
 
     #[tokio::test]
     async fn test_mcp_client_spawn_succeeds() {
+        let _guard = always_on_tracing_guard();
         let _client = spawn_stub_client(STUB_INIT_LIST_CALL).await;
         // If we got here, spawn worked
     }
 
     #[tokio::test]
     async fn test_mcp_client_connect_parses_capabilities() {
+        let _guard = always_on_tracing_guard();
         let mut client = spawn_stub_client(STUB_INIT_LIST_CALL).await;
         client.connect().await.expect("connect should succeed");
 
@@ -969,6 +1012,7 @@ sys.stdout.close()
 
     #[tokio::test]
     async fn test_mcp_client_list_tools_returns_tools() {
+        let _guard = always_on_tracing_guard();
         let mut client = spawn_stub_client(STUB_INIT_LIST_CALL).await;
         client.connect().await.unwrap();
 
@@ -986,6 +1030,7 @@ sys.stdout.close()
 
     #[tokio::test]
     async fn test_mcp_client_call_tool_returns_result() {
+        let _guard = always_on_tracing_guard();
         let mut client = spawn_stub_client(STUB_INIT_LIST_CALL).await;
         client.connect().await.unwrap();
         // Consume the tools/list response first
@@ -1005,6 +1050,7 @@ sys.stdout.close()
 
     #[tokio::test]
     async fn test_mcp_client_shutdown_succeeds() {
+        let _guard = always_on_tracing_guard();
         let mut client = spawn_stub_client(STUB_INIT_LIST_CALL).await;
         client.connect().await.unwrap();
         // Shutdown should not fail even if the process is still running
@@ -1019,6 +1065,68 @@ sys.stdout.close()
             .shutdown()
             .await
             .expect("shutdown should be graceful");
+    }
+
+    // ─── send_request/send_notification: real write/flush I/O errors ───────
+    //
+    // `writer` is a `BufWriter`, so a small `write_all` just appends to its
+    // in-memory buffer without touching the OS -- the *real* write only
+    // happens on `flush()`, which is where a broken pipe actually surfaces.
+    // Killing and reaping the child first guarantees the pipe's read end is
+    // gone, so these are deterministic, not racy. A payload large enough to
+    // exceed `BufWriter`'s default 8KB capacity forces `write_all` itself to
+    // bypass buffering and write directly, surfacing the error there instead.
+
+    async fn spawn_and_kill_stub_client() -> MCPClient {
+        let mut client = spawn_stub_client(STUB_INIT_LIST_CALL).await;
+        client.child.kill().await.expect("kill should succeed");
+        let _ = client.child.wait().await; // reap so the pipe's read end is fully gone
+                                           // Empirically, a *tiny* buffered write's subsequent flush() doesn't
+                                           // reliably surface EPIPE immediately after reaping on this platform
+                                           // (unlike a >8KB write, which bypasses BufWriter's buffer and hits
+                                           // the OS directly in write_all() itself -- see the write_all tests
+                                           // below, which are deterministic). A short delay lets the kernel
+                                           // fully settle the closed pipe state before flush() is attempted.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        client
+    }
+
+    #[tokio::test]
+    async fn test_send_notification_flush_after_child_killed_returns_error() {
+        let mut client = spawn_and_kill_stub_client().await;
+        let result = client
+            .send_notification("notifications/test", serde_json::json!({}))
+            .await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_send_notification_write_all_after_child_killed_returns_error() {
+        let mut client = spawn_and_kill_stub_client().await;
+        // >8KB payload exceeds BufWriter's default capacity, forcing write_all
+        // to write directly rather than buffer.
+        let huge = "x".repeat(20_000);
+        let result = client
+            .send_notification("notifications/test", serde_json::json!({"data": huge}))
+            .await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_send_request_flush_after_child_killed_returns_error() {
+        let mut client = spawn_and_kill_stub_client().await;
+        let result = client.connect().await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_send_request_write_all_after_child_killed_returns_error() {
+        let mut client = spawn_and_kill_stub_client().await;
+        let huge = "x".repeat(20_000);
+        let result = client
+            .call_tool("echo", serde_json::json!({"data": huge}))
+            .await;
+        assert!(result.is_err());
     }
 
     #[tokio::test]
