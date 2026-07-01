@@ -1015,6 +1015,15 @@ mod tests {
         output_text: Option<&str>,
     ) -> DashboardAgent {
         let dir = runstate::run_dir(run_id);
+        // Defensive cleanup: if a previous run of a test using this fixed
+        // run_id panicked before reaching its own cleanup (e.g. a failed
+        // assertion), stale log/output files from that run would otherwise
+        // accumulate here across every subsequent `cargo test` invocation --
+        // this bit us for real (a stale `logs.log` with dozens of duplicated
+        // `[tool]` lines, some corrupted from concurrent-append races,
+        // silently broke `render_content_pane_logs_mode_shows_tool_count_badge`'s
+        // exact-count assertion on every run until this was added).
+        let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let meta = runstate::RunMeta::new(
             run_id.to_string(),

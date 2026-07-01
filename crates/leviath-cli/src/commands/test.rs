@@ -46,6 +46,62 @@ struct TestFile {
 }
 
 pub async fn execute(args: TestArgs) -> anyhow::Result<()> {
+    execute_with_registry(args, build_registry_from_config).await
+}
+
+/// Builds the real provider registry from a loaded [`Config`] -- the
+/// production `build_registry` passed to [`execute_with_registry`] by
+/// [`execute`].
+fn build_registry_from_config(config: &Config) -> ProviderRegistry {
+    let mut reg = ProviderRegistry::new();
+
+    if let Some(ref key) = config.providers.anthropic_api_key {
+        reg.register(
+            "anthropic".to_string(),
+            Arc::new(leviath_providers::AnthropicProvider::new(key.clone())),
+        );
+    }
+    if let Some(ref key) = config.providers.openai_api_key {
+        reg.register(
+            "openai".to_string(),
+            Arc::new(leviath_providers::OpenAIProvider::new(key.clone())),
+        );
+    }
+    if let Some(ref key) = config.providers.google_api_key {
+        reg.register(
+            "google".to_string(),
+            Arc::new(leviath_providers::GeminiProvider::new(key.clone())),
+        );
+    }
+    if let Some(ref key) = config.openrouter_api_key {
+        reg.register(
+            "openrouter".to_string(),
+            Arc::new(leviath_providers::OpenRouterProvider::new(key.clone())),
+        );
+    }
+    let ollama_url = config
+        .ollama_base_url
+        .as_deref()
+        .unwrap_or("http://localhost:11434");
+    reg.register(
+        "ollama".to_string(),
+        Arc::new(leviath_providers::OllamaProvider::with_base_url(
+            ollama_url.to_string(),
+        )),
+    );
+
+    reg
+}
+
+/// Core of [`execute`], with provider-registry construction injected so
+/// tests can drive the non-dry-run path with a mock [`Provider`] instead of
+/// either skipping it (dry-run only) or making a real, billed network call
+/// through whatever the developer's real `~/.leviath/config.toml` happens to
+/// contain.
+async fn execute_with_registry(
+    args: TestArgs,
+    build_registry: impl FnOnce(&Config) -> ProviderRegistry,
+) -> anyhow::Result<()> {
     let path = args.path.unwrap_or_else(|| ".".to_string());
     tracing::info!(path = %path, "Running agent tests");
 
@@ -81,44 +137,7 @@ pub async fn execute(args: TestArgs) -> anyhow::Result<()> {
 
     let registry = if !args.dry_run {
         let config = Config::load()?;
-        let mut reg = ProviderRegistry::new();
-
-        if let Some(ref key) = config.providers.anthropic_api_key {
-            reg.register(
-                "anthropic".to_string(),
-                Arc::new(leviath_providers::AnthropicProvider::new(key.clone())),
-            );
-        }
-        if let Some(ref key) = config.providers.openai_api_key {
-            reg.register(
-                "openai".to_string(),
-                Arc::new(leviath_providers::OpenAIProvider::new(key.clone())),
-            );
-        }
-        if let Some(ref key) = config.providers.google_api_key {
-            reg.register(
-                "google".to_string(),
-                Arc::new(leviath_providers::GeminiProvider::new(key.clone())),
-            );
-        }
-        if let Some(ref key) = config.openrouter_api_key {
-            reg.register(
-                "openrouter".to_string(),
-                Arc::new(leviath_providers::OpenRouterProvider::new(key.clone())),
-            );
-        }
-        let ollama_url = config
-            .ollama_base_url
-            .as_deref()
-            .unwrap_or("http://localhost:11434");
-        reg.register(
-            "ollama".to_string(),
-            Arc::new(leviath_providers::OllamaProvider::with_base_url(
-                ollama_url.to_string(),
-            )),
-        );
-
-        Some(reg)
+        Some(build_registry(&config))
     } else {
         None
     };
@@ -1373,5 +1392,421 @@ model = { provider = "anthropic", model = "claude-sonnet-4-6" }
 
         let result = run_test_case(&blueprint, &registry, &tc).await;
         assert!(result.unwrap());
+    }
+
+    // ─── execute_with_registry: non-dry-run path (mock provider) ────────────
+    //
+    // `execute()`'s non-dry-run path still calls the real `Config::load()`
+    // (no path-injection seam for that without touching config.rs, out of
+    // scope here), but its *return value* is now irrelevant to these tests:
+    // `execute_with_registry` takes the registry-building step as a
+    // parameter, so we can hand it a registry built entirely from an
+    // in-memory `MockProvider` and completely ignore whatever the developer's
+    // real config file happens to contain. No network calls, no real API
+    // keys read.
+
+    fn mock_registry_builder(
+        content: &'static str,
+        tool_calls: Vec<ToolCall>,
+    ) -> impl FnOnce(&Config) -> ProviderRegistry {
+        move |_config: &Config| {
+            let mut reg = ProviderRegistry::new();
+            reg.register(
+                "anthropic".to_string(),
+                Arc::new(MockProvider {
+                    content: content.to_string(),
+                    tool_calls,
+                }),
+            );
+            reg
+        }
+    }
+
+    fn write_project_with_test_file(project: &std::path::Path, test_toml: &str) {
+        let manifest = r#"
+[agent]
+name = "test-agent"
+version = "0.1.0"
+description = "test"
+
+[stages.main]
+model = { provider = "anthropic", model = "claude-sonnet-4-6" }
+"#;
+        std::fs::write(project.join("agent.leviath"), manifest).unwrap();
+        let tests_dir = project.join("tests");
+        std::fs::create_dir_all(&tests_dir).unwrap();
+        std::fs::write(tests_dir.join("basic.toml"), test_toml).unwrap();
+    }
+
+    #[tokio::test]
+    async fn execute_with_registry_non_dry_run_all_pass() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path();
+        write_project_with_test_file(
+            project,
+            r#"
+[[test]]
+name = "greeting"
+input = "say hello"
+expect_contains = "world"
+"#,
+        );
+
+        let args = TestArgs {
+            path: Some(project.to_str().unwrap().to_string()),
+            filter: None,
+            dry_run: false,
+        };
+
+        let result =
+            execute_with_registry(args, mock_registry_builder("Hello, world!", vec![])).await;
+        assert!(result.is_ok(), "expected success, got: {:?}", result.err());
+    }
+
+    #[tokio::test]
+    async fn execute_with_registry_non_dry_run_failure_bails_with_count() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path();
+        write_project_with_test_file(
+            project,
+            r#"
+[[test]]
+name = "greeting"
+input = "say hello"
+expect_contains = "world"
+"#,
+        );
+
+        let args = TestArgs {
+            path: Some(project.to_str().unwrap().to_string()),
+            filter: None,
+            dry_run: false,
+        };
+
+        let result = execute_with_registry(args, mock_registry_builder("goodbye", vec![])).await;
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("1 test(s) failed"), "got: {}", err);
+    }
+
+    #[tokio::test]
+    async fn execute_with_registry_non_dry_run_applies_filter() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path();
+        write_project_with_test_file(
+            project,
+            r#"
+[[test]]
+name = "keep_me"
+input = "say hello"
+expect_contains = "world"
+
+[[test]]
+name = "skip_me"
+input = "say hello"
+expect_contains = "unmatchable content"
+"#,
+        );
+
+        let args = TestArgs {
+            path: Some(project.to_str().unwrap().to_string()),
+            filter: Some("keep".to_string()),
+            dry_run: false,
+        };
+
+        // "skip_me" would fail (its expectation never matches the mock
+        // response), but the filter excludes it -- only "keep_me" runs, and
+        // it passes, so the whole run succeeds.
+        let result =
+            execute_with_registry(args, mock_registry_builder("Hello, world!", vec![])).await;
+        assert!(result.is_ok(), "expected success, got: {:?}", result.err());
+    }
+
+    #[tokio::test]
+    async fn execute_with_registry_non_dry_run_tool_call_assertion() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path();
+        write_project_with_test_file(
+            project,
+            r#"
+[[test]]
+name = "tool_test"
+input = "run a command"
+expect_tool_call = "bash"
+"#,
+        );
+
+        let args = TestArgs {
+            path: Some(project.to_str().unwrap().to_string()),
+            filter: None,
+            dry_run: false,
+        };
+
+        let tool_calls = vec![ToolCall {
+            id: "call_1".to_string(),
+            name: "bash".to_string(),
+            arguments: serde_json::json!({}),
+        }];
+        let result = execute_with_registry(args, mock_registry_builder("", tool_calls)).await;
+        assert!(result.is_ok(), "expected success, got: {:?}", result.err());
+    }
+
+    #[tokio::test]
+    async fn execute_with_registry_non_dry_run_provider_error_counts_as_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path();
+        write_project_with_test_file(
+            project,
+            r#"
+[[test]]
+name = "no_such_provider"
+input = "hi"
+expect_contains = "x"
+"#,
+        );
+        // Overwrite the manifest with a provider name the mock registry never
+        // registers, so `run_test_case`'s "not configured" error path fires
+        // (the `Err(e)` arm of `execute`'s match, not `Ok(false)`).
+        std::fs::write(
+            project.join("agent.leviath"),
+            r#"
+[agent]
+name = "test-agent"
+version = "0.1.0"
+description = "test"
+
+[stages.main]
+model = { provider = "nonexistent-provider", model = "x" }
+"#,
+        )
+        .unwrap();
+
+        let args = TestArgs {
+            path: Some(project.to_str().unwrap().to_string()),
+            filter: None,
+            dry_run: false,
+        };
+
+        let result = execute_with_registry(args, mock_registry_builder("irrelevant", vec![])).await;
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("1 test(s) failed"), "got: {}", err);
+    }
+
+    #[tokio::test]
+    async fn execute_with_registry_non_dry_run_toml_malformed_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path();
+        write_project_with_test_file(project, "not valid {{{ toml");
+
+        let args = TestArgs {
+            path: Some(project.to_str().unwrap().to_string()),
+            filter: None,
+            dry_run: false,
+        };
+
+        let result = execute_with_registry(args, mock_registry_builder("irrelevant", vec![])).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Failed to parse"));
+    }
+
+    // ─── rhai script execution path ──────────────────────────────────────────
+
+    #[tokio::test]
+    async fn execute_with_registry_rhai_script_passes() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path();
+        let manifest = r#"
+[agent]
+name = "test-agent"
+version = "0.1.0"
+description = "test"
+
+[stages.main]
+model = { provider = "anthropic", model = "claude-sonnet-4-6" }
+"#;
+        std::fs::write(project.join("agent.leviath"), manifest).unwrap();
+        let tests_dir = project.join("tests");
+        std::fs::create_dir_all(&tests_dir).unwrap();
+        std::fs::write(tests_dir.join("script.rhai"), "true").unwrap();
+
+        let args = TestArgs {
+            path: Some(project.to_str().unwrap().to_string()),
+            filter: None,
+            dry_run: false,
+        };
+
+        let result = execute_with_registry(args, mock_registry_builder("unused", vec![])).await;
+        assert!(result.is_ok(), "expected success, got: {:?}", result.err());
+    }
+
+    #[tokio::test]
+    async fn execute_with_registry_rhai_script_returns_false_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path();
+        let manifest = r#"
+[agent]
+name = "test-agent"
+version = "0.1.0"
+description = "test"
+
+[stages.main]
+model = { provider = "anthropic", model = "claude-sonnet-4-6" }
+"#;
+        std::fs::write(project.join("agent.leviath"), manifest).unwrap();
+        let tests_dir = project.join("tests");
+        std::fs::create_dir_all(&tests_dir).unwrap();
+        std::fs::write(tests_dir.join("script.rhai"), "false").unwrap();
+
+        let args = TestArgs {
+            path: Some(project.to_str().unwrap().to_string()),
+            filter: None,
+            dry_run: false,
+        };
+
+        let result = execute_with_registry(args, mock_registry_builder("unused", vec![])).await;
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("1 test(s) failed"), "got: {}", err);
+    }
+
+    #[tokio::test]
+    async fn execute_with_registry_rhai_script_error_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path();
+        let manifest = r#"
+[agent]
+name = "test-agent"
+version = "0.1.0"
+description = "test"
+
+[stages.main]
+model = { provider = "anthropic", model = "claude-sonnet-4-6" }
+"#;
+        std::fs::write(project.join("agent.leviath"), manifest).unwrap();
+        let tests_dir = project.join("tests");
+        std::fs::create_dir_all(&tests_dir).unwrap();
+        std::fs::write(tests_dir.join("script.rhai"), "this is not valid rhai (((").unwrap();
+
+        let args = TestArgs {
+            path: Some(project.to_str().unwrap().to_string()),
+            filter: None,
+            dry_run: false,
+        };
+
+        let result = execute_with_registry(args, mock_registry_builder("unused", vec![])).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn execute_with_registry_rhai_script_non_bool_return_passes() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path();
+        let manifest = r#"
+[agent]
+name = "test-agent"
+version = "0.1.0"
+description = "test"
+
+[stages.main]
+model = { provider = "anthropic", model = "claude-sonnet-4-6" }
+"#;
+        std::fs::write(project.join("agent.leviath"), manifest).unwrap();
+        let tests_dir = project.join("tests");
+        std::fs::create_dir_all(&tests_dir).unwrap();
+        // Returns an integer, not a bool -- exercises the `else` arm of the
+        // `result.as_bool()` match (treated as an automatic pass).
+        std::fs::write(tests_dir.join("script.rhai"), "42").unwrap();
+
+        let args = TestArgs {
+            path: Some(project.to_str().unwrap().to_string()),
+            filter: None,
+            dry_run: false,
+        };
+
+        let result = execute_with_registry(args, mock_registry_builder("unused", vec![])).await;
+        assert!(result.is_ok(), "expected success, got: {:?}", result.err());
+    }
+
+    #[tokio::test]
+    async fn execute_with_registry_rhai_script_filter_excludes_all() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path();
+        let manifest = r#"
+[agent]
+name = "test-agent"
+version = "0.1.0"
+description = "test"
+
+[stages.main]
+model = { provider = "anthropic", model = "claude-sonnet-4-6" }
+"#;
+        std::fs::write(project.join("agent.leviath"), manifest).unwrap();
+        let tests_dir = project.join("tests");
+        std::fs::create_dir_all(&tests_dir).unwrap();
+        std::fs::write(tests_dir.join("script.rhai"), "false").unwrap();
+
+        let args = TestArgs {
+            path: Some(project.to_str().unwrap().to_string()),
+            filter: Some("no-such-script".to_string()),
+            dry_run: false,
+        };
+
+        // Filter excludes the only script -- 0 total, reports "no test files
+        // found" and succeeds (rather than failing on the script's `false`).
+        let result = execute_with_registry(args, mock_registry_builder("unused", vec![])).await;
+        assert!(result.is_ok(), "expected success, got: {:?}", result.err());
+    }
+
+    // ─── build_registry_from_config ──────────────────────────────────────────
+    //
+    // The production registry builder passed to `execute_with_registry` by
+    // `execute()`. `Provider::new`/`with_base_url` constructors just store
+    // config -- they don't make network calls -- so this is safe to exercise
+    // directly with fake keys, registering every provider branch.
+
+    #[test]
+    fn build_registry_from_config_registers_all_providers() {
+        let config = Config {
+            default_provider: "anthropic".to_string(),
+            providers: crate::config::ProviderConfig {
+                anthropic_api_key: Some("fake-anthropic-key".to_string()),
+                openai_api_key: Some("fake-openai-key".to_string()),
+                google_api_key: Some("fake-google-key".to_string()),
+            },
+            openrouter_api_key: Some("fake-openrouter-key".to_string()),
+            ollama_base_url: Some("http://localhost:12345".to_string()),
+            ..Config::default()
+        };
+
+        let registry = build_registry_from_config(&config);
+        assert!(registry.has("anthropic"));
+        assert!(registry.has("openai"));
+        assert!(registry.has("google"));
+        assert!(registry.has("openrouter"));
+        assert!(registry.has("ollama"));
+    }
+
+    #[test]
+    fn build_registry_from_config_no_keys_still_registers_ollama_with_default_url() {
+        let config = Config::default();
+        let registry = build_registry_from_config(&config);
+        assert!(!registry.has("anthropic"));
+        assert!(!registry.has("openai"));
+        assert!(!registry.has("google"));
+        assert!(!registry.has("openrouter"));
+        // ollama has no key gate -- always registered, with the default URL
+        // when `ollama_base_url` is unset.
+        assert!(registry.has("ollama"));
+    }
+
+    // ─── MockProvider trivial trait methods ──────────────────────────────────
+
+    #[test]
+    fn mock_provider_trivial_trait_methods() {
+        let provider = MockProvider {
+            content: "x".to_string(),
+            tool_calls: vec![],
+        };
+        assert_eq!(provider.count_tokens("hello", "any-model"), 5);
+        assert_eq!(provider.max_context_tokens("any-model"), 8192);
+        assert_eq!(provider.name(), "mock");
     }
 }

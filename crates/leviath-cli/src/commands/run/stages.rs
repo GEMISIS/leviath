@@ -386,7 +386,16 @@ where
                     leviath_core::blueprint::InteractionStyle::FreeText => response_as_text(&resp),
                 }
             } else {
-                // Foreground (stdin) path — `request_interaction_stdin` prints and reads
+                // Foreground (stdin) path — `request_interaction_stdin` prints and
+                // reads real process stdin directly (unlike `run_interactive_stage`'s
+                // `None` path, which goes through the injectable `RunIO` trait).
+                // There's no reader-generic seam here to mock without either
+                // blocking a test on real stdin or threading a new parameter
+                // through this function and its callers in `foreground.rs`/
+                // `worker.rs` -- out of scope for a single-file coverage pass.
+                // Not exercised by any test; same for its `followup_text` sibling
+                // call below and the `None => (None, None)` `run_context` arm
+                // above, both reachable only via this same real-stdin path.
                 let resp = request_interaction_stdin(&ipc_req);
                 match bp_style {
                     leviath_core::blueprint::InteractionStyle::MultipleChoice
@@ -595,6 +604,93 @@ mod tests {
         (engine, pool, entity)
     }
 
+    /// Like [`make_engine_and_entity`], but registers `provider` under
+    /// `provider_name` instead of the fixed `MockProvider`/`"mock"` pair --
+    /// used for providers with different `infer`/`infer_stream` behavior
+    /// (e.g. [`StreamFailingProvider`]).
+    fn make_engine_and_entity_with_provider(
+        blueprint: &Blueprint,
+        provider_name: &str,
+        provider: Arc<dyn Provider>,
+    ) -> (
+        leviath_runtime::AgentEngine,
+        AgentPool,
+        bevy_ecs::prelude::Entity,
+    ) {
+        let mut registry = ProviderRegistry::new();
+        registry.register(provider_name.to_string(), provider);
+        let mut engine = leviath_runtime::AgentEngine::with_providers(registry);
+        let mut pool = AgentPool::new(blueprint.clone());
+        let agent_id = pool.spawn_agent(engine.world_mut());
+        let entity = pool.get_agent(&agent_id).unwrap();
+        initialize_context_window(&mut engine, entity, blueprint, "test task");
+        (engine, pool, entity)
+    }
+
+    /// `infer_stream` always fails; `infer` (used by `run_interactive_stage`'s
+    /// non-streaming fallback) succeeds -- exercises the "streaming
+    /// unavailable, falling back" branch in the tool-less path.
+    struct StreamFailingProvider {
+        response_content: String,
+    }
+
+    #[async_trait]
+    impl Provider for StreamFailingProvider {
+        async fn infer(
+            &self,
+            _request: InferenceRequest,
+        ) -> Result<InferenceResponse, ProviderError> {
+            Ok(InferenceResponse {
+                content: self.response_content.clone(),
+                tool_calls: vec![],
+                tokens_used: TokenUsage {
+                    prompt_tokens: 3,
+                    completion_tokens: 2,
+                    total_tokens: 5,
+                    cached_tokens: 0,
+                    cache_write_tokens: 0,
+                },
+                finish_reason: FinishReason::Complete,
+            })
+        }
+
+        async fn infer_stream(
+            &self,
+            _request: InferenceRequest,
+        ) -> Result<
+            std::pin::Pin<
+                Box<
+                    dyn futures::Stream<
+                            Item = Result<leviath_providers::StreamChunk, ProviderError>,
+                        > + Send,
+                >,
+            >,
+            ProviderError,
+        > {
+            Err(ProviderError::Other("stream unavailable".to_string()))
+        }
+
+        fn count_tokens(&self, text: &str, _model: &str) -> usize {
+            text.len() / 4
+        }
+
+        fn max_context_tokens(&self, _model: &str) -> usize {
+            100_000
+        }
+
+        fn name(&self) -> &str {
+            "stream-failing-mock"
+        }
+
+        fn capabilities(&self, _model: &str) -> ModelCapabilities {
+            ModelCapabilities::default()
+        }
+
+        async fn list_models(&self) -> Result<Vec<ModelInfo>, ProviderError> {
+            Ok(vec![])
+        }
+    }
+
     fn noop_exec(
         _calls: Vec<leviath_providers::ToolCall>,
     ) -> std::future::Ready<Vec<(String, String)>> {
@@ -687,6 +783,179 @@ mod tests {
             "Expected session ended in outputs: {:?}",
             io.outputs
         );
+    }
+
+    #[tokio::test]
+    async fn interactive_stage_stream_unavailable_falls_back_to_non_streaming() {
+        let bp = make_blueprint(vec![make_stage("main")]);
+        let (mut engine, _pool, entity) = make_engine_and_entity_with_provider(
+            &bp,
+            "stream-fail",
+            Arc::new(StreamFailingProvider {
+                response_content: "fallback content".to_string(),
+            }),
+        );
+        let mut io = MockIO::new().with_inputs(vec!["/quit".to_string()]);
+
+        run_interactive_stage(
+            &mut engine,
+            entity,
+            "stream-fail",
+            "test-model",
+            10,
+            &[], // no tools → uses stream_inference path, which fails here
+            None,
+            "main",
+            &mut io,
+            &mut noop_exec,
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            io.outputs
+                .iter()
+                .any(|o| o.contains("Assistant: fallback content")),
+            "Expected fallback response in outputs: {:?}",
+            io.outputs
+        );
+    }
+
+    #[tokio::test]
+    async fn interactive_stage_with_run_context_and_tools_records_meta_and_output() {
+        let bp = make_blueprint(vec![make_stage("main")]);
+        let (mut engine, _pool, entity) = make_engine_and_entity(&bp, "Agent reply with tools");
+        let mut io = MockIO::new();
+
+        let run_id = format!(
+            "test-is-tools-ctx-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .subsec_nanos()
+        );
+        let mut meta = RunMeta::new(
+            run_id.clone(),
+            "test".into(),
+            "/p".into(),
+            "t".into(),
+            None,
+            "/tmp".into(),
+            1,
+        );
+        runstate::create_run(&meta).unwrap();
+
+        let responder = spawn_interaction_responder(
+            run_id.clone(),
+            vec![crate::interaction::InteractionResponse::text("", "")],
+        );
+
+        run_interactive_stage(
+            &mut engine,
+            entity,
+            "mock",
+            "test-model",
+            10,
+            &[leviath_providers::Tool {
+                name: "noop".to_string(),
+                description: "does nothing".to_string(),
+                parameters: serde_json::json!({"type": "object", "properties": {}}),
+            }],
+            Some((&run_id, &mut meta)),
+            "main",
+            &mut io,
+            &mut noop_exec,
+        )
+        .await
+        .unwrap();
+
+        responder.abort();
+
+        assert_eq!(meta.prompt_tokens, 10);
+        assert_eq!(meta.completion_tokens, 5);
+        let output = crate::runstate::tail_stage_output(&run_id, meta.stage_index, 65536);
+        assert!(
+            output.contains("Agent reply with tools"),
+            "expected stage output to be recorded, got: {}",
+            output
+        );
+
+        let _ = std::fs::remove_dir_all(runstate::run_dir(&run_id));
+    }
+
+    #[tokio::test]
+    async fn interactive_stage_with_run_context_no_tools_records_meta() {
+        let bp = make_blueprint(vec![make_stage("main")]);
+        let (mut engine, _pool, entity) = make_engine_and_entity(&bp, "Streamed agent reply");
+        let mut io = MockIO::new();
+
+        let run_id = format!(
+            "test-is-notools-ctx-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .subsec_nanos()
+        );
+        let mut meta = RunMeta::new(
+            run_id.clone(),
+            "test".into(),
+            "/p".into(),
+            "t".into(),
+            None,
+            "/tmp".into(),
+            1,
+        );
+        runstate::create_run(&meta).unwrap();
+
+        let responder = spawn_interaction_responder(
+            run_id.clone(),
+            vec![crate::interaction::InteractionResponse::text("", "")],
+        );
+
+        run_interactive_stage(
+            &mut engine,
+            entity,
+            "mock",
+            "test-model",
+            10,
+            &[], // no tools → tool-less streaming path, background run_context
+            Some((&run_id, &mut meta)),
+            "main",
+            &mut io,
+            &mut noop_exec,
+        )
+        .await
+        .unwrap();
+
+        responder.abort();
+
+        assert_eq!(meta.prompt_tokens, 10);
+        assert_eq!(meta.completion_tokens, 5);
+
+        let _ = std::fs::remove_dir_all(runstate::run_dir(&run_id));
+    }
+
+    #[test]
+    fn mock_provider_trivial_trait_methods() {
+        let provider = MockProvider::new("content");
+        assert_eq!(provider.count_tokens("abcd", "m"), 1);
+        assert_eq!(provider.max_context_tokens("m"), 100_000);
+        assert_eq!(provider.name(), "mock");
+        assert!(tokio_test_block_on(provider.list_models())
+            .unwrap()
+            .is_empty());
+    }
+
+    fn tokio_test_block_on<F: std::future::Future>(fut: F) -> F::Output {
+        tokio::runtime::Runtime::new().unwrap().block_on(fut)
+    }
+
+    #[tokio::test]
+    async fn noop_exec_returns_empty_vec() {
+        let out = noop_exec(vec![]).await;
+        assert!(out.is_empty());
     }
 
     #[tokio::test]

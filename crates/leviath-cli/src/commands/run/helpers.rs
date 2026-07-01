@@ -600,6 +600,20 @@ mod tests {
             RegionDefinition::new("system".to_string(), RegionKind::Pinned, 2000),
             RegionDefinition::new("temp".to_string(), RegionKind::Temporary, 1000),
             RegionDefinition::new("clear".to_string(), RegionKind::Clearable, 1000),
+            RegionDefinition::new(
+                "compact".to_string(),
+                RegionKind::Compacting {
+                    threshold_tokens: 500,
+                },
+                1000,
+            ),
+            RegionDefinition::new(
+                "history".to_string(),
+                RegionKind::CompactHistory {
+                    source_region: "compact".to_string(),
+                },
+                1000,
+            ),
         ]);
         let (mut engine, entity) = make_engine_and_entity(&bp);
         initialize_context_window(&mut engine, entity, &bp, "task");
@@ -609,6 +623,8 @@ mod tests {
         assert!(kinds.contains(&"pinned"));
         assert!(kinds.contains(&"temporary"));
         assert!(kinds.contains(&"clearable"));
+        assert!(kinds.contains(&"compacting"));
+        assert!(kinds.contains(&"history"));
     }
 
     // ─── build_context_snapshot: returns None for invalid entity ────────
@@ -720,5 +736,189 @@ mod tests {
         let config = make_title_config();
         let title = generate_title("download a webpage", &config, &registry, None).await;
         assert_eq!(title, None);
+    }
+
+    // ─── generate_title: provider/model resolution fallback branches ────
+
+    #[tokio::test]
+    async fn generate_title_falls_back_to_default_provider_when_title_provider_unset() {
+        // config.title.provider = None -> falls back to config.default_provider
+        let registry = make_title_registry("Web Page Downloader");
+        let config = Config {
+            default_provider: "mock".to_string(),
+            title: crate::config::TitleConfig {
+                enabled: true,
+                provider: None,
+                model: Some("mock-model".to_string()),
+            },
+            ..Config::default()
+        };
+        let title = generate_title("download a webpage", &config, &registry, None).await;
+        assert_eq!(title, Some("Web Page Downloader".to_string()));
+    }
+
+    #[tokio::test]
+    async fn generate_title_uses_default_title_model_when_title_model_unset_for_known_provider() {
+        // config.title.model = None, provider is "anthropic" (known to
+        // default_title_model) -> resolves via default_title_model, not
+        // fallback_model. Registered under "anthropic" so the real provider
+        // name (not "mock") is what's looked up.
+        let mut registry = ProviderRegistry::new();
+        registry.register(
+            "anthropic".to_string(),
+            std::sync::Arc::new(CannedTitleProvider {
+                content: "Web Page Downloader".to_string(),
+            }),
+        );
+        let config = Config {
+            default_provider: "anthropic".to_string(),
+            title: crate::config::TitleConfig {
+                enabled: true,
+                provider: None,
+                model: None,
+            },
+            ..Config::default()
+        };
+        let title = generate_title("download a webpage", &config, &registry, None).await;
+        assert_eq!(title, Some("Web Page Downloader".to_string()));
+    }
+
+    #[tokio::test]
+    async fn generate_title_uses_fallback_model_for_unknown_provider_when_title_model_unset() {
+        // config.title.model = None, provider unknown to default_title_model
+        // (returns "") -> falls through to fallback_model.
+        let registry = make_title_registry("Web Page Downloader");
+        let config = Config {
+            default_provider: "mock".to_string(),
+            title: crate::config::TitleConfig {
+                enabled: true,
+                provider: None,
+                model: None,
+            },
+            ..Config::default()
+        };
+        let title = generate_title(
+            "download a webpage",
+            &config,
+            &registry,
+            Some("fallback-model"),
+        )
+        .await;
+        assert_eq!(title, Some("Web Page Downloader".to_string()));
+    }
+
+    #[tokio::test]
+    async fn generate_title_returns_none_when_no_model_resolves_at_all() {
+        // title.model unset, provider unknown to default_title_model, and no
+        // fallback_model given -> the `?` on model resolution short-circuits.
+        let registry = make_title_registry("Web Page Downloader");
+        let config = Config {
+            default_provider: "mock".to_string(),
+            title: crate::config::TitleConfig {
+                enabled: true,
+                provider: None,
+                model: None,
+            },
+            ..Config::default()
+        };
+        let title = generate_title("download a webpage", &config, &registry, None).await;
+        assert_eq!(title, None);
+    }
+
+    // ─── generate_title: inference error ─────────────────────────────────
+
+    struct FailingTitleProvider;
+
+    #[async_trait]
+    impl Provider for FailingTitleProvider {
+        async fn infer(
+            &self,
+            _request: InferenceRequest,
+        ) -> Result<InferenceResponse, ProviderError> {
+            Err(ProviderError::Other("simulated failure".to_string()))
+        }
+
+        fn count_tokens(&self, text: &str, _model: &str) -> usize {
+            text.len() / 4
+        }
+
+        fn max_context_tokens(&self, _model: &str) -> usize {
+            100_000
+        }
+
+        fn name(&self) -> &str {
+            "failing-mock"
+        }
+
+        fn capabilities(&self, _model: &str) -> ModelCapabilities {
+            ModelCapabilities::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn generate_title_infer_error_returns_none() {
+        let mut registry = ProviderRegistry::new();
+        registry.register(
+            "mock".to_string(),
+            std::sync::Arc::new(FailingTitleProvider),
+        );
+        let config = make_title_config();
+        let title = generate_title("download a webpage", &config, &registry, None).await;
+        assert_eq!(title, None);
+    }
+
+    #[test]
+    fn failing_title_provider_trivial_trait_methods() {
+        let provider = FailingTitleProvider;
+        assert_eq!(provider.count_tokens("abcd", "mock-model"), 1);
+        assert_eq!(provider.max_context_tokens("mock-model"), 100_000);
+        assert_eq!(provider.name(), "failing-mock");
+        let _ = provider.capabilities("mock-model");
+    }
+
+    // ─── generate_title: title.is_empty() after stripping punctuation ────
+
+    #[tokio::test]
+    async fn generate_title_returns_none_when_only_punctuation_remains_after_stripping() {
+        // Raw response is nothing but quote marks -- after all trim_start/
+        // trim_end passes, `title` is empty via the explicit
+        // `if title.is_empty()` branch, distinct from the `?`-short-circuit
+        // path already covered by the "no real content" fenced-block test.
+        let registry = make_title_registry("\"\"");
+        let config = make_title_config();
+        let title = generate_title("download a webpage", &config, &registry, None).await;
+        assert_eq!(title, None);
+    }
+
+    // ─── CannedTitleProvider: otherwise-dead trivial trait methods ───────
+
+    #[test]
+    fn canned_title_provider_trivial_trait_methods() {
+        let provider = CannedTitleProvider {
+            content: "x".to_string(),
+        };
+        assert_eq!(provider.count_tokens("abcd", "mock-model"), 1);
+        assert_eq!(provider.max_context_tokens("mock-model"), 100_000);
+        assert_eq!(provider.name(), "mock");
+        let _ = provider.capabilities("mock-model");
+    }
+
+    // ─── record_stage_output / record_stage_log ──────────────────────────
+
+    #[test]
+    fn record_stage_output_and_log_write_through_to_runstate() {
+        let run_id = "test-helpers-record-stage";
+        let dir = runstate::run_dir(run_id);
+        let _ = std::fs::create_dir_all(&dir);
+
+        record_stage_output(run_id, 0, "some output line");
+        record_stage_log(run_id, 0, "some log line");
+
+        let output = runstate::tail_stage_output(run_id, 0, 65536);
+        let log = runstate::tail_stage_log(run_id, 0, 65536);
+        assert!(output.contains("some output line"));
+        assert!(log.contains("some log line"));
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

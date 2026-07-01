@@ -60,6 +60,11 @@ async fn handle_ws(
                     Err(broadcast::error::RecvError::Lagged(n)) => {
                         warn!("WebSocket subscriber lagged by {} events", n);
                     }
+                    // Unreachable in practice: `event_tx` (this connection's
+                    // own `Sender` clone) is held alive in this function's
+                    // stack frame for as long as `handle_ws` runs, so the
+                    // broadcast channel can never report `Closed` to `rx`
+                    // while this very call is still executing to observe it.
                     Err(broadcast::error::RecvError::Closed) => break,
                 }
             }
@@ -404,6 +409,57 @@ mod tests {
         // Close so the server-side handle_ws task terminates instead of
         // idling forever on rx.recv() for the rest of the process lifetime.
         client.send_close().await;
+    }
+
+    #[tokio::test]
+    async fn ws_global_breaks_on_abrupt_tcp_close_without_ws_close_frame() {
+        // Unlike `ws_global_closes_on_client_close_frame` (a clean WS close
+        // frame -> `Some(Ok(Message::Close(_)))`), this drives the sibling
+        // `None` arm of the same match: the client tears down the raw TCP
+        // connection without ever sending a WS close frame, so
+        // `socket.recv()` observes end-of-stream as `None`.
+        let state = test_state();
+        let addr = spawn_test_server(state).await;
+
+        let client = WsTestClient::connect(addr, "/ws").await;
+        drop(client.stream);
+
+        // The server task should exit promptly rather than hang; prove the
+        // server itself is still alive and accepting new connections
+        // afterwards (i.e. handling the abrupt close didn't panic anything).
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        let mut second = WsTestClient::connect(addr, "/ws").await;
+        second.send_close().await;
+    }
+
+    #[tokio::test]
+    async fn ws_global_breaks_when_send_fails_after_abrupt_client_close() {
+        // Exercises the `socket.send(...).await.is_err() { break; }` arm:
+        // the client vanishes before an event is broadcast, so the server's
+        // send -- not its recv -- is what fails.
+        let state = test_state();
+        let tx = state.event_tx.clone();
+        let addr = spawn_test_server(state).await;
+
+        let client = WsTestClient::connect(addr, "/ws").await;
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        drop(client.stream);
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        // Broadcasting after the client is gone forces the server's
+        // in-flight `handle_ws` task to attempt (and fail) a send. There may
+        // be no live subscribers left to receive this (that's fine -- the
+        // point is exercising the send-error path without panicking).
+        let _ = tx.send(ServerEvent::Log {
+            agent_id: "a".to_string(),
+            run_id: "run-1".to_string(),
+            line: "nobody home".to_string(),
+        });
+
+        // Prove the server is still healthy afterwards.
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        let mut second = WsTestClient::connect(addr, "/ws").await;
+        second.send_close().await;
     }
 
     #[test]
