@@ -270,4 +270,149 @@ mod tests {
         assert_eq!(plan_edges[0].target, "implement");
         assert_eq!(plan_edges[1].target, "abort");
     }
+
+    // ─── load_graph_info ────────────────────────────────────────────────────
+
+    fn write_agent_manifest(dir: &std::path::Path, content: &str) {
+        std::fs::write(dir.join("agent.leviath"), content).unwrap();
+    }
+
+    #[test]
+    fn load_graph_info_missing_directory_returns_none() {
+        assert!(load_graph_info("/nonexistent/path/to/agent").is_none());
+    }
+
+    #[test]
+    fn load_graph_info_malformed_manifest_returns_none() {
+        let dir = tempfile::tempdir().unwrap();
+        write_agent_manifest(dir.path(), "not valid toml [[[");
+        assert!(load_graph_info(dir.path().to_str().unwrap()).is_none());
+    }
+
+    #[test]
+    fn load_graph_info_linear_agent_returns_none() {
+        let dir = tempfile::tempdir().unwrap();
+        write_agent_manifest(
+            dir.path(),
+            r#"
+[agent]
+name = "linear-agent"
+
+[stages.main]
+mode = "autonomous"
+"#,
+        );
+        assert!(load_graph_info(dir.path().to_str().unwrap()).is_none());
+    }
+
+    #[test]
+    fn load_graph_info_graph_agent_builds_edges_with_all_condition_and_transform_kinds() {
+        let dir = tempfile::tempdir().unwrap();
+        write_agent_manifest(
+            dir.path(),
+            r#"
+[agent]
+name = "graph-agent"
+entry_stage = "plan"
+
+[stages.plan]
+mode = "autonomous"
+
+[stages.plan.transitions.implement]
+hint = "approved"
+condition = "always"
+transform = "direct"
+
+[stages.implement]
+mode = "autonomous"
+
+[stages.implement.transitions.review]
+condition = "llm_choice"
+transform = "clear"
+
+[stages.implement.transitions.error_recovery]
+condition = "error"
+transform = "compact"
+
+[stages.implement.transitions.plan]
+condition = "max_iterations"
+
+[stages.review]
+mode = "autonomous"
+
+[stages.review.transitions.implement]
+condition = "custom_flag"
+transform = "custom"
+
+[stages.review.transitions.implement.transform_config]
+carry = ["task"]
+
+[stages.error_recovery]
+mode = "autonomous"
+
+[stages.error_recovery.transitions.implement]
+hint = "retry"
+"#,
+        );
+
+        let info = load_graph_info(dir.path().to_str().unwrap()).expect("graph mode expected");
+        assert_eq!(info.entry_stage, "plan");
+        assert_eq!(info.stage_names.len(), 4);
+        assert!(info.stage_names.contains(&"plan".to_string()));
+
+        let plan_edges = info.edges.get("plan").unwrap();
+        assert_eq!(plan_edges.len(), 1);
+        assert_eq!(plan_edges[0].target, "implement");
+        assert_eq!(plan_edges[0].hint.as_deref(), Some("approved"));
+        assert_eq!(plan_edges[0].condition, "always");
+        assert_eq!(plan_edges[0].transform, "direct");
+
+        let implement_edges = info.edges.get("implement").unwrap();
+        assert_eq!(implement_edges.len(), 3);
+        let review_edge = implement_edges
+            .iter()
+            .find(|e| e.target == "review")
+            .unwrap();
+        assert_eq!(review_edge.condition, "llm_choice");
+        assert_eq!(review_edge.transform, "clear");
+        let error_edge = implement_edges
+            .iter()
+            .find(|e| e.target == "error_recovery")
+            .unwrap();
+        assert_eq!(error_edge.condition, "error");
+        assert_eq!(error_edge.transform, "compact");
+        let plan_edge = implement_edges.iter().find(|e| e.target == "plan").unwrap();
+        assert_eq!(plan_edge.condition, "max_iterations");
+        assert_eq!(plan_edge.transform, "direct"); // default when omitted
+
+        let review_edges = info.edges.get("review").unwrap();
+        assert_eq!(review_edges[0].condition, "custom_flag");
+        assert_eq!(review_edges[0].transform, "custom");
+
+        let error_recovery_edges = info.edges.get("error_recovery").unwrap();
+        assert_eq!(error_recovery_edges[0].hint.as_deref(), Some("retry"));
+    }
+
+    #[test]
+    fn load_graph_info_no_entry_stage_falls_back_to_first_stage() {
+        let dir = tempfile::tempdir().unwrap();
+        write_agent_manifest(
+            dir.path(),
+            r#"
+[agent]
+name = "no-entry-agent"
+
+[stages.first]
+mode = "autonomous"
+
+[stages.first.transitions.second]
+condition = "always"
+
+[stages.second]
+mode = "autonomous"
+"#,
+        );
+        let info = load_graph_info(dir.path().to_str().unwrap()).expect("graph mode expected");
+        assert_eq!(info.entry_stage, "first");
+    }
 }

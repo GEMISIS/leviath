@@ -233,6 +233,14 @@ mod tests {
     }
 
     #[test]
+    fn agent_display_status_color_idle_and_cancelled() {
+        assert_eq!(AgentDisplayStatus::Idle.color(), C_DIM);
+        assert_eq!(AgentDisplayStatus::Cancelled.color(), C_DIM);
+        assert_eq!(AgentDisplayStatus::Waiting.color(), C_WARN);
+        assert_eq!(AgentDisplayStatus::CompleteInteractive.color(), C_SUCCESS);
+    }
+
+    #[test]
     fn stage_content_mode_equality() {
         assert_eq!(StageContentMode::Output, StageContentMode::Output);
         assert_ne!(StageContentMode::Output, StageContentMode::Logs);

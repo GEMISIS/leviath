@@ -1047,6 +1047,30 @@ mod tests {
         assert_eq!(dash.list_search_query, "test"); // preserved
     }
 
+    #[test]
+    fn list_search_mode_unhandled_key_is_noop() {
+        let mut dash = make_test_dashboard();
+        dash.list_search_mode = true;
+        dash.list_search_query = "test".to_string();
+        dash.handle_key(key(KeyCode::Left));
+        assert!(dash.list_search_mode);
+        assert_eq!(dash.list_search_query, "test");
+    }
+
+    #[test]
+    fn detail_view_search_mode_unhandled_key_is_noop() {
+        let mut dash = make_test_dashboard();
+        let agent = make_test_agent("run-1", AgentDisplayStatus::Active);
+        dash.agents.push(agent);
+        dash.update_display_indices();
+        dash.detail_view = true;
+        dash.search_mode = true;
+        dash.search_query = "test".to_string();
+        dash.handle_key(key(KeyCode::Left));
+        assert!(dash.search_mode);
+        assert_eq!(dash.search_query, "test");
+    }
+
     // ─── handle_input_mode_key for choice navigation ──────────────────────
 
     #[test]
@@ -1103,6 +1127,39 @@ mod tests {
     }
 
     #[test]
+    fn input_mode_free_text_typing_appends_to_textarea() {
+        let mut dash = make_test_dashboard();
+        let mut agent = make_test_agent("run-1", AgentDisplayStatus::Waiting);
+        agent.pending_request = Some(crate::interaction::InteractionRequest::free_text(
+            "ft1", "prompt", "main", true,
+        ));
+        agent.waiting_prompt = Some("prompt".to_string());
+        dash.agents.push(agent);
+        dash.update_display_indices();
+        dash.detail_view = true;
+        dash.input_mode = true;
+
+        dash.handle_key(key(KeyCode::Char('h')));
+        dash.handle_key(key(KeyCode::Char('i')));
+        assert_eq!(dash.input_textarea.lines(), vec!["hi".to_string()]);
+    }
+
+    #[test]
+    fn input_mode_no_pending_request_typing_appends_to_textarea() {
+        // kind resolves to None when there's no pending_request at all —
+        // exercises the `Some(FreeText) | None` arm's None side.
+        let mut dash = make_test_dashboard();
+        let agent = make_test_agent("run-1", AgentDisplayStatus::Active);
+        dash.agents.push(agent);
+        dash.update_display_indices();
+        dash.detail_view = true;
+        dash.input_mode = true;
+
+        dash.handle_key(key(KeyCode::Char('x')));
+        assert_eq!(dash.input_textarea.lines(), vec!["x".to_string()]);
+    }
+
+    #[test]
     fn input_mode_esc_on_choice_resets() {
         let mut dash = make_test_dashboard();
         let mut agent = make_test_agent("run-1", AgentDisplayStatus::Waiting);
@@ -1154,6 +1211,45 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn cancel_from_list_waiting_agent_clears_interaction() {
+        let run_id = "test-cancel-list-waiting-clears";
+        std::fs::create_dir_all(crate::runstate::run_dir(run_id)).unwrap();
+        let req = crate::interaction::InteractionRequest::free_text("q1", "?", "main", true);
+        let _ = crate::interaction::write_request(run_id, &req);
+
+        let mut dash = make_test_dashboard();
+        let mut agent = make_test_agent(run_id, AgentDisplayStatus::Waiting);
+        agent.waiting_prompt = Some("?".to_string());
+        dash.agents.push(agent);
+        dash.update_display_indices();
+        dash.handle_key(key(KeyCode::Char('c')));
+
+        assert!(matches!(
+            dash.agents[0].status,
+            AgentDisplayStatus::Cancelled
+        ));
+        assert!(crate::interaction::read_request(run_id).is_none());
+
+        let _ = std::fs::remove_dir_all(crate::runstate::run_dir(run_id));
+    }
+
+    #[test]
+    fn cancel_from_list_with_pid_sends_signal() {
+        // See kill_from_detail_with_pid_sends_signal for why this PID value
+        // is safe: implausibly large, guaranteed ESRCH no-op.
+        let mut dash = make_test_dashboard();
+        let mut agent = make_test_agent("run-1", AgentDisplayStatus::Active);
+        agent.pid = 2_000_000_000;
+        dash.agents.push(agent);
+        dash.update_display_indices();
+        dash.handle_key(key(KeyCode::Char('c')));
+        assert!(matches!(
+            dash.agents[0].status,
+            AgentDisplayStatus::Cancelled
+        ));
+    }
+
     // ─── handle_kill_from_list ─────────────────────────────────────────────
 
     #[test]
@@ -1182,6 +1278,86 @@ mod tests {
             AgentDisplayStatus::Cancelled
         ));
         assert!(dash.agents[0].waiting_prompt.is_none());
+    }
+
+    #[test]
+    fn kill_from_list_complete_agent_no_op() {
+        let mut dash = make_test_dashboard();
+        dash.agents
+            .push(make_test_agent("run-1", AgentDisplayStatus::Complete));
+        dash.update_display_indices();
+        dash.handle_key(key(KeyCode::Char('k')));
+        assert!(matches!(
+            dash.agents[0].status,
+            AgentDisplayStatus::Complete
+        ));
+    }
+
+    #[test]
+    fn kill_from_list_with_pid_sends_signal() {
+        // See kill_from_detail_with_pid_sends_signal for why this PID value
+        // is safe: implausibly large, guaranteed ESRCH no-op.
+        let mut dash = make_test_dashboard();
+        let mut agent = make_test_agent("run-1", AgentDisplayStatus::Active);
+        agent.pid = 2_000_000_000;
+        dash.agents.push(agent);
+        dash.update_display_indices();
+        dash.handle_key(key(KeyCode::Char('k')));
+        assert!(matches!(
+            dash.agents[0].status,
+            AgentDisplayStatus::Cancelled
+        ));
+    }
+
+    #[test]
+    fn main_list_d_no_agent_selected_is_noop() {
+        let mut dash = make_test_dashboard();
+        dash.handle_key(key(KeyCode::Char('d')));
+        assert!(!dash.confirm_delete);
+        assert!(dash.agents.is_empty());
+    }
+
+    #[test]
+    fn cancel_from_list_no_agent_selected_is_noop() {
+        let mut dash = make_test_dashboard();
+        // No agents at all — selected_agent() is None.
+        dash.handle_key(key(KeyCode::Char('c')));
+        assert!(dash.agents.is_empty());
+    }
+
+    #[test]
+    fn kill_from_list_no_agent_selected_is_noop() {
+        let mut dash = make_test_dashboard();
+        dash.handle_key(key(KeyCode::Char('k')));
+        assert!(dash.agents.is_empty());
+    }
+
+    #[test]
+    fn kill_from_detail_no_agent_selected_is_noop() {
+        let mut dash = make_test_dashboard();
+        dash.detail_view = true;
+        dash.handle_key(key(KeyCode::Char('k')));
+        assert!(dash.agents.is_empty());
+    }
+
+    #[test]
+    fn main_list_unhandled_key_is_noop() {
+        let mut dash = make_test_dashboard();
+        dash.agents
+            .push(make_test_agent("run-1", AgentDisplayStatus::Active));
+        dash.update_display_indices();
+        let selected_before = dash.selected;
+        dash.handle_key(key(KeyCode::Char('z')));
+        assert_eq!(dash.selected, selected_before);
+    }
+
+    #[test]
+    fn submit_input_no_agent_selected_returns_early() {
+        let mut dash = make_test_dashboard();
+        dash.input_mode = true;
+        // No agents at all — selected_agent() is None.
+        dash.submit_input();
+        assert!(dash.agents.is_empty());
     }
 
     // ─── handle_kill_from_detail ──────────────────────────────────────────
@@ -1213,6 +1389,50 @@ mod tests {
             dash.agents[0].status,
             AgentDisplayStatus::Complete
         ));
+    }
+
+    #[test]
+    fn kill_from_detail_with_pid_sends_signal() {
+        // Exercise the `pid > 0` unix-kill branch. Use an implausibly large
+        // PID (near i32::MAX, far beyond any real PID_MAX) so `libc::kill`
+        // is guaranteed to be a harmless no-op (ESRCH) rather than risking
+        // sending SIGTERM to a real, unrelated process.
+        let mut dash = make_test_dashboard();
+        let mut agent = make_test_agent("run-1", AgentDisplayStatus::Active);
+        agent.pid = 2_000_000_000;
+        dash.agents.push(agent);
+        dash.update_display_indices();
+        dash.detail_view = true;
+        dash.handle_key(key(KeyCode::Char('k')));
+        assert!(matches!(
+            dash.agents[0].status,
+            AgentDisplayStatus::Cancelled
+        ));
+    }
+
+    #[test]
+    fn kill_from_detail_waiting_agent_clears_interaction() {
+        let run_id = "test-kill-waiting-clears";
+        std::fs::create_dir_all(crate::runstate::run_dir(run_id)).unwrap();
+        let req = crate::interaction::InteractionRequest::free_text("q1", "?", "main", true);
+        let _ = crate::interaction::write_request(run_id, &req);
+        assert!(crate::interaction::read_request(run_id).is_some());
+
+        let mut dash = make_test_dashboard();
+        let mut agent = make_test_agent(run_id, AgentDisplayStatus::Waiting);
+        agent.waiting_prompt = Some("?".to_string());
+        dash.agents.push(agent);
+        dash.update_display_indices();
+        dash.detail_view = true;
+        dash.handle_key(key(KeyCode::Char('k')));
+
+        assert!(matches!(
+            dash.agents[0].status,
+            AgentDisplayStatus::Cancelled
+        ));
+        assert!(crate::interaction::read_request(run_id).is_none());
+
+        let _ = std::fs::remove_dir_all(crate::runstate::run_dir(run_id));
     }
 
     // ─── detail view: search n/N ──────────────────────────────────────────
@@ -1744,6 +1964,23 @@ mod tests {
     // ─── process_events AgentDone doesn't override Error/Cancelled ────────
 
     #[test]
+    fn process_events_agent_done_for_unknown_agent_is_noop() {
+        let mut dash = make_test_dashboard();
+        dash.agents
+            .push(make_test_agent("run-1", AgentDisplayStatus::Active));
+        dash.update_display_indices();
+        let tx = dash.event_tx.clone();
+        // Event for an agent_id that isn't in dash.agents at all.
+        tx.send(AgentEvent::AgentDone {
+            agent_id: "nonexistent-run".to_string(),
+        })
+        .unwrap();
+        dash.process_events();
+        // The unrelated existing agent must be untouched.
+        assert!(matches!(dash.agents[0].status, AgentDisplayStatus::Active));
+    }
+
+    #[test]
     fn process_events_agent_done_does_not_override_error() {
         let mut dash = make_test_dashboard();
         dash.agents.push(make_test_agent(
@@ -1861,6 +2098,70 @@ mod tests {
 
         // Should have generated a toast (either "No Output content" or clipboard result)
         assert!(!dash.toasts.is_empty());
+    }
+
+    #[test]
+    fn yank_logs_mode_empty_content_toast() {
+        let mut dash = make_test_dashboard();
+        let agent = make_test_agent("run-yank-logs", AgentDisplayStatus::Active);
+        dash.agents.push(agent);
+        dash.update_display_indices();
+        dash.detail_view = true;
+        dash.stage_content_mode = StageContentMode::Logs;
+
+        dash.handle_key(key(KeyCode::Char('y')));
+
+        assert!(!dash.toasts.is_empty());
+    }
+
+    #[test]
+    fn yank_context_mode_empty_content_toast() {
+        let mut dash = make_test_dashboard();
+        let agent = make_test_agent("run-yank-context", AgentDisplayStatus::Active);
+        dash.agents.push(agent);
+        dash.update_display_indices();
+        dash.detail_view = true;
+        dash.stage_content_mode = StageContentMode::Context;
+
+        dash.handle_key(key(KeyCode::Char('y')));
+
+        assert!(!dash.toasts.is_empty());
+    }
+
+    #[test]
+    fn yank_with_real_content_reports_success_or_clipboard_unavailable() {
+        let run_id = "test-yank-real-content";
+        crate::runstate::append_stage_output(run_id, 0, "some real output");
+
+        let mut dash = make_test_dashboard();
+        let agent = make_test_agent(run_id, AgentDisplayStatus::Active);
+        dash.agents.push(agent);
+        dash.update_display_indices();
+        dash.detail_view = true;
+        dash.stage_content_mode = StageContentMode::Output;
+
+        dash.handle_key(key(KeyCode::Char('y')));
+
+        assert!(!dash.toasts.is_empty());
+        let msg = &dash.toasts[0].message;
+        assert!(
+            msg.contains("yanked to clipboard") || msg.contains("Clipboard unavailable"),
+            "unexpected toast message: {}",
+            msg
+        );
+
+        let _ = std::fs::remove_dir_all(crate::runstate::run_dir(run_id));
+    }
+
+    #[test]
+    fn detail_view_question_mark_shows_help() {
+        let mut dash = make_test_dashboard();
+        dash.agents
+            .push(make_test_agent("run-1", AgentDisplayStatus::Active));
+        dash.update_display_indices();
+        dash.detail_view = true;
+        dash.handle_key(key(KeyCode::Char('?')));
+        assert!(dash.show_help);
     }
 
     // ─── d key from main list for non-run-state agent ─────────────────────

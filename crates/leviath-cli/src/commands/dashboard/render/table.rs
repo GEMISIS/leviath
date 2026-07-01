@@ -555,6 +555,43 @@ mod tests {
     }
 
     #[test]
+    fn draw_agent_table_run_state_zero_tokens_shows_dash() {
+        let backend = TestBackend::new(120, 40);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut dash = make_test_dashboard();
+        let mut agent = make_test_agent("run-zero-tok", AgentDisplayStatus::Active);
+        agent.is_run_state = true;
+        agent.tokens_in = 0;
+        agent.tokens_out = 0;
+        dash.agents.push(agent);
+        dash.update_display_indices();
+        terminal
+            .draw(|f| {
+                let area = f.area();
+                dash.draw_agent_table(f, area);
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn draw_agent_table_non_run_state_zero_max_context() {
+        let backend = TestBackend::new(120, 40);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut dash = make_test_dashboard();
+        let mut agent = make_test_agent("run-zero-ctx", AgentDisplayStatus::Active);
+        agent.is_run_state = false;
+        agent.context_tokens = (0, 0);
+        dash.agents.push(agent);
+        dash.update_display_indices();
+        terminal
+            .draw(|f| {
+                let area = f.area();
+                dash.draw_agent_table(f, area);
+            })
+            .unwrap();
+    }
+
+    #[test]
     fn draw_agent_table_with_list_search_mode() {
         let backend = TestBackend::new(120, 40);
         let mut terminal = Terminal::new(backend).unwrap();

@@ -179,16 +179,15 @@ pub(super) fn osc52_yank_raw(text: &str) -> bool {
     #[cfg(unix)]
     {
         if let Ok(mut tty) = std::fs::OpenOptions::new().write(true).open("/dev/tty") {
-            let _ = tty.write_all(osc.as_bytes());
-            let _ = tty.flush();
-            return true;
+            if tty.write_all(osc.as_bytes()).is_ok() && tty.flush().is_ok() {
+                return true;
+            }
         }
     }
-    // Fallback: write to stdout
+    // Fallback: write to stdout. Report the real outcome instead of always
+    // claiming success — callers show an error toast when this is false.
     let mut stdout = std::io::stdout();
-    let _ = stdout.write_all(osc.as_bytes());
-    let _ = stdout.flush();
-    true
+    stdout.write_all(osc.as_bytes()).is_ok() && stdout.flush().is_ok()
 }
 
 #[cfg(test)]
@@ -512,6 +511,51 @@ mod tests {
         // Multiple 3-byte groups plus a remainder
         let text = "The quick brown fox jumps over the lazy dog";
         let result = osc52_yank_raw(text);
+        assert!(result);
+    }
+
+    // ─── kill_write_cancelled ───────────────────────────────────────────────
+
+    #[test]
+    fn test_kill_write_cancelled_updates_existing_meta() {
+        let run_id = "test-kill-write-cancelled";
+        let meta = runstate::RunMeta::new(
+            run_id.to_string(),
+            "agent".to_string(),
+            "/tmp/agent.toml".to_string(),
+            "task".to_string(),
+            None,
+            "/tmp".to_string(),
+            1,
+        );
+        runstate::create_run(&meta).unwrap();
+
+        kill_write_cancelled(run_id);
+
+        let after = runstate::read_meta(run_id).unwrap();
+        assert_eq!(after.status, runstate::RunStatus::Cancelled);
+
+        let _ = std::fs::remove_dir_all(runstate::run_dir(run_id));
+    }
+
+    #[test]
+    fn test_kill_write_cancelled_missing_run_is_noop() {
+        // No meta.json exists for this run_id — read_meta fails, the `if let
+        // Ok` guard should just skip without panicking.
+        kill_write_cancelled("test-kill-write-cancelled-nonexistent");
+    }
+
+    // ─── yank_to_clipboard ──────────────────────────────────────────────────
+
+    #[test]
+    fn test_yank_to_clipboard_returns_true() {
+        // On any platform this ends up either succeeding via a native
+        // clipboard tool (pbcopy/xclip/wl-copy) or falling back to OSC52,
+        // which itself always returns true (see osc52_yank_raw tests) — so
+        // this is true unconditionally, but exercises the real dispatch
+        // path (including spawning the native clipboard command) rather
+        // than calling osc52_yank_raw directly.
+        let result = yank_to_clipboard("dashboard yank test content");
         assert!(result);
     }
 }

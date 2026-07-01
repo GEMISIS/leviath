@@ -963,6 +963,194 @@ mod tests {
     }
 
     #[test]
+    fn render_content_pane_search_mode_active_empty_query_shows_cursor() {
+        // search_mode on but no query typed yet -> the "▌" cursor indicator
+        // branch (query_lc.is_empty() && self.search_mode).
+        let backend = TestBackend::new(120, 40);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut dash = make_test_dashboard();
+        dash.stage_content_mode = StageContentMode::Output;
+        dash.search_mode = true;
+        dash.search_query = String::new();
+        let agent = make_test_agent("run-sm-empty", AgentDisplayStatus::Active);
+        terminal
+            .draw(|f| {
+                let area = Rect::new(0, 0, 100, 20);
+                dash.render_content_pane(f, area, &agent, 100);
+            })
+            .unwrap();
+
+        let content: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|c| c.symbol())
+            .collect();
+        assert!(content.contains('▌'));
+    }
+
+    #[test]
+    fn render_content_pane_clamps_scroll_beyond_available_lines() {
+        // detail_scroll set far beyond the (empty) content's max_scroll must
+        // be clamped rather than underflowing/panicking.
+        let backend = TestBackend::new(120, 40);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut dash = make_test_dashboard();
+        dash.stage_content_mode = StageContentMode::Output;
+        dash.detail_scroll = 9999;
+        let agent = make_test_agent("run-clamp", AgentDisplayStatus::Active);
+        terminal
+            .draw(|f| {
+                let area = Rect::new(0, 0, 100, 20);
+                dash.render_content_pane(f, area, &agent, 100);
+            })
+            .unwrap();
+        assert_eq!(dash.detail_scroll, 0);
+    }
+
+    fn setup_run_state_agent_with_logs(
+        run_id: &str,
+        log_lines: &[&str],
+        output_text: Option<&str>,
+    ) -> DashboardAgent {
+        let dir = runstate::run_dir(run_id);
+        std::fs::create_dir_all(&dir).unwrap();
+        let meta = runstate::RunMeta::new(
+            run_id.to_string(),
+            "agent".to_string(),
+            "/p".to_string(),
+            "task".to_string(),
+            None,
+            "/tmp".to_string(),
+            1,
+        );
+        runstate::create_run(&meta).unwrap();
+        for line in log_lines {
+            runstate::append_stage_log(run_id, 0, line);
+        }
+        if let Some(text) = output_text {
+            runstate::append_stage_output(run_id, 0, text);
+        }
+
+        let mut agent = make_test_agent(run_id, AgentDisplayStatus::Active);
+        agent.is_run_state = true;
+        agent
+    }
+
+    #[test]
+    fn render_content_pane_logs_mode_shows_tool_count_badge() {
+        let run_id = "test-content-tool-badge";
+        let agent = setup_run_state_agent_with_logs(
+            run_id,
+            &["[tool] read_file(x.rs)", "[tool] write_file(y.rs)"],
+            None,
+        );
+
+        let backend = TestBackend::new(120, 40);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut dash = make_test_dashboard();
+        dash.stage_content_mode = StageContentMode::Logs;
+        terminal
+            .draw(|f| {
+                let area = Rect::new(0, 0, 100, 20);
+                dash.render_content_pane(f, area, &agent, 100);
+            })
+            .unwrap();
+
+        let content: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|c| c.symbol())
+            .collect();
+        assert!(content.contains("2 tools"));
+
+        let _ = std::fs::remove_dir_all(runstate::run_dir(run_id));
+    }
+
+    #[test]
+    fn render_content_pane_output_mode_run_state_shows_file_path_hint() {
+        let run_id = "test-content-output-hint";
+        let agent = setup_run_state_agent_with_logs(run_id, &[], Some("hello output"));
+
+        let backend = TestBackend::new(120, 40);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut dash = make_test_dashboard();
+        dash.stage_content_mode = StageContentMode::Output;
+        terminal
+            .draw(|f| {
+                let area = Rect::new(0, 0, 100, 20);
+                dash.render_content_pane(f, area, &agent, 100);
+            })
+            .unwrap();
+
+        let content: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|c| c.symbol())
+            .collect();
+        assert!(content.contains("output.log"));
+
+        let _ = std::fs::remove_dir_all(runstate::run_dir(run_id));
+    }
+
+    #[test]
+    fn build_output_lines_logs_mode_colors_by_line_prefix() {
+        let run_id = "test-content-log-prefixes";
+        let agent = setup_run_state_agent_with_logs(
+            run_id,
+            &[
+                "[tool] did a thing",
+                "[error] it broke",
+                "[denied] not allowed",
+                "--- separator ---",
+                "[All stages complete]",
+                "a plain message",
+            ],
+            None,
+        );
+
+        let dash = make_test_dashboard();
+        let lines = dash.build_output_lines(&agent, false, 100);
+        let text: String = lines
+            .iter()
+            .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(text.contains("did a thing"));
+        assert!(text.contains("it broke"));
+        assert!(text.contains("not allowed"));
+        assert!(text.contains("separator"));
+        assert!(text.contains("All stages complete"));
+        assert!(text.contains("a plain message"));
+
+        let _ = std::fs::remove_dir_all(runstate::run_dir(run_id));
+    }
+
+    #[test]
+    fn build_output_lines_output_mode_renders_markdown_when_non_empty() {
+        let run_id = "test-content-output-markdown";
+        let agent = setup_run_state_agent_with_logs(run_id, &[], Some("# Heading\n\nbody text"));
+
+        let dash = make_test_dashboard();
+        let lines = dash.build_output_lines(&agent, true, 100);
+        assert!(!lines.is_empty());
+        let text: String = lines
+            .iter()
+            .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(text.contains("Heading"));
+        assert!(text.contains("body text"));
+
+        let _ = std::fs::remove_dir_all(runstate::run_dir(run_id));
+    }
+
+    #[test]
     fn build_context_lines_with_snapshot() {
         let dash = make_test_dashboard();
         let mut agent = make_test_agent("run-bcl", AgentDisplayStatus::Active);
@@ -1015,6 +1203,99 @@ mod tests {
             .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
             .collect();
         assert!(text.contains("Stage:"));
+    }
+
+    #[test]
+    fn build_context_lines_graph_info_falls_back_to_stage_names_when_no_stage_record() {
+        // agent.stages doesn't have an entry for the selected index, so
+        // sel_name must fall back to graph.stage_names.get(selected_stage).
+        let dash = make_test_dashboard();
+        let mut agent = make_test_agent("run-graph-fallback", AgentDisplayStatus::Active);
+        agent.context_snapshot = Some(make_context_snapshot(4000, 8000));
+        let edges = std::collections::HashMap::new();
+        agent.graph_info = Some(crate::commands::dashboard::graph::GraphTransitionInfo {
+            edges,
+            entry_stage: "main".to_string(),
+            stage_names: vec!["main".to_string(), "implement".to_string()],
+        });
+        agent.stages = vec![]; // no stage records at all -> .get(0) is None
+
+        let lines = dash.build_context_lines(&agent, 80);
+        let text: String = lines
+            .iter()
+            .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
+            .collect();
+        assert!(text.contains("Stage: main"));
+    }
+
+    #[test]
+    fn build_context_lines_graph_info_shows_visited_count() {
+        let dash = make_test_dashboard();
+        let mut agent = make_test_agent("run-graph-visited", AgentDisplayStatus::Active);
+        agent.context_snapshot = Some(make_context_snapshot(4000, 8000));
+        agent.graph_info = Some(crate::commands::dashboard::graph::GraphTransitionInfo {
+            edges: std::collections::HashMap::new(),
+            entry_stage: "main".to_string(),
+            stage_names: vec!["main".to_string()],
+        });
+        // Two records named "main" -> visited count 2, exercising the plural "s".
+        let rec = crate::runstate::StageRecord {
+            name: "main".to_string(),
+            index: 0,
+            status: crate::runstate::StageRunStatus::Active,
+            prompt_tokens: 0,
+            completion_tokens: 0,
+            cached_tokens: 0,
+            started_at: Some(chrono::Utc::now().timestamp() - 30),
+            ended_at: None,
+        };
+        agent.stages = vec![rec.clone(), rec];
+
+        let lines = dash.build_context_lines(&agent, 80);
+        let text: String = lines
+            .iter()
+            .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
+            .collect();
+        assert!(text.contains("Visited 2 times"));
+    }
+
+    #[test]
+    fn build_context_lines_graph_info_edge_with_non_always_condition() {
+        let dash = make_test_dashboard();
+        let mut agent = make_test_agent("run-graph-cond", AgentDisplayStatus::Active);
+        agent.context_snapshot = Some(make_context_snapshot(4000, 8000));
+        let mut edges = std::collections::HashMap::new();
+        edges.insert(
+            "main".to_string(),
+            vec![crate::commands::dashboard::graph::GraphEdge {
+                target: "error_recovery".to_string(),
+                hint: None,
+                condition: "error".to_string(),
+                transform: "direct".to_string(),
+            }],
+        );
+        agent.graph_info = Some(crate::commands::dashboard::graph::GraphTransitionInfo {
+            edges,
+            entry_stage: "main".to_string(),
+            stage_names: vec!["main".to_string(), "error_recovery".to_string()],
+        });
+        agent.stages = vec![crate::runstate::StageRecord {
+            name: "main".to_string(),
+            index: 0,
+            status: crate::runstate::StageRunStatus::Active,
+            prompt_tokens: 0,
+            completion_tokens: 0,
+            cached_tokens: 0,
+            started_at: Some(chrono::Utc::now().timestamp() - 30),
+            ended_at: None,
+        }];
+
+        let lines = dash.build_context_lines(&agent, 80);
+        let text: String = lines
+            .iter()
+            .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
+            .collect();
+        assert!(text.contains("[error]"));
     }
 
     #[test]

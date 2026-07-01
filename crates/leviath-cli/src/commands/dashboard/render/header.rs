@@ -423,4 +423,23 @@ mod tests {
             })
             .unwrap();
     }
+
+    #[test]
+    fn render_info_strip_tokens_present_without_cache() {
+        // tokens_in > 0 but cached_tokens == 0: total_tok_part is shown but
+        // the cache-percentage sub-part must stay empty.
+        let backend = TestBackend::new(120, 40);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let dash = make_test_dashboard();
+        let mut agent = make_test_agent("run-no-cache", AgentDisplayStatus::Active);
+        agent.tokens_in = 100;
+        agent.tokens_out = 50;
+        agent.cached_tokens = 0;
+        terminal
+            .draw(|f| {
+                let area = Rect::new(0, 0, 120, 4);
+                dash.render_info_strip(f, area, &agent, 120);
+            })
+            .unwrap();
+    }
 }

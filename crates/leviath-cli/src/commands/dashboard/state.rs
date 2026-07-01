@@ -1715,4 +1715,517 @@ mod tests {
         dash.selected_stage = 0;
         assert!(!dash.selected_stage_can_respond());
     }
+
+    // ─── sync_from_run_state ────────────────────────────────────────────────
+    //
+    // Uses real on-disk run directories (via runstate::create_run), like
+    // runstate.rs's own `list_runs_returns_sorted` test does — unique run_ids
+    // + inclusion checks (not exact-list assertions) so these coexist safely
+    // with any other real runs on disk and with concurrently-running tests.
+
+    fn make_run_meta(run_id: &str, status: RunStatus) -> runstate::RunMeta {
+        let mut meta = runstate::RunMeta::new(
+            run_id.to_string(),
+            // Use the (unique-per-test) run_id as the agent name too, so toast
+            // messages ("Agent '<name>' ...") can be unambiguously matched even
+            // when tests run concurrently against the shared real runs dir.
+            run_id.to_string(),
+            "/nonexistent/agent/path".to_string(),
+            "test task".to_string(),
+            None,
+            "/tmp".to_string(),
+            1,
+        );
+        meta.status = status;
+        meta
+    }
+
+    fn cleanup_run(run_id: &str) {
+        let _ = std::fs::remove_dir_all(runstate::run_dir(run_id));
+    }
+
+    #[test]
+    fn sync_from_run_state_new_agent_active() {
+        let run_id = "test-sync-new-active";
+        cleanup_run(run_id);
+        let meta = make_run_meta(run_id, RunStatus::Running);
+        runstate::create_run(&meta).unwrap();
+
+        let mut dash = make_test_dashboard();
+        dash.sync_from_run_state();
+
+        let agent = dash.agents.iter().find(|a| a.id == run_id).unwrap();
+        assert!(matches!(agent.status, AgentDisplayStatus::Active));
+        assert!(agent.is_run_state);
+        assert!(dash.initial_sync_done);
+        // No toasts on the very first sync (startup), even though this is a "new" agent.
+        assert!(dash.toasts.is_empty());
+
+        cleanup_run(run_id);
+    }
+
+    #[test]
+    fn sync_from_run_state_new_agent_starting_maps_to_active() {
+        let run_id = "test-sync-new-starting";
+        cleanup_run(run_id);
+        let meta = make_run_meta(run_id, RunStatus::Starting);
+        runstate::create_run(&meta).unwrap();
+
+        let mut dash = make_test_dashboard();
+        dash.sync_from_run_state();
+
+        let agent = dash.agents.iter().find(|a| a.id == run_id).unwrap();
+        assert!(matches!(agent.status, AgentDisplayStatus::Active));
+
+        cleanup_run(run_id);
+    }
+
+    #[test]
+    fn sync_from_run_state_new_agent_error_status() {
+        let run_id = "test-sync-new-error";
+        cleanup_run(run_id);
+        let mut meta = make_run_meta(run_id, RunStatus::Error);
+        meta.error = Some("boom".to_string());
+        runstate::create_run(&meta).unwrap();
+
+        let mut dash = make_test_dashboard();
+        dash.sync_from_run_state();
+
+        let agent = dash.agents.iter().find(|a| a.id == run_id).unwrap();
+        match &agent.status {
+            AgentDisplayStatus::Error(msg) => assert_eq!(msg, "boom"),
+            other => panic!("expected Error status, got {:?}", other),
+        }
+
+        cleanup_run(run_id);
+    }
+
+    #[test]
+    fn sync_from_run_state_new_agent_cancelled_status() {
+        let run_id = "test-sync-new-cancelled";
+        cleanup_run(run_id);
+        let meta = make_run_meta(run_id, RunStatus::Cancelled);
+        runstate::create_run(&meta).unwrap();
+
+        let mut dash = make_test_dashboard();
+        dash.sync_from_run_state();
+
+        let agent = dash.agents.iter().find(|a| a.id == run_id).unwrap();
+        assert!(matches!(agent.status, AgentDisplayStatus::Cancelled));
+
+        cleanup_run(run_id);
+    }
+
+    #[test]
+    fn sync_from_run_state_new_agent_waiting_input_reads_pending_request() {
+        let run_id = "test-sync-new-waiting";
+        cleanup_run(run_id);
+        let meta = make_run_meta(run_id, RunStatus::WaitingInput);
+        runstate::create_run(&meta).unwrap();
+        let req =
+            crate::interaction::InteractionRequest::free_text("req1", "What next?", "main", true);
+        crate::interaction::write_request(run_id, &req).unwrap();
+
+        let mut dash = make_test_dashboard();
+        dash.sync_from_run_state();
+
+        let agent = dash.agents.iter().find(|a| a.id == run_id).unwrap();
+        assert!(matches!(agent.status, AgentDisplayStatus::Waiting));
+        assert_eq!(agent.waiting_prompt.as_deref(), Some("What next?"));
+        assert!(agent.pending_request.is_some());
+        assert!(agent.active_until.is_some());
+
+        cleanup_run(run_id);
+    }
+
+    #[test]
+    fn sync_from_run_state_new_agent_complete_interactive() {
+        let run_id = "test-sync-new-complete-interactive";
+        cleanup_run(run_id);
+        let meta = make_run_meta(run_id, RunStatus::CompleteInteractive);
+        runstate::create_run(&meta).unwrap();
+        let req = crate::interaction::InteractionRequest::free_text(
+            "req1",
+            "Any feedback?",
+            "review",
+            false,
+        );
+        crate::interaction::write_request(run_id, &req).unwrap();
+
+        let mut dash = make_test_dashboard();
+        dash.sync_from_run_state();
+
+        let agent = dash.agents.iter().find(|a| a.id == run_id).unwrap();
+        assert!(matches!(
+            agent.status,
+            AgentDisplayStatus::CompleteInteractive
+        ));
+        assert!(agent.waiting_prompt.is_some());
+        assert!(agent.active_until.is_some());
+
+        cleanup_run(run_id);
+    }
+
+    #[test]
+    fn sync_from_run_state_new_agent_toasts_after_initial_sync_waiting() {
+        let run_id = "test-sync-new-toast-waiting";
+        cleanup_run(run_id);
+
+        let mut dash = make_test_dashboard();
+        dash.initial_sync_done = true; // simulate: not the app's first sync
+
+        let meta = make_run_meta(run_id, RunStatus::WaitingInput);
+        runstate::create_run(&meta).unwrap();
+        let req = crate::interaction::InteractionRequest::confirm("req1", "Proceed?", "main");
+        crate::interaction::write_request(run_id, &req).unwrap();
+
+        dash.sync_from_run_state();
+
+        assert!(dash
+            .toasts
+            .iter()
+            .any(|t| t.message.contains("needs input")));
+
+        cleanup_run(run_id);
+    }
+
+    #[test]
+    fn sync_from_run_state_new_agent_toasts_after_initial_sync_complete() {
+        let run_id = "test-sync-new-toast-complete";
+        cleanup_run(run_id);
+
+        let mut dash = make_test_dashboard();
+        dash.initial_sync_done = true;
+
+        let meta = make_run_meta(run_id, RunStatus::Complete);
+        runstate::create_run(&meta).unwrap();
+
+        dash.sync_from_run_state();
+
+        assert!(dash.toasts.iter().any(|t| t.message.contains("completed")));
+
+        cleanup_run(run_id);
+    }
+
+    #[test]
+    fn sync_from_run_state_existing_agent_active_to_error_toasts_with_message() {
+        let run_id = "test-sync-existing-to-error";
+        cleanup_run(run_id);
+        let meta = make_run_meta(run_id, RunStatus::Running);
+        runstate::create_run(&meta).unwrap();
+
+        let mut dash = make_test_dashboard();
+        dash.sync_from_run_state(); // first sync: creates the agent, Active
+
+        let mut meta2 = make_run_meta(run_id, RunStatus::Error);
+        meta2.error = Some("disk full".to_string());
+        runstate::write_meta(&meta2).unwrap();
+        dash.sync_from_run_state(); // second sync: transitions to Error
+
+        let agent = dash.agents.iter().find(|a| a.id == run_id).unwrap();
+        assert!(matches!(agent.status, AgentDisplayStatus::Error(_)));
+        assert!(dash
+            .toasts
+            .iter()
+            .any(|t| t.message.contains("failed") && t.message.contains("disk full")));
+
+        cleanup_run(run_id);
+    }
+
+    #[test]
+    fn sync_from_run_state_existing_agent_active_to_error_empty_message() {
+        let run_id = "test-sync-existing-to-error-empty";
+        cleanup_run(run_id);
+        let meta = make_run_meta(run_id, RunStatus::Running);
+        runstate::create_run(&meta).unwrap();
+
+        let mut dash = make_test_dashboard();
+        dash.sync_from_run_state();
+
+        let meta2 = make_run_meta(run_id, RunStatus::Error); // error left None
+        runstate::write_meta(&meta2).unwrap();
+        dash.sync_from_run_state();
+
+        let failed_toast = dash
+            .toasts
+            .iter()
+            .find(|t| t.message.contains("failed"))
+            .unwrap();
+        // No ": <preview>" suffix when the error message is empty.
+        assert!(!failed_toast.message.contains(":"));
+
+        cleanup_run(run_id);
+    }
+
+    #[test]
+    fn sync_from_run_state_existing_agent_active_to_complete_toasts() {
+        let run_id = "test-sync-existing-to-complete";
+        cleanup_run(run_id);
+        let meta = make_run_meta(run_id, RunStatus::Running);
+        runstate::create_run(&meta).unwrap();
+
+        let mut dash = make_test_dashboard();
+        dash.sync_from_run_state();
+
+        let meta2 = make_run_meta(run_id, RunStatus::Complete);
+        runstate::write_meta(&meta2).unwrap();
+        dash.sync_from_run_state();
+
+        let agent = dash.agents.iter().find(|a| a.id == run_id).unwrap();
+        assert!(matches!(agent.status, AgentDisplayStatus::Complete));
+        assert!(dash.toasts.iter().any(|t| t.message.contains("completed")));
+
+        cleanup_run(run_id);
+    }
+
+    #[test]
+    fn sync_from_run_state_existing_agent_active_to_complete_interactive_toasts() {
+        let run_id = "test-sync-existing-to-complete-interactive";
+        cleanup_run(run_id);
+        let meta = make_run_meta(run_id, RunStatus::Running);
+        runstate::create_run(&meta).unwrap();
+
+        let mut dash = make_test_dashboard();
+        dash.sync_from_run_state();
+
+        let meta2 = make_run_meta(run_id, RunStatus::CompleteInteractive);
+        runstate::write_meta(&meta2).unwrap();
+        dash.sync_from_run_state();
+
+        assert!(dash.toasts.iter().any(|t| t.message.contains("completed")));
+
+        cleanup_run(run_id);
+    }
+
+    #[test]
+    fn sync_from_run_state_existing_agent_stays_active_no_toast() {
+        let run_id = "test-sync-existing-stays-active";
+        cleanup_run(run_id);
+        let meta = make_run_meta(run_id, RunStatus::Running);
+        runstate::create_run(&meta).unwrap();
+
+        let mut dash = make_test_dashboard();
+        dash.sync_from_run_state();
+        dash.sync_from_run_state(); // still Running -> Active, no transition
+
+        // Scoped to this test's (uniquely-named) agent rather than
+        // `dash.toasts.is_empty()` — the dashboard also picks up any other
+        // real/concurrently-running-test runs on disk via list_runs(), whose
+        // own transitions may toast independently of this one.
+        assert!(!dash.toasts.iter().any(|t| t.message.contains(run_id)));
+
+        cleanup_run(run_id);
+    }
+
+    #[test]
+    fn sync_from_run_state_existing_agent_enters_waiting_toasts_and_freezes_timer() {
+        let run_id = "test-sync-existing-enters-waiting";
+        cleanup_run(run_id);
+        let meta = make_run_meta(run_id, RunStatus::Running);
+        runstate::create_run(&meta).unwrap();
+
+        let mut dash = make_test_dashboard();
+        dash.sync_from_run_state();
+        assert!(dash
+            .agents
+            .iter()
+            .find(|a| a.id == run_id)
+            .unwrap()
+            .active_until
+            .is_none());
+
+        let mut meta2 = make_run_meta(run_id, RunStatus::WaitingInput);
+        meta2.updated_at = meta.started_at + 42;
+        runstate::write_meta(&meta2).unwrap();
+        let req = crate::interaction::InteractionRequest::free_text("req1", "Q?", "main", true);
+        crate::interaction::write_request(run_id, &req).unwrap();
+        dash.sync_from_run_state();
+
+        let agent = dash.agents.iter().find(|a| a.id == run_id).unwrap();
+        assert!(matches!(agent.status, AgentDisplayStatus::Waiting));
+        assert_eq!(agent.active_until, Some(meta2.updated_at));
+        assert_eq!(agent.waiting_prompt.as_deref(), Some("Q?"));
+        assert!(dash
+            .toasts
+            .iter()
+            .any(|t| t.message.contains("needs input")));
+
+        cleanup_run(run_id);
+    }
+
+    #[test]
+    fn sync_from_run_state_existing_agent_leaves_waiting_accumulates_waiting_secs() {
+        let run_id = "test-sync-existing-leaves-waiting";
+        cleanup_run(run_id);
+        let mut meta = make_run_meta(run_id, RunStatus::WaitingInput);
+        meta.updated_at = meta.started_at + 10;
+        runstate::create_run(&meta).unwrap();
+        let req = crate::interaction::InteractionRequest::free_text("req1", "Q?", "main", true);
+        crate::interaction::write_request(run_id, &req).unwrap();
+
+        let mut dash = make_test_dashboard();
+        dash.sync_from_run_state();
+        let entered_wait_at = dash
+            .agents
+            .iter()
+            .find(|a| a.id == run_id)
+            .unwrap()
+            .active_until
+            .unwrap();
+
+        // Now the run resumes (Running) — clear the interaction and re-sync.
+        crate::interaction::clear_interaction(run_id);
+        let mut meta2 = make_run_meta(run_id, RunStatus::Running);
+        meta2.updated_at = entered_wait_at + 25;
+        runstate::write_meta(&meta2).unwrap();
+        dash.sync_from_run_state();
+
+        let agent = dash.agents.iter().find(|a| a.id == run_id).unwrap();
+        assert!(agent.active_until.is_none());
+        assert_eq!(agent.waiting_secs, 25);
+        assert!(agent.waiting_prompt.is_none());
+        assert!(agent.pending_request.is_none());
+        assert!(agent.last_answered_request_id.is_none());
+
+        cleanup_run(run_id);
+    }
+
+    #[test]
+    fn sync_from_run_state_already_answered_request_not_reapplied() {
+        let run_id = "test-sync-already-answered";
+        cleanup_run(run_id);
+        let meta = make_run_meta(run_id, RunStatus::Running);
+        runstate::create_run(&meta).unwrap();
+
+        let mut dash = make_test_dashboard();
+        dash.sync_from_run_state();
+        // Simulate having just answered a request with this id.
+        {
+            let agent = dash.agents.iter_mut().find(|a| a.id == run_id).unwrap();
+            agent.last_answered_request_id = Some("req-answered".to_string());
+        }
+
+        let meta2 = make_run_meta(run_id, RunStatus::WaitingInput);
+        runstate::write_meta(&meta2).unwrap();
+        let req = crate::interaction::InteractionRequest::free_text(
+            "req-answered",
+            "Already answered?",
+            "main",
+            true,
+        );
+        crate::interaction::write_request(run_id, &req).unwrap();
+        dash.sync_from_run_state();
+
+        // Should NOT re-populate waiting_prompt/pending_request for a
+        // request id that was already answered.
+        let agent = dash.agents.iter().find(|a| a.id == run_id).unwrap();
+        assert!(agent.waiting_prompt.is_none());
+        assert!(agent.pending_request.is_none());
+
+        cleanup_run(run_id);
+    }
+
+    #[test]
+    fn sync_from_run_state_no_reptoast_when_already_waiting() {
+        let run_id = "test-sync-no-retoast";
+        cleanup_run(run_id);
+        let meta = make_run_meta(run_id, RunStatus::WaitingInput);
+        runstate::create_run(&meta).unwrap();
+        let req = crate::interaction::InteractionRequest::free_text("req1", "Q1?", "main", true);
+        crate::interaction::write_request(run_id, &req).unwrap();
+
+        let mut dash = make_test_dashboard();
+        dash.sync_from_run_state(); // first sync creates the agent, already Waiting -> no toast (new agent, initial sync)
+        dash.toasts.clear();
+
+        // Still waiting, same kind of request — re-sync must not toast again.
+        dash.sync_from_run_state();
+        assert!(!dash.toasts.iter().any(|t| t.message.contains(run_id)));
+
+        cleanup_run(run_id);
+    }
+
+    #[test]
+    fn sync_from_run_state_updates_stage_and_token_fields() {
+        let run_id = "test-sync-updates-fields";
+        cleanup_run(run_id);
+        let meta = make_run_meta(run_id, RunStatus::Running);
+        runstate::create_run(&meta).unwrap();
+
+        let mut dash = make_test_dashboard();
+        dash.sync_from_run_state();
+
+        let mut meta2 = make_run_meta(run_id, RunStatus::Running);
+        meta2.current_stage = "implement".to_string();
+        meta2.stage_index = 1;
+        meta2.num_stages = 3;
+        meta2.iteration = 5;
+        meta2.prompt_tokens = 100;
+        meta2.completion_tokens = 50;
+        meta2.cached_tokens = 10;
+        meta2.title = Some("My Title".to_string());
+        meta2.pid = 4242;
+        runstate::write_meta(&meta2).unwrap();
+        dash.sync_from_run_state();
+
+        let agent = dash.agents.iter().find(|a| a.id == run_id).unwrap();
+        assert_eq!(agent.stage, "implement");
+        assert_eq!(agent.stage_index, 1);
+        assert_eq!(agent.num_stages, 3);
+        assert_eq!(agent.iteration, 5);
+        assert_eq!(agent.tokens_in, 100);
+        assert_eq!(agent.tokens_out, 50);
+        assert_eq!(agent.cached_tokens, 10);
+        assert_eq!(agent.title.as_deref(), Some("My Title"));
+        assert_eq!(agent.pid, 4242);
+
+        cleanup_run(run_id);
+    }
+
+    #[test]
+    fn sync_from_run_state_waiting_with_no_pending_request_leaves_agent_unchanged() {
+        // WaitingInput but no pending.json on disk (e.g. race/cleanup) — the
+        // `if waiting_prompt.is_some()` branch is skipped entirely.
+        let run_id = "test-sync-waiting-no-pending";
+        cleanup_run(run_id);
+        let meta = make_run_meta(run_id, RunStatus::Running);
+        runstate::create_run(&meta).unwrap();
+
+        let mut dash = make_test_dashboard();
+        dash.sync_from_run_state();
+
+        let meta2 = make_run_meta(run_id, RunStatus::WaitingInput);
+        runstate::write_meta(&meta2).unwrap();
+        // No pending.json written.
+        dash.sync_from_run_state();
+
+        let agent = dash.agents.iter().find(|a| a.id == run_id).unwrap();
+        assert!(matches!(agent.status, AgentDisplayStatus::Waiting));
+        assert!(agent.waiting_prompt.is_none());
+
+        cleanup_run(run_id);
+    }
+
+    #[test]
+    fn sync_from_run_state_updates_workdir_and_display_indices() {
+        let run_id = "test-sync-workdir";
+        cleanup_run(run_id);
+        let mut meta = make_run_meta(run_id, RunStatus::Running);
+        meta.workdir = "/first/workdir".to_string();
+        runstate::create_run(&meta).unwrap();
+
+        let mut dash = make_test_dashboard();
+        dash.sync_from_run_state();
+
+        let mut meta2 = make_run_meta(run_id, RunStatus::Running);
+        meta2.workdir = "/second/workdir".to_string();
+        runstate::write_meta(&meta2).unwrap();
+        dash.sync_from_run_state();
+
+        let agent = dash.agents.iter().find(|a| a.id == run_id).unwrap();
+        assert_eq!(agent.workdir, "/second/workdir");
+        assert!(!dash.display_indices.is_empty());
+
+        cleanup_run(run_id);
+    }
 }

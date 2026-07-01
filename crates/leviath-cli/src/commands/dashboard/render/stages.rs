@@ -802,6 +802,279 @@ mod tests {
     }
 
     #[test]
+    fn draw_graph_view_no_visible_stages_shows_placeholder() {
+        // No stage records, no reachable stages, and an entry_stage that
+        // isn't in stage_names at all -> visible_stages ends up empty.
+        let backend = TestBackend::new(120, 10);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let dash = make_test_dashboard();
+        let mut agent = make_test_agent("run-empty-graph", AgentDisplayStatus::Active);
+        agent.stage = "nowhere".to_string();
+        agent.stages = vec![];
+        let graph = GraphTransitionInfo {
+            edges: HashMap::new(),
+            entry_stage: "missing_entry".to_string(),
+            stage_names: vec![],
+        };
+        terminal
+            .draw(|f| {
+                let area = Rect::new(0, 0, 120, 7);
+                dash.draw_graph_view(f, area, &agent, &graph);
+            })
+            .unwrap();
+
+        let content: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|c| c.symbol())
+            .collect();
+        assert!(content.contains("No stages yet"));
+    }
+
+    #[test]
+    fn draw_graph_view_shows_entry_stage_even_when_unreached() {
+        // "plan" is the entry_stage but current position is "implement" with
+        // no path back to "plan" -> plan is shown only via the
+        // `**name == graph.entry_stage` fallback, and colored C_DIM since
+        // it's not in stage_statuses and not `reachable`.
+        let backend = TestBackend::new(120, 10);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let dash = make_test_dashboard();
+        let mut agent = make_test_agent("run-entry-unreached", AgentDisplayStatus::Active);
+        agent.stage = "implement".to_string();
+        agent.stages = vec![make_stage_record("implement", StageRunStatus::Active)];
+        let graph = GraphTransitionInfo {
+            edges: HashMap::new(), // no outgoing edges from "implement"
+            entry_stage: "plan".to_string(),
+            stage_names: vec!["plan".to_string(), "implement".to_string()],
+        };
+        terminal
+            .draw(|f| {
+                let area = Rect::new(0, 0, 120, 7);
+                dash.draw_graph_view(f, area, &agent, &graph);
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn draw_graph_view_dangling_edge_targets_hit_cycle_detection() {
+        // Two edges pointing at stage names that don't exist in stage_names
+        // both resolve to "" via unwrap_or(""), so "" gets queued twice —
+        // exercising the `if !set.insert(name) { continue; }` cycle guard
+        // when the second "" is popped and already visited.
+        let backend = TestBackend::new(120, 10);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let dash = make_test_dashboard();
+        let mut agent = make_test_agent("run-dangling", AgentDisplayStatus::Active);
+        agent.stage = "plan".to_string();
+        agent.stages = vec![make_stage_record("plan", StageRunStatus::Active)];
+        let mut edges = HashMap::new();
+        edges.insert(
+            "plan".to_string(),
+            vec![
+                GraphEdge {
+                    target: "ghost_one".to_string(),
+                    hint: None,
+                    condition: "always".to_string(),
+                    transform: "replace".to_string(),
+                },
+                GraphEdge {
+                    target: "ghost_two".to_string(),
+                    hint: None,
+                    condition: "always".to_string(),
+                    transform: "replace".to_string(),
+                },
+            ],
+        );
+        let graph = GraphTransitionInfo {
+            edges,
+            entry_stage: "plan".to_string(),
+            stage_names: vec!["plan".to_string()], // neither ghost target exists
+        };
+        // Must not panic/loop forever despite the dangling edge targets.
+        terminal
+            .draw(|f| {
+                let area = Rect::new(0, 0, 120, 7);
+                dash.draw_graph_view(f, area, &agent, &graph);
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn draw_graph_view_multi_visit_count_and_error_glyph() {
+        // "plan" was visited twice (vc=2, exercising the "x{vc}" suffix) and
+        // its last recorded status is Error while it's not the current
+        // stage -> the visited-but-not-current glyph should be GLYPH_ERROR.
+        let backend = TestBackend::new(160, 10);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let dash = make_test_dashboard();
+        let mut agent = make_test_agent("run-multivisit", AgentDisplayStatus::Active);
+        agent.stage = "implement".to_string();
+        agent.stages = vec![
+            make_stage_record("plan", StageRunStatus::Complete),
+            make_stage_record("plan", StageRunStatus::Error),
+            make_stage_record("implement", StageRunStatus::Active),
+        ];
+        let mut edges = HashMap::new();
+        edges.insert(
+            "plan".to_string(),
+            vec![GraphEdge {
+                target: "implement".to_string(),
+                hint: None,
+                condition: "always".to_string(),
+                transform: "replace".to_string(),
+            }],
+        );
+        let graph = GraphTransitionInfo {
+            edges,
+            entry_stage: "plan".to_string(),
+            stage_names: vec!["plan".to_string(), "implement".to_string()],
+        };
+        terminal
+            .draw(|f| {
+                let area = Rect::new(0, 0, 160, 7);
+                dash.draw_graph_view(f, area, &agent, &graph);
+            })
+            .unwrap();
+
+        let content: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|c| c.symbol())
+            .collect();
+        assert!(content.contains("x2"));
+    }
+
+    #[test]
+    fn draw_graph_view_all_status_colors_and_reverse_only_arrow() {
+        // Exercises WaitingInput/Pending glyph colors, a reverse-only arrow
+        // (b has an edge back to a, but a has none to b), and an
+        // unreachable/unvisited stage colored C_DIM.
+        let backend = TestBackend::new(200, 10);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let dash = make_test_dashboard();
+        let mut agent = make_test_agent("run-colors", AgentDisplayStatus::Active);
+        agent.stage = "a".to_string();
+        agent.stages = vec![
+            make_stage_record("a", StageRunStatus::Active),
+            make_stage_record("b", StageRunStatus::WaitingInput),
+            make_stage_record("c", StageRunStatus::Pending),
+        ];
+        let mut edges = HashMap::new();
+        // b -> a (reverse-only relative to a/b pairing; a has no edge to b)
+        edges.insert(
+            "b".to_string(),
+            vec![GraphEdge {
+                target: "a".to_string(),
+                hint: None,
+                condition: "always".to_string(),
+                transform: "replace".to_string(),
+            }],
+        );
+        let graph = GraphTransitionInfo {
+            edges,
+            entry_stage: "a".to_string(),
+            stage_names: vec!["a".to_string(), "b".to_string(), "c".to_string()],
+        };
+        terminal
+            .draw(|f| {
+                let area = Rect::new(0, 0, 200, 7);
+                dash.draw_graph_view(f, area, &agent, &graph);
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn draw_graph_view_breaks_when_total_width_exceeds_area() {
+        // Many stages in a narrow area force the `total_w > inner_w` early
+        // break while laying out nodes.
+        let backend = TestBackend::new(30, 10);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let dash = make_test_dashboard();
+        let mut agent = make_test_agent("run-narrow", AgentDisplayStatus::Active);
+        agent.stage = "s1".to_string();
+        let mut edges = HashMap::new();
+        let stage_names: Vec<String> = (1..=8).map(|i| format!("s{}", i)).collect();
+        agent.stages = stage_names
+            .iter()
+            .map(|n| make_stage_record(n, StageRunStatus::Complete))
+            .collect();
+        for w in stage_names.windows(2) {
+            edges.insert(
+                w[0].clone(),
+                vec![GraphEdge {
+                    target: w[1].clone(),
+                    hint: None,
+                    condition: "always".to_string(),
+                    transform: "replace".to_string(),
+                }],
+            );
+        }
+        let graph = GraphTransitionInfo {
+            edges,
+            entry_stage: "s1".to_string(),
+            stage_names,
+        };
+        terminal
+            .draw(|f| {
+                let area = Rect::new(0, 0, 30, 7);
+                dash.draw_graph_view(f, area, &agent, &graph);
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn draw_linear_tabs_fallback_marks_stages_before_current_as_complete() {
+        // Empty agent.stages triggers the synthesized-fallback path; a
+        // stage_index > 0 exercises the "i < stage_index -> Complete glyph"
+        // branch for the earlier, already-passed stages.
+        let backend = TestBackend::new(120, 10);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let dash = make_test_dashboard();
+        let mut agent = make_test_agent("run-fallback-idx", AgentDisplayStatus::Active);
+        agent.stages = vec![];
+        agent.num_stages = 3;
+        agent.stage_index = 2;
+        terminal
+            .draw(|f| {
+                let area = Rect::new(0, 0, 120, 3);
+                dash.render_stage_tabs(f, area, &agent);
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn build_stage_tab_title_duration_over_a_minute_shows_minutes() {
+        let dash = make_test_dashboard();
+        let agent = make_test_agent("run-mins", AgentDisplayStatus::Active);
+        let mut record = make_stage_record("plan", StageRunStatus::Complete);
+        record.started_at = Some(0);
+        record.ended_at = Some(125); // 2m5s
+        let line = dash.build_stage_tab_title(0, &record, &agent);
+        let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(text.contains("2m5s"));
+    }
+
+    #[test]
+    fn build_stage_tab_title_active_current_tab_uses_active_until() {
+        let dash = make_test_dashboard();
+        let mut agent = make_test_agent("run-active-until", AgentDisplayStatus::Active);
+        agent.stage_index = 0;
+        agent.active_until = Some(chrono::Utc::now().timestamp());
+        let mut record = make_stage_record("plan", StageRunStatus::Active);
+        record.started_at = Some(chrono::Utc::now().timestamp() - 30);
+        record.ended_at = None;
+        // is_current_tab (i == agent.stage_index) with an active_until set
+        // exercises elapsed_str_until() instead of elapsed_str().
+        let line = dash.build_stage_tab_title(0, &record, &agent);
+        assert!(!line.spans.is_empty());
+    }
+
+    #[test]
     fn build_stage_tab_title_complete() {
         let dash = make_test_dashboard();
         let agent = make_test_agent("run-t", AgentDisplayStatus::Active);

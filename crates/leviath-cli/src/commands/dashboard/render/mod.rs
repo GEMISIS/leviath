@@ -295,6 +295,66 @@ mod tests {
         terminal.draw(|f| dash.draw(f)).unwrap();
     }
 
+    #[test]
+    fn draw_detail_view_clamps_out_of_range_selected_stage() {
+        let backend = TestBackend::new(120, 40);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut dash = make_test_dashboard();
+        let agent = make_test_agent("run-det-clamp", AgentDisplayStatus::Active);
+        assert_eq!(agent.num_stages, 1);
+        dash.agents.push(agent);
+        dash.update_display_indices();
+        dash.detail_view = true;
+        dash.selected_stage = 99; // way beyond num_stages - 1
+
+        terminal.draw(|f| dash.draw(f)).unwrap();
+        assert_eq!(dash.selected_stage, 0);
+    }
+
+    #[test]
+    fn draw_detail_view_input_mode_multiple_choice_pending() {
+        let backend = TestBackend::new(120, 40);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut dash = make_test_dashboard();
+        let mut agent = make_test_agent("run-mc-input", AgentDisplayStatus::Waiting);
+        agent.waiting_prompt = Some("Pick one".to_string());
+        agent.pending_request = Some(crate::interaction::InteractionRequest::multiple_choice(
+            "mc1",
+            "Pick one",
+            vec!["A".to_string(), "B".to_string()],
+            "main",
+        ));
+        dash.agents.push(agent);
+        dash.update_display_indices();
+        dash.detail_view = true;
+        dash.input_mode = true;
+
+        terminal.draw(|f| dash.draw(f)).unwrap();
+    }
+
+    #[test]
+    fn draw_detail_view_waiting_multiple_choice_preview_not_input_mode() {
+        let backend = TestBackend::new(120, 40);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut dash = make_test_dashboard();
+        let mut agent = make_test_agent("run-mc-preview", AgentDisplayStatus::Waiting);
+        agent.waiting_prompt = Some("Pick one".to_string());
+        agent.pending_request = Some(crate::interaction::InteractionRequest::multiple_choice(
+            "mc2",
+            "Pick one",
+            vec!["A".to_string(), "B".to_string()],
+            "main",
+        ));
+        agent.stages = vec![crate::runstate::StageRecord::new("main".to_string(), 0)];
+        dash.agents.push(agent);
+        dash.update_display_indices();
+        dash.detail_view = true;
+        dash.input_mode = false;
+        dash.selected_stage = 0;
+
+        terminal.draw(|f| dash.draw(f)).unwrap();
+    }
+
     // ─── Regression: mid-run message input pane must actually render ──────
     //
     // Pressing 'i' (formerly 'm') on an Active agent that accepts mid-run

@@ -310,6 +310,27 @@ mod tests {
     }
 
     #[test]
+    fn render_review_body_clamps_out_of_range_scroll() {
+        let backend = TestBackend::new(120, 40);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut dash = make_test_dashboard();
+        // Scroll offset far beyond the content length must be clamped down.
+        dash.review_scroll = usize::MAX;
+        let lines: Vec<ratatui::text::Line<'static>> = vec![
+            ratatui::text::Line::from("Line 1"),
+            ratatui::text::Line::from("Line 2"),
+        ];
+        let pending: Option<interaction::InteractionRequest> = None;
+        terminal
+            .draw(|f| {
+                let area = Rect::new(0, 0, 80, 10);
+                dash.render_review_body(f, area, &lines, &pending);
+            })
+            .unwrap();
+        assert!(dash.review_scroll < usize::MAX);
+    }
+
+    #[test]
     fn render_review_body_with_pending_req() {
         let backend = TestBackend::new(120, 40);
         let mut terminal = Terminal::new(backend).unwrap();
@@ -433,6 +454,26 @@ mod tests {
             "Option B".to_string(),
             "Option C".to_string(),
         ];
+        terminal
+            .draw(|f| {
+                let area = Rect::new(0, 0, 80, 14);
+                dash.render_input_pane(f, area, &agent, &pending, &kind, &options);
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn render_input_pane_preview_confirm_with_options() {
+        // Not-input-mode preview of a Confirm request must label options
+        // "y)"/"n)" rather than "[1]"/"[2]".
+        let backend = TestBackend::new(120, 40);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut dash = make_test_dashboard();
+        dash.input_mode = false;
+        let agent = make_test_agent("run-preview-confirm", AgentDisplayStatus::Waiting);
+        let pending = Some(make_pending_req(interaction::InteractionKind::Confirm));
+        let kind = Some(interaction::InteractionKind::Confirm);
+        let options = vec!["Yes".to_string(), "No".to_string()];
         terminal
             .draw(|f| {
                 let area = Rect::new(0, 0, 80, 14);
