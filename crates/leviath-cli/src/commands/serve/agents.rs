@@ -358,6 +358,208 @@ mod tests {
         )
     }
 
+    fn test_state_with_agent_paths(paths: Vec<PathBuf>) -> AppState {
+        let (tx, _) = broadcast::channel(64);
+        AppState {
+            config: Arc::new(Config {
+                agent_paths: paths,
+                ..Default::default()
+            }),
+            event_tx: tx,
+        }
+    }
+
+    fn write_test_blueprint(dir: &std::path::Path, name: &str) {
+        std::fs::create_dir_all(dir).unwrap();
+        std::fs::write(
+            dir.join("agent.leviath"),
+            format!(
+                r#"
+[agent]
+name = "{name}"
+version = "1.0.0"
+description = "A spawnable test blueprint"
+
+[stages.plan]
+prompt = "Plan the work"
+"#
+            ),
+        )
+        .unwrap();
+    }
+
+    // ─── spawn_agent ──────────────────────────────────────────────────────────
+    //
+    // spawn_agent shells out to `std::env::current_exe()` with `__run-worker`.
+    // Under `cargo test` that resolves to the test harness binary rather than
+    // `lev`, so the spawned child immediately exits with an "unrecognized
+    // option" error instead of doing real work. That's fine for these tests:
+    // we only assert on spawn_agent's own behavior (run creation, response
+    // shape, event broadcast) up through a successful `Command::spawn()`,
+    // not on what the child process does afterwards.
+
+    #[tokio::test]
+    async fn spawn_agent_blueprint_not_found_returns_404() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = test_state_with_agent_paths(vec![dir.path().to_path_buf()]);
+        let app = Router::new()
+            .route("/api/agents", axum::routing::post(spawn_agent))
+            .with_state(state);
+        let body = serde_json::json!({
+            "blueprint": "does-not-exist-xyz",
+            "task": "do something"
+        });
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/agents")
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_string(&body).unwrap()))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), axum::http::StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn spawn_agent_valid_blueprint_creates_run_and_returns_ok() {
+        let dir = tempfile::tempdir().unwrap();
+        let bp_name = format!("spawnable-{}", std::process::id());
+        write_test_blueprint(&dir.path().join(&bp_name), &bp_name);
+
+        let state = test_state_with_agent_paths(vec![dir.path().to_path_buf()]);
+        let mut rx = state.event_tx.subscribe();
+        let app = Router::new()
+            .route("/api/agents", axum::routing::post(spawn_agent))
+            .with_state(state);
+
+        let workdir = tempfile::tempdir().unwrap();
+        let body = serde_json::json!({
+            "blueprint": bp_name,
+            "task": "do the thing",
+            "workdir": workdir.path().to_string_lossy(),
+        });
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/agents")
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_string(&body).unwrap()))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), axum::http::StatusCode::OK);
+
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let spawn_resp: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let agent_id = spawn_resp["agent_id"].as_str().unwrap().to_string();
+        let run_id = spawn_resp["run_id"].as_str().unwrap().to_string();
+        assert_eq!(agent_id, bp_name);
+        assert!(run_id.contains(&bp_name));
+
+        // The run should have been persisted to disk.
+        let meta = runstate::read_meta(&run_id).expect("run meta should exist");
+        assert_eq!(meta.agent_name, bp_name);
+
+        // An AgentSpawned event should have been broadcast.
+        let mut saw_spawned = false;
+        while let Ok(ev) = rx.try_recv() {
+            if let ServerEvent::AgentSpawned {
+                run_id: ev_run_id, ..
+            } = &ev
+            {
+                if ev_run_id == &run_id {
+                    saw_spawned = true;
+                }
+            }
+        }
+        assert!(saw_spawned, "should broadcast AgentSpawned event");
+
+        // Give the (doomed) child process a moment to exit on its own so we
+        // don't leave a zombie process behind, then clean up run state.
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        let _ = std::fs::remove_dir_all(runstate::run_dir(&run_id));
+    }
+
+    #[tokio::test]
+    async fn spawn_agent_with_full_options_creates_run() {
+        let dir = tempfile::tempdir().unwrap();
+        let bp_name = format!("spawnable-full-{}", std::process::id());
+        write_test_blueprint(&dir.path().join(&bp_name), &bp_name);
+
+        let state = test_state_with_agent_paths(vec![dir.path().to_path_buf()]);
+        let app = Router::new()
+            .route("/api/agents", axum::routing::post(spawn_agent))
+            .with_state(state);
+
+        let workdir = tempfile::tempdir().unwrap();
+        let body = serde_json::json!({
+            "blueprint": bp_name,
+            "task": "do the thing",
+            "workdir": workdir.path().to_string_lossy(),
+            "model": "claude-sonnet-4-6",
+            "yolo": true,
+            "allow": ["read_file"],
+            "max_depth": 2,
+            "metadata": {"k": "v"},
+            "callback_url": "https://example.com/hook",
+        });
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/agents")
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_string(&body).unwrap()))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), axum::http::StatusCode::OK);
+
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let spawn_resp: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let run_id = spawn_resp["run_id"].as_str().unwrap().to_string();
+        let meta = runstate::read_meta(&run_id).expect("run meta should exist");
+        assert_eq!(
+            meta.callback_url.as_deref(),
+            Some("https://example.com/hook")
+        );
+        assert_eq!(meta.metadata.get("k").map(|v| v.as_str()), Some("v"));
+
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        let _ = std::fs::remove_dir_all(runstate::run_dir(&run_id));
+    }
+
+    #[tokio::test]
+    async fn spawn_agent_manifest_removed_after_discovery_returns_404() {
+        // Blueprint dir exists at discovery time but its manifest is removed
+        // before spawn_agent looks it up. discover_blueprints already
+        // filters out unreadable manifests, so the net effect is the same
+        // 404 path as "blueprint not found" — this documents that behavior
+        // explicitly rather than relying on it being implicit.
+        let dir = tempfile::tempdir().unwrap();
+        let bp_name = format!("vanishing-{}", std::process::id());
+        let bp_dir = dir.path().join(&bp_name);
+        write_test_blueprint(&bp_dir, &bp_name);
+
+        let state = test_state_with_agent_paths(vec![dir.path().to_path_buf()]);
+
+        std::fs::remove_file(bp_dir.join("agent.leviath")).unwrap();
+
+        let app = Router::new()
+            .route("/api/agents", axum::routing::post(spawn_agent))
+            .with_state(state);
+        let body = serde_json::json!({
+            "blueprint": bp_name,
+            "task": "do the thing",
+        });
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/agents")
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_string(&body).unwrap()))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), axum::http::StatusCode::NOT_FOUND);
+    }
+
     // ─── list_agents ──────────────────────────────────────────────────────────
 
     #[tokio::test]

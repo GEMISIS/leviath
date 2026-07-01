@@ -658,6 +658,104 @@ prompt = "Run"
         let _ = std::fs::remove_dir_all(crate::runstate::run_dir(&run_id));
     }
 
+    // ─── execute() — real server bootstrap ─────────────────────────────────
+    //
+    // These drive the actual `execute()` entrypoint (config load, CORS setup,
+    // full router construction, real TCP bind, background polling spawn) end
+    // to end using port 0 (OS-assigned ephemeral port) so no fixed port is
+    // required. Since `axum::serve(...).await` never returns on success, the
+    // task is aborted once we've proven the server is up and responding.
+
+    #[tokio::test]
+    async fn execute_binds_and_serves_with_wildcard_cors() {
+        // execute() binds its own listener internally, so we can't learn the
+        // ephemeral port directly. Instead, bind our own listener first to
+        // reserve a free port, then hand that port number to execute() and
+        // race a connection against it.
+        let probe = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = probe.local_addr().unwrap().port();
+        drop(probe); // free the port for execute() to bind
+
+        let args = ServeArgs {
+            port,
+            host: "127.0.0.1".to_string(),
+            cors: "*".to_string(),
+        };
+        let handle = tokio::spawn(execute(args));
+
+        // Poll until the server accepts connections (or time out).
+        let addr: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
+        let mut connected = false;
+        for _ in 0..50 {
+            if tokio::net::TcpStream::connect(addr).await.is_ok() {
+                connected = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        assert!(
+            connected,
+            "server should have started accepting connections"
+        );
+
+        // Sanity-check a real request round trip through the full app.
+        let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        stream
+            .write_all(b"GET /api/config HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+            .await
+            .unwrap();
+        let mut resp = Vec::new();
+        stream.read_to_end(&mut resp).await.unwrap();
+        let resp_str = String::from_utf8_lossy(&resp);
+        assert!(resp_str.starts_with("HTTP/1.1 200"), "got: {resp_str}");
+
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn execute_with_specific_cors_origin_serves() {
+        let probe = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = probe.local_addr().unwrap().port();
+        drop(probe);
+
+        let args = ServeArgs {
+            port,
+            host: "127.0.0.1".to_string(),
+            cors: "https://example.com".to_string(),
+        };
+        let handle = tokio::spawn(execute(args));
+
+        let addr: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
+        let mut connected = false;
+        for _ in 0..50 {
+            if tokio::net::TcpStream::connect(addr).await.is_ok() {
+                connected = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        assert!(
+            connected,
+            "server should have started accepting connections"
+        );
+
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn execute_with_unparseable_addr_returns_err() {
+        // An invalid host string makes `format!("{host}:{port}").parse()`
+        // fail, exercising execute()'s `?` on the SocketAddr parse.
+        let args = ServeArgs {
+            port: 0,
+            host: "not a valid host".to_string(),
+            cors: "*".to_string(),
+        };
+        let result = execute(args).await;
+        assert!(result.is_err());
+    }
+
     #[tokio::test]
     async fn test_agent_list_with_status_filter_full_router() {
         let app = full_app();

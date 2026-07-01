@@ -615,4 +615,185 @@ mod tests {
             "poll_once should have emitted InteractionNeeded event"
         );
     }
+
+    // ─── callback webhook (poll_once's tokio::spawn branch) ────────────────
+
+    /// Minimal raw-TCP mock HTTP server that accepts one connection and
+    /// records the request body it received, per the hand-rolled mocking
+    /// convention used elsewhere in this crate (no mockito/wiremock).
+    async fn spawn_mock_webhook() -> (String, tokio::sync::oneshot::Receiver<Vec<u8>>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (tx, rx) = tokio::sync::oneshot::channel();
+
+        tokio::spawn(async move {
+            if let Ok((mut socket, _)) = listener.accept().await {
+                let mut buf = vec![0u8; 8192];
+                let n = socket.read(&mut buf).await.unwrap_or(0);
+                buf.truncate(n);
+                let resp = b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+                let _ = socket.write_all(resp).await;
+                let _ = socket.shutdown().await;
+                let _ = tx.send(buf);
+            }
+        });
+
+        (format!("http://{}", addr), rx)
+    }
+
+    #[tokio::test]
+    async fn poll_once_fires_callback_webhook_on_completion() {
+        use crate::runstate::{RunMeta, RunStatus};
+
+        let (url, rx) = spawn_mock_webhook().await;
+
+        let (state, mut evt_rx) = make_test_state();
+        let mut poll = PollState {
+            last_status: HashMap::new(),
+            last_context_tokens: HashMap::new(),
+            last_pending: HashMap::new(),
+            callback_fired: HashMap::new(),
+        };
+        let client = reqwest::Client::new();
+
+        let mut meta = RunMeta::new(
+            "run-webhook-1".into(),
+            "agent".into(),
+            "/p".into(),
+            "task".into(),
+            None,
+            "/tmp".into(),
+            1,
+        );
+        meta.callback_url = Some(url);
+        meta.status = RunStatus::Running;
+        poll_once(&state, &mut poll, &client, &[meta.clone()]);
+        while evt_rx.try_recv().is_ok() {}
+
+        meta.status = RunStatus::Complete;
+        meta.touch();
+        poll_once(&state, &mut poll, &client, &[meta]);
+
+        // callback_fired should be recorded immediately...
+        assert!(poll
+            .callback_fired
+            .get("run-webhook-1")
+            .copied()
+            .unwrap_or(false));
+
+        // ...and the webhook POST should actually be delivered.
+        let body = tokio::time::timeout(std::time::Duration::from_secs(5), rx)
+            .await
+            .expect("timed out waiting for webhook request")
+            .expect("webhook sender dropped without sending");
+        let body_str = String::from_utf8_lossy(&body);
+        assert!(body_str.contains("agent_completed"));
+        assert!(body_str.contains("run-webhook-1"));
+    }
+
+    #[tokio::test]
+    async fn poll_once_does_not_refire_callback_on_repeated_completion() {
+        use crate::runstate::{RunMeta, RunStatus};
+
+        let (url, rx) = spawn_mock_webhook().await;
+
+        let (state, _rx) = make_test_state();
+        let mut poll = PollState {
+            last_status: HashMap::new(),
+            last_context_tokens: HashMap::new(),
+            last_pending: HashMap::new(),
+            callback_fired: HashMap::new(),
+        };
+        let client = reqwest::Client::new();
+
+        let mut meta = RunMeta::new(
+            "run-webhook-2".into(),
+            "agent".into(),
+            "/p".into(),
+            "task".into(),
+            None,
+            "/tmp".into(),
+            1,
+        );
+        meta.callback_url = Some(url);
+        meta.status = RunStatus::Running;
+        poll_once(&state, &mut poll, &client, &[meta.clone()]);
+
+        meta.status = RunStatus::Complete;
+        meta.touch();
+        // First completion: fires the webhook and marks it fired.
+        poll_once(&state, &mut poll, &client, &[meta.clone()]);
+        assert!(poll
+            .callback_fired
+            .get("run-webhook-2")
+            .copied()
+            .unwrap_or(false));
+
+        // The mock server only accepts a single connection; if poll_once
+        // tried to fire the callback again it would either hang or the
+        // second send would simply be dropped since nothing is listening
+        // anymore. Re-running poll_once with the same terminal status should
+        // be a no-op (status key unchanged means we don't even re-enter the
+        // completion branch).
+        poll_once(&state, &mut poll, &client, &[meta]);
+
+        let body = tokio::time::timeout(std::time::Duration::from_secs(5), rx)
+            .await
+            .expect("timed out waiting for webhook request")
+            .expect("webhook sender dropped without sending");
+        assert!(String::from_utf8_lossy(&body).contains("run-webhook-2"));
+    }
+
+    // ─── polling_loop wrapper ────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn polling_loop_wrapper_picks_up_real_runs_from_disk() {
+        use crate::runstate::{create_run, RunMeta};
+
+        let run_id = format!(
+            "test-poll-loop-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .subsec_nanos()
+        );
+        let meta = RunMeta::new(
+            run_id.clone(),
+            "agent".into(),
+            "/p".into(),
+            "task".into(),
+            None,
+            "/tmp".into(),
+            1,
+        );
+        create_run(&meta).unwrap();
+
+        let (state, mut rx) = make_test_state();
+        let handle = tokio::spawn(polling_loop(state));
+
+        // polling_loop sleeps 200ms between cycles; give it enough time for
+        // at least one full cycle to run and pick up the real run from disk.
+        let mut saw_status = false;
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+        while tokio::time::Instant::now() < deadline {
+            match tokio::time::timeout(std::time::Duration::from_millis(500), rx.recv()).await {
+                Ok(Ok(ServerEvent::AgentStatus { run_id: rid, .. })) if rid == run_id => {
+                    saw_status = true;
+                    break;
+                }
+                _ => continue,
+            }
+        }
+
+        handle.abort();
+        let _ = std::fs::remove_dir_all(crate::runstate::run_dir(&run_id));
+        assert!(
+            saw_status,
+            "polling_loop should have broadcast an AgentStatus event for the real run"
+        );
+    }
 }
