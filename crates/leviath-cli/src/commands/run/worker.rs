@@ -24,6 +24,42 @@ use super::WorkerArgs;
 /// Tracks the current stage index for tool-activity logging from the executor closure.
 type CurrentStageIdx = Arc<Mutex<usize>>;
 
+/// Background-worker [`InteractionBackend`]: answers via the file-based IPC
+/// channel and logs to the per-stage log file.
+struct WorkerInteractionBackend<'a> {
+    run_id: &'a str,
+    stage_idx: usize,
+}
+
+#[async_trait]
+impl super::dynamic_interaction::InteractionBackend for WorkerInteractionBackend<'_> {
+    async fn ask(
+        &self,
+        req: crate::interaction::InteractionRequest,
+    ) -> crate::interaction::InteractionResponse {
+        crate::interaction::request_interaction_bg_review(self.run_id, req).await
+    }
+
+    fn log(&self, message: &str) {
+        record_stage_log(self.run_id, self.stage_idx, message);
+    }
+
+    fn on_review_document(&self, tool_call_id: &str, title: &str, markdown: &str) {
+        // Persist the review artifact under stages/<idx>/reviews/
+        let review_dir = runstate::stage_dir(self.run_id, self.stage_idx).join("reviews");
+        let _ = std::fs::create_dir_all(&review_dir);
+        let artifact_path = review_dir.join(format!("review-{}.md", tool_call_id));
+        let _ = std::fs::write(&artifact_path, markdown);
+
+        // Also write to stage output so it's visible in the Output tab after review
+        record_stage_output(
+            self.run_id,
+            self.stage_idx,
+            &format!("---\n## {}\n\n{}\n---", title, markdown),
+        );
+    }
+}
+
 /// Worker-specific callbacks for the unified stage loop.
 struct WorkerCallbacks<'a> {
     run_id: String,
@@ -443,178 +479,26 @@ async fn run_worker_inner(args: &WorkerArgs, meta: &mut RunMeta) -> anyhow::Resu
         async move {
             let stage_idx = *stage_idx_arc.lock().await;
             let stage_name = stage_name_arc.lock().await.clone();
+            let interaction_backend = WorkerInteractionBackend {
+                run_id: &run_id,
+                stage_idx,
+            };
             let mut out: Vec<(String, String)> = Vec::new();
             for tc in calls {
-                // ── present_for_review: special built-in that raises an interaction ──
-                if tc.name == "present_for_review" {
-                    let title = tc
-                        .arguments
-                        .get("title")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("Review")
-                        .to_string();
-                    let markdown = tc
-                        .arguments
-                        .get("markdown")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("")
-                        .to_string();
-
-                    // Persist the review artifact under stages/<idx>/reviews/
-                    let review_dir = runstate::stage_dir(&run_id, stage_idx).join("reviews");
-                    let _ = std::fs::create_dir_all(&review_dir);
-                    let artifact_path = review_dir.join(format!("review-{}.md", tc.id));
-                    let _ = std::fs::write(&artifact_path, &markdown);
-
-                    // Also write to stage output so it's visible in the Output tab after review
-                    record_stage_output(
-                        &run_id,
-                        stage_idx,
-                        &format!("---\n## {}\n\n{}\n---", title, markdown),
-                    );
-
-                    // Log the event
-                    record_stage_log(
-                        &run_id,
-                        stage_idx,
-                        &format!(
-                            "[tool] present_for_review \u{2192} waiting for user review: {}",
-                            title
-                        ),
-                    );
-
-                    // Build the interaction request with markdown body
-                    let req = crate::interaction::InteractionRequest::review(
-                        format!("review-{}", tc.id),
-                        &title,
-                        &markdown,
-                        &stage_name,
-                    );
-
-                    // Write request and wait for response
-                    let resp =
-                        crate::interaction::request_interaction_bg_review(&run_id, req).await;
-
-                    let user_feedback = crate::interaction::response_as_text(&resp);
-                    let result = if user_feedback.trim().is_empty() {
-                        "User reviewed the document and acknowledged.".to_string()
-                    } else {
-                        format!("User feedback: {}", user_feedback)
-                    };
-                    record_stage_log(
-                        &run_id,
-                        stage_idx,
-                        "[tool] present_for_review \u{2192} done",
-                    );
-                    out.push((tc.id.clone(), result));
-                    continue;
-                }
-
-                // ── ask_user_*: agent-initiated dynamic interaction tools ──────
+                // ── Dynamic interaction tools (present_for_review, ask_user_*) ──
                 // Unlike `interaction_points` (declared statically in the
                 // blueprint and always shown), these let the model itself
                 // decide, mid-reasoning, that it needs human input.
-                if tc.name == "ask_user_text" {
-                    let prompt = tc
-                        .arguments
-                        .get("prompt")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("")
-                        .to_string();
-                    record_stage_log(
-                        &run_id,
-                        stage_idx,
-                        &format!("[tool] ask_user_text \u{2192} waiting: {}", prompt),
-                    );
-                    let req = crate::interaction::InteractionRequest::free_text(
-                        format!("ask-{}", tc.id),
-                        &prompt,
-                        &stage_name,
-                        true,
-                    );
-                    let resp =
-                        crate::interaction::request_interaction_bg_review(&run_id, req).await;
-                    let answer = crate::interaction::response_as_text(&resp);
-                    record_stage_log(&run_id, stage_idx, "[tool] ask_user_text \u{2192} done");
-                    let result = if answer.trim().is_empty() {
-                        "User provided no answer.".to_string()
-                    } else {
-                        format!("User: {}", answer)
-                    };
+                if let Some(result) = super::dynamic_interaction::dispatch_dynamic_interaction(
+                    &interaction_backend,
+                    &tc.name,
+                    &tc.id,
+                    &tc.arguments,
+                    &stage_name,
+                )
+                .await
+                {
                     out.push((tc.id.clone(), result));
-                    continue;
-                }
-
-                if tc.name == "ask_user_choice" {
-                    let prompt = tc
-                        .arguments
-                        .get("prompt")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("")
-                        .to_string();
-                    let options: Vec<String> = tc
-                        .arguments
-                        .get("options")
-                        .and_then(|v| v.as_array())
-                        .map(|arr| {
-                            arr.iter()
-                                .filter_map(|v| v.as_str().map(|s| s.to_string()))
-                                .collect()
-                        })
-                        .unwrap_or_default();
-                    if options.len() < 2 {
-                        out.push((
-                            tc.id.clone(),
-                            "[error] ask_user_choice requires at least 2 options".to_string(),
-                        ));
-                        continue;
-                    }
-                    record_stage_log(
-                        &run_id,
-                        stage_idx,
-                        &format!("[tool] ask_user_choice \u{2192} waiting: {}", prompt),
-                    );
-                    let req = crate::interaction::InteractionRequest::multiple_choice(
-                        format!("ask-{}", tc.id),
-                        &prompt,
-                        options.clone(),
-                        &stage_name,
-                    );
-                    let resp =
-                        crate::interaction::request_interaction_bg_review(&run_id, req).await;
-                    let choice = crate::interaction::response_as_choice(&resp, &options)
-                        .cloned()
-                        .unwrap_or_else(|| crate::interaction::response_as_text(&resp));
-                    record_stage_log(&run_id, stage_idx, "[tool] ask_user_choice \u{2192} done");
-                    out.push((tc.id.clone(), format!("User chose: {}", choice)));
-                    continue;
-                }
-
-                if tc.name == "ask_user_confirm" {
-                    let prompt = tc
-                        .arguments
-                        .get("prompt")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("")
-                        .to_string();
-                    record_stage_log(
-                        &run_id,
-                        stage_idx,
-                        &format!("[tool] ask_user_confirm \u{2192} waiting: {}", prompt),
-                    );
-                    let req = crate::interaction::InteractionRequest::confirm(
-                        format!("ask-{}", tc.id),
-                        &prompt,
-                        &stage_name,
-                    );
-                    let resp =
-                        crate::interaction::request_interaction_bg_review(&run_id, req).await;
-                    let approved = crate::interaction::response_approved(&resp);
-                    record_stage_log(&run_id, stage_idx, "[tool] ask_user_confirm \u{2192} done");
-                    out.push((
-                        tc.id.clone(),
-                        format!("User answered: {}", if approved { "Yes" } else { "No" }),
-                    ));
                     continue;
                 }
 
@@ -1755,5 +1639,80 @@ mode = "autonomous"
         assert!(matches!(cb.meta.status, RunStatus::Error));
 
         let _ = std::fs::remove_dir_all(crate::runstate::run_dir(run_id));
+    }
+
+    // ─── WorkerInteractionBackend ───────────────────────────────────────────
+
+    use crate::commands::run::dynamic_interaction::InteractionBackend;
+
+    #[tokio::test]
+    async fn worker_interaction_backend_ask_delegates_to_bg_review() {
+        let run_id = "test-worker-backend-ask";
+        let dir = crate::runstate::run_dir(run_id);
+        std::fs::create_dir_all(&dir).unwrap();
+        let meta = make_meta(run_id, 1);
+        crate::runstate::create_run(&meta).unwrap();
+
+        let run_id_clone = run_id.to_string();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+            let resp = crate::interaction::InteractionResponse::text("ask-1", "the answer");
+            crate::interaction::write_response(&run_id_clone, &resp).ok();
+        });
+
+        let backend = WorkerInteractionBackend {
+            run_id,
+            stage_idx: 0,
+        };
+        let req =
+            crate::interaction::InteractionRequest::free_text("ask-1", "Question?", "main", true);
+        let resp = backend.ask(req).await;
+        assert_eq!(resp.value.as_deref(), Some("the answer"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn worker_interaction_backend_log_writes_to_stage_log() {
+        let run_id = "test-worker-backend-log";
+        let dir = crate::runstate::run_dir(run_id);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let backend = WorkerInteractionBackend {
+            run_id,
+            stage_idx: 0,
+        };
+        backend.log("[tool] ask_user_text \u{2192} waiting: hello");
+
+        let log_contents = crate::runstate::tail_stage_log(run_id, 0, 65536);
+        assert!(log_contents.contains("ask_user_text"));
+        assert!(log_contents.contains("hello"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn worker_interaction_backend_on_review_document_persists_artifact_and_output() {
+        let run_id = "test-worker-backend-review-doc";
+        let dir = crate::runstate::run_dir(run_id);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let backend = WorkerInteractionBackend {
+            run_id,
+            stage_idx: 0,
+        };
+        backend.on_review_document("call-42", "My Title", "# Body\ncontent");
+
+        let artifact_path = crate::runstate::stage_dir(run_id, 0)
+            .join("reviews")
+            .join("review-call-42.md");
+        let artifact = std::fs::read_to_string(&artifact_path).unwrap();
+        assert_eq!(artifact, "# Body\ncontent");
+
+        let output = crate::runstate::tail_stage_output(run_id, 0, 65536);
+        assert!(output.contains("My Title"));
+        assert!(output.contains("# Body\ncontent"));
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

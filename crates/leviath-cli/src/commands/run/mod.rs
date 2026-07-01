@@ -10,6 +10,7 @@
 //! - `foreground`: Foreground (inline, blocking) run mode
 //! - `worker`: Background worker run mode
 
+mod dynamic_interaction;
 pub mod executor;
 mod foreground;
 mod graph;
