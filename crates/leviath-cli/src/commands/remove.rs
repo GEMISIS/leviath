@@ -11,18 +11,23 @@ pub struct RemoveArgs {
 
 pub async fn execute(args: RemoveArgs) -> anyhow::Result<()> {
     let installer = leviath_package::AgentInstaller::new();
+    remove_agent(&installer, &args.name)
+}
 
+/// Core removal logic, parameterized by installer so it can be tested
+/// against a tempdir instead of the real `~/.leviath/agents`.
+fn remove_agent(installer: &leviath_package::AgentInstaller, name: &str) -> anyhow::Result<()> {
     // Verify it's actually installed first
-    let installed = installer.get_installed(&args.name)?;
+    let installed = installer.get_installed(name)?;
     if installed.is_none() {
         anyhow::bail!(
             "Agent '{}' is not installed. Use `lev list` to see installed agents.",
-            args.name
+            name
         );
     }
 
-    installer.uninstall(&args.name)?;
-    println!("Removed agent '{}'.", args.name);
+    installer.uninstall(name)?;
+    println!("Removed agent '{}'.", name);
     Ok(())
 }
 
@@ -52,5 +57,44 @@ mod tests {
             };
             assert_eq!(args.name, *name);
         }
+    }
+
+    // ─── remove_agent ────────────────────────────────────────────────────
+
+    fn install_test_agent(installer: &leviath_package::AgentInstaller, name: &str) {
+        let project_dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            project_dir.path().join("agent.leviath"),
+            format!(
+                "[agent]\nname = \"{name}\"\nversion = \"1.0.0\"\ndescription = \"test agent\"\n"
+            ),
+        )
+        .unwrap();
+        let bundle = leviath_package::AgentBundler::new()
+            .bundle(project_dir.path())
+            .unwrap();
+        installer.install_from_bytes(name, &bundle).unwrap();
+    }
+
+    #[test]
+    fn remove_agent_not_installed_returns_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let installer = leviath_package::AgentInstaller::with_install_dir(dir.path().to_path_buf());
+
+        let err = remove_agent(&installer, "nonexistent").unwrap_err();
+        assert!(err.to_string().contains("is not installed"));
+        assert!(err.to_string().contains("lev list"));
+    }
+
+    #[test]
+    fn remove_agent_installed_succeeds_and_uninstalls() {
+        let dir = tempfile::tempdir().unwrap();
+        let installer = leviath_package::AgentInstaller::with_install_dir(dir.path().to_path_buf());
+        install_test_agent(&installer, "my-agent");
+        assert!(installer.get_installed("my-agent").unwrap().is_some());
+
+        remove_agent(&installer, "my-agent").unwrap();
+
+        assert!(installer.get_installed("my-agent").unwrap().is_none());
     }
 }

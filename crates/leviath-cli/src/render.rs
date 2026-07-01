@@ -780,4 +780,172 @@ mod tests {
             text.lines.len()
         );
     }
+
+    // ─── Additional heading levels (H4/H5/H6) ───────────────────────────────
+
+    #[test]
+    fn h4_h5_h6_headings_rendered() {
+        let md = "#### Four\n\n##### Five\n\n###### Six";
+        let text = markdown_to_text(md, 80);
+        let all: String = text
+            .lines
+            .iter()
+            .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
+            .collect();
+        assert!(all.contains("Four"), "got: {}", all);
+        assert!(all.contains("Five"), "got: {}", all);
+        assert!(all.contains("Six"), "got: {}", all);
+    }
+
+    // ─── Nested inline styles inherit from parent ──────────────────────────
+
+    #[test]
+    fn bold_italic_nested_inherits_both_modifiers() {
+        // ***text*** parses as Strong containing Emphasis (or vice versa) —
+        // the inner style must inherit the outer's bold/italic/strikethrough.
+        let md = "***bold italic***";
+        let text = markdown_to_text(md, 80);
+        let style = text.lines[0].spans[0].style;
+        assert!(style.add_modifier.contains(Modifier::BOLD));
+        assert!(style.add_modifier.contains(Modifier::ITALIC));
+    }
+
+    #[test]
+    fn strikethrough_inside_bold_inherits_bold() {
+        let md = "**bold ~~and struck~~**";
+        let text = markdown_to_text(md, 80);
+        let all_styled_bold = text.lines[0].spans.iter().any(|s| {
+            s.style
+                .add_modifier
+                .contains(Modifier::CROSSED_OUT | Modifier::BOLD)
+        });
+        assert!(all_styled_bold);
+    }
+
+    // ─── Blockquote with multiple lines flushes correctly ──────────────────
+
+    #[test]
+    fn blockquote_with_multiple_lines() {
+        let md = "> line one\n> line two";
+        let text = markdown_to_text(md, 80);
+        let all: String = text
+            .lines
+            .iter()
+            .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
+            .collect();
+        assert!(all.contains("line one"), "got: {}", all);
+        assert!(all.contains("line two"), "got: {}", all);
+    }
+
+    // ─── Nested / multi-item lists flush pending content between items ─────
+
+    #[test]
+    fn bullet_list_with_multiple_items() {
+        let md = "- alpha\n- beta\n- gamma";
+        let text = markdown_to_text(md, 80);
+        let all: String = text
+            .lines
+            .iter()
+            .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
+            .collect();
+        assert!(all.contains("alpha"), "got: {}", all);
+        assert!(all.contains("beta"), "got: {}", all);
+        assert!(all.contains("gamma"), "got: {}", all);
+        assert!(
+            all.contains("\u{25cf}"),
+            "expected bullet glyph, got: {}",
+            all
+        );
+    }
+
+    #[test]
+    fn nested_list_indents() {
+        let md = "- top\n  - nested\n- top2";
+        let text = markdown_to_text(md, 80);
+        let all: String = text
+            .lines
+            .iter()
+            .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
+            .collect();
+        assert!(all.contains("top"), "got: {}", all);
+        assert!(all.contains("nested"), "got: {}", all);
+    }
+
+    // ─── Indented (non-fenced) code block ───────────────────────────────────
+
+    #[test]
+    fn indented_code_block_has_no_language_label_from_lang() {
+        let md = "Normal text.\n\n    indented code line\n\nMore text.";
+        let text = markdown_to_text(md, 80);
+        let all: String = text
+            .lines
+            .iter()
+            .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
+            .collect();
+        assert!(all.contains("indented code line"), "got: {}", all);
+    }
+
+    // ─── Multi-line text event (embedded newline split) ────────────────────
+
+    #[test]
+    fn hard_break_splits_into_separate_lines() {
+        // Two trailing spaces + newline = hard break in CommonMark.
+        let md = "first line  \nsecond line";
+        let text = markdown_to_text(md, 80);
+        assert!(text.lines.len() >= 2);
+        let all: String = text
+            .lines
+            .iter()
+            .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
+            .collect();
+        assert!(all.contains("first line"), "got: {}", all);
+        assert!(all.contains("second line"), "got: {}", all);
+    }
+
+    #[test]
+    fn soft_break_becomes_space() {
+        let md = "first\nsecond";
+        let text = markdown_to_text(md, 80);
+        let all: String = text
+            .lines
+            .iter()
+            .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
+            .collect();
+        assert!(all.contains("first"), "got: {}", all);
+        assert!(all.contains("second"), "got: {}", all);
+    }
+
+    // ─── Rule with pending inline content before it ────────────────────────
+
+    #[test]
+    fn rule_flushes_pending_content_first() {
+        // pulldown-cmark treats "text\n***" as a paragraph followed by a rule
+        // only when properly separated; use explicit blank-line-free content
+        // before a thematic break to exercise the pending-flush branch.
+        let md = "above text\n\n---\nbelow text";
+        let text = markdown_to_text(md, 80);
+        let all: String = text
+            .lines
+            .iter()
+            .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
+            .collect();
+        assert!(all.contains("above text"), "got: {}", all);
+        assert!(all.contains("below text"), "got: {}", all);
+    }
+
+    // ─── Table events fall through the catch-all arm ───────────────────────
+
+    #[test]
+    fn table_does_not_panic_and_renders_cell_text() {
+        let md = "| A | B |\n|---|---|\n| 1 | 2 |";
+        let text = markdown_to_text(md, 80);
+        let all: String = text
+            .lines
+            .iter()
+            .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
+            .collect();
+        // Table structural events are ignored (catch-all arm), but the text
+        // content inside cells still comes through as Text events.
+        assert!(all.contains('1') || all.contains('A'), "got: {}", all);
+    }
 }

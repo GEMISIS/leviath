@@ -1719,6 +1719,322 @@ mod policy_tests {
         );
     }
 
+    /// Spawn an agent, register it, set its AgentState.status, and return
+    /// (executor, agent_id) for exec_check-style tests.
+    async fn spawn_agent_with_status(
+        status: leviath_runtime::AgentStatus,
+    ) -> (SubAgentExecutor, String) {
+        use leviath_runtime::AgentPool;
+
+        let registry = leviath_runtime::ProviderRegistry::new();
+        let engine = leviath_runtime::AgentEngine::with_providers(registry);
+        let engine_arc = Arc::new(tokio::sync::RwLock::new(engine));
+        let exec = SubAgentExecutor::new(Arc::clone(&engine_arc));
+
+        let bp = leviath_core::Blueprint::new(
+            "status-bp".to_string(),
+            "desc".to_string(),
+            vec![],
+            leviath_core::ContextLayout::new(vec![], 128_000),
+        );
+
+        let agent_id = {
+            let mut eng = engine_arc.write().await;
+            let mut pool = AgentPool::new(bp);
+            let id = pool.spawn_agent(eng.world_mut());
+            let entity = pool.get_agent(&id).unwrap();
+            exec.register_agent(id.clone(), entity);
+            if let Some(mut state) = eng.world_mut().get_mut::<AgentState>(entity) {
+                state.status = status;
+            }
+            id
+        };
+
+        (exec, agent_id)
+    }
+
+    #[tokio::test]
+    async fn test_exec_check_reports_waiting_status() {
+        let (exec, agent_id) = spawn_agent_with_status(AgentStatus::Waiting).await;
+        let result = exec
+            .execute(
+                "check_agent",
+                &serde_json::json!({"agent_id": agent_id}),
+                "caller",
+                bevy_ecs::prelude::Entity::from_raw(0),
+                0,
+                3,
+            )
+            .await;
+        assert_eq!(result, "Status: waiting");
+    }
+
+    #[tokio::test]
+    async fn test_exec_check_reports_error_status_with_message() {
+        let (exec, agent_id) = spawn_agent_with_status(AgentStatus::Error {
+            message: "boom".to_string(),
+        })
+        .await;
+        let result = exec
+            .execute(
+                "check_agent",
+                &serde_json::json!({"agent_id": agent_id}),
+                "caller",
+                bevy_ecs::prelude::Entity::from_raw(0),
+                0,
+                3,
+            )
+            .await;
+        assert_eq!(result, "Status: error: boom");
+    }
+
+    #[tokio::test]
+    async fn test_exec_check_reports_cancelled_status() {
+        let (exec, agent_id) = spawn_agent_with_status(AgentStatus::Cancelled).await;
+        let result = exec
+            .execute(
+                "check_agent",
+                &serde_json::json!({"agent_id": agent_id}),
+                "caller",
+                bevy_ecs::prelude::Entity::from_raw(0),
+                0,
+                3,
+            )
+            .await;
+        assert_eq!(result, "Status: cancelled");
+    }
+
+    #[tokio::test]
+    async fn test_exec_check_reports_idle_status() {
+        let (exec, agent_id) = spawn_agent_with_status(AgentStatus::Idle).await;
+        let result = exec
+            .execute(
+                "check_agent",
+                &serde_json::json!({"agent_id": agent_id}),
+                "caller",
+                bevy_ecs::prelude::Entity::from_raw(0),
+                0,
+                3,
+            )
+            .await;
+        assert_eq!(result, "Status: idle");
+    }
+
+    #[tokio::test]
+    async fn test_exec_check_complete_status_includes_last_conversation_entry() {
+        let (exec, agent_id) = spawn_agent_with_status(AgentStatus::Complete).await;
+        let result = exec
+            .execute(
+                "check_agent",
+                &serde_json::json!({"agent_id": agent_id}),
+                "caller",
+                bevy_ecs::prelude::Entity::from_raw(0),
+                0,
+                3,
+            )
+            .await;
+        // No conversation region content was added, so it should still say
+        // "Status: complete" without a "Result:" line — but must not panic.
+        assert!(result.starts_with("Status: complete"));
+    }
+
+    #[tokio::test]
+    async fn test_exec_check_entity_no_longer_exists() {
+        // Register an agent_id pointing to an Entity that doesn't exist in
+        // the world at all (never spawned).
+        let registry = leviath_runtime::ProviderRegistry::new();
+        let engine = leviath_runtime::AgentEngine::with_providers(registry);
+        let engine_arc = Arc::new(tokio::sync::RwLock::new(engine));
+        let exec = SubAgentExecutor::new(Arc::clone(&engine_arc));
+        exec.register_agent(
+            "ghost-agent".to_string(),
+            bevy_ecs::prelude::Entity::from_raw(9999),
+        );
+
+        let result = exec
+            .execute(
+                "check_agent",
+                &serde_json::json!({"agent_id": "ghost-agent"}),
+                "caller",
+                bevy_ecs::prelude::Entity::from_raw(0),
+                0,
+                3,
+            )
+            .await;
+        assert!(result.contains("no state") || result.contains("[error]"));
+    }
+
+    // ─── exec_wait: completes, errors, cancelled ────────────────────────────
+
+    #[tokio::test]
+    async fn test_exec_wait_returns_when_agent_completes() {
+        use leviath_runtime::AgentPool;
+
+        let registry = leviath_runtime::ProviderRegistry::new();
+        let engine = leviath_runtime::AgentEngine::with_providers(registry);
+        let engine_arc = Arc::new(tokio::sync::RwLock::new(engine));
+        let exec = SubAgentExecutor::new(Arc::clone(&engine_arc));
+
+        let bp = leviath_core::Blueprint::new(
+            "wait-bp".to_string(),
+            "desc".to_string(),
+            vec![],
+            leviath_core::ContextLayout::new(vec![], 128_000),
+        );
+
+        let (agent_id, entity) = {
+            let mut eng = engine_arc.write().await;
+            let mut pool = AgentPool::new(bp);
+            let id = pool.spawn_agent(eng.world_mut());
+            let entity = pool.get_agent(&id).unwrap();
+            exec.register_agent(id.clone(), entity);
+            (id, entity)
+        };
+
+        // Flip to Complete after a short delay, from a background task.
+        let engine_arc2 = Arc::clone(&engine_arc);
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            let mut eng = engine_arc2.write().await;
+            if let Some(mut state) = eng.world_mut().get_mut::<AgentState>(entity) {
+                state.status = AgentStatus::Complete;
+            }
+        });
+
+        let result = exec
+            .execute(
+                "wait_for_agent",
+                &serde_json::json!({"agent_id": agent_id}),
+                "caller",
+                bevy_ecs::prelude::Entity::from_raw(0),
+                0,
+                3,
+            )
+            .await;
+        assert!(result.contains("completed"), "got: {}", result);
+    }
+
+    #[tokio::test]
+    async fn test_exec_wait_returns_when_agent_errors() {
+        use leviath_runtime::AgentPool;
+
+        let registry = leviath_runtime::ProviderRegistry::new();
+        let engine = leviath_runtime::AgentEngine::with_providers(registry);
+        let engine_arc = Arc::new(tokio::sync::RwLock::new(engine));
+        let exec = SubAgentExecutor::new(Arc::clone(&engine_arc));
+
+        let bp = leviath_core::Blueprint::new(
+            "wait-err-bp".to_string(),
+            "desc".to_string(),
+            vec![],
+            leviath_core::ContextLayout::new(vec![], 128_000),
+        );
+
+        let (agent_id, entity) = {
+            let mut eng = engine_arc.write().await;
+            let mut pool = AgentPool::new(bp);
+            let id = pool.spawn_agent(eng.world_mut());
+            let entity = pool.get_agent(&id).unwrap();
+            exec.register_agent(id.clone(), entity);
+            (id, entity)
+        };
+
+        let engine_arc2 = Arc::clone(&engine_arc);
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            let mut eng = engine_arc2.write().await;
+            if let Some(mut state) = eng.world_mut().get_mut::<AgentState>(entity) {
+                state.status = AgentStatus::Error {
+                    message: "oops".to_string(),
+                };
+            }
+        });
+
+        let result = exec
+            .execute(
+                "wait_for_agent",
+                &serde_json::json!({"agent_id": agent_id}),
+                "caller",
+                bevy_ecs::prelude::Entity::from_raw(0),
+                0,
+                3,
+            )
+            .await;
+        assert!(result.contains("failed"), "got: {}", result);
+        assert!(result.contains("oops"), "got: {}", result);
+    }
+
+    #[tokio::test]
+    async fn test_exec_wait_returns_when_agent_cancelled() {
+        use leviath_runtime::AgentPool;
+
+        let registry = leviath_runtime::ProviderRegistry::new();
+        let engine = leviath_runtime::AgentEngine::with_providers(registry);
+        let engine_arc = Arc::new(tokio::sync::RwLock::new(engine));
+        let exec = SubAgentExecutor::new(Arc::clone(&engine_arc));
+
+        let bp = leviath_core::Blueprint::new(
+            "wait-cancel-bp".to_string(),
+            "desc".to_string(),
+            vec![],
+            leviath_core::ContextLayout::new(vec![], 128_000),
+        );
+
+        let (agent_id, entity) = {
+            let mut eng = engine_arc.write().await;
+            let mut pool = AgentPool::new(bp);
+            let id = pool.spawn_agent(eng.world_mut());
+            let entity = pool.get_agent(&id).unwrap();
+            exec.register_agent(id.clone(), entity);
+            (id, entity)
+        };
+
+        let engine_arc2 = Arc::clone(&engine_arc);
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            let mut eng = engine_arc2.write().await;
+            if let Some(mut state) = eng.world_mut().get_mut::<AgentState>(entity) {
+                state.status = AgentStatus::Cancelled;
+            }
+        });
+
+        let result = exec
+            .execute(
+                "wait_for_agent",
+                &serde_json::json!({"agent_id": agent_id}),
+                "caller",
+                bevy_ecs::prelude::Entity::from_raw(0),
+                0,
+                3,
+            )
+            .await;
+        assert!(result.contains("cancelled"), "got: {}", result);
+    }
+
+    #[tokio::test]
+    async fn test_exec_wait_entity_no_longer_exists() {
+        let registry = leviath_runtime::ProviderRegistry::new();
+        let engine = leviath_runtime::AgentEngine::with_providers(registry);
+        let engine_arc = Arc::new(tokio::sync::RwLock::new(engine));
+        let exec = SubAgentExecutor::new(Arc::clone(&engine_arc));
+        exec.register_agent(
+            "ghost-wait".to_string(),
+            bevy_ecs::prelude::Entity::from_raw(9999),
+        );
+
+        let result = exec
+            .execute(
+                "wait_for_agent",
+                &serde_json::json!({"agent_id": "ghost-wait"}),
+                "caller",
+                bevy_ecs::prelude::Entity::from_raw(0),
+                0,
+                3,
+            )
+            .await;
+        assert!(result.contains("no longer exists"), "got: {}", result);
+    }
+
     // ─── exec_send success path ────────────────────────────────────────────
 
     #[tokio::test]

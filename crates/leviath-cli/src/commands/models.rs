@@ -1112,4 +1112,84 @@ mod tests {
         assert_eq!(fmt_tokens(1500), "1K");
         assert_eq!(fmt_tokens(65_536), "65K");
     }
+
+    // ─── list() / show() non-remote paths ──────────────────────────────
+    //
+    // Config::load() gracefully falls back to defaults when
+    // ~/.leviath/config.toml doesn't exist, so these are safe to call
+    // directly without touching the real environment. The --remote branches
+    // (real network calls to provider list_models() APIs) are intentionally
+    // not covered here — list()/show() build their own ProviderRegistry
+    // internally from Config::load(), with no injection seam, and exercising
+    // them would mean either real API keys or refactoring both functions to
+    // accept an injectable registry purely for this test.
+
+    #[tokio::test]
+    async fn list_builtin_no_filter_succeeds() {
+        let args = ListArgs {
+            remote: false,
+            provider: None,
+        };
+        let result = list(args).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn list_builtin_with_provider_filter_succeeds() {
+        let args = ListArgs {
+            remote: false,
+            provider: Some("anthropic".to_string()),
+        };
+        let result = list(args).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn list_unknown_provider_filter_finds_nothing() {
+        let args = ListArgs {
+            remote: false,
+            provider: Some("no-such-provider".to_string()),
+        };
+        // Should print "No models found." and still succeed, not error.
+        let result = list(args).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn show_builtin_model_succeeds() {
+        // Use a model ID guaranteed to be in the builtin table.
+        let known_id = builtin_table()[0].model_id.to_string();
+        let args = ShowArgs {
+            model: known_id,
+            remote: false,
+            provider: None,
+        };
+        let result = show(args).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn show_unknown_model_without_remote_succeeds_with_warning() {
+        let args = ShowArgs {
+            model: "totally-unknown-model-xyz".to_string(),
+            remote: false,
+            provider: None,
+        };
+        // Falls through all lookup tiers; must not error even when not found.
+        let result = show(args).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn show_remote_without_provider_falls_through_gracefully() {
+        // args.remote = true but no --provider given -> the remote-fetch
+        // branch's inner `if let Some(ref provider_name)` is skipped.
+        let args = ShowArgs {
+            model: "totally-unknown-model-xyz".to_string(),
+            remote: true,
+            provider: None,
+        };
+        let result = show(args).await;
+        assert!(result.is_ok());
+    }
 }

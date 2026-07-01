@@ -222,4 +222,62 @@ mod tests {
             );
         }
     }
+
+    // ─── execute ─────────────────────────────────────────────────────────
+    //
+    // `args.name` is used directly as a Path — passing an absolute tempdir
+    // path makes this testable without touching the real CWD.
+
+    #[tokio::test]
+    async fn execute_creates_blueprint_dir_with_expected_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let blueprint_path = dir.path().join("my-new-agent");
+        let args = CreateArgs {
+            name: blueprint_path.to_str().unwrap().to_string(),
+            template: "coder".to_string(),
+        };
+
+        execute(args).await.unwrap();
+
+        assert!(blueprint_path.join("agent.leviath").exists());
+        assert!(blueprint_path.join(".gitignore").exists());
+        assert!(blueprint_path.join(".env.example").exists());
+
+        let manifest = fs::read_to_string(blueprint_path.join("agent.leviath")).unwrap();
+        assert!(manifest.contains("analyze"));
+    }
+
+    #[tokio::test]
+    async fn execute_default_template_is_software_engineer_shape() {
+        let dir = tempfile::tempdir().unwrap();
+        let blueprint_path = dir.path().join("default-template-agent");
+        let args = CreateArgs {
+            name: blueprint_path.to_str().unwrap().to_string(),
+            template: "software-engineer".to_string(),
+        };
+
+        execute(args).await.unwrap();
+
+        let manifest = fs::read_to_string(blueprint_path.join("agent.leviath")).unwrap();
+        let parsed: toml::Value = toml::from_str(&manifest).unwrap();
+        assert_eq!(
+            parsed["agent"]["name"].as_str().unwrap(),
+            blueprint_path.to_str().unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn execute_existing_directory_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let blueprint_path = dir.path().join("already-exists");
+        fs::create_dir_all(&blueprint_path).unwrap();
+
+        let args = CreateArgs {
+            name: blueprint_path.to_str().unwrap().to_string(),
+            template: "coder".to_string(),
+        };
+
+        let err = execute(args).await.unwrap_err();
+        assert!(err.to_string().contains("already exists"));
+    }
 }

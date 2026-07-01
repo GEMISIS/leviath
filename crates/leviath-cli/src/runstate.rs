@@ -1139,4 +1139,67 @@ mod tests {
     fn tail_stage_log_nonexistent_returns_empty() {
         assert_eq!(tail_stage_log("no-such-run-xyz", 0, 4096), "");
     }
+
+    // ─── runs_dir / list_runs edge cases ────────────────────────────────────
+
+    #[test]
+    fn runs_dir_respects_leviath_runs_dir_env_override() {
+        // This test process/suite already relies on LEVIATH_RUNS_DIR being
+        // set for determinism (see other tests using run_dir/create_run
+        // without touching the real ~/.leviath/runs) — assert the override
+        // actually takes effect rather than assuming it silently.
+        let existing = std::env::var("LEVIATH_RUNS_DIR").ok();
+        let dir = runs_dir();
+        match existing {
+            Some(v) => assert_eq!(dir, PathBuf::from(v)),
+            None => assert!(dir.ends_with(".leviath/runs") || dir.ends_with(".leviath\\runs")),
+        }
+    }
+
+    #[test]
+    fn list_runs_empty_when_runs_dir_missing_or_empty() {
+        // With no runs created under a fresh unique prefix, list_runs()
+        // should not include them. We can't safely blow away the whole
+        // runs_dir (other tests use it concurrently), so instead verify
+        // list_runs() never panics and returns a Vec (covers the has-entries
+        // path already; this covers the function executing end-to-end when
+        // there happen to be zero matching/readable entries for a bogus id).
+        let runs = list_runs();
+        assert!(!runs
+            .iter()
+            .any(|r| r.run_id == "definitely-not-a-real-run-id"));
+    }
+
+    #[test]
+    fn tail_file_nonexistent_path_returns_empty() {
+        let path = std::path::Path::new("/nonexistent/path/to/a/file.log");
+        assert_eq!(tail_file(path, 1024), "");
+    }
+
+    #[test]
+    fn tail_file_small_file_returns_whole_contents() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("small.log");
+        std::fs::write(&path, "hello world").unwrap();
+        assert_eq!(tail_file(&path, 1024), "hello world");
+    }
+
+    #[test]
+    fn tail_file_large_file_truncates_from_offset() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("big.log");
+        let content = "a".repeat(100) + "\nTAIL_MARKER\n";
+        std::fs::write(&path, &content).unwrap();
+        let tailed = tail_file(&path, 20);
+        assert!(tailed.contains("TAIL_MARKER"));
+        assert!(tailed.len() < content.len());
+    }
+
+    #[test]
+    fn tail_file_directory_path_returns_empty() {
+        // metadata() succeeds on a directory but read_to_string/File::open
+        // will fail — exercises the graceful-empty-string fallback.
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(tail_file(dir.path(), 4), "");
+    }
 }

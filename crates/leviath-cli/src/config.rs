@@ -156,13 +156,22 @@ impl Config {
         // Load .env file from current directory (silently ignored if missing)
         let _ = dotenvy::dotenv();
 
-        let path = Self::config_path();
+        let config = Self::load_from_path(&Self::config_path())?;
 
+        // Check config file permissions on Unix
+        check_permissions();
+
+        Ok(config)
+    }
+
+    /// Core of `load()`, parameterized by path so it can be exercised in
+    /// tests against a tempfile instead of the real `~/.leviath/config.toml`.
+    fn load_from_path(path: &std::path::Path) -> anyhow::Result<Self> {
         let mut config = if !path.exists() {
             tracing::debug!("No config file found at {}, using defaults", path.display());
             Self::default()
         } else {
-            let content = std::fs::read_to_string(&path).map_err(|e| {
+            let content = std::fs::read_to_string(path).map_err(|e| {
                 anyhow::anyhow!("Failed to read config from '{}': {}", path.display(), e)
             })?;
 
@@ -191,17 +200,20 @@ impl Config {
             config.ollama_base_url = std::env::var("OLLAMA_HOST").ok();
         }
 
-        // Check config file permissions on Unix
-        check_permissions();
-
         Ok(config)
     }
 
     /// Save configuration to the default location.
     #[allow(dead_code)] // Public API for config editing (used by init, future commands)
     pub fn save(&self) -> anyhow::Result<()> {
-        let path = Self::config_path();
+        self.save_to_path(&Self::config_path())
+    }
 
+    /// Core of `save()`, parameterized by path so it can be exercised in
+    /// tests against a tempfile instead of the real `~/.leviath/config.toml`.
+    /// `pub(crate)` so other in-crate callers (e.g. the `setup` wizard) can
+    /// also inject a path for testability.
+    pub(crate) fn save_to_path(&self, path: &std::path::Path) -> anyhow::Result<()> {
         // Create parent directory if needed
         if let Some(parent) = path.parent() {
             create_config_dir(parent)?;
@@ -210,12 +222,12 @@ impl Config {
         let content = toml::to_string_pretty(self)
             .map_err(|e| anyhow::anyhow!("Failed to serialize config: {}", e))?;
 
-        std::fs::write(&path, content).map_err(|e| {
+        std::fs::write(path, content).map_err(|e| {
             anyhow::anyhow!("Failed to write config to '{}': {}", path.display(), e)
         })?;
 
         // Set restrictive permissions on the config file
-        set_file_permissions(&path);
+        set_file_permissions(path);
 
         tracing::debug!("Saved config to {}", path.display());
         Ok(())
@@ -272,14 +284,20 @@ fn create_config_dir(dir: &std::path::Path) -> anyhow::Result<()> {
 /// Check permissions on the config file and auto-fix if too permissive (Unix only).
 #[cfg(unix)]
 fn check_permissions() {
+    check_permissions_at(&Config::config_path());
+}
+
+/// Core of `check_permissions()`, parameterized by path so it can be
+/// exercised in tests against a tempfile instead of the real config path.
+#[cfg(unix)]
+fn check_permissions_at(path: &std::path::Path) {
     use std::os::unix::fs::PermissionsExt;
 
-    let path = Config::config_path();
     if !path.exists() {
         return;
     }
 
-    if let Ok(metadata) = std::fs::metadata(&path) {
+    if let Ok(metadata) = std::fs::metadata(path) {
         let mode = metadata.permissions().mode();
         if mode & 0o077 != 0 {
             tracing::warn!(
@@ -288,7 +306,7 @@ fn check_permissions() {
                 "Config file has overly permissive permissions, fixing to 600"
             );
             let perms = std::fs::Permissions::from_mode(0o600);
-            if let Err(e) = std::fs::set_permissions(&path, perms) {
+            if let Err(e) = std::fs::set_permissions(path, perms) {
                 tracing::warn!("Failed to fix config file permissions: {}", e);
             }
         }
@@ -333,6 +351,168 @@ fn set_dir_permissions(_path: &std::path::Path) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ─── load_from_path / save_to_path (path-parameterized for testability) ─
+
+    #[test]
+    fn load_from_path_missing_file_returns_defaults() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let config = Config::load_from_path(&path).unwrap();
+        assert_eq!(config.default_provider, "anthropic");
+    }
+
+    #[test]
+    fn load_from_path_valid_toml_is_parsed() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let original = Config {
+            default_provider: "openai".to_string(),
+            ..Config::default()
+        };
+        std::fs::write(&path, toml::to_string_pretty(&original).unwrap()).unwrap();
+        let config = Config::load_from_path(&path).unwrap();
+        assert_eq!(config.default_provider, "openai");
+    }
+
+    #[test]
+    fn load_from_path_malformed_toml_returns_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "not valid toml [[[").unwrap();
+        let result = Config::load_from_path(&path);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Failed to parse"));
+    }
+
+    #[test]
+    fn load_from_path_unreadable_path_returns_error() {
+        // A directory can't be read as a config file.
+        let dir = tempfile::tempdir().unwrap();
+        let result = Config::load_from_path(dir.path());
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn save_to_path_writes_valid_toml_that_round_trips() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nested").join("config.toml");
+        let config = Config {
+            default_provider: "google".to_string(),
+            ..Config::default()
+        };
+        config.save_to_path(&path).unwrap();
+
+        let loaded = Config::load_from_path(&path).unwrap();
+        assert_eq!(loaded.default_provider, "google");
+    }
+
+    #[test]
+    fn save_to_path_creates_parent_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a").join("b").join("config.toml");
+        let config = Config::default();
+        config.save_to_path(&path).unwrap();
+        assert!(path.exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn save_to_path_sets_restrictive_file_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        Config::default().save_to_path(&path).unwrap();
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
+    }
+
+    // ─── check_permissions_at ────────────────────────────────────────────
+
+    #[cfg(unix)]
+    #[test]
+    fn check_permissions_at_missing_file_is_noop() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nonexistent.toml");
+        check_permissions_at(&path); // must not panic
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn check_permissions_at_fixes_overly_permissive_file() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        check_permissions_at(&path);
+
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn check_permissions_at_leaves_already_restrictive_file_alone() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+        check_permissions_at(&path);
+
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
+    }
+
+    // ─── create_config_dir / set_file_permissions / set_dir_permissions ───
+    // (already path-parameterized — directly testable without touching the
+    // real ~/.leviath/config.toml)
+
+    #[test]
+    fn create_config_dir_creates_nested_dirs() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("a").join("b").join("c");
+        create_config_dir(&target).unwrap();
+        assert!(target.is_dir());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn create_config_dir_sets_restrictive_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("leviath");
+        create_config_dir(&target).unwrap();
+        let mode = std::fs::metadata(&target).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o700);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn set_file_permissions_sets_0600() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("f.toml");
+        std::fs::write(&path, "").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        set_file_permissions(&path);
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn set_dir_permissions_sets_0700() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
+        set_dir_permissions(dir.path());
+        let mode = std::fs::metadata(dir.path()).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o700);
+    }
 
     #[test]
     fn test_redact_key_short() {

@@ -10,85 +10,114 @@ pub struct ValidateArgs {
     path: String,
 }
 
-pub async fn execute(args: ValidateArgs) -> anyhow::Result<()> {
-    let path = PathBuf::from(&args.path);
+/// Resolve, read, parse, and validate the manifest at `path`. Distinguishes
+/// I/O failures (propagated as a normal error) from parse/validation
+/// failures (which `execute()` reports specially and exits(1) on) so the
+/// core logic can be unit tested without killing the test process.
+#[derive(Debug)]
+enum ManifestCheckError {
+    Io(anyhow::Error),
+    Parse(String),
+    Validation(String),
+}
 
+fn check_manifest(path: &std::path::Path) -> Result<leviath_core::Blueprint, ManifestCheckError> {
     // Resolve manifest path
     let manifest_path = if path.is_file() {
-        path.clone()
+        path.to_path_buf()
     } else {
         let p = path.join("agent.leviath");
         if !p.exists() {
-            anyhow::bail!("No agent.leviath found at {}", path.display());
+            return Err(ManifestCheckError::Io(anyhow::anyhow!(
+                "No agent.leviath found at {}",
+                path.display()
+            )));
         }
         p
     };
 
-    let content = std::fs::read_to_string(&manifest_path)
-        .map_err(|e| anyhow::anyhow!("Failed to read {}: {}", manifest_path.display(), e))?;
+    let content = std::fs::read_to_string(&manifest_path).map_err(|e| {
+        ManifestCheckError::Io(anyhow::anyhow!(
+            "Failed to read {}: {}",
+            manifest_path.display(),
+            e
+        ))
+    })?;
 
-    // Parse
-    let blueprint = match super::run::parse_manifest_public(&content) {
+    let blueprint = super::run::parse_manifest_public(&content)
+        .map_err(|e| ManifestCheckError::Parse(e.to_string()))?;
+
+    blueprint
+        .validate()
+        .map_err(|e| ManifestCheckError::Validation(e.to_string()))?;
+
+    Ok(blueprint)
+}
+
+/// Print the "valid blueprint" summary + non-fatal warnings.
+fn print_success(blueprint: &leviath_core::Blueprint) {
+    println!("✓ Blueprint '{}' is valid.", blueprint.name);
+    println!(
+        "  {} stages, version {}",
+        blueprint.stages.len(),
+        blueprint.version
+    );
+
+    // Check if graph mode
+    let is_graph = blueprint.stages.iter().any(|s| s.transitions.is_some());
+    if is_graph {
+        let entry = blueprint.resolve_entry_stage_name();
+        println!("  Graph mode: entry stage '{}'", entry);
+
+        // List stages and their transitions
+        for stage in &blueprint.stages {
+            let transitions_info = match &stage.transitions {
+                Some(t) if !t.is_empty() => {
+                    let targets: Vec<&str> = t.keys().map(|k| k.as_str()).collect();
+                    format!(" → {}", targets.join(", "))
+                }
+                Some(_) => " (terminal)".to_string(),
+                None => " (linear)".to_string(),
+            };
+            let revisits = stage
+                .max_revisits
+                .map(|n| format!(" (max_revisits: {})", n))
+                .unwrap_or_default();
+            println!("  - {}{}{}", stage.name, transitions_info, revisits);
+        }
+    } else {
+        println!(
+            "  Linear mode: {}",
+            blueprint
+                .stages
+                .iter()
+                .map(|s| s.name.as_str())
+                .collect::<Vec<_>>()
+                .join(" → ")
+        );
+    }
+
+    // Warnings (non-fatal)
+    print_warnings(blueprint);
+}
+
+pub async fn execute(args: ValidateArgs) -> anyhow::Result<()> {
+    let path = PathBuf::from(&args.path);
+
+    let blueprint = match check_manifest(&path) {
         Ok(bp) => bp,
-        Err(e) => {
+        Err(ManifestCheckError::Io(e)) => return Err(e),
+        Err(ManifestCheckError::Parse(e)) => {
             eprintln!("✗ Parse error: {}", e);
+            std::process::exit(1);
+        }
+        Err(ManifestCheckError::Validation(e)) => {
+            eprintln!("✗ Validation failed: {}", e);
             std::process::exit(1);
         }
     };
 
-    // Validate
-    match blueprint.validate() {
-        Ok(()) => {
-            println!("✓ Blueprint '{}' is valid.", blueprint.name);
-            println!(
-                "  {} stages, version {}",
-                blueprint.stages.len(),
-                blueprint.version
-            );
-
-            // Check if graph mode
-            let is_graph = blueprint.stages.iter().any(|s| s.transitions.is_some());
-            if is_graph {
-                let entry = blueprint.resolve_entry_stage_name();
-                println!("  Graph mode: entry stage '{}'", entry);
-
-                // List stages and their transitions
-                for stage in &blueprint.stages {
-                    let transitions_info = match &stage.transitions {
-                        Some(t) if !t.is_empty() => {
-                            let targets: Vec<&str> = t.keys().map(|k| k.as_str()).collect();
-                            format!(" → {}", targets.join(", "))
-                        }
-                        Some(_) => " (terminal)".to_string(),
-                        None => " (linear)".to_string(),
-                    };
-                    let revisits = stage
-                        .max_revisits
-                        .map(|n| format!(" (max_revisits: {})", n))
-                        .unwrap_or_default();
-                    println!("  - {}{}{}", stage.name, transitions_info, revisits);
-                }
-            } else {
-                println!(
-                    "  Linear mode: {}",
-                    blueprint
-                        .stages
-                        .iter()
-                        .map(|s| s.name.as_str())
-                        .collect::<Vec<_>>()
-                        .join(" → ")
-                );
-            }
-
-            // Warnings (non-fatal)
-            print_warnings(&blueprint);
-        }
-        Err(e) => {
-            eprintln!("✗ Validation failed: {}", e);
-            std::process::exit(1);
-        }
-    }
-
+    print_success(&blueprint);
     Ok(())
 }
 
@@ -451,5 +480,158 @@ max_iterations = 5
         );
         let bp = parse(&toml);
         print_warnings(&bp);
+    }
+
+    // ─── check_manifest ──────────────────────────────────────────────────
+
+    fn write_manifest(dir: &std::path::Path, content: &str) -> std::path::PathBuf {
+        let path = dir.join("agent.leviath");
+        std::fs::write(&path, content).unwrap();
+        path
+    }
+
+    #[test]
+    fn check_manifest_missing_directory_manifest_is_io_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let err = check_manifest(dir.path()).unwrap_err();
+        assert!(matches!(err, ManifestCheckError::Io(_)));
+        if let ManifestCheckError::Io(e) = err {
+            assert!(e.to_string().contains("No agent.leviath found"));
+        }
+    }
+
+    #[test]
+    fn check_manifest_unreadable_file_path_is_io_error() {
+        let dir = tempfile::tempdir().unwrap();
+        // Pass a path to a file that doesn't exist directly (is_file() is
+        // false, and it's not a directory either) — falls through to the
+        // "join agent.leviath" branch, which also won't exist.
+        let missing = dir.path().join("nonexistent-subdir");
+        let err = check_manifest(&missing).unwrap_err();
+        assert!(matches!(err, ManifestCheckError::Io(_)));
+    }
+
+    #[test]
+    fn check_manifest_malformed_toml_is_parse_error() {
+        let dir = tempfile::tempdir().unwrap();
+        write_manifest(dir.path(), "not valid toml [[[");
+        let err = check_manifest(dir.path()).unwrap_err();
+        assert!(matches!(err, ManifestCheckError::Parse(_)));
+    }
+
+    #[test]
+    fn check_manifest_direct_file_path_is_accepted() {
+        let dir = tempfile::tempdir().unwrap();
+        let toml = make_blueprint_toml(
+            r#"
+[stages.main]
+mode = "autonomous"
+model = { provider = "anthropic", model = "claude-sonnet-4-6" }
+description = "Main stage"
+max_iterations = 5
+"#,
+        );
+        let manifest_path = write_manifest(dir.path(), &toml);
+        // Pass the *file* path directly, not the directory.
+        let blueprint = check_manifest(&manifest_path).unwrap();
+        assert_eq!(blueprint.name, "test");
+    }
+
+    #[test]
+    fn check_manifest_valid_linear_blueprint_succeeds() {
+        let dir = tempfile::tempdir().unwrap();
+        let toml = make_blueprint_toml(
+            r#"
+[stages.main]
+mode = "autonomous"
+model = { provider = "anthropic", model = "claude-sonnet-4-6" }
+description = "Main stage"
+max_iterations = 5
+"#,
+        );
+        write_manifest(dir.path(), &toml);
+        let blueprint = check_manifest(dir.path()).unwrap();
+        assert_eq!(blueprint.name, "test");
+        assert_eq!(blueprint.stages.len(), 1);
+    }
+
+    // ─── print_success ───────────────────────────────────────────────────
+
+    #[test]
+    fn print_success_linear_mode_no_panic() {
+        let toml = make_blueprint_toml(
+            r#"
+[stages.main]
+mode = "autonomous"
+model = { provider = "anthropic", model = "claude-sonnet-4-6" }
+description = "Main stage"
+max_iterations = 5
+
+[stages.review]
+mode = "autonomous"
+model = { provider = "anthropic", model = "claude-sonnet-4-6" }
+description = "Review stage"
+max_iterations = 5
+"#,
+        );
+        let bp = parse(&toml);
+        print_success(&bp);
+    }
+
+    #[test]
+    fn print_success_graph_mode_with_terminal_and_revisits_no_panic() {
+        let toml = make_blueprint_toml(
+            r#"
+[stages.a]
+mode = "autonomous"
+model = { provider = "anthropic", model = "claude-sonnet-4-6" }
+description = "A"
+max_iterations = 5
+entry = true
+max_revisits = 3
+[stages.a.transitions]
+b = "true"
+
+[stages.b]
+mode = "autonomous"
+model = { provider = "anthropic", model = "claude-sonnet-4-6" }
+description = "B"
+max_iterations = 5
+"#,
+        );
+        let bp = parse(&toml);
+        // Exercises: graph mode header, an edge with a target ("-> b"), and
+        // stage "b" which has transitions = None ("(linear)" branch) as well
+        // as the max_revisits formatting on stage "a".
+        print_success(&bp);
+    }
+
+    #[test]
+    fn print_success_graph_mode_terminal_stage_no_panic() {
+        let toml = make_blueprint_toml(
+            r#"
+[stages.a]
+mode = "autonomous"
+model = { provider = "anthropic", model = "claude-sonnet-4-6" }
+description = "A"
+max_iterations = 5
+entry = true
+[stages.a.transitions]
+b = "true"
+
+[stages.b]
+mode = "autonomous"
+model = { provider = "anthropic", model = "claude-sonnet-4-6" }
+description = "B"
+max_iterations = 5
+[stages.b.transitions]
+"#,
+        );
+        let bp = parse(&toml);
+        // Stage "b" has an explicitly-empty transitions table -> Some(empty
+        // map) -> exercises the "(terminal)" formatting branch.
+        let b = bp.find_stage("b").unwrap();
+        assert!(matches!(&b.transitions, Some(t) if t.is_empty()));
+        print_success(&bp);
     }
 }

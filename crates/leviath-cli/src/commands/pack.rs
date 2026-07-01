@@ -294,4 +294,92 @@ mod tests {
             PathBuf::from("my-agent-1.0.0-beta.1.leviath-bundle")
         );
     }
+
+    // ─── execute ─────────────────────────────────────────────────────────
+    //
+    // Both `args.path` and `args.output` are used directly as Paths, so
+    // passing absolute tempdir paths avoids touching the real CWD.
+
+    fn make_project_dir(with_scripts: bool, with_tests: bool) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("agent.leviath"),
+            "[agent]\nname = \"packed-agent\"\nversion = \"1.0.0\"\ndescription = \"d\"\n",
+        )
+        .unwrap();
+        if with_scripts {
+            std::fs::create_dir_all(dir.path().join("scripts")).unwrap();
+            std::fs::write(dir.path().join("scripts/run.sh"), "#!/bin/sh\n").unwrap();
+        }
+        if with_tests {
+            std::fs::create_dir_all(dir.path().join("tests")).unwrap();
+            std::fs::write(dir.path().join("tests/test1.txt"), "test").unwrap();
+        }
+        dir
+    }
+
+    #[tokio::test]
+    async fn execute_packs_project_to_explicit_output() {
+        let project = make_project_dir(false, false);
+        let output_dir = tempfile::tempdir().unwrap();
+        let output_path = output_dir.path().join("out.leviath-bundle");
+
+        let args = PackArgs {
+            path: Some(project.path().to_str().unwrap().to_string()),
+            output: Some(output_path.to_str().unwrap().to_string()),
+        };
+
+        execute(args).await.unwrap();
+
+        assert!(output_path.exists());
+        assert!(std::fs::metadata(&output_path).unwrap().len() > 0);
+    }
+
+    #[tokio::test]
+    async fn execute_with_scripts_and_tests_dirs() {
+        let project = make_project_dir(true, true);
+        let output_dir = tempfile::tempdir().unwrap();
+        let output_path = output_dir.path().join("out.leviath-bundle");
+
+        let args = PackArgs {
+            path: Some(project.path().to_str().unwrap().to_string()),
+            output: Some(output_path.to_str().unwrap().to_string()),
+        };
+
+        execute(args).await.unwrap();
+        assert!(output_path.exists());
+    }
+
+    #[tokio::test]
+    async fn execute_missing_manifest_errors() {
+        let project = tempfile::tempdir().unwrap(); // no agent.leviath written
+        let output_dir = tempfile::tempdir().unwrap();
+        let output_path = output_dir.path().join("out.leviath-bundle");
+
+        let args = PackArgs {
+            path: Some(project.path().to_str().unwrap().to_string()),
+            output: Some(output_path.to_str().unwrap().to_string()),
+        };
+
+        let err = execute(args).await.unwrap_err();
+        assert!(err.to_string().contains("Could not find agent.leviath"));
+    }
+
+    #[tokio::test]
+    async fn execute_unwritable_output_path_errors() {
+        let project = make_project_dir(false, false);
+        // Output path inside a directory that doesn't exist -> write fails.
+        let output_path = project
+            .path()
+            .join("nonexistent-subdir")
+            .join("out.leviath-bundle");
+
+        let args = PackArgs {
+            path: Some(project.path().to_str().unwrap().to_string()),
+            output: Some(output_path.to_str().unwrap().to_string()),
+        };
+
+        let err = execute(args).await.unwrap_err();
+        assert!(err.to_string().contains("Failed to write bundle"));
+    }
 }

@@ -65,11 +65,28 @@ fn scan_directory_for_agents(dir: &Path) -> Vec<(PathBuf, AgentInfo)> {
 
 pub async fn execute(_args: ListArgs) -> anyhow::Result<()> {
     let config = Config::load().unwrap_or_default();
+    let agents_dir = get_agents_dir()?;
+    let cwd = std::env::current_dir().unwrap_or_default();
+    let exe_dir = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|p| p.to_path_buf()));
+
+    print_agent_listing(&agents_dir, &cwd, exe_dir.as_deref(), &config)
+}
+
+/// Core `lev list` logic, parameterized by every real-environment source it
+/// reads from so it can be tested against tempdirs instead of the real
+/// home directory / CWD / executable location / config.
+fn print_agent_listing(
+    agents_dir: &Path,
+    cwd: &Path,
+    exe_dir: Option<&Path>,
+    config: &Config,
+) -> anyhow::Result<()> {
     let mut found_anything = false;
 
     // 1. Installed agents (~/.leviath/agents/)
-    let agents_dir = get_agents_dir()?;
-    let installed = scan_directory_for_agents(&agents_dir);
+    let installed = scan_directory_for_agents(agents_dir);
     if !installed.is_empty() {
         found_anything = true;
         println!("Installed agents (~/.leviath/agents/):");
@@ -85,7 +102,6 @@ pub async fn execute(_args: ListArgs) -> anyhow::Result<()> {
     }
 
     // 2. Local (current directory)
-    let cwd = std::env::current_dir().unwrap_or_default();
     let local_manifest = cwd.join("agent.leviath");
     if local_manifest.exists() {
         if let Some(info) = read_agent_info(&local_manifest) {
@@ -122,10 +138,7 @@ pub async fn execute(_args: ListArgs) -> anyhow::Result<()> {
     }
 
     // 4. Built-in agents (relative to the binary or known locations)
-    let exe_dir = std::env::current_exe()
-        .ok()
-        .and_then(|p| p.parent().map(|p| p.to_path_buf()));
-    if let Some(ref exe_dir) = exe_dir {
+    if let Some(exe_dir) = exe_dir {
         let builtin_dir = exe_dir.join("agents");
         let builtins = scan_directory_for_agents(&builtin_dir);
         if !builtins.is_empty() {
@@ -342,29 +355,115 @@ system = { kind = "pinned", max_tokens = 1000 }
         assert_eq!(info.description, "");
     }
 
-    // ─── execute() async tests ─────────────────────────────────────────
+    // ─── execute() smoke test (real environment) ────────────────────────
 
     #[tokio::test]
-    async fn execute_with_no_agents_found() {
-        // execute() loads config and scans for agents; when none found, prints help
-        // We can verify it doesn't panic/error even when no agents exist.
+    async fn execute_runs_without_error() {
+        // Touches the real environment (home dir / CWD / exe location /
+        // config) but must always succeed regardless of what it finds.
         let args = ListArgs {
             filter: "all".to_string(),
         };
-        // This touches the real agents dir (~/.leviath/agents), which may or may not exist.
-        // The function should succeed regardless.
         let result = execute(args).await;
         assert!(result.is_ok());
     }
 
-    #[tokio::test]
-    async fn execute_with_local_manifest() {
-        // Test by setting up a temp directory as CWD is complex; test indirectly.
-        // Just verify the function runs successfully with default filter.
-        let args = ListArgs {
-            filter: "all".to_string(),
+    // ─── print_agent_listing (fully injectable) ─────────────────────────
+
+    #[test]
+    fn print_agent_listing_nothing_found() {
+        let agents_dir = tempfile::tempdir().unwrap();
+        let cwd = tempfile::tempdir().unwrap();
+        let config = Config::default();
+
+        let result = print_agent_listing(agents_dir.path(), cwd.path(), None, &config);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn print_agent_listing_finds_installed_agent() {
+        let agents_dir = tempfile::tempdir().unwrap();
+        let sub = agents_dir.path().join("installed-agent");
+        fs::create_dir_all(&sub).unwrap();
+        write_manifest(&sub, "installed-agent");
+
+        let cwd = tempfile::tempdir().unwrap();
+        let config = Config::default();
+
+        let result = print_agent_listing(agents_dir.path(), cwd.path(), None, &config);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn print_agent_listing_finds_local_manifest() {
+        let agents_dir = tempfile::tempdir().unwrap();
+        let cwd = tempfile::tempdir().unwrap();
+        write_manifest(cwd.path(), "local-agent");
+        let config = Config::default();
+
+        let result = print_agent_listing(agents_dir.path(), cwd.path(), None, &config);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn print_agent_listing_finds_configured_path_agent() {
+        let agents_dir = tempfile::tempdir().unwrap();
+        let cwd = tempfile::tempdir().unwrap();
+        let configured = tempfile::tempdir().unwrap();
+        let sub = configured.path().join("configured-agent");
+        fs::create_dir_all(&sub).unwrap();
+        write_manifest(&sub, "configured-agent");
+
+        let config = Config {
+            agent_paths: vec![configured.path().to_path_buf()],
+            ..Config::default()
         };
-        let result = execute(args).await;
+
+        let result = print_agent_listing(agents_dir.path(), cwd.path(), None, &config);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn print_agent_listing_finds_builtin_agents() {
+        let agents_dir = tempfile::tempdir().unwrap();
+        let cwd = tempfile::tempdir().unwrap();
+        let exe_dir = tempfile::tempdir().unwrap();
+        let builtin_dir = exe_dir.path().join("agents");
+        let sub = builtin_dir.join("builtin-agent");
+        fs::create_dir_all(&sub).unwrap();
+        write_manifest(&sub, "builtin-agent");
+        let config = Config::default();
+
+        let result =
+            print_agent_listing(agents_dir.path(), cwd.path(), Some(exe_dir.path()), &config);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn print_agent_listing_all_sources_populated() {
+        let agents_dir = tempfile::tempdir().unwrap();
+        fs::create_dir_all(agents_dir.path().join("installed")).unwrap();
+        write_manifest(&agents_dir.path().join("installed"), "installed");
+
+        let cwd = tempfile::tempdir().unwrap();
+        write_manifest(cwd.path(), "local");
+
+        let configured = tempfile::tempdir().unwrap();
+        fs::create_dir_all(configured.path().join("configured")).unwrap();
+        write_manifest(&configured.path().join("configured"), "configured");
+
+        let exe_dir = tempfile::tempdir().unwrap();
+        let builtin_sub = exe_dir.path().join("agents").join("builtin");
+        fs::create_dir_all(&builtin_sub).unwrap();
+        write_manifest(&builtin_sub, "builtin");
+
+        let config = Config {
+            agent_paths: vec![configured.path().to_path_buf()],
+            ..Config::default()
+        };
+
+        let result =
+            print_agent_listing(agents_dir.path(), cwd.path(), Some(exe_dir.path()), &config);
         assert!(result.is_ok());
     }
 

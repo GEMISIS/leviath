@@ -15,14 +15,29 @@ pub struct AddArgs {
 }
 
 pub async fn execute(args: AddArgs) -> anyhow::Result<()> {
+    let installer = leviath_package::AgentInstaller::new();
+    let agents_dir = dirs::home_dir()
+        .ok_or_else(|| anyhow::anyhow!("Could not determine home directory"))?
+        .join(".leviath")
+        .join("agents");
+    execute_with(&args, &installer, &agents_dir).await
+}
+
+/// Core `lev add` logic, parameterized by installer + agents base directory
+/// so it can be tested against tempdirs instead of the real
+/// `~/.leviath/agents`.
+async fn execute_with(
+    args: &AddArgs,
+    installer: &leviath_package::AgentInstaller,
+    agents_dir: &Path,
+) -> anyhow::Result<()> {
     tracing::info!(package = %args.package, "Installing agent package");
 
-    let installer = leviath_package::AgentInstaller::new();
     let package_path = Path::new(&args.package);
 
     if package_path.is_dir() {
-        // Directory install: copy directory into ~/.leviath/agents/<name>/
-        install_from_dir(package_path)?;
+        // Directory install: copy directory into <agents_dir>/<name>/
+        install_from_dir(package_path, agents_dir)?;
     } else if package_path.exists() || args.package.ends_with(".leviath-bundle") {
         // Bundle file installation
         if !package_path.exists() {
@@ -41,6 +56,7 @@ pub async fn execute(args: AddArgs) -> anyhow::Result<()> {
         let config = crate::config::Config::load()?;
         let registry_url = args
             .registry
+            .clone()
             .or_else(|| config.registries.first().cloned())
             .unwrap_or_else(|| "https://leviath.dev/registry".to_string());
 
@@ -72,11 +88,11 @@ pub async fn execute(args: AddArgs) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Copy a plain agent directory into `~/.leviath/agents/<name>/`.
+/// Copy a plain agent directory into `<agents_dir>/<name>/`.
 ///
 /// The agent name is read from `agent.leviath` in the directory (falling back
 /// to the directory's own name).
-fn install_from_dir(src: &Path) -> anyhow::Result<()> {
+fn install_from_dir(src: &Path, agents_dir: &Path) -> anyhow::Result<()> {
     let manifest_path = src.join("agent.leviath");
     if !manifest_path.exists() {
         anyhow::bail!(
@@ -94,11 +110,7 @@ fn install_from_dir(src: &Path) -> anyhow::Result<()> {
             .to_string()
     });
 
-    let install_dir = dirs::home_dir()
-        .ok_or_else(|| anyhow::anyhow!("Could not determine home directory"))?
-        .join(".leviath")
-        .join("agents")
-        .join(&name);
+    let install_dir = agents_dir.join(&name);
 
     if install_dir.exists() {
         println!("Reinstalling agent '{}' (replacing existing)", name);
@@ -226,9 +238,222 @@ description = "test"
     #[test]
     fn install_from_dir_no_manifest_errors() {
         let dir = tempfile::tempdir().unwrap();
-        let result = install_from_dir(dir.path());
+        let agents_dir = tempfile::tempdir().unwrap();
+        let result = install_from_dir(dir.path(), agents_dir.path());
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("agent.leviath"));
+    }
+
+    #[test]
+    fn install_from_dir_copies_and_names_from_manifest() {
+        let src = tempfile::tempdir().unwrap();
+        let agents_dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            src.path().join("agent.leviath"),
+            "[agent]\nname = \"my-agent\"\n",
+        )
+        .unwrap();
+        std::fs::write(src.path().join("extra.txt"), "data").unwrap();
+
+        install_from_dir(src.path(), agents_dir.path()).unwrap();
+
+        let installed_dir = agents_dir.path().join("my-agent");
+        assert!(installed_dir.join("agent.leviath").exists());
+        assert!(installed_dir.join("extra.txt").exists());
+    }
+
+    #[test]
+    fn install_from_dir_falls_back_to_dirname_when_name_missing() {
+        let src = tempfile::tempdir().unwrap();
+        let agent_dir = src.path().join("my-dir-name");
+        std::fs::create_dir_all(&agent_dir).unwrap();
+        std::fs::write(agent_dir.join("agent.leviath"), "version = \"1.0\"\n").unwrap();
+        let agents_dir = tempfile::tempdir().unwrap();
+
+        install_from_dir(&agent_dir, agents_dir.path()).unwrap();
+
+        assert!(agents_dir.path().join("my-dir-name").exists());
+    }
+
+    #[test]
+    fn install_from_dir_reinstalls_existing() {
+        let src = tempfile::tempdir().unwrap();
+        std::fs::write(
+            src.path().join("agent.leviath"),
+            "[agent]\nname = \"dup-agent\"\n",
+        )
+        .unwrap();
+        let agents_dir = tempfile::tempdir().unwrap();
+
+        // Pre-create an existing install with a stale file that should be wiped.
+        let existing = agents_dir.path().join("dup-agent");
+        std::fs::create_dir_all(&existing).unwrap();
+        std::fs::write(existing.join("stale.txt"), "old").unwrap();
+
+        install_from_dir(src.path(), agents_dir.path()).unwrap();
+
+        assert!(!existing.join("stale.txt").exists());
+        assert!(existing.join("agent.leviath").exists());
+    }
+
+    // ─── execute_with: directory + bundle-file paths ───────────────────────
+
+    #[test]
+    fn execute_with_directory_package_installs() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let src = tempfile::tempdir().unwrap();
+            std::fs::write(
+                src.path().join("agent.leviath"),
+                "[agent]\nname = \"dir-pkg\"\n",
+            )
+            .unwrap();
+            let agents_dir = tempfile::tempdir().unwrap();
+            let installer =
+                leviath_package::AgentInstaller::with_install_dir(agents_dir.path().to_path_buf());
+            let args = AddArgs {
+                package: src.path().to_str().unwrap().to_string(),
+                registry: None,
+            };
+
+            execute_with(&args, &installer, agents_dir.path())
+                .await
+                .unwrap();
+
+            assert!(agents_dir.path().join("dir-pkg").exists());
+        });
+    }
+
+    #[test]
+    fn execute_with_missing_bundle_file_errors() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let agents_dir = tempfile::tempdir().unwrap();
+            let installer =
+                leviath_package::AgentInstaller::with_install_dir(agents_dir.path().to_path_buf());
+            let args = AddArgs {
+                package: "nonexistent.leviath-bundle".to_string(),
+                registry: None,
+            };
+
+            let err = execute_with(&args, &installer, agents_dir.path())
+                .await
+                .unwrap_err();
+            assert!(err.to_string().contains("Package file not found"));
+        });
+    }
+
+    #[test]
+    fn execute_with_bundle_file_installs() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let project_dir = tempfile::tempdir().unwrap();
+            std::fs::write(
+                project_dir.path().join("agent.leviath"),
+                "[agent]\nname = \"bundled-pkg\"\nversion = \"1.0.0\"\ndescription = \"d\"\n",
+            )
+            .unwrap();
+            let bundle_bytes = leviath_package::AgentBundler::new()
+                .bundle(project_dir.path())
+                .unwrap();
+            let bundle_dir = tempfile::tempdir().unwrap();
+            // AgentInstaller::install() derives the agent name from the
+            // bundle *filename* (not the manifest content), so name it
+            // to match what we assert on below.
+            let bundle_path = bundle_dir.path().join("bundled-pkg.leviath-bundle");
+            std::fs::write(&bundle_path, bundle_bytes).unwrap();
+
+            let agents_dir = tempfile::tempdir().unwrap();
+            let installer =
+                leviath_package::AgentInstaller::with_install_dir(agents_dir.path().to_path_buf());
+            let args = AddArgs {
+                package: bundle_path.to_str().unwrap().to_string(),
+                registry: None,
+            };
+
+            execute_with(&args, &installer, agents_dir.path())
+                .await
+                .unwrap();
+
+            assert!(agents_dir.path().join("bundled-pkg").exists());
+        });
+    }
+
+    // ─── execute_with: registry path (raw-TCP mock server) ─────────────────
+
+    async fn spawn_mock_registry(
+        get_info_body: &'static [u8],
+        download_body: &'static [u8],
+    ) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        tokio::spawn(async move {
+            // First request: GET .../packages/<name> (get_info)
+            if let Ok((mut socket, _)) = listener.accept().await {
+                let mut buf = [0u8; 8192];
+                let _ = socket.read(&mut buf).await;
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    get_info_body.len()
+                );
+                let _ = socket.write_all(resp.as_bytes()).await;
+                let _ = socket.write_all(get_info_body).await;
+                let _ = socket.shutdown().await;
+            }
+            // Second request: GET .../download (download)
+            if let Ok((mut socket, _)) = listener.accept().await {
+                let mut buf = [0u8; 8192];
+                let _ = socket.read(&mut buf).await;
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    download_body.len()
+                );
+                let _ = socket.write_all(resp.as_bytes()).await;
+                let _ = socket.write_all(download_body).await;
+                let _ = socket.shutdown().await;
+            }
+        });
+
+        format!("http://{}", addr)
+    }
+
+    #[test]
+    fn execute_with_registry_package_installs() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            let project_dir = tempfile::tempdir().unwrap();
+            std::fs::write(
+                project_dir.path().join("agent.leviath"),
+                "[agent]\nname = \"reg-pkg\"\nversion = \"1.0.0\"\ndescription = \"d\"\n",
+            )
+            .unwrap();
+            let bundle_bytes = leviath_package::AgentBundler::new()
+                .bundle(project_dir.path())
+                .unwrap();
+
+            let info_json =
+                br#"{"name":"reg-pkg","version":"1.0.0","description":"A registry package"}"#;
+            let url =
+                spawn_mock_registry(info_json, Box::leak(bundle_bytes.into_boxed_slice())).await;
+
+            let agents_dir = tempfile::tempdir().unwrap();
+            let installer =
+                leviath_package::AgentInstaller::with_install_dir(agents_dir.path().to_path_buf());
+            let args = AddArgs {
+                package: "reg-pkg".to_string(),
+                registry: Some(url),
+            };
+
+            execute_with(&args, &installer, agents_dir.path())
+                .await
+                .unwrap();
+
+            assert!(agents_dir.path().join("reg-pkg").exists());
+        });
     }
 
     // ─── path detection ────────────────────────────────────────────────────
@@ -309,8 +534,6 @@ name = "second"
 
     #[test]
     fn install_from_dir_with_manifest_runs() {
-        // This will try to install to ~/.leviath/agents/ which may or may not exist
-        // but the important thing is it parses the manifest correctly
         let dir = tempfile::tempdir().unwrap();
         let manifest = r#"
 [agent]
@@ -321,18 +544,11 @@ description = "test"
         std::fs::write(dir.path().join("agent.leviath"), manifest).unwrap();
         std::fs::write(dir.path().join("readme.txt"), "hello").unwrap();
 
-        // The install will succeed or fail depending on home dir access
-        // but it should not panic
-        let result = install_from_dir(dir.path());
-        // Clean up if it succeeded
-        if result.is_ok() {
-            if let Some(home) = dirs::home_dir() {
-                let install_dir = home
-                    .join(".leviath")
-                    .join("agents")
-                    .join("test-install-agent-xyz");
-                let _ = std::fs::remove_dir_all(install_dir);
-            }
-        }
+        let agents_dir = tempfile::tempdir().unwrap();
+        install_from_dir(dir.path(), agents_dir.path()).unwrap();
+
+        let install_dir = agents_dir.path().join("test-install-agent-xyz");
+        assert!(install_dir.join("agent.leviath").exists());
+        assert!(install_dir.join("readme.txt").exists());
     }
 }

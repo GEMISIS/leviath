@@ -39,14 +39,39 @@ pub struct SetupArgs {
 pub async fn execute(args: SetupArgs) -> anyhow::Result<()> {
     // Load existing config so we can preserve existing values as defaults
     let mut config = Config::load().unwrap_or_default();
+    let save_path = Config::config_path();
 
     if args.non_interactive {
-        apply_flags(&mut config, &args);
-        config.save()?;
-        println!("Config saved to {}", Config::config_path().display());
-        return Ok(());
+        return run_non_interactive_setup(&mut config, &args, &save_path);
     }
 
+    let stdin = io::stdin();
+    run_interactive_setup(&mut config, &mut stdin.lock(), &save_path)
+}
+
+/// Core of the `--non-interactive` path, with an explicit `save_path` for
+/// the same testability reason as `run_interactive_setup`.
+fn run_non_interactive_setup(
+    config: &mut Config,
+    args: &SetupArgs,
+    save_path: &std::path::Path,
+) -> anyhow::Result<()> {
+    apply_flags(config, args);
+    config.save_to_path(save_path)?;
+    println!("Config saved to {}", save_path.display());
+    Ok(())
+}
+
+/// The interactive prompt sequence, reading from any [`io::BufRead`] instead
+/// of hardcoding `io::stdin()`, and saving to an explicit `save_path` instead
+/// of hardcoding the real `~/.leviath/config.toml` — factored out so it can
+/// be exercised in tests with an in-memory reader and a tempfile path
+/// instead of blocking on real stdin and writing to the user's real config.
+fn run_interactive_setup<R: io::BufRead>(
+    config: &mut Config,
+    reader: &mut R,
+    save_path: &std::path::Path,
+) -> anyhow::Result<()> {
     println!("Leviath Setup");
     println!("─────────────────────────────────────────");
     println!("Press Enter to keep the current value shown in [brackets].");
@@ -57,6 +82,7 @@ pub async fn execute(args: SetupArgs) -> anyhow::Result<()> {
     // Anthropic API key
     let current_anthropic = config.providers.anthropic_api_key.as_deref().map(redact);
     config.providers.anthropic_api_key = prompt_secret(
+        reader,
         "Anthropic API key",
         "sk-ant-...",
         config.providers.anthropic_api_key.as_deref(),
@@ -66,6 +92,7 @@ pub async fn execute(args: SetupArgs) -> anyhow::Result<()> {
     // OpenAI API key
     let current_openai = config.providers.openai_api_key.as_deref().map(redact);
     config.providers.openai_api_key = prompt_secret(
+        reader,
         "OpenAI API key",
         "sk-...",
         config.providers.openai_api_key.as_deref(),
@@ -75,6 +102,7 @@ pub async fn execute(args: SetupArgs) -> anyhow::Result<()> {
     // Google AI (Gemini) API key
     let current_google = config.providers.google_api_key.as_deref().map(redact);
     config.providers.google_api_key = prompt_secret(
+        reader,
         "Google AI (Gemini) API key",
         "AIza...",
         config.providers.google_api_key.as_deref(),
@@ -84,6 +112,7 @@ pub async fn execute(args: SetupArgs) -> anyhow::Result<()> {
     // OpenRouter API key
     let current_or = config.openrouter_api_key.as_deref().map(redact);
     config.openrouter_api_key = prompt_secret(
+        reader,
         "OpenRouter API key",
         "sk-or-...",
         config.openrouter_api_key.as_deref(),
@@ -93,7 +122,7 @@ pub async fn execute(args: SetupArgs) -> anyhow::Result<()> {
     // Ollama URL
     let default_ollama = "http://localhost:11434";
     let current_ollama = config.ollama_base_url.as_deref().unwrap_or(default_ollama);
-    let ollama_input = prompt_plain("Ollama base URL", current_ollama)?;
+    let ollama_input = prompt_plain(reader, "Ollama base URL", current_ollama)?;
     config.ollama_base_url = if ollama_input == default_ollama {
         None // store None so the default takes effect
     } else if ollama_input.is_empty() {
@@ -107,7 +136,7 @@ pub async fn execute(args: SetupArgs) -> anyhow::Result<()> {
         .default_model
         .as_deref()
         .unwrap_or("(provider default)");
-    let model_input = prompt_plain("Default model override", current_model)?;
+    let model_input = prompt_plain(reader, "Default model override", current_model)?;
     config.default_model = if model_input.is_empty() || model_input == "(provider default)" {
         config.default_model.clone()
     } else if model_input == "clear" {
@@ -117,14 +146,14 @@ pub async fn execute(args: SetupArgs) -> anyhow::Result<()> {
     };
 
     // Default provider
-    let provider_input = prompt_plain("Default provider", &config.default_provider)?;
+    let provider_input = prompt_plain(reader, "Default provider", &config.default_provider)?;
     if !provider_input.is_empty() {
         config.default_provider = provider_input;
     }
 
     println!();
-    config.save()?;
-    println!("Config saved to {}", Config::config_path().display());
+    config.save_to_path(save_path)?;
+    println!("Config saved to {}", save_path.display());
 
     // Validate and warn about keys
     let warnings = config.validate_keys();
@@ -162,7 +191,8 @@ fn apply_flags(config: &mut Config, args: &SetupArgs) {
 
 /// Prompt for a secret value. Shows a redacted hint of the stored value.
 /// Returns `None` if the user clears the value; preserves the existing value on empty input.
-fn prompt_secret(
+fn prompt_secret<R: io::BufRead>(
+    reader: &mut R,
     label: &str,
     hint: &str,
     current: Option<&str>,
@@ -173,7 +203,7 @@ fn prompt_secret(
     io::stdout().flush()?;
 
     let mut input = String::new();
-    io::stdin().read_line(&mut input)?;
+    reader.read_line(&mut input)?;
     let input = input.trim();
 
     Ok(if input == "clear" {
@@ -186,12 +216,16 @@ fn prompt_secret(
 }
 
 /// Prompt for a plain (non-secret) value.
-fn prompt_plain(label: &str, current: &str) -> anyhow::Result<String> {
+fn prompt_plain<R: io::BufRead>(
+    reader: &mut R,
+    label: &str,
+    current: &str,
+) -> anyhow::Result<String> {
     print!("  {} [{}]: ", label, current);
     io::stdout().flush()?;
 
     let mut input = String::new();
-    io::stdin().read_line(&mut input)?;
+    reader.read_line(&mut input)?;
     Ok(input.trim().to_string())
 }
 
@@ -495,35 +529,270 @@ mod tests {
         assert!(redacted.ends_with("..."));
     }
 
-    // ─── prompt_secret logic ──────────────────────────────────────────────
+    // ─── prompt_secret / prompt_plain (mocked stdin) ───────────────────────
+
+    use std::io::Cursor;
+
+    fn reader_from(input: &str) -> Cursor<Vec<u8>> {
+        Cursor::new(input.as_bytes().to_vec())
+    }
 
     #[test]
     fn prompt_secret_clear_returns_none() {
-        // Simulate "clear" input → returns None
-        // We test the logic directly since we can't easily inject stdin in unit tests.
-        // The function returns None when input == "clear"
-        // We test by calling with known current values and verifying semantics.
+        let mut reader = reader_from("clear\n");
+        let result = prompt_secret(
+            &mut reader,
+            "Anthropic API key",
+            "sk-ant-...",
+            Some("existing-key"),
+            Some("existin..."),
+        )
+        .unwrap();
+        assert_eq!(result, None);
+    }
 
-        // We test apply_flags instead since prompt_secret reads from stdin.
-        // Verify that applying None keys doesn't overwrite.
+    #[test]
+    fn prompt_secret_empty_input_preserves_current() {
+        let mut reader = reader_from("\n");
+        let result = prompt_secret(
+            &mut reader,
+            "Anthropic API key",
+            "sk-ant-...",
+            Some("existing-key"),
+            Some("existin..."),
+        )
+        .unwrap();
+        assert_eq!(result, Some("existing-key".to_string()));
+    }
+
+    #[test]
+    fn prompt_secret_empty_input_with_no_current_stays_none() {
+        let mut reader = reader_from("\n");
+        let result =
+            prompt_secret(&mut reader, "Anthropic API key", "sk-ant-...", None, None).unwrap();
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn prompt_secret_new_value_overwrites() {
+        let mut reader = reader_from("sk-ant-brand-new\n");
+        let result = prompt_secret(
+            &mut reader,
+            "Anthropic API key",
+            "sk-ant-...",
+            Some("old-key"),
+            Some("old-k..."),
+        )
+        .unwrap();
+        assert_eq!(result, Some("sk-ant-brand-new".to_string()));
+    }
+
+    #[test]
+    fn prompt_secret_eof_behaves_like_empty_input() {
+        // Closed/exhausted stdin: read_line leaves the buffer empty, which
+        // is already handled the same as a plain empty-input Enter press.
+        let mut reader = reader_from("");
+        let result = prompt_secret(
+            &mut reader,
+            "Anthropic API key",
+            "sk-ant-...",
+            Some("existing-key"),
+            Some("existin..."),
+        )
+        .unwrap();
+        assert_eq!(result, Some("existing-key".to_string()));
+    }
+
+    #[test]
+    fn prompt_plain_returns_trimmed_new_value() {
+        let mut reader = reader_from("  http://custom:1234  \n");
+        let result =
+            prompt_plain(&mut reader, "Ollama base URL", "http://localhost:11434").unwrap();
+        assert_eq!(result, "http://custom:1234");
+    }
+
+    #[test]
+    fn prompt_plain_empty_input_returns_empty_string() {
+        let mut reader = reader_from("\n");
+        let result = prompt_plain(&mut reader, "Default provider", "anthropic").unwrap();
+        assert_eq!(result, "");
+    }
+
+    #[test]
+    fn prompt_plain_eof_returns_empty_string() {
+        let mut reader = reader_from("");
+        let result = prompt_plain(&mut reader, "Default provider", "anthropic").unwrap();
+        assert_eq!(result, "");
+    }
+
+    // ─── run_interactive_setup (mocked stdin + tempfile save path) ─────────
+
+    fn all_prompts_input(lines: &[&str]) -> Cursor<Vec<u8>> {
+        reader_from(&lines.join("\n"))
+    }
+
+    #[test]
+    fn run_interactive_setup_all_defaults_kept() {
+        let dir = tempfile::tempdir().unwrap();
+        let save_path = dir.path().join("config.toml");
+        let mut config = Config::default();
+
+        // 7 prompts: anthropic, openai, google, openrouter, ollama, model, provider.
+        // Empty answers to all of them.
+        let mut reader = all_prompts_input(&["", "", "", "", "", "", ""]);
+        run_interactive_setup(&mut config, &mut reader, &save_path).unwrap();
+
+        assert!(save_path.exists());
+        assert!(config.providers.anthropic_api_key.is_none());
+        assert!(config.ollama_base_url.is_none());
+        assert_eq!(config.default_provider, "anthropic");
+    }
+
+    #[test]
+    fn run_interactive_setup_sets_new_values() {
+        let dir = tempfile::tempdir().unwrap();
+        let save_path = dir.path().join("config.toml");
+        let mut config = Config::default();
+
+        let mut reader = all_prompts_input(&[
+            "sk-ant-new",
+            "sk-oai-new",
+            "AIza-new",
+            "sk-or-new",
+            "http://custom-ollama:9999",
+            "gpt-5",
+            "openai",
+        ]);
+        run_interactive_setup(&mut config, &mut reader, &save_path).unwrap();
+
+        assert_eq!(
+            config.providers.anthropic_api_key.as_deref(),
+            Some("sk-ant-new")
+        );
+        assert_eq!(
+            config.providers.openai_api_key.as_deref(),
+            Some("sk-oai-new")
+        );
+        assert_eq!(config.providers.google_api_key.as_deref(), Some("AIza-new"));
+        assert_eq!(config.openrouter_api_key.as_deref(), Some("sk-or-new"));
+        assert_eq!(
+            config.ollama_base_url.as_deref(),
+            Some("http://custom-ollama:9999")
+        );
+        assert_eq!(config.default_model.as_deref(), Some("gpt-5"));
+        assert_eq!(config.default_provider, "openai");
+
+        // Verify it was actually persisted to the injected path.
+        let saved = std::fs::read_to_string(&save_path).unwrap();
+        assert!(saved.contains("sk-ant-new"));
+    }
+
+    #[test]
+    fn run_interactive_setup_clear_removes_secrets() {
+        let dir = tempfile::tempdir().unwrap();
+        let save_path = dir.path().join("config.toml");
         let mut config = Config {
-            openrouter_api_key: Some("existing-or-key".to_string()),
+            providers: crate::config::ProviderConfig {
+                anthropic_api_key: Some("old-ant".to_string()),
+                openai_api_key: Some("old-oai".to_string()),
+                google_api_key: Some("old-goog".to_string()),
+            },
+            openrouter_api_key: Some("old-or".to_string()),
             ..Config::default()
         };
+
+        let mut reader = all_prompts_input(&["clear", "clear", "clear", "clear", "", "", ""]);
+        run_interactive_setup(&mut config, &mut reader, &save_path).unwrap();
+
+        assert!(config.providers.anthropic_api_key.is_none());
+        assert!(config.providers.openai_api_key.is_none());
+        assert!(config.providers.google_api_key.is_none());
+        assert!(config.openrouter_api_key.is_none());
+    }
+
+    #[test]
+    fn run_interactive_setup_ollama_url_matching_default_stores_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let save_path = dir.path().join("config.toml");
+        let mut config = Config {
+            ollama_base_url: Some("http://something-else:1111".to_string()),
+            ..Config::default()
+        };
+
+        let mut reader = all_prompts_input(&["", "", "", "", "http://localhost:11434", "", ""]);
+        run_interactive_setup(&mut config, &mut reader, &save_path).unwrap();
+
+        assert!(config.ollama_base_url.is_none());
+    }
+
+    #[test]
+    fn run_interactive_setup_default_model_clear() {
+        let dir = tempfile::tempdir().unwrap();
+        let save_path = dir.path().join("config.toml");
+        let mut config = Config {
+            default_model: Some("old-model".to_string()),
+            ..Config::default()
+        };
+
+        let mut reader = all_prompts_input(&["", "", "", "", "", "clear", ""]);
+        run_interactive_setup(&mut config, &mut reader, &save_path).unwrap();
+
+        assert!(config.default_model.is_none());
+    }
+
+    #[test]
+    fn run_interactive_setup_warns_on_invalid_key_format() {
+        let dir = tempfile::tempdir().unwrap();
+        let save_path = dir.path().join("config.toml");
+        let mut config = Config::default();
+
+        // Anthropic key that doesn't start with "sk-ant-" triggers a warning.
+        let mut reader = all_prompts_input(&["not-a-valid-anthropic-key", "", "", "", "", "", ""]);
+        run_interactive_setup(&mut config, &mut reader, &save_path).unwrap();
+
+        let warnings = config.validate_keys();
+        assert!(!warnings.is_empty());
+    }
+
+    #[test]
+    fn run_interactive_setup_eof_treated_as_all_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let save_path = dir.path().join("config.toml");
+        let mut config = Config::default();
+
+        // Closed stdin: every read_line call returns 0 bytes immediately.
+        let mut reader = reader_from("");
+        run_interactive_setup(&mut config, &mut reader, &save_path).unwrap();
+
+        assert!(save_path.exists());
+        assert!(config.providers.anthropic_api_key.is_none());
+    }
+
+    // ─── run_non_interactive_setup (tempfile save path) ────────────────────
+
+    #[test]
+    fn run_non_interactive_setup_applies_flags_and_saves() {
+        let dir = tempfile::tempdir().unwrap();
+        let save_path = dir.path().join("config.toml");
+        let mut config = Config::default();
         let args = SetupArgs {
             non_interactive: true,
-            anthropic_key: None,
+            anthropic_key: Some("sk-ant-cli".to_string()),
             openai_key: None,
             google_key: None,
             openrouter_key: None,
             ollama_url: None,
             default_model: None,
         };
-        apply_flags(&mut config, &args);
+
+        run_non_interactive_setup(&mut config, &args, &save_path).unwrap();
+
         assert_eq!(
-            config.openrouter_api_key.as_deref(),
-            Some("existing-or-key")
+            config.providers.anthropic_api_key.as_deref(),
+            Some("sk-ant-cli")
         );
+        let saved = std::fs::read_to_string(&save_path).unwrap();
+        assert!(saved.contains("sk-ant-cli"));
     }
 
     // ─── redact edge ──────────────────────────────────────────────────────
