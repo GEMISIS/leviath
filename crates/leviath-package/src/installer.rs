@@ -397,4 +397,67 @@ description = "{}"
         fs::create_dir_all(dir.path().join("empty-agent")).unwrap();
         assert!(installer.get_installed("empty-agent").unwrap().is_none());
     }
+
+    // ─── AgentInstaller::new / Default ─────────────────────────────────
+
+    #[test]
+    fn new_derives_install_dir_from_home() {
+        let installer = AgentInstaller::new();
+        assert!(installer.install_dir.ends_with(".leviath/agents"));
+    }
+
+    #[test]
+    fn default_matches_new() {
+        let installer = AgentInstaller::default();
+        assert!(installer.install_dir.ends_with(".leviath/agents"));
+    }
+
+    // ─── install() (file-based) ────────────────────────────────────────
+
+    #[test]
+    fn install_from_file_path_derives_name_from_filename() {
+        let dir = tempfile::tempdir().unwrap();
+        let installer = AgentInstaller::with_install_dir(dir.path().join("agents"));
+
+        let bundle = make_bundle("file-agent", "1.2.3", "Installed from a file");
+        let package_path = dir.path().join("file-agent.leviath-bundle");
+        fs::write(&package_path, &bundle).unwrap();
+
+        let result = installer.install(&package_path).unwrap();
+        assert_eq!(result.name, "file-agent");
+        assert_eq!(result.version, "1.2.3");
+        assert_eq!(result.description, "Installed from a file");
+        assert!(result.path.exists());
+    }
+
+    #[test]
+    fn install_from_file_path_missing_file_returns_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let installer = AgentInstaller::with_install_dir(dir.path().to_path_buf());
+
+        let err = installer
+            .install(dir.path().join("does-not-exist.leviath-bundle"))
+            .unwrap_err();
+        assert!(err.to_string().contains("Failed to read package"));
+    }
+
+    // ─── install_from_bytes: create_dir_all failure ────────────────────
+
+    #[test]
+    fn install_from_bytes_create_dir_failure_returns_error() {
+        let dir = tempfile::tempdir().unwrap();
+        // Make a plain file where a directory needs to exist, so
+        // create_dir_all(install_dir.join(name)) fails.
+        let blocker = dir.path().join("blocker");
+        fs::write(&blocker, b"not a directory").unwrap();
+
+        let installer = AgentInstaller::with_install_dir(blocker.join("agents"));
+        let bundle = make_bundle("blocked", "1.0.0", "desc");
+        let err = installer
+            .install_from_bytes("blocked", &bundle)
+            .unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("Failed to create install directory"));
+    }
 }

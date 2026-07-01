@@ -213,4 +213,47 @@ mod tests {
             "expected license error, got: {err}"
         );
     }
+
+    #[test]
+    fn invalid_blueprint_fails_validation() {
+        // Package-level fields are all valid, but the blueprint itself isn't
+        // (empty stage name) — validate() must forward that error.
+        let mut manifest = make_valid_manifest();
+        manifest.blueprint.stages[0].name = String::new();
+        assert!(manifest.validate().is_err());
+    }
+
+    // ─── PackageManifest::load ──────────────────────────────────────────────
+
+    #[test]
+    fn load_reads_and_parses_a_valid_manifest_file() {
+        // Round-trip a real PackageManifest through TOML instead of
+        // hand-writing the schema, so this test doesn't drift if Blueprint's
+        // fields change.
+        let original = make_valid_manifest();
+        let toml_content = toml::to_string(&original).unwrap();
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("leviath.toml");
+        std::fs::write(&path, toml_content).unwrap();
+
+        let manifest = PackageManifest::load(&path).unwrap();
+        assert_eq!(manifest.package.name, "my-agent");
+        assert_eq!(manifest.package.version, "1.0.0");
+    }
+
+    #[test]
+    fn load_missing_file_returns_error() {
+        let result = PackageManifest::load("/nonexistent/path/leviath.toml");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn load_malformed_toml_returns_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("leviath.toml");
+        std::fs::write(&path, "not valid toml [[[").unwrap();
+        let result = PackageManifest::load(&path);
+        assert!(result.is_err());
+    }
 }

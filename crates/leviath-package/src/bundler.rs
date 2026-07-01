@@ -359,6 +359,59 @@ mod tests {
         assert!(file_size > 0);
     }
 
+    #[test]
+    fn test_bundle_to_file_write_failure_returns_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path().join("project");
+        fs::create_dir_all(&project).unwrap();
+        fs::write(
+            project.join("agent.leviath"),
+            "[agent]\nname = \"test\"\nversion = \"1.0.0\"\ndescription = \"test\"\n",
+        )
+        .unwrap();
+
+        // Output path inside a directory that doesn't exist — fs::write must fail.
+        let output = dir
+            .path()
+            .join("no-such-parent-dir")
+            .join("output.leviath-bundle");
+        let bundler = AgentBundler::new();
+        let result = bundler.bundle_to_file(&project, &output);
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Failed to write bundle"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_bundle_unreadable_file_returns_error() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path();
+        fs::write(
+            project.join("agent.leviath"),
+            "[agent]\nname = \"test\"\nversion = \"1.0.0\"\ndescription = \"test\"\n",
+        )
+        .unwrap();
+
+        let secret = project.join("secret.dat");
+        fs::write(&secret, b"cant read me").unwrap();
+        // Remove all permissions so opening the file for the tar archive fails.
+        fs::set_permissions(&secret, fs::Permissions::from_mode(0o000)).unwrap();
+
+        let bundler = AgentBundler::new();
+        let result = bundler.bundle(project);
+
+        // Restore permissions so tempdir cleanup can remove the file.
+        fs::set_permissions(&secret, fs::Permissions::from_mode(0o644)).unwrap();
+
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Failed to add"));
+    }
+
     // ─── bundle: with subdirectories ────────────────────────────────────
 
     #[test]

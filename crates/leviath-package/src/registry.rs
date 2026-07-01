@@ -353,6 +353,130 @@ mod tests {
         );
     }
 
+    // ─── Minimal raw-TCP mock HTTP server (no new dependency needed) ───────
+    //
+    // Binds to an OS-assigned localhost port, accepts exactly one connection,
+    // discards the request, and writes back a fixed raw HTTP/1.1 response.
+    // Good enough for exercising PackageRegistry's response-parsing paths
+    // without a mocking crate.
+
+    async fn spawn_mock_server(status: u16, reason: &str, body: &'static [u8]) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let response = format!(
+            "HTTP/1.1 {} {}\r\nContent-Type: application/octet-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            status,
+            reason,
+            body.len()
+        )
+        .into_bytes();
+
+        tokio::spawn(async move {
+            if let Ok((mut socket, _)) = listener.accept().await {
+                let mut buf = [0u8; 8192];
+                let _ = socket.read(&mut buf).await;
+                let _ = socket.write_all(&response).await;
+                let _ = socket.write_all(body).await;
+                let _ = socket.flush().await;
+                let _ = socket.shutdown().await;
+            }
+        });
+
+        format!("http://{}", addr)
+    }
+
+    #[tokio::test]
+    async fn search_success_returns_packages() {
+        let body = br#"[{"name":"pkg-a","version":"1.0.0","description":"desc"}]"#;
+        let url = spawn_mock_server(200, "OK", body).await;
+        let registry = PackageRegistry::new(url);
+        let packages = registry.search("pkg").await.unwrap();
+        assert_eq!(packages.len(), 1);
+        assert_eq!(packages[0].name, "pkg-a");
+    }
+
+    #[tokio::test]
+    async fn search_non_success_status_returns_error() {
+        let url = spawn_mock_server(404, "Not Found", b"").await;
+        let registry = PackageRegistry::new(url);
+        let err = registry.search("pkg").await.unwrap_err();
+        assert!(err.to_string().contains("404"));
+    }
+
+    #[tokio::test]
+    async fn search_malformed_json_returns_error() {
+        let url = spawn_mock_server(200, "OK", b"not json").await;
+        let registry = PackageRegistry::new(url);
+        let err = registry.search("pkg").await.unwrap_err();
+        assert!(err.to_string().contains("Failed to parse search results"));
+    }
+
+    #[tokio::test]
+    async fn download_success_returns_bytes() {
+        let url = spawn_mock_server(200, "OK", b"binary bundle content").await;
+        let registry = PackageRegistry::new(url);
+        let bytes = registry.download("pkg-a", "1.0.0").await.unwrap();
+        assert_eq!(bytes, b"binary bundle content");
+    }
+
+    #[tokio::test]
+    async fn download_non_success_status_returns_error() {
+        let url = spawn_mock_server(500, "Internal Server Error", b"").await;
+        let registry = PackageRegistry::new(url);
+        let err = registry.download("pkg-a", "1.0.0").await.unwrap_err();
+        assert!(err.to_string().contains("500"));
+    }
+
+    #[tokio::test]
+    async fn get_info_success_returns_info() {
+        let body = br#"{"name":"pkg-a","version":"1.0.0","description":"desc"}"#;
+        let url = spawn_mock_server(200, "OK", body).await;
+        let registry = PackageRegistry::new(url);
+        let info = registry.get_info("pkg-a").await.unwrap();
+        assert_eq!(info.name, "pkg-a");
+        assert_eq!(info.version, "1.0.0");
+    }
+
+    #[tokio::test]
+    async fn get_info_non_success_status_returns_error() {
+        let url = spawn_mock_server(404, "Not Found", b"").await;
+        let registry = PackageRegistry::new(url);
+        let err = registry.get_info("pkg-a").await.unwrap_err();
+        assert!(err.to_string().contains("404"));
+    }
+
+    #[tokio::test]
+    async fn get_info_malformed_json_returns_error() {
+        let url = spawn_mock_server(200, "OK", b"not json").await;
+        let registry = PackageRegistry::new(url);
+        let err = registry.get_info("pkg-a").await.unwrap_err();
+        assert!(err.to_string().contains("Failed to parse package info"));
+    }
+
+    #[tokio::test]
+    async fn publish_success_returns_ok() {
+        let url = spawn_mock_server(200, "OK", b"").await;
+        let registry = PackageRegistry::new(url);
+        let result = registry.publish(b"bundle bytes", "token").await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn publish_non_success_status_returns_error_with_body() {
+        let url = spawn_mock_server(403, "Forbidden", b"invalid token").await;
+        let registry = PackageRegistry::new(url);
+        let err = registry
+            .publish(b"bundle bytes", "bad-token")
+            .await
+            .unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("403"));
+        assert!(msg.contains("invalid token"));
+    }
+
     // ─── PackageInfo various field combinations ─────────────────────────
 
     #[test]
