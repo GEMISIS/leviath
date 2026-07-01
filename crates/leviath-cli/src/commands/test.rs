@@ -1108,4 +1108,270 @@ model = { provider = "anthropic", model = "claude-sonnet-4-6" }
         let result = execute(args).await;
         assert!(result.is_err());
     }
+
+    // ─── run_test_case: mock provider (no real network calls) ────────────
+    //
+    // `execute()`'s non-dry-run path calls `Config::load()`, which reads the
+    // developer's real `~/.leviath/config.toml` (and env var fallbacks) --
+    // there's no path-injection seam for it from this file, and adding one
+    // would require touching `config.rs`, which is out of scope. Driving
+    // `execute(dry_run: false)` in a test would risk registering a real
+    // provider with a real API key and making a live network call, which is
+    // exactly the kind of flakiness/cost we must not introduce. Instead, we
+    // exercise `run_test_case` directly with an in-memory mock `Provider`,
+    // which covers the same assertion/response-handling logic without any
+    // I/O.
+
+    use leviath_providers::{
+        FinishReason, InferenceRequest, InferenceResponse, Provider, TokenUsage, ToolCall,
+    };
+
+    /// A mock provider that returns a fixed canned response, entirely in
+    /// memory -- no network calls, no subprocess spawning.
+    struct MockProvider {
+        content: String,
+        tool_calls: Vec<ToolCall>,
+    }
+
+    #[async_trait::async_trait]
+    impl Provider for MockProvider {
+        async fn infer(
+            &self,
+            _request: InferenceRequest,
+        ) -> leviath_providers::Result<InferenceResponse> {
+            Ok(InferenceResponse {
+                content: self.content.clone(),
+                tool_calls: self.tool_calls.clone(),
+                tokens_used: TokenUsage {
+                    prompt_tokens: 1,
+                    completion_tokens: 1,
+                    total_tokens: 2,
+                    cached_tokens: 0,
+                    cache_write_tokens: 0,
+                },
+                finish_reason: FinishReason::Complete,
+            })
+        }
+
+        fn count_tokens(&self, text: &str, _model: &str) -> usize {
+            text.len()
+        }
+
+        fn max_context_tokens(&self, _model: &str) -> usize {
+            8192
+        }
+
+        fn name(&self) -> &str {
+            "mock"
+        }
+
+        fn capabilities(&self, _model: &str) -> leviath_providers::ModelCapabilities {
+            leviath_providers::ModelCapabilities::default()
+        }
+    }
+
+    fn basic_blueprint() -> leviath_core::Blueprint {
+        let manifest = r#"
+[agent]
+name = "test-agent"
+version = "0.1.0"
+description = "test"
+
+[stages.main]
+model = { provider = "anthropic", model = "claude-sonnet-4-6" }
+"#;
+        parse_manifest_public(manifest).unwrap()
+    }
+
+    #[tokio::test]
+    async fn run_test_case_passes_with_expect_contains() {
+        let blueprint = basic_blueprint();
+        let mut registry = ProviderRegistry::new();
+        registry.register(
+            "anthropic".to_string(),
+            Arc::new(MockProvider {
+                content: "Hello, world!".to_string(),
+                tool_calls: vec![],
+            }),
+        );
+
+        let tc = TestCase {
+            name: "greeting".to_string(),
+            input: "say hello".to_string(),
+            expect_contains: Some("world".to_string()),
+            expect_tool_call: None,
+            max_tokens: None,
+        };
+
+        let result = run_test_case(&blueprint, &registry, &tc).await;
+        assert!(result.unwrap());
+    }
+
+    #[tokio::test]
+    async fn run_test_case_fails_expect_contains_mismatch() {
+        let blueprint = basic_blueprint();
+        let mut registry = ProviderRegistry::new();
+        registry.register(
+            "anthropic".to_string(),
+            Arc::new(MockProvider {
+                content: "Goodbye".to_string(),
+                tool_calls: vec![],
+            }),
+        );
+
+        let tc = TestCase {
+            name: "greeting".to_string(),
+            input: "say hello".to_string(),
+            expect_contains: Some("world".to_string()),
+            expect_tool_call: None,
+            max_tokens: None,
+        };
+
+        let result = run_test_case(&blueprint, &registry, &tc).await;
+        assert!(!result.unwrap());
+    }
+
+    #[tokio::test]
+    async fn run_test_case_passes_with_expect_tool_call() {
+        let blueprint = basic_blueprint();
+        let mut registry = ProviderRegistry::new();
+        registry.register(
+            "anthropic".to_string(),
+            Arc::new(MockProvider {
+                content: String::new(),
+                tool_calls: vec![ToolCall {
+                    id: "call_1".to_string(),
+                    name: "bash".to_string(),
+                    arguments: serde_json::json!({}),
+                }],
+            }),
+        );
+
+        let tc = TestCase {
+            name: "tool_test".to_string(),
+            input: "run a command".to_string(),
+            expect_contains: None,
+            expect_tool_call: Some("bash".to_string()),
+            max_tokens: None,
+        };
+
+        let result = run_test_case(&blueprint, &registry, &tc).await;
+        assert!(result.unwrap());
+    }
+
+    #[tokio::test]
+    async fn run_test_case_fails_expect_tool_call_missing() {
+        let blueprint = basic_blueprint();
+        let mut registry = ProviderRegistry::new();
+        registry.register(
+            "anthropic".to_string(),
+            Arc::new(MockProvider {
+                content: "no tools here".to_string(),
+                tool_calls: vec![],
+            }),
+        );
+
+        let tc = TestCase {
+            name: "tool_test".to_string(),
+            input: "run a command".to_string(),
+            expect_contains: None,
+            expect_tool_call: Some("bash".to_string()),
+            max_tokens: None,
+        };
+
+        let result = run_test_case(&blueprint, &registry, &tc).await;
+        assert!(!result.unwrap());
+    }
+
+    #[tokio::test]
+    async fn run_test_case_fails_both_assertions() {
+        let blueprint = basic_blueprint();
+        let mut registry = ProviderRegistry::new();
+        registry.register(
+            "anthropic".to_string(),
+            Arc::new(MockProvider {
+                content: "unrelated content".to_string(),
+                tool_calls: vec![],
+            }),
+        );
+
+        let tc = TestCase {
+            name: "both".to_string(),
+            input: "do stuff".to_string(),
+            expect_contains: Some("expected".to_string()),
+            expect_tool_call: Some("write_file".to_string()),
+            max_tokens: None,
+        };
+
+        let result = run_test_case(&blueprint, &registry, &tc).await;
+        assert!(!result.unwrap());
+    }
+
+    #[tokio::test]
+    async fn run_test_case_no_assertions_always_passes() {
+        let blueprint = basic_blueprint();
+        let mut registry = ProviderRegistry::new();
+        registry.register(
+            "anthropic".to_string(),
+            Arc::new(MockProvider {
+                content: "anything".to_string(),
+                tool_calls: vec![],
+            }),
+        );
+
+        let tc = TestCase {
+            name: "no_assertions".to_string(),
+            input: "hi".to_string(),
+            expect_contains: None,
+            expect_tool_call: None,
+            max_tokens: None,
+        };
+
+        let result = run_test_case(&blueprint, &registry, &tc).await;
+        assert!(result.unwrap());
+    }
+
+    #[tokio::test]
+    async fn run_test_case_provider_not_registered_errors() {
+        let blueprint = basic_blueprint();
+        let registry = ProviderRegistry::new(); // empty -- "anthropic" not registered
+
+        let tc = TestCase {
+            name: "no_provider".to_string(),
+            input: "hi".to_string(),
+            expect_contains: Some("x".to_string()),
+            expect_tool_call: None,
+            max_tokens: None,
+        };
+
+        let result = run_test_case(&blueprint, &registry, &tc).await;
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("not configured"));
+    }
+
+    #[tokio::test]
+    async fn run_test_case_long_input_computes_task_tokens() {
+        // Exercise the pinned-region input injection branch with an input
+        // long enough that `input.len() / 4 + 1` is non-trivial.
+        let blueprint = basic_blueprint();
+        let mut registry = ProviderRegistry::new();
+        registry.register(
+            "anthropic".to_string(),
+            Arc::new(MockProvider {
+                content: "response text mentioning keyword".to_string(),
+                tool_calls: vec![],
+            }),
+        );
+
+        let tc = TestCase {
+            name: "long_input".to_string(),
+            input: "x".repeat(500),
+            expect_contains: Some("keyword".to_string()),
+            expect_tool_call: None,
+            max_tokens: None,
+        };
+
+        let result = run_test_case(&blueprint, &registry, &tc).await;
+        assert!(result.unwrap());
+    }
 }
