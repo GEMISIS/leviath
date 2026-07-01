@@ -218,4 +218,73 @@ mod tests {
         let subtree = build_tree(&runs, Some("r"));
         assert_eq!(subtree.len(), 2);
     }
+
+    // ─── agents_tree / agent_tree_status (real runstate, unique run ids) ────
+    //
+    // `runstate::list_runs()` reads the real on-disk runs directory (there's
+    // no test-isolated override in this crate's test suite), so these tests
+    // use unique run-id prefixes and only assert on their own entries, then
+    // clean up afterward -- the same convention already used by
+    // `commands/run/worker.rs` and `commands/run/mod.rs`'s tests.
+
+    struct RunCleanup<'a>(&'a [&'a str]);
+    impl Drop for RunCleanup<'_> {
+        fn drop(&mut self) {
+            for id in self.0 {
+                let _ = std::fs::remove_dir_all(runstate::run_dir(id));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn agents_tree_includes_created_run() {
+        let run_id = "test-tree-agents-tree-1";
+        let _cleanup = RunCleanup(&[run_id]);
+        let meta = make_meta(run_id, "agent-tree-test", None);
+        runstate::create_run(&meta).unwrap();
+
+        let Json(tree) = agents_tree().await;
+        assert!(tree.iter().any(|n| n.run_id == run_id));
+    }
+
+    #[tokio::test]
+    async fn agent_tree_status_returns_not_found_for_missing_id() {
+        let result = agent_tree_status(AxumPath("definitely-not-a-real-run-id".to_string())).await;
+        match result {
+            Err((status, Json(body))) => {
+                assert_eq!(status, StatusCode::NOT_FOUND);
+                assert!(body.error.contains("definitely-not-a-real-run-id"));
+            }
+            Ok(_) => panic!("expected NOT_FOUND for a nonexistent run id"),
+        }
+    }
+
+    #[tokio::test]
+    async fn agent_tree_status_returns_tree_with_subtree_totals() {
+        let run_id = "test-tree-status-root";
+        let child_id = "test-tree-status-child";
+        let _cleanup = RunCleanup(&[run_id, child_id]);
+
+        let mut root = make_meta(run_id, "root-agent", None);
+        root.prompt_tokens = 10;
+        root.completion_tokens = 2;
+        runstate::create_run(&root).unwrap();
+
+        let mut child = make_meta(child_id, "child-agent", Some(run_id));
+        child.prompt_tokens = 20;
+        child.completion_tokens = 3;
+        runstate::create_run(&child).unwrap();
+
+        let result = agent_tree_status(AxumPath(run_id.to_string())).await;
+        match result {
+            Ok(Json(node)) => {
+                assert_eq!(node.run_id, run_id);
+                assert_eq!(node.subtree_prompt_tokens, 30);
+                assert_eq!(node.subtree_completion_tokens, 5);
+                assert_eq!(node.children.len(), 1);
+                assert_eq!(node.children[0].run_id, child_id);
+            }
+            Err(_) => panic!("expected Ok tree status for a real run id"),
+        }
+    }
 }

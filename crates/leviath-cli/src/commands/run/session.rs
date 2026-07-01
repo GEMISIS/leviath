@@ -124,7 +124,10 @@ fn launch_editor(path: &std::path::Path) -> anyhow::Result<()> {
     {
         candidates.push("notepad".to_string());
     }
-    // Final fallback
+    // Final fallback -- unreachable under the `#[cfg(unix)]`/`#[cfg(windows)]`
+    // targets this crate actually ships for, since both of those blocks
+    // unconditionally push at least one candidate already. Only relevant on
+    // a hypothetical third target platform with neither cfg set.
     if candidates.is_empty() {
         candidates.push("nano".to_string());
     }
@@ -615,6 +618,28 @@ mod tests {
         assert_eq!(result.unwrap(), "literal task");
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn resolve_task_none_arg_exercises_real_stdin_is_terminal_check() {
+        // Unlike reading from stdin, `IsTerminal::is_terminal()` is a
+        // non-blocking fd check -- safe to call for real. This drives
+        // `resolve_task`'s actual (non-injected) closure at least once. The
+        // outcome depends on whether *this test process's* stdin happens to
+        // be a TTY, so VISUAL is set to a no-op editor to keep both possible
+        // branches fast and deterministic: TTY-false hits the "no task
+        // provided" error immediately; TTY-true opens the (untouched)
+        // template through `/usr/bin/true` and then errors on the resulting
+        // empty task -- neither path blocks or spawns a real interactive
+        // editor.
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _guard = EnvGuard;
+        unsafe {
+            std::env::set_var("VISUAL", "/usr/bin/true");
+        }
+        let result = resolve_task(&None, "test-agent", None);
+        assert!(result.is_err());
+    }
+
     // ─── launch_editor: VISUAL takes priority and succeeds ───────────────
 
     #[test]
@@ -748,5 +773,162 @@ mod tests {
         assert!(result.is_ok(), "expected Ok, got {:?}", result);
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ─── launch_editor: non-NotFound spawn error propagates ──────────────
+
+    #[cfg(unix)]
+    #[test]
+    fn launch_editor_permission_denied_returns_error() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _guard = EnvGuard;
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = std::env::temp_dir().join("lev-test-launch-editor-perm-denied");
+        let _ = std::fs::create_dir_all(&dir);
+        // A regular, non-executable file: spawning it directly fails with
+        // `PermissionDenied`, not `NotFound` -- exercising the generic
+        // `Err(e)` arm (as opposed to the `NotFound` "try next candidate"
+        // arm already covered above).
+        let not_executable = dir.join("not-executable");
+        std::fs::write(&not_executable, "not a script").unwrap();
+        let mut perms = std::fs::metadata(&not_executable).unwrap().permissions();
+        perms.set_mode(0o600);
+        std::fs::set_permissions(&not_executable, perms).unwrap();
+
+        unsafe {
+            std::env::set_var("VISUAL", &not_executable);
+        }
+        let file = dir.join("edit.txt");
+        std::fs::write(&file, "content").unwrap();
+
+        let result = launch_editor(&file);
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Failed to launch editor"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ─── launch_editor: no candidate resolves anywhere on PATH ────────────
+
+    #[test]
+    fn launch_editor_no_editor_found_when_path_has_no_candidates() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _guard = EnvGuard;
+
+        /// Restores the real `PATH` on drop -- separate from `EnvGuard`
+        /// (which only handles `VISUAL`/`EDITOR`) since breaking `PATH` for
+        /// the rest of the test process would be far more disruptive than
+        /// leaving those two unset.
+        struct PathGuard(Option<std::ffi::OsString>);
+        impl Drop for PathGuard {
+            fn drop(&mut self) {
+                unsafe {
+                    match self.0.take() {
+                        Some(p) => std::env::set_var("PATH", p),
+                        None => std::env::remove_var("PATH"),
+                    }
+                }
+            }
+        }
+        let _path_guard = PathGuard(std::env::var_os("PATH"));
+        unsafe {
+            // No VISUAL/EDITOR (cleared by EnvGuard already), and PATH
+            // points nowhere -- so even the unix platform-default
+            // candidates (vim/nano/vi) all fail to resolve.
+            std::env::set_var("PATH", "/lev-definitely-empty-path-dir");
+        }
+
+        let dir = std::env::temp_dir().join("lev-test-launch-editor-no-editor");
+        let _ = std::fs::create_dir_all(&dir);
+        let file = dir.join("edit.txt");
+        std::fs::write(&file, "content").unwrap();
+
+        let result = launch_editor(&file);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("No editor found"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ─── resolve_task_with: editor path (stdin is a TTY) ──────────────────
+
+    #[cfg(unix)]
+    #[test]
+    fn resolve_task_with_editor_path_happy_case() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _guard = EnvGuard;
+        use std::os::unix::fs::PermissionsExt;
+
+        // A tiny "editor" script that appends a non-comment line to
+        // whatever file it's invoked on ($1) -- standing in for a real
+        // interactive editor session.
+        let dir = std::env::temp_dir().join("lev-test-resolve-task-editor-happy");
+        let _ = std::fs::create_dir_all(&dir);
+        let script = dir.join("fake-editor.sh");
+        std::fs::write(
+            &script,
+            "#!/bin/sh\necho \"task body from editor\" >> \"$1\"\n",
+        )
+        .unwrap();
+        let mut perms = std::fs::metadata(&script).unwrap().permissions();
+        perms.set_mode(0o700);
+        std::fs::set_permissions(&script, perms).unwrap();
+
+        unsafe {
+            std::env::set_var("VISUAL", &script);
+        }
+
+        let result =
+            resolve_task_with(&None, "test-agent", Some("a non-empty description"), || {
+                true
+            });
+        assert_eq!(result.unwrap(), "task body from editor");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolve_task_with_editor_path_empty_after_stripping_comments_errors() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _guard = EnvGuard;
+        // /usr/bin/true "opens" the file and does nothing to it, so only the
+        // commented-out template remains -- stripped down to an empty task.
+        unsafe {
+            std::env::set_var("VISUAL", "/usr/bin/true");
+        }
+
+        let result = resolve_task_with(&None, "test-agent", None, || true);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("Aborting run"));
+    }
+
+    #[test]
+    fn resolve_task_with_editor_path_propagates_launch_editor_error() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _guard = EnvGuard;
+        struct PathGuard(Option<std::ffi::OsString>);
+        impl Drop for PathGuard {
+            fn drop(&mut self) {
+                unsafe {
+                    match self.0.take() {
+                        Some(p) => std::env::set_var("PATH", p),
+                        None => std::env::remove_var("PATH"),
+                    }
+                }
+            }
+        }
+        let _path_guard = PathGuard(std::env::var_os("PATH"));
+        unsafe {
+            std::env::set_var("PATH", "/lev-definitely-empty-path-dir");
+        }
+
+        let result = resolve_task_with(&None, "test-agent", None, || true);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("No editor found"));
     }
 }

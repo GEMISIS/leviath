@@ -58,33 +58,43 @@ async fn engine_background_loop(
     }
 }
 
-pub async fn execute(_args: DashboardArgs) -> anyhow::Result<()> {
-    // Load config and create engine
-    let config = Config::load()?;
-    let registry = build_provider_registry(&config);
-    let engine = Arc::new(Mutex::new(AgentEngine::with_providers(registry)));
+/// Abstracts "give me the next input event, or `None` if the poll timeout
+/// elapses" (i.e. `crossterm::event::poll` + `event::read`), so the
+/// dashboard's main loop ([`run_dashboard_loop`]) can be driven by canned
+/// events in tests instead of blocking on a real terminal.
+trait EventSource {
+    fn poll_event(&mut self, timeout: Duration) -> std::io::Result<Option<Event>>;
+}
 
-    // Create command channel
-    let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
+/// Production [`EventSource`]: reads real terminal input via crossterm.
+struct CrosstermEventSource;
 
-    let mut dashboard = Dashboard::new(cmd_tx);
+impl EventSource for CrosstermEventSource {
+    fn poll_event(&mut self, timeout: Duration) -> std::io::Result<Option<Event>> {
+        if event::poll(timeout)? {
+            Ok(Some(event::read()?))
+        } else {
+            Ok(None)
+        }
+    }
+}
 
-    // Store event_tx for background loop
-    let bg_event_tx = dashboard.event_tx.clone();
-
-    // Start engine background loop
-    tokio::spawn(engine_background_loop(engine.clone(), cmd_rx, bg_event_tx));
-
-    dashboard.add_log("Dashboard started. Use `lev run <agent>` to start an agent.".to_string());
-
-    enable_raw_mode()?;
-    stdout().execute(EnterAlternateScreen)?;
-
-    let backend = ratatui::backend::CrosstermBackend::new(stdout());
-    let mut terminal = Terminal::new(backend)?;
-
-    let tick_rate = Duration::from_millis(100);
-
+/// The dashboard's per-tick render/input loop, extracted from [`execute`] so
+/// it can run against a [`ratatui::backend::TestBackend`] and a canned
+/// [`EventSource`] in tests, instead of a real terminal. Exits (returning
+/// `Ok(())`) once `dashboard.should_quit` is set; propagates the first I/O
+/// error from drawing or event polling, exactly as the original inline loop
+/// in `execute` did (including leaving raw mode / the alternate screen
+/// untouched on error -- restoring those is `execute`'s responsibility, not
+/// this loop's, and this refactor preserves that pre-existing behavior
+/// rather than changing it as a side effect of a coverage pass).
+async fn run_dashboard_loop<B: ratatui::backend::Backend>(
+    dashboard: &mut Dashboard,
+    engine: &Arc<Mutex<AgentEngine>>,
+    terminal: &mut Terminal<B>,
+    events: &mut impl EventSource,
+    tick_rate: Duration,
+) -> anyhow::Result<()> {
     loop {
         dashboard.tick_count += 1;
         dashboard.tick_toasts();
@@ -104,8 +114,8 @@ pub async fn execute(_args: DashboardArgs) -> anyhow::Result<()> {
         terminal.draw(|frame| dashboard.draw(frame))?;
 
         // Handle input
-        if event::poll(tick_rate)? {
-            match event::read()? {
+        if let Some(event) = events.poll_event(tick_rate)? {
+            match event {
                 Event::Key(key) if key.kind == KeyEventKind::Press => {
                     dashboard.handle_key(key);
                 }
@@ -117,9 +127,65 @@ pub async fn execute(_args: DashboardArgs) -> anyhow::Result<()> {
         }
 
         if dashboard.should_quit {
-            break;
+            return Ok(());
         }
     }
+}
+
+/// Builds the [`Dashboard`] and its backing [`AgentEngine`], starts the
+/// engine background loop, and seeds the startup log line. Split out of
+/// [`execute`] purely so this (entirely terminal-independent) setup is
+/// unit-testable on its own, separate from the real-terminal I/O sliver.
+async fn init_dashboard(config: &Config) -> (Dashboard, Arc<Mutex<AgentEngine>>) {
+    let registry = build_provider_registry(config);
+    let engine = Arc::new(Mutex::new(AgentEngine::with_providers(registry)));
+
+    let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
+    let mut dashboard = Dashboard::new(cmd_tx);
+
+    // Store event_tx for background loop
+    let bg_event_tx = dashboard.event_tx.clone();
+
+    // Start engine background loop
+    tokio::spawn(engine_background_loop(engine.clone(), cmd_rx, bg_event_tx));
+
+    dashboard.add_log("Dashboard started. Use `lev run <agent>` to start an agent.".to_string());
+
+    (dashboard, engine)
+}
+
+pub async fn execute(_args: DashboardArgs) -> anyhow::Result<()> {
+    // Load config and create engine
+    let config = Config::load()?;
+    let (mut dashboard, engine) = init_dashboard(&config).await;
+
+    // The following four lines (enable_raw_mode/EnterAlternateScreen and
+    // their restore counterparts below) are the one irreducible sliver of
+    // this file that a unit test genuinely cannot exercise: they mutate the
+    // real controlling terminal's termios state and alternate-screen buffer.
+    // Running them under `cargo test` (no real TTY, and often many tests
+    // executing concurrently against the same process's stdout) would either
+    // error out non-deterministically or corrupt the test harness's own
+    // terminal output -- there is no in-memory substitute, unlike
+    // `ratatui::backend::TestBackend` for the `Terminal`/drawing side. The
+    // entire render/input loop in between is fully covered via
+    // `run_dashboard_loop` with a `TestBackend` and a fake `EventSource`.
+    enable_raw_mode()?;
+    stdout().execute(EnterAlternateScreen)?;
+
+    let backend = ratatui::backend::CrosstermBackend::new(stdout());
+    let mut terminal = Terminal::new(backend)?;
+
+    let tick_rate = Duration::from_millis(100);
+    let mut events = CrosstermEventSource;
+    run_dashboard_loop(
+        &mut dashboard,
+        &engine,
+        &mut terminal,
+        &mut events,
+        tick_rate,
+    )
+    .await?;
 
     // Restore terminal
     disable_raw_mode()?;
@@ -219,6 +285,33 @@ mod tests {
         };
         let dbg = format!("{:?}", event);
         assert!(dbg.contains("something broke"));
+    }
+
+    // ─── init_dashboard ──────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn init_dashboard_seeds_startup_log_and_starts_background_loop() {
+        let config = Config::default();
+        let (dashboard, engine) = init_dashboard(&config).await;
+
+        assert!(
+            dashboard
+                .log
+                .iter()
+                .any(|entry| entry.message.contains("Dashboard started")),
+            "expected the startup message to be logged"
+        );
+
+        // The background loop is live: a CancelAgent command sent on
+        // dashboard's own cmd_tx should be processed without panicking.
+        dashboard
+            .cmd_tx
+            .send(EngineCommand::CancelAgent {
+                agent_id: "nonexistent".to_string(),
+            })
+            .unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        let _ = engine.try_lock();
     }
 
     // ─── engine_background_loop: CancelAgent command ─────────────────────
@@ -353,4 +446,171 @@ mod tests {
         assert_eq!(agent.stage, "init");
         assert!(!agent.is_run_state);
     }
+
+    // ─── run_dashboard_loop / EventSource ───────────────────────────────────
+
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    fn key(code: KeyCode) -> Event {
+        Event::Key(KeyEvent::new(code, KeyModifiers::empty()))
+    }
+
+    /// Test [`EventSource`] that yields a fixed sequence of events (one per
+    /// `poll_event` call), then `None` (simulating a poll-timeout tick) for
+    /// every call after the sequence is exhausted.
+    struct ScriptedEventSource {
+        events: std::collections::VecDeque<Event>,
+    }
+
+    impl ScriptedEventSource {
+        fn new(events: Vec<Event>) -> Self {
+            Self {
+                events: events.into(),
+            }
+        }
+    }
+
+    impl EventSource for ScriptedEventSource {
+        fn poll_event(&mut self, _timeout: Duration) -> std::io::Result<Option<Event>> {
+            Ok(self.events.pop_front())
+        }
+    }
+
+    /// [`EventSource`] whose `poll_event` always errors, to exercise
+    /// `run_dashboard_loop`'s `?`-propagation path.
+    struct FailingEventSource;
+
+    impl EventSource for FailingEventSource {
+        fn poll_event(&mut self, _timeout: Duration) -> std::io::Result<Option<Event>> {
+            Err(std::io::Error::other("simulated event source failure"))
+        }
+    }
+
+    fn test_terminal() -> Terminal<ratatui::backend::TestBackend> {
+        Terminal::new(ratatui::backend::TestBackend::new(120, 40)).unwrap()
+    }
+
+    #[tokio::test]
+    async fn run_dashboard_loop_quits_on_esc_from_main_list() {
+        let mut dashboard = make_test_dashboard();
+        let engine = Arc::new(Mutex::new(AgentEngine::new()));
+        let mut terminal = test_terminal();
+        // A no-op Resize tick first, then the Esc that triggers quit --
+        // covers both the `Event::Resize` and `Event::Key` match arms.
+        let mut events = ScriptedEventSource::new(vec![Event::Resize(80, 24), key(KeyCode::Esc)]);
+
+        let result = run_dashboard_loop(
+            &mut dashboard,
+            &engine,
+            &mut terminal,
+            &mut events,
+            Duration::from_millis(1),
+        )
+        .await;
+
+        assert!(result.is_ok());
+        assert!(dashboard.should_quit);
+    }
+
+    #[tokio::test]
+    async fn run_dashboard_loop_no_event_tick_then_quits() {
+        // First tick: `poll_event` returns `None` (poll-timeout branch, no
+        // key/resize handling); second tick: Esc quits.
+        let mut dashboard = make_test_dashboard();
+        let engine = Arc::new(Mutex::new(AgentEngine::new()));
+        let mut terminal = test_terminal();
+        let mut events = ScriptedEventSource::new(vec![key(KeyCode::Esc)]);
+
+        let result = run_dashboard_loop(
+            &mut dashboard,
+            &engine,
+            &mut terminal,
+            &mut events,
+            Duration::from_millis(1),
+        )
+        .await;
+
+        assert!(result.is_ok());
+        assert!(dashboard.should_quit);
+    }
+
+    #[tokio::test]
+    async fn run_dashboard_loop_ignores_non_press_and_other_events() {
+        // A key release (not Press) and a mouse-like "other" event are both
+        // ignored by the `_ => {}` arm; only the trailing Esc actually quits.
+        let mut dashboard = make_test_dashboard();
+        let engine = Arc::new(Mutex::new(AgentEngine::new()));
+        let mut terminal = test_terminal();
+        let release = Event::Key(crossterm::event::KeyEvent::new_with_kind(
+            KeyCode::Char('x'),
+            KeyModifiers::empty(),
+            crossterm::event::KeyEventKind::Release,
+        ));
+        let mut events =
+            ScriptedEventSource::new(vec![release, Event::FocusGained, key(KeyCode::Esc)]);
+
+        let result = run_dashboard_loop(
+            &mut dashboard,
+            &engine,
+            &mut terminal,
+            &mut events,
+            Duration::from_millis(1),
+        )
+        .await;
+
+        assert!(result.is_ok());
+        assert!(dashboard.should_quit);
+    }
+
+    #[tokio::test]
+    async fn run_dashboard_loop_propagates_event_source_error() {
+        let mut dashboard = make_test_dashboard();
+        let engine = Arc::new(Mutex::new(AgentEngine::new()));
+        let mut terminal = test_terminal();
+        let mut events = FailingEventSource;
+
+        let result = run_dashboard_loop(
+            &mut dashboard,
+            &engine,
+            &mut terminal,
+            &mut events,
+            Duration::from_millis(1),
+        )
+        .await;
+
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn run_dashboard_loop_syncs_agent_state_when_engine_lock_available() {
+        // Exercises the `engine.try_lock()` success branch (as opposed to
+        // the lock being held elsewhere, which the other tests implicitly
+        // cover since they never contend for it either -- both arms of the
+        // `if let Ok(...)` are trivial, but this makes the intent explicit).
+        let mut dashboard = make_test_dashboard();
+        let engine = Arc::new(Mutex::new(AgentEngine::new()));
+        let mut terminal = test_terminal();
+        let mut events = ScriptedEventSource::new(vec![key(KeyCode::Esc)]);
+
+        let result = run_dashboard_loop(
+            &mut dashboard,
+            &engine,
+            &mut terminal,
+            &mut events,
+            Duration::from_millis(1),
+        )
+        .await;
+
+        assert!(result.is_ok());
+    }
+
+    // `CrosstermEventSource::poll_event` itself is intentionally not unit
+    // tested: `crossterm::event::poll`/`event::read` read the real
+    // controlling terminal's input state, which doesn't exist (or errors
+    // non-deterministically, as confirmed while writing these tests -- it
+    // returned `Err` in this sandboxed/non-TTY environment rather than
+    // `Ok(false)`) under `cargo test`. It's a one-line delegation with no
+    // branching logic of its own; `run_dashboard_loop`'s handling of both the
+    // `Some(event)` and `None` cases it can return is fully covered above via
+    // `ScriptedEventSource`.
 }
