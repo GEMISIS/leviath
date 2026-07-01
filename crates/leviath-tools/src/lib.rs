@@ -871,6 +871,21 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn edit_file_missing_file_returns_read_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let tools = make_tools(dir.path());
+
+        let result = tools
+            .execute(
+                "edit_file",
+                json!({"path": "does-not-exist.txt", "old_str": "a", "new_str": "b"}),
+            )
+            .await;
+        assert!(result.contains("[error]"));
+        assert!(result.contains("Failed to read"));
+    }
+
+    #[tokio::test]
     async fn edit_file_multiple_occurrences() {
         let dir = tempfile::tempdir().unwrap();
         let tools = make_tools(dir.path());
@@ -1221,5 +1236,46 @@ mod tests {
         // On unix, flag should be "-c"
         #[cfg(not(windows))]
         assert_eq!(flag, "-c");
+    }
+
+    // `detect_shell` is the only reader of `$SHELL` in this crate, but the
+    // env var is still process-global -- serialize any test that overrides
+    // it so a concurrently-running `detect_shell_returns_valid_shell` (which
+    // relies on the real, unmodified `$SHELL`) can't observe a torn value.
+    #[cfg(not(windows))]
+    static SHELL_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[cfg(not(windows))]
+    #[test]
+    fn detect_shell_falls_back_to_common_shells_when_shell_env_unrecognized() {
+        let _lock = SHELL_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let original = std::env::var_os("SHELL");
+        // Doesn't end in /zsh, /bash, or /sh -- skips the $SHELL fast path
+        // and falls into the "try common shells in order" loop, which finds
+        // whichever of /bin/bash, /usr/bin/bash, /bin/zsh, /usr/bin/zsh,
+        // /bin/sh actually exists on this machine (always true on any real
+        // Unix system, including every CI runner).
+        unsafe {
+            std::env::set_var("SHELL", "/opt/definitely-not-a-recognized-shell");
+        }
+        let (shell, flag) = BuiltinTools::detect_shell();
+        assert_eq!(flag, "-c");
+        assert!(
+            [
+                "/bin/bash",
+                "/usr/bin/bash",
+                "/bin/zsh",
+                "/usr/bin/zsh",
+                "/bin/sh"
+            ]
+            .contains(&shell),
+            "expected a fallback candidate, got {shell}"
+        );
+        unsafe {
+            match original {
+                Some(v) => std::env::set_var("SHELL", v),
+                None => std::env::remove_var("SHELL"),
+            }
+        }
     }
 }

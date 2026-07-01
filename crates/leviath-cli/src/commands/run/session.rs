@@ -239,16 +239,27 @@ pub fn build_provider_registry(config: &Config) -> ProviderRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
     use std::sync::Mutex;
 
     /// Serializes tests that mutate the process-wide `VISUAL`/`EDITOR` env
     /// vars, since `cargo test` runs tests in parallel threads within the
     /// same process.
+    ///
+    /// Every current usage lives inside a `#[cfg(unix)]` test (the
+    /// `VISUAL`/`EDITOR` values used are Unix-only paths like
+    /// `/usr/bin/true`, and PATH-starvation to force "no editor found"
+    /// doesn't work on Windows since it resolves `notepad` via System32
+    /// regardless of `$PATH`) -- so this must be `#[cfg(unix)]` too, or a
+    /// non-Unix build sees it as genuine dead code under `-D warnings`.
+    #[cfg(unix)]
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     /// RAII guard that clears `VISUAL`/`EDITOR` on drop, restoring a clean
     /// environment for subsequent tests regardless of panics.
+    #[cfg(unix)]
     struct EnvGuard;
+    #[cfg(unix)]
     impl Drop for EnvGuard {
         fn drop(&mut self) {
             unsafe {
