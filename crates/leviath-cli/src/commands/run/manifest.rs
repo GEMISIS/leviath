@@ -1156,6 +1156,28 @@ mode = "autonomous"
         assert!(matches!(edge.transform, EdgeTransform::Compact { .. }));
     }
 
+    #[test]
+    fn parse_manifest_unrecognized_transform_defaults_to_direct() {
+        let toml = r#"
+[agent]
+name = "unknown-transform"
+
+[stages.a]
+mode = "autonomous"
+
+[stages.a.transitions.b]
+transform = "some_unrecognized_value"
+
+[stages.b]
+mode = "autonomous"
+"#;
+        let bp = parse_manifest(toml).unwrap();
+        let stage_a = bp.find_stage("a").unwrap();
+        let transitions = stage_a.transitions.as_ref().unwrap();
+        let edge = transitions.get("b").unwrap();
+        assert!(matches!(edge.transform, EdgeTransform::Direct));
+    }
+
     // ─── find_manifest ───────────────────────────────────────────────────────
 
     #[test]
@@ -1191,6 +1213,38 @@ mode = "autonomous"
         let result = find_manifest("/nonexistent/path/to/nothing");
         assert!(result.is_err());
     }
+
+    #[test]
+    fn find_manifest_installed_agent_by_name() {
+        // `dirs::home_dir()` can't be redirected via `$HOME` on macOS (it
+        // resolves via `NSHomeDirectory()`), so this writes to the real
+        // `~/.leviath/agents/<name>/agent.leviath` -- using a name unlikely
+        // to collide with a real installed agent, cleaned up afterward.
+        let Some(home) = dirs::home_dir() else {
+            return; // no home dir in this environment; nothing to test
+        };
+        let agent_name = "test-find-manifest-installed-by-name-8f3a";
+        let agent_dir = home.join(".leviath").join("agents").join(agent_name);
+        std::fs::create_dir_all(&agent_dir).unwrap();
+        let manifest_path = agent_dir.join("agent.leviath");
+        std::fs::write(&manifest_path, "[agent]\nname = \"test\"").unwrap();
+
+        let result = find_manifest(agent_name);
+        assert_eq!(result.unwrap(), manifest_path);
+
+        let _ = std::fs::remove_dir_all(&agent_dir);
+    }
+
+    // `find_manifest`'s 4th branch (bare relative `PathBuf::from("agent.leviath")`
+    // checked against the process's current directory) is intentionally not
+    // covered by a test here. `std::env::set_current_dir` is process-global,
+    // and `commands/pack.rs` has an identical relative-path fallback with its
+    // own negative test (`find_manifest_not_found_errors`) that isn't
+    // protected by any shared lock -- mutating cwd from this file's tests
+    // could make that sibling test flaky (it would spuriously find this
+    // test's temp `agent.leviath` if the two ran concurrently). Fixing this
+    // properly means adding a cross-file lock in `pack.rs` too, which is out
+    // of scope for a manifest.rs-only pass.
 
     // ─── parse_manifest_public ───────────────────────────────────────────────
 

@@ -516,7 +516,7 @@ pub async fn execute_worker(args: WorkerArgs) -> anyhow::Result<()> {
     meta.touch();
     let _ = runstate::write_meta(&meta);
 
-    let result = run_worker_inner(&args, &mut meta).await;
+    let result = run_worker_inner(&args, &mut meta, build_provider_registry).await;
 
     match &result {
         Ok(()) => meta.status = RunStatus::Complete,
@@ -531,7 +531,17 @@ pub async fn execute_worker(args: WorkerArgs) -> anyhow::Result<()> {
     result
 }
 
-async fn run_worker_inner(args: &WorkerArgs, meta: &mut RunMeta) -> anyhow::Result<()> {
+/// Core of [`execute_worker`], with provider-registry construction injected
+/// so tests can drive a real (in-process, no network) inference round trip
+/// with a [`Provider`](leviath_providers::Provider) mock -- covering title
+/// generation and the `exec` closure's real call site -- instead of either
+/// stopping at a missing-provider error or making a real, billed network
+/// call. Production always passes [`build_provider_registry`].
+async fn run_worker_inner(
+    args: &WorkerArgs,
+    meta: &mut RunMeta,
+    build_registry: impl FnOnce(&Config) -> leviath_runtime::ProviderRegistry,
+) -> anyhow::Result<()> {
     let manifest_path = find_manifest(&args.path)?;
     println!("Loading agent from: {}", manifest_path.display());
 
@@ -547,7 +557,7 @@ async fn run_worker_inner(args: &WorkerArgs, meta: &mut RunMeta) -> anyhow::Resu
         println!("Warning: {}", warning);
     }
 
-    let prov_registry = build_provider_registry(&config);
+    let prov_registry = build_registry(&config);
 
     // Generate a human-readable title from the task prompt (best-effort).
     if config.title.enabled && meta.title.is_none() {
@@ -680,7 +690,7 @@ async fn run_worker_inner(args: &WorkerArgs, meta: &mut RunMeta) -> anyhow::Resu
 #[cfg(test)]
 mod tests {
     use super::*;
-    use leviath_providers::{FinishReason, InferenceResponse, TokenUsage};
+    use leviath_providers::{FinishReason, InferenceResponse, Provider, TokenUsage};
 
     // ─── Helpers ──────────────────────────────────────────────────────────────
 
@@ -1458,6 +1468,179 @@ model = "claude-sonnet-4-6"
         let _ = std::fs::remove_dir_all(&temp_dir);
     }
 
+    // ─── run_worker_inner (mock provider, no network) ────────────────────────
+    //
+    // With a real, working (mock) provider injected via
+    // `run_worker_inner`'s `build_registry` parameter, the run completes an
+    // actual inference round trip in-process -- exercising the `exec`
+    // closure's real construction/call site, `generate_title`'s success
+    // path (the "Title: {}" print), and `validate_keys()`'s warning-print
+    // branch, none of which are reachable once the run aborts early at
+    // `on_provider_missing` (as in the tests above).
+
+    struct MockProvider {
+        call_count: std::sync::atomic::AtomicUsize,
+    }
+
+    impl MockProvider {
+        fn new() -> Self {
+            Self {
+                call_count: std::sync::atomic::AtomicUsize::new(0),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl leviath_providers::Provider for MockProvider {
+        async fn infer(
+            &self,
+            _request: leviath_providers::InferenceRequest,
+        ) -> Result<leviath_providers::InferenceResponse, leviath_providers::ProviderError>
+        {
+            let call = self
+                .call_count
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let tool_calls = if call == 0 {
+                vec![leviath_providers::ToolCall {
+                    id: "call-1".to_string(),
+                    name: "read_file".to_string(),
+                    arguments: serde_json::json!({"path": "definitely-not-here.txt"}),
+                }]
+            } else {
+                vec![]
+            };
+            Ok(leviath_providers::InferenceResponse {
+                content: "done".to_string(),
+                tool_calls,
+                tokens_used: leviath_providers::TokenUsage {
+                    prompt_tokens: 10,
+                    completion_tokens: 5,
+                    total_tokens: 15,
+                    cached_tokens: 0,
+                    cache_write_tokens: 0,
+                },
+                finish_reason: leviath_providers::FinishReason::Complete,
+            })
+        }
+
+        fn count_tokens(&self, text: &str, _model: &str) -> usize {
+            text.len() / 4
+        }
+
+        fn max_context_tokens(&self, _model: &str) -> usize {
+            100_000
+        }
+
+        fn name(&self) -> &str {
+            "mock"
+        }
+
+        fn capabilities(&self, _model: &str) -> leviath_providers::ModelCapabilities {
+            leviath_providers::ModelCapabilities::default()
+        }
+
+        async fn list_models(
+            &self,
+        ) -> Result<Vec<leviath_providers::ModelInfo>, leviath_providers::ProviderError> {
+            Ok(vec![])
+        }
+    }
+
+    #[tokio::test]
+    async fn run_worker_inner_with_mock_provider_completes_full_round_trip() {
+        let _config_guard = isolate_config_path("worker-mock-provider");
+        // A malformed key still exercises the `validate_keys()` warning
+        // branch without being usable as a real credential -- and since the
+        // provider registry is fully mocked below, no real network call can
+        // happen regardless.
+        let mut fake_config = Config::default();
+        fake_config.providers.anthropic_api_key = Some("not-a-real-key".to_string());
+        // Title generation and the stage's own inference must use distinct
+        // registered providers: both draw from the same injected registry,
+        // and a single shared `MockProvider` instance's call-count-based
+        // "return a tool call on the first call" logic would otherwise be
+        // consumed by the title-generation call, leaving the stage's own
+        // first (real) call already past index 0 -- silently skipping the
+        // exec-closure tool-call round trip this test exists to cover.
+        fake_config.title.provider = Some("title-mock".to_string());
+        fake_config.title.model = Some("title-mock-model".to_string());
+        std::fs::write(
+            Config::config_path(),
+            toml::to_string(&fake_config).unwrap(),
+        )
+        .unwrap();
+
+        let temp_dir = std::env::temp_dir().join("lev-test-worker-mock-provider");
+        let _ = std::fs::create_dir_all(&temp_dir);
+        let manifest_content = r#"
+[agent]
+name = "test-worker-mock-agent"
+version = "1.0.0"
+description = "Test agent"
+
+[stages.main]
+mode = "autonomous"
+max_iterations = 2
+
+[stages.main.model]
+provider = "anthropic"
+model = "mock-model"
+
+[tool_permissions]
+bash = "ask"
+"#;
+        std::fs::write(temp_dir.join("agent.leviath"), manifest_content).unwrap();
+
+        let run_id = "test-worker-mock-provider-round-trip";
+        let dir = crate::runstate::run_dir(run_id);
+        let _ = std::fs::create_dir_all(&dir);
+        let mut meta = make_meta(run_id, 1);
+        crate::runstate::create_run(&meta).unwrap();
+
+        let args = WorkerArgs {
+            path: temp_dir.to_string_lossy().to_string(),
+            task: "test task".to_string(),
+            run_id: run_id.to_string(),
+            model: None,
+            yolo: true,
+            allow: vec![],
+            ask: vec![],
+            deny: vec![],
+            max_depth: None,
+        };
+
+        let result = run_worker_inner(&args, &mut meta, |_config| {
+            let mut registry = leviath_runtime::ProviderRegistry::new();
+            registry.register("anthropic".to_string(), Arc::new(MockProvider::new()));
+            registry.register("title-mock".to_string(), Arc::new(MockProvider::new()));
+            registry
+        })
+        .await;
+
+        assert!(
+            result.is_ok(),
+            "expected clean completion, got: {:?}",
+            result.err()
+        );
+        assert!(
+            meta.title.is_some(),
+            "generate_title should have produced a title via the mock provider"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn mock_provider_trivial_trait_methods() {
+        let provider = MockProvider::new();
+        assert_eq!(provider.count_tokens("abcd", "mock-model"), 1);
+        assert_eq!(provider.max_context_tokens("mock-model"), 100_000);
+        assert_eq!(provider.name(), "mock");
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        assert!(rt.block_on(provider.list_models()).unwrap().is_empty());
+    }
+
     #[tokio::test]
     async fn execute_worker_with_yolo_false_and_empty_overrides() {
         // Redirect $HOME so Config::load() can't see a real config/API key —
@@ -1980,6 +2163,136 @@ mode = "autonomous"
         assert_eq!(out.len(), 1);
         // Session scope approval should have been recorded.
         assert!(state.session_allows.lock().await.contains("read_file"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn dispatch_tool_calls_ask_approved_mcp_tool_returns_error_text() {
+        // Not a builtin name and no MCP server registered -> the MCP
+        // execute() path returns Err, exercising the `Err(e)` arm of the
+        // Ask-branch's MCP dispatch (as opposed to the builtin-execution arm
+        // already covered by `dispatch_tool_calls_ask_approved_executes_tool`).
+        let run_id = "test-dispatch-ask-approved-mcp";
+        let dir = crate::runstate::run_dir(run_id);
+        std::fs::create_dir_all(&dir).unwrap();
+        let meta = make_meta(run_id, 1);
+        crate::runstate::create_run(&meta).unwrap();
+
+        let mut state = make_dispatch_state(run_id).await;
+        let mut global = std::collections::HashMap::new();
+        global.insert("some_mcp_tool".to_string(), ToolPolicy::Ask);
+        state.global_perms = Arc::new(global);
+
+        let tool_name = "some_mcp_tool";
+        let hash = tool_name
+            .bytes()
+            .fold(0usize, |a, b| a.wrapping_add(b as usize));
+        let req_id = crate::interaction::make_interaction_id(hash, 0);
+
+        let run_id_clone = run_id.to_string();
+        let req_id_clone = req_id.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+            let resp = crate::interaction::InteractionResponse::approval(
+                &req_id_clone,
+                true,
+                crate::interaction::ApprovalScope::Once,
+            );
+            crate::interaction::write_response(&run_id_clone, &resp).ok();
+        });
+
+        let calls = vec![make_tool_call("some_mcp_tool", serde_json::json!({}))];
+        let out = dispatch_tool_calls(&state, calls).await;
+
+        assert_eq!(out.len(), 1);
+        assert!(out[0].1.contains("[error]"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn dispatch_tool_calls_allow_mcp_tool_returns_error_text() {
+        // Same as above but via the Allow branch's MCP dispatch (lines
+        // distinct from the Ask branch's identical match).
+        let run_id = "test-dispatch-allow-mcp";
+        let dir = crate::runstate::run_dir(run_id);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let mut state = make_dispatch_state(run_id).await;
+        let mut launch = std::collections::HashMap::new();
+        launch.insert("*".to_string(), ToolPolicy::Allow);
+        state.launch_overrides = Arc::new(launch);
+
+        let calls = vec![make_tool_call("some_mcp_tool", serde_json::json!({}))];
+        let out = dispatch_tool_calls(&state, calls).await;
+
+        assert_eq!(out.len(), 1);
+        assert!(out[0].1.contains("[error]"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn dispatch_tool_calls_ask_approved_long_result_is_truncated_in_log() {
+        // The Ask branch's own truncation computation (distinct from the
+        // Allow branch's, covered by `dispatch_tool_calls_result_truncated_when_long`)
+        // had no test driving a long result through an Ask-approved call.
+        let run_id = "test-dispatch-ask-truncate";
+        let dir = crate::runstate::run_dir(run_id);
+        std::fs::create_dir_all(&dir).unwrap();
+        let meta = make_meta(run_id, 1);
+        crate::runstate::create_run(&meta).unwrap();
+
+        let long_content = "y".repeat(500);
+        std::fs::write(dir.join("big.txt"), &long_content).unwrap();
+
+        let workdir = dir.clone();
+        let config = Config::default();
+        let tool_registry = ToolRegistry::build(workdir, &config).await;
+        let mut global = std::collections::HashMap::new();
+        global.insert("read_file".to_string(), ToolPolicy::Ask);
+        let state = ToolDispatchState {
+            builtins: tool_registry.builtins.clone(),
+            mcp: tool_registry.mcp.clone(),
+            builtin_names: tool_registry.builtin_names.clone(),
+            launch_overrides: Arc::new(std::collections::HashMap::new()),
+            session_allows: Arc::new(Mutex::new(std::collections::HashSet::new())),
+            stage_perms: Arc::new(Mutex::new(std::collections::HashMap::new())),
+            agent_perms: Arc::new(std::collections::HashMap::new()),
+            global_perms: Arc::new(global),
+            run_id: Arc::new(run_id.to_string()),
+            stage_idx: Arc::new(Mutex::new(0usize)),
+            stage_name: Arc::new(Mutex::new("main".to_string())),
+        };
+
+        let tool_name = "read_file";
+        let hash = tool_name
+            .bytes()
+            .fold(0usize, |a, b| a.wrapping_add(b as usize));
+        let req_id = crate::interaction::make_interaction_id(hash, 0);
+
+        let run_id_clone = run_id.to_string();
+        let req_id_clone = req_id.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+            let resp = crate::interaction::InteractionResponse::approval(
+                &req_id_clone,
+                true,
+                crate::interaction::ApprovalScope::Once,
+            );
+            crate::interaction::write_response(&run_id_clone, &resp).ok();
+        });
+
+        let calls = vec![make_tool_call(
+            "read_file",
+            serde_json::json!({"path": "big.txt"}),
+        )];
+        let out = dispatch_tool_calls(&state, calls).await;
+
+        assert_eq!(out.len(), 1);
+        // Full (untruncated) result is returned to the model.
+        assert!(out[0].1.contains(&long_content));
 
         let _ = std::fs::remove_dir_all(&dir);
     }

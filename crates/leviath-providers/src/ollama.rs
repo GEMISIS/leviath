@@ -1611,6 +1611,36 @@ mod tests {
         format!("http://{}", addr)
     }
 
+    /// Sends a non-2xx status line with a `Content-Length` far larger than
+    /// the actual bytes written, then closes the connection -- this forces a
+    /// genuine mid-body I/O error when the caller tries to read the error
+    /// body (`response.text().await` returns `Err`, not merely an empty or
+    /// malformed string), exercising the `unwrap_or_else(|_| "unknown
+    /// error"...)` fallback that a well-formed (even if empty/garbled) body
+    /// can never reach. Mirrors `infer_stream_body_error_propagates_as_stream_item_error`'s
+    /// technique below, applied to the non-streaming error-body read path.
+    async fn spawn_mock_server_truncated_error_body(status: u16, reason: &str) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let response = format!(
+            "HTTP/1.1 {} {}\r\nContent-Length: 1000\r\nConnection: close\r\n\r\n",
+            status, reason
+        );
+        tokio::spawn(async move {
+            if let Ok((mut socket, _)) = listener.accept().await {
+                let mut buf = [0u8; 8192];
+                let _ = socket.read(&mut buf).await;
+                let _ = socket.write_all(response.as_bytes()).await;
+                let _ = socket.write_all(b"short").await;
+                let _ = socket.flush().await;
+                let _ = socket.shutdown().await;
+            }
+        });
+        format!("http://{}", addr)
+    }
+
     fn mock_request() -> InferenceRequest {
         InferenceRequest {
             messages: vec![crate::provider::Message {
@@ -1635,6 +1665,17 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn infer_non_success_status_body_read_error_falls_back_to_unknown_error() {
+        let url = spawn_mock_server_truncated_error_body(500, "Internal Server Error").await;
+        let provider = OllamaProvider::with_base_url(url);
+        let err = provider.infer(mock_request()).await.unwrap_err();
+        match err {
+            ProviderError::ApiError(msg) => assert!(msg.contains("unknown error")),
+            other => panic!("expected ApiError, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
     async fn infer_malformed_json_returns_invalid_response() {
         let url = spawn_mock_server(200, "OK", b"not json").await;
         let provider = OllamaProvider::with_base_url(url);
@@ -1651,6 +1692,20 @@ mod tests {
             Ok(_) => panic!("expected an error"),
         };
         assert!(matches!(err, ProviderError::ApiError(_)));
+    }
+
+    #[tokio::test]
+    async fn infer_stream_non_success_status_body_read_error_falls_back_to_unknown_error() {
+        let url = spawn_mock_server_truncated_error_body(503, "Service Unavailable").await;
+        let provider = OllamaProvider::with_base_url(url);
+        let err = match provider.infer_stream(mock_request()).await {
+            Err(e) => e,
+            Ok(_) => panic!("expected an error"),
+        };
+        match err {
+            ProviderError::ApiError(msg) => assert!(msg.contains("unknown error")),
+            other => panic!("expected ApiError, got {:?}", other),
+        }
     }
 
     #[tokio::test]
@@ -1705,6 +1760,17 @@ mod tests {
         let provider = OllamaProvider::with_base_url(url);
         let err = provider.list_models().await.unwrap_err();
         assert!(matches!(err, ProviderError::RequestFailed(_)));
+    }
+
+    #[tokio::test]
+    async fn list_models_non_success_status_body_read_error_falls_back_to_unknown_error() {
+        let url = spawn_mock_server_truncated_error_body(401, "Unauthorized").await;
+        let provider = OllamaProvider::with_base_url(url);
+        let err = provider.list_models().await.unwrap_err();
+        match err {
+            ProviderError::RequestFailed(msg) => assert!(msg.contains("unknown error")),
+            other => panic!("expected RequestFailed, got {:?}", other),
+        }
     }
 
     #[tokio::test]

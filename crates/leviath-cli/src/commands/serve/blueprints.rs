@@ -117,6 +117,12 @@ pub(super) async fn create_blueprint(
         )
     })?;
 
+    // Untested by design: `read_blueprint_info` re-parses the exact content
+    // this function just wrote via `parse_manifest_public`, which already
+    // succeeded on the same bytes moments earlier -- only a TOCTOU race
+    // (something else replacing the file between write and read-back) could
+    // hit this arm, and there's no seam to inject that without unsafely
+    // mutating shared filesystem state mid-request.
     read_blueprint_info(&manifest_path, &dir)
         .map(Json)
         .ok_or_else(|| {
@@ -162,6 +168,7 @@ pub(super) async fn update_blueprint(
         )
     })?;
 
+    // Same TOCTOU-only reasoning as create_blueprint's identical pattern above.
     read_blueprint_info(&manifest_path, &dir)
         .map(Json)
         .ok_or_else(|| {
@@ -448,6 +455,34 @@ prompt = "Plan the work"
         assert_eq!(resp.status(), axum::http::StatusCode::BAD_REQUEST);
     }
 
+    #[tokio::test]
+    async fn create_blueprint_manifest_write_failure_returns_500() {
+        // Distinct from `create_blueprint_dir_creation_failure_returns_500`:
+        // here `create_dir_all` succeeds (the blueprint dir doesn't already
+        // exist as a blocking file), but the manifest *file* write fails --
+        // forced by pre-creating a directory at the exact path
+        // `<dir>/agent.leviath`, so `std::fs::write` hits EISDIR.
+        let name = unique_bp_name("create-manifest-write-fail");
+        let dir = agents_dir().join(&name);
+        std::fs::create_dir_all(dir.join("agent.leviath")).unwrap();
+
+        let app = Router::new().route("/api/blueprints", post(create_blueprint));
+        let manifest = format!(
+            "\n[agent]\nname = \"{name}\"\nversion = \"1.0.0\"\ndescription = \"d\"\n\n[stages.plan]\nprompt = \"p\"\n"
+        );
+        let body = serde_json::json!({ "name": name, "manifest": manifest });
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/blueprints")
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_string(&body).unwrap()))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), axum::http::StatusCode::INTERNAL_SERVER_ERROR);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     // ─── update_blueprint ─────────────────────────────────────────────────────
 
     #[cfg(unix)]
@@ -688,6 +723,46 @@ prompt = "Run"
         let result: ValidateResponse = serde_json::from_slice(&bytes).unwrap();
         assert!(!result.valid);
         assert!(result.errors.is_some());
+    }
+
+    #[tokio::test]
+    async fn validate_blueprint_parses_but_fails_structural_validation_returns_ok_valid_false() {
+        // Distinct from the manifest above: this one parses fine as TOML/a
+        // Blueprint (Ok(bp) from parse_manifest_public), but bp.validate()
+        // itself rejects it -- an entry_stage that doesn't match any defined
+        // stage. Exercises the `Ok(bp) => match bp.validate() { Err(e) => .. }`
+        // arm, which `validate_blueprint_invalid_manifest_returns_ok_valid_false`
+        // (a parse failure) never reaches.
+        let app = Router::new().route("/api/blueprints/validate", post(validate_blueprint));
+        let manifest = r#"
+[agent]
+name = "bad-entry-stage"
+version = "1.0.0"
+description = "Entry stage doesn't exist"
+entry_stage = "does-not-exist"
+
+[stages.plan]
+prompt = "Plan"
+"#;
+        let body = serde_json::json!({"manifest": manifest});
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/blueprints/validate")
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_string(&body).unwrap()))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), axum::http::StatusCode::OK);
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let result: ValidateResponse = serde_json::from_slice(&bytes).unwrap();
+        assert!(!result.valid);
+        assert!(result
+            .errors
+            .unwrap()
+            .iter()
+            .any(|e| e.contains("entry_stage")));
     }
 
     #[test]
