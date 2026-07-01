@@ -1264,6 +1264,379 @@ mod tests {
         assert_eq!(result.unwrap(), 0);
     }
 
+    #[tokio::test]
+    async fn test_evict_and_compact_frees_tokens_via_temporary_eviction() {
+        // A Temporary region alone is enough to satisfy target_free_tokens,
+        // so eviction succeeds with tokens_freed > 0 and no compaction needed.
+        let mut engine = AgentEngine::new();
+        let entity = engine
+            .world_mut()
+            .spawn({
+                let mut window = ContextWindow::new(1000);
+                let mut temp = leviath_core::Region::new(
+                    "scratch".to_string(),
+                    leviath_core::RegionKind::Temporary,
+                    1000,
+                );
+                temp.add_entry("disposable tool output".to_string(), 950)
+                    .unwrap();
+                window.add_region(temp);
+                window.current_tokens = 950; // 95% full -> needs_eviction(0.9) true
+                window
+            })
+            .id();
+
+        let cc = leviath_core::CompactionConfig {
+            provider: "unused".to_string(),
+            model: "test".to_string(),
+            max_summary_tokens: 500,
+            temperature: 0.3,
+            system_prompt: None,
+            user_prompt_template: None,
+        };
+
+        let result = engine.evict_and_compact(entity, &cc).await;
+        assert!(result.is_ok());
+        assert!(result.unwrap() > 0, "expected tokens to be freed");
+    }
+
+    #[tokio::test]
+    async fn test_evict_and_compact_runs_compaction_for_needed_regions() {
+        // Only a Compacting region over threshold, nothing Temporary/Clearable
+        // to evict -> try_evict reports needs_compaction, and evict_and_compact
+        // must call compact_region for it.
+        let mut registry = ProviderRegistry::new();
+        registry.register(
+            "compact-provider".to_string(),
+            Arc::new(MockProvider::new("compact-provider")),
+        );
+        let mut engine = AgentEngine::with_providers(registry);
+
+        let entity = engine
+            .world_mut()
+            .spawn({
+                let mut window = ContextWindow::new(700);
+                let mut compacting = leviath_core::Region::new(
+                    "analysis".to_string(),
+                    leviath_core::RegionKind::Compacting {
+                        threshold_tokens: 500,
+                    },
+                    700,
+                );
+                compacting
+                    .add_entry("lots of analysis".to_string(), 650)
+                    .unwrap();
+                window.add_region(compacting);
+                window.current_tokens = 650; // 650/700 ~= 0.93 -> needs_eviction(0.9) true
+                window
+            })
+            .id();
+
+        let cc = leviath_core::CompactionConfig {
+            provider: "compact-provider".to_string(),
+            model: "test".to_string(),
+            max_summary_tokens: 200,
+            temperature: 0.3,
+            system_prompt: None,
+            user_prompt_template: None,
+        };
+
+        let result = engine.evict_and_compact(entity, &cc).await;
+        assert!(
+            result.is_ok(),
+            "expected compaction to succeed: {:?}",
+            result.err()
+        );
+
+        // The compacting region should have been cleared by compact_region.
+        let w = engine.world().get::<ContextWindow>(entity).unwrap();
+        let region = w.get_region("analysis").unwrap();
+        assert!(region.content.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_evict_and_compact_propagates_pinned_over_budget_error() {
+        // Pinned regions alone exceed max_tokens -> try_evict returns
+        // PinnedRegionsOverBudget, which evict_and_compact must propagate.
+        let mut engine = AgentEngine::new();
+        let entity = engine
+            .world_mut()
+            .spawn({
+                let mut window = ContextWindow::new(1000);
+                let mut pinned = leviath_core::Region::new(
+                    "architecture".to_string(),
+                    leviath_core::RegionKind::Pinned,
+                    2000,
+                );
+                pinned
+                    .add_entry("huge pinned doc".to_string(), 1500)
+                    .unwrap();
+                window.add_region(pinned);
+                window.current_tokens = 1500; // over max_tokens -> needs_eviction(0.9) true
+                window
+            })
+            .id();
+
+        let cc = leviath_core::CompactionConfig {
+            provider: "unused".to_string(),
+            model: "test".to_string(),
+            max_summary_tokens: 500,
+            temperature: 0.3,
+            system_prompt: None,
+            user_prompt_template: None,
+        };
+
+        let result = engine.evict_and_compact(entity, &cc).await;
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.to_lowercase().contains("pinned"),
+            "expected a pinned-regions-over-budget error, got: {}",
+            err_msg
+        );
+    }
+
+    #[tokio::test]
+    async fn test_run_inference_loop_filtered_auto_eviction_frees_tokens() {
+        // First response has a tool call (so the loop reaches the
+        // post-tool-execution auto-eviction check); by then the window is
+        // over the 90% threshold via a Temporary region, so evict_and_compact
+        // returns Ok(freed) with freed > 0 -- the "Auto-eviction during
+        // inference loop" info-log branch.
+        let responses = vec![
+            InferenceResponse {
+                content: "using a tool".to_string(),
+                tool_calls: vec![leviath_providers::ToolCall {
+                    id: "call_1".to_string(),
+                    name: "noop".to_string(),
+                    arguments: serde_json::json!({}),
+                }],
+                tokens_used: leviath_providers::TokenUsage {
+                    prompt_tokens: 1,
+                    completion_tokens: 1,
+                    total_tokens: 2,
+                    cached_tokens: 0,
+                    cache_write_tokens: 0,
+                },
+                finish_reason: leviath_providers::FinishReason::ToolCall,
+            },
+            default_response(),
+        ];
+        let mut registry = ProviderRegistry::new();
+        registry.register(
+            "mock".to_string(),
+            Arc::new(MockProvider::with_responses("mock", responses)),
+        );
+        let mut engine = AgentEngine::with_providers(registry);
+
+        let entity = engine
+            .world_mut()
+            .spawn({
+                let mut window = ContextWindow::new(1000);
+                let mut temp = leviath_core::Region::new(
+                    "scratch".to_string(),
+                    leviath_core::RegionKind::Temporary,
+                    1000,
+                );
+                temp.add_entry("disposable".to_string(), 920).unwrap();
+                window.add_region(temp);
+                window.add_region(leviath_core::Region::new(
+                    "tool_results".to_string(),
+                    leviath_core::RegionKind::SlidingWindow { max_items: 50 },
+                    50,
+                ));
+                window.current_tokens = 920;
+                window
+            })
+            .id();
+
+        let cc = leviath_core::CompactionConfig {
+            provider: "unused".to_string(),
+            model: "test".to_string(),
+            max_summary_tokens: 200,
+            temperature: 0.3,
+            system_prompt: None,
+            user_prompt_template: None,
+        };
+
+        let result = engine
+            .run_inference_loop_filtered(
+                entity,
+                "mock",
+                "test-model",
+                Vec::new(),
+                5,
+                None,
+                None,
+                Some(&cc),
+                &mut |_tool_calls| async { vec![("call_1".to_string(), "ok".to_string())] },
+            )
+            .await;
+        assert!(
+            result.is_ok(),
+            "expected loop to complete: {:?}",
+            result.err()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_run_inference_loop_filtered_auto_eviction_error_logs_warning_and_continues() {
+        // Same shape as above, but the window's only occupied region is
+        // Pinned and over budget -> evict_and_compact returns Err, which
+        // must be logged and swallowed (loop continues to iteration 2,
+        // which completes normally), not propagated as a loop failure.
+        let responses = vec![
+            InferenceResponse {
+                content: "using a tool".to_string(),
+                tool_calls: vec![leviath_providers::ToolCall {
+                    id: "call_1".to_string(),
+                    name: "noop".to_string(),
+                    arguments: serde_json::json!({}),
+                }],
+                tokens_used: leviath_providers::TokenUsage {
+                    prompt_tokens: 1,
+                    completion_tokens: 1,
+                    total_tokens: 2,
+                    cached_tokens: 0,
+                    cache_write_tokens: 0,
+                },
+                finish_reason: leviath_providers::FinishReason::ToolCall,
+            },
+            default_response(),
+        ];
+        let mut registry = ProviderRegistry::new();
+        registry.register(
+            "mock".to_string(),
+            Arc::new(MockProvider::with_responses("mock", responses)),
+        );
+        let mut engine = AgentEngine::with_providers(registry);
+
+        let entity = engine
+            .world_mut()
+            .spawn({
+                let mut window = ContextWindow::new(1000);
+                let mut pinned = leviath_core::Region::new(
+                    "architecture".to_string(),
+                    leviath_core::RegionKind::Pinned,
+                    2000,
+                );
+                pinned
+                    .add_entry("huge pinned doc".to_string(), 1500)
+                    .unwrap();
+                window.add_region(pinned);
+                window.add_region(leviath_core::Region::new(
+                    "tool_results".to_string(),
+                    leviath_core::RegionKind::SlidingWindow { max_items: 50 },
+                    50,
+                ));
+                window.current_tokens = 1500;
+                window
+            })
+            .id();
+
+        let cc = leviath_core::CompactionConfig {
+            provider: "unused".to_string(),
+            model: "test".to_string(),
+            max_summary_tokens: 200,
+            temperature: 0.3,
+            system_prompt: None,
+            user_prompt_template: None,
+        };
+
+        let result = engine
+            .run_inference_loop_filtered(
+                entity,
+                "mock",
+                "test-model",
+                Vec::new(),
+                5,
+                None,
+                None,
+                Some(&cc),
+                &mut |_tool_calls| async { vec![("call_1".to_string(), "ok".to_string())] },
+            )
+            .await;
+        assert!(
+            result.is_ok(),
+            "auto-eviction errors must be logged, not propagated: {:?}",
+            result.err()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_run_inference_loop_filtered_auto_eviction_noop_below_threshold() {
+        // compaction_config is Some, but the window is well below the 90%
+        // threshold -> evict_and_compact's early-return Ok(0) hits the `_`
+        // (no-op) match arm in the loop, neither logging nor erroring.
+        let responses = vec![
+            InferenceResponse {
+                content: "using a tool".to_string(),
+                tool_calls: vec![leviath_providers::ToolCall {
+                    id: "call_1".to_string(),
+                    name: "noop".to_string(),
+                    arguments: serde_json::json!({}),
+                }],
+                tokens_used: leviath_providers::TokenUsage {
+                    prompt_tokens: 1,
+                    completion_tokens: 1,
+                    total_tokens: 2,
+                    cached_tokens: 0,
+                    cache_write_tokens: 0,
+                },
+                finish_reason: leviath_providers::FinishReason::ToolCall,
+            },
+            default_response(),
+        ];
+        let mut registry = ProviderRegistry::new();
+        registry.register(
+            "mock".to_string(),
+            Arc::new(MockProvider::with_responses("mock", responses)),
+        );
+        let mut engine = AgentEngine::with_providers(registry);
+
+        let entity = engine
+            .world_mut()
+            .spawn({
+                let mut window = ContextWindow::new(10000);
+                window.add_region(leviath_core::Region::new(
+                    "conversation".to_string(),
+                    leviath_core::RegionKind::SlidingWindow { max_items: 50 },
+                    8000,
+                ));
+                window.add_region(leviath_core::Region::new(
+                    "tool_results".to_string(),
+                    leviath_core::RegionKind::SlidingWindow { max_items: 50 },
+                    2000,
+                ));
+                window
+            })
+            .id();
+
+        let cc = leviath_core::CompactionConfig {
+            provider: "unused".to_string(),
+            model: "test".to_string(),
+            max_summary_tokens: 200,
+            temperature: 0.3,
+            system_prompt: None,
+            user_prompt_template: None,
+        };
+
+        let result = engine
+            .run_inference_loop_filtered(
+                entity,
+                "mock",
+                "test-model",
+                Vec::new(),
+                5,
+                None,
+                None,
+                Some(&cc),
+                &mut |_tool_calls| async { vec![("call_1".to_string(), "ok".to_string())] },
+            )
+            .await;
+        assert!(result.is_ok());
+    }
+
     // ─── MockProvider for inference tests ─────────────────────────────────
 
     struct MockProvider {
@@ -2145,5 +2518,20 @@ mod tests {
             !bash_output.content.is_empty(),
             "bash tool results should route to override region"
         );
+    }
+
+    #[test]
+    fn test_mock_providers_trivial_trait_methods() {
+        use leviath_providers::Provider;
+
+        let mock = MockProvider::new("trivial-mock");
+        assert_eq!(mock.count_tokens("anything", "any-model"), 4);
+        assert_eq!(mock.max_context_tokens("any-model"), 100_000);
+        assert_eq!(mock.name(), "trivial-mock");
+
+        let no_temp = NoTemperatureMockProvider;
+        assert_eq!(no_temp.count_tokens("anything", "any-model"), 4);
+        assert_eq!(no_temp.max_context_tokens("any-model"), 100_000);
+        assert_eq!(no_temp.name(), "no-temp-mock");
     }
 }

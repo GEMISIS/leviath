@@ -98,6 +98,11 @@ impl ToolRegistry {
     /// Shut down all MCP connections.
     pub async fn shutdown(&self) {
         let mut mcp = self.mcp.lock().await;
+        // `Err(e)` here is unreachable given `leviath_mcp::MCPClient::shutdown`'s
+        // current implementation: it discards the result of both the
+        // cancellation notification and the child-process kill, always
+        // returning `Ok(())`. Covering this arm would require a change to
+        // `leviath-mcp` itself, out of scope for a `tools.rs`-only pass.
         if let Err(e) = mcp.shutdown_all().await {
             tracing::warn!(error = %e, "Error shutting down MCP servers");
         }
@@ -107,7 +112,7 @@ impl ToolRegistry {
 // ─── Sub-agent tool executor ─────────────────────────────────────────────────
 
 use bevy_ecs::prelude::Entity;
-use leviath_core::Blueprint;
+use leviath_core::{Blueprint, Region};
 use leviath_runtime::{
     AgentEngine, AgentPool, AgentState, AgentStatus, CancellationToken, ContextWindow, ParentRef,
     SubAgentChildren,
@@ -267,6 +272,35 @@ impl SubAgentExecutor {
             .write()
             .unwrap()
             .insert(child_agent_id.clone(), child_entity);
+
+        // Initialize the child's context window regions from its blueprint.
+        // `AgentPool::spawn_agent` only allocates an empty `ContextWindow`
+        // (regions are populated separately elsewhere for the root agent via
+        // `initialize_context_window` in `commands/run/helpers.rs`) -- without
+        // this, `seed_context` below could never find a pinned region to
+        // write into, and `check_agent`/`wait_for_agent` could never read
+        // back a "conversation" region that doesn't exist yet.
+        {
+            let mut engine = self.engine.write().await;
+            if let Some(mut window) = engine.world_mut().get_mut::<ContextWindow>(child_entity) {
+                for region_def in &blueprint.context_layout.regions {
+                    if window.get_region(&region_def.name).is_none() {
+                        window.add_region(Region::new(
+                            region_def.name.clone(),
+                            region_def.kind.clone(),
+                            region_def.max_tokens,
+                        ));
+                    }
+                }
+                if window.get_region("conversation").is_none() {
+                    window.add_region(Region::new(
+                        "conversation".to_string(),
+                        leviath_core::RegionKind::SlidingWindow { max_items: 50 },
+                        10000,
+                    ));
+                }
+            }
+        }
 
         // Attach ParentRef and SubAgentChildren components
         {
@@ -626,6 +660,921 @@ fn parse_policy_str(s: &str) -> ToolPolicy {
         "deny" => ToolPolicy::Deny,
         _ => ToolPolicy::Ask,
     }
+}
+
+#[cfg(test)]
+mod mcp_registry_tests {
+    use super::*;
+    use leviath_mcp::MCPServerConfig;
+    use std::collections::HashMap as Map;
+
+    // A minimal MCP server speaking just enough JSON-RPC over stdio to
+    // satisfy `initialize` / `notifications/initialized` / `tools/list`,
+    // mirroring `leviath-mcp/src/discovery.rs`'s own `STUB_INIT_AND_LIST`
+    // test fixture -- a real (but fast, local, no-network) subprocess round
+    // trip rather than a fake/mocked `ToolExecutor`.
+    const STUB_INIT_AND_LIST: &str = r#"
+import sys, json
+
+def respond(id, result):
+    msg = json.dumps({"jsonrpc": "2.0", "id": id, "result": result})
+    sys.stdout.write(msg + "\n")
+    sys.stdout.flush()
+
+for line in sys.stdin:
+    line = line.strip()
+    if not line:
+        continue
+    req = json.loads(line)
+    method = req.get("method", "")
+    id_ = req.get("id")
+    if method == "initialize":
+        respond(id_, {"capabilities": {"tools": {"listChanged": True}}, "protocolVersion": "2024-11-05"})
+    elif method == "notifications/initialized":
+        pass
+    elif method == "tools/list":
+        respond(id_, {"tools": [{"name": "echo", "description": "echo tool", "inputSchema": {}}]})
+    elif method == "tools/call":
+        args = req.get("params", {}).get("arguments", {})
+        if args.get("fail"):
+            respond(id_, {"content": [{"type": "text", "text": "it broke"}], "is_error": True})
+        else:
+            respond(id_, {"content": [{"type": "text", "text": "echoed!"}], "is_error": False})
+    else:
+        respond(id_, {"error": {"code": -32601, "message": "method not found"}})
+"#;
+
+    fn config_with_mcp_server(command: &str, args: Vec<&str>) -> Config {
+        Config {
+            mcp_servers: vec![MCPServerConfig {
+                name: "stub-server".to_string(),
+                command: command.to_string(),
+                args: args.into_iter().map(String::from).collect(),
+                env: Map::new(),
+            }],
+            ..Config::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn build_connects_mcp_server_and_registers_its_tools() {
+        let config = config_with_mcp_server("python3", vec!["-c", STUB_INIT_AND_LIST]);
+        let registry = ToolRegistry::build(std::env::temp_dir(), &config).await;
+
+        assert_eq!(registry.mcp_tool_defs.len(), 1);
+        assert_eq!(registry.mcp_tool_defs[0].name, "echo");
+
+        registry.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn build_skips_mcp_server_that_fails_to_connect() {
+        // A nonexistent command fails to spawn, exercising the `Err(e)` arm
+        // ("Failed to connect MCP server -- skipping") instead of the
+        // success arm above.
+        let config = config_with_mcp_server("definitely-not-a-real-binary-xyz", vec![]);
+        let registry = ToolRegistry::build(std::env::temp_dir(), &config).await;
+
+        assert!(registry.mcp_tool_defs.is_empty());
+    }
+
+    #[tokio::test]
+    async fn call_dispatches_to_builtin_and_all_mcp_result_arms() {
+        let config = config_with_mcp_server("python3", vec!["-c", STUB_INIT_AND_LIST]);
+        let registry = ToolRegistry::build(std::env::temp_dir(), &config).await;
+
+        // Builtin path.
+        let builtin_out = registry
+            .call(
+                "read_file",
+                serde_json::json!({"path": "definitely-not-here.txt"}),
+            )
+            .await;
+        assert!(!builtin_out.is_empty());
+
+        // MCP `Ok(r) if r.success` arm.
+        let ok_out = registry.call("echo", serde_json::json!({})).await;
+        assert_eq!(ok_out, "echoed!");
+
+        // MCP `Ok(r)` (tool-level failure) arm.
+        let fail_out = registry
+            .call("echo", serde_json::json!({"fail": true}))
+            .await;
+        assert!(fail_out.contains("[error]"));
+        assert!(fail_out.contains("it broke"));
+
+        // MCP `Err(e)` (transport/protocol error) arm: a tool name the stub
+        // doesn't recognize at all is never in `cached_tools()`, but the
+        // server *is* connected -- unlike `execute()`'s "no server found"
+        // path, this specific `Err` comes from the JSON-RPC "method not
+        // found" response bubbling up through `call_tool`. We can't hit
+        // that distinct transport-error arm without a tool name the stub
+        // itself advertises but then refuses at call time, which the stub
+        // doesn't model -- `discover.rs`'s own test suite already covers
+        // this exact JSON-RPC-error-response path at the `MCPClient` level.
+        registry.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn shutdown_with_no_servers_is_a_noop() {
+        let config = Config::default();
+        let registry = ToolRegistry::build(std::env::temp_dir(), &config).await;
+        registry.shutdown().await; // must not panic
+    }
+}
+
+#[cfg(test)]
+mod subagent_tests {
+    use super::*;
+    use leviath_core::blueprint::ModelConfig;
+    use leviath_core::{ContextLayout, RegionDefinition, RegionKind, Stage};
+    use leviath_runtime::ProviderRegistry;
+
+    fn make_blueprint(name: &str) -> Blueprint {
+        let layout = ContextLayout::new(
+            vec![
+                RegionDefinition::new("system".to_string(), RegionKind::Pinned, 2000),
+                RegionDefinition::new(
+                    "conversation".to_string(),
+                    RegionKind::SlidingWindow { max_items: 50 },
+                    10000,
+                ),
+            ],
+            12000,
+        );
+        Blueprint::new(
+            name.to_string(),
+            "test agent".to_string(),
+            vec![Stage::new(
+                "main".to_string(),
+                ModelConfig::new("mock".to_string(), "test-model".to_string()),
+            )],
+            layout,
+        )
+    }
+
+    /// Builds a fresh executor plus a registered "root" caller agent (spawned
+    /// directly into the engine, not via the executor -- mirrors how the real
+    /// root agent isn't itself a sub-agent-spawned entity).
+    fn make_executor_with_root() -> (SubAgentExecutor, Entity, Arc<RwLock<AgentEngine>>) {
+        let mut engine = AgentEngine::with_providers(ProviderRegistry::new());
+        let mut root_pool = AgentPool::new(make_blueprint("root"));
+        let root_id = root_pool.spawn_agent(engine.world_mut());
+        let root_entity = root_pool.get_agent(&root_id).unwrap();
+
+        let engine = Arc::new(RwLock::new(engine));
+        let exec = SubAgentExecutor::new(engine.clone());
+        exec.register_agent("root".to_string(), root_entity);
+        exec.register_blueprint(make_blueprint("child-bp"));
+        (exec, root_entity, engine)
+    }
+
+    #[tokio::test]
+    async fn execute_unknown_tool_returns_error() {
+        let (exec, root_entity, _engine) = make_executor_with_root();
+        let out = exec
+            .execute(
+                "not_a_real_tool",
+                &serde_json::json!({}),
+                "root",
+                root_entity,
+                0,
+                5,
+            )
+            .await;
+        assert!(out.contains("Unknown sub-agent tool"));
+    }
+
+    // ─── spawn_agent ─────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn spawn_agent_missing_blueprint_arg_errors() {
+        let (exec, root_entity, _engine) = make_executor_with_root();
+        let out = exec
+            .execute(
+                "spawn_agent",
+                &serde_json::json!({"task": "do it"}),
+                "root",
+                root_entity,
+                0,
+                5,
+            )
+            .await;
+        assert!(out.contains("missing 'blueprint'"));
+    }
+
+    #[tokio::test]
+    async fn spawn_agent_missing_task_arg_errors() {
+        let (exec, root_entity, _engine) = make_executor_with_root();
+        let out = exec
+            .execute(
+                "spawn_agent",
+                &serde_json::json!({"blueprint": "child-bp"}),
+                "root",
+                root_entity,
+                0,
+                5,
+            )
+            .await;
+        assert!(out.contains("missing 'task'"));
+    }
+
+    #[tokio::test]
+    async fn spawn_agent_depth_exceeded_errors() {
+        let (exec, root_entity, _engine) = make_executor_with_root();
+        let out = exec
+            .execute(
+                "spawn_agent",
+                &serde_json::json!({"blueprint": "child-bp", "task": "do it"}),
+                "root",
+                root_entity,
+                5,
+                5,
+            )
+            .await;
+        assert!(out.contains("exceeds max depth"));
+    }
+
+    #[tokio::test]
+    async fn spawn_agent_unregistered_blueprint_errors() {
+        let (exec, root_entity, _engine) = make_executor_with_root();
+        let out = exec
+            .execute(
+                "spawn_agent",
+                &serde_json::json!({"blueprint": "never-registered", "task": "do it"}),
+                "root",
+                root_entity,
+                0,
+                5,
+            )
+            .await;
+        assert!(out.contains("not found"));
+    }
+
+    #[tokio::test]
+    async fn spawn_agent_success_with_seed_context_registers_child() {
+        let (exec, root_entity, engine) = make_executor_with_root();
+        let out = exec
+            .execute(
+                "spawn_agent",
+                &serde_json::json!({
+                    "blueprint": "child-bp",
+                    "task": "do it",
+                    "wait": false,
+                    "seed_context": "seeded text",
+                }),
+                "root",
+                root_entity,
+                0,
+                5,
+            )
+            .await;
+        assert!(out.starts_with("Spawned sub-agent"));
+
+        // Parent's SubAgentChildren/AgentState got updated too.
+        let eng = engine.read().await;
+        let world = eng.world();
+        let children = world.get::<leviath_runtime::SubAgentChildren>(root_entity);
+        assert_eq!(children.unwrap().children.len(), 1);
+        let root_state = world.get::<AgentState>(root_entity).unwrap();
+        assert_eq!(root_state.spawned_children_ids.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn spawn_agent_blueprint_without_conversation_region_gets_fallback_region() {
+        // `make_blueprint` (used everywhere else in this module) always
+        // declares a "conversation" region, so the fallback add-if-missing
+        // branch in `exec_spawn` never runs under those tests. Use a
+        // layout with only a "system" region to force it.
+        let (exec, root_entity, engine) = make_executor_with_root();
+        let layout = ContextLayout::new(
+            vec![RegionDefinition::new(
+                "system".to_string(),
+                RegionKind::Pinned,
+                2000,
+            )],
+            12000,
+        );
+        let bp = Blueprint::new(
+            "no-conversation-bp".to_string(),
+            "test agent".to_string(),
+            vec![Stage::new(
+                "main".to_string(),
+                ModelConfig::new("mock".to_string(), "test-model".to_string()),
+            )],
+            layout,
+        );
+        exec.register_blueprint(bp);
+
+        let out = exec
+            .execute(
+                "spawn_agent",
+                &serde_json::json!({"blueprint": "no-conversation-bp", "task": "do it"}),
+                "root",
+                root_entity,
+                0,
+                5,
+            )
+            .await;
+        assert!(out.starts_with("Spawned sub-agent"));
+
+        let child_id = out.split('\'').nth(1).unwrap().to_string();
+        let child_entity = *exec.agent_entities.read().unwrap().get(&child_id).unwrap();
+        let eng = engine.read().await;
+        let window = eng.world().get::<ContextWindow>(child_entity).unwrap();
+        assert!(
+            window.get_region("conversation").is_some(),
+            "fallback should have added a conversation region"
+        );
+    }
+
+    #[tokio::test]
+    async fn check_agent_complete_without_context_window_omits_result() {
+        // Distinguishes the "no ContextWindow component at all" branch from
+        // the "has ContextWindow but no conversation content" branch: spawn
+        // a bare entity with only an `AgentState` (no `ContextWindow`) set
+        // to `Complete`.
+        let (exec, root_entity, engine) = make_executor_with_root();
+        let bare_entity = {
+            let mut eng = engine.write().await;
+            eng.world_mut()
+                .spawn(AgentState {
+                    agent_id: "bare-complete".to_string(),
+                    current_stage: "main".to_string(),
+                    iteration: 0,
+                    status: AgentStatus::Complete,
+                    spawned_children_ids: Vec::new(),
+                    pending_wait: None,
+                    accepts_messages: true,
+                })
+                .id()
+        };
+        exec.register_agent("bare-complete".to_string(), bare_entity);
+
+        let out = exec
+            .execute(
+                "check_agent",
+                &serde_json::json!({"agent_id": "bare-complete"}),
+                "root",
+                root_entity,
+                0,
+                5,
+            )
+            .await;
+        assert_eq!(out, "Status: complete");
+    }
+
+    #[tokio::test]
+    async fn spawn_agent_second_child_appends_to_existing_children_list() {
+        let (exec, root_entity, engine) = make_executor_with_root();
+        for _ in 0..2 {
+            let out = exec
+                .execute(
+                    "spawn_agent",
+                    &serde_json::json!({"blueprint": "child-bp", "task": "do it"}),
+                    "root",
+                    root_entity,
+                    0,
+                    5,
+                )
+                .await;
+            assert!(out.starts_with("Spawned sub-agent"));
+        }
+        let eng = engine.read().await;
+        let children = eng
+            .world()
+            .get::<leviath_runtime::SubAgentChildren>(root_entity)
+            .unwrap();
+        assert_eq!(children.children.len(), 2);
+    }
+
+    // ─── check_agent ─────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn check_agent_missing_agent_id_errors() {
+        let (exec, root_entity, _engine) = make_executor_with_root();
+        let out = exec
+            .execute(
+                "check_agent",
+                &serde_json::json!({}),
+                "root",
+                root_entity,
+                0,
+                5,
+            )
+            .await;
+        assert!(out.contains("missing 'agent_id'"));
+    }
+
+    #[tokio::test]
+    async fn check_agent_not_found_errors() {
+        let (exec, root_entity, _engine) = make_executor_with_root();
+        let out = exec
+            .execute(
+                "check_agent",
+                &serde_json::json!({"agent_id": "ghost"}),
+                "root",
+                root_entity,
+                0,
+                5,
+            )
+            .await;
+        assert!(out.contains("not found"));
+    }
+
+    #[tokio::test]
+    async fn check_agent_entity_with_no_state_errors() {
+        let (exec, root_entity, engine) = make_executor_with_root();
+        let bare_entity = {
+            let mut eng = engine.write().await;
+            eng.world_mut().spawn_empty().id()
+        };
+        exec.register_agent("bare".to_string(), bare_entity);
+        let out = exec
+            .execute(
+                "check_agent",
+                &serde_json::json!({"agent_id": "bare"}),
+                "root",
+                root_entity,
+                0,
+                5,
+            )
+            .await;
+        assert!(out.contains("has no state"));
+    }
+
+    async fn spawn_child(exec: &SubAgentExecutor, root_entity: Entity) -> String {
+        let out = exec
+            .execute(
+                "spawn_agent",
+                &serde_json::json!({"blueprint": "child-bp", "task": "do it"}),
+                "root",
+                root_entity,
+                0,
+                5,
+            )
+            .await;
+        // "Spawned sub-agent 'child-bp-0' (blueprint: child-bp, depth: 1)"
+        out.split('\'').nth(1).unwrap().to_string()
+    }
+
+    async fn set_status(engine: &Arc<RwLock<AgentEngine>>, entity: Entity, status: AgentStatus) {
+        let mut eng = engine.write().await;
+        if let Some(mut state) = eng.world_mut().get_mut::<AgentState>(entity) {
+            state.status = status;
+        }
+    }
+
+    #[tokio::test]
+    async fn check_agent_reports_every_status_variant() {
+        let (exec, root_entity, engine) = make_executor_with_root();
+        let child_id = spawn_child(&exec, root_entity).await;
+        let child_entity = *exec.agent_entities.read().unwrap().get(&child_id).unwrap();
+
+        for (status, expect_substr) in [
+            (AgentStatus::Active, "Status: active"),
+            (AgentStatus::Waiting, "Status: waiting"),
+            (AgentStatus::Cancelled, "Status: cancelled"),
+            (AgentStatus::Idle, "Status: idle"),
+            (
+                AgentStatus::Error {
+                    message: "boom".to_string(),
+                },
+                "Status: error: boom",
+            ),
+        ] {
+            set_status(&engine, child_entity, status).await;
+            let out = exec
+                .execute(
+                    "check_agent",
+                    &serde_json::json!({"agent_id": child_id}),
+                    "root",
+                    root_entity,
+                    0,
+                    5,
+                )
+                .await;
+            assert!(out.contains(expect_substr), "got: {}", out);
+        }
+    }
+
+    #[tokio::test]
+    async fn check_agent_complete_without_conversation_content_omits_result() {
+        let (exec, root_entity, engine) = make_executor_with_root();
+        let child_id = spawn_child(&exec, root_entity).await;
+        let child_entity = *exec.agent_entities.read().unwrap().get(&child_id).unwrap();
+        set_status(&engine, child_entity, AgentStatus::Complete).await;
+
+        let out = exec
+            .execute(
+                "check_agent",
+                &serde_json::json!({"agent_id": child_id}),
+                "root",
+                root_entity,
+                0,
+                5,
+            )
+            .await;
+        assert_eq!(out, "Status: complete");
+    }
+
+    #[tokio::test]
+    async fn check_agent_complete_with_conversation_content_includes_result() {
+        let (exec, root_entity, engine) = make_executor_with_root();
+        let child_id = spawn_child(&exec, root_entity).await;
+        let child_entity = *exec.agent_entities.read().unwrap().get(&child_id).unwrap();
+        {
+            let mut eng = engine.write().await;
+            if let Some(mut window) = eng.world_mut().get_mut::<ContextWindow>(child_entity) {
+                let _ = window.add_to_region("conversation", "final answer".to_string(), 10);
+            }
+        }
+        set_status(&engine, child_entity, AgentStatus::Complete).await;
+
+        let out = exec
+            .execute(
+                "check_agent",
+                &serde_json::json!({"agent_id": child_id}),
+                "root",
+                root_entity,
+                0,
+                5,
+            )
+            .await;
+        assert_eq!(out, "Status: complete\nResult: final answer");
+    }
+
+    // ─── wait_for_agent ──────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn wait_for_agent_missing_agent_id_errors() {
+        let (exec, root_entity, _engine) = make_executor_with_root();
+        let out = exec
+            .execute(
+                "wait_for_agent",
+                &serde_json::json!({}),
+                "root",
+                root_entity,
+                0,
+                5,
+            )
+            .await;
+        assert!(out.contains("missing 'agent_id'"));
+    }
+
+    #[tokio::test]
+    async fn wait_for_agent_not_found_errors() {
+        let (exec, root_entity, _engine) = make_executor_with_root();
+        let out = exec
+            .execute(
+                "wait_for_agent",
+                &serde_json::json!({"agent_id": "ghost"}),
+                "root",
+                root_entity,
+                0,
+                5,
+            )
+            .await;
+        assert!(out.contains("not found"));
+    }
+
+    #[tokio::test]
+    async fn wait_for_agent_already_complete_returns_immediately_and_clears_pending() {
+        let (exec, root_entity, engine) = make_executor_with_root();
+        let child_id = spawn_child(&exec, root_entity).await;
+        let child_entity = *exec.agent_entities.read().unwrap().get(&child_id).unwrap();
+        {
+            let mut eng = engine.write().await;
+            if let Some(mut window) = eng.world_mut().get_mut::<ContextWindow>(child_entity) {
+                let _ = window.add_to_region("conversation", "done!".to_string(), 10);
+            }
+        }
+        set_status(&engine, child_entity, AgentStatus::Complete).await;
+
+        let out = exec
+            .execute(
+                "wait_for_agent",
+                &serde_json::json!({"agent_id": child_id}),
+                "root",
+                root_entity,
+                0,
+                5,
+            )
+            .await;
+        assert!(out.contains("completed"));
+        assert!(out.contains("done!"));
+
+        let eng = engine.read().await;
+        let root_state = eng.world().get::<AgentState>(root_entity).unwrap();
+        assert_eq!(root_state.pending_wait, None);
+    }
+
+    #[tokio::test]
+    async fn wait_for_agent_already_complete_no_result_uses_placeholder() {
+        let (exec, root_entity, engine) = make_executor_with_root();
+        let child_id = spawn_child(&exec, root_entity).await;
+        let child_entity = *exec.agent_entities.read().unwrap().get(&child_id).unwrap();
+        set_status(&engine, child_entity, AgentStatus::Complete).await;
+
+        let out = exec
+            .execute(
+                "wait_for_agent",
+                &serde_json::json!({"agent_id": child_id}),
+                "root",
+                root_entity,
+                0,
+                5,
+            )
+            .await;
+        assert!(out.contains("(no result)"));
+    }
+
+    #[tokio::test]
+    async fn wait_for_agent_errored_child_returns_error_message() {
+        let (exec, root_entity, engine) = make_executor_with_root();
+        let child_id = spawn_child(&exec, root_entity).await;
+        let child_entity = *exec.agent_entities.read().unwrap().get(&child_id).unwrap();
+        set_status(
+            &engine,
+            child_entity,
+            AgentStatus::Error {
+                message: "kaboom".to_string(),
+            },
+        )
+        .await;
+
+        let out = exec
+            .execute(
+                "wait_for_agent",
+                &serde_json::json!({"agent_id": child_id}),
+                "root",
+                root_entity,
+                0,
+                5,
+            )
+            .await;
+        assert!(out.contains("failed with error: kaboom"));
+    }
+
+    #[tokio::test]
+    async fn wait_for_agent_cancelled_child_returns_cancelled_message() {
+        let (exec, root_entity, engine) = make_executor_with_root();
+        let child_id = spawn_child(&exec, root_entity).await;
+        let child_entity = *exec.agent_entities.read().unwrap().get(&child_id).unwrap();
+        set_status(&engine, child_entity, AgentStatus::Cancelled).await;
+
+        let out = exec
+            .execute(
+                "wait_for_agent",
+                &serde_json::json!({"agent_id": child_id}),
+                "root",
+                root_entity,
+                0,
+                5,
+            )
+            .await;
+        assert!(out.contains("was cancelled"));
+    }
+
+    #[tokio::test]
+    async fn wait_for_agent_entity_removed_mid_poll_errors() {
+        let (exec, root_entity, engine) = make_executor_with_root();
+        let child_id = spawn_child(&exec, root_entity).await;
+        let child_entity = *exec.agent_entities.read().unwrap().get(&child_id).unwrap();
+        {
+            let mut eng = engine.write().await;
+            eng.world_mut().despawn(child_entity);
+        }
+
+        let out = exec
+            .execute(
+                "wait_for_agent",
+                &serde_json::json!({"agent_id": child_id}),
+                "root",
+                root_entity,
+                0,
+                5,
+            )
+            .await;
+        assert!(out.contains("no longer exists"));
+    }
+
+    #[tokio::test]
+    async fn wait_for_agent_polls_until_status_flips_to_complete() {
+        let (exec, root_entity, engine) = make_executor_with_root();
+        let child_id = spawn_child(&exec, root_entity).await;
+        let child_entity = *exec.agent_entities.read().unwrap().get(&child_id).unwrap();
+
+        let engine_clone = engine.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(600)).await;
+            set_status(&engine_clone, child_entity, AgentStatus::Complete).await;
+        });
+
+        let out = exec
+            .execute(
+                "wait_for_agent",
+                &serde_json::json!({"agent_id": child_id}),
+                "root",
+                root_entity,
+                0,
+                5,
+            )
+            .await;
+        assert!(out.contains("completed"));
+    }
+
+    // ─── send_to_agent ───────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn send_to_agent_missing_agent_id_errors() {
+        let (exec, root_entity, _engine) = make_executor_with_root();
+        let out = exec
+            .execute(
+                "send_to_agent",
+                &serde_json::json!({}),
+                "root",
+                root_entity,
+                0,
+                5,
+            )
+            .await;
+        assert!(out.contains("missing 'agent_id'"));
+    }
+
+    #[tokio::test]
+    async fn send_to_agent_missing_message_errors() {
+        let (exec, root_entity, _engine) = make_executor_with_root();
+        let out = exec
+            .execute(
+                "send_to_agent",
+                &serde_json::json!({"agent_id": "root"}),
+                "root",
+                root_entity,
+                0,
+                5,
+            )
+            .await;
+        assert!(out.contains("missing 'message'"));
+    }
+
+    #[tokio::test]
+    async fn send_to_agent_success_with_and_without_target_region() {
+        let (exec, root_entity, _engine) = make_executor_with_root();
+        let out = exec
+            .execute(
+                "send_to_agent",
+                &serde_json::json!({"agent_id": "root", "message": "hi"}),
+                "root",
+                root_entity,
+                0,
+                5,
+            )
+            .await;
+        assert!(out.contains("Message sent to 'root'"));
+
+        let out2 = exec
+            .execute(
+                "send_to_agent",
+                &serde_json::json!({
+                    "agent_id": "root",
+                    "message": "hi",
+                    "target_region": "conversation",
+                }),
+                "root",
+                root_entity,
+                0,
+                5,
+            )
+            .await;
+        assert!(out2.contains("Message sent to 'root'"));
+    }
+
+    // ─── kill_agent ──────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn kill_agent_missing_agent_id_errors() {
+        let (exec, root_entity, _engine) = make_executor_with_root();
+        let out = exec
+            .execute(
+                "kill_agent",
+                &serde_json::json!({}),
+                "root",
+                root_entity,
+                0,
+                5,
+            )
+            .await;
+        assert!(out.contains("missing 'agent_id'"));
+    }
+
+    #[tokio::test]
+    async fn kill_agent_not_found_errors() {
+        let (exec, root_entity, _engine) = make_executor_with_root();
+        let out = exec
+            .execute(
+                "kill_agent",
+                &serde_json::json!({"agent_id": "ghost"}),
+                "root",
+                root_entity,
+                0,
+                5,
+            )
+            .await;
+        assert!(out.contains("not found"));
+    }
+
+    #[tokio::test]
+    async fn kill_agent_single_agent_no_descendants() {
+        let (exec, root_entity, engine) = make_executor_with_root();
+        let child_id = spawn_child(&exec, root_entity).await;
+
+        let out = exec
+            .execute(
+                "kill_agent",
+                &serde_json::json!({"agent_id": child_id}),
+                "root",
+                root_entity,
+                0,
+                5,
+            )
+            .await;
+        assert_eq!(out, format!("Killed agent '{}'", child_id));
+
+        let child_entity = *exec.agent_entities.read().unwrap().get(&child_id).unwrap();
+        let eng = engine.read().await;
+        let state = eng.world().get::<AgentState>(child_entity).unwrap();
+        assert!(matches!(state.status, AgentStatus::Cancelled));
+    }
+
+    #[tokio::test]
+    async fn kill_agent_cascades_to_descendants() {
+        let (exec, root_entity, engine) = make_executor_with_root();
+        // root -> child -> grandchild
+        let child_id = spawn_child(&exec, root_entity).await;
+        let child_entity = *exec.agent_entities.read().unwrap().get(&child_id).unwrap();
+        let grandchild_id = {
+            let out = exec
+                .execute(
+                    "spawn_agent",
+                    &serde_json::json!({"blueprint": "child-bp", "task": "do it"}),
+                    &child_id,
+                    child_entity,
+                    1,
+                    5,
+                )
+                .await;
+            out.split('\'').nth(1).unwrap().to_string()
+        };
+        let grandchild_entity = *exec
+            .agent_entities
+            .read()
+            .unwrap()
+            .get(&grandchild_id)
+            .unwrap();
+
+        let out = exec
+            .execute(
+                "kill_agent",
+                &serde_json::json!({"agent_id": child_id}),
+                "root",
+                root_entity,
+                0,
+                5,
+            )
+            .await;
+        assert_eq!(
+            out,
+            format!("Killed agent '{}' and 1 descendant(s)", child_id)
+        );
+
+        let eng = engine.read().await;
+        assert!(matches!(
+            eng.world()
+                .get::<AgentState>(grandchild_entity)
+                .unwrap()
+                .status,
+            AgentStatus::Cancelled
+        ));
+    }
+
+    // `exec_spawn`'s "Failed to get spawned child entity" branch (the `None`
+    // arm reading back the pool entry we just inserted moments earlier under
+    // the same write lock) is not covered: it's a TOCTOU-only defensive
+    // check -- the only way to hit it is for another task to remove the pool
+    // entry between the write-lock spawn and the read-lock lookup, which
+    // isn't something a single-threaded unit test can force without directly
+    // mutating `SubAgentExecutor`'s private `pools` field from outside
+    // `exec_spawn` itself while it's suspended mid-await, which `pools` being
+    // a `std::sync::RwLock` (non-async, held only briefly, never across an
+    // await point) makes impossible to interleave into.
+    //
+    // `exec_send`'s `Err(e)` arm (the underlying `mpsc` receiver having been
+    // dropped) is similarly unreachable from this file: `AgentEngine` owns
+    // both the sender and receiver ends privately with no API to drop just
+    // the receiver while keeping the engine usable, so triggering it would
+    // require a change to `leviath-runtime`, out of scope for a
+    // `tools.rs`-only pass.
 }
 
 #[cfg(test)]

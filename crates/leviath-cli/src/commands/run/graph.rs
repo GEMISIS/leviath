@@ -1525,6 +1525,39 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn prompt_llm_transition_custom_prompt_and_allow_complete_mentions_done() {
+        // Unlike resolve_transition_allow_complete_single_edge_consults_llm
+        // (whose stage has no transition_prompt, hitting the *default*
+        // prompt's allow_complete branch), this stage has an explicit
+        // transition_prompt set, exercising the *custom* prompt's separate
+        // allow_complete branch (its own "...or ONLY the word DONE..." text).
+        let mut stage = make_stage("review");
+        stage.allow_complete = true;
+        stage.transition_prompt = Some("Review the work and decide what's next.".to_string());
+
+        let bp = make_blueprint(vec![stage, make_stage("implement")]);
+        let (mut engine, entity) = make_engine_with_mock_provider(&bp, "DONE");
+
+        let edge = TransitionEdge {
+            target: "implement".to_string(),
+            condition: TransitionCondition::LlmChoice,
+            hint: None,
+            transform: EdgeTransform::Direct,
+        };
+        let name = "implement".to_string();
+        let edges: Vec<(&String, &TransitionEdge)> = vec![(&name, &edge)];
+
+        let stage_ref = &bp.stages[0];
+        let result =
+            prompt_llm_transition(stage_ref, &edges, &mut engine, entity, "mock", "test").await;
+
+        assert!(
+            result.is_none(),
+            "custom-prompt stage with allow_complete must still honor DONE"
+        );
+    }
+
+    #[tokio::test]
     async fn resolve_transition_without_allow_complete_single_edge_ignores_done() {
         // Same setup, but allow_complete = false (default) — a stray "DONE"
         // from the model must NOT terminate the run; the single edge is
@@ -1699,6 +1732,210 @@ mod tests {
         (engine, entity)
     }
 
+    /// A mock provider whose `infer()` always errors, for exercising
+    /// `apply_compact_transform`'s `Err(e)` arm.
+    struct FailingProvider;
+
+    #[async_trait]
+    impl Provider for FailingProvider {
+        async fn infer(
+            &self,
+            _request: InferenceRequest,
+        ) -> Result<InferenceResponse, ProviderError> {
+            Err(ProviderError::Other(
+                "simulated compaction failure".to_string(),
+            ))
+        }
+
+        fn count_tokens(&self, text: &str, _model: &str) -> usize {
+            text.len() / 4
+        }
+
+        fn max_context_tokens(&self, _model: &str) -> usize {
+            100_000
+        }
+
+        fn name(&self) -> &str {
+            "failing"
+        }
+
+        fn capabilities(&self, _model: &str) -> ModelCapabilities {
+            ModelCapabilities::default()
+        }
+
+        async fn list_models(&self) -> Result<Vec<ModelInfo>, ProviderError> {
+            Ok(vec![])
+        }
+    }
+
+    fn make_engine_with_provider(
+        blueprint: &Blueprint,
+        name: &str,
+        provider: Arc<dyn Provider>,
+    ) -> (AgentEngine, bevy_ecs::prelude::Entity) {
+        let mut registry = ProviderRegistry::new();
+        registry.register(name.to_string(), provider);
+        let mut engine = AgentEngine::with_providers(registry);
+        let mut pool = AgentPool::new(blueprint.clone());
+        let agent_id = pool.spawn_agent(engine.world_mut());
+        let entity = pool.get_agent(&agent_id).unwrap();
+
+        crate::commands::run::helpers::initialize_context_window(
+            &mut engine,
+            entity,
+            blueprint,
+            "test task",
+        );
+
+        (engine, entity)
+    }
+
+    // ─── apply_compact_transform: provider present, ContextWindow missing ───
+
+    #[tokio::test]
+    async fn apply_compact_transform_missing_context_window_returns_early() {
+        let bp = make_blueprint(vec![make_stage("a")]);
+        let (mut engine, entity) =
+            make_engine_with_provider(&bp, "mock", Arc::new(MockProvider::new("summary")));
+        // Remove the ContextWindow that initialize_context_window just added,
+        // so `engine.world().get::<ContextWindow>(entity)` returns `None`
+        // even though the provider itself resolves fine.
+        engine
+            .world_mut()
+            .entity_mut(entity)
+            .remove::<ContextWindow>();
+
+        // Should not panic, and should return before ever calling the provider.
+        apply_compact_transform(&mut engine, entity, "mock", "test-model", "Summarize", None).await;
+    }
+
+    // ─── apply_compact_transform: provider present, no compactable content ──
+
+    #[tokio::test]
+    async fn apply_compact_transform_provider_present_but_content_empty_returns_early() {
+        let bp = make_blueprint(vec![make_stage("a")]);
+        let (mut engine, entity) =
+            make_engine_with_mock_provider(&bp, "should never be used as a summary");
+
+        // Fresh window: "conversation" (SlidingWindow, compactable) starts
+        // empty, so content_to_compact is empty and the function returns
+        // before ever calling provider.infer() -- distinct from the
+        // `apply_compact_transform_no_provider_does_not_panic` test, which
+        // returns even earlier (no provider at all).
+        apply_compact_transform(&mut engine, entity, "mock", "test-model", "Summarize", None).await;
+
+        // The mock's canned response was never written anywhere.
+        let window = engine.world().get::<ContextWindow>(entity).unwrap();
+        let conv = window.get_region("conversation").unwrap();
+        assert!(!conv
+            .content
+            .iter()
+            .any(|e| e.content.contains("should never be used as a summary")));
+    }
+
+    // ─── apply_compact_transform: success path ───────────────────────────────
+
+    #[tokio::test]
+    async fn apply_compact_transform_success_clears_and_summarizes() {
+        let bp = make_blueprint(vec![make_stage("a")]);
+        let (mut engine, entity) =
+            make_engine_with_mock_provider(&bp, "concise summary of the conversation");
+
+        if let Some(mut window) = engine.world_mut().get_mut::<ContextWindow>(entity) {
+            let _ = window.add_to_region("conversation", "raw conversation content".to_string(), 5);
+        }
+
+        apply_compact_transform(&mut engine, entity, "mock", "test-model", "Summarize", None).await;
+
+        let window = engine.world().get::<ContextWindow>(entity).unwrap();
+        let conv = window.get_region("conversation").unwrap();
+        assert!(
+            conv.content
+                .iter()
+                .any(|e| e.content.contains("concise summary of the conversation")),
+            "summary should have been written into the conversation region"
+        );
+        assert!(
+            !conv
+                .content
+                .iter()
+                .any(|e| e.content.contains("raw conversation content")),
+            "original content should have been cleared before the summary was added"
+        );
+    }
+
+    // ─── apply_compact_transform: provider infer() errors ────────────────────
+
+    #[tokio::test]
+    async fn apply_compact_transform_provider_error_does_not_panic() {
+        let bp = make_blueprint(vec![make_stage("a")]);
+        let (mut engine, entity) =
+            make_engine_with_provider(&bp, "failing", Arc::new(FailingProvider));
+
+        if let Some(mut window) = engine.world_mut().get_mut::<ContextWindow>(entity) {
+            let _ = window.add_to_region("conversation", "raw conversation content".to_string(), 5);
+        }
+
+        // Should log a warning and return, not panic; original content is
+        // left untouched since the Err arm never reaches the clear/summarize step.
+        apply_compact_transform(
+            &mut engine,
+            entity,
+            "failing",
+            "test-model",
+            "Summarize",
+            None,
+        )
+        .await;
+
+        let window = engine.world().get::<ContextWindow>(entity).unwrap();
+        let conv = window.get_region("conversation").unwrap();
+        assert!(conv
+            .content
+            .iter()
+            .any(|e| e.content.contains("raw conversation content")));
+    }
+
+    // ─── apply_edge_transform: Custom with non-empty compact + no explicit prompt ─
+
+    #[tokio::test]
+    async fn apply_edge_transform_custom_compact_uses_default_prompt() {
+        let bp = make_blueprint(vec![make_stage("a"), make_stage("b")]);
+        let (mut engine, entity) = make_engine_and_entity(&bp);
+
+        if let Some(mut window) = engine.world_mut().get_mut::<ContextWindow>(entity) {
+            let _ = window.add_to_region("conversation", "conv content".to_string(), 5);
+        }
+
+        let edge = TransitionEdge {
+            target: "b".to_string(),
+            condition: TransitionCondition::Always,
+            hint: None,
+            transform: EdgeTransform::Custom {
+                carry: vec!["system".to_string()],
+                compact: vec!["conversation".to_string()],
+                clear: vec![],
+                compact_prompt: None, // exercises the default-prompt format! branch
+            },
+        };
+        let visit_counts = HashMap::new();
+
+        // No provider registered for "anthropic" -- apply_compact_transform
+        // will return early after failing to resolve the provider, but the
+        // default-prompt format! runs before that lookup, so this still
+        // exercises the target line without panicking.
+        apply_edge_transform(
+            &edge,
+            &visit_counts,
+            &mut engine,
+            entity,
+            "anthropic",
+            "test",
+            None,
+        )
+        .await;
+    }
+
     // ─── prompt_llm_transition ────────────────────────────────────────────────
 
     #[tokio::test]
@@ -1765,6 +2002,47 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn prompt_llm_transition_fuzzy_lowercase_match_when_exact_case_fails() {
+        // "REVIEWED and approved" doesn't `eq_ignore_ascii_case` the edge
+        // name "review" (different length/content) and doesn't contain it as
+        // an exact-case substring ("REVIEWED" is all-caps, "review" isn't a
+        // substring of it) -- but *lowercased*, "reviewed and approved"
+        // contains "review", so only the second (fuzzy) loop in
+        // prompt_llm_transition matches.
+        let bp = make_blueprint(vec![
+            make_stage("a"),
+            make_stage("review"),
+            make_stage("implement"),
+        ]);
+        let (mut engine, entity) = make_engine_with_mock_provider(&bp, "REVIEWED and approved");
+
+        let stage = &bp.stages[0];
+        let edge_review = TransitionEdge {
+            target: "review".to_string(),
+            condition: TransitionCondition::LlmChoice,
+            hint: None,
+            transform: EdgeTransform::Direct,
+        };
+        let edge_implement = TransitionEdge {
+            target: "implement".to_string(),
+            condition: TransitionCondition::LlmChoice,
+            hint: None,
+            transform: EdgeTransform::Direct,
+        };
+        let name_review = "review".to_string();
+        let name_implement = "implement".to_string();
+        let edges: Vec<(&String, &TransitionEdge)> = vec![
+            (&name_review, &edge_review),
+            (&name_implement, &edge_implement),
+        ];
+
+        let result =
+            prompt_llm_transition(stage, &edges, &mut engine, entity, "mock", "test").await;
+
+        assert_eq!(result.unwrap().target, "review");
+    }
+
+    #[tokio::test]
     async fn prompt_llm_transition_fallback_to_first_edge_when_no_match() {
         // LLM returns something that doesn't match any edge name → falls back to first.
         // Use stage names with no common substrings to avoid fuzzy match false-positives.
@@ -1824,6 +2102,23 @@ mod tests {
             prompt_llm_transition(stage, &edges, &mut engine, entity, "nonexistent", "test").await;
 
         assert!(result.is_none());
+    }
+
+    #[tokio::test]
+    async fn mock_and_failing_provider_trivial_trait_methods() {
+        let mock = MockProvider::new("x");
+        assert_eq!(mock.count_tokens("abcd", "m"), 1);
+        assert_eq!(mock.max_context_tokens("m"), 100_000);
+        assert_eq!(mock.name(), "mock");
+        let _ = mock.capabilities("m");
+        assert!(mock.list_models().await.unwrap().is_empty());
+
+        let failing = FailingProvider;
+        assert_eq!(failing.count_tokens("abcd", "m"), 1);
+        assert_eq!(failing.max_context_tokens("m"), 100_000);
+        assert_eq!(failing.name(), "failing");
+        let _ = failing.capabilities("m");
+        assert!(failing.list_models().await.unwrap().is_empty());
     }
 
     // ─── resolve_transition: multiple LlmChoice edges triggers prompt_llm_transition
