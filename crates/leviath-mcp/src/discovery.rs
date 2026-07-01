@@ -223,4 +223,119 @@ mod tests {
         assert!(d1.all_tools().is_empty());
         assert!(d2.all_tools().is_empty());
     }
+
+    // --- discover_from_client / discover_from_config ---
+    //
+    // Same Python-backed JSON-RPC stub approach used in client.rs's tests
+    // (a minimal in-process server reading one request per line from stdin).
+
+    const STUB_INIT_AND_LIST: &str = r#"
+import sys, json
+
+def respond(id, result):
+    msg = json.dumps({"jsonrpc": "2.0", "id": id, "result": result})
+    sys.stdout.write(msg + "\n")
+    sys.stdout.flush()
+
+for line in sys.stdin:
+    line = line.strip()
+    if not line:
+        continue
+    req = json.loads(line)
+    method = req.get("method", "")
+    id_ = req.get("id")
+    if method == "initialize":
+        respond(id_, {"capabilities": {"tools": {"listChanged": True}}, "protocolVersion": "2024-11-05"})
+    elif method == "notifications/initialized":
+        pass
+    elif method == "tools/list":
+        respond(id_, {"tools": [{"name": "echo", "description": "echo tool", "inputSchema": {}}]})
+    else:
+        respond(id_, {"error": {"code": -32601, "message": "method not found"}})
+"#;
+
+    #[tokio::test]
+    async fn discover_from_client_returns_tools_and_indexes_by_server_name() {
+        let mut client = MCPClient::spawn("python3", &["-c", STUB_INIT_AND_LIST], &HashMap::new())
+            .await
+            .expect("failed to spawn stub server");
+        client.connect().await.expect("connect should succeed");
+
+        let mut discovery = ToolDiscovery::new();
+        let tools = discovery
+            .discover_from_client("server1", &mut client)
+            .await
+            .expect("discovery should succeed");
+
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0].name, "echo");
+        assert_eq!(discovery.server_count(), 1);
+        assert_eq!(discovery.all_tools().len(), 1);
+
+        let (server_name, tool) = discovery.find_tool("echo").expect("tool should be found");
+        assert_eq!(server_name, "server1");
+        assert_eq!(tool.name, "echo");
+
+        let server_tools = discovery
+            .server_tools("server1")
+            .expect("server tools should be present");
+        assert_eq!(server_tools.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn discover_from_client_missing_tool_returns_none() {
+        let mut client = MCPClient::spawn("python3", &["-c", STUB_INIT_AND_LIST], &HashMap::new())
+            .await
+            .expect("failed to spawn stub server");
+        client.connect().await.expect("connect should succeed");
+
+        let mut discovery = ToolDiscovery::new();
+        discovery
+            .discover_from_client("server1", &mut client)
+            .await
+            .expect("discovery should succeed");
+
+        assert!(discovery.find_tool("nonexistent").is_none());
+        assert!(discovery.server_tools("nonexistent").is_none());
+    }
+
+    #[tokio::test]
+    async fn discover_from_config_spawns_connects_and_discovers() {
+        let config = MCPServerConfig {
+            name: "configured-server".to_string(),
+            command: "python3".to_string(),
+            args: vec!["-c".to_string(), STUB_INIT_AND_LIST.to_string()],
+            env: HashMap::new(),
+        };
+
+        let mut discovery = ToolDiscovery::new();
+        let (tools, mut client) = discovery
+            .discover_from_config(&config)
+            .await
+            .expect("discover_from_config should succeed");
+
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0].name, "echo");
+        assert_eq!(discovery.server_count(), 1);
+        assert!(discovery.find_tool("echo").is_some());
+
+        // The returned client is live and connected (capabilities were parsed).
+        assert!(client.capabilities().is_some());
+        let _ = client.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn discover_from_config_invalid_command_propagates_error() {
+        let config = MCPServerConfig {
+            name: "bad-server".to_string(),
+            command: "this-command-does-not-exist-anywhere".to_string(),
+            args: vec![],
+            env: HashMap::new(),
+        };
+
+        let mut discovery = ToolDiscovery::new();
+        let result = discovery.discover_from_config(&config).await;
+        assert!(result.is_err());
+        assert_eq!(discovery.server_count(), 0);
+    }
 }

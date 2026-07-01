@@ -186,4 +186,73 @@ mod tests {
 
         assert!(layout.validate().is_err());
     }
+
+    #[test]
+    fn test_eviction_order_unknown_region_is_error() {
+        let regions = vec![RegionDefinition::new(
+            "test".to_string(),
+            RegionKind::Pinned,
+            5000,
+        )];
+        let layout =
+            ContextLayout::new(regions, 10000).with_eviction_order(vec!["nonexistent".to_string()]);
+
+        let err = layout.validate().unwrap_err();
+        assert!(matches!(err, ValidationError::Layout(_)));
+    }
+
+    #[test]
+    fn test_validate_warns_but_does_not_error_when_max_tokens_exceed_budget() {
+        // Sum of region max_tokens (5000 + 10000 = 15000) exceeds the total
+        // budget (10000) — this should only warn, not fail validation, since
+        // not all regions are full simultaneously.
+        let regions = vec![
+            RegionDefinition::new("a".to_string(), RegionKind::Pinned, 5000),
+            RegionDefinition::new("b".to_string(), RegionKind::Temporary, 10000),
+        ];
+        let layout = ContextLayout::new(regions, 10000);
+        assert!(layout.validate().is_ok());
+    }
+
+    #[test]
+    fn test_get_region_found() {
+        let regions = vec![
+            RegionDefinition::new("a".to_string(), RegionKind::Pinned, 5000),
+            RegionDefinition::new("b".to_string(), RegionKind::Temporary, 3000),
+        ];
+        let layout = ContextLayout::new(regions, 10000);
+
+        let found = layout.get_region("b").unwrap();
+        assert_eq!(found.name, "b");
+        assert_eq!(found.max_tokens, 3000);
+    }
+
+    #[test]
+    fn test_get_region_not_found() {
+        let regions = vec![RegionDefinition::new(
+            "a".to_string(),
+            RegionKind::Pinned,
+            5000,
+        )];
+        let layout = ContextLayout::new(regions, 10000);
+        assert!(layout.get_region("missing").is_none());
+    }
+
+    #[test]
+    fn test_region_definition_with_schema() {
+        let schema = crate::region::RegionSchema::new(crate::region::ContentFormat::Json);
+        let def =
+            RegionDefinition::new("a".to_string(), RegionKind::Pinned, 5000).with_schema(schema);
+        assert!(matches!(
+            def.schema.as_ref().unwrap().format,
+            crate::region::ContentFormat::Json
+        ));
+    }
+
+    #[test]
+    fn test_region_definition_with_description() {
+        let def = RegionDefinition::new("a".to_string(), RegionKind::Pinned, 5000)
+            .with_description("holds architecture notes".to_string());
+        assert_eq!(def.description.as_deref(), Some("holds architecture notes"));
+    }
 }

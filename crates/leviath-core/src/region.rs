@@ -506,4 +506,261 @@ mod tests {
             crate::cache::CacheHint::Never
         );
     }
+
+    // ─── Region::with_schema / add_entry schema + budget checks ────────────
+
+    #[test]
+    fn test_with_schema_attaches_schema() {
+        let schema = RegionSchema::new(ContentFormat::Json);
+        let region =
+            Region::new("data".to_string(), RegionKind::Temporary, 1000).with_schema(schema);
+        assert!(region.schema.is_some());
+    }
+
+    #[test]
+    fn test_add_entry_rejects_content_failing_schema() {
+        let schema = RegionSchema::new(ContentFormat::Json);
+        let mut region =
+            Region::new("data".to_string(), RegionKind::Temporary, 1000).with_schema(schema);
+        let result = region.add_entry("not json".to_string(), 10);
+        assert!(result.is_err());
+        assert_eq!(region.entry_count(), 0);
+    }
+
+    #[test]
+    fn test_add_entry_accepts_content_passing_schema() {
+        let schema = RegionSchema::new(ContentFormat::Json);
+        let mut region =
+            Region::new("data".to_string(), RegionKind::Temporary, 1000).with_schema(schema);
+        let result = region.add_entry("{\"a\":1}".to_string(), 10);
+        assert!(result.is_ok());
+        assert_eq!(region.entry_count(), 1);
+    }
+
+    #[test]
+    fn test_add_entry_rejects_over_budget() {
+        let mut region = Region::new("data".to_string(), RegionKind::Temporary, 10);
+        let result = region.add_entry("too much".to_string(), 20);
+        assert!(matches!(
+            result,
+            Err(crate::error::Error::TokenBudgetExceeded { used: 20, max: 10 })
+        ));
+        assert_eq!(region.entry_count(), 0);
+    }
+
+    #[test]
+    fn test_add_entry_with_metadata_rejects_content_failing_schema() {
+        let schema = RegionSchema::new(ContentFormat::Json);
+        let mut region =
+            Region::new("data".to_string(), RegionKind::Temporary, 1000).with_schema(schema);
+        let result =
+            region.add_entry_with_metadata("not json".to_string(), 10, serde_json::json!({}));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_add_entry_with_metadata_rejects_over_budget() {
+        let mut region = Region::new("data".to_string(), RegionKind::Temporary, 10);
+        let result =
+            region.add_entry_with_metadata("too much".to_string(), 20, serde_json::json!({}));
+        assert!(matches!(
+            result,
+            Err(crate::error::Error::TokenBudgetExceeded { used: 20, max: 10 })
+        ));
+    }
+
+    #[test]
+    fn test_add_entry_with_metadata_stores_metadata() {
+        let mut region = Region::new("data".to_string(), RegionKind::Temporary, 1000);
+        region
+            .add_entry_with_metadata("hello".to_string(), 5, serde_json::json!({"k": "v"}))
+            .unwrap();
+        assert_eq!(
+            region.content[0].metadata,
+            Some(serde_json::json!({"k": "v"}))
+        );
+    }
+
+    // ─── clear / remove_oldest / needs_compaction ──────────────────────────
+
+    #[test]
+    fn test_clear_removes_all_content_and_resets_tokens() {
+        let mut region = Region::new("data".to_string(), RegionKind::Temporary, 1000);
+        region.add_entry("a".to_string(), 10).unwrap();
+        region.add_entry("b".to_string(), 20).unwrap();
+        assert_eq!(region.entry_count(), 2);
+
+        region.clear();
+        assert_eq!(region.entry_count(), 0);
+        assert_eq!(region.current_tokens, 0);
+    }
+
+    #[test]
+    fn test_remove_oldest_returns_and_removes_first_entry() {
+        let mut region = Region::new("data".to_string(), RegionKind::Temporary, 1000);
+        region.add_entry("first".to_string(), 10).unwrap();
+        region.add_entry("second".to_string(), 20).unwrap();
+
+        let removed = region.remove_oldest().unwrap();
+        assert_eq!(removed.content, "first");
+        assert_eq!(region.entry_count(), 1);
+        assert_eq!(region.current_tokens, 20);
+    }
+
+    #[test]
+    fn test_remove_oldest_returns_none_when_empty() {
+        let mut region = Region::new("data".to_string(), RegionKind::Temporary, 1000);
+        assert!(region.remove_oldest().is_none());
+    }
+
+    #[test]
+    fn test_needs_compaction_true_when_over_threshold() {
+        let mut region = Region::new(
+            "impl".to_string(),
+            RegionKind::Compacting {
+                threshold_tokens: 10,
+            },
+            1000,
+        );
+        region.add_entry("x".to_string(), 20).unwrap();
+        assert!(region.needs_compaction());
+    }
+
+    #[test]
+    fn test_needs_compaction_false_when_under_threshold() {
+        let mut region = Region::new(
+            "impl".to_string(),
+            RegionKind::Compacting {
+                threshold_tokens: 100,
+            },
+            1000,
+        );
+        region.add_entry("x".to_string(), 20).unwrap();
+        assert!(!region.needs_compaction());
+    }
+
+    #[test]
+    fn test_needs_compaction_false_for_non_compacting_kind() {
+        let region = Region::new("data".to_string(), RegionKind::Temporary, 1000);
+        assert!(!region.needs_compaction());
+    }
+
+    // ─── RegionSchema::with_custom_script ──────────────────────────────────
+
+    #[test]
+    fn test_region_schema_with_custom_script() {
+        let schema = RegionSchema::new(ContentFormat::Custom {
+            format_name: "special".to_string(),
+        })
+        .with_custom_script("validate_special()".to_string());
+        assert_eq!(schema.custom_script.as_deref(), Some("validate_special()"));
+    }
+
+    // ─── RegionSchema::validate — every ContentFormat branch ───────────────
+
+    #[test]
+    fn test_validate_json_valid() {
+        let schema = RegionSchema::new(ContentFormat::Json);
+        assert!(schema.validate("{\"a\": 1}").is_ok());
+    }
+
+    #[test]
+    fn test_validate_json_invalid() {
+        let schema = RegionSchema::new(ContentFormat::Json);
+        let err = schema.validate("not json").unwrap_err();
+        assert!(matches!(err, crate::error::Error::ValidationFailed(_)));
+    }
+
+    #[test]
+    fn test_validate_mermaid_valid() {
+        let schema = RegionSchema::new(ContentFormat::Mermaid);
+        assert!(schema.validate("graph TD\nA-->B").is_ok());
+    }
+
+    #[test]
+    fn test_validate_mermaid_all_recognized_diagram_types() {
+        let schema = RegionSchema::new(ContentFormat::Mermaid);
+        for kind in [
+            "graph",
+            "sequenceDiagram",
+            "classDiagram",
+            "stateDiagram",
+            "erDiagram",
+            "journey",
+            "gantt",
+            "pie",
+            "flowchart",
+        ] {
+            assert!(
+                schema.validate(&format!("{} content", kind)).is_ok(),
+                "{} should be recognized as valid mermaid",
+                kind
+            );
+        }
+    }
+
+    #[test]
+    fn test_validate_mermaid_invalid() {
+        let schema = RegionSchema::new(ContentFormat::Mermaid);
+        let err = schema.validate("just some text").unwrap_err();
+        assert!(matches!(err, crate::error::Error::ValidationFailed(_)));
+    }
+
+    #[test]
+    fn test_validate_code_non_empty_is_ok() {
+        let schema = RegionSchema::new(ContentFormat::Code {
+            language: "rust".to_string(),
+        });
+        assert!(schema.validate("fn main() {}").is_ok());
+    }
+
+    #[test]
+    fn test_validate_code_empty_is_error() {
+        let schema = RegionSchema::new(ContentFormat::Code {
+            language: "rust".to_string(),
+        });
+        let err = schema.validate("   ").unwrap_err();
+        assert!(matches!(err, crate::error::Error::ValidationFailed(_)));
+    }
+
+    #[test]
+    fn test_validate_markdown_non_empty_is_ok() {
+        let schema = RegionSchema::new(ContentFormat::Markdown);
+        assert!(schema.validate("# Heading").is_ok());
+    }
+
+    #[test]
+    fn test_validate_markdown_empty_is_error() {
+        let schema = RegionSchema::new(ContentFormat::Markdown);
+        let err = schema.validate("").unwrap_err();
+        assert!(matches!(err, crate::error::Error::ValidationFailed(_)));
+    }
+
+    #[test]
+    fn test_validate_text_has_no_restrictions() {
+        let schema = RegionSchema::new(ContentFormat::Text);
+        assert!(schema.validate("").is_ok());
+        assert!(schema.validate("anything at all").is_ok());
+    }
+
+    #[test]
+    fn test_validate_custom_has_no_restrictions_here() {
+        let schema = RegionSchema::new(ContentFormat::Custom {
+            format_name: "special".to_string(),
+        });
+        // Custom format validation is deferred to the scripting layer —
+        // this schema's own validate() is a no-op for it.
+        assert!(schema.validate("").is_ok());
+        assert!(schema.validate("whatever").is_ok());
+    }
+
+    // ─── RegionSchema Clone impl ────────────────────────────────────────────
+
+    #[test]
+    fn test_region_schema_clone_preserves_fields() {
+        let schema = RegionSchema::new(ContentFormat::Text).with_custom_script("s".to_string());
+        let cloned = schema.clone();
+        assert_eq!(cloned.custom_script.as_deref(), Some("s"));
+        assert!(matches!(cloned.format, ContentFormat::Text));
+    }
 }

@@ -355,6 +355,118 @@ mod tests {
         assert_eq!(executor.server_count(), 0);
     }
 
+    // ─── add_client / execute / execute_on with a live client ───────────
+    //
+    // Same Python-backed JSON-RPC stub approach used in client.rs/discovery.rs
+    // tests. Note: MCPClient::shutdown() always returns Ok(()) by design (it
+    // swallows failures so a dead server can't block cleanup) — so
+    // shutdown_all()'s error-collection branch is intentionally left
+    // uncovered here; there's no way to make client.shutdown() fail without
+    // changing that documented "always succeeds" behavior.
+
+    const STUB_INIT_LIST_AND_CALL: &str = r#"
+import sys, json
+
+def respond(id, result):
+    msg = json.dumps({"jsonrpc": "2.0", "id": id, "result": result})
+    sys.stdout.write(msg + "\n")
+    sys.stdout.flush()
+
+for line in sys.stdin:
+    line = line.strip()
+    if not line:
+        continue
+    req = json.loads(line)
+    method = req.get("method", "")
+    id_ = req.get("id")
+    if method == "initialize":
+        respond(id_, {"capabilities": {"tools": {"listChanged": True}}, "protocolVersion": "2024-11-05"})
+    elif method == "notifications/initialized":
+        pass
+    elif method == "tools/list":
+        respond(id_, {"tools": [{"name": "echo", "description": "echo tool", "inputSchema": {}}]})
+    elif method == "tools/call":
+        respond(id_, {"content": [{"type": "text", "text": "hello from tool"}], "isError": False})
+    elif method == "notifications/cancelled":
+        pass
+    else:
+        respond(id_, {"error": {"code": -32601, "message": "method not found"}})
+"#;
+
+    async fn spawn_ready_client() -> MCPClient {
+        let mut client =
+            MCPClient::spawn("python3", &["-c", STUB_INIT_LIST_AND_CALL], &HashMap::new())
+                .await
+                .expect("failed to spawn stub server");
+        client.connect().await.expect("connect should succeed");
+        client
+            .list_tools()
+            .await
+            .expect("list_tools should succeed");
+        client
+    }
+
+    #[tokio::test]
+    async fn add_client_and_server_count_reflects_it() {
+        let mut executor = ToolExecutor::new();
+        let client = spawn_ready_client().await;
+        executor.add_client("server1".to_string(), client);
+        assert_eq!(executor.server_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn execute_finds_owning_server_and_calls_tool() {
+        let mut executor = ToolExecutor::new();
+        let client = spawn_ready_client().await;
+        executor.add_client("server1".to_string(), client);
+
+        let result = executor
+            .execute("echo", serde_json::json!({"text": "hi"}))
+            .await
+            .expect("execute should succeed");
+        assert!(result.success);
+        assert_eq!(result.text, "hello from tool");
+    }
+
+    #[tokio::test]
+    async fn execute_on_specific_server_calls_tool() {
+        let mut executor = ToolExecutor::new();
+        let client = spawn_ready_client().await;
+        executor.add_client("server1".to_string(), client);
+
+        let result = executor
+            .execute_on("server1", "echo", serde_json::json!({}))
+            .await
+            .expect("execute_on should succeed");
+        assert!(result.success);
+        assert_eq!(result.text, "hello from tool");
+    }
+
+    #[tokio::test]
+    async fn execute_filtered_allowed_tool_with_server_succeeds() {
+        let mut executor = ToolExecutor::new();
+        let client = spawn_ready_client().await;
+        executor.add_client("server1".to_string(), client);
+
+        let allowed = vec!["echo".to_string()];
+        let result = executor
+            .execute_filtered("echo", serde_json::json!({}), &allowed)
+            .await
+            .expect("execute_filtered should succeed");
+        assert!(result.success);
+    }
+
+    #[tokio::test]
+    async fn shutdown_all_with_live_client_succeeds_and_clears() {
+        let mut executor = ToolExecutor::new();
+        let client = spawn_ready_client().await;
+        executor.add_client("server1".to_string(), client);
+
+        let result = executor.shutdown_all().await;
+        assert!(result.is_ok());
+        assert_eq!(executor.server_count(), 0);
+    }
+
     // ─── ExecutionResult ────────────────────────────────────────────────
 
     #[test]

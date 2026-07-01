@@ -697,6 +697,92 @@ mod tests {
     }
 
     #[test]
+    fn test_blueprint_with_tools_transforms_version() {
+        let stages = vec![Stage::new("plan".to_string(), make_model())];
+        let bp = Blueprint::new("t".into(), "d".into(), stages, make_layout())
+            .with_tools(vec![ToolFilter {
+                pattern: "bash".to_string(),
+                filter_type: FilterType::Exclude,
+                stage: None,
+            }])
+            .with_transforms(vec![ContextTransform {
+                from_blueprint: "a".to_string(),
+                to_blueprint: "b".to_string(),
+                mappings: vec![],
+            }])
+            .with_version("2.0.0".to_string());
+
+        assert_eq!(bp.tools.len(), 1);
+        assert_eq!(bp.transforms.len(), 1);
+        assert_eq!(bp.version, "2.0.0");
+    }
+
+    #[test]
+    fn test_blueprint_validate_runs_transform_validation() {
+        // A transform whose mapping targets a real region — validate() must
+        // reach ContextTransform::validate() and succeed.
+        let stages = vec![Stage::new("plan".to_string(), make_model())];
+        let mut bp = Blueprint::new("t".into(), "d".into(), stages, make_layout());
+        bp.transforms.push(ContextTransform {
+            from_blueprint: "a".to_string(),
+            to_blueprint: "b".to_string(),
+            mappings: vec![RegionMapping {
+                from_region: "test".to_string(),
+                to_region: "test".to_string(),
+                transform: None,
+            }],
+        });
+        assert!(bp.validate().is_ok());
+    }
+
+    #[test]
+    fn test_blueprint_validate_fails_on_transform_targeting_unknown_region() {
+        let stages = vec![Stage::new("plan".to_string(), make_model())];
+        let mut bp = Blueprint::new("t".into(), "d".into(), stages, make_layout());
+        bp.transforms.push(ContextTransform {
+            from_blueprint: "a".to_string(),
+            to_blueprint: "b".to_string(),
+            mappings: vec![RegionMapping {
+                from_region: "test".to_string(),
+                to_region: "nonexistent".to_string(),
+                transform: None,
+            }],
+        });
+        let err = bp.validate().unwrap_err();
+        assert!(matches!(err, ValidationError::Region { .. }));
+    }
+
+    #[test]
+    fn test_mixed_linear_and_graph_mode_terminal_path() {
+        // "plan" has explicit transitions (triggers graph-mode validation),
+        // but "impl" and "review" have none — they must fall back to
+        // linear (next-by-index) terminal-path resolution.
+        let mut plan = Stage::new("plan".to_string(), make_model());
+        let impl_stage = Stage::new("impl".to_string(), make_model());
+        let review = Stage::new("review".to_string(), make_model());
+
+        let mut transitions = HashMap::new();
+        transitions.insert(
+            "impl".to_string(),
+            TransitionEdge {
+                target: "impl".to_string(),
+                condition: TransitionCondition::Always,
+                hint: None,
+                transform: EdgeTransform::Direct,
+            },
+        );
+        plan.transitions = Some(transitions);
+
+        let bp = Blueprint::new(
+            "t".into(),
+            "".into(),
+            vec![plan, impl_stage, review],
+            make_layout(),
+        );
+        assert!(bp.validate().is_ok());
+    }
+
+    #[test]
     fn test_stage_validation() {
         let stage = Stage::new(
             "test".to_string(),
@@ -709,6 +795,44 @@ mod tests {
             ModelConfig::new("anthropic".to_string(), "claude-sonnet-4-6".to_string()),
         );
         assert!(empty_stage.validate().is_err());
+    }
+
+    #[test]
+    fn test_stage_validate_with_valid_context_layout_is_ok() {
+        let mut stage = Stage::new("test".to_string(), make_model());
+        stage.context_layout = Some(make_layout());
+        assert!(stage.validate().is_ok());
+    }
+
+    #[test]
+    fn test_stage_validate_with_invalid_context_layout_is_err() {
+        // Duplicate region names make the layout itself invalid.
+        let regions = vec![
+            RegionDefinition::new("dup".to_string(), RegionKind::Pinned, 100),
+            RegionDefinition::new("dup".to_string(), RegionKind::Temporary, 100),
+        ];
+        let mut stage = Stage::new("test".to_string(), make_model());
+        stage.context_layout = Some(ContextLayout::new(regions, 200));
+        assert!(stage.validate().is_err());
+    }
+
+    #[test]
+    fn test_stage_with_tools_context_layout_description() {
+        let stage = Stage::new("test".to_string(), make_model())
+            .with_tools(vec!["read_file".to_string(), "bash".to_string()])
+            .with_context_layout(make_layout())
+            .with_description("does things".to_string());
+
+        assert_eq!(stage.available_tools, vec!["read_file", "bash"]);
+        assert!(stage.context_layout.is_some());
+        assert_eq!(stage.description.as_deref(), Some("does things"));
+    }
+
+    #[test]
+    fn test_stage_with_mode() {
+        let stage = Stage::new("test".to_string(), make_model())
+            .with_mode(StageMode::InteractivePoints { points: vec![] });
+        assert!(matches!(stage.mode, StageMode::InteractivePoints { .. }));
     }
 
     #[test]
