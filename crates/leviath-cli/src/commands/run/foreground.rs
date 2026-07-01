@@ -7,7 +7,10 @@ use leviath_runtime::{AgentMessage, AgentPool, AgentState, ToolResultRoutingConf
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
+use std::collections::{HashMap, HashSet};
+
 use crate::config::{Config, ToolPolicy};
+use crate::interaction::{InteractionRequest, InteractionResponse};
 use crate::runstate::RunMeta;
 use crate::tools::{resolve_policy, ToolRegistry};
 
@@ -39,6 +42,158 @@ impl super::dynamic_interaction::InteractionBackend for ForegroundInteractionBac
         println!("{}", "\u{2500}".repeat(60));
         println!("{}", markdown);
         println!("{}", "\u{2500}".repeat(60));
+    }
+}
+
+/// Shared state needed by [`dispatch_tool_calls_foreground`] to resolve and
+/// execute a batch of tool calls from the model.
+///
+/// Extracted from the `exec` closure in [`run_foreground`] purely so the
+/// tool-dispatch logic (policy resolution, dynamic interactions, approval
+/// gating, builtin/MCP execution) can be exercised by unit tests directly,
+/// without needing to drive a full run through a real provider/inference call
+/// or block on real stdin.
+struct ForegroundToolDispatchState {
+    builtins: Arc<leviath_tools::BuiltinTools>,
+    mcp: Arc<Mutex<leviath_mcp::ToolExecutor>>,
+    builtin_names: HashSet<String>,
+    launch_overrides: Arc<HashMap<String, ToolPolicy>>,
+    session_allows: Arc<Mutex<HashSet<String>>>,
+    stage_perms: Arc<Mutex<HashMap<String, String>>>,
+    stage_name: Arc<Mutex<String>>,
+    agent_perms: Arc<HashMap<String, String>>,
+    global_perms: Arc<HashMap<String, ToolPolicy>>,
+}
+
+/// Resolve tool policy, handle approvals/dynamic interactions, and execute a
+/// batch of tool calls from the model. Returns `(tool_call_id, result_text)`
+/// pairs in the same order as `calls`.
+///
+/// This is the core body of the `exec` closure passed to
+/// [`super::executor::run_stage_loop`] in [`run_foreground`], lifted out into
+/// a standalone function so it can be unit-tested directly. `interaction_backend`
+/// and `ask_approval` are injected so tests never block on real stdin: in
+/// production these are [`ForegroundInteractionBackend`] and
+/// [`crate::interaction::request_interaction_stdin`] respectively.
+async fn dispatch_tool_calls_foreground(
+    state: &ForegroundToolDispatchState,
+    calls: Vec<leviath_providers::ToolCall>,
+    interaction_backend: &dyn super::dynamic_interaction::InteractionBackend,
+    ask_approval: &(dyn Fn(&InteractionRequest) -> InteractionResponse + Send + Sync),
+) -> Vec<(String, String)> {
+    let stage_name = state.stage_name.lock().await.clone();
+    let mut out: Vec<(String, String)> = Vec::new();
+    for tc in calls {
+        // ── Dynamic interaction tools (present_for_review, ask_user_*) ──
+        // Unlike `interaction_points` (declared statically in the
+        // blueprint and always shown), these let the model itself
+        // decide, mid-reasoning, that it needs human input.
+        if let Some(result) = super::dynamic_interaction::dispatch_dynamic_interaction(
+            interaction_backend,
+            &tc.name,
+            &tc.id,
+            &tc.arguments,
+            &stage_name,
+        )
+        .await
+        {
+            out.push((tc.id.clone(), result));
+            continue;
+        }
+
+        let is_builtin = state.builtin_names.contains(&tc.name);
+        let session_has = state.session_allows.lock().await.contains(&tc.name);
+        let policy = if session_has {
+            ToolPolicy::Allow
+        } else {
+            let stage_pm_snap = state.stage_perms.lock().await.clone();
+            resolve_policy(
+                &tc.name,
+                is_builtin,
+                &state.launch_overrides,
+                &stage_pm_snap,
+                &state.agent_perms,
+                &state.global_perms,
+            )
+        };
+
+        let res = match policy {
+            ToolPolicy::Deny => {
+                format!("[denied] Tool '{}' is not permitted for this run.", tc.name)
+            }
+            ToolPolicy::Ask => {
+                use crate::interaction::{response_approved, ApprovalScope};
+                let req = InteractionRequest::tool_approval(
+                    format!("fg-{}", tc.id),
+                    &tc.name,
+                    tc.arguments.clone(),
+                    "tool-call",
+                );
+                let resp = ask_approval(&req);
+                if response_approved(&resp) {
+                    if resp.scope == Some(ApprovalScope::Session) {
+                        state.session_allows.lock().await.insert(tc.name.clone());
+                    }
+                    if is_builtin {
+                        state.builtins.execute(&tc.name, tc.arguments.clone()).await
+                    } else {
+                        // Only the `Err` arm is covered by unit tests here: a
+                        // real success/failure `ExecutionResult` requires an
+                        // actual connected MCP server round trip, which
+                        // `leviath-mcp`'s own test suite already covers at
+                        // the `ToolExecutor`/`MCPClient` level.
+                        let mut mcp_lock = state.mcp.lock().await;
+                        match mcp_lock.execute(&tc.name, tc.arguments.clone()).await {
+                            Ok(r) if r.success => r.text,
+                            Ok(r) => format!("[error] {}", r.text),
+                            Err(e) => format!("[error] tool error: {}", e),
+                        }
+                    }
+                } else {
+                    format!("[denied] User declined tool call '{}'.", tc.name)
+                }
+            }
+            ToolPolicy::Allow => {
+                if is_builtin {
+                    state.builtins.execute(&tc.name, tc.arguments.clone()).await
+                } else {
+                    let mut mcp_lock = state.mcp.lock().await;
+                    match mcp_lock.execute(&tc.name, tc.arguments.clone()).await {
+                        Ok(r) if r.success => r.text,
+                        Ok(r) => format!("[error] {}", r.text),
+                        Err(e) => format!("[error] tool error: {}", e),
+                    }
+                }
+            }
+        };
+        out.push((tc.id.clone(), res));
+    }
+    out
+}
+
+/// Reads newline-delimited messages from `reader` and forwards each
+/// non-empty, trimmed line to `message_tx` as an [`AgentMessage`] from
+/// `agent_id`. Generic over `R` (rather than hardcoding real stdin) purely so
+/// tests can drive it with an in-memory reader instead of blocking on real
+/// process stdin.
+async fn forward_lines_as_messages<R: tokio::io::AsyncBufRead + Unpin>(
+    reader: R,
+    agent_id: String,
+    message_tx: tokio::sync::mpsc::UnboundedSender<AgentMessage>,
+) {
+    use tokio::io::AsyncBufReadExt;
+    let mut lines = reader.lines();
+    while let Ok(Some(line)) = lines.next_line().await {
+        let trimmed = line.trim().to_string();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let _ = message_tx.send(AgentMessage {
+            agent_id: agent_id.clone(),
+            content: trimmed,
+            target_region: None,
+            priority: 10,
+        });
     }
 }
 
@@ -98,23 +253,18 @@ impl StageCallbacks for ForegroundCallbacks {
         }
         let message_tx = engine.get_message_sender();
         let stdin_agent_id = agent_id.to_string();
+        // The 4-line body of this spawned task (real `tokio::io::stdin()` plus
+        // the `forward_lines_as_messages` call) is intentionally not driven by
+        // a test: awaiting it would block on real process stdin, which is a
+        // TTY (not EOF) when tests run from an interactive terminal -- the
+        // same class of hang risk already hit and fixed once this session
+        // (see `resolve_task_with`'s `stdin_is_terminal` injection). The
+        // line-forwarding logic itself is fully covered via
+        // `forward_lines_as_messages` with an in-memory reader below.
         Some(tokio::spawn(async move {
-            use tokio::io::AsyncBufReadExt;
             let stdin = tokio::io::stdin();
             let reader = tokio::io::BufReader::new(stdin);
-            let mut lines = reader.lines();
-            while let Ok(Some(line)) = lines.next_line().await {
-                let trimmed = line.trim().to_string();
-                if trimmed.is_empty() {
-                    continue;
-                }
-                let _ = message_tx.send(AgentMessage {
-                    agent_id: stdin_agent_id.clone(),
-                    content: trimmed,
-                    target_region: None,
-                    priority: 10,
-                });
-            }
+            forward_lines_as_messages(reader, stdin_agent_id, message_tx).await;
         }))
     }
 
@@ -214,6 +364,18 @@ impl StageCallbacks for ForegroundCallbacks {
 
 /// Run an agent in the foreground (inline, blocking) — the original behavior.
 pub async fn run_foreground(args: RunArgs) -> anyhow::Result<()> {
+    run_foreground_with_registry(args, build_provider_registry).await
+}
+
+/// Core of [`run_foreground`], with provider-registry construction injected
+/// so tests can drive a real (in-process, no network) inference round trip
+/// with a [`Provider`](leviath_providers::Provider) mock instead of either
+/// stopping at [`StageCallbacks::on_provider_missing`] or making a real,
+/// billed network call.
+async fn run_foreground_with_registry(
+    args: RunArgs,
+    build_registry: impl FnOnce(&Config) -> leviath_runtime::ProviderRegistry,
+) -> anyhow::Result<()> {
     let path = args.path.unwrap_or_else(|| ".".to_string());
 
     let manifest_path = find_manifest(&path)?;
@@ -236,7 +398,7 @@ pub async fn run_foreground(args: RunArgs) -> anyhow::Result<()> {
         println!("Warning: {}", warning);
     }
 
-    let registry = build_provider_registry(&config);
+    let registry = build_registry(&config);
     let mut engine = leviath_runtime::AgentEngine::with_providers(registry);
 
     let mut pool = AgentPool::new(blueprint.clone());
@@ -300,104 +462,26 @@ pub async fn run_foreground(args: RunArgs) -> anyhow::Result<()> {
     let exec_agent_perms = agent_perms_arc.clone();
     let exec_global_perms = Arc::new(global_perms);
     let mut exec = move |calls: Vec<leviath_providers::ToolCall>| {
-        let builtins = builtins.clone();
-        let mcp = mcp.clone();
-        let builtin_names = builtin_names.clone();
-        let launch_ov = launch_overrides_arc.clone();
-        let session_al = exec_session_allows.clone();
-        let stage_pm = exec_stage_perms.clone();
-        let stage_nm = exec_stage_name.clone();
-        let agent_pm = exec_agent_perms.clone();
-        let global_pm = exec_global_perms.clone();
+        let state = ForegroundToolDispatchState {
+            builtins: builtins.clone(),
+            mcp: mcp.clone(),
+            builtin_names: builtin_names.clone(),
+            launch_overrides: launch_overrides_arc.clone(),
+            session_allows: exec_session_allows.clone(),
+            stage_perms: exec_stage_perms.clone(),
+            stage_name: exec_stage_name.clone(),
+            agent_perms: exec_agent_perms.clone(),
+            global_perms: exec_global_perms.clone(),
+        };
         async move {
-            let mut out: Vec<(String, String)> = Vec::new();
-            for tc in calls {
-                // ── Dynamic interaction tools (present_for_review, ask_user_*) ──
-                // Unlike `interaction_points` (declared statically in the
-                // blueprint and always shown), these let the model itself
-                // decide, mid-reasoning, that it needs human input.
-                let stage_name = stage_nm.lock().await.clone();
-                let interaction_backend = ForegroundInteractionBackend;
-                if let Some(result) = super::dynamic_interaction::dispatch_dynamic_interaction(
-                    &interaction_backend,
-                    &tc.name,
-                    &tc.id,
-                    &tc.arguments,
-                    &stage_name,
-                )
-                .await
-                {
-                    out.push((tc.id.clone(), result));
-                    continue;
-                }
-
-                let is_builtin = builtin_names.contains(&tc.name);
-                let session_has = session_al.lock().await.contains(&tc.name);
-                let policy = if session_has {
-                    ToolPolicy::Allow
-                } else {
-                    let stage_pm_snap = stage_pm.lock().await.clone();
-                    resolve_policy(
-                        &tc.name,
-                        is_builtin,
-                        &launch_ov,
-                        &stage_pm_snap,
-                        &agent_pm,
-                        &global_pm,
-                    )
-                };
-
-                let res = match policy {
-                    ToolPolicy::Deny => {
-                        format!("[denied] Tool '{}' is not permitted for this run.", tc.name)
-                    }
-                    ToolPolicy::Ask => {
-                        // Foreground: ask via stdin
-                        use crate::interaction::{
-                            request_interaction_stdin, response_approved, ApprovalScope,
-                            InteractionRequest,
-                        };
-                        let req = InteractionRequest::tool_approval(
-                            format!("fg-{}", tc.id),
-                            &tc.name,
-                            tc.arguments.clone(),
-                            "tool-call",
-                        );
-                        let resp = request_interaction_stdin(&req);
-                        if response_approved(&resp) {
-                            if resp.scope == Some(ApprovalScope::Session) {
-                                session_al.lock().await.insert(tc.name.clone());
-                            }
-                            if is_builtin {
-                                builtins.execute(&tc.name, tc.arguments.clone()).await
-                            } else {
-                                let mut mcp_lock = mcp.lock().await;
-                                match mcp_lock.execute(&tc.name, tc.arguments.clone()).await {
-                                    Ok(r) if r.success => r.text,
-                                    Ok(r) => format!("[error] {}", r.text),
-                                    Err(e) => format!("[error] tool error: {}", e),
-                                }
-                            }
-                        } else {
-                            format!("[denied] User declined tool call '{}'.", tc.name)
-                        }
-                    }
-                    ToolPolicy::Allow => {
-                        if is_builtin {
-                            builtins.execute(&tc.name, tc.arguments.clone()).await
-                        } else {
-                            let mut mcp_lock = mcp.lock().await;
-                            match mcp_lock.execute(&tc.name, tc.arguments.clone()).await {
-                                Ok(r) if r.success => r.text,
-                                Ok(r) => format!("[error] {}", r.text),
-                                Err(e) => format!("[error] tool error: {}", e),
-                            }
-                        }
-                    }
-                };
-                out.push((tc.id.clone(), res));
-            }
-            out
+            let interaction_backend = ForegroundInteractionBackend;
+            dispatch_tool_calls_foreground(
+                &state,
+                calls,
+                &interaction_backend,
+                &crate::interaction::request_interaction_stdin,
+            )
+            .await
         }
     };
 
@@ -429,6 +513,7 @@ pub async fn run_foreground(args: RunArgs) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use leviath_providers::Provider;
 
     #[test]
     fn foreground_callbacks_construction() {
@@ -662,5 +747,500 @@ mod tests {
         use crate::commands::run::dynamic_interaction::InteractionBackend;
         let backend = ForegroundInteractionBackend;
         backend.on_review_document("call-1", "Title", "# Markdown body");
+    }
+
+    // ─── dispatch_tool_calls_foreground ─────────────────────────────────────
+
+    async fn make_dispatch_state(unique: &str) -> ForegroundToolDispatchState {
+        let workdir = std::env::temp_dir().join(format!("lev-fg-dispatch-{}", unique));
+        let _ = std::fs::create_dir_all(&workdir);
+        let config = Config::default();
+        let tool_registry = ToolRegistry::build(workdir, &config).await;
+        ForegroundToolDispatchState {
+            builtins: tool_registry.builtins.clone(),
+            mcp: tool_registry.mcp.clone(),
+            builtin_names: tool_registry.builtin_names.clone(),
+            launch_overrides: Arc::new(HashMap::new()),
+            session_allows: Arc::new(Mutex::new(HashSet::new())),
+            stage_perms: Arc::new(Mutex::new(HashMap::new())),
+            stage_name: Arc::new(Mutex::new("main".to_string())),
+            agent_perms: Arc::new(HashMap::new()),
+            global_perms: Arc::new(HashMap::new()),
+        }
+    }
+
+    fn make_tool_call(name: &str, args: serde_json::Value) -> leviath_providers::ToolCall {
+        leviath_providers::ToolCall {
+            id: format!("call-{}", name),
+            name: name.to_string(),
+            arguments: args,
+        }
+    }
+
+    fn approve_once(_req: &InteractionRequest) -> InteractionResponse {
+        InteractionResponse::approval("ignored", true, crate::interaction::ApprovalScope::Once)
+    }
+
+    fn approve_session(_req: &InteractionRequest) -> InteractionResponse {
+        InteractionResponse::approval("ignored", true, crate::interaction::ApprovalScope::Session)
+    }
+
+    fn deny_once(_req: &InteractionRequest) -> InteractionResponse {
+        InteractionResponse::approval("ignored", false, crate::interaction::ApprovalScope::Once)
+    }
+
+    #[tokio::test]
+    async fn dispatch_tool_calls_foreground_deny_policy_returns_denied_message() {
+        let mut state = make_dispatch_state("deny").await;
+        let mut global = HashMap::new();
+        global.insert("bash".to_string(), ToolPolicy::Deny);
+        state.global_perms = Arc::new(global);
+
+        let backend = ForegroundInteractionBackend;
+        let calls = vec![make_tool_call("bash", serde_json::json!({"command": "ls"}))];
+        let out = dispatch_tool_calls_foreground(&state, calls, &backend, &approve_once).await;
+
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].0, "call-bash");
+        assert!(out[0].1.contains("[denied]"));
+        assert!(out[0].1.contains("not permitted"));
+    }
+
+    #[tokio::test]
+    async fn dispatch_tool_calls_foreground_allow_builtin_executes() {
+        let mut state = make_dispatch_state("allow-builtin").await;
+        let mut launch = HashMap::new();
+        launch.insert("*".to_string(), ToolPolicy::Allow);
+        state.launch_overrides = Arc::new(launch);
+
+        let backend = ForegroundInteractionBackend;
+        let calls = vec![make_tool_call(
+            "read_file",
+            serde_json::json!({"path": "definitely-not-here.txt"}),
+        )];
+        let out = dispatch_tool_calls_foreground(&state, calls, &backend, &approve_once).await;
+
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].0, "call-read_file");
+    }
+
+    #[tokio::test]
+    async fn dispatch_tool_calls_foreground_session_allow_short_circuits_policy() {
+        let mut state = make_dispatch_state("session-allow").await;
+        let mut global = HashMap::new();
+        global.insert("read_file".to_string(), ToolPolicy::Deny);
+        state.global_perms = Arc::new(global);
+        state
+            .session_allows
+            .lock()
+            .await
+            .insert("read_file".to_string());
+
+        let backend = ForegroundInteractionBackend;
+        let calls = vec![make_tool_call(
+            "read_file",
+            serde_json::json!({"path": "definitely-not-here.txt"}),
+        )];
+        let out = dispatch_tool_calls_foreground(&state, calls, &backend, &approve_once).await;
+
+        assert_eq!(out.len(), 1);
+        assert!(!out[0].1.contains("[denied]"));
+    }
+
+    #[tokio::test]
+    async fn dispatch_tool_calls_foreground_ask_approved_once_executes_tool() {
+        let mut state = make_dispatch_state("ask-approved-once").await;
+        let mut global = HashMap::new();
+        global.insert("read_file".to_string(), ToolPolicy::Ask);
+        state.global_perms = Arc::new(global);
+
+        let backend = ForegroundInteractionBackend;
+        let calls = vec![make_tool_call(
+            "read_file",
+            serde_json::json!({"path": "definitely-not-here.txt"}),
+        )];
+        let out = dispatch_tool_calls_foreground(&state, calls, &backend, &approve_once).await;
+
+        assert_eq!(out.len(), 1);
+        assert!(!out[0].1.contains("[denied]"));
+        assert!(
+            !state.session_allows.lock().await.contains("read_file"),
+            "Once-scope approval must not be recorded as a session allow"
+        );
+    }
+
+    #[tokio::test]
+    async fn dispatch_tool_calls_foreground_ask_approved_session_records_session_allow() {
+        let mut state = make_dispatch_state("ask-approved-session").await;
+        let mut global = HashMap::new();
+        global.insert("read_file".to_string(), ToolPolicy::Ask);
+        state.global_perms = Arc::new(global);
+
+        let backend = ForegroundInteractionBackend;
+        let calls = vec![make_tool_call(
+            "read_file",
+            serde_json::json!({"path": "definitely-not-here.txt"}),
+        )];
+        let out = dispatch_tool_calls_foreground(&state, calls, &backend, &approve_session).await;
+
+        assert_eq!(out.len(), 1);
+        assert!(!out[0].1.contains("[denied]"));
+        assert!(state.session_allows.lock().await.contains("read_file"));
+    }
+
+    #[tokio::test]
+    async fn dispatch_tool_calls_foreground_ask_denied_returns_declined_message() {
+        let mut state = make_dispatch_state("ask-denied").await;
+        let mut global = HashMap::new();
+        global.insert("read_file".to_string(), ToolPolicy::Ask);
+        state.global_perms = Arc::new(global);
+
+        let backend = ForegroundInteractionBackend;
+        let calls = vec![make_tool_call(
+            "read_file",
+            serde_json::json!({"path": "definitely-not-here.txt"}),
+        )];
+        let out = dispatch_tool_calls_foreground(&state, calls, &backend, &deny_once).await;
+
+        assert_eq!(out.len(), 1);
+        assert!(out[0].1.contains("[denied]"));
+        assert!(out[0].1.contains("declined"));
+        assert!(!state.session_allows.lock().await.contains("read_file"));
+    }
+
+    #[tokio::test]
+    async fn dispatch_tool_calls_foreground_dynamic_interaction_short_circuits() {
+        let state = make_dispatch_state("dynamic-interaction").await;
+        let backend = ForegroundInteractionBackend;
+        // ask_user_confirm is intercepted before any tool-policy resolution;
+        // ask_approval/backend are never reached for it, so a real
+        // ForegroundInteractionBackend (which would block on stdin if it were
+        // ever invoked) proves the short-circuit happened.
+        let calls = vec![make_tool_call(
+            "ask_user_confirm",
+            serde_json::json!({"prompt": "Continue?"}),
+        )];
+        let out = dispatch_tool_calls_foreground(&state, calls, &backend, &deny_once).await;
+
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].0, "call-ask_user_confirm");
+    }
+
+    #[tokio::test]
+    async fn dispatch_tool_calls_foreground_multiple_calls_preserve_order() {
+        let mut state = make_dispatch_state("multi-order").await;
+        let mut global = HashMap::new();
+        global.insert("bash".to_string(), ToolPolicy::Deny);
+        global.insert("read_file".to_string(), ToolPolicy::Deny);
+        state.global_perms = Arc::new(global);
+
+        let backend = ForegroundInteractionBackend;
+        let calls = vec![
+            make_tool_call("bash", serde_json::json!({"command": "ls"})),
+            make_tool_call("read_file", serde_json::json!({"path": "x"})),
+        ];
+        let out = dispatch_tool_calls_foreground(&state, calls, &backend, &approve_once).await;
+
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0].0, "call-bash");
+        assert_eq!(out[1].0, "call-read_file");
+    }
+
+    #[tokio::test]
+    async fn dispatch_tool_calls_foreground_allow_mcp_tool_returns_error_text() {
+        // Not a builtin name and no MCP server registered -> the MCP
+        // execute() path returns Err, exercising the `Err(e)` arm of the
+        // Allow branch (as opposed to the builtin-execution arm).
+        let mut state = make_dispatch_state("allow-mcp").await;
+        let mut launch = HashMap::new();
+        launch.insert("*".to_string(), ToolPolicy::Allow);
+        state.launch_overrides = Arc::new(launch);
+
+        let backend = ForegroundInteractionBackend;
+        let calls = vec![make_tool_call("some_mcp_tool", serde_json::json!({}))];
+        let out = dispatch_tool_calls_foreground(&state, calls, &backend, &approve_once).await;
+
+        assert_eq!(out.len(), 1);
+        assert!(out[0].1.contains("[error]"));
+    }
+
+    #[tokio::test]
+    async fn dispatch_tool_calls_foreground_ask_approved_mcp_tool_returns_error_text() {
+        let mut state = make_dispatch_state("ask-mcp").await;
+        let mut global = HashMap::new();
+        global.insert("some_mcp_tool".to_string(), ToolPolicy::Ask);
+        state.global_perms = Arc::new(global);
+
+        let backend = ForegroundInteractionBackend;
+        let calls = vec![make_tool_call("some_mcp_tool", serde_json::json!({}))];
+        let out = dispatch_tool_calls_foreground(&state, calls, &backend, &approve_once).await;
+
+        assert_eq!(out.len(), 1);
+        assert!(out[0].1.contains("[error]"));
+    }
+
+    // ─── forward_lines_as_messages ───────────────────────────────────────────
+
+    #[tokio::test]
+    async fn forward_lines_as_messages_forwards_nonempty_trimmed_lines() {
+        let input = "  hello\n\n   \nworld  \n";
+        let reader = tokio::io::BufReader::new(std::io::Cursor::new(input.as_bytes()));
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<AgentMessage>();
+
+        forward_lines_as_messages(reader, "agent-1".to_string(), tx).await;
+
+        let first = rx.try_recv().unwrap();
+        assert_eq!(first.agent_id, "agent-1");
+        assert_eq!(first.content, "hello");
+        let second = rx.try_recv().unwrap();
+        assert_eq!(second.content, "world");
+        assert!(rx.try_recv().is_err(), "blank lines must be skipped");
+    }
+
+    #[tokio::test]
+    async fn forward_lines_as_messages_empty_input_sends_nothing() {
+        let reader = tokio::io::BufReader::new(std::io::Cursor::new(&b""[..]));
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<AgentMessage>();
+
+        forward_lines_as_messages(reader, "agent-1".to_string(), tx).await;
+
+        assert!(rx.try_recv().is_err());
+    }
+
+    // ─── run_foreground ──────────────────────────────────────────────────────
+    //
+    // `run_foreground()` drives a real `Config::load()` + real provider
+    // registry + real `AgentEngine`/`AgentPool`, so it can't be safely driven
+    // end-to-end with a live provider without either a real API key (a real,
+    // billed network call) or an injectable provider registry -- out of scope
+    // for a coverage-only pass. These tests instead isolate `Config::load()`
+    // from any real API key (see `crate::config::isolate_config_path_for_test`)
+    // so the run reliably reaches `on_provider_missing` and aborts cleanly,
+    // exercising manifest loading, blueprint parsing, config loading, provider
+    // registry building, engine/pool setup, tool registry init, and
+    // launch_overrides population (yolo/allow/ask/deny) without ever blocking
+    // on stdin or making a network call.
+
+    #[tokio::test]
+    async fn run_foreground_with_valid_manifest_aborts_at_missing_provider() {
+        let _config_guard = crate::config::isolate_config_path_for_test("fg-valid-manifest");
+
+        let temp_dir = std::env::temp_dir().join("lev-test-foreground-valid-manifest");
+        let _ = std::fs::create_dir_all(&temp_dir);
+        let manifest_content = r#"
+[agent]
+name = "test-foreground-agent"
+version = "1.0.0"
+description = "Test agent"
+
+[stages.main]
+mode = "autonomous"
+max_iterations = 1
+
+[stages.main.model]
+provider = "anthropic"
+model = "claude-sonnet-4-6"
+
+[tool_permissions]
+bash = "ask"
+"#;
+        std::fs::write(temp_dir.join("agent.leviath"), manifest_content).unwrap();
+
+        let args = RunArgs {
+            path: Some(temp_dir.to_string_lossy().to_string()),
+            task: Some("test task".to_string()),
+            model: None,
+            foreground: true,
+            yolo: true,
+            allow: vec!["read_file".to_string()],
+            ask: vec!["bash".to_string()],
+            deny: vec!["write_file".to_string()],
+            max_depth: None,
+            count: 1,
+        };
+
+        // No provider is configured (config isolated above), so this should
+        // abort cleanly via `on_provider_missing` returning `true` -- which
+        // `run_stage_loop` surfaces as `Ok(())`, not an error.
+        let result = run_foreground(args).await;
+        assert!(
+            result.is_ok(),
+            "expected clean abort on missing provider, got: {:?}",
+            result.err()
+        );
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    // ─── run_foreground_with_registry (mock provider, no network) ───────────
+    //
+    // With a real, working (mock) provider injected via
+    // `run_foreground_with_registry`, the run completes an actual inference
+    // round trip in-process -- exercising `StageCallbacks::run_autonomous`,
+    // the `exec` closure construction/call site, and the `validate_keys()`
+    // warning-print branch, none of which are reachable once the run aborts
+    // early at `on_provider_missing` (as in the test above).
+
+    struct MockProvider {
+        call_count: std::sync::atomic::AtomicUsize,
+    }
+
+    impl MockProvider {
+        fn new() -> Self {
+            Self {
+                call_count: std::sync::atomic::AtomicUsize::new(0),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl leviath_providers::Provider for MockProvider {
+        async fn infer(
+            &self,
+            _request: leviath_providers::InferenceRequest,
+        ) -> Result<leviath_providers::InferenceResponse, leviath_providers::ProviderError>
+        {
+            let call = self
+                .call_count
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let tool_calls = if call == 0 {
+                vec![leviath_providers::ToolCall {
+                    id: "call-1".to_string(),
+                    name: "read_file".to_string(),
+                    arguments: serde_json::json!({"path": "definitely-not-here.txt"}),
+                }]
+            } else {
+                vec![]
+            };
+            Ok(leviath_providers::InferenceResponse {
+                content: "done".to_string(),
+                tool_calls,
+                tokens_used: leviath_providers::TokenUsage {
+                    prompt_tokens: 10,
+                    completion_tokens: 5,
+                    total_tokens: 15,
+                    cached_tokens: 0,
+                    cache_write_tokens: 0,
+                },
+                finish_reason: leviath_providers::FinishReason::Complete,
+            })
+        }
+
+        fn count_tokens(&self, text: &str, _model: &str) -> usize {
+            text.len() / 4
+        }
+
+        fn max_context_tokens(&self, _model: &str) -> usize {
+            100_000
+        }
+
+        fn name(&self) -> &str {
+            "mock"
+        }
+
+        fn capabilities(&self, _model: &str) -> leviath_providers::ModelCapabilities {
+            leviath_providers::ModelCapabilities::default()
+        }
+
+        async fn list_models(
+            &self,
+        ) -> Result<Vec<leviath_providers::ModelInfo>, leviath_providers::ProviderError> {
+            Ok(vec![])
+        }
+    }
+
+    #[tokio::test]
+    async fn run_foreground_with_mock_provider_completes_full_round_trip() {
+        let _config_guard = crate::config::isolate_config_path_for_test("fg-mock-provider");
+        // A malformed key still exercises the `validate_keys()` warning
+        // branch without being usable as a real credential -- and since the
+        // provider registry is fully mocked below, no real network call can
+        // happen regardless.
+        let mut fake_config = Config::default();
+        fake_config.providers.anthropic_api_key = Some("not-a-real-key".to_string());
+        std::fs::write(
+            Config::config_path(),
+            toml::to_string(&fake_config).unwrap(),
+        )
+        .unwrap();
+
+        let temp_dir = std::env::temp_dir().join("lev-test-foreground-mock-provider");
+        let _ = std::fs::create_dir_all(&temp_dir);
+        let manifest_content = r#"
+[agent]
+name = "test-foreground-mock-agent"
+version = "1.0.0"
+description = "Test agent"
+
+[stages.main]
+mode = "autonomous"
+max_iterations = 2
+
+[stages.main.model]
+provider = "mock"
+model = "mock-model"
+"#;
+        std::fs::write(temp_dir.join("agent.leviath"), manifest_content).unwrap();
+
+        let args = RunArgs {
+            path: Some(temp_dir.to_string_lossy().to_string()),
+            task: Some("test task".to_string()),
+            model: None,
+            foreground: true,
+            yolo: true,
+            allow: vec![],
+            ask: vec![],
+            deny: vec![],
+            max_depth: None,
+            count: 1,
+        };
+
+        let result = run_foreground_with_registry(args, |_config| {
+            let mut registry = leviath_runtime::ProviderRegistry::new();
+            registry.register("mock".to_string(), Arc::new(MockProvider::new()));
+            registry
+        })
+        .await;
+
+        assert!(
+            result.is_ok(),
+            "expected clean completion, got: {:?}",
+            result.err()
+        );
+
+        // Cover the remaining `Provider` trait methods that this particular
+        // run never exercises through the engine.
+        let provider = MockProvider::new();
+        assert_eq!(provider.count_tokens("abcd", "mock-model"), 1);
+        assert_eq!(provider.max_context_tokens("mock-model"), 100_000);
+        assert_eq!(provider.name(), "mock");
+        assert!(provider.list_models().await.unwrap().is_empty());
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[tokio::test]
+    async fn run_foreground_fails_with_nonexistent_path() {
+        let args = RunArgs {
+            path: Some("/nonexistent/path/to/nowhere".to_string()),
+            task: Some("do something".to_string()),
+            model: None,
+            foreground: true,
+            yolo: false,
+            allow: vec![],
+            ask: vec![],
+            deny: vec![],
+            max_depth: None,
+            count: 1,
+        };
+
+        let result = run_foreground(args).await;
+        assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("Could not find") || err_msg.contains("manifest"),
+            "Expected manifest error, got: {}",
+            err_msg
+        );
     }
 }

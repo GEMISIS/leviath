@@ -375,6 +375,88 @@ fn set_dir_permissions(_path: &std::path::Path) {
 #[cfg(test)]
 pub(crate) static CONFIG_PATH_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+/// Provider API key env vars that `Config::load()` (via `dotenvy::dotenv()`)
+/// loads into the process env regardless of which config file path is used --
+/// so redirecting the config path alone isn't enough; these must be cleared
+/// too by [`isolate_config_path_for_test`].
+#[cfg(test)]
+const PROVIDER_KEY_ENV_VARS: &[&str] = &[
+    "ANTHROPIC_API_KEY",
+    "OPENAI_API_KEY",
+    "GOOGLE_API_KEY",
+    "OPENROUTER_API_KEY",
+];
+
+/// RAII guard that restores `LEVIATH_CONFIG_PATH`, `LEVIATH_SKIP_DOTENV`, and
+/// the provider key env vars to their original values, and releases
+/// [`CONFIG_PATH_ENV_LOCK`], on drop.
+#[cfg(test)]
+pub(crate) struct ConfigPathTestGuard {
+    original_config_path: Option<std::ffi::OsString>,
+    original_skip_dotenv: Option<std::ffi::OsString>,
+    original_keys: Vec<(&'static str, Option<std::ffi::OsString>)>,
+    fake_dir: std::path::PathBuf,
+    _lock: std::sync::MutexGuard<'static, ()>,
+}
+
+#[cfg(test)]
+impl Drop for ConfigPathTestGuard {
+    fn drop(&mut self) {
+        match self.original_config_path.take() {
+            Some(path) => std::env::set_var("LEVIATH_CONFIG_PATH", path),
+            None => std::env::remove_var("LEVIATH_CONFIG_PATH"),
+        }
+        match self.original_skip_dotenv.take() {
+            Some(v) => std::env::set_var("LEVIATH_SKIP_DOTENV", v),
+            None => std::env::remove_var("LEVIATH_SKIP_DOTENV"),
+        }
+        for (key, value) in self.original_keys.drain(..) {
+            match value {
+                Some(v) => std::env::set_var(key, v),
+                None => std::env::remove_var(key),
+            }
+        }
+        let _ = std::fs::remove_dir_all(&self.fake_dir);
+    }
+}
+
+/// Points `LEVIATH_CONFIG_PATH` at a nonexistent path inside a fresh temp
+/// directory, sets `LEVIATH_SKIP_DOTENV`, and clears `PROVIDER_KEY_ENV_VARS`,
+/// for the duration of the returned guard -- so `Config::load()` sees no
+/// config file and no real API keys, and falls back to defaults with no
+/// registered providers.
+///
+/// Shared across test modules (e.g. `commands/run/worker.rs`,
+/// `commands/run/foreground.rs`) that need to drive a real `Config::load()`
+/// without risking a real, billed inference call via a real API key found in
+/// `~/.leviath/config.toml` or a repo-root `.env`.
+#[cfg(test)]
+pub(crate) fn isolate_config_path_for_test(unique: &str) -> ConfigPathTestGuard {
+    let lock = CONFIG_PATH_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let original_config_path = std::env::var_os("LEVIATH_CONFIG_PATH");
+    let original_skip_dotenv = std::env::var_os("LEVIATH_SKIP_DOTENV");
+    let original_keys: Vec<_> = PROVIDER_KEY_ENV_VARS
+        .iter()
+        .map(|&key| (key, std::env::var_os(key)))
+        .collect();
+    for &key in PROVIDER_KEY_ENV_VARS {
+        std::env::remove_var(key);
+    }
+    let fake_dir = std::env::temp_dir().join(format!("lev-fake-config-{}", unique));
+    let _ = std::fs::create_dir_all(&fake_dir);
+    std::env::set_var("LEVIATH_CONFIG_PATH", fake_dir.join("config.toml"));
+    std::env::set_var("LEVIATH_SKIP_DOTENV", "1");
+    ConfigPathTestGuard {
+        original_config_path,
+        original_skip_dotenv,
+        original_keys,
+        fake_dir,
+        _lock: lock,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

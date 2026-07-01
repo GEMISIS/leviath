@@ -684,102 +684,13 @@ mod tests {
 
     // ─── Helpers ──────────────────────────────────────────────────────────────
 
-    /// Provider API key env vars that `Config::load_from_path()` falls back
-    /// to when the config file doesn't set them. The repo root has a `.env`
-    /// with a real `ANTHROPIC_API_KEY`, which `dotenvy::dotenv()` (called by
-    /// `Config::load()`) loads into the process env regardless of which
-    /// config file path is used -- so redirecting the config path alone
-    /// isn't enough; these must be cleared too.
-    const PROVIDER_KEY_ENV_VARS: &[&str] = &[
-        "ANTHROPIC_API_KEY",
-        "OPENAI_API_KEY",
-        "GOOGLE_API_KEY",
-        "OPENROUTER_API_KEY",
-    ];
-
-    /// Serializes tests that redirect `LEVIATH_CONFIG_PATH`, set
-    /// `LEVIATH_SKIP_DOTENV`, and clear provider API key env vars so
-    /// `Config::load()` can't see the developer's real
-    /// `~/.leviath/config.toml`, real `.env`, or any real API key. Without
-    /// this, `execute_worker()` on a valid manifest would call
-    /// `generate_title()` and make a real, billed inference request.
-    ///
-    /// Two things make this trickier than it looks:
-    /// - Mutating `$HOME` doesn't work: on macOS, `dirs::home_dir()` resolves
-    ///   via `NSHomeDirectory()`, not `$HOME`.
-    /// - Merely clearing the provider key env vars isn't enough either: the
-    ///   repo root has a `.env` with a real `ANTHROPIC_API_KEY`, and
-    ///   `dotenvy::dotenv()` (called unconditionally inside `Config::load()`,
-    ///   which walks up parent directories looking for `.env`) repopulates
-    ///   any env var that isn't already set -- hence `LEVIATH_SKIP_DOTENV`.
-    ///
-    /// This is `crate::config::CONFIG_PATH_ENV_LOCK`, not a private static
-    /// here: `LEVIATH_CONFIG_PATH` is process-global, so any test anywhere
-    /// in the crate that reads `Config::config_path()`'s default behavior
-    /// (e.g. `config.rs`'s `config_path_contains_leviath`) must serialize
-    /// against this same lock, or it can race against the override below.
-    use crate::config::CONFIG_PATH_ENV_LOCK;
-
-    /// RAII guard that restores `LEVIATH_CONFIG_PATH`, `LEVIATH_SKIP_DOTENV`,
-    /// and the provider key env vars to their original values, and releases
-    /// `CONFIG_PATH_ENV_LOCK`, on drop.
-    struct ConfigPathGuard {
-        original_config_path: Option<std::ffi::OsString>,
-        original_skip_dotenv: Option<std::ffi::OsString>,
-        original_keys: Vec<(&'static str, Option<std::ffi::OsString>)>,
-        fake_dir: std::path::PathBuf,
-        _lock: std::sync::MutexGuard<'static, ()>,
-    }
-    impl Drop for ConfigPathGuard {
-        fn drop(&mut self) {
-            match self.original_config_path.take() {
-                Some(path) => std::env::set_var("LEVIATH_CONFIG_PATH", path),
-                None => std::env::remove_var("LEVIATH_CONFIG_PATH"),
-            }
-            match self.original_skip_dotenv.take() {
-                Some(v) => std::env::set_var("LEVIATH_SKIP_DOTENV", v),
-                None => std::env::remove_var("LEVIATH_SKIP_DOTENV"),
-            }
-            for (key, value) in self.original_keys.drain(..) {
-                match value {
-                    Some(v) => std::env::set_var(key, v),
-                    None => std::env::remove_var(key),
-                }
-            }
-            let _ = std::fs::remove_dir_all(&self.fake_dir);
-        }
-    }
-
-    /// Points `LEVIATH_CONFIG_PATH` at a nonexistent path inside a fresh temp
-    /// directory, sets `LEVIATH_SKIP_DOTENV`, and clears
-    /// `PROVIDER_KEY_ENV_VARS`, for the duration of the returned guard -- so
-    /// `Config::load()` sees no config file and no real API keys, and falls
-    /// back to defaults with no registered providers.
-    fn isolate_config_path(unique: &str) -> ConfigPathGuard {
-        let lock = CONFIG_PATH_ENV_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        let original_config_path = std::env::var_os("LEVIATH_CONFIG_PATH");
-        let original_skip_dotenv = std::env::var_os("LEVIATH_SKIP_DOTENV");
-        let original_keys: Vec<_> = PROVIDER_KEY_ENV_VARS
-            .iter()
-            .map(|&key| (key, std::env::var_os(key)))
-            .collect();
-        for &key in PROVIDER_KEY_ENV_VARS {
-            std::env::remove_var(key);
-        }
-        let fake_dir = std::env::temp_dir().join(format!("lev-fake-config-{}", unique));
-        let _ = std::fs::create_dir_all(&fake_dir);
-        std::env::set_var("LEVIATH_CONFIG_PATH", fake_dir.join("config.toml"));
-        std::env::set_var("LEVIATH_SKIP_DOTENV", "1");
-        ConfigPathGuard {
-            original_config_path,
-            original_skip_dotenv,
-            original_keys,
-            fake_dir,
-            _lock: lock,
-        }
-    }
+    /// Isolates `Config::load()` from the developer's real
+    /// `~/.leviath/config.toml`, real `.env`, and any real API key, so tests
+    /// that drive a real config load (e.g. `execute_worker()` on a valid
+    /// manifest) don't make a real, billed inference request via
+    /// `generate_title()`. Shared with `commands/run/foreground.rs` — see
+    /// `crate::config::isolate_config_path_for_test` for the rationale.
+    use crate::config::isolate_config_path_for_test as isolate_config_path;
 
     fn make_meta(run_id: &str, num_stages: usize) -> RunMeta {
         RunMeta::new(
