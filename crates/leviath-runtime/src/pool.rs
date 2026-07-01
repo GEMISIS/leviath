@@ -136,4 +136,52 @@ mod tests {
         assert_eq!(pool.agent_count(), 1);
         assert!(agent_id.starts_with("test-agent-"));
     }
+
+    #[test]
+    fn test_get_agent_returns_entity_for_known_id() {
+        let blueprint = create_test_blueprint();
+        let mut pool = AgentPool::new(blueprint);
+        let mut world = World::new();
+
+        let agent_id = pool.spawn_agent(&mut world);
+        assert!(pool.get_agent(&agent_id).is_some());
+    }
+
+    #[test]
+    fn test_get_agent_returns_none_for_unknown_id() {
+        let blueprint = create_test_blueprint();
+        let pool = AgentPool::new(blueprint);
+        assert!(pool.get_agent("nonexistent-agent").is_none());
+    }
+
+    #[test]
+    fn test_remove_agent_decrements_count() {
+        let blueprint = create_test_blueprint();
+        let mut pool = AgentPool::new(blueprint);
+        let mut world = World::new();
+
+        let agent_id = pool.spawn_agent(&mut world);
+        assert_eq!(pool.agent_count(), 1);
+
+        pool.remove_agent(&agent_id);
+        assert_eq!(pool.agent_count(), 0);
+        assert!(pool.get_agent(&agent_id).is_none());
+    }
+
+    #[test]
+    fn test_remove_agent_unknown_id_is_noop() {
+        let blueprint = create_test_blueprint();
+        let mut pool = AgentPool::new(blueprint);
+        // Removing an agent that was never spawned must not panic.
+        pool.remove_agent("nonexistent-agent");
+        assert_eq!(pool.agent_count(), 0);
+    }
+
+    #[test]
+    fn test_blueprint_accessor_returns_original_blueprint() {
+        let blueprint = create_test_blueprint();
+        let expected_name = blueprint.name.clone();
+        let pool = AgentPool::new(blueprint);
+        assert_eq!(pool.blueprint().name, expected_name);
+    }
 }

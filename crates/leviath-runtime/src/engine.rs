@@ -1399,6 +1399,64 @@ mod tests {
         assert_eq!(ir.tokens_used, 15);
     }
 
+    /// A provider whose model doesn't support temperature sampling (e.g. some
+    /// reasoning models deprecate it) — used to exercise the `else` branch of
+    /// `run_inference_filtered`'s temperature selection, which every other
+    /// test (via `MockProvider`, capabilities always default-true) never hits.
+    struct NoTemperatureMockProvider;
+
+    #[async_trait::async_trait]
+    impl leviath_providers::Provider for NoTemperatureMockProvider {
+        async fn infer(
+            &self,
+            request: InferenceRequest,
+        ) -> leviath_providers::Result<InferenceResponse> {
+            // Surface the temperature the engine actually chose, so the test
+            // can assert on it without needing internal access.
+            Ok(InferenceResponse {
+                content: format!("temperature={}", request.temperature),
+                tool_calls: vec![],
+                tokens_used: leviath_providers::TokenUsage {
+                    prompt_tokens: 1,
+                    completion_tokens: 1,
+                    total_tokens: 2,
+                    cached_tokens: 0,
+                    cache_write_tokens: 0,
+                },
+                finish_reason: leviath_providers::FinishReason::Complete,
+            })
+        }
+        fn count_tokens(&self, _text: &str, _model: &str) -> usize {
+            4
+        }
+        fn max_context_tokens(&self, _model: &str) -> usize {
+            100_000
+        }
+        fn name(&self) -> &str {
+            "no-temp-mock"
+        }
+        fn capabilities(&self, _model: &str) -> leviath_providers::ModelCapabilities {
+            leviath_providers::ModelCapabilities {
+                supports_temperature: false,
+                ..Default::default()
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_run_inference_omits_temperature_when_unsupported() {
+        let (mut engine, entity) = make_engine_with_mock();
+        engine
+            .providers_mut()
+            .register("no-temp".to_string(), Arc::new(NoTemperatureMockProvider));
+
+        let result = engine
+            .run_inference(entity, "no-temp", "reasoning-model", Vec::new())
+            .await
+            .unwrap();
+        assert_eq!(result.content, "temperature=0");
+    }
+
     #[tokio::test]
     async fn test_run_inference_filtered_empty_filter_includes_all() {
         let (mut engine, entity) = make_engine_with_mock();

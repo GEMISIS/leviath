@@ -669,6 +669,93 @@ mod tests {
         assert_eq!(window.current_tokens, 500, "Should not evict below 95%");
     }
 
+    #[test]
+    fn eviction_system_adds_needs_compaction_component() {
+        let mut world = World::new();
+        let mut window = ContextWindow::new(1000);
+        // Only a Compacting region — nothing clearable/temporary to evict,
+        // so try_evict should surface it as needing LLM compaction.
+        let mut region = Region::new(
+            "impl".to_string(),
+            RegionKind::Compacting {
+                threshold_tokens: 500,
+            },
+            1000,
+        );
+        region.add_entry("data".to_string(), 960).unwrap();
+        window.add_region(region);
+        window.current_tokens = 960;
+
+        let entity = world
+            .spawn((make_agent_state("agent-1", AgentStatus::Active), window))
+            .id();
+
+        let mut schedule = Schedule::default();
+        schedule.add_systems(eviction_system);
+        schedule.run(&mut world);
+
+        let compaction = world.get::<NeedsCompaction>(entity);
+        assert!(
+            compaction.is_some(),
+            "eviction_system should add NeedsCompaction when compacting regions need it"
+        );
+        assert!(compaction.unwrap().regions.contains(&"impl".to_string()));
+    }
+
+    // ── context_management_system / eviction_system: try_evict error path ──
+    // A Pinned region whose tokens alone exceed max_tokens makes try_evict()
+    // return Err(PinnedRegionsOverBudget) — both systems must log and
+    // continue rather than propagate/panic.
+
+    #[test]
+    fn context_management_system_handles_eviction_error_without_panicking() {
+        let mut world = World::new();
+        let mut window = ContextWindow::new(1000);
+        let mut region = Region::new("architecture".to_string(), RegionKind::Pinned, 2000);
+        region
+            .add_entry("huge pinned doc".to_string(), 1500)
+            .unwrap();
+        window.add_region(region);
+        window.current_tokens = 1500;
+
+        let entity = world
+            .spawn((make_agent_state("agent-1", AgentStatus::Active), window))
+            .id();
+
+        let mut schedule = Schedule::default();
+        schedule.add_systems(context_management_system);
+        schedule.run(&mut world);
+
+        // Pinned regions are never touched, even on error — nothing evicted.
+        let window = world.get::<ContextWindow>(entity).unwrap();
+        assert_eq!(window.current_tokens, 1500);
+        assert!(world.get::<NeedsCompaction>(entity).is_none());
+    }
+
+    #[test]
+    fn eviction_system_handles_eviction_error_without_panicking() {
+        let mut world = World::new();
+        let mut window = ContextWindow::new(1000);
+        let mut region = Region::new("architecture".to_string(), RegionKind::Pinned, 2000);
+        region
+            .add_entry("huge pinned doc".to_string(), 1500)
+            .unwrap();
+        window.add_region(region);
+        window.current_tokens = 1500;
+
+        let entity = world
+            .spawn((make_agent_state("agent-1", AgentStatus::Active), window))
+            .id();
+
+        let mut schedule = Schedule::default();
+        schedule.add_systems(eviction_system);
+        schedule.run(&mut world);
+
+        let window = world.get::<ContextWindow>(entity).unwrap();
+        assert_eq!(window.current_tokens, 1500);
+        assert!(world.get::<NeedsCompaction>(entity).is_none());
+    }
+
     // ── stage_gating_system ────────────────────────────────────────────────
 
     #[test]
@@ -950,6 +1037,33 @@ mod tests {
         assert!(parent_state.spawned_children_ids.is_empty());
     }
 
+    #[test]
+    fn child_completion_ignores_non_terminal_child_status() {
+        let mut world = World::new();
+
+        let mut parent_state = make_agent_state("parent", AgentStatus::Active);
+        parent_state.spawned_children_ids = vec!["child-active".to_string()];
+        let parent_entity = world.spawn(parent_state).id();
+
+        // Child is still Active — not Complete or Error — so it must be
+        // ignored entirely (the `_ => {}` catch-all arm).
+        world.spawn((
+            make_agent_state("child-active", AgentStatus::Active),
+            ParentRef {
+                parent_entity,
+                parent_agent_id: "parent".to_string(),
+                depth: 1,
+            },
+        ));
+
+        let mut schedule = Schedule::default();
+        schedule.add_systems(child_completion_system);
+        schedule.run(&mut world);
+
+        let parent_state = world.get::<AgentState>(parent_entity).unwrap();
+        assert_eq!(parent_state.spawned_children_ids, vec!["child-active"]);
+    }
+
     // ── message_delivery_system ────────────────────────────────────────────
 
     #[test]
@@ -993,6 +1107,39 @@ mod tests {
             .content
             .iter()
             .any(|e| e.content.contains("Hello from user")));
+    }
+
+    #[test]
+    fn message_delivery_logs_and_continues_when_target_region_missing() {
+        let mut world = World::new();
+
+        // No regions added at all — "conversation" (the default target) does
+        // not exist, so add_to_region() must return Err(RegionNotFound).
+        let window = ContextWindow::new(10000);
+
+        let mut inbox = MessageInbox::new();
+        inbox.push(AgentMessage {
+            agent_id: "agent-1".to_string(),
+            content: "Hello".to_string(),
+            target_region: Some("nonexistent".to_string()),
+            priority: 0,
+        });
+
+        let entity = world
+            .spawn((
+                make_agent_state("agent-1", AgentStatus::Active),
+                inbox,
+                window,
+            ))
+            .id();
+
+        let mut schedule = Schedule::default();
+        schedule.add_systems(message_delivery_system);
+        // Must not panic even though the target region doesn't exist.
+        schedule.run(&mut world);
+
+        let inbox = world.get::<MessageInbox>(entity).unwrap();
+        assert!(inbox.messages.is_empty(), "Inbox should still be drained");
     }
 
     #[test]

@@ -200,7 +200,7 @@ impl ContextWindow {
                     "Cleared Clearable region (all-or-nothing)"
                 );
 
-                if self.max_tokens - self.current_tokens >= target_free_tokens {
+                if self.max_tokens.saturating_sub(self.current_tokens) >= target_free_tokens {
                     return Ok(EvictionResult {
                         tokens_freed: initial_tokens - self.current_tokens,
                         needs_compaction: Vec::new(),
@@ -226,7 +226,8 @@ impl ContextWindow {
                             "Evicted temporary region entry (oldest first)"
                         );
 
-                        if self.max_tokens - self.current_tokens >= target_free_tokens {
+                        if self.max_tokens.saturating_sub(self.current_tokens) >= target_free_tokens
+                        {
                             return Ok(EvictionResult {
                                 tokens_freed: initial_tokens - self.current_tokens,
                                 needs_compaction: Vec::new(),
@@ -243,7 +244,7 @@ impl ContextWindow {
 
         // Phase 3: If still need space, identify Compacting regions that need compaction
         let mut needs_compaction = Vec::new();
-        if self.max_tokens - self.current_tokens < target_free_tokens {
+        if self.max_tokens.saturating_sub(self.current_tokens) < target_free_tokens {
             for region in &self.regions {
                 if region.needs_compaction() {
                     needs_compaction.push(region.name.clone());
@@ -895,6 +896,28 @@ mod tests {
         let result = window.try_evict(500).unwrap();
         assert_eq!(result.tokens_freed, 0);
         assert!(result.needs_compaction.contains(&"analysis".to_string()));
+    }
+
+    #[test]
+    fn test_try_evict_errors_when_pinned_regions_exceed_budget() {
+        // Pinned/CompactHistory regions are never evicted — if their combined
+        // token usage alone exceeds max_tokens, try_evict must report this as
+        // a configuration error instead of silently doing nothing useful.
+        let mut window = ContextWindow::new(1000);
+        let mut pinned = Region::new("architecture".to_string(), RegionKind::Pinned, 2000);
+        pinned
+            .add_entry("huge pinned doc".to_string(), 1500)
+            .unwrap();
+        window.add_region(pinned);
+
+        let result = window.try_evict(100);
+        assert!(matches!(
+            result,
+            Err(leviath_core::Error::PinnedRegionsOverBudget {
+                pinned_tokens: 1500,
+                total_budget: 1000,
+            })
+        ));
     }
 
     #[test]

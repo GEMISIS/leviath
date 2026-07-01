@@ -81,4 +81,33 @@ mod tests {
         let next = scheduler.next_task().unwrap();
         assert_eq!(next.id, "2"); // High priority first
     }
+
+    #[test]
+    fn test_pending_count_tracks_queue_size() {
+        let mut scheduler = TaskScheduler::new();
+        assert_eq!(scheduler.pending_count(), 0);
+
+        scheduler.schedule(Task {
+            id: "1".to_string(),
+            prompt: "First".to_string(),
+            priority: 1,
+        });
+        assert_eq!(scheduler.pending_count(), 1);
+
+        scheduler.schedule(Task {
+            id: "2".to_string(),
+            prompt: "Second".to_string(),
+            priority: 2,
+        });
+        assert_eq!(scheduler.pending_count(), 2);
+
+        scheduler.next_task();
+        assert_eq!(scheduler.pending_count(), 1);
+    }
+
+    #[test]
+    fn test_default_creates_empty_scheduler() {
+        let scheduler = TaskScheduler::default();
+        assert_eq!(scheduler.pending_count(), 0);
+    }
 }
