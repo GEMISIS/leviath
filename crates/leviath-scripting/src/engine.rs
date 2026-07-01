@@ -182,4 +182,72 @@ mod tests {
         let result = engine.validate(script, "test");
         assert!(result.is_err());
     }
+
+    // ─── transform() ────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_transform_success() {
+        let engine = ScriptEngine::new();
+        let mut input = rhai::Map::new();
+        input.insert("name".into(), rhai::Dynamic::from("world".to_string()));
+
+        let script = r#"("hello " + input["name"])"#;
+        let result = engine.transform(script, input);
+        assert_eq!(result.unwrap(), "hello world");
+    }
+
+    #[test]
+    fn test_transform_script_error_returns_execution_failed() {
+        let engine = ScriptEngine::new();
+        let input = rhai::Map::new();
+
+        // Syntax error in the script.
+        let script = "this is not valid rhai {{{";
+        let result = engine.transform(script, input);
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), Error::ExecutionFailed(_)));
+    }
+
+    #[test]
+    fn test_transform_wrong_return_type_returns_execution_failed() {
+        let engine = ScriptEngine::new();
+        let input = rhai::Map::new();
+
+        // Returns an integer, not a String — eval_with_scope::<String> should error.
+        let script = "42";
+        let result = engine.transform(script, input);
+        assert!(result.is_err());
+    }
+
+    // ─── execute() ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_execute_returns_dynamic_value() {
+        let engine = ScriptEngine::new();
+        let mut scope = Scope::new();
+        scope.push("x", 10_i64);
+
+        let result = engine.execute("x * 2", &mut scope);
+        let value = result.unwrap();
+        assert_eq!(value.as_int().unwrap(), 20);
+    }
+
+    #[test]
+    fn test_execute_script_error_returns_execution_failed() {
+        let engine = ScriptEngine::new();
+        let mut scope = Scope::new();
+
+        let result = engine.execute("undefined_function_call()", &mut scope);
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), Error::ExecutionFailed(_)));
+    }
+
+    // ─── Default ────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_default_creates_working_engine() {
+        let engine = ScriptEngine::default();
+        let result = engine.validate("content.len() > 0", "hi");
+        assert!(result.unwrap());
+    }
 }

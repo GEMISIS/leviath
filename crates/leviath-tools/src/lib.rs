@@ -532,6 +532,12 @@ impl BuiltinTools {
     }
 
     async fn shell(&self, args: &Value) -> String {
+        self.shell_with_timeout(args, Duration::from_secs(60)).await
+    }
+
+    /// Same as [`Self::shell`], with an injectable timeout so tests can
+    /// exercise the timeout branch without a real 60-second wait.
+    async fn shell_with_timeout(&self, args: &Value, timeout_duration: Duration) -> String {
         let command = match args.get("command").and_then(|v| v.as_str()) {
             Some(c) => c,
             None => return "[error] missing 'command' argument".to_string(),
@@ -546,7 +552,7 @@ impl BuiltinTools {
             .current_dir(&workdir)
             .output();
 
-        match timeout(Duration::from_secs(60), run).await {
+        match timeout(timeout_duration, run).await {
             Err(_) => format!("[timed out] Command exceeded 60s: {}", command),
             Ok(Err(e)) => format!("[error] Failed to spawn shell '{}': {}", shell, e),
             Ok(Ok(output)) => {
@@ -801,6 +807,28 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn write_file_missing_path_arg() {
+        let dir = tempfile::tempdir().unwrap();
+        let tools = make_tools(dir.path());
+        let result = tools.execute("write_file", json!({"content": "x"})).await;
+        assert!(result.contains("missing 'path'"));
+    }
+
+    #[test]
+    fn resolve_rejects_excessive_parent_dir_traversal() {
+        // More ".." segments than the workdir itself has components, so
+        // `normalized.pop()` fails on an already-empty path (distinct from
+        // the "popped below workdir root" case covered by
+        // resolve_rejects_path_escape).
+        let dir = tempfile::tempdir().unwrap();
+        let tools = make_tools(dir.path());
+        let deep_traversal = "../".repeat(64) + "etc/passwd";
+        let result = tools.resolve(&deep_traversal);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("escapes"));
+    }
+
+    #[tokio::test]
     async fn edit_file_successful_replacement() {
         let dir = tempfile::tempdir().unwrap();
         let tools = make_tools(dir.path());
@@ -922,6 +950,165 @@ mod tests {
         assert!(result.contains("Failed to read"));
     }
 
+    // ── resolve() absolute paths ────────────────────────────────────────────
+
+    #[test]
+    fn resolve_absolute_path_inside_workdir() {
+        let dir = tempfile::tempdir().unwrap();
+        let tools = make_tools(dir.path());
+        // Build the absolute path from the tool's own (canonicalized) workdir
+        // rather than `dir.path()` directly — on macOS `/tmp`/`/var` are
+        // symlinks, so the two can differ even though they're the same place.
+        let abs = tools.ctx.workdir.join("inside.txt");
+        let result = tools.resolve(abs.to_str().unwrap()).unwrap();
+        assert_eq!(result, abs);
+    }
+
+    #[test]
+    fn resolve_rejects_absolute_path_outside_workdir() {
+        let dir = tempfile::tempdir().unwrap();
+        let tools = make_tools(dir.path());
+        let result = tools.resolve("/etc/passwd");
+        assert!(result.is_err());
+    }
+
+    // ── path-escape rejection propagates through each tool ─────────────────
+
+    #[tokio::test]
+    async fn read_file_path_escape_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let tools = make_tools(dir.path());
+        let result = tools
+            .execute("read_file", json!({"path": "../../etc/passwd"}))
+            .await;
+        assert!(result.contains("[error]"));
+        assert!(result.contains("escape"));
+    }
+
+    #[tokio::test]
+    async fn write_file_path_escape_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let tools = make_tools(dir.path());
+        let result = tools
+            .execute(
+                "write_file",
+                json!({"path": "../../evil.txt", "content": "x"}),
+            )
+            .await;
+        assert!(result.contains("[error]"));
+        assert!(result.contains("escape"));
+    }
+
+    #[tokio::test]
+    async fn edit_file_path_escape_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let tools = make_tools(dir.path());
+        let result = tools
+            .execute(
+                "edit_file",
+                json!({"path": "../../evil.txt", "old_str": "a", "new_str": "b"}),
+            )
+            .await;
+        assert!(result.contains("[error]"));
+        assert!(result.contains("escape"));
+    }
+
+    #[tokio::test]
+    async fn list_dir_path_escape_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let tools = make_tools(dir.path());
+        let result = tools.execute("list_dir", json!({"path": "../../"})).await;
+        assert!(result.contains("[error]"));
+        assert!(result.contains("escape"));
+    }
+
+    // ── filesystem failure branches ─────────────────────────────────────────
+
+    #[tokio::test]
+    async fn write_file_fails_when_path_is_a_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let tools = make_tools(dir.path());
+        fs::create_dir(dir.path().join("adir")).unwrap();
+
+        let result = tools
+            .execute("write_file", json!({"path": "adir", "content": "x"}))
+            .await;
+        assert!(result.contains("[error]"));
+        assert!(result.contains("Failed to write"));
+    }
+
+    #[tokio::test]
+    async fn write_file_parent_dir_creation_fails_when_blocked_by_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let tools = make_tools(dir.path());
+        // "blocker" exists as a plain file, so create_dir_all("blocker") must fail.
+        fs::write(dir.path().join("blocker"), "im a file").unwrap();
+
+        let result = tools
+            .execute(
+                "write_file",
+                json!({"path": "blocker/nested.txt", "content": "x"}),
+            )
+            .await;
+        assert!(result.contains("[error]"));
+        assert!(result.contains("Failed to create directories"));
+    }
+
+    #[tokio::test]
+    async fn read_file_fails_when_path_is_a_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let tools = make_tools(dir.path());
+        fs::create_dir(dir.path().join("adir")).unwrap();
+
+        let result = tools.execute("read_file", json!({"path": "adir"})).await;
+        assert!(result.contains("[error]"));
+        assert!(result.contains("Failed to read"));
+    }
+
+    #[tokio::test]
+    async fn list_dir_fails_when_path_is_a_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let tools = make_tools(dir.path());
+        fs::write(dir.path().join("afile.txt"), "content").unwrap();
+
+        let result = tools
+            .execute("list_dir", json!({"path": "afile.txt"}))
+            .await;
+        assert!(result.contains("[error]"));
+        assert!(result.contains("Failed to read directory"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn edit_file_write_failure_after_successful_match() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let tools = make_tools(dir.path());
+        let file_path = dir.path().join("ro.txt");
+        fs::write(&file_path, "hello world").unwrap();
+
+        // Make the file read-only so the read succeeds but the write-back fails.
+        let mut perms = fs::metadata(&file_path).unwrap().permissions();
+        perms.set_mode(0o444);
+        fs::set_permissions(&file_path, perms).unwrap();
+
+        let result = tools
+            .execute(
+                "edit_file",
+                json!({"path": "ro.txt", "old_str": "hello", "new_str": "goodbye"}),
+            )
+            .await;
+
+        // Restore permissions so tempdir cleanup can remove the file.
+        let mut perms = fs::metadata(&file_path).unwrap().permissions();
+        perms.set_mode(0o644);
+        fs::set_permissions(&file_path, perms).unwrap();
+
+        assert!(result.contains("[error]"));
+        assert!(result.contains("Failed to write"));
+    }
+
     #[tokio::test]
     async fn shell_echo_command() {
         let dir = tempfile::tempdir().unwrap();
@@ -956,6 +1143,55 @@ mod tests {
         let tools = make_tools(dir.path());
         let result = tools.execute("shell", json!({"command": "false"})).await;
         assert!(result.contains("[exit code"));
+    }
+
+    #[tokio::test]
+    async fn shell_successful_command_with_no_output() {
+        let dir = tempfile::tempdir().unwrap();
+        let tools = make_tools(dir.path());
+        let result = tools.execute("shell", json!({"command": "true"})).await;
+        assert_eq!(result, "(command succeeded with no output)");
+    }
+
+    #[tokio::test]
+    async fn shell_failing_command_reports_stdout_and_stderr() {
+        let dir = tempfile::tempdir().unwrap();
+        let tools = make_tools(dir.path());
+        let result = tools
+            .execute(
+                "shell",
+                json!({"command": "echo out-line; echo err-line 1>&2; exit 1"}),
+            )
+            .await;
+        assert!(result.contains("[exit code 1]"));
+        assert!(result.contains("stdout:"));
+        assert!(result.contains("out-line"));
+        assert!(result.contains("stderr:"));
+        assert!(result.contains("err-line"));
+    }
+
+    #[tokio::test]
+    async fn shell_with_timeout_fires_on_slow_command() {
+        let dir = tempfile::tempdir().unwrap();
+        let tools = make_tools(dir.path());
+        let result = tools
+            .shell_with_timeout(&json!({"command": "sleep 5"}), Duration::from_millis(100))
+            .await;
+        assert!(result.contains("[timed out]"));
+    }
+
+    #[tokio::test]
+    async fn shell_spawn_failure_when_workdir_missing() {
+        // A workdir that doesn't exist on disk makes Command::output() fail
+        // before the shell ever runs (current_dir() can't chdir into it).
+        // canonicalize() fails for a nonexistent path, so ToolContext::new()
+        // falls back to keeping the raw (nonexistent) path as-is.
+        let tools = make_tools(std::path::Path::new(
+            "/definitely/does/not/exist/leviath-test",
+        ));
+        let result = tools.execute("shell", json!({"command": "echo hi"})).await;
+        assert!(result.contains("[error]"));
+        assert!(result.contains("Failed to spawn shell"));
     }
 
     // ── ToolContext ────────────────────────────────────────────────────────
