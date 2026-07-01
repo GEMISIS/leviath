@@ -24,6 +24,165 @@ use super::WorkerArgs;
 /// Tracks the current stage index for tool-activity logging from the executor closure.
 type CurrentStageIdx = Arc<Mutex<usize>>;
 
+/// Shared state needed by [`dispatch_tool_calls`] to resolve and execute a
+/// batch of tool calls from the model.
+///
+/// Extracted from the `exec` closure in [`run_worker_inner`] purely so the
+/// tool-dispatch logic (policy resolution, dynamic interactions, approval
+/// gating, builtin/MCP execution, activity logging) can be exercised by unit
+/// tests directly, without needing to drive the full worker through a real
+/// provider/inference call.
+struct ToolDispatchState {
+    builtins: Arc<leviath_tools::BuiltinTools>,
+    mcp: Arc<Mutex<leviath_mcp::ToolExecutor>>,
+    builtin_names: std::collections::HashSet<String>,
+    launch_overrides: Arc<std::collections::HashMap<String, ToolPolicy>>,
+    session_allows: Arc<Mutex<std::collections::HashSet<String>>>,
+    stage_perms: Arc<Mutex<std::collections::HashMap<String, String>>>,
+    agent_perms: Arc<std::collections::HashMap<String, String>>,
+    global_perms: Arc<std::collections::HashMap<String, ToolPolicy>>,
+    run_id: Arc<String>,
+    stage_idx: CurrentStageIdx,
+    stage_name: Arc<Mutex<String>>,
+}
+
+/// Resolve tool policy, handle approvals/dynamic interactions, and execute a
+/// batch of tool calls from the model. Returns `(tool_call_id, result_text)`
+/// pairs in the same order as `calls`.
+///
+/// This is the core body of the `exec` closure passed to
+/// [`super::executor::run_stage_loop`] in [`run_worker_inner`], lifted out
+/// into a standalone function so it can be unit-tested directly.
+async fn dispatch_tool_calls(
+    state: &ToolDispatchState,
+    calls: Vec<leviath_providers::ToolCall>,
+) -> Vec<(String, String)> {
+    let stage_idx = *state.stage_idx.lock().await;
+    let stage_name = state.stage_name.lock().await.clone();
+    let interaction_backend = WorkerInteractionBackend {
+        run_id: &state.run_id,
+        stage_idx,
+    };
+    let mut out: Vec<(String, String)> = Vec::new();
+    for tc in calls {
+        // ── Dynamic interaction tools (present_for_review, ask_user_*) ──
+        // Unlike `interaction_points` (declared statically in the
+        // blueprint and always shown), these let the model itself
+        // decide, mid-reasoning, that it needs human input.
+        if let Some(result) = super::dynamic_interaction::dispatch_dynamic_interaction(
+            &interaction_backend,
+            &tc.name,
+            &tc.id,
+            &tc.arguments,
+            &stage_name,
+        )
+        .await
+        {
+            out.push((tc.id.clone(), result));
+            continue;
+        }
+
+        let is_builtin = state.builtin_names.contains(&tc.name);
+        let session_has = state.session_allows.lock().await.contains(&tc.name);
+        let policy = if session_has {
+            ToolPolicy::Allow
+        } else {
+            let stage_pm_snap = state.stage_perms.lock().await.clone();
+            resolve_policy(
+                &tc.name,
+                is_builtin,
+                &state.launch_overrides,
+                &stage_pm_snap,
+                &state.agent_perms,
+                &state.global_perms,
+            )
+        };
+
+        let res = match policy {
+            ToolPolicy::Deny => {
+                let msg = format!("[denied] Tool '{}' is not permitted.", tc.name);
+                record_stage_log(
+                    &state.run_id,
+                    stage_idx,
+                    &format!("[tool] {} \u{2192} denied", tc.name),
+                );
+                msg
+            }
+            ToolPolicy::Ask => {
+                use crate::interaction::{
+                    request_tool_approval_background, ApprovalScope, TOOL_APPROVAL_TIMEOUT,
+                };
+                let (approved, scope) = request_tool_approval_background(
+                    &state.run_id,
+                    &tc.name,
+                    &tc.arguments,
+                    "tool-call",
+                    TOOL_APPROVAL_TIMEOUT,
+                )
+                .await;
+                if approved {
+                    if scope == ApprovalScope::Session {
+                        state.session_allows.lock().await.insert(tc.name.clone());
+                    }
+                    let result = if is_builtin {
+                        state.builtins.execute(&tc.name, tc.arguments.clone()).await
+                    } else {
+                        let mut mcp_lock = state.mcp.lock().await;
+                        match mcp_lock.execute(&tc.name, tc.arguments.clone()).await {
+                            Ok(r) if r.success => r.text,
+                            Ok(r) => format!("[error] {}", r.text),
+                            Err(e) => format!("[error] tool error: {}", e),
+                        }
+                    };
+                    let short_result = if result.len() > 120 {
+                        format!("{}\u{2026}", &result[..120])
+                    } else {
+                        result.clone()
+                    };
+                    record_stage_log(
+                        &state.run_id,
+                        stage_idx,
+                        &format!("[tool] {} \u{2192} {}", tc.name, short_result),
+                    );
+                    result
+                } else {
+                    record_stage_log(
+                        &state.run_id,
+                        stage_idx,
+                        &format!("[tool] {} \u{2192} declined by user", tc.name),
+                    );
+                    format!("[denied] User declined tool call '{}'.", tc.name)
+                }
+            }
+            ToolPolicy::Allow => {
+                let result = if is_builtin {
+                    state.builtins.execute(&tc.name, tc.arguments.clone()).await
+                } else {
+                    let mut mcp_lock = state.mcp.lock().await;
+                    match mcp_lock.execute(&tc.name, tc.arguments.clone()).await {
+                        Ok(r) if r.success => r.text,
+                        Ok(r) => format!("[error] {}", r.text),
+                        Err(e) => format!("[error] tool error: {}", e),
+                    }
+                };
+                let short_result = if result.len() > 120 {
+                    format!("{}\u{2026}", &result[..120])
+                } else {
+                    result.clone()
+                };
+                record_stage_log(
+                    &state.run_id,
+                    stage_idx,
+                    &format!("[tool] {} \u{2192} {}", tc.name, short_result),
+                );
+                result
+            }
+        };
+        out.push((tc.id.clone(), res));
+    }
+    out
+}
+
 /// Background-worker [`InteractionBackend`]: answers via the file-based IPC
 /// channel and logs to the per-stage log file.
 struct WorkerInteractionBackend<'a> {
@@ -454,154 +613,22 @@ async fn run_worker_inner(args: &WorkerArgs, meta: &mut RunMeta) -> anyhow::Resu
     // Shared current stage name for present_for_review interactions.
     let current_stage_name: Arc<Mutex<String>> = Arc::new(Mutex::new(String::new()));
 
-    let builtins = tool_registry.builtins.clone();
-    let mcp = tool_registry.mcp.clone();
-    let builtin_names = tool_registry.builtin_names.clone();
-    let exec_session_allows = session_allows.clone();
-    let exec_stage_perms = current_stage_perms.clone();
-    let exec_agent_perms = agent_perms_arc.clone();
-    let exec_global_perms = global_perms.clone();
-    let exec_run_id = run_id_arc.clone();
-    let exec_stage_idx = current_stage_idx.clone();
-    let exec_stage_name = current_stage_name.clone();
+    let dispatch_state = Arc::new(ToolDispatchState {
+        builtins: tool_registry.builtins.clone(),
+        mcp: tool_registry.mcp.clone(),
+        builtin_names: tool_registry.builtin_names.clone(),
+        launch_overrides: launch_overrides_arc,
+        session_allows: session_allows.clone(),
+        stage_perms: current_stage_perms.clone(),
+        agent_perms: agent_perms_arc.clone(),
+        global_perms: global_perms.clone(),
+        run_id: run_id_arc.clone(),
+        stage_idx: current_stage_idx.clone(),
+        stage_name: current_stage_name.clone(),
+    });
     let mut exec = move |calls: Vec<leviath_providers::ToolCall>| {
-        let builtins = builtins.clone();
-        let mcp = mcp.clone();
-        let builtin_names = builtin_names.clone();
-        let launch_ov = launch_overrides_arc.clone();
-        let session_al = exec_session_allows.clone();
-        let stage_pm = exec_stage_perms.clone();
-        let agent_pm = exec_agent_perms.clone();
-        let global_pm = exec_global_perms.clone();
-        let run_id = exec_run_id.clone();
-        let stage_idx_arc = exec_stage_idx.clone();
-        let stage_name_arc = exec_stage_name.clone();
-        async move {
-            let stage_idx = *stage_idx_arc.lock().await;
-            let stage_name = stage_name_arc.lock().await.clone();
-            let interaction_backend = WorkerInteractionBackend {
-                run_id: &run_id,
-                stage_idx,
-            };
-            let mut out: Vec<(String, String)> = Vec::new();
-            for tc in calls {
-                // ── Dynamic interaction tools (present_for_review, ask_user_*) ──
-                // Unlike `interaction_points` (declared statically in the
-                // blueprint and always shown), these let the model itself
-                // decide, mid-reasoning, that it needs human input.
-                if let Some(result) = super::dynamic_interaction::dispatch_dynamic_interaction(
-                    &interaction_backend,
-                    &tc.name,
-                    &tc.id,
-                    &tc.arguments,
-                    &stage_name,
-                )
-                .await
-                {
-                    out.push((tc.id.clone(), result));
-                    continue;
-                }
-
-                let is_builtin = builtin_names.contains(&tc.name);
-                let session_has = session_al.lock().await.contains(&tc.name);
-                let policy = if session_has {
-                    ToolPolicy::Allow
-                } else {
-                    let stage_pm_snap = stage_pm.lock().await.clone();
-                    resolve_policy(
-                        &tc.name,
-                        is_builtin,
-                        &launch_ov,
-                        &stage_pm_snap,
-                        &agent_pm,
-                        &global_pm,
-                    )
-                };
-
-                let res = match policy {
-                    ToolPolicy::Deny => {
-                        let msg = format!("[denied] Tool '{}' is not permitted.", tc.name);
-                        record_stage_log(
-                            &run_id,
-                            stage_idx,
-                            &format!("[tool] {} \u{2192} denied", tc.name),
-                        );
-                        msg
-                    }
-                    ToolPolicy::Ask => {
-                        use crate::interaction::{
-                            request_tool_approval_background, ApprovalScope, TOOL_APPROVAL_TIMEOUT,
-                        };
-                        let (approved, scope) = request_tool_approval_background(
-                            &run_id,
-                            &tc.name,
-                            &tc.arguments,
-                            "tool-call",
-                            TOOL_APPROVAL_TIMEOUT,
-                        )
-                        .await;
-                        if approved {
-                            if scope == ApprovalScope::Session {
-                                session_al.lock().await.insert(tc.name.clone());
-                            }
-                            let result = if is_builtin {
-                                builtins.execute(&tc.name, tc.arguments.clone()).await
-                            } else {
-                                let mut mcp_lock = mcp.lock().await;
-                                match mcp_lock.execute(&tc.name, tc.arguments.clone()).await {
-                                    Ok(r) if r.success => r.text,
-                                    Ok(r) => format!("[error] {}", r.text),
-                                    Err(e) => format!("[error] tool error: {}", e),
-                                }
-                            };
-                            let short_result = if result.len() > 120 {
-                                format!("{}\u{2026}", &result[..120])
-                            } else {
-                                result.clone()
-                            };
-                            record_stage_log(
-                                &run_id,
-                                stage_idx,
-                                &format!("[tool] {} \u{2192} {}", tc.name, short_result),
-                            );
-                            result
-                        } else {
-                            record_stage_log(
-                                &run_id,
-                                stage_idx,
-                                &format!("[tool] {} \u{2192} declined by user", tc.name),
-                            );
-                            format!("[denied] User declined tool call '{}'.", tc.name)
-                        }
-                    }
-                    ToolPolicy::Allow => {
-                        let result = if is_builtin {
-                            builtins.execute(&tc.name, tc.arguments.clone()).await
-                        } else {
-                            let mut mcp_lock = mcp.lock().await;
-                            match mcp_lock.execute(&tc.name, tc.arguments.clone()).await {
-                                Ok(r) if r.success => r.text,
-                                Ok(r) => format!("[error] {}", r.text),
-                                Err(e) => format!("[error] tool error: {}", e),
-                            }
-                        };
-                        let short_result = if result.len() > 120 {
-                            format!("{}\u{2026}", &result[..120])
-                        } else {
-                            result.clone()
-                        };
-                        record_stage_log(
-                            &run_id,
-                            stage_idx,
-                            &format!("[tool] {} \u{2192} {}", tc.name, short_result),
-                        );
-                        result
-                    }
-                };
-                out.push((tc.id.clone(), res));
-            }
-            out
-        }
+        let dispatch_state = dispatch_state.clone();
+        async move { dispatch_tool_calls(&dispatch_state, calls).await }
     };
 
     let compaction_config = blueprint.compaction_config.clone();
@@ -1715,6 +1742,334 @@ mode = "autonomous"
         let output = crate::runstate::tail_stage_output(run_id, 0, 65536);
         assert!(output.contains("My Title"));
         assert!(output.contains("# Body\ncontent"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ─── dispatch_tool_calls ────────────────────────────────────────────────
+    //
+    // These exercise the tool-dispatch logic (policy resolution, dynamic
+    // interaction short-circuit, approval gating, builtin execution, result
+    // truncation, activity logging) directly, extracted out of the `exec`
+    // closure in `run_worker_inner`. `run_worker_inner`/`execute_worker`
+    // build this state from a *real* `Config::load()` + real provider
+    // registry + real inference call, so it can't be safely driven
+    // end-to-end in a test without either a live provider API key (which,
+    // on a developer machine with `~/.leviath/config.toml` configured,
+    // would mean a real network call to a paid API) or a larger refactor
+    // of `run_worker_inner` to accept an injectable provider registry --
+    // out of scope for a coverage-only pass. Testing `dispatch_tool_calls`
+    // directly gets full coverage of the actual dispatch logic without
+    // either risk.
+
+    async fn make_dispatch_state(run_id: &str) -> ToolDispatchState {
+        let workdir = std::env::temp_dir();
+        let config = Config::default();
+        let tool_registry = ToolRegistry::build(workdir, &config).await;
+        ToolDispatchState {
+            builtins: tool_registry.builtins.clone(),
+            mcp: tool_registry.mcp.clone(),
+            builtin_names: tool_registry.builtin_names.clone(),
+            launch_overrides: Arc::new(std::collections::HashMap::new()),
+            session_allows: Arc::new(Mutex::new(std::collections::HashSet::new())),
+            stage_perms: Arc::new(Mutex::new(std::collections::HashMap::new())),
+            agent_perms: Arc::new(std::collections::HashMap::new()),
+            global_perms: Arc::new(std::collections::HashMap::new()),
+            run_id: Arc::new(run_id.to_string()),
+            stage_idx: Arc::new(Mutex::new(0usize)),
+            stage_name: Arc::new(Mutex::new("main".to_string())),
+        }
+    }
+
+    fn make_tool_call(name: &str, args: serde_json::Value) -> leviath_providers::ToolCall {
+        leviath_providers::ToolCall {
+            id: format!("call-{}", name),
+            name: name.to_string(),
+            arguments: args,
+        }
+    }
+
+    #[tokio::test]
+    async fn dispatch_tool_calls_deny_policy_returns_denied_message() {
+        let run_id = "test-dispatch-deny";
+        let dir = crate::runstate::run_dir(run_id);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let mut state = make_dispatch_state(run_id).await;
+        let mut global = std::collections::HashMap::new();
+        global.insert("bash".to_string(), ToolPolicy::Deny);
+        state.global_perms = Arc::new(global);
+
+        let calls = vec![make_tool_call("bash", serde_json::json!({"command": "ls"}))];
+        let out = dispatch_tool_calls(&state, calls).await;
+
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].0, "call-bash");
+        assert!(out[0].1.contains("[denied]"));
+        assert!(out[0].1.contains("not permitted"));
+
+        let log = crate::runstate::tail_stage_log(run_id, 0, 65536);
+        assert!(log.contains("denied"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn dispatch_tool_calls_allow_builtin_executes_and_logs() {
+        let run_id = "test-dispatch-allow-builtin";
+        let dir = crate::runstate::run_dir(run_id);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let mut state = make_dispatch_state(run_id).await;
+        let mut launch = std::collections::HashMap::new();
+        launch.insert("*".to_string(), ToolPolicy::Allow);
+        state.launch_overrides = Arc::new(launch);
+
+        // read_file on a file that doesn't exist still returns a (tool-level)
+        // error string rather than panicking, which is enough to prove the
+        // builtin execution path ran.
+        let calls = vec![make_tool_call(
+            "read_file",
+            serde_json::json!({"path": "definitely-not-here.txt"}),
+        )];
+        let out = dispatch_tool_calls(&state, calls).await;
+
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].0, "call-read_file");
+
+        let log = crate::runstate::tail_stage_log(run_id, 0, 65536);
+        assert!(log.contains("read_file"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn dispatch_tool_calls_result_truncated_when_long() {
+        let run_id = "test-dispatch-truncate";
+        let dir = crate::runstate::run_dir(run_id);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // Write a file with content long enough that its read_file result
+        // exceeds 120 chars, exercising the truncation branch of the
+        // activity-log message (the returned tool result itself is never
+        // truncated -- only the short-form log line is).
+        let file_path = dir.join("big.txt");
+        let long_content = "x".repeat(500);
+        std::fs::write(&file_path, &long_content).unwrap();
+
+        let workdir = dir.clone();
+        let config = Config::default();
+        let tool_registry = ToolRegistry::build(workdir, &config).await;
+        let mut launch = std::collections::HashMap::new();
+        launch.insert("*".to_string(), ToolPolicy::Allow);
+        let state = ToolDispatchState {
+            builtins: tool_registry.builtins.clone(),
+            mcp: tool_registry.mcp.clone(),
+            builtin_names: tool_registry.builtin_names.clone(),
+            launch_overrides: Arc::new(launch),
+            session_allows: Arc::new(Mutex::new(std::collections::HashSet::new())),
+            stage_perms: Arc::new(Mutex::new(std::collections::HashMap::new())),
+            agent_perms: Arc::new(std::collections::HashMap::new()),
+            global_perms: Arc::new(std::collections::HashMap::new()),
+            run_id: Arc::new(run_id.to_string()),
+            stage_idx: Arc::new(Mutex::new(0usize)),
+            stage_name: Arc::new(Mutex::new("main".to_string())),
+        };
+
+        let calls = vec![make_tool_call(
+            "read_file",
+            serde_json::json!({"path": "big.txt"}),
+        )];
+        let out = dispatch_tool_calls(&state, calls).await;
+
+        assert_eq!(out.len(), 1);
+        // Full (untruncated) result is returned to the model.
+        assert!(out[0].1.contains(&long_content));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn dispatch_tool_calls_session_allow_short_circuits_policy_resolution() {
+        let run_id = "test-dispatch-session-allow";
+        let dir = crate::runstate::run_dir(run_id);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let mut state = make_dispatch_state(run_id).await;
+        // Global policy says Deny, but session_allows already contains the
+        // tool, so it should be treated as Allow regardless.
+        let mut global = std::collections::HashMap::new();
+        global.insert("read_file".to_string(), ToolPolicy::Deny);
+        state.global_perms = Arc::new(global);
+        state
+            .session_allows
+            .lock()
+            .await
+            .insert("read_file".to_string());
+
+        let calls = vec![make_tool_call(
+            "read_file",
+            serde_json::json!({"path": "definitely-not-here.txt"}),
+        )];
+        let out = dispatch_tool_calls(&state, calls).await;
+
+        assert_eq!(out.len(), 1);
+        // Not denied -- session allow overrode the global Deny.
+        assert!(!out[0].1.contains("[denied]"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn dispatch_tool_calls_ask_approved_executes_tool() {
+        let run_id = "test-dispatch-ask-approved";
+        let dir = crate::runstate::run_dir(run_id);
+        std::fs::create_dir_all(&dir).unwrap();
+        let meta = make_meta(run_id, 1);
+        crate::runstate::create_run(&meta).unwrap();
+
+        let mut state = make_dispatch_state(run_id).await;
+        let mut global = std::collections::HashMap::new();
+        global.insert("read_file".to_string(), ToolPolicy::Ask);
+        state.global_perms = Arc::new(global);
+
+        // Compute the request id the same way `request_tool_approval_background`
+        // does, so our canned response matches.
+        let tool_name = "read_file";
+        let hash = tool_name
+            .bytes()
+            .fold(0usize, |a, b| a.wrapping_add(b as usize));
+        let req_id = crate::interaction::make_interaction_id(hash, 0);
+
+        let run_id_clone = run_id.to_string();
+        let req_id_clone = req_id.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+            let resp = crate::interaction::InteractionResponse::approval(
+                &req_id_clone,
+                true,
+                crate::interaction::ApprovalScope::Session,
+            );
+            crate::interaction::write_response(&run_id_clone, &resp).ok();
+        });
+
+        let calls = vec![make_tool_call(
+            "read_file",
+            serde_json::json!({"path": "definitely-not-here.txt"}),
+        )];
+        let out = dispatch_tool_calls(&state, calls).await;
+
+        assert_eq!(out.len(), 1);
+        // Session scope approval should have been recorded.
+        assert!(state.session_allows.lock().await.contains("read_file"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn dispatch_tool_calls_ask_denied_returns_declined_message() {
+        let run_id = "test-dispatch-ask-denied";
+        let dir = crate::runstate::run_dir(run_id);
+        std::fs::create_dir_all(&dir).unwrap();
+        let meta = make_meta(run_id, 1);
+        crate::runstate::create_run(&meta).unwrap();
+
+        let mut state = make_dispatch_state(run_id).await;
+        let mut global = std::collections::HashMap::new();
+        global.insert("read_file".to_string(), ToolPolicy::Ask);
+        state.global_perms = Arc::new(global);
+
+        let tool_name = "read_file";
+        let hash = tool_name
+            .bytes()
+            .fold(0usize, |a, b| a.wrapping_add(b as usize));
+        let req_id = crate::interaction::make_interaction_id(hash, 0);
+
+        let run_id_clone = run_id.to_string();
+        let req_id_clone = req_id.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+            let resp = crate::interaction::InteractionResponse::approval(
+                &req_id_clone,
+                false,
+                crate::interaction::ApprovalScope::Once,
+            );
+            crate::interaction::write_response(&run_id_clone, &resp).ok();
+        });
+
+        let calls = vec![make_tool_call(
+            "read_file",
+            serde_json::json!({"path": "definitely-not-here.txt"}),
+        )];
+        let out = dispatch_tool_calls(&state, calls).await;
+
+        assert_eq!(out.len(), 1);
+        assert!(out[0].1.contains("[denied]"));
+        assert!(out[0].1.contains("declined"));
+        assert!(!state.session_allows.lock().await.contains("read_file"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn dispatch_tool_calls_dynamic_interaction_short_circuits() {
+        let run_id = "test-dispatch-dynamic-interaction";
+        let dir = crate::runstate::run_dir(run_id);
+        std::fs::create_dir_all(&dir).unwrap();
+        let meta = make_meta(run_id, 1);
+        crate::runstate::create_run(&meta).unwrap();
+
+        let state = make_dispatch_state(run_id).await;
+
+        // `handle_ask_user_text` (via `dispatch_dynamic_interaction`) never
+        // times out -- it blocks on `request_interaction_bg_review` until a
+        // response is written. Its request id is deterministically
+        // `ask-<tool_call_id>` (see dynamic_interaction.rs), so we can
+        // pre-compute it and answer in the background.
+        let req_id = "ask-call-ask_user_text".to_string();
+        let run_id_clone = run_id.to_string();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+            let resp = crate::interaction::InteractionResponse::text(&req_id, "hi there");
+            crate::interaction::write_response(&run_id_clone, &resp).ok();
+        });
+
+        let calls = vec![make_tool_call(
+            "ask_user_text",
+            serde_json::json!({"prompt": "What is your name?"}),
+        )];
+        let out = dispatch_tool_calls(&state, calls).await;
+
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].0, "call-ask_user_text");
+        assert!(out[0].1.contains("hi there"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn dispatch_tool_calls_multiple_calls_preserve_order() {
+        let run_id = "test-dispatch-multi";
+        let dir = crate::runstate::run_dir(run_id);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let mut state = make_dispatch_state(run_id).await;
+        let mut global = std::collections::HashMap::new();
+        global.insert("bash".to_string(), ToolPolicy::Deny);
+        global.insert("read_file".to_string(), ToolPolicy::Allow);
+        state.global_perms = Arc::new(global);
+
+        let calls = vec![
+            make_tool_call("bash", serde_json::json!({"command": "ls"})),
+            make_tool_call("read_file", serde_json::json!({"path": "nope.txt"})),
+        ];
+        let out = dispatch_tool_calls(&state, calls).await;
+
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0].0, "call-bash");
+        assert!(out[0].1.contains("[denied]"));
+        assert_eq!(out[1].0, "call-read_file");
+        assert!(!out[1].1.contains("[denied]"));
 
         let _ = std::fs::remove_dir_all(&dir);
     }

@@ -220,6 +220,24 @@ pub fn build_provider_registry(config: &Config) -> ProviderRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    /// Serializes tests that mutate the process-wide `VISUAL`/`EDITOR` env
+    /// vars, since `cargo test` runs tests in parallel threads within the
+    /// same process.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    /// RAII guard that clears `VISUAL`/`EDITOR` on drop, restoring a clean
+    /// environment for subsequent tests regardless of panics.
+    struct EnvGuard;
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            unsafe {
+                std::env::remove_var("VISUAL");
+                std::env::remove_var("EDITOR");
+            }
+        }
+    }
 
     #[test]
     fn resolve_task_with_literal_string() {
@@ -554,5 +572,154 @@ mod tests {
         };
         let registry = build_provider_registry(&config);
         assert!(registry.has("ollama"));
+    }
+
+    // ─── resolve_task: None arg, non-TTY stdin ───────────────────────────
+
+    #[test]
+    fn resolve_task_none_arg_errors_when_stdin_not_tty() {
+        // Under `cargo test`, stdin is never a real TTY, so the `None`
+        // branch should hit the "no task provided" error path rather than
+        // trying to launch an interactive editor.
+        let result = resolve_task(&None, "test-agent", None);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("No task provided"));
+        assert!(msg.contains("stdin is not a TTY"));
+    }
+
+    // ─── launch_editor: VISUAL takes priority and succeeds ───────────────
+
+    #[test]
+    fn launch_editor_visual_env_success() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _guard = EnvGuard;
+        unsafe {
+            std::env::set_var("VISUAL", "/usr/bin/true");
+            std::env::remove_var("EDITOR");
+        }
+        let dir = std::env::temp_dir().join("lev-test-launch-editor-visual");
+        let _ = std::fs::create_dir_all(&dir);
+        let file = dir.join("edit.txt");
+        std::fs::write(&file, "content").unwrap();
+
+        let result = launch_editor(&file);
+        assert!(result.is_ok(), "expected Ok, got {:?}", result);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ─── launch_editor: EDITOR used when VISUAL unset ────────────────────
+
+    #[test]
+    fn launch_editor_editor_env_success() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _guard = EnvGuard;
+        unsafe {
+            std::env::remove_var("VISUAL");
+            std::env::set_var("EDITOR", "/usr/bin/true");
+        }
+        let dir = std::env::temp_dir().join("lev-test-launch-editor-editor");
+        let _ = std::fs::create_dir_all(&dir);
+        let file = dir.join("edit.txt");
+        std::fs::write(&file, "content").unwrap();
+
+        let result = launch_editor(&file);
+        assert!(result.is_ok(), "expected Ok, got {:?}", result);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ─── launch_editor: exit code (even non-zero) is treated as success ──
+
+    #[test]
+    fn launch_editor_nonzero_exit_still_ok() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _guard = EnvGuard;
+        unsafe {
+            std::env::set_var("VISUAL", "/usr/bin/false");
+        }
+        let dir = std::env::temp_dir().join("lev-test-launch-editor-nonzero");
+        let _ = std::fs::create_dir_all(&dir);
+        let file = dir.join("edit.txt");
+        std::fs::write(&file, "content").unwrap();
+
+        // A non-zero-but-present exit code is treated as the user having
+        // closed the editor -- not an error.
+        let result = launch_editor(&file);
+        assert!(result.is_ok(), "expected Ok, got {:?}", result);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ─── launch_editor: command with flags is split correctly ────────────
+
+    #[test]
+    fn launch_editor_command_with_flags_splits_correctly() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _guard = EnvGuard;
+        unsafe {
+            // `/usr/bin/true` ignores all arguments, so appending a flag
+            // and the file path is harmless; this exercises the
+            // whitespace-splitting logic for editor strings like
+            // "code --wait".
+            std::env::set_var("VISUAL", "/usr/bin/true --some-flag");
+        }
+        let dir = std::env::temp_dir().join("lev-test-launch-editor-flags");
+        let _ = std::fs::create_dir_all(&dir);
+        let file = dir.join("edit.txt");
+        std::fs::write(&file, "content").unwrap();
+
+        let result = launch_editor(&file);
+        assert!(result.is_ok(), "expected Ok, got {:?}", result);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ─── launch_editor: whitespace-only VISUAL falls through, EDITOR used ─
+
+    #[test]
+    fn launch_editor_whitespace_only_visual_falls_through_to_editor() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _guard = EnvGuard;
+        unsafe {
+            // Whitespace-only string is non-empty so it IS pushed as a
+            // candidate, but splitting on whitespace yields an empty parts
+            // vec, which triggers the `continue` branch.
+            std::env::set_var("VISUAL", "   ");
+            std::env::set_var("EDITOR", "/usr/bin/true");
+        }
+        let dir = std::env::temp_dir().join("lev-test-launch-editor-ws-visual");
+        let _ = std::fs::create_dir_all(&dir);
+        let file = dir.join("edit.txt");
+        std::fs::write(&file, "content").unwrap();
+
+        let result = launch_editor(&file);
+        assert!(result.is_ok(), "expected Ok, got {:?}", result);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ─── launch_editor: NotFound candidate is skipped, next one used ─────
+
+    #[test]
+    fn launch_editor_not_found_candidate_falls_through_to_next() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _guard = EnvGuard;
+        unsafe {
+            // VISUAL points at a nonexistent binary, which should be
+            // skipped (NotFound branch, `continue`) in favor of EDITOR.
+            std::env::set_var("VISUAL", "lev-definitely-not-a-real-binary-xyz");
+            std::env::set_var("EDITOR", "/usr/bin/true");
+        }
+        let dir = std::env::temp_dir().join("lev-test-launch-editor-notfound");
+        let _ = std::fs::create_dir_all(&dir);
+        let file = dir.join("edit.txt");
+        std::fs::write(&file, "content").unwrap();
+
+        let result = launch_editor(&file);
+        assert!(result.is_ok(), "expected Ok, got {:?}", result);
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
