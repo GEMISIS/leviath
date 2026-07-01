@@ -153,8 +153,13 @@ impl Config {
     /// After loading from file (or using defaults), environment variables are
     /// checked as fallbacks. Env vars override config file values if set.
     pub fn load() -> anyhow::Result<Self> {
-        // Load .env file from current directory (silently ignored if missing)
-        let _ = dotenvy::dotenv();
+        // Load .env file from current directory (silently ignored if missing).
+        // `LEVIATH_SKIP_DOTENV` lets tests fully isolate `Config::load()` from
+        // a real `.env` in a parent directory (dotenvy walks upward looking
+        // for one, and won't override env vars a test has already cleared).
+        if std::env::var_os("LEVIATH_SKIP_DOTENV").is_none() {
+            let _ = dotenvy::dotenv();
+        }
 
         let config = Self::load_from_path(&Self::config_path())?;
 
@@ -234,7 +239,17 @@ impl Config {
     }
 
     /// Get the path to the config file.
+    ///
+    /// `LEVIATH_CONFIG_PATH` overrides this when set (mirrors the
+    /// `LEVIATH_RUNS_DIR` convention in `runstate.rs`), so tests can point
+    /// at an isolated path instead of the developer's real
+    /// `~/.leviath/config.toml`. On macOS, `dirs::home_dir()` resolves via
+    /// `NSHomeDirectory()` rather than the `$HOME` env var, so mutating
+    /// `$HOME` alone does not redirect this.
     pub fn config_path() -> PathBuf {
+        if let Ok(override_path) = std::env::var("LEVIATH_CONFIG_PATH") {
+            return PathBuf::from(override_path);
+        }
         dirs::home_dir()
             .unwrap_or_default()
             .join(".leviath")
@@ -347,6 +362,18 @@ fn set_dir_permissions(path: &std::path::Path) {
 fn set_dir_permissions(_path: &std::path::Path) {
     // No-op on non-Unix platforms
 }
+
+/// Serializes any test, in this file or elsewhere in the crate, that reads
+/// `Config::config_path()`'s default (unset-env) behavior or that
+/// temporarily overrides `LEVIATH_CONFIG_PATH`. This env var is
+/// process-global, so tests in different files/modules that don't share a
+/// lock can race — e.g. a test in `commands/run/worker.rs` redirecting
+/// `LEVIATH_CONFIG_PATH` while this file's `config_path_contains_leviath`
+/// concurrently asserts on the real default path. Declared here (not inside
+/// `mod tests`) so it's reachable crate-wide as `crate::config::CONFIG_PATH_ENV_LOCK`
+/// without needing to expose the whole test module.
+#[cfg(test)]
+pub(crate) static CONFIG_PATH_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 #[cfg(test)]
 mod tests {
@@ -802,6 +829,13 @@ max_output_tokens = 2048
 
     #[test]
     fn config_path_contains_leviath() {
+        // LEVIATH_CONFIG_PATH is process-global — hold the shared lock so a
+        // concurrently-running test elsewhere in the crate (e.g.
+        // commands/run/worker.rs's isolate_config_path) can't be mid-override
+        // when we read the real default here.
+        let _lock = CONFIG_PATH_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let path = Config::config_path();
         assert!(path.to_str().unwrap().contains(".leviath"));
         assert!(path.to_str().unwrap().ends_with("config.toml"));

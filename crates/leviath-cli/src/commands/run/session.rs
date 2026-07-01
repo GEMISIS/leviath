@@ -15,6 +15,23 @@ pub fn resolve_task(
     agent_name: &str,
     description: Option<&str>,
 ) -> anyhow::Result<String> {
+    use std::io::IsTerminal;
+    resolve_task_with(arg, agent_name, description, || {
+        std::io::stdin().is_terminal()
+    })
+}
+
+/// Same as [`resolve_task`], but with the stdin-is-a-TTY check injected
+/// instead of hardcoded — lets tests deterministically exercise both the
+/// "not a TTY" error path and the "is a TTY" editor-launch path regardless
+/// of whether the test runner's own stdin happens to be a real terminal
+/// (e.g. a human running `cargo test` interactively vs. CI).
+fn resolve_task_with(
+    arg: &Option<String>,
+    agent_name: &str,
+    description: Option<&str>,
+    stdin_is_terminal: impl FnOnce() -> bool,
+) -> anyhow::Result<String> {
     match arg {
         Some(s) => {
             let p = std::path::Path::new(s);
@@ -30,8 +47,7 @@ pub fn resolve_task(
             Ok(s.clone())
         }
         None => {
-            use std::io::IsTerminal;
-            if !std::io::stdin().is_terminal() {
+            if !stdin_is_terminal() {
                 anyhow::bail!(
                     "No task provided. Pass --task \"<prompt>\" or --task <file>.\n\
                      (stdin is not a TTY, so the interactive editor cannot be used)"
@@ -578,14 +594,25 @@ mod tests {
 
     #[test]
     fn resolve_task_none_arg_errors_when_stdin_not_tty() {
-        // Under `cargo test`, stdin is never a real TTY, so the `None`
-        // branch should hit the "no task provided" error path rather than
-        // trying to launch an interactive editor.
-        let result = resolve_task(&None, "test-agent", None);
+        // The TTY check is injected (not the real std::io::stdin()) so this
+        // is deterministic regardless of whether the test runner's own
+        // stdin happens to be a real terminal — a human running `cargo test`
+        // interactively has a real TTY on stdin, unlike CI, so hardcoding
+        // "stdin is never a TTY under cargo test" was a false assumption.
+        let result = resolve_task_with(&None, "test-agent", None, || false);
         assert!(result.is_err());
         let msg = result.unwrap_err().to_string();
         assert!(msg.contains("No task provided"));
         assert!(msg.contains("stdin is not a TTY"));
+    }
+
+    #[test]
+    fn resolve_task_none_arg_uses_real_stdin_check_via_public_wrapper() {
+        // Smoke test that the public resolve_task() wrapper still compiles
+        // and delegates correctly — doesn't assert on the TTY-dependent
+        // outcome itself, since that legitimately varies by environment.
+        let result = resolve_task(&Some("literal task".to_string()), "test-agent", None);
+        assert_eq!(result.unwrap(), "literal task");
     }
 
     // ─── launch_editor: VISUAL takes priority and succeeds ───────────────
