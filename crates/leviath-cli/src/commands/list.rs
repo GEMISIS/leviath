@@ -174,11 +174,15 @@ mod tests {
     use super::*;
 
     fn write_manifest(dir: &Path, name: &str) {
+        write_manifest_with_description(dir, name, "Test agent");
+    }
+
+    fn write_manifest_with_description(dir: &Path, name: &str, description: &str) {
         let content = format!(
             r#"[agent]
 name = "{}"
 version = "1.0.0"
-description = "Test agent"
+description = "{}"
 
 [stages.main]
 mode = "autonomous"
@@ -189,7 +193,7 @@ max_iterations = 5
 [context.regions]
 system = {{ kind = "pinned", max_tokens = 1000 }}
 "#,
-            name
+            name, description
         );
         fs::write(dir.join("agent.leviath"), content).unwrap();
     }
@@ -464,6 +468,32 @@ system = { kind = "pinned", max_tokens = 1000 }
 
         let result =
             print_agent_listing(agents_dir.path(), cwd.path(), Some(exe_dir.path()), &config);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn print_agent_listing_empty_descriptions_across_all_sources() {
+        // Every section (installed / local / configured-path) has its own
+        // "empty description -> no dash suffix" branch; the tests above only
+        // ever exercise the non-empty path for all three, since
+        // `write_manifest` hardcodes a non-empty description.
+        let agents_dir = tempfile::tempdir().unwrap();
+        fs::create_dir_all(agents_dir.path().join("installed")).unwrap();
+        write_manifest_with_description(&agents_dir.path().join("installed"), "installed", "");
+
+        let cwd = tempfile::tempdir().unwrap();
+        write_manifest_with_description(cwd.path(), "local", "");
+
+        let configured = tempfile::tempdir().unwrap();
+        fs::create_dir_all(configured.path().join("configured")).unwrap();
+        write_manifest_with_description(&configured.path().join("configured"), "configured", "");
+
+        let config = Config {
+            agent_paths: vec![configured.path().to_path_buf()],
+            ..Config::default()
+        };
+
+        let result = print_agent_listing(agents_dir.path(), cwd.path(), None, &config);
         assert!(result.is_ok());
     }
 

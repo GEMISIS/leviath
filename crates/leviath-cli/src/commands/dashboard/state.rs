@@ -107,6 +107,14 @@ impl Dashboard {
     /// `LogEntry` for the initial in-memory buffer.
     fn load_log_seed() -> Vec<LogEntry> {
         let tail = runstate::tail_file(&runstate::dashboard_log_path(), 32_768);
+        Self::parse_log_lines(&tail)
+    }
+
+    /// Core parsing logic of [`load_log_seed`], split out so it can be
+    /// exercised in tests against controlled input -- `dashboard_log_path()`
+    /// always points at the real, shared `~/.leviath/dashboard.log`, with no
+    /// injectable override, so tests can't safely control its content.
+    fn parse_log_lines(tail: &str) -> Vec<LogEntry> {
         let mut entries = Vec::new();
         for line in tail.lines() {
             // Lines are written as "YYYY-MM-DD HH:MM:SS <message>"
@@ -904,6 +912,27 @@ mod tests {
     }
 
     #[test]
+    fn update_display_indices_resets_selection_when_previously_selected_agent_disappears() {
+        let mut dash = make_test_dashboard();
+        dash.agents
+            .push(make_test_agent("run-1", AgentDisplayStatus::Active));
+        dash.agents
+            .push(make_test_agent("run-2", AgentDisplayStatus::Active));
+        dash.update_display_indices();
+        dash.selected = 1;
+        dash.table_state.select(Some(1));
+
+        // The previously-selected agent ("run-2") is filtered out entirely,
+        // so its id can't be found in the recomputed display_indices --
+        // exercising the `else { self.selected = 0; }` reset branch, as
+        // opposed to `update_display_indices_preserves_selection`'s
+        // find-and-restore-position path above.
+        dash.list_search_query = "run-1".to_string();
+        dash.update_display_indices();
+        assert_eq!(dash.selected, 0);
+    }
+
+    #[test]
     fn process_events_stage_changed() {
         let mut dash = make_test_dashboard();
         dash.agents
@@ -1582,6 +1611,33 @@ mod tests {
         let _ = entries.len();
     }
 
+    // ─── parse_log_lines: the pure parsing core of load_log_seed ──────────
+
+    #[test]
+    fn parse_log_lines_normal_line_uses_time_portion() {
+        let entries = Dashboard::parse_log_lines("2026-01-01 12:00:00 something happened");
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].timestamp, "12:00:00");
+        assert_eq!(entries[0].message, "something happened");
+    }
+
+    #[test]
+    fn parse_log_lines_missing_time_token_falls_back_to_date() {
+        // A double space between the first token and the message leaves the
+        // "time" slot empty, exercising the `if time.is_empty() { date }`
+        // fallback branch.
+        let entries = Dashboard::parse_log_lines("2026-01-01  something happened");
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].timestamp, "2026-01-01");
+        assert_eq!(entries[0].message, "something happened");
+    }
+
+    #[test]
+    fn parse_log_lines_skips_lines_with_empty_message() {
+        let entries = Dashboard::parse_log_lines("2026-01-01 12:00:00 \n");
+        assert!(entries.is_empty());
+    }
+
     // ─── push_toast: level variants ──────────────────────────────────────
 
     #[test]
@@ -1682,6 +1738,67 @@ mod tests {
         assert!(
             dash.agents.is_empty() || dash.agents[0].id != tmp_id,
             "agent should have been removed"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn delete_selected_agent_sends_sigterm_to_real_pid() {
+        // Spawns a real, throwaway child process we fully own (so sending it
+        // SIGTERM is safe, unlike an arbitrary PID) to exercise the
+        // `#[cfg(unix)] if _pid > 0 { libc::kill(...) }` branch, which every
+        // other `delete_selected_agent` test avoids via `pid = 0`.
+        let mut child = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .expect("failed to spawn a throwaway child process");
+        let child_pid = child.id();
+
+        let mut dash = make_test_dashboard();
+        dash.log.clear();
+        let tmp_id = format!("test-run-kill-{}", std::process::id());
+        let run_dir = crate::runstate::run_dir(&tmp_id);
+        let _ = std::fs::create_dir_all(&run_dir);
+
+        let mut agent = make_test_agent(&tmp_id, AgentDisplayStatus::Active);
+        agent.is_run_state = true;
+        agent.pid = child_pid;
+        dash.agents.push(agent);
+        dash.update_display_indices();
+
+        dash.delete_selected_agent();
+
+        let status = child
+            .wait()
+            .expect("failed to wait on the throwaway child process");
+        assert!(
+            !status.success(),
+            "expected the child to be terminated by SIGTERM, not exit successfully"
+        );
+    }
+
+    #[test]
+    fn delete_selected_agent_missing_run_dir_logs_delete_failed() {
+        // Unlike `delete_selected_agent_removes_run_state_agent` (which
+        // pre-creates the run dir so removal succeeds), this never creates
+        // it -- `std::fs::remove_dir_all` on a nonexistent path returns
+        // `Err`, exercising the "Delete failed" log branch.
+        let mut dash = make_test_dashboard();
+        dash.log.clear();
+        let tmp_id = format!("test-run-missing-{}", std::process::id());
+
+        let mut agent = make_test_agent(&tmp_id, AgentDisplayStatus::Complete);
+        agent.is_run_state = true;
+        agent.pid = 0;
+        dash.agents.push(agent);
+        dash.update_display_indices();
+
+        dash.delete_selected_agent();
+
+        assert!(
+            dash.log.iter().any(|l| l.message.contains("Delete failed")),
+            "expected a 'Delete failed' log entry, got: {:?}",
+            dash.log
         );
     }
 
