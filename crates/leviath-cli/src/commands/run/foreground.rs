@@ -910,12 +910,31 @@ mod tests {
 
     #[tokio::test]
     async fn dispatch_tool_calls_foreground_dynamic_interaction_short_circuits() {
+        // `ask_user_confirm` IS answered via the backend (that's the whole
+        // point of the tool) -- what it short-circuits is normal tool-policy
+        // resolution (Deny/Ask/Allow), not the backend call itself. A real
+        // `ForegroundInteractionBackend` here would block on real stdin
+        // (this hung under `cargo llvm-cov` in an interactive terminal,
+        // where stdin isn't already closed/EOF the way it is in a sandboxed
+        // test runner) -- use a mock backend instead, matching the pattern
+        // `dynamic_interaction.rs`'s own tests use.
+        struct StubBackend;
+        #[async_trait]
+        impl super::super::dynamic_interaction::InteractionBackend for StubBackend {
+            async fn ask(
+                &self,
+                req: crate::interaction::InteractionRequest,
+            ) -> crate::interaction::InteractionResponse {
+                crate::interaction::InteractionResponse::approval(
+                    &req.id,
+                    true,
+                    crate::interaction::ApprovalScope::Once,
+                )
+            }
+        }
+
         let state = make_dispatch_state("dynamic-interaction").await;
-        let backend = ForegroundInteractionBackend;
-        // ask_user_confirm is intercepted before any tool-policy resolution;
-        // ask_approval/backend are never reached for it, so a real
-        // ForegroundInteractionBackend (which would block on stdin if it were
-        // ever invoked) proves the short-circuit happened.
+        let backend = StubBackend;
         let calls = vec![make_tool_call(
             "ask_user_confirm",
             serde_json::json!({"prompt": "Continue?"}),
