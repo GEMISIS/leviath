@@ -878,6 +878,75 @@ mod tests {
         assert_eq!(resp.content, "hi there");
     }
 
+    // ─── HTTP error paths (connection refused) ─────────────────────────────
+
+    #[tokio::test]
+    async fn infer_connection_refused_returns_error() {
+        let provider = provider_with_url("http://127.0.0.1:19997".to_string());
+        let result = provider.infer(simple_request()).await;
+        assert!(matches!(
+            result.unwrap_err(),
+            ProviderError::RequestFailed(_)
+        ));
+    }
+
+    #[tokio::test]
+    async fn infer_stream_connection_refused_returns_error() {
+        let provider = provider_with_url("http://127.0.0.1:19997".to_string());
+        let result = provider.infer_stream(simple_request()).await;
+        assert!(result.is_err());
+        if let Err(e) = result {
+            assert!(matches!(e, ProviderError::RequestFailed(_)));
+        }
+    }
+
+    #[tokio::test]
+    async fn list_models_connection_refused_returns_error() {
+        let provider = provider_with_url("http://127.0.0.1:19997".to_string());
+        let result = provider.list_models().await;
+        assert!(matches!(
+            result.unwrap_err(),
+            ProviderError::RequestFailed(_)
+        ));
+    }
+
+    /// Declares a `Content-Length` larger than the bytes actually sent, then
+    /// closes -- forcing a genuine mid-body I/O error when the caller reads
+    /// the response body, rather than a merely garbled-but-readable one.
+    async fn spawn_mock_server_truncated_body(status: u16, reason: &str) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let response = format!(
+            "HTTP/1.1 {} {}\r\nContent-Type: application/json\r\nContent-Length: 9999\r\nConnection: close\r\n\r\n",
+            status, reason
+        )
+        .into_bytes();
+        tokio::spawn(async move {
+            if let Ok((mut socket, _)) = listener.accept().await {
+                let mut buf = [0u8; 8192];
+                let _ = socket.read(&mut buf).await;
+                let _ = socket.write_all(&response).await;
+                let _ = socket.write_all(b"short").await;
+                let _ = socket.flush().await;
+                let _ = socket.shutdown().await;
+            }
+        });
+        format!("http://{}", addr)
+    }
+
+    #[tokio::test]
+    async fn list_models_non_success_body_read_error_falls_back_to_unknown_error() {
+        let url = spawn_mock_server_truncated_body(500, "Internal Server Error").await;
+        let provider = provider_with_url(url);
+        let err = provider.list_models().await.unwrap_err();
+        match err {
+            ProviderError::ApiError(msg) => assert!(msg.contains("unknown error")),
+            other => panic!("expected ApiError, got {other:?}"),
+        }
+    }
+
     #[tokio::test]
     async fn infer_non_success_status_returns_api_error() {
         let url = spawn_mock_server(500, "Internal Server Error", b"boom").await;

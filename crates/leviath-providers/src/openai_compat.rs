@@ -866,4 +866,73 @@ mod tests {
         let chunk = sse.next().await.unwrap().unwrap();
         assert_eq!(chunk.delta, "ok");
     }
+
+    #[tokio::test]
+    async fn openai_sse_stream_flushes_trailing_buffered_event_when_stream_ends() {
+        use tokio_stream::StreamExt;
+        // A comment-only SSE event (no `data:` line) glued directly to a real
+        // data event in the SAME chunk. `parse_openai_sse_event` consumes the
+        // comment event from the buffer but returns plain `None` (its
+        // for-loop finds no `data:` line to act on) -- indistinguishable to
+        // the caller from "incomplete". So `poll_next`'s top-of-loop check
+        // falls through and polls the inner stream again, which then reports
+        // end-of-stream; only *there* does poll_next's own end-of-stream
+        // re-check find the still-buffered, still-unconsumed data event.
+        let data = b": ping\n\ndata: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n".to_vec();
+        let stream = StaticByteStream {
+            data: vec![data],
+            idx: 0,
+        };
+        let mut sse = OpenAiSseStream::new(stream);
+        let chunk = sse.next().await.unwrap().unwrap();
+        assert_eq!(chunk.delta, "hi");
+        assert!(sse.next().await.is_none());
+    }
+
+    /// Declares a `Content-Length` far larger than the bytes actually sent,
+    /// then closes the connection -- forcing a genuine `reqwest::Error` when
+    /// the byte stream itself is polled (not just `.text()`), so
+    /// `OpenAiSseStream`'s `Poll::Ready(Some(Err(e)))` arm is reachable.
+    /// `reqwest::Error` has no public constructor, so a real (truncated) HTTP
+    /// response is the only way to produce one.
+    async fn spawn_mock_server_truncated_body() -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let response = b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: 10000\r\nConnection: close\r\n\r\nshort".to_vec();
+
+        tokio::spawn(async move {
+            if let Ok((mut socket, _)) = listener.accept().await {
+                let mut buf = [0u8; 8192];
+                let _ = socket.read(&mut buf).await;
+                let _ = socket.write_all(&response).await;
+                let _ = socket.flush().await;
+                let _ = socket.shutdown().await;
+            }
+        });
+
+        format!("http://{}", addr)
+    }
+
+    #[tokio::test]
+    async fn openai_sse_stream_propagates_real_reqwest_error() {
+        use tokio_stream::StreamExt;
+
+        let url = spawn_mock_server_truncated_body().await;
+        let client = reqwest::Client::new();
+        let resp = client.get(&url).send().await.unwrap();
+        let byte_stream = resp.bytes_stream();
+        let mut sse = OpenAiSseStream::new(byte_stream);
+
+        let result = sse.next().await;
+        match result {
+            Some(Err(ProviderError::RequestFailed(_))) => {}
+            other => panic!(
+                "expected RequestFailed, got: {:?}",
+                other.map(|r| r.is_ok())
+            ),
+        }
+    }
 }
