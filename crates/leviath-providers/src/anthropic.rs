@@ -1696,4 +1696,340 @@ mod tests {
             .count();
         assert_eq!(bp_count, 4);
     }
+
+    // ─── HTTP-call-level tests via a raw-TCP mock server ───────────────────
+    //
+    // No mocking crate — bind to an OS-assigned localhost port, accept one
+    // connection, write back a fixed HTTP/1.1 response. Enough to exercise
+    // infer()/infer_stream()/list_models()'s response-handling branches
+    // without a real network call.
+
+    async fn spawn_mock_server(status: u16, reason: &str, body: &'static [u8]) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let response = format!(
+            "HTTP/1.1 {} {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            status,
+            reason,
+            body.len()
+        )
+        .into_bytes();
+
+        tokio::spawn(async move {
+            if let Ok((mut socket, _)) = listener.accept().await {
+                let mut buf = [0u8; 8192];
+                let _ = socket.read(&mut buf).await;
+                let _ = socket.write_all(&response).await;
+                let _ = socket.write_all(body).await;
+                let _ = socket.flush().await;
+                let _ = socket.shutdown().await;
+            }
+        });
+
+        format!("http://{}", addr)
+    }
+
+    async fn spawn_mock_server_with_headers(
+        status: u16,
+        reason: &str,
+        extra_headers: &str,
+        body: &'static [u8],
+    ) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let response = format!(
+            "HTTP/1.1 {} {}\r\n{}Content-Length: {}\r\nConnection: close\r\n\r\n",
+            status,
+            reason,
+            extra_headers,
+            body.len()
+        )
+        .into_bytes();
+
+        tokio::spawn(async move {
+            if let Ok((mut socket, _)) = listener.accept().await {
+                let mut buf = [0u8; 8192];
+                let _ = socket.read(&mut buf).await;
+                let _ = socket.write_all(&response).await;
+                let _ = socket.write_all(body).await;
+                let _ = socket.flush().await;
+                let _ = socket.shutdown().await;
+            }
+        });
+
+        format!("http://{}", addr)
+    }
+
+    fn provider_with_url(url: String) -> AnthropicProvider {
+        AnthropicProvider::with_config(ProviderConfig {
+            api_key: "test-key".to_string(),
+            base_url: Some(url),
+            rate_limit: None,
+        })
+    }
+
+    fn simple_request() -> InferenceRequest {
+        InferenceRequest {
+            messages: vec![crate::provider::Message {
+                role: "user".to_string(),
+                content: "hi".to_string(),
+                cache_breakpoint: false,
+            }],
+            model: "claude-sonnet-4-6".to_string(),
+            max_tokens: 100,
+            temperature: 0.0,
+            tools: vec![],
+            extra: serde_json::Value::Null,
+        }
+    }
+
+    #[tokio::test]
+    async fn infer_success_parses_response() {
+        let body = br#"{
+            "content": [{"type": "text", "text": "hello there"}],
+            "stop_reason": "end_turn",
+            "usage": {"input_tokens": 10, "output_tokens": 5}
+        }"#;
+        let url = spawn_mock_server(200, "OK", body).await;
+        let provider = provider_with_url(url);
+        let resp = provider.infer(simple_request()).await.unwrap();
+        assert_eq!(resp.content, "hello there");
+        assert_eq!(resp.tokens_used.prompt_tokens, 10);
+        assert_eq!(resp.tokens_used.completion_tokens, 5);
+    }
+
+    #[tokio::test]
+    async fn infer_rate_limited_returns_rate_limit_error() {
+        let url = spawn_mock_server(429, "Too Many Requests", b"{}").await;
+        let provider = provider_with_url(url);
+        let err = provider.infer(simple_request()).await.unwrap_err();
+        assert!(matches!(err, ProviderError::RateLimitExceeded));
+    }
+
+    #[tokio::test]
+    async fn infer_rate_limited_with_retry_after_header() {
+        let url =
+            spawn_mock_server_with_headers(429, "Too Many Requests", "retry-after: 5\r\n", b"{}")
+                .await;
+        let provider = provider_with_url(url);
+        let err = provider.infer(simple_request()).await.unwrap_err();
+        assert!(matches!(err, ProviderError::RateLimitExceeded));
+    }
+
+    #[tokio::test]
+    async fn infer_non_success_status_returns_api_error() {
+        let url = spawn_mock_server(500, "Internal Server Error", b"boom").await;
+        let provider = provider_with_url(url);
+        let err = provider.infer(simple_request()).await.unwrap_err();
+        match err {
+            ProviderError::ApiError(msg) => {
+                assert!(msg.contains("500"));
+                assert!(msg.contains("boom"));
+            }
+            other => panic!("expected ApiError, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn infer_malformed_json_returns_invalid_response() {
+        let url = spawn_mock_server(200, "OK", b"not json").await;
+        let provider = provider_with_url(url);
+        let err = provider.infer(simple_request()).await.unwrap_err();
+        assert!(matches!(err, ProviderError::InvalidResponse(_)));
+    }
+
+    #[tokio::test]
+    async fn infer_stream_rate_limited_returns_error() {
+        let url = spawn_mock_server(429, "Too Many Requests", b"{}").await;
+        let provider = provider_with_url(url);
+        let err = match provider.infer_stream(simple_request()).await {
+            Err(e) => e,
+            Ok(_) => panic!("expected an error"),
+        };
+        assert!(matches!(err, ProviderError::RateLimitExceeded));
+    }
+
+    #[tokio::test]
+    async fn infer_stream_non_success_status_returns_api_error() {
+        let url = spawn_mock_server(503, "Service Unavailable", b"down").await;
+        let provider = provider_with_url(url);
+        let err = match provider.infer_stream(simple_request()).await {
+            Err(e) => e,
+            Ok(_) => panic!("expected an error"),
+        };
+        match err {
+            ProviderError::ApiError(msg) => assert!(msg.contains("503")),
+            other => panic!("expected ApiError, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn infer_stream_success_yields_chunks() {
+        let sse_body = b"event: content_block_delta\ndata: {\"delta\":{\"type\":\"text_delta\",\"text\":\"hi\"}}\n\n";
+        let url = spawn_mock_server(200, "OK", sse_body).await;
+        let provider = provider_with_url(url);
+        let mut stream = provider.infer_stream(simple_request()).await.unwrap();
+        use tokio_stream::StreamExt;
+        let chunk = stream.next().await.unwrap().unwrap();
+        assert_eq!(chunk.delta, "hi");
+    }
+
+    #[tokio::test]
+    async fn list_models_success_returns_models() {
+        let body = br#"{"data": [{"id": "claude-sonnet-4-6", "display_name": "Sonnet"}]}"#;
+        let url = spawn_mock_server(200, "OK", body).await;
+        let provider = provider_with_url(url);
+        let models = provider.list_models().await.unwrap();
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0].id, "claude-sonnet-4-6");
+        assert_eq!(models[0].display_name.as_deref(), Some("Sonnet"));
+        assert_eq!(models[0].provider, "anthropic");
+    }
+
+    #[tokio::test]
+    async fn list_models_non_success_status_returns_error() {
+        let url = spawn_mock_server(401, "Unauthorized", b"bad key").await;
+        let provider = provider_with_url(url);
+        let err = provider.list_models().await.unwrap_err();
+        match err {
+            ProviderError::RequestFailed(msg) => {
+                assert!(msg.contains("401"));
+                assert!(msg.contains("bad key"));
+            }
+            other => panic!("expected RequestFailed, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn list_models_malformed_json_returns_error() {
+        let url = spawn_mock_server(200, "OK", b"not json").await;
+        let provider = provider_with_url(url);
+        let err = provider.list_models().await.unwrap_err();
+        assert!(matches!(err, ProviderError::RequestFailed(_)));
+    }
+
+    #[tokio::test]
+    async fn list_models_missing_data_field_returns_error() {
+        let url = spawn_mock_server(200, "OK", b"{}").await;
+        let provider = provider_with_url(url);
+        let err = provider.list_models().await.unwrap_err();
+        match err {
+            ProviderError::RequestFailed(msg) => assert!(msg.contains("data")),
+            other => panic!("expected RequestFailed, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn list_models_skips_entries_without_id() {
+        let body = br#"{"data": [{"display_name": "No ID"}, {"id": "valid-model"}]}"#;
+        let url = spawn_mock_server(200, "OK", body).await;
+        let provider = provider_with_url(url);
+        let models = provider.list_models().await.unwrap();
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0].id, "valid-model");
+    }
+
+    // ─── AnthropicSseStream parser (no HTTP needed) ────────────────────────
+
+    struct StaticByteStream {
+        data: Vec<Vec<u8>>,
+        idx: usize,
+    }
+
+    impl futures_core::Stream for StaticByteStream {
+        type Item = std::result::Result<bytes::Bytes, reqwest::Error>;
+        fn poll_next(
+            mut self: Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Option<Self::Item>> {
+            if self.idx < self.data.len() {
+                let chunk = bytes::Bytes::from(self.data[self.idx].clone());
+                self.idx += 1;
+                std::task::Poll::Ready(Some(Ok(chunk)))
+            } else {
+                std::task::Poll::Ready(None)
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn sse_stream_parses_input_json_delta() {
+        use tokio_stream::StreamExt;
+        let data = b"event: content_block_delta\ndata: {\"delta\":{\"type\":\"input_json_delta\",\"partial_json\":\"{\\\"a\\\":1}\"}}\n\n".to_vec();
+        let stream = StaticByteStream {
+            data: vec![data],
+            idx: 0,
+        };
+        let mut sse = AnthropicSseStream::new(stream);
+        let chunk = sse.next().await.unwrap().unwrap();
+        assert_eq!(chunk.tool_calls.len(), 1);
+        assert_eq!(chunk.tool_calls[0].arguments_delta, "{\"a\":1}");
+    }
+
+    #[tokio::test]
+    async fn sse_stream_unknown_delta_type_is_skipped() {
+        use tokio_stream::StreamExt;
+        // An unknown delta type produces None from parse_sse_event, so the
+        // stream keeps polling the inner stream until it ends.
+        let data =
+            b"event: content_block_delta\ndata: {\"delta\":{\"type\":\"unknown_delta\"}}\n\n"
+                .to_vec();
+        let stream = StaticByteStream {
+            data: vec![data],
+            idx: 0,
+        };
+        let mut sse = AnthropicSseStream::new(stream);
+        assert!(sse.next().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn sse_stream_ends_with_incomplete_buffer_returns_none() {
+        use tokio_stream::StreamExt;
+        // No trailing "\n\n", so the event never completes.
+        let data = b"event: content_block_delta\ndata: {\"delta\":{}}".to_vec();
+        let stream = StaticByteStream {
+            data: vec![data],
+            idx: 0,
+        };
+        let mut sse = AnthropicSseStream::new(stream);
+        assert!(sse.next().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn infer_stream_body_error_propagates_as_stream_item_error() {
+        // Send a Content-Length larger than the actual body and close the
+        // connection early — reqwest's body stream then yields a real
+        // Err(reqwest::Error) mid-stream, exercising AnthropicSseStream's
+        // Poll::Ready(Some(Err(e))) branch with a genuine error (not a
+        // hand-built one — reqwest::Error has no public constructor).
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            if let Ok((mut socket, _)) = listener.accept().await {
+                let mut buf = [0u8; 8192];
+                let _ = socket.read(&mut buf).await;
+                let response =
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 1000\r\nConnection: close\r\n\r\nshort";
+                let _ = socket.write_all(response).await;
+                let _ = socket.flush().await;
+                let _ = socket.shutdown().await;
+            }
+        });
+
+        let provider = provider_with_url(format!("http://{}", addr));
+        let mut stream = provider.infer_stream(simple_request()).await.unwrap();
+        use tokio_stream::StreamExt;
+        let result = stream.next().await;
+        assert!(result.is_some());
+        assert!(result.unwrap().is_err());
+    }
 }

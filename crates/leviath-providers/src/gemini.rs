@@ -525,4 +525,148 @@ mod tests {
         let response = parse_openai_response(&body).unwrap();
         assert!(matches!(response.finish_reason, FinishReason::TokenLimit));
     }
+
+    // ─── HTTP-call-level tests via a raw-TCP mock server ───────────────────
+
+    async fn spawn_mock_server(status: u16, reason: &str, body: &'static [u8]) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let response = format!(
+            "HTTP/1.1 {} {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            status, reason, body.len()
+        )
+        .into_bytes();
+        tokio::spawn(async move {
+            if let Ok((mut socket, _)) = listener.accept().await {
+                let mut buf = [0u8; 8192];
+                let _ = socket.read(&mut buf).await;
+                let _ = socket.write_all(&response).await;
+                let _ = socket.write_all(body).await;
+                let _ = socket.flush().await;
+                let _ = socket.shutdown().await;
+            }
+        });
+        format!("http://{}", addr)
+    }
+
+    fn provider_with_url(url: String) -> GeminiProvider {
+        GeminiProvider::with_config(ProviderConfig {
+            api_key: "test-key".to_string(),
+            base_url: Some(url),
+            rate_limit: None,
+        })
+    }
+
+    fn simple_request() -> InferenceRequest {
+        InferenceRequest {
+            messages: vec![crate::provider::Message {
+                role: "user".to_string(),
+                content: "hi".to_string(),
+                cache_breakpoint: false,
+            }],
+            model: "gemini-3.5-flash".to_string(),
+            max_tokens: 100,
+            temperature: 0.0,
+            tools: vec![],
+            extra: serde_json::Value::Null,
+        }
+    }
+
+    #[tokio::test]
+    async fn infer_success_parses_response() {
+        let body = br#"{"choices":[{"message":{"content":"hi there"},"finish_reason":"stop"}],"usage":{"prompt_tokens":3,"completion_tokens":2}}"#;
+        let url = spawn_mock_server(200, "OK", body).await;
+        let provider = provider_with_url(url);
+        let resp = provider.infer(simple_request()).await.unwrap();
+        assert_eq!(resp.content, "hi there");
+    }
+
+    #[tokio::test]
+    async fn infer_non_success_status_returns_error() {
+        let url = spawn_mock_server(500, "Internal Server Error", b"boom").await;
+        let provider = provider_with_url(url);
+        let err = provider.infer(simple_request()).await.unwrap_err();
+        assert!(matches!(err, ProviderError::ApiError(_)));
+    }
+
+    #[tokio::test]
+    async fn infer_malformed_json_returns_invalid_response() {
+        let url = spawn_mock_server(200, "OK", b"not json").await;
+        let provider = provider_with_url(url);
+        let err = provider.infer(simple_request()).await.unwrap_err();
+        assert!(matches!(err, ProviderError::InvalidResponse(_)));
+    }
+
+    #[tokio::test]
+    async fn infer_stream_non_success_status_returns_error() {
+        let url = spawn_mock_server(503, "Service Unavailable", b"down").await;
+        let provider = provider_with_url(url);
+        let err = match provider.infer_stream(simple_request()).await {
+            Err(e) => e,
+            Ok(_) => panic!("expected an error"),
+        };
+        assert!(matches!(err, ProviderError::ApiError(_)));
+    }
+
+    #[tokio::test]
+    async fn infer_stream_success_yields_chunks() {
+        let sse_body =
+            b"data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\ndata: [DONE]\n\n";
+        let url = spawn_mock_server(200, "OK", sse_body).await;
+        let provider = provider_with_url(url);
+        let mut stream = provider.infer_stream(simple_request()).await.unwrap();
+        use tokio_stream::StreamExt;
+        let chunk = stream.next().await.unwrap().unwrap();
+        assert_eq!(chunk.delta, "hi");
+    }
+
+    #[tokio::test]
+    async fn list_models_success_returns_models() {
+        let body = br#"{"data":[{"id":"gemini-3.5-flash"}]}"#;
+        let url = spawn_mock_server(200, "OK", body).await;
+        let provider = provider_with_url(url);
+        let models = provider.list_models().await.unwrap();
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0].id, "gemini-3.5-flash");
+        assert_eq!(models[0].provider, "google");
+    }
+
+    #[tokio::test]
+    async fn list_models_non_success_status_returns_error() {
+        let url = spawn_mock_server(401, "Unauthorized", b"bad key").await;
+        let provider = provider_with_url(url);
+        let err = provider.list_models().await.unwrap_err();
+        match err {
+            ProviderError::ApiError(msg) => assert!(msg.contains("401")),
+            other => panic!("expected ApiError, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn list_models_malformed_json_returns_error() {
+        let url = spawn_mock_server(200, "OK", b"not json").await;
+        let provider = provider_with_url(url);
+        let err = provider.list_models().await.unwrap_err();
+        assert!(matches!(err, ProviderError::InvalidResponse(_)));
+    }
+
+    #[tokio::test]
+    async fn list_models_missing_data_field_returns_error() {
+        let url = spawn_mock_server(200, "OK", b"{}").await;
+        let provider = provider_with_url(url);
+        let err = provider.list_models().await.unwrap_err();
+        assert!(matches!(err, ProviderError::InvalidResponse(_)));
+    }
+
+    #[tokio::test]
+    async fn list_models_skips_entries_without_id() {
+        let body = br#"{"data":[{"no_id": true}, {"id":"valid-model"}]}"#;
+        let url = spawn_mock_server(200, "OK", body).await;
+        let provider = provider_with_url(url);
+        let models = provider.list_models().await.unwrap();
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0].id, "valid-model");
+    }
 }

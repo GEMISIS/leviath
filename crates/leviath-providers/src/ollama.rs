@@ -1459,4 +1459,289 @@ mod tests {
             assert_eq!(chunks[0].as_ref().unwrap().delta, "hi");
         });
     }
+
+    #[test]
+    fn test_ollama_ndjson_stream_invalid_remaining_buffer_yields_none() {
+        use futures_core::Stream;
+        use std::pin::Pin;
+        use std::task::{Context, Poll};
+
+        struct StaticStream {
+            data: Vec<Vec<u8>>,
+            idx: usize,
+        }
+
+        impl Stream for StaticStream {
+            type Item = std::result::Result<bytes::Bytes, reqwest::Error>;
+            fn poll_next(
+                mut self: Pin<&mut Self>,
+                _cx: &mut Context<'_>,
+            ) -> Poll<Option<Self::Item>> {
+                if self.idx < self.data.len() {
+                    let chunk = bytes::Bytes::from(self.data[self.idx].clone());
+                    self.idx += 1;
+                    Poll::Ready(Some(Ok(chunk)))
+                } else {
+                    Poll::Ready(None)
+                }
+            }
+        }
+
+        // No trailing newline, and the leftover isn't valid JSON either --
+        // the remaining-buffer parse attempt fails and the stream just ends.
+        let chunk1 = b"not valid json, no newline".to_vec();
+        let static_stream = StaticStream {
+            data: vec![chunk1],
+            idx: 0,
+        };
+
+        let ndjson_stream = OllamaNdjsonStream::new(static_stream);
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            use tokio_stream::StreamExt;
+            let chunks: Vec<_> = ndjson_stream.collect().await;
+            assert!(chunks.is_empty());
+        });
+    }
+
+    #[test]
+    fn test_ollama_ndjson_stream_pending_is_propagated() {
+        use futures_core::Stream;
+        use std::pin::Pin;
+        use std::task::{Context, Poll};
+
+        // Yields Pending once, then a done line, then ends.
+        struct PendingThenDataStream {
+            polled_once: bool,
+            yielded: bool,
+        }
+
+        impl Stream for PendingThenDataStream {
+            type Item = std::result::Result<bytes::Bytes, reqwest::Error>;
+            fn poll_next(
+                mut self: Pin<&mut Self>,
+                cx: &mut Context<'_>,
+            ) -> Poll<Option<Self::Item>> {
+                if !self.polled_once {
+                    self.polled_once = true;
+                    cx.waker().wake_by_ref();
+                    return Poll::Pending;
+                }
+                if !self.yielded {
+                    self.yielded = true;
+                    let chunk = bytes::Bytes::from(
+                        b"{\"message\":{\"content\":\"hi\"},\"done\":true}\n".to_vec(),
+                    );
+                    return Poll::Ready(Some(Ok(chunk)));
+                }
+                Poll::Ready(None)
+            }
+        }
+
+        let ndjson_stream = OllamaNdjsonStream::new(PendingThenDataStream {
+            polled_once: false,
+            yielded: false,
+        });
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            use tokio_stream::StreamExt;
+            let chunks: Vec<_> = ndjson_stream.collect().await;
+            assert_eq!(chunks.len(), 1);
+            assert_eq!(chunks[0].as_ref().unwrap().delta, "hi");
+        });
+    }
+
+    #[test]
+    fn test_build_request_body_no_temperature_via_override() {
+        let mut overrides = HashMap::new();
+        overrides.insert(
+            "no-temp-model".to_string(),
+            ModelCapabilities {
+                supports_temperature: false,
+                supports_streaming: true,
+                supports_tools: true,
+                supports_system_prompt: true,
+                max_context_tokens: 8192,
+                max_output_tokens: 4096,
+            },
+        );
+        let provider =
+            OllamaProvider::with_overrides("http://localhost:11434".to_string(), overrides);
+        let request = InferenceRequest {
+            messages: vec![crate::provider::Message {
+                role: "user".to_string(),
+                content: "hi".to_string(),
+                cache_breakpoint: false,
+            }],
+            model: "no-temp-model".to_string(),
+            max_tokens: 50,
+            temperature: 0.7,
+            tools: vec![],
+            extra: serde_json::Value::Null,
+        };
+        let body = provider.build_request_body(&request);
+        assert!(body["options"].get("temperature").is_none());
+        assert_eq!(body["options"]["num_predict"], 50);
+    }
+
+    // ─── HTTP-call-level tests via a raw-TCP mock server ───────────────────
+
+    async fn spawn_mock_server(status: u16, reason: &str, body: &'static [u8]) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let response = format!(
+            "HTTP/1.1 {} {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            status, reason, body.len()
+        )
+        .into_bytes();
+        tokio::spawn(async move {
+            if let Ok((mut socket, _)) = listener.accept().await {
+                let mut buf = [0u8; 8192];
+                let _ = socket.read(&mut buf).await;
+                let _ = socket.write_all(&response).await;
+                let _ = socket.write_all(body).await;
+                let _ = socket.flush().await;
+                let _ = socket.shutdown().await;
+            }
+        });
+        format!("http://{}", addr)
+    }
+
+    fn mock_request() -> InferenceRequest {
+        InferenceRequest {
+            messages: vec![crate::provider::Message {
+                role: "user".to_string(),
+                content: "hi".to_string(),
+                cache_breakpoint: false,
+            }],
+            model: "llama3-8b".to_string(),
+            max_tokens: 50,
+            temperature: 0.5,
+            tools: vec![],
+            extra: serde_json::Value::Null,
+        }
+    }
+
+    #[tokio::test]
+    async fn infer_non_success_status_returns_api_error() {
+        let url = spawn_mock_server(500, "Internal Server Error", b"boom").await;
+        let provider = OllamaProvider::with_base_url(url);
+        let err = provider.infer(mock_request()).await.unwrap_err();
+        assert!(matches!(err, ProviderError::ApiError(_)));
+    }
+
+    #[tokio::test]
+    async fn infer_malformed_json_returns_invalid_response() {
+        let url = spawn_mock_server(200, "OK", b"not json").await;
+        let provider = OllamaProvider::with_base_url(url);
+        let err = provider.infer(mock_request()).await.unwrap_err();
+        assert!(matches!(err, ProviderError::InvalidResponse(_)));
+    }
+
+    #[tokio::test]
+    async fn infer_stream_non_success_status_returns_api_error() {
+        let url = spawn_mock_server(503, "Service Unavailable", b"down").await;
+        let provider = OllamaProvider::with_base_url(url);
+        let err = match provider.infer_stream(mock_request()).await {
+            Err(e) => e,
+            Ok(_) => panic!("expected an error"),
+        };
+        assert!(matches!(err, ProviderError::ApiError(_)));
+    }
+
+    #[tokio::test]
+    async fn infer_stream_success_yields_chunks() {
+        let ndjson_body =
+            b"{\"message\":{\"content\":\"hi\"},\"done\":true,\"eval_count\":1,\"prompt_eval_count\":1}\n";
+        let url = spawn_mock_server(200, "OK", ndjson_body).await;
+        let provider = OllamaProvider::with_base_url(url);
+        let mut stream = provider.infer_stream(mock_request()).await.unwrap();
+        use tokio_stream::StreamExt;
+        let chunk = stream.next().await.unwrap().unwrap();
+        assert_eq!(chunk.delta, "hi");
+    }
+
+    #[tokio::test]
+    async fn infer_stream_body_error_propagates_as_stream_item_error() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+        // Send a Content-Length larger than the actual body, then close the
+        // connection early -- this produces a genuine mid-stream reqwest::Error
+        // (there's no public constructor to fake one).
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            if let Ok((mut socket, _)) = listener.accept().await {
+                let mut buf = [0u8; 8192];
+                let _ = socket.read(&mut buf).await;
+                let response =
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 1000\r\nConnection: close\r\n\r\n";
+                let _ = socket.write_all(response).await;
+                let _ = socket.write_all(b"short").await;
+                let _ = socket.flush().await;
+                let _ = socket.shutdown().await;
+            }
+        });
+        let provider = OllamaProvider::with_base_url(format!("http://{}", addr));
+        let mut stream = provider.infer_stream(mock_request()).await.unwrap();
+        use tokio_stream::StreamExt;
+        let mut saw_error = false;
+        while let Some(item) = stream.next().await {
+            if item.is_err() {
+                saw_error = true;
+                break;
+            }
+        }
+        assert!(saw_error);
+    }
+
+    #[tokio::test]
+    async fn list_models_non_success_status_returns_error() {
+        let url = spawn_mock_server(401, "Unauthorized", b"nope").await;
+        let provider = OllamaProvider::with_base_url(url);
+        let err = provider.list_models().await.unwrap_err();
+        assert!(matches!(err, ProviderError::RequestFailed(_)));
+    }
+
+    #[tokio::test]
+    async fn list_models_malformed_json_returns_error() {
+        let url = spawn_mock_server(200, "OK", b"not json").await;
+        let provider = OllamaProvider::with_base_url(url);
+        let err = provider.list_models().await.unwrap_err();
+        assert!(matches!(err, ProviderError::InvalidResponse(_)));
+    }
+
+    #[tokio::test]
+    async fn list_models_success_returns_models() {
+        let body = br#"{"models":[{"name":"llama3-8b"},{"name":"mistral-7b"}]}"#;
+        let url = spawn_mock_server(200, "OK", body).await;
+        let provider = OllamaProvider::with_base_url(url);
+        let models = provider.list_models().await.unwrap();
+        assert_eq!(models.len(), 2);
+        assert_eq!(models[0].id, "llama3-8b");
+        assert_eq!(models[0].display_name, Some("llama3-8b".to_string()));
+        assert_eq!(models[0].provider, "ollama");
+    }
+
+    #[tokio::test]
+    async fn list_models_missing_data_field_returns_empty() {
+        let url = spawn_mock_server(200, "OK", b"{}").await;
+        let provider = OllamaProvider::with_base_url(url);
+        let models = provider.list_models().await.unwrap();
+        assert!(models.is_empty());
+    }
+
+    #[tokio::test]
+    async fn list_models_entry_without_name_is_skipped() {
+        let body = br#"{"models":[{"foo":"bar"},{"name":"llama3-8b"}]}"#;
+        let url = spawn_mock_server(200, "OK", body).await;
+        let provider = OllamaProvider::with_base_url(url);
+        let models = provider.list_models().await.unwrap();
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0].id, "llama3-8b");
+    }
 }

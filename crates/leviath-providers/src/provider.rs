@@ -645,4 +645,193 @@ mod tests {
             other => panic!("Expected Ready(None), got {:?}", other),
         }
     }
+
+    // ─── Default trait method impls (infer_stream, list_models) ────────────
+
+    struct MinimalProvider;
+
+    #[async_trait]
+    impl Provider for MinimalProvider {
+        async fn infer(&self, _request: InferenceRequest) -> Result<InferenceResponse> {
+            Ok(InferenceResponse {
+                content: "hello".to_string(),
+                tool_calls: vec![ToolCall {
+                    id: "call_1".to_string(),
+                    name: "search".to_string(),
+                    arguments: serde_json::json!({"q": "rust"}),
+                }],
+                tokens_used: TokenUsage {
+                    prompt_tokens: 1,
+                    completion_tokens: 1,
+                    total_tokens: 2,
+                    cached_tokens: 0,
+                    cache_write_tokens: 0,
+                },
+                finish_reason: FinishReason::Complete,
+            })
+        }
+
+        fn count_tokens(&self, text: &str, _model: &str) -> usize {
+            text.len()
+        }
+
+        fn max_context_tokens(&self, _model: &str) -> usize {
+            1000
+        }
+
+        fn name(&self) -> &str {
+            "minimal"
+        }
+
+        fn capabilities(&self, _model: &str) -> ModelCapabilities {
+            ModelCapabilities::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn default_infer_stream_yields_single_chunk_from_infer() {
+        use tokio_stream::StreamExt;
+
+        let provider = MinimalProvider;
+        let request = InferenceRequest {
+            messages: vec![],
+            model: "any".to_string(),
+            max_tokens: 10,
+            temperature: 0.0,
+            tools: vec![],
+            extra: serde_json::Value::Null,
+        };
+        let mut stream = provider.infer_stream(request).await.unwrap();
+        let chunk = stream.next().await.unwrap().unwrap();
+        assert_eq!(chunk.delta, "hello");
+        assert_eq!(chunk.tool_calls.len(), 1);
+        assert_eq!(chunk.tool_calls[0].index, 0);
+        assert_eq!(chunk.tool_calls[0].id.as_deref(), Some("call_1"));
+        assert_eq!(chunk.tool_calls[0].name.as_deref(), Some("search"));
+        assert_eq!(chunk.tokens.as_ref().unwrap().total_tokens, 2);
+        assert!(matches!(chunk.finish_reason, Some(FinishReason::Complete)));
+        assert!(stream.next().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn default_list_models_returns_empty() {
+        let provider = MinimalProvider;
+        let models = provider.list_models().await.unwrap();
+        assert!(models.is_empty());
+    }
+
+    #[test]
+    fn minimal_provider_trait_accessors() {
+        let provider = MinimalProvider;
+        assert_eq!(provider.count_tokens("hello", "any"), 5);
+        assert_eq!(provider.max_context_tokens("any"), 1000);
+        assert_eq!(provider.name(), "minimal");
+        assert_eq!(
+            provider.capabilities("any").max_context_tokens,
+            ModelCapabilities::default().max_context_tokens
+        );
+    }
+
+    // ─── check_http_response ────────────────────────────────────────────────
+
+    async fn spawn_mock_response(
+        status: u16,
+        reason: &str,
+        headers: &[(&str, &str)],
+        body: &'static [u8],
+    ) -> reqwest::Response {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let mut header_lines = format!(
+            "HTTP/1.1 {} {}\r\nContent-Length: {}\r\nConnection: close\r\n",
+            status,
+            reason,
+            body.len()
+        );
+        for (k, v) in headers {
+            header_lines.push_str(&format!("{}: {}\r\n", k, v));
+        }
+        header_lines.push_str("\r\n");
+        let response_bytes = header_lines.into_bytes();
+        tokio::spawn(async move {
+            if let Ok((mut socket, _)) = listener.accept().await {
+                let mut buf = [0u8; 8192];
+                let _ = socket.read(&mut buf).await;
+                let _ = socket.write_all(&response_bytes).await;
+                let _ = socket.write_all(body).await;
+                let _ = socket.flush().await;
+                let _ = socket.shutdown().await;
+            }
+        });
+        reqwest::get(format!("http://{}", addr)).await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn check_http_response_success_returns_response() {
+        let response = spawn_mock_response(200, "OK", &[], b"ok").await;
+        let result = check_http_response(response, None).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn check_http_response_non_success_returns_api_error() {
+        let response = spawn_mock_response(500, "Internal Server Error", &[], b"boom").await;
+        let err = check_http_response(response, None).await.unwrap_err();
+        match err {
+            ProviderError::ApiError(msg) => {
+                assert!(msg.contains("500"));
+                assert!(msg.contains("boom"));
+            }
+            other => panic!("expected ApiError, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn check_http_response_rate_limited_without_limiter_returns_rate_limit_exceeded() {
+        let response = spawn_mock_response(429, "Too Many Requests", &[], b"slow down").await;
+        let err = check_http_response(response, None).await.unwrap_err();
+        assert!(matches!(err, ProviderError::RateLimitExceeded));
+    }
+
+    #[tokio::test]
+    async fn check_http_response_rate_limited_with_retry_after_notifies_limiter() {
+        use crate::rate_limit::RateLimiter;
+        let limiter = RateLimiter::new(&RateLimitConfig {
+            requests_per_minute: 60,
+            tokens_per_minute: 100_000,
+        });
+        let response = spawn_mock_response(
+            429,
+            "Too Many Requests",
+            &[("retry-after", "2")],
+            b"slow down",
+        )
+        .await;
+        let err = check_http_response(response, Some(&limiter))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ProviderError::RateLimitExceeded));
+    }
+
+    #[tokio::test]
+    async fn check_http_response_rate_limited_with_non_numeric_retry_after_is_ignored() {
+        use crate::rate_limit::RateLimiter;
+        let limiter = RateLimiter::new(&RateLimitConfig {
+            requests_per_minute: 60,
+            tokens_per_minute: 100_000,
+        });
+        let response = spawn_mock_response(
+            429,
+            "Too Many Requests",
+            &[("retry-after", "not-a-number")],
+            b"slow down",
+        )
+        .await;
+        let err = check_http_response(response, Some(&limiter))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ProviderError::RateLimitExceeded));
+    }
 }

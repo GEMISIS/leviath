@@ -357,4 +357,43 @@ mod tests {
             assert_eq!(state.request_timestamps.len(), 2);
         }
     }
+
+    #[tokio::test]
+    async fn acquire_waits_then_prunes_expired_timestamp() {
+        let limiter = RateLimiter::new(&RateLimitConfig {
+            requests_per_minute: 1,
+            tokens_per_minute: 100_000,
+        });
+        // Seed a timestamp that's 59.95s old, so the very first `acquire()`
+        // call is already at the RPM limit and must take the "wait" branch
+        // before the entry ages out of the 60s window and gets pruned.
+        {
+            let mut state = limiter.state.lock().await;
+            state
+                .request_timestamps
+                .push_back(Instant::now() - Duration::from_millis(59_950));
+        }
+        limiter.acquire().await.unwrap();
+        let state = limiter.state.lock().await;
+        assert_eq!(state.request_timestamps.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn check_tpm_prunes_expired_token_entries() {
+        let limiter = RateLimiter::new(&RateLimitConfig {
+            requests_per_minute: 60,
+            tokens_per_minute: 100,
+        });
+        {
+            let mut state = limiter.state.lock().await;
+            state
+                .token_counts
+                .push_back((Instant::now() - Duration::from_secs(61), 90));
+        }
+        // The stale entry is outside the 60s window and should be pruned,
+        // leaving the limiter under its TPM limit.
+        assert!(limiter.check_tpm().await);
+        let state = limiter.state.lock().await;
+        assert!(state.token_counts.is_empty());
+    }
 }

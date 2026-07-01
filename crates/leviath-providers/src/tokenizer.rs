@@ -113,6 +113,16 @@ mod tests {
     }
 
     #[test]
+    fn test_recognized_gpt4_model_resolves_bpe_directly() {
+        // "gpt-4" is recognized by tiktoken-rs's own model table, so this
+        // exercises the `Ok(bpe)` branch of `get_bpe_from_model` directly,
+        // as opposed to the cl100k_base fallback used for fictional/future
+        // model names like "gpt-5.5" above.
+        let count = count_tokens("Hello, world!", "gpt-4");
+        assert!(count > 0);
+    }
+
+    #[test]
     fn test_o3_model_uses_tiktoken() {
         let count = count_tokens("Hello", "o3-mini");
         assert!(count > 0);

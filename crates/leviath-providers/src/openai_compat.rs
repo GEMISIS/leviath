@@ -789,4 +789,81 @@ mod tests {
         let result = parse_openai_sse_event(&mut buf);
         assert!(result.is_none() || matches!(result, Some(None)));
     }
+
+    // ─── OpenAiSseStream (Stream-level, not just parse_openai_sse_event) ───
+
+    struct StaticByteStream {
+        data: Vec<Vec<u8>>,
+        idx: usize,
+    }
+
+    impl futures_core::Stream for StaticByteStream {
+        type Item = std::result::Result<bytes::Bytes, reqwest::Error>;
+        fn poll_next(
+            mut self: Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Option<Self::Item>> {
+            if self.idx < self.data.len() {
+                let chunk = bytes::Bytes::from(self.data[self.idx].clone());
+                self.idx += 1;
+                std::task::Poll::Ready(Some(Ok(chunk)))
+            } else {
+                std::task::Poll::Ready(None)
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn openai_sse_stream_yields_content_delta() {
+        use tokio_stream::StreamExt;
+        let data = b"data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n".to_vec();
+        let stream = StaticByteStream {
+            data: vec![data],
+            idx: 0,
+        };
+        let mut sse = OpenAiSseStream::new(stream);
+        let chunk = sse.next().await.unwrap().unwrap();
+        assert_eq!(chunk.delta, "hi");
+    }
+
+    #[tokio::test]
+    async fn openai_sse_stream_done_marker_ends_stream() {
+        use tokio_stream::StreamExt;
+        let data = b"data: [DONE]\n\n".to_vec();
+        let stream = StaticByteStream {
+            data: vec![data],
+            idx: 0,
+        };
+        let mut sse = OpenAiSseStream::new(stream);
+        assert!(sse.next().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn openai_sse_stream_ends_with_incomplete_buffer_returns_none() {
+        use tokio_stream::StreamExt;
+        // No trailing "\n\n" — the event never completes.
+        let data = b"data: {\"choices\":[{\"delta\":{}}]}".to_vec();
+        let stream = StaticByteStream {
+            data: vec![data],
+            idx: 0,
+        };
+        let mut sse = OpenAiSseStream::new(stream);
+        assert!(sse.next().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn openai_sse_stream_multiple_chunks_across_reads() {
+        use tokio_stream::StreamExt;
+        // First read has no complete event; second read completes it.
+        let stream = StaticByteStream {
+            data: vec![
+                b"data: {\"choices\":".to_vec(),
+                b"[{\"delta\":{\"content\":\"ok\"}}]}\n\n".to_vec(),
+            ],
+            idx: 0,
+        };
+        let mut sse = OpenAiSseStream::new(stream);
+        let chunk = sse.next().await.unwrap().unwrap();
+        assert_eq!(chunk.delta, "ok");
+    }
 }
