@@ -263,9 +263,53 @@ where
     F: FnMut(Vec<leviath_providers::ToolCall>) -> Fut,
     Fut: std::future::Future<Output = Vec<(String, String)>>,
 {
+    run_interactive_points_stage_with(
+        engine,
+        entity,
+        provider_name,
+        model_name,
+        max_iterations,
+        tools,
+        routing,
+        compaction_config,
+        points,
+        run_context,
+        io,
+        executor,
+        &crate::interaction::request_interaction_stdin,
+    )
+    .await
+}
+
+/// Core of [`run_interactive_points_stage`], with the foreground (stdin)
+/// interaction dispatch injected as `ask_foreground` so tests can drive the
+/// `run_context = None` path with a mock closure instead of blocking on real
+/// process stdin. Production callers always go through the public wrapper
+/// above, which passes the real [`crate::interaction::request_interaction_stdin`].
+#[allow(clippy::too_many_arguments)]
+async fn run_interactive_points_stage_with<F, Fut>(
+    engine: &mut AgentEngine,
+    entity: bevy_ecs::prelude::Entity,
+    provider_name: &str,
+    model_name: &str,
+    max_iterations: usize,
+    tools: &[leviath_providers::Tool],
+    routing: Option<&leviath_runtime::ToolResultRoutingConfig>,
+    compaction_config: Option<&CompactionConfig>,
+    points: &[leviath_core::blueprint::InteractionPoint],
+    run_context: Option<(&str, &mut RunMeta)>,
+    io: &mut dyn RunIO,
+    executor: &mut F,
+    ask_foreground: &(dyn Fn(&crate::interaction::InteractionRequest) -> crate::interaction::InteractionResponse
+          + Sync),
+) -> anyhow::Result<()>
+where
+    F: FnMut(Vec<leviath_providers::ToolCall>) -> Fut,
+    Fut: std::future::Future<Output = Vec<(String, String)>>,
+{
     use crate::interaction::{
-        make_interaction_id, request_interaction_async, request_interaction_stdin,
-        response_as_choice, response_as_text, InteractionRequest,
+        make_interaction_id, request_interaction_async, response_as_choice, response_as_text,
+        InteractionRequest,
     };
     use leviath_runtime::ContextWindow;
 
@@ -386,17 +430,12 @@ where
                     leviath_core::blueprint::InteractionStyle::FreeText => response_as_text(&resp),
                 }
             } else {
-                // Foreground (stdin) path — `request_interaction_stdin` prints and
-                // reads real process stdin directly (unlike `run_interactive_stage`'s
-                // `None` path, which goes through the injectable `RunIO` trait).
-                // There's no reader-generic seam here to mock without either
-                // blocking a test on real stdin or threading a new parameter
-                // through this function and its callers in `foreground.rs`/
-                // `worker.rs` -- out of scope for a single-file coverage pass.
-                // Not exercised by any test; same for its `followup_text` sibling
-                // call below and the `None => (None, None)` `run_context` arm
-                // above, both reachable only via this same real-stdin path.
-                let resp = request_interaction_stdin(&ipc_req);
+                // Foreground (stdin) path — dispatched through the injected
+                // `ask_foreground` closure (real `request_interaction_stdin`
+                // in production, a mock in tests) rather than calling it
+                // directly, so this whole branch is testable without
+                // blocking on real stdin.
+                let resp = ask_foreground(&ipc_req);
                 match bp_style {
                     leviath_core::blueprint::InteractionStyle::MultipleChoice
                     | leviath_core::blueprint::InteractionStyle::Confirm => {
@@ -435,7 +474,7 @@ where
                     let resp = request_interaction_async(run_id, meta, followup_req, None).await?;
                     response_as_text(&resp)
                 } else {
-                    response_as_text(&request_interaction_stdin(&followup_req))
+                    response_as_text(&ask_foreground(&followup_req))
                 };
 
             if !followup_text.is_empty() {
@@ -943,6 +982,19 @@ mod tests {
         assert_eq!(provider.count_tokens("abcd", "m"), 1);
         assert_eq!(provider.max_context_tokens("m"), 100_000);
         assert_eq!(provider.name(), "mock");
+        assert!(tokio_test_block_on(provider.list_models())
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn stream_failing_provider_trivial_trait_methods() {
+        let provider = StreamFailingProvider {
+            response_content: "content".to_string(),
+        };
+        assert_eq!(provider.count_tokens("abcd", "m"), 1);
+        assert_eq!(provider.max_context_tokens("m"), 100_000);
+        assert_eq!(provider.name(), "stream-failing-mock");
         assert!(tokio_test_block_on(provider.list_models())
             .unwrap()
             .is_empty());
@@ -1547,6 +1599,259 @@ mod tests {
         assert!(all_content.contains("Approve"));
 
         let _ = std::fs::remove_dir_all(runstate::run_dir(&run_id));
+    }
+
+    // ─── run_interactive_points_stage: real foreground (stdin) path ─────────
+    //
+    // Unlike every test above (all of which pass `Some((run_id, meta))` and
+    // go through the background file-IPC responder, regardless of test name),
+    // these call `run_interactive_points_stage_with` directly with
+    // `run_context: None` and a mock `ask_foreground` closure -- the actual
+    // foreground/stdin dispatch path, previously untested because the public
+    // wrapper always calls the real, stdin-blocking
+    // `crate::interaction::request_interaction_stdin`.
+
+    #[tokio::test]
+    async fn foreground_path_choice_no_followup_completes_without_ipc() {
+        use crate::interaction::InteractionResponse;
+
+        let bp = make_blueprint(vec![make_stage("main")]);
+        let (mut engine, _pool, entity) = make_engine_and_entity(&bp, "Agent response");
+        let mut io = MockIO::new();
+
+        let points = vec![make_multiple_choice_point(
+            "plan_approval",
+            "Approve the plan?",
+            vec!["Approve".to_string(), "Revise".to_string()],
+        )];
+
+        let ask_foreground = |_req: &crate::interaction::InteractionRequest| {
+            InteractionResponse::choice("", 0) // "Approve" -- no followup configured
+        };
+
+        // run_context: None exercises the `(None, None)` arm and the whole
+        // foreground branch, with no real run directory or IPC responder
+        // needed at all.
+        run_interactive_points_stage_with(
+            &mut engine,
+            entity,
+            "mock",
+            "test-model",
+            4,
+            &[],
+            None,
+            None,
+            &points,
+            None,
+            &mut io,
+            &mut noop_exec,
+            &ask_foreground,
+        )
+        .await
+        .unwrap();
+
+        let window = engine
+            .world()
+            .get::<leviath_runtime::ContextWindow>(entity)
+            .unwrap();
+        let conversation = window.get_region("conversation").unwrap();
+        let all_content: String = conversation
+            .content
+            .iter()
+            .map(|e| e.content.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(all_content.contains("Approve"));
+    }
+
+    #[tokio::test]
+    async fn foreground_path_free_text_point_completes_without_ipc() {
+        use crate::interaction::InteractionResponse;
+
+        let bp = make_blueprint(vec![make_stage("main")]);
+        let (mut engine, _pool, entity) = make_engine_and_entity(&bp, "Agent response");
+        let mut io = MockIO::new();
+
+        let points = vec![make_free_text_point("clarify", "Anything else to add?")];
+        let ask_foreground = |_req: &crate::interaction::InteractionRequest| {
+            InteractionResponse::text("", "nothing else")
+        };
+
+        run_interactive_points_stage_with(
+            &mut engine,
+            entity,
+            "mock",
+            "test-model",
+            4,
+            &[],
+            None,
+            None,
+            &points,
+            None,
+            &mut io,
+            &mut noop_exec,
+            &ask_foreground,
+        )
+        .await
+        .unwrap();
+
+        let window = engine
+            .world()
+            .get::<leviath_runtime::ContextWindow>(entity)
+            .unwrap();
+        let conversation = window.get_region("conversation").unwrap();
+        let all_content: String = conversation
+            .content
+            .iter()
+            .map(|e| e.content.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(all_content.contains("nothing else"));
+    }
+
+    #[tokio::test]
+    async fn foreground_path_choice_with_followup_loops_back_for_revision() {
+        use crate::interaction::InteractionResponse;
+        use std::collections::VecDeque;
+        use std::sync::Mutex;
+
+        let bp = make_blueprint(vec![make_stage("main")]);
+        let (mut engine, _pool, entity) = make_engine_and_entity(&bp, "Agent response");
+        let mut io = MockIO::new();
+
+        let mut followups = std::collections::HashMap::new();
+        followups.insert(
+            "Revise".to_string(),
+            "What would you like to change?".to_string(),
+        );
+        let points = vec![make_multiple_choice_point_with_followups(
+            "plan_approval",
+            "Approve the plan?",
+            vec!["Approve".to_string(), "Revise".to_string()],
+            followups,
+        )];
+
+        // Round 1: "Revise" (index 1) -> triggers the followup FreeText ask
+        // (also dispatched through `ask_foreground`). Round 2: "Approve"
+        // (index 0, no followup) -> the point loop ends.
+        let queued = Mutex::new(VecDeque::from(vec![
+            InteractionResponse::choice("", 1),
+            InteractionResponse::text("", "please add error handling"),
+            InteractionResponse::choice("", 0),
+        ]));
+        let ask_foreground = move |_req: &crate::interaction::InteractionRequest| {
+            queued
+                .lock()
+                .unwrap()
+                .pop_front()
+                .expect("ask_foreground called more times than expected")
+        };
+
+        run_interactive_points_stage_with(
+            &mut engine,
+            entity,
+            "mock",
+            "test-model",
+            8,
+            &[],
+            None,
+            None,
+            &points,
+            None,
+            &mut io,
+            &mut noop_exec,
+            &ask_foreground,
+        )
+        .await
+        .unwrap();
+
+        let window = engine
+            .world()
+            .get::<leviath_runtime::ContextWindow>(entity)
+            .unwrap();
+        let conversation = window.get_region("conversation").unwrap();
+        let all_content: String = conversation
+            .content
+            .iter()
+            .map(|e| e.content.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            all_content.contains("please add error handling"),
+            "expected the followup elaboration in context, got: {}",
+            all_content
+        );
+        assert!(all_content.contains("Revise"));
+        assert!(all_content.contains("Approve"));
+    }
+
+    #[tokio::test]
+    async fn foreground_path_revision_cap_stops_infinite_revise_loop() {
+        use crate::interaction::InteractionResponse;
+        use std::collections::VecDeque;
+        use std::sync::Mutex;
+
+        // A user who always picks "Revise" must eventually be cut off by
+        // MAX_REVISION_ROUNDS (4) rather than looping forever -- this
+        // exercises the `revision_round + 1 >= MAX_REVISION_ROUNDS` guard,
+        // previously unreached by any test (every other followup test picks
+        // "Approve" after exactly one revision).
+        let bp = make_blueprint(vec![make_stage("main")]);
+        let (mut engine, _pool, entity) = make_engine_and_entity(&bp, "Agent response");
+        let mut io = MockIO::new();
+
+        let mut followups = std::collections::HashMap::new();
+        followups.insert(
+            "Revise".to_string(),
+            "What would you like to change?".to_string(),
+        );
+        let points = vec![make_multiple_choice_point_with_followups(
+            "plan_approval",
+            "Approve the plan?",
+            vec!["Approve".to_string(), "Revise".to_string()],
+            followups,
+        )];
+
+        // "Revise" every time; a followup answer follows each "Revise" until
+        // the cap breaks the loop before a 4th followup is ever asked.
+        let queued = Mutex::new(VecDeque::from(vec![
+            InteractionResponse::choice("", 1),
+            InteractionResponse::text("", "change 1"),
+            InteractionResponse::choice("", 1),
+            InteractionResponse::text("", "change 2"),
+            InteractionResponse::choice("", 1),
+            InteractionResponse::text("", "change 3"),
+            InteractionResponse::choice("", 1),
+        ]));
+        let ask_foreground = move |_req: &crate::interaction::InteractionRequest| {
+            queued
+                .lock()
+                .unwrap()
+                .pop_front()
+                .expect("ask_foreground called more times than the revision cap allows")
+        };
+
+        run_interactive_points_stage_with(
+            &mut engine,
+            entity,
+            "mock",
+            "test-model",
+            100,
+            &[],
+            None,
+            None,
+            &points,
+            None,
+            &mut io,
+            &mut noop_exec,
+            &ask_foreground,
+        )
+        .await
+        .unwrap();
+
+        // The loop must have stopped after exactly 4 choice picks (no 4th
+        // followup ask) -- if it looped forever, `pop_front` above would
+        // have panicked on an empty queue instead.
     }
 
     #[tokio::test]

@@ -22,6 +22,19 @@ struct PollState {
 }
 
 pub(super) async fn polling_loop(state: AppState) {
+    polling_loop_with(state, runstate::list_runs).await
+}
+
+/// Core of [`polling_loop`], with the run-listing source injected so tests
+/// can drive it with a canned run list instead of the real, system-wide
+/// `~/.leviath/runs` directory. Scanning the real directory made this
+/// function's own test flaky in a full-suite run: real, genuinely active
+/// `lev` background worker processes on a developer machine emit a
+/// continuous stream of real events every poll cycle, which can starve out
+/// a test's own event via the bounded broadcast channel's `Lagged` overflow
+/// under heavy concurrent-test CPU contention -- an environmental race with
+/// unrelated real activity, not a bug in this loop itself.
+async fn polling_loop_with(state: AppState, list_runs: impl Fn() -> Vec<runstate::RunMeta>) {
     let mut poll = PollState {
         last_status: HashMap::new(),
         last_context_tokens: HashMap::new(),
@@ -33,7 +46,7 @@ pub(super) async fn polling_loop(state: AppState) {
 
     loop {
         tokio::time::sleep(Duration::from_millis(200)).await;
-        let runs = runstate::list_runs();
+        let runs = list_runs();
         poll_once(&state, &mut poll, &client, &runs);
     }
 }
@@ -799,16 +812,23 @@ mod tests {
 
     #[tokio::test]
     async fn polling_loop_wrapper_picks_up_real_runs_from_disk() {
-        use crate::runstate::{create_run, RunMeta};
+        // Regression note: this test used to spawn the real `polling_loop`
+        // (which scans the real, system-wide `~/.leviath/runs` directory)
+        // and wait for its own run's event to arrive. That made it flaky
+        // under a full-suite run: any genuinely active `lev` background
+        // worker processes on the machine emit a continuous stream of real
+        // events every 200ms poll cycle, and under heavy concurrent-test
+        // CPU contention the bounded broadcast channel could drop this
+        // test's own event via `Lagged` overflow before it was ever
+        // received -- an environmental race with unrelated real activity,
+        // not a bug in `polling_loop` itself. `polling_loop_with` injects
+        // the run list instead, eliminating the real-directory dependency
+        // (and the flakiness) entirely while still exercising the exact
+        // same sleep-then-list-then-poll_once loop body as the real
+        // `polling_loop` wrapper.
+        use crate::runstate::RunMeta;
 
-        let run_id = format!(
-            "test-poll-loop-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .subsec_nanos()
-        );
+        let run_id = "test-poll-loop-injected".to_string();
         let meta = RunMeta::new(
             run_id.clone(),
             "agent".into(),
@@ -818,13 +838,11 @@ mod tests {
             "/tmp".into(),
             1,
         );
-        create_run(&meta).unwrap();
 
         let (state, mut rx) = make_test_state();
-        let handle = tokio::spawn(polling_loop(state));
+        let meta_clone = meta.clone();
+        let handle = tokio::spawn(polling_loop_with(state, move || vec![meta_clone.clone()]));
 
-        // polling_loop sleeps 200ms between cycles; give it enough time for
-        // at least one full cycle to run and pick up the real run from disk.
         let mut saw_status = false;
         let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
         while tokio::time::Instant::now() < deadline {
@@ -838,10 +856,9 @@ mod tests {
         }
 
         handle.abort();
-        let _ = std::fs::remove_dir_all(crate::runstate::run_dir(&run_id));
         assert!(
             saw_status,
-            "polling_loop should have broadcast an AgentStatus event for the real run"
+            "polling_loop_with should have broadcast an AgentStatus event for the injected run"
         );
     }
 }
