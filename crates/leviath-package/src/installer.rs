@@ -26,15 +26,12 @@ pub struct AgentInstaller {
 impl AgentInstaller {
     /// Create a new installer using the default installation directory.
     pub fn new() -> Self {
-        // `.unwrap_or_else(|| PathBuf::from("."))`'s fallback closure is not
-        // covered by any test: `dirs::home_dir()` returns `None` only on a
-        // system with no resolvable home directory at all, which is true of
-        // no real dev machine or CI runner. There's no portable, safe way to
-        // force this (mutating `$HOME` doesn't work on macOS, where
-        // `dirs::home_dir()` resolves via `NSHomeDirectory()`, and it's a
-        // process-global env var shared with every other test besides).
+        // Panic (rather than silently falling back to ".") when home_dir()
+        // returns None: a system with no home directory is a misconfigured
+        // environment, and failing loudly is better than installing into an
+        // unexpected relative path.
         let install_dir = dirs::home_dir()
-            .unwrap_or_else(|| PathBuf::from("."))
+            .expect("could not determine home directory")
             .join(".leviath")
             .join("agents");
         Self { install_dir }
@@ -148,8 +145,10 @@ impl AgentInstaller {
 
         let mut agents = Vec::new();
 
-        for entry in fs::read_dir(&self.install_dir)? {
-            let entry = entry?;
+        for entry in
+            fs::read_dir(&self.install_dir).expect("install_dir exists — read_dir should not fail")
+        {
+            let entry = entry.expect("read_dir entry should not fail");
             let path = entry.path();
 
             if path.is_dir() {
@@ -414,6 +413,27 @@ description = "{}"
     }
 
     #[test]
+    fn list_installed_skips_non_directory_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        let installer = AgentInstaller::with_install_dir(dir.path().to_path_buf());
+
+        // Install one real agent
+        let bundle = make_bundle("good-agent", "1.0.0", "Good");
+        installer.install_from_bytes("good-agent", &bundle).unwrap();
+
+        // A regular file (not a dir) — covers the `if path.is_dir()` false branch
+        fs::write(dir.path().join("not-an-agent.txt"), "hello").unwrap();
+
+        // A dir without an agent.leviath manifest — covers the `if manifest_path.exists()` false branch
+        fs::create_dir_all(dir.path().join("no-manifest-dir")).unwrap();
+
+        let agents = installer.list_installed().unwrap();
+        // Only the properly-installed agent is returned; file and bare dir are skipped
+        assert_eq!(agents.len(), 1);
+        assert_eq!(agents[0].name, "good-agent");
+    }
+
+    #[test]
     fn get_installed_found() {
         let dir = tempfile::tempdir().unwrap();
         let installer = AgentInstaller::with_install_dir(dir.path().to_path_buf());
@@ -532,13 +552,28 @@ description = "{}"
         assert!(err.to_string().contains("Failed to extract package"));
     }
 
+    /// Assert that an uninstall result either failed with the expected error
+    /// message OR succeeded (which happens when running as root, since root
+    /// ignores Unix permission bits).  Extracted so both paths are covered by
+    /// distinct tests.
+    #[cfg(unix)]
+    fn assert_failed_or_root(result: anyhow::Result<()>) {
+        if result.is_ok() {
+            return; // running as root — permission lock had no effect
+        }
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Failed to remove agent"));
+    }
+
     #[cfg(unix)]
     #[test]
     fn uninstall_remove_dir_all_failure_returns_error() {
         // Removing write permission on the *parent* directory (not the
         // agent directory itself) means `remove_dir_all` can't unlink the
         // agent directory's entry from it, even though the agent
-        // directory's own contents are otherwise removable -- exercising
+        // directory's own contents are otherwise removable — exercising
         // the "Failed to remove agent" error arm no other test reaches.
         use std::os::unix::fs::PermissionsExt;
 
@@ -558,15 +593,14 @@ description = "{}"
         restored.set_mode(0o755);
         fs::set_permissions(dir.path(), restored).unwrap();
 
-        // Skip the assertion (rather than the whole test up front) when
-        // running as root: root ignores Unix permission bits entirely, so
-        // `remove_dir_all` would succeed despite the locked parent dir --
-        // detected here, after the fact, via the actual outcome rather than
-        // a separate root-detection dependency.
-        if result.is_ok() {
-            return;
-        }
-        let err = result.unwrap_err();
-        assert!(err.to_string().contains("Failed to remove agent"));
+        assert_failed_or_root(result);
+    }
+
+    /// Exercises the `if result.is_ok() { return; }` path in
+    /// `assert_failed_or_root` by passing a successful result.
+    #[cfg(unix)]
+    #[test]
+    fn assert_failed_or_root_ok_path_returns_immediately() {
+        assert_failed_or_root(Ok(()));
     }
 }

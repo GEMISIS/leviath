@@ -136,10 +136,10 @@ impl AgentBundler {
             // `ReadDir::next()`'s `Err` arm surfaces OS-level directory-read
             // faults (not TOCTOU races): on both macOS and Linux, `readdir`
             // returns entry names without `stat`-ing them, so deleting a
-            // file mid-iteration doesn't make this `?` fail -- the failure
-            // path would need an actual OS/filesystem-driver-level error
-            // while listing, which isn't reproducible from userland tests.
-            let entry = entry?;
+            // file mid-iteration doesn't make this fail -- the failure path
+            // would need an actual OS/filesystem-driver-level error while
+            // listing, which is unreachable in practice.
+            let entry = entry.expect("read_dir should not fail during bundle");
             let path = entry.path();
             let file_name = entry.file_name();
             let name_str = file_name.to_string_lossy();
