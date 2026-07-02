@@ -195,6 +195,11 @@ impl Blueprint {
         let stage = self.stages.iter().find(|s| s.name == stage_name);
         let stage = match stage {
             Some(s) => s,
+            // Unreachable via this function's only call site (`validate_graph`,
+            // below): it rejects any transition target that doesn't match a
+            // real stage name *before* ever calling `has_terminal_path`, and
+            // `has_terminal_path` is private, so no other caller can pass in
+            // an unvalidated stage name.
             None => return false,
         };
 
@@ -224,6 +229,14 @@ impl Blueprint {
                 // If all targets are exhaustible (already visited + have max_revisits),
                 // the stage will eventually have zero available edges → terminal
                 let all_exhaustible = transitions.keys().all(|target| {
+                    // Unreachable: reaching this closure means the `for` loop
+                    // above completed without any `has_terminal_path(target, ..)`
+                    // call returning `true`. Each such call either short-circuits
+                    // immediately because `target` is already in `visited`, or
+                    // it isn't yet -- in which case the call itself inserts
+                    // `target` into `visited` right after that check, before
+                    // doing anything else. Either way, every `target` this
+                    // closure sees is already in `visited` by construction.
                     if !visited.contains(target) {
                         return false;
                     }
