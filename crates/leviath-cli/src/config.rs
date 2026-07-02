@@ -406,7 +406,7 @@ pub(crate) struct ConfigPathTestGuard {
     original_config_path: Option<std::ffi::OsString>,
     original_skip_dotenv: Option<std::ffi::OsString>,
     original_keys: Vec<(&'static str, Option<std::ffi::OsString>)>,
-    fake_dir: std::path::PathBuf,
+    pub(crate) fake_dir: std::path::PathBuf,
     _lock: std::sync::MutexGuard<'static, ()>,
 }
 
@@ -692,6 +692,20 @@ google_api_key = "AIza-existing"
             .unwrap_err()
             .to_string()
             .contains("Failed to write config"));
+    }
+
+    #[test]
+    fn save_to_path_create_config_dir_failure_returns_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let blocking_file = dir.path().join("not-a-dir");
+        std::fs::write(&blocking_file, "").unwrap();
+        let path = blocking_file.join("config.toml");
+        let result = Config::default().save_to_path(&path);
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Failed to create config directory"));
     }
 
     #[test]

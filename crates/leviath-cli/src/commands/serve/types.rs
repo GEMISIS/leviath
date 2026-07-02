@@ -143,7 +143,7 @@ pub(super) struct SpawnAgentReq {
     pub(super) callback_url: Option<String>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Debug)]
 pub(super) struct SpawnAgentResp {
     pub(super) agent_id: String,
     pub(super) run_id: String,

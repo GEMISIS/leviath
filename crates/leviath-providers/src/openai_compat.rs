@@ -516,7 +516,10 @@ mod tests {
             "usage": {"prompt_tokens": 5, "completion_tokens": 5}
         });
         let resp = parse_openai_response(&body).unwrap();
-        assert_eq!(resp.finish_reason, crate::provider::FinishReason::TokenLimit);
+        assert_eq!(
+            resp.finish_reason,
+            crate::provider::FinishReason::TokenLimit
+        );
     }
 
     // ─── parse_openai_sse_event ─────────────────────────────────────────────
@@ -565,7 +568,10 @@ mod tests {
             })
         );
         let chunk = parse_openai_sse_event(&mut buf).unwrap().unwrap();
-        assert_eq!(chunk.finish_reason, Some(crate::provider::FinishReason::Complete));
+        assert_eq!(
+            chunk.finish_reason,
+            Some(crate::provider::FinishReason::Complete)
+        );
     }
 
     #[test]

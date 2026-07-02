@@ -27,3 +27,7 @@ Thumbs.db
 
 tarpaulin-report.json
 .claude/worktrees/
+
+# LLVM coverage profiling data
+*.profraw
+*.profdata

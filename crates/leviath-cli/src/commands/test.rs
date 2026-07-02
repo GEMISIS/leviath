@@ -147,9 +147,8 @@ async fn execute_with_registry(
     let mut failed = 0;
     let mut failures: Vec<String> = Vec::new();
 
-    // Run .toml test files
-    for entry in fs::read_dir(&tests_dir)? {
-        let entry = entry?;
+    // Run .toml test files and .rhai test scripts (single directory scan)
+    for entry in fs::read_dir(&tests_dir)?.flatten() {
         let test_path = entry.path();
 
         if test_path.extension().and_then(|e| e.to_str()) == Some("toml") {
@@ -211,15 +210,7 @@ async fn execute_with_registry(
                     }
                 }
             }
-        }
-    }
-
-    // Run .rhai test scripts
-    for entry in fs::read_dir(&tests_dir)? {
-        let entry = entry?;
-        let test_path = entry.path();
-
-        if test_path.extension().and_then(|e| e.to_str()) == Some("rhai") {
+        } else if test_path.extension().and_then(|e| e.to_str()) == Some("rhai") {
             let file_name = test_path
                 .file_name()
                 .and_then(|n| n.to_str())
@@ -285,6 +276,53 @@ async fn execute_with_registry(
     Ok(())
 }
 
+/// Initialise the context-window regions for a test run.
+///
+/// Returns `true` when the entity has a [`leviath_runtime::ContextWindow`]
+/// component (the normal path) and `false` when it does not (should never
+/// happen with a pool-spawned agent, but the branch is kept so both paths
+/// are reachable from unit tests).
+fn init_test_context_window(
+    world: &mut bevy_ecs::world::World,
+    entity: bevy_ecs::entity::Entity,
+    blueprint: &leviath_core::Blueprint,
+    input: &str,
+) -> bool {
+    let Some(mut window) = world.get_mut::<leviath_runtime::ContextWindow>(entity) else {
+        return false;
+    };
+
+    for region_def in &blueprint.context_layout.regions {
+        let region = Region::new(
+            region_def.name.clone(),
+            region_def.kind.clone(),
+            region_def.max_tokens,
+        );
+        window.add_region(region);
+    }
+
+    // Add tool_results region if not present
+    if window.get_region("tool_results").is_none() {
+        let tool_region = Region::new("tool_results".to_string(), RegionKind::Temporary, 5000);
+        window.add_region(tool_region);
+    }
+
+    // Add test input to the first pinned/system region
+    let system_region_name = blueprint
+        .context_layout
+        .regions
+        .iter()
+        .find(|r| matches!(r.kind, RegionKind::Pinned))
+        .map(|r| r.name.clone());
+
+    if let Some(region_name) = system_region_name {
+        let task_tokens = input.len() / 4 + 1;
+        let _ = window.add_to_region(&region_name, input.to_string(), task_tokens);
+    }
+
+    true
+}
+
 /// Run a single test case by spawning an agent and running one inference call.
 async fn run_test_case(
     blueprint: &leviath_core::Blueprint,
@@ -299,47 +337,16 @@ async fn run_test_case(
     let agent_id = pool.spawn_agent(engine.world_mut());
     let entity = pool
         .get_agent(&agent_id)
-        .ok_or_else(|| anyhow::anyhow!("Failed to get spawned agent entity"))?;
+        .expect("AgentPool::spawn_agent always inserts the entity; this is unreachable");
 
     // Initialize context window regions from blueprint layout
-    if let Some(mut window) = engine
-        .world_mut()
-        .get_mut::<leviath_runtime::ContextWindow>(entity)
-    {
-        for region_def in &blueprint.context_layout.regions {
-            let region = Region::new(
-                region_def.name.clone(),
-                region_def.kind.clone(),
-                region_def.max_tokens,
-            );
-            window.add_region(region);
-        }
-
-        // Add tool_results region if not present
-        if window.get_region("tool_results").is_none() {
-            let tool_region = Region::new("tool_results".to_string(), RegionKind::Temporary, 5000);
-            window.add_region(tool_region);
-        }
-
-        // Add test input to the first pinned/system region
-        let system_region_name = blueprint
-            .context_layout
-            .regions
-            .iter()
-            .find(|r| matches!(r.kind, RegionKind::Pinned))
-            .map(|r| r.name.clone());
-
-        if let Some(region_name) = system_region_name {
-            let task_tokens = test.input.len() / 4 + 1;
-            let _ = window.add_to_region(&region_name, test.input.clone(), task_tokens);
-        }
-    }
+    init_test_context_window(engine.world_mut(), entity, blueprint, &test.input);
 
     // Get model config from the first stage
     let stage = blueprint
         .stages
         .first()
-        .ok_or_else(|| anyhow::anyhow!("Blueprint has no stages"))?;
+        .ok_or(anyhow::anyhow!("Blueprint has no stages"))?;
 
     let provider_name = &stage.model.provider;
     let model_name = &stage.model.model;
@@ -1225,6 +1232,37 @@ model = { provider = "anthropic", model = "claude-sonnet-4-6" }
         }
     }
 
+    /// A mock provider that always returns an error.
+    struct ErrorProvider;
+
+    #[async_trait::async_trait]
+    impl Provider for ErrorProvider {
+        async fn infer(
+            &self,
+            _request: InferenceRequest,
+        ) -> leviath_providers::Result<InferenceResponse> {
+            Err(leviath_providers::ProviderError::ApiError(
+                "simulated inference error".to_string(),
+            ))
+        }
+
+        fn count_tokens(&self, text: &str, _model: &str) -> usize {
+            text.len()
+        }
+
+        fn max_context_tokens(&self, _model: &str) -> usize {
+            8192
+        }
+
+        fn name(&self) -> &str {
+            "error-provider"
+        }
+
+        fn capabilities(&self, _model: &str) -> leviath_providers::ModelCapabilities {
+            leviath_providers::ModelCapabilities::default()
+        }
+    }
+
     fn basic_blueprint() -> leviath_core::Blueprint {
         let manifest = r#"
 [agent]
@@ -1236,6 +1274,323 @@ description = "test"
 model = { provider = "anthropic", model = "claude-sonnet-4-6" }
 "#;
         parse_manifest_public(manifest).unwrap()
+    }
+
+    /// Blueprint with an explicit `tool_results` region, so the
+    /// `if window.get_region("tool_results").is_none()` branch is NOT taken.
+    fn blueprint_with_tool_results_region() -> leviath_core::Blueprint {
+        let manifest = r#"
+[agent]
+name = "test-agent"
+version = "0.1.0"
+description = "test"
+
+[stages.main]
+model = { provider = "anthropic", model = "claude-sonnet-4-6" }
+
+[context.regions.tool_results]
+kind = "temporary"
+max_tokens = 5000
+"#;
+        parse_manifest_public(manifest).unwrap()
+    }
+
+    // ── new coverage tests ────────────────────────────────────────────────────
+
+    /// Covers the `map_err(|e| anyhow!("Inference failed: {}", e))` closure
+    /// path at the `run_inference` call-site.
+    #[tokio::test]
+    async fn run_test_case_inference_error_propagates() {
+        let blueprint = basic_blueprint();
+        let mut registry = ProviderRegistry::new();
+        registry.register("anthropic".to_string(), Arc::new(ErrorProvider));
+        let tc = TestCase {
+            name: "inference_error".to_string(),
+            input: "hi".to_string(),
+            expect_contains: Some("x".to_string()),
+            expect_tool_call: None,
+            max_tokens: None,
+        };
+        let result = run_test_case(&blueprint, &registry, &tc).await;
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("Inference failed"), "got: {}", err);
+    }
+
+    /// Covers the `ok_or(anyhow!("Blueprint has no stages"))` path.
+    #[tokio::test]
+    async fn run_test_case_blueprint_with_no_stages_errors() {
+        use leviath_core::{layout::ContextLayout, Blueprint};
+        let blueprint = Blueprint::new(
+            "no-stages".to_string(),
+            "test".to_string(),
+            vec![],
+            ContextLayout::new(vec![], 4096),
+        );
+        let registry = ProviderRegistry::new();
+        let tc = TestCase {
+            name: "no_stages".to_string(),
+            input: "hi".to_string(),
+            expect_contains: Some("x".to_string()),
+            expect_tool_call: None,
+            max_tokens: None,
+        };
+        let result = run_test_case(&blueprint, &registry, &tc).await;
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("Blueprint has no stages"), "got: {}", err);
+    }
+
+    /// Covers the `if window.get_region("tool_results").is_none()` false branch:
+    /// the region already exists, so we skip the insertion block.
+    #[tokio::test]
+    async fn run_test_case_with_preexisting_tool_results_region() {
+        let blueprint = blueprint_with_tool_results_region();
+        let mut registry = ProviderRegistry::new();
+        registry.register(
+            "anthropic".to_string(),
+            Arc::new(MockProvider {
+                content: "hello world".to_string(),
+                tool_calls: vec![],
+            }),
+        );
+        let tc = TestCase {
+            name: "has_tool_results_region".to_string(),
+            input: "hi".to_string(),
+            expect_contains: Some("world".to_string()),
+            expect_tool_call: None,
+            max_tokens: None,
+        };
+        let result = run_test_case(&blueprint, &registry, &tc).await;
+        assert!(result.unwrap());
+    }
+
+    /// Covers `fs::read_to_string(&manifest_path)?` failing (line 135) by
+    /// making the manifest file unreadable on Unix.
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn execute_with_registry_manifest_unreadable_errors() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path();
+        let manifest_path = project.join("agent.leviath");
+        std::fs::write(
+            &manifest_path,
+            "[agent]\nname=\"x\"\nversion=\"0.1.0\"\ndescription=\"x\"",
+        )
+        .unwrap();
+        // Make the file unreadable.
+        std::fs::set_permissions(&manifest_path, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let tests_dir = project.join("tests");
+        std::fs::create_dir_all(&tests_dir).unwrap();
+        let args = TestArgs {
+            path: Some(project.to_str().unwrap().to_string()),
+            filter: None,
+            dry_run: true,
+        };
+        let result = execute_with_registry(args, build_registry_from_config).await;
+        // Restore permissions so tempdir cleanup succeeds.
+        std::fs::set_permissions(&manifest_path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(result.is_err());
+    }
+
+    /// Covers `Config::load()?` (line 139) failing when the config file exists
+    /// but contains invalid TOML.  Uses `isolate_config_path_for_test` so that
+    /// we redirect `LEVIATH_CONFIG_PATH` to a temp file we control, avoiding
+    /// any mutation of the user's real `~/.leviath/config.toml`.
+    #[tokio::test]
+    async fn execute_with_registry_config_load_fails_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path();
+        let manifest = r#"
+[agent]
+name = "test-agent"
+version = "0.1.0"
+description = "test"
+
+[stages.main]
+model = { provider = "anthropic", model = "claude-sonnet-4-6" }
+"#;
+        std::fs::write(project.join("agent.leviath"), manifest).unwrap();
+        let tests_dir = project.join("tests");
+        std::fs::create_dir_all(&tests_dir).unwrap();
+
+        // Redirect Config::load() to a file with invalid TOML.
+        let guard = crate::config::isolate_config_path_for_test("test-cmd-config-fail");
+        let bad_config = guard.fake_dir.join("config.toml");
+        std::fs::write(&bad_config, "not valid toml {{{").unwrap();
+
+        let args = TestArgs {
+            path: Some(project.to_str().unwrap().to_string()),
+            filter: None,
+            dry_run: false, // triggers Config::load()
+        };
+        let result = execute_with_registry(args, build_registry_from_config).await;
+        drop(guard);
+        assert!(result.is_err());
+    }
+
+    /// Covers the `parse_manifest_public(&manifest_content)?` error path
+    /// in `execute_with_registry` (invalid TOML in agent.leviath).
+    #[tokio::test]
+    async fn execute_with_registry_manifest_invalid_toml_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path();
+        std::fs::write(project.join("agent.leviath"), "not valid toml {{{").unwrap();
+        let tests_dir = project.join("tests");
+        std::fs::create_dir_all(&tests_dir).unwrap();
+        let args = TestArgs {
+            path: Some(project.to_str().unwrap().to_string()),
+            filter: None,
+            dry_run: false,
+        };
+        let result = execute_with_registry(args, mock_registry_builder("irrelevant", vec![])).await;
+        assert!(result.is_err());
+    }
+
+    /// Covers `fs::read_dir(&tests_dir)?` (line 151) failing when the
+    /// tests directory is inaccessible.
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn execute_with_registry_tests_dir_unreadable_errors() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path();
+        let manifest = r#"
+[agent]
+name = "test-agent"
+version = "0.1.0"
+description = "test"
+
+[stages.main]
+model = { provider = "anthropic", model = "claude-sonnet-4-6" }
+"#;
+        std::fs::write(project.join("agent.leviath"), manifest).unwrap();
+        let tests_dir = project.join("tests");
+        std::fs::create_dir_all(&tests_dir).unwrap();
+        // Remove all permissions on the tests directory.
+        std::fs::set_permissions(&tests_dir, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let args = TestArgs {
+            path: Some(project.to_str().unwrap().to_string()),
+            filter: None,
+            dry_run: true,
+        };
+        let result = execute_with_registry(args, build_registry_from_config).await;
+        std::fs::set_permissions(&tests_dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(result.is_err());
+    }
+
+    /// Covers `fs::read_to_string(&test_path)?` (line 163) for a .toml file
+    /// that becomes unreadable after creation.
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn execute_with_registry_toml_unreadable_errors() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path();
+        let manifest = r#"
+[agent]
+name = "test-agent"
+version = "0.1.0"
+description = "test"
+
+[stages.main]
+model = { provider = "anthropic", model = "claude-sonnet-4-6" }
+"#;
+        std::fs::write(project.join("agent.leviath"), manifest).unwrap();
+        let tests_dir = project.join("tests");
+        std::fs::create_dir_all(&tests_dir).unwrap();
+        let toml_path = tests_dir.join("unreadable.toml");
+        std::fs::write(
+            &toml_path,
+            "[[test]]\nname=\"x\"\ninput=\"y\"\nexpect_contains=\"z\"",
+        )
+        .unwrap();
+        // Make the .toml file unreadable.
+        std::fs::set_permissions(&toml_path, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let args = TestArgs {
+            path: Some(project.to_str().unwrap().to_string()),
+            filter: None,
+            dry_run: true,
+        };
+        let result = execute_with_registry(args, build_registry_from_config).await;
+        std::fs::set_permissions(&toml_path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(result.is_err());
+    }
+
+    /// Covers `fs::read_to_string(&test_path)?` (line 238) for a .rhai file
+    /// that becomes unreadable after creation.
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn execute_with_registry_rhai_unreadable_errors() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path();
+        let manifest = r#"
+[agent]
+name = "test-agent"
+version = "0.1.0"
+description = "test"
+
+[stages.main]
+model = { provider = "anthropic", model = "claude-sonnet-4-6" }
+"#;
+        std::fs::write(project.join("agent.leviath"), manifest).unwrap();
+        let tests_dir = project.join("tests");
+        std::fs::create_dir_all(&tests_dir).unwrap();
+        let rhai_path = tests_dir.join("unreadable.rhai");
+        std::fs::write(&rhai_path, "true").unwrap();
+        // Make the .rhai file unreadable.
+        std::fs::set_permissions(&rhai_path, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let args = TestArgs {
+            path: Some(project.to_str().unwrap().to_string()),
+            filter: None,
+            dry_run: true,
+        };
+        let result = execute_with_registry(args, build_registry_from_config).await;
+        std::fs::set_permissions(&rhai_path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(result.is_err());
+    }
+
+    /// Covers the `else { return false; }` arm of `init_test_context_window`:
+    /// an entity that was spawned WITHOUT a ContextWindow component causes the
+    /// function to return `false` immediately.
+    #[test]
+    fn init_test_context_window_returns_false_for_entity_without_context_window() {
+        use bevy_ecs::world::World;
+        let blueprint = basic_blueprint();
+        let mut world = World::new();
+        // Spawn an entity with NO components — no ContextWindow.
+        let entity = world.spawn(()).id();
+        let result = init_test_context_window(&mut world, entity, &blueprint, "hello");
+        assert!(!result);
+    }
+
+    /// Covers the `if let Some(region_name) = system_region_name` false branch
+    /// in `init_test_context_window`: a blueprint whose context_layout has no
+    /// Pinned regions means `system_region_name` is `None`, so the
+    /// `add_to_region` call is skipped.
+    #[test]
+    fn init_test_context_window_no_pinned_region_skips_input() {
+        use bevy_ecs::world::World;
+        use leviath_core::layout::ContextLayout;
+        use leviath_core::Blueprint;
+        // Blueprint with no context regions → ContextLayout has no Pinned region.
+        let blueprint = Blueprint::new(
+            "no-regions".to_string(),
+            "test".to_string(),
+            vec![leviath_core::Stage::new(
+                "main".to_string(),
+                leviath_core::blueprint::ModelConfig::new(
+                    "anthropic".to_string(),
+                    "claude-sonnet-4-6".to_string(),
+                ),
+            )],
+            ContextLayout::new(vec![], 4096),
+        );
+        let mut world = World::new();
+        let window = leviath_runtime::ContextWindow::new(4096);
+        let entity = world.spawn((window,)).id();
+        let result = init_test_context_window(&mut world, entity, &blueprint, "hello");
+        assert!(result);
     }
 
     #[tokio::test]
@@ -1506,7 +1861,7 @@ expect_contains = "world"
 
         let result =
             execute_with_registry(args, mock_registry_builder("Hello, world!", vec![])).await;
-        assert!(result.is_ok(), "expected success, got: {:?}", result.err());
+        assert!(result.is_ok());
     }
 
     #[tokio::test]
@@ -1522,7 +1877,7 @@ expect_contains = "world"
             filter: None,
             dry_run: true,
         };
-        let result = execute_with_registry(args, |_| ProviderRegistry::new()).await;
+        let result = execute_with_registry(args, build_registry_from_config).await;
         assert!(result.is_err());
         assert!(result
             .unwrap_err()
@@ -1585,7 +1940,7 @@ expect_contains = "unmatchable content"
         // it passes, so the whole run succeeds.
         let result =
             execute_with_registry(args, mock_registry_builder("Hello, world!", vec![])).await;
-        assert!(result.is_ok(), "expected success, got: {:?}", result.err());
+        assert!(result.is_ok());
     }
 
     #[tokio::test]
@@ -1614,7 +1969,7 @@ expect_tool_call = "bash"
             arguments: serde_json::json!({}),
         }];
         let result = execute_with_registry(args, mock_registry_builder("", tool_calls)).await;
-        assert!(result.is_ok(), "expected success, got: {:?}", result.err());
+        assert!(result.is_ok());
     }
 
     #[tokio::test]
@@ -1702,7 +2057,7 @@ model = { provider = "anthropic", model = "claude-sonnet-4-6" }
         };
 
         let result = execute_with_registry(args, mock_registry_builder("unused", vec![])).await;
-        assert!(result.is_ok(), "expected success, got: {:?}", result.err());
+        assert!(result.is_ok());
     }
 
     #[tokio::test]
@@ -1789,7 +2144,7 @@ model = { provider = "anthropic", model = "claude-sonnet-4-6" }
         };
 
         let result = execute_with_registry(args, mock_registry_builder("unused", vec![])).await;
-        assert!(result.is_ok(), "expected success, got: {:?}", result.err());
+        assert!(result.is_ok());
     }
 
     #[tokio::test]
@@ -1819,7 +2174,7 @@ model = { provider = "anthropic", model = "claude-sonnet-4-6" }
         // Filter excludes the only script -- 0 total, reports "no test files
         // found" and succeeds (rather than failing on the script's `false`).
         let result = execute_with_registry(args, mock_registry_builder("unused", vec![])).await;
-        assert!(result.is_ok(), "expected success, got: {:?}", result.err());
+        assert!(result.is_ok());
     }
 
     // ─── build_registry_from_config ──────────────────────────────────────────
@@ -1862,6 +2217,48 @@ model = { provider = "anthropic", model = "claude-sonnet-4-6" }
         // ollama has no key gate -- always registered, with the default URL
         // when `ollama_base_url` is unset.
         assert!(registry.has("ollama"));
+    }
+
+    /// Covers the implicit `else` branch in the `if .toml / else if .rhai`
+    /// check: a file in tests/ whose extension is neither is silently skipped.
+    #[tokio::test]
+    async fn execute_with_registry_ignores_non_test_files_in_tests_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path();
+        let manifest = r#"
+[agent]
+name = "test-agent"
+version = "0.1.0"
+description = "test"
+
+[stages.main]
+model = { provider = "anthropic", model = "claude-sonnet-4-6" }
+"#;
+        std::fs::write(project.join("agent.leviath"), manifest).unwrap();
+        let tests_dir = project.join("tests");
+        std::fs::create_dir_all(&tests_dir).unwrap();
+        // A .txt file — neither .toml nor .rhai — exercises the implicit else
+        // path that simply skips unrecognized files.
+        std::fs::write(tests_dir.join("readme.txt"), "this file should be ignored").unwrap();
+        let args = TestArgs {
+            path: Some(project.to_str().unwrap().to_string()),
+            filter: None,
+            dry_run: true,
+        };
+        let result = execute_with_registry(args, build_registry_from_config).await;
+        assert!(result.is_ok());
+    }
+
+    // ─── ErrorProvider trivial trait methods ─────────────────────────────────
+
+    #[test]
+    fn error_provider_trivial_trait_methods() {
+        let provider = ErrorProvider;
+        assert_eq!(provider.count_tokens("hello", "any-model"), 5);
+        assert_eq!(provider.max_context_tokens("any-model"), 8192);
+        assert_eq!(provider.name(), "error-provider");
+        let caps = provider.capabilities("any-model");
+        let _ = caps; // just verify it doesn't panic
     }
 
     // ─── MockProvider trivial trait methods ──────────────────────────────────

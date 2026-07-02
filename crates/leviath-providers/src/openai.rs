@@ -771,7 +771,11 @@ mod tests {
     async fn infer_stream_connection_refused_returns_error() {
         let provider = provider_with_url("http://127.0.0.1:19997".to_string());
         let result = provider.infer_stream(simple_request()).await;
-        assert!(result.err().unwrap().to_string().contains("Request failed:"));
+        assert!(result
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("Request failed:"));
     }
 
     #[tokio::test]

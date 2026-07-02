@@ -21,8 +21,8 @@ struct PollState {
     callback_fired: HashMap<String, bool>,
 }
 
-pub(super) async fn polling_loop(state: AppState) {
-    polling_loop_with(state, runstate::list_runs).await
+pub(super) fn polling_loop(state: AppState) -> impl std::future::Future<Output = ()> {
+    polling_loop_with(state, runstate::list_runs)
 }
 
 /// Core of [`polling_loop`], with the run-listing source injected so tests
@@ -48,6 +48,14 @@ async fn polling_loop_with(state: AppState, list_runs: impl Fn() -> Vec<runstate
         tokio::time::sleep(Duration::from_millis(200)).await;
         let runs = list_runs();
         poll_once(&state, &mut poll, &client, &runs);
+    }
+}
+
+/// Fire a webhook POST and log any delivery failure. Extracted from poll_once
+/// so tests can await it directly without a timing-dependent tokio::spawn.
+async fn fire_webhook(client: reqwest::Client, url: String, payload: serde_json::Value) {
+    if let Err(e) = client.post(&url).json(&payload).send().await {
+        error!(url = %url, error = %e, "Webhook callback failed");
     }
 }
 
@@ -90,8 +98,9 @@ fn poll_once(
             let was_terminal = poll
                 .last_status
                 .get(&meta.run_id)
-                .map(|(s, _, _, _)| s == "Complete" || s == "Error" || s == "Cancelled")
-                .unwrap_or(false);
+                .is_some_and(|(s, _, _, _)| {
+                    matches!(s.as_str(), "Complete" | "Error" | "Cancelled")
+                });
 
             if !was_terminal
                 && (meta.status == RunStatus::Complete || meta.status == RunStatus::Error)
@@ -125,11 +134,7 @@ fn poll_once(
                         });
                         let client = client.clone();
                         let url = url.clone();
-                        tokio::spawn(async move {
-                            if let Err(e) = client.post(&url).json(&payload).send().await {
-                                error!(url = %url, error = %e, "Webhook callback failed");
-                            }
-                        });
+                        tokio::spawn(fire_webhook(client, url, payload));
                     }
                 }
             }
@@ -152,22 +157,23 @@ fn poll_once(
             }
         }
 
-        // Detect pending.json
-        let has_pending = interaction::read_request(&meta.run_id).is_some();
+        // Detect pending.json — read once to avoid TOCTOU between the
+        // is_some() check and the value use below.
+        let pending_req = interaction::read_request(&meta.run_id);
+        let has_pending = pending_req.is_some();
         let had_pending = poll
             .last_pending
             .get(&meta.run_id)
             .copied()
             .unwrap_or(false);
         if has_pending && !had_pending {
-            if let Some(req) = interaction::read_request(&meta.run_id) {
-                let val = serde_json::to_value(&req).unwrap_or(serde_json::Value::Null);
-                let _ = state.event_tx.send(ServerEvent::InteractionNeeded {
-                    agent_id: meta.agent_name.clone(),
-                    run_id: meta.run_id.clone(),
-                    request: val,
-                });
-            }
+            let req = pending_req.unwrap(); // safe: has_pending == true
+            let val = serde_json::to_value(&req).unwrap_or(serde_json::Value::Null);
+            let _ = state.event_tx.send(ServerEvent::InteractionNeeded {
+                agent_id: meta.agent_name.clone(),
+                run_id: meta.run_id.clone(),
+                request: val,
+            });
         }
         poll.last_pending.insert(meta.run_id.clone(), has_pending);
     }
@@ -285,16 +291,17 @@ mod tests {
 
     #[test]
     fn terminal_status_detection() {
-        let terminal_statuses = ["Complete", "Error", "Cancelled"];
-        for s in &terminal_statuses {
-            let is_terminal = *s == "Complete" || *s == "Error" || *s == "Cancelled";
-            assert!(is_terminal, "{} should be terminal", s);
-        }
-
-        let non_terminal = ["Running", "WaitingInput", "Pending"];
-        for s in &non_terminal {
-            let is_terminal = *s == "Complete" || *s == "Error" || *s == "Cancelled";
-            assert!(!is_terminal, "{} should not be terminal", s);
+        let cases: &[(&str, bool)] = &[
+            ("Complete", true),
+            ("Error", true),
+            ("Cancelled", true),
+            ("Running", false),
+            ("WaitingInput", false),
+            ("Pending", false),
+        ];
+        for (s, expected) in cases {
+            let is_terminal = matches!(*s, "Complete" | "Error" | "Cancelled");
+            assert_eq!(is_terminal, *expected, "{} terminal mismatch", s);
         }
     }
 
@@ -311,8 +318,7 @@ mod tests {
         let was_terminal = poll
             .last_status
             .get("run-1")
-            .map(|(s, _, _, _)| s == "Complete" || s == "Error" || s == "Cancelled")
-            .unwrap_or(false);
+            .is_some_and(|(s, _, _, _)| matches!(s.as_str(), "Complete" | "Error" | "Cancelled"));
         assert!(!was_terminal);
 
         // Insert a running status
@@ -321,8 +327,7 @@ mod tests {
         let was_terminal = poll
             .last_status
             .get("run-1")
-            .map(|(s, _, _, _)| s == "Complete" || s == "Error" || s == "Cancelled")
-            .unwrap_or(false);
+            .is_some_and(|(s, _, _, _)| matches!(s.as_str(), "Complete" | "Error" | "Cancelled"));
         assert!(!was_terminal);
 
         // Insert a terminal status
@@ -331,8 +336,7 @@ mod tests {
         let was_terminal = poll
             .last_status
             .get("run-1")
-            .map(|(s, _, _, _)| s == "Complete" || s == "Error" || s == "Cancelled")
-            .unwrap_or(false);
+            .is_some_and(|(s, _, _, _)| matches!(s.as_str(), "Complete" | "Error" | "Cancelled"));
         assert!(was_terminal);
     }
 
@@ -493,7 +497,7 @@ mod tests {
             1,
         );
         meta.status = RunStatus::Running;
-        poll_once(&state, &mut poll, &client, &[meta.clone()]);
+        poll_once(&state, &mut poll, &client, std::slice::from_ref(&meta));
 
         // Drain Running events
         while rx.try_recv().is_ok() {}
@@ -566,6 +570,69 @@ mod tests {
         let _ = std::fs::remove_dir_all(crate::runstate::run_dir(&run_id));
         #[rustfmt::skip]
         assert!(got_context, "poll_once should have emitted ContextUpdate event");
+    }
+
+    /// Covers the `if prev != Some(ctx.total_tokens)` ELSE path: when the
+    /// context token count hasn't changed between two poll cycles, no
+    /// ContextUpdate event is emitted on the second call.
+    #[test]
+    fn poll_once_no_context_update_when_tokens_unchanged() {
+        use crate::runstate::{create_run, write_context_snapshot, ContextSnapshot, RunMeta};
+
+        let (state, mut rx) = make_test_state();
+        let mut poll = PollState {
+            last_status: HashMap::new(),
+            last_context_tokens: HashMap::new(),
+            last_pending: HashMap::new(),
+            callback_fired: HashMap::new(),
+        };
+        let client = reqwest::Client::new();
+
+        let run_id = format!(
+            "test-poll-ctx-same-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .subsec_nanos()
+        );
+        let meta = RunMeta::new(
+            run_id.clone(),
+            "agent".into(),
+            "/p".into(),
+            "task".into(),
+            None,
+            "/tmp".into(),
+            1,
+        );
+        create_run(&meta).unwrap();
+
+        let snap = ContextSnapshot {
+            stage_name: "plan".to_string(),
+            total_tokens: 5000,
+            max_tokens: 200000,
+            regions: vec![],
+        };
+        write_context_snapshot(&run_id, &snap).unwrap();
+
+        // First call: tokens change (prev = None → 5000), should emit event.
+        poll_once(&state, &mut poll, &client, std::slice::from_ref(&meta));
+        while rx.try_recv().is_ok() {} // drain events
+
+        // Second call: tokens unchanged (prev = 5000, current = 5000), no event.
+        poll_once(&state, &mut poll, &client, &[meta]);
+        let mut got_context_update = false;
+        while let Ok(ev) = rx.try_recv() {
+            if matches!(&ev, ServerEvent::ContextUpdate { run_id: eid, .. } if eid == &run_id) {
+                got_context_update = true;
+            }
+        }
+
+        let _ = std::fs::remove_dir_all(crate::runstate::run_dir(&run_id));
+        assert!(
+            !got_context_update,
+            "poll_once should not emit ContextUpdate when token count is unchanged"
+        );
     }
 
     #[test]
@@ -671,7 +738,7 @@ mod tests {
         );
         meta.callback_url = Some(url);
         meta.status = RunStatus::Running;
-        poll_once(&state, &mut poll, &client, &[meta.clone()]);
+        poll_once(&state, &mut poll, &client, std::slice::from_ref(&meta));
         while evt_rx.try_recv().is_ok() {}
 
         meta.status = RunStatus::Complete;
@@ -724,7 +791,7 @@ mod tests {
         );
         meta.callback_url = Some("http://127.0.0.1:19997".to_string());
         meta.status = RunStatus::Running;
-        poll_once(&state, &mut poll, &client, &[meta.clone()]);
+        poll_once(&state, &mut poll, &client, std::slice::from_ref(&meta));
         while evt_rx.try_recv().is_ok() {}
 
         meta.status = RunStatus::Complete;
@@ -741,6 +808,32 @@ mod tests {
 
         // Give the spawned task time to attempt the connection and fail.
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    }
+
+    /// Directly exercise `fire_webhook`'s `Err` arm (connection refused) and
+    /// `Ok` arm (successful delivery) without going through `tokio::spawn`,
+    /// so coverage is attributed synchronously rather than depending on timing.
+    #[tokio::test]
+    async fn fire_webhook_logs_on_connection_failure() {
+        // Use a port with no listener so the HTTP POST fails immediately.
+        let client = reqwest::Client::new();
+        let payload = serde_json::json!({"event": "agent_completed"});
+        // Should complete without panic; error is logged.
+        fire_webhook(client, "http://127.0.0.1:19997".to_string(), payload).await;
+    }
+
+    #[tokio::test]
+    async fn fire_webhook_succeeds_on_valid_server() {
+        let (url, rx) = spawn_mock_webhook().await;
+        let client = reqwest::Client::new();
+        let payload = serde_json::json!({"event": "agent_completed", "run_id": "test"});
+        fire_webhook(client, url, payload).await;
+        let body = tokio::time::timeout(std::time::Duration::from_secs(5), rx)
+            .await
+            .expect("timed out")
+            .expect("sender dropped");
+        let s = String::from_utf8_lossy(&body);
+        assert!(s.contains("agent_completed"));
     }
 
     #[tokio::test]
@@ -769,12 +862,12 @@ mod tests {
         );
         meta.callback_url = Some(url);
         meta.status = RunStatus::Running;
-        poll_once(&state, &mut poll, &client, &[meta.clone()]);
+        poll_once(&state, &mut poll, &client, std::slice::from_ref(&meta));
 
         meta.status = RunStatus::Complete;
         meta.touch();
         // First completion: fires the webhook and marks it fired.
-        poll_once(&state, &mut poll, &client, &[meta.clone()]);
+        poll_once(&state, &mut poll, &client, std::slice::from_ref(&meta));
         assert!(poll
             .callback_fired
             .get("run-webhook-2")

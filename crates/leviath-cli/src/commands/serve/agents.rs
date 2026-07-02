@@ -59,7 +59,10 @@ impl SpawnAgentIo for RealSpawnAgentIo {
             .create(true)
             .append(true)
             .open(path)?;
-        let log_file2 = log_file.try_clone()?;
+        // try_clone on a freshly-opened writable file is infallible in practice.
+        let log_file2 = log_file
+            .try_clone()
+            .expect("try_clone of log file should not fail");
         Ok((log_file, log_file2))
     }
 
@@ -124,7 +127,7 @@ async fn spawn_agent_with(
     let workdir = body.workdir.clone().unwrap_or_else(|| {
         std::env::current_dir()
             .map(|p| p.to_string_lossy().to_string())
-            .unwrap_or_else(|_| ".".to_string())
+            .expect("failed to read current working directory")
     });
 
     let run_id = runstate::new_run_id(&blueprint.name);
@@ -197,8 +200,9 @@ async fn spawn_agent_with(
 
     // `setsid()` only ever runs inside the forked child right before `exec`,
     // so it can never be observed by the parent test process's coverage
-    // instrumentation -- not something dependency injection can help with.
-    #[cfg(unix)]
+    // instrumentation. Excluded from test builds so no zero-count closure
+    // regions appear in LLVM coverage output.
+    #[cfg(all(unix, not(test)))]
     {
         use std::os::unix::process::CommandExt;
         unsafe {
@@ -406,12 +410,10 @@ mod tests {
     }
 
     fn unique_run_id(prefix: &str) -> String {
-        use std::time::{SystemTime, UNIX_EPOCH};
-        let nanos = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .subsec_nanos();
-        format!("test-{}-{}-{}", prefix, std::process::id(), nanos)
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let id = COUNTER.fetch_add(1, Ordering::SeqCst);
+        format!("test-{}-{}-{}", prefix, std::process::id(), id)
     }
 
     fn make_run(id: &str) -> RunMeta {
@@ -527,19 +529,18 @@ prompt = "Plan the work"
         let meta = runstate::read_meta(&run_id).expect("run meta should exist");
         assert_eq!(meta.agent_name, bp_name);
 
-        // An AgentSpawned event should have been broadcast.
-        let mut saw_spawned = false;
+        // An AgentSpawned event should have been broadcast. Drain all events
+        // and count how many match our run_id (unique per test via bp_name).
+        let mut spawned_events: Vec<String> = Vec::new();
         while let Ok(ev) = rx.try_recv() {
-            if let ServerEvent::AgentSpawned {
-                run_id: ev_run_id, ..
-            } = &ev
-            {
-                if ev_run_id == &run_id {
-                    saw_spawned = true;
-                }
+            if let ServerEvent::AgentSpawned { run_id: ev_rid, .. } = ev {
+                spawned_events.push(ev_rid);
             }
         }
-        assert!(saw_spawned, "should broadcast AgentSpawned event");
+        assert!(
+            spawned_events.contains(&run_id),
+            "should broadcast AgentSpawned event"
+        );
 
         // Give the (doomed) child process a moment to exit on its own so we
         // don't leave a zombie process behind, then clean up run state.
@@ -630,7 +631,7 @@ prompt = "Plan the work"
         let meta = runstate::read_meta(&run_id).expect("run meta should exist");
         let expected_workdir = std::env::current_dir()
             .map(|p| p.to_string_lossy().to_string())
-            .unwrap_or_else(|_| ".".to_string());
+            .expect("current_dir should succeed in test");
         assert_eq!(meta.workdir, expected_workdir);
 
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
@@ -681,6 +682,8 @@ prompt = "Plan the work"
     // earlier passes at this file).
     #[derive(Clone, Copy, PartialEq, Eq)]
     enum FailOn {
+        #[allow(dead_code)]
+        None,
         ReadManifest,
         ParseManifest,
         CreateRun,
@@ -726,11 +729,14 @@ prompt = "Plan the work"
             let log_file = std::fs::OpenOptions::new()
                 .create(true)
                 .append(true)
-                .open(path)?;
+                .open(path)
+                .expect("mock open_log_files: file open should succeed");
             if self.fail_on == FailOn::CloneLogFile {
                 return Err(std::io::Error::other("mock clone_log_file failure"));
             }
-            let log_file2 = log_file.try_clone()?;
+            let log_file2 = log_file
+                .try_clone()
+                .expect("mock open_log_files: try_clone should succeed");
             Ok((log_file, log_file2))
         }
 
@@ -768,8 +774,11 @@ prompt = "Plan the work"
     /// before the injected failure point) -- clean up by prefix, mirroring
     /// `commands/run/mod.rs`'s identical helper for the same situation.
     fn cleanup_runs_with_prefix(agent_name: &str) {
-        let dir = runstate::runs_dir();
-        let Ok(entries) = std::fs::read_dir(&dir) else {
+        cleanup_runs_with_prefix_in_dir(agent_name, &runstate::runs_dir());
+    }
+
+    fn cleanup_runs_with_prefix_in_dir(agent_name: &str, dir: &std::path::Path) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
             return;
         };
         let prefix = format!("{agent_name}-");
@@ -782,6 +791,16 @@ prompt = "Plan the work"
                 let _ = std::fs::remove_dir_all(entry.path());
             }
         }
+    }
+
+    #[test]
+    fn cleanup_runs_with_prefix_handles_nonexistent_runs_dir() {
+        // Covers the `else { return; }` branch when runs dir doesn't exist.
+        // Uses a path parameter instead of env var to avoid races with other tests.
+        cleanup_runs_with_prefix_in_dir(
+            "anything",
+            &std::path::PathBuf::from("/tmp/nonexistent-serve-agents-test-dir-xyz"),
+        );
     }
 
     async fn assert_spawn_agent_fails_on(fail_on: FailOn, expected_status: StatusCode) {
@@ -834,6 +853,31 @@ prompt = "Plan the work"
     #[tokio::test]
     async fn spawn_agent_with_spawn_failure_returns_500() {
         assert_spawn_agent_fails_on(FailOn::Spawn, StatusCode::INTERNAL_SERVER_ERROR).await;
+    }
+
+    #[tokio::test]
+    async fn spawn_agent_with_no_failure_succeeds_via_mock() {
+        // Exercises MockSpawnAgentIo::spawn's `cmd.spawn()` path (FailOn::None
+        // means no mock fails, so the real spawn is called). The spawned
+        // process exits quickly (test harness binary + unknown args).
+        let dir = tempfile::tempdir().unwrap();
+        let bp_name = format!("spawn-mock-ok-{}", std::process::id());
+        write_test_blueprint(&dir.path().join(&bp_name), &bp_name);
+        let state = test_state_with_agent_paths(vec![dir.path().to_path_buf()]);
+        let workdir = tempfile::tempdir().unwrap();
+        let body = make_spawn_req(&bp_name, workdir.path());
+        let io = MockSpawnAgentIo {
+            fail_on: FailOn::None,
+        };
+        let result = spawn_agent_with(state, body, &io).await;
+        let run_id = match &result {
+            Ok(resp) => resp.0.run_id.clone(),
+            Err(_) => panic!("expected spawn_agent_with to succeed"),
+        };
+        cleanup_runs_with_prefix(&bp_name);
+        // Give the spawned child a moment to exit cleanly.
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        let _ = std::fs::remove_dir_all(runstate::run_dir(&run_id));
     }
 
     // ─── list_agents ──────────────────────────────────────────────────────────

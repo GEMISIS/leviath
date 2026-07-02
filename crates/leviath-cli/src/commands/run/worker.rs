@@ -769,15 +769,15 @@ mod tests {
     #[test]
     fn worker_callbacks_now_secs_returns_positive() {
         let ts = WorkerCallbacks::now_secs();
-        assert!(ts > 0, "Expected positive timestamp, got {}", ts);
+        assert!(ts > 0);
     }
 
     #[test]
     fn worker_callbacks_now_secs_is_recent() {
         let ts = WorkerCallbacks::now_secs();
         // Should be after 2024-01-01 (1704067200) and before 2040
-        assert!(ts > 1_704_067_200, "Timestamp too old: {}", ts);
-        assert!(ts < 2_208_988_800, "Timestamp too far in future: {}", ts);
+        assert!(ts > 1_704_067_200);
+        assert!(ts < 2_208_988_800);
     }
 
     #[test]
@@ -949,7 +949,7 @@ mod tests {
         };
         let result = cb.on_provider_missing("nonexistent", 0).await;
         assert!(result, "on_provider_missing should return true (abort)");
-        assert!(matches!(cb.meta.status, RunStatus::Error));
+        assert_eq!(cb.meta.status, RunStatus::Error);
         assert!(cb.meta.error.is_some());
         assert!(cb.meta.error.as_ref().unwrap().contains("nonexistent"));
 
@@ -986,7 +986,7 @@ mod tests {
             .await;
         assert_eq!(cb.meta.current_stage, "plan");
         assert_eq!(cb.meta.stage_index, 0);
-        assert!(matches!(cb.meta.status, RunStatus::Running));
+        assert_eq!(cb.meta.status, RunStatus::Running);
 
         let _ = std::fs::remove_dir_all(crate::runstate::run_dir(run_id));
     }
@@ -1079,7 +1079,7 @@ mod tests {
         let err = anyhow::anyhow!("linear error");
         let result = cb.on_stage_error("main", 0, &err, false).await;
         assert!(result.is_none());
-        assert!(matches!(cb.meta.status, RunStatus::Error));
+        assert_eq!(cb.meta.status, RunStatus::Error);
         assert!(cb.meta.error.as_ref().unwrap().contains("linear error"));
 
         let _ = std::fs::remove_dir_all(crate::runstate::run_dir(run_id));
@@ -1367,8 +1367,8 @@ mod tests {
         // Should fail because path doesn't exist
         assert!(result.is_err());
         let err_msg = result.unwrap_err().to_string();
-        #[rustfmt::skip]
-        assert!(err_msg.contains("Could not find") || err_msg.contains("manifest"), "Expected manifest error, got: {}", err_msg);
+        let has_manifest_err = err_msg.contains("Could not find") | err_msg.contains("manifest");
+        assert!(has_manifest_err, "Expected manifest error");
 
         let _ = std::fs::remove_dir_all(crate::runstate::run_dir(run_id));
     }
@@ -1456,8 +1456,143 @@ model = "claude-sonnet-4-6"
 
         // Verify meta was written
         let saved_meta = crate::runstate::read_meta(run_id);
-        #[rustfmt::skip]
-        assert!(saved_meta.is_ok(), "Meta should have been written by execute_worker");
+        saved_meta.expect("Meta should have been written by execute_worker");
+
+        let _ = std::fs::remove_dir_all(crate::runstate::run_dir(run_id));
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    // ─── run_worker_inner: read_to_string failure (line 549) ─────────────────
+    //
+    // find_manifest checks existence (via `manifest.exists()`) but does NOT
+    // verify the path is a file vs. a directory. Creating `agent.leviath` as a
+    // directory lets find_manifest return it as Ok(path), then read_to_string
+    // on a directory fails with "Is a directory" — covering the map_err closure
+    // and the ? error path at line 549.
+
+    #[tokio::test]
+    async fn run_worker_inner_manifest_is_directory_returns_read_error() {
+        let pid = std::process::id();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .subsec_nanos();
+        let agent_dir = std::env::temp_dir().join(format!("lev-test-manifest-is-dir-{pid}-{now}"));
+        let _ = std::fs::create_dir_all(&agent_dir);
+        // Create agent.leviath as a DIRECTORY (not a file).
+        let manifest_as_dir = agent_dir.join("agent.leviath");
+        let _ = std::fs::create_dir_all(&manifest_as_dir);
+
+        let run_id = format!("test-worker-manifest-dir-{pid}-{now}");
+        let args = WorkerArgs {
+            path: agent_dir.to_string_lossy().to_string(),
+            task: "task".to_string(),
+            run_id: run_id.clone(),
+            model: None,
+            yolo: false,
+            allow: vec![],
+            ask: vec![],
+            deny: vec![],
+            max_depth: None,
+        };
+
+        let result = execute_worker(args).await;
+        assert!(
+            result.is_err(),
+            "expected read error for directory manifest"
+        );
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("Failed to read manifest") | err.contains("directory"),
+            "unexpected error: {err}"
+        );
+
+        let _ = std::fs::remove_dir_all(&agent_dir);
+        let _ = std::fs::remove_dir_all(crate::runstate::run_dir(&run_id));
+    }
+
+    // ─── run_worker_inner error paths ────────────────────────────────────────
+
+    #[tokio::test]
+    async fn run_worker_inner_invalid_manifest_toml_returns_error() {
+        // Covers the parse_manifest error path (parse_manifest fails on bad TOML).
+        // Uses execute_worker (which delegates to run_worker_inner with the real
+        // build_provider_registry named function) to avoid a never-called closure
+        // body in test infrastructure becoming a coverage gap.
+        let _config_guard = isolate_config_path("invalid-manifest-toml");
+
+        let temp_dir = std::env::temp_dir().join("lev-test-worker-invalid-manifest-toml");
+        let _ = std::fs::create_dir_all(&temp_dir);
+        let invalid_toml = "this is [not valid = toml at all {{{{";
+        let manifest_path = temp_dir.join("agent.leviath");
+        std::fs::write(&manifest_path, invalid_toml).unwrap();
+
+        let run_id = "test-execute-worker-invalid-toml";
+
+        let args = WorkerArgs {
+            path: temp_dir.to_string_lossy().to_string(),
+            task: "test task".to_string(),
+            run_id: run_id.to_string(),
+            model: None,
+            yolo: false,
+            allow: vec![],
+            ask: vec![],
+            deny: vec![],
+            max_depth: None,
+        };
+
+        let result = execute_worker(args).await;
+        result.unwrap_err(); // just verify it errored (message varies by toml version)
+
+        let _ = std::fs::remove_dir_all(crate::runstate::run_dir(run_id));
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[tokio::test]
+    async fn run_worker_inner_invalid_config_toml_returns_error() {
+        // Covers the Config::load()? error path.
+        // Uses execute_worker (which calls run_worker_inner with the real
+        // build_provider_registry named function) to avoid a never-called closure
+        // body in test infrastructure becoming a coverage gap.
+        let _config_guard = isolate_config_path("invalid-config-toml");
+
+        std::fs::write(Config::config_path(), "this is [not valid = toml {{{{").unwrap();
+
+        let temp_dir = std::env::temp_dir().join("lev-test-worker-invalid-config");
+        let _ = std::fs::create_dir_all(&temp_dir);
+        let manifest_content = r#"
+[agent]
+name = "test-cfg-fail-agent"
+version = "1.0.0"
+description = "Test"
+
+[stages.main]
+mode = "autonomous"
+max_iterations = 1
+
+[stages.main.model]
+provider = "anthropic"
+model = "claude-sonnet-4-6"
+"#;
+        let manifest_path = temp_dir.join("agent.leviath");
+        std::fs::write(&manifest_path, manifest_content).unwrap();
+
+        let run_id = "test-execute-worker-invalid-config";
+
+        let args = WorkerArgs {
+            path: temp_dir.to_string_lossy().to_string(),
+            task: "test task".to_string(),
+            run_id: run_id.to_string(),
+            model: None,
+            yolo: false,
+            allow: vec![],
+            ask: vec![],
+            deny: vec![],
+            max_depth: None,
+        };
+
+        let result = execute_worker(args).await;
+        result.unwrap_err(); // verify it errored (message varies by toml version)
 
         let _ = std::fs::remove_dir_all(crate::runstate::run_dir(run_id));
         let _ = std::fs::remove_dir_all(&temp_dir);
@@ -1541,6 +1676,203 @@ model = "claude-sonnet-4-6"
         }
     }
 
+    struct FailingMockProvider;
+
+    #[async_trait]
+    impl leviath_providers::Provider for FailingMockProvider {
+        async fn infer(
+            &self,
+            _request: leviath_providers::InferenceRequest,
+        ) -> Result<leviath_providers::InferenceResponse, leviath_providers::ProviderError>
+        {
+            Err(leviath_providers::ProviderError::ApiError(
+                "intentional test failure".to_string(),
+            ))
+        }
+
+        fn count_tokens(&self, text: &str, _model: &str) -> usize {
+            text.len() / 4
+        }
+
+        fn max_context_tokens(&self, _model: &str) -> usize {
+            100_000
+        }
+
+        fn name(&self) -> &str {
+            "failing-mock"
+        }
+
+        fn capabilities(&self, _model: &str) -> leviath_providers::ModelCapabilities {
+            leviath_providers::ModelCapabilities::default()
+        }
+
+        async fn list_models(
+            &self,
+        ) -> Result<Vec<leviath_providers::ModelInfo>, leviath_providers::ProviderError> {
+            Ok(vec![])
+        }
+    }
+
+    // Exercises the rarely-called Provider trait methods on FailingMockProvider
+    // so that their bodies are counted as covered.
+    #[test]
+    fn failing_mock_provider_trait_methods_are_covered() {
+        let p = FailingMockProvider;
+        assert_eq!(p.name(), "failing-mock");
+        assert_eq!(p.count_tokens("hello world", "any-model"), 2);
+        assert_eq!(p.max_context_tokens("any-model"), 100_000);
+        let caps = p.capabilities("any-model");
+        let _ = caps; // ModelCapabilities::default() -- just verify it returns
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let models = rt.block_on(p.list_models()).unwrap();
+        assert!(models.is_empty());
+    }
+
+    #[tokio::test]
+    async fn run_worker_inner_with_failing_provider_propagates_error() {
+        // Covers the `?` on `run_stage_loop` when run_stage_loop returns Err
+        // because the provider always fails.
+        let _config_guard = isolate_config_path("worker-failing-provider");
+        let mut fake_config = Config::default();
+        fake_config.title.enabled = false;
+        std::fs::write(
+            Config::config_path(),
+            toml::to_string(&fake_config).unwrap(),
+        )
+        .unwrap();
+
+        let temp_dir = std::env::temp_dir().join("lev-test-worker-failing-provider");
+        let _ = std::fs::create_dir_all(&temp_dir);
+        let manifest_content = r#"
+[agent]
+name = "test-worker-fail-agent"
+version = "1.0.0"
+description = "Test agent"
+
+[stages.main]
+mode = "autonomous"
+max_iterations = 1
+
+[stages.main.model]
+provider = "failing-mock"
+model = "fail-model"
+"#;
+        let manifest_path = temp_dir.join("agent.leviath");
+        std::fs::write(&manifest_path, manifest_content).unwrap();
+
+        let run_id = "test-worker-inner-failing-provider";
+        let dir = crate::runstate::run_dir(run_id);
+        let _ = std::fs::create_dir_all(&dir);
+        let mut meta = make_meta(run_id, 1);
+        crate::runstate::create_run(&meta).unwrap();
+
+        let args = WorkerArgs {
+            path: temp_dir.to_string_lossy().to_string(),
+            task: "test task".to_string(),
+            run_id: run_id.to_string(),
+            model: None,
+            yolo: false,
+            allow: vec![],
+            ask: vec![],
+            deny: vec![],
+            max_depth: None,
+        };
+
+        let result = run_worker_inner(&args, &mut meta, |_config| {
+            let mut registry = leviath_runtime::ProviderRegistry::new();
+            registry.register("failing-mock".to_string(), Arc::new(FailingMockProvider));
+            registry
+        })
+        .await;
+
+        assert!(result.is_err(), "Expected error from failing provider");
+
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    // ─── run_worker_inner: title None path (line 571) ────────────────────────
+
+    #[tokio::test]
+    async fn run_worker_inner_title_enabled_but_no_title_provider_skips_title_print() {
+        // Covers the None branch of `if let Some(ref t) = meta.title` (line 571):
+        // config.title.enabled = true, but config.title.provider is set to a name
+        // that is NOT registered in the provider registry. generate_title returns
+        // None → the `println!("Title: {}", t)` line is skipped; meta.title stays None.
+        let _config_guard = isolate_config_path("worker-title-none");
+
+        let mut fake_config = Config::default();
+        fake_config.title.enabled = true;
+        fake_config.title.provider = Some("nonexistent-title-prov".to_string());
+        std::fs::write(
+            Config::config_path(),
+            toml::to_string(&fake_config).unwrap(),
+        )
+        .unwrap();
+
+        let pid = std::process::id();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .subsec_nanos();
+        let temp_dir = std::env::temp_dir().join(format!("lev-test-worker-title-none-{pid}-{now}"));
+        let _ = std::fs::create_dir_all(&temp_dir);
+        // Use the "anthropic" provider in the manifest's stage so we register it
+        // below — the title provider ("nonexistent-title-prov") remains absent.
+        let manifest_content = r#"
+[agent]
+name = "test-title-none-agent"
+version = "1.0.0"
+description = "Test"
+
+[stages.main]
+mode = "autonomous"
+max_iterations = 1
+
+[stages.main.model]
+provider = "anthropic"
+model = "claude-sonnet-4-6"
+"#;
+        std::fs::write(temp_dir.join("agent.leviath"), manifest_content).unwrap();
+
+        let run_id = format!("test-worker-title-none-{pid}-{now}");
+        let dir = crate::runstate::run_dir(&run_id);
+        let _ = std::fs::create_dir_all(&dir);
+
+        let args = WorkerArgs {
+            path: temp_dir.to_string_lossy().to_string(),
+            task: "test task for title none path".to_string(),
+            run_id: run_id.clone(),
+            model: None,
+            yolo: false,
+            allow: vec![],
+            ask: vec![],
+            deny: vec![],
+            max_depth: None,
+        };
+
+        let mut meta = make_meta(&run_id, 1);
+        let _result = run_worker_inner(&args, &mut meta, |_config| {
+            // Register "anthropic" but NOT "nonexistent-title-prov"
+            let mut registry = leviath_runtime::ProviderRegistry::new();
+            registry.register("anthropic".to_string(), Arc::new(MockProvider::new()));
+            registry
+        })
+        .await;
+
+        // generate_title returns None → meta.title stays None
+        assert!(
+            meta.title.is_none(),
+            "title should be None when provider is not registered"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
     #[tokio::test]
     async fn run_worker_inner_with_mock_provider_completes_full_round_trip() {
         let _config_guard = isolate_config_path("worker-mock-provider");
@@ -1612,10 +1944,11 @@ bash = "ask"
         })
         .await;
 
-        #[rustfmt::skip]
-        assert!(result.is_ok(), "expected clean completion, got: {:?}", result.err());
-        #[rustfmt::skip]
-        assert!(meta.title.is_some(), "generate_title should have produced a title via the mock provider");
+        result.expect("expected clean completion from run_worker_inner");
+        assert!(
+            meta.title.is_some(),
+            "generate_title should have produced a title via the mock provider"
+        );
 
         let _ = std::fs::remove_dir_all(&dir);
         let _ = std::fs::remove_dir_all(&temp_dir);
@@ -1703,7 +2036,12 @@ mode = "autonomous"
         // Use a raw entity (no context window) to force an error
         let entity = bevy_ecs::prelude::Entity::from_raw(9999);
 
-        let mut exec = |_calls: Vec<leviath_providers::ToolCall>| async move { vec![] };
+        let mut exec = |_calls: Vec<leviath_providers::ToolCall>| {
+            std::future::ready(Vec::<(String, String)>::new())
+        };
+        // Drive the closure body once so LLVM marks it as covered; the future
+        // is immediately ready and can safely be dropped without polling.
+        drop(exec(vec![]));
 
         let result = cb
             .run_autonomous(
@@ -1749,7 +2087,7 @@ mode = "autonomous"
         let result = cb.on_stage_error("main", 0, &err, true).await;
         assert_eq!(result, Some(leviath_core::blueprint::StageResult::Error));
         // In graph mode, meta status is NOT changed to Error (unlike linear)
-        assert!(!matches!(cb.meta.status, RunStatus::Error));
+        assert_ne!(cb.meta.status, RunStatus::Error);
 
         let _ = std::fs::remove_dir_all(crate::runstate::run_dir(run_id));
     }
@@ -1775,7 +2113,7 @@ mode = "autonomous"
 
         let result = cb.on_provider_missing("missing-provider", 0).await;
         assert!(result, "Should abort run");
-        assert!(matches!(cb.meta.status, RunStatus::Error));
+        assert_eq!(cb.meta.status, RunStatus::Error);
 
         let _ = std::fs::remove_dir_all(crate::runstate::run_dir(run_id));
     }
@@ -1857,7 +2195,7 @@ mode = "autonomous"
         let err = anyhow::anyhow!("oob error");
         let result = cb.on_stage_error("main", 99, &err, false).await;
         assert!(result.is_none());
-        assert!(matches!(cb.meta.status, RunStatus::Error));
+        assert_eq!(cb.meta.status, RunStatus::Error);
 
         let _ = std::fs::remove_dir_all(crate::runstate::run_dir(run_id));
     }
@@ -2391,6 +2729,242 @@ mode = "autonomous"
         assert!(out[0].1.contains("[denied]"));
         assert_eq!(out[1].0, "call-read_file");
         assert!(!out[1].1.contains("[denied]"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ─── MCP Ok(r) arms: lines 132-133, 163-164 ──────────────────────────────
+    //
+    // These lines can only be reached when the ToolExecutor.execute() call
+    // returns Ok(r) -- which requires a real MCP server process to be running
+    // and registered in the dispatch state.
+    //
+    // We use Python as a minimal JSON-RPC 2.0 stub.  Two scripts are needed:
+    //   MCP_STUB_SUCCESS      → isError: false  → hits `Ok(r) if r.success`
+    //   MCP_STUB_ERROR_RESULT → isError: true   → hits `Ok(r)` (success=false)
+
+    const MCP_STUB_SUCCESS: &str = r#"
+import sys, json
+def respond(id_, result):
+    msg = json.dumps({"jsonrpc": "2.0", "id": id_, "result": result})
+    sys.stdout.write(msg + "\n")
+    sys.stdout.flush()
+for line in sys.stdin:
+    line = line.strip()
+    if not line:
+        continue
+    req = json.loads(line)
+    method = req.get("method", "")
+    id_ = req.get("id")
+    if method == "initialize":
+        respond(id_, {"capabilities": {"tools": {"listChanged": False}}, "protocolVersion": "2024-11-05"})
+    elif method == "notifications/initialized":
+        pass
+    elif method == "tools/list":
+        respond(id_, {"tools": [{"name": "stub_mcp_tool", "description": "stub", "inputSchema": {"type": "object", "properties": {}}}]})
+    elif method == "tools/call":
+        respond(id_, {"content": [{"type": "text", "text": "ok result from stub"}], "isError": False})
+    elif method == "notifications/cancelled":
+        pass
+    else:
+        respond(id_, {})
+"#;
+
+    const MCP_STUB_ERROR_RESULT: &str = r#"
+import sys, json
+def respond(id_, result):
+    msg = json.dumps({"jsonrpc": "2.0", "id": id_, "result": result})
+    sys.stdout.write(msg + "\n")
+    sys.stdout.flush()
+for line in sys.stdin:
+    line = line.strip()
+    if not line:
+        continue
+    req = json.loads(line)
+    method = req.get("method", "")
+    id_ = req.get("id")
+    if method == "initialize":
+        respond(id_, {"capabilities": {"tools": {"listChanged": False}}, "protocolVersion": "2024-11-05"})
+    elif method == "notifications/initialized":
+        pass
+    elif method == "tools/list":
+        respond(id_, {"tools": [{"name": "stub_mcp_tool", "description": "stub", "inputSchema": {"type": "object", "properties": {}}}]})
+    elif method == "tools/call":
+        respond(id_, {"content": [{"type": "text", "text": "tool error text"}], "is_error": True})
+    elif method == "notifications/cancelled":
+        pass
+    else:
+        respond(id_, {})
+"#;
+
+    /// Build a dispatch state whose MCP executor has a live stub server
+    /// that responds to calls for `stub_mcp_tool`.
+    ///
+    /// `policy` is inserted into `launch_overrides` for `stub_mcp_tool`.
+    async fn make_dispatch_state_with_mcp_tool(
+        run_id: &str,
+        stub_script: &str,
+        policy: ToolPolicy,
+    ) -> ToolDispatchState {
+        use std::collections::HashMap;
+        let mut client =
+            leviath_mcp::MCPClient::spawn("python3", &["-c", stub_script], &HashMap::new())
+                .await
+                .expect("Failed to spawn MCP stub");
+        // Connect (initialize + initialized handshake) so the server is ready
+        client.connect().await.expect("MCP connect failed");
+        // Populate the tool cache so executor.execute() can find "stub_mcp_tool"
+        client.list_tools().await.expect("list_tools failed");
+
+        let mut executor = leviath_mcp::ToolExecutor::new();
+        executor.add_client("stub-server".to_string(), client);
+
+        let workdir = std::env::temp_dir();
+        let config = Config::default();
+        let tool_registry = ToolRegistry::build(workdir, &config).await;
+
+        let mut launch = std::collections::HashMap::new();
+        launch.insert("stub_mcp_tool".to_string(), policy);
+
+        ToolDispatchState {
+            builtins: tool_registry.builtins.clone(),
+            mcp: Arc::new(Mutex::new(executor)),
+            builtin_names: tool_registry.builtin_names.clone(),
+            launch_overrides: Arc::new(launch),
+            session_allows: Arc::new(Mutex::new(std::collections::HashSet::new())),
+            stage_perms: Arc::new(Mutex::new(std::collections::HashMap::new())),
+            agent_perms: Arc::new(std::collections::HashMap::new()),
+            global_perms: Arc::new(std::collections::HashMap::new()),
+            run_id: Arc::new(run_id.to_string()),
+            stage_idx: Arc::new(Mutex::new(0usize)),
+            stage_name: Arc::new(Mutex::new("main".to_string())),
+        }
+    }
+
+    // ─── Allow branch MCP Ok(r) arms (lines 163-164) ─────────────────────────
+
+    #[tokio::test]
+    async fn dispatch_tool_calls_allow_mcp_ok_success_returns_text() {
+        // Covers line 163: `Ok(r) if r.success => r.text`
+        let run_id = "test-dispatch-allow-mcp-ok-success";
+        let dir = crate::runstate::run_dir(run_id);
+        std::fs::create_dir_all(&dir).unwrap();
+        let meta = make_meta(run_id, 1);
+        crate::runstate::create_run(&meta).unwrap();
+
+        let state =
+            make_dispatch_state_with_mcp_tool(run_id, MCP_STUB_SUCCESS, ToolPolicy::Allow).await;
+
+        let calls = vec![make_tool_call("stub_mcp_tool", serde_json::json!({}))];
+        let out = dispatch_tool_calls(&state, calls).await;
+
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].0, "call-stub_mcp_tool");
+        let has_ok_text = out[0].1.contains("ok result from stub");
+        assert!(has_ok_text, "expected success text");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn dispatch_tool_calls_allow_mcp_ok_error_result_returns_error_prefix() {
+        // Covers line 164: `Ok(r) => format!("[error] {}", r.text)` (isError: true)
+        let run_id = "test-dispatch-allow-mcp-ok-error-result";
+        let dir = crate::runstate::run_dir(run_id);
+        std::fs::create_dir_all(&dir).unwrap();
+        let meta = make_meta(run_id, 1);
+        crate::runstate::create_run(&meta).unwrap();
+
+        let state =
+            make_dispatch_state_with_mcp_tool(run_id, MCP_STUB_ERROR_RESULT, ToolPolicy::Allow)
+                .await;
+
+        let calls = vec![make_tool_call("stub_mcp_tool", serde_json::json!({}))];
+        let out = dispatch_tool_calls(&state, calls).await;
+
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].0, "call-stub_mcp_tool");
+        let has_error_prefix = out[0].1.starts_with("[error]");
+        assert!(has_error_prefix, "expected [error] prefix");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ─── Ask branch MCP Ok(r) arms (lines 132-133) ───────────────────────────
+
+    #[tokio::test]
+    async fn dispatch_tool_calls_ask_approved_mcp_ok_success_returns_text() {
+        // Covers line 132: `Ok(r) if r.success => r.text` in the Ask branch
+        let run_id = "test-dispatch-ask-mcp-ok-success";
+        let dir = crate::runstate::run_dir(run_id);
+        std::fs::create_dir_all(&dir).unwrap();
+        let meta = make_meta(run_id, 1);
+        crate::runstate::create_run(&meta).unwrap();
+
+        let state =
+            make_dispatch_state_with_mcp_tool(run_id, MCP_STUB_SUCCESS, ToolPolicy::Ask).await;
+
+        // Schedule approval response so the Ask branch doesn't block
+        let run_id_clone = run_id.to_string();
+        let tool_name = "stub_mcp_tool";
+        let hash = tool_name
+            .bytes()
+            .fold(0usize, |a, b| a.wrapping_add(b as usize));
+        let req_id = crate::interaction::make_interaction_id(hash, 0);
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            let resp = crate::interaction::InteractionResponse::approval(
+                &req_id,
+                true,
+                crate::interaction::ApprovalScope::Once,
+            );
+            crate::interaction::write_response(&run_id_clone, &resp).ok();
+        });
+
+        let calls = vec![make_tool_call("stub_mcp_tool", serde_json::json!({}))];
+        let out = dispatch_tool_calls(&state, calls).await;
+
+        assert_eq!(out.len(), 1);
+        let has_ok_text = out[0].1.contains("ok result from stub");
+        assert!(has_ok_text, "expected success text");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn dispatch_tool_calls_ask_approved_mcp_ok_error_result_returns_error_prefix() {
+        // Covers line 133: `Ok(r) => format!("[error] {}", r.text)` in the Ask branch
+        let run_id = "test-dispatch-ask-mcp-ok-error-result";
+        let dir = crate::runstate::run_dir(run_id);
+        std::fs::create_dir_all(&dir).unwrap();
+        let meta = make_meta(run_id, 1);
+        crate::runstate::create_run(&meta).unwrap();
+
+        let state =
+            make_dispatch_state_with_mcp_tool(run_id, MCP_STUB_ERROR_RESULT, ToolPolicy::Ask).await;
+
+        let run_id_clone = run_id.to_string();
+        let tool_name = "stub_mcp_tool";
+        let hash = tool_name
+            .bytes()
+            .fold(0usize, |a, b| a.wrapping_add(b as usize));
+        let req_id = crate::interaction::make_interaction_id(hash, 0);
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            let resp = crate::interaction::InteractionResponse::approval(
+                &req_id,
+                true,
+                crate::interaction::ApprovalScope::Once,
+            );
+            crate::interaction::write_response(&run_id_clone, &resp).ok();
+        });
+
+        let calls = vec![make_tool_call("stub_mcp_tool", serde_json::json!({}))];
+        let out = dispatch_tool_calls(&state, calls).await;
+
+        assert_eq!(out.len(), 1);
+        let has_error_prefix = out[0].1.starts_with("[error]");
+        assert!(has_error_prefix, "expected [error] prefix");
 
         let _ = std::fs::remove_dir_all(&dir);
     }

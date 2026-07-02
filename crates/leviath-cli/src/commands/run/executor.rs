@@ -1528,4 +1528,190 @@ mod tests {
         );
         assert_eq!(cb.completed_at, Some(0));
     }
+
+    // ─── Interactive/InteractivePoints error propagation ────────────────────
+
+    #[tokio::test]
+    async fn interactive_stage_missing_provider_propagates_error() {
+        // make_engine_and_entity has no registered provider → run_interactive_stage
+        // returns Err during inference; the ? at the Interactive match arm propagates.
+        let mut stage = make_stage("main");
+        stage.mode = StageMode::Interactive;
+        stage.accepts_messages = false; // stdin_handle = None (avoids leaked handle)
+        let bp = make_blueprint(vec![stage]);
+        let (mut engine, mut pool, entity) = make_engine_and_entity(&bp);
+        let tool_registry = make_tool_registry().await;
+        let mut cb = MockCallbacks::new();
+        // abort_on_provider_missing defaults to false → execution reaches run_interactive_stage
+
+        let mut ctx = StageContext {
+            blueprint: &bp,
+            engine: &mut engine,
+            entity,
+            pool: &mut pool,
+            tool_registry: &tool_registry,
+            current_stage_name: Arc::new(Mutex::new(String::new())),
+            current_stage_perms: Arc::new(Mutex::new(HashMap::new())),
+            current_stage_idx: Arc::new(Mutex::new(0)),
+            model_override: None,
+            compaction_ref: None,
+        };
+
+        let result = run_stage_loop(
+            &mut ctx,
+            &mut cb,
+            "agent-1",
+            &mut MockIO::new(),
+            &mut noop_exec,
+        )
+        .await;
+
+        assert!(result.is_err(), "missing provider should propagate Err");
+    }
+
+    #[tokio::test]
+    async fn interactive_points_stage_ipc_write_failure_propagates_error() {
+        // InteractivePoints with a non-empty points slice and a run_context whose
+        // run_dir doesn't exist → write_request fails inside request_interaction_async
+        // → Err propagates via the ? at the InteractivePoints match arm.
+        //
+        // Uses an inline mock with get_run_context returning Some so the IPC path
+        // is taken (MockCallbacks always returns None for get_run_context).
+        use crate::runstate::RunMeta;
+        use leviath_core::blueprint::InteractionPoint;
+
+        struct IpcMock {
+            run_id: String,
+            meta: RunMeta,
+        }
+
+        #[async_trait]
+        impl StageCallbacks for IpcMock {
+            async fn on_provider_missing(&mut self, _p: &str, _i: usize) -> bool {
+                false
+            }
+            async fn on_stage_enter(&mut self, _n: &str, _i: usize, _pv: &str, _m: &str, _v: &str) {
+            }
+            async fn on_claude_code_warning(&mut self, _i: usize) {}
+            fn start_message_reader(
+                &mut self,
+                _e: &AgentEngine,
+                _a: &str,
+                _b: bool,
+            ) -> Option<tokio::task::JoinHandle<()>> {
+                None
+            }
+            fn get_run_context(&mut self) -> Option<(&str, &mut RunMeta)> {
+                Some((&self.run_id, &mut self.meta))
+            }
+            async fn run_autonomous<F, Fut>(
+                &mut self,
+                _e: &mut AgentEngine,
+                _en: bevy_ecs::prelude::Entity,
+                _p: &str,
+                _m: &str,
+                _mx: usize,
+                _t: Vec<leviath_providers::Tool>,
+                _r: Option<&ToolResultRoutingConfig>,
+                _c: Option<&leviath_core::lifecycle::CompactionConfig>,
+                _io: &mut dyn RunIO,
+                _ex: &mut F,
+            ) -> anyhow::Result<(StageResult, Option<InferenceResponse>)>
+            where
+                F: FnMut(Vec<ToolCall>) -> Fut + Send,
+                Fut: std::future::Future<Output = Vec<(String, String)>> + Send,
+            {
+                Ok((StageResult::Success, None))
+            }
+            async fn on_stage_result(
+                &mut self,
+                _n: &str,
+                _i: usize,
+                _r: &StageResult,
+                _resp: Option<&InferenceResponse>,
+                _e: &mut AgentEngine,
+                _en: bevy_ecs::prelude::Entity,
+            ) {
+            }
+            async fn on_stage_error(
+                &mut self,
+                _n: &str,
+                _i: usize,
+                _e: &anyhow::Error,
+                _g: bool,
+            ) -> Option<StageResult> {
+                None
+            }
+            async fn on_transition(&mut self, _f: &str, _t: &str, _i: usize) {}
+            async fn on_complete(&mut self, _i: usize) {}
+            async fn on_post_stage(
+                &mut self,
+                _e: &AgentEngine,
+                _en: bevy_ecs::prelude::Entity,
+                _n: &str,
+            ) {
+            }
+        }
+
+        let mut stage = make_stage("main");
+        stage.mode = StageMode::InteractivePoints {
+            points: vec![InteractionPoint {
+                name: "confirm".to_string(),
+                prompt: "Continue?".to_string(),
+                required: false,
+                style: Default::default(),
+                options: vec![],
+                followups: Default::default(),
+            }],
+        };
+        stage.accepts_messages = false;
+        let bp = make_blueprint(vec![stage]);
+        // No provider → inference fails silently (if-let skips record_stage_log),
+        // so the run directory is NOT created before write_request is called.
+        // write_request then fails with ENOENT → Err propagates from InteractivePoints.
+        let (mut engine, mut pool, entity) = make_engine_and_entity(&bp);
+        let tool_registry = make_tool_registry().await;
+        // Ensure the test directory doesn't exist from a prior run
+        let _ = std::fs::remove_dir_all(crate::runstate::run_dir("executor-test-no-dir-ipc"));
+
+        let mut cb = IpcMock {
+            run_id: "executor-test-no-dir-ipc".to_string(),
+            meta: RunMeta::new(
+                "executor-test-no-dir-ipc".to_string(),
+                "test-agent".to_string(),
+                "/path".to_string(),
+                "task".to_string(),
+                None,
+                "/tmp".to_string(),
+                1,
+            ),
+        };
+
+        let mut ctx = StageContext {
+            blueprint: &bp,
+            engine: &mut engine,
+            entity,
+            pool: &mut pool,
+            tool_registry: &tool_registry,
+            current_stage_name: Arc::new(Mutex::new(String::new())),
+            current_stage_perms: Arc::new(Mutex::new(HashMap::new())),
+            current_stage_idx: Arc::new(Mutex::new(0)),
+            model_override: None,
+            compaction_ref: None,
+        };
+
+        let result = run_stage_loop(
+            &mut ctx,
+            &mut cb,
+            "agent-1",
+            &mut MockIO::new(),
+            &mut noop_exec,
+        )
+        .await;
+
+        assert!(
+            result.is_err(),
+            "IPC write failure should propagate Err from InteractivePoints"
+        );
+    }
 }

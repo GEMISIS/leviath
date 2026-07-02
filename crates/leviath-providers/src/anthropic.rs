@@ -1514,8 +1514,7 @@ mod tests {
     fn test_parse_sse_event_content_block_delta_without_delta_field_returns_none() {
         // content_block_delta event where the JSON has no "delta" key → the ?
         // at json.get("delta")? returns None.
-        let mut buffer =
-            "event: content_block_delta\ndata: {\"no_delta\": true}\n\n".to_string();
+        let mut buffer = "event: content_block_delta\ndata: {\"no_delta\": true}\n\n".to_string();
         let mut tool_index = 0usize;
         let result = parse_sse_event(&mut buffer, &mut tool_index);
         assert!(result.is_none());
@@ -1563,7 +1562,10 @@ mod tests {
         };
         let result = provider.infer(request).await;
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().starts_with("Request failed:"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .starts_with("Request failed:"));
     }
 
     #[tokio::test]
@@ -1601,7 +1603,10 @@ mod tests {
         };
         let result = provider.list_models().await;
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().starts_with("Request failed:"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .starts_with("Request failed:"));
     }
 
     // ─── parse_sse_event: message_delta without usage ─────────────────────
@@ -1857,7 +1862,10 @@ mod tests {
         let url = spawn_mock_server(429, "Too Many Requests", b"{}").await;
         let provider = provider_with_url(url);
         let err = provider.infer(simple_request()).await.unwrap_err();
-        assert_eq!(std::mem::discriminant(&err), std::mem::discriminant(&ProviderError::RateLimitExceeded));
+        assert_eq!(
+            std::mem::discriminant(&err),
+            std::mem::discriminant(&ProviderError::RateLimitExceeded)
+        );
     }
 
     #[tokio::test]
@@ -1867,14 +1875,21 @@ mod tests {
                 .await;
         let provider = provider_with_url(url);
         let err = provider.infer(simple_request()).await.unwrap_err();
-        assert_eq!(std::mem::discriminant(&err), std::mem::discriminant(&ProviderError::RateLimitExceeded));
+        assert_eq!(
+            std::mem::discriminant(&err),
+            std::mem::discriminant(&ProviderError::RateLimitExceeded)
+        );
     }
 
     #[tokio::test]
     async fn infer_non_success_status_returns_api_error() {
         let url = spawn_mock_server(500, "Internal Server Error", b"boom").await;
         let provider = provider_with_url(url);
-        let msg = provider.infer(simple_request()).await.unwrap_err().to_string();
+        let msg = provider
+            .infer(simple_request())
+            .await
+            .unwrap_err()
+            .to_string();
         assert!(msg.contains("500"));
         assert!(msg.contains("boom"));
     }
@@ -1883,7 +1898,11 @@ mod tests {
     async fn infer_non_success_status_body_read_error_falls_back_to_unknown_error() {
         let url = spawn_mock_server_truncated_error_body(500, "Internal Server Error").await;
         let provider = provider_with_url(url);
-        let msg = provider.infer(simple_request()).await.unwrap_err().to_string();
+        let msg = provider
+            .infer(simple_request())
+            .await
+            .unwrap_err()
+            .to_string();
         assert!(msg.contains("500"), "expected 500 in: {msg}");
     }
 
@@ -1926,7 +1945,10 @@ mod tests {
         let provider = provider_with_url(url);
         let result = provider.infer_stream(simple_request()).await;
         assert!(result.is_err());
-        assert!(result.err().unwrap().to_string().contains("503"), "expected 503 in error");
+        assert!(
+            result.err().unwrap().to_string().contains("503"),
+            "expected 503 in error"
+        );
     }
 
     #[tokio::test]

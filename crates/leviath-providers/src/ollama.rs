@@ -1194,7 +1194,11 @@ mod tests {
             extra: serde_json::Value::Null,
         };
         let result = provider.infer_stream(request).await;
-        assert!(result.err().unwrap().to_string().contains("Request failed:"));
+        assert!(result
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("Request failed:"));
     }
 
     #[tokio::test]
@@ -1713,10 +1717,11 @@ mod tests {
             let (mut socket, _) = listener.accept().await.expect("accept");
             let mut buf = [0u8; 8192];
             let _ = socket.read(&mut buf).await;
-            let response =
-                b"HTTP/1.1 200 OK\r\nContent-Length: 1000\r\nConnection: close\r\n\r\n";
+            let response = b"HTTP/1.1 200 OK\r\nContent-Length: 1000\r\nConnection: close\r\n\r\n";
             let _ = socket.write_all(response).await;
-            let _ = socket.write_all(b"{\"message\":{\"content\":\"hi\"},\"done\":false}\nshort").await;
+            let _ = socket
+                .write_all(b"{\"message\":{\"content\":\"hi\"},\"done\":false}\nshort")
+                .await;
             let _ = socket.flush().await;
             let _ = socket.shutdown().await;
         });
@@ -1812,7 +1817,10 @@ mod tests {
         }
         impl Stream for StaticStream {
             type Item = std::result::Result<bytes::Bytes, reqwest::Error>;
-            fn poll_next(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+            fn poll_next(
+                mut self: Pin<&mut Self>,
+                _cx: &mut Context<'_>,
+            ) -> Poll<Option<Self::Item>> {
                 if self.idx < self.data.len() {
                     let chunk = bytes::Bytes::from(self.data[self.idx].clone());
                     self.idx += 1;
@@ -1824,7 +1832,8 @@ mod tests {
         }
 
         let invalid_utf8 = vec![0xFF, 0xFE, 0x00];
-        let valid_chunk = b"{\"message\":{\"role\":\"assistant\",\"content\":\"ok\"},\"done\":false}\n".to_vec();
+        let valid_chunk =
+            b"{\"message\":{\"role\":\"assistant\",\"content\":\"ok\"},\"done\":false}\n".to_vec();
         let stream = StaticStream {
             data: vec![invalid_utf8, valid_chunk],
             idx: 0,

@@ -603,7 +603,10 @@ mod tests {
     fn test_parse_malformed_json() {
         let result = parse_claude_response("not valid json at all");
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().starts_with("Invalid response:"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .starts_with("Invalid response:"));
     }
 
     #[test]
@@ -817,7 +820,10 @@ mod tests {
         assert_eq!(parse_stop_reason(Some("end_turn")), FinishReason::Complete);
         assert_eq!(parse_stop_reason(Some("stop")), FinishReason::Complete);
         assert_eq!(parse_stop_reason(Some("tool_use")), FinishReason::ToolCall);
-        assert_eq!(parse_stop_reason(Some("max_tokens")), FinishReason::TokenLimit);
+        assert_eq!(
+            parse_stop_reason(Some("max_tokens")),
+            FinishReason::TokenLimit
+        );
         assert_eq!(parse_stop_reason(None), FinishReason::Complete);
         assert_eq!(parse_stop_reason(Some("unknown")), FinishReason::Complete);
     }

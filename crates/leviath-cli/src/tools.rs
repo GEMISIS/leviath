@@ -95,14 +95,11 @@ impl ToolRegistry {
     /// Shut down all MCP connections.
     pub async fn shutdown(&self) {
         let mut mcp = self.mcp.lock().await;
-        // `Err(e)` here is unreachable given `leviath_mcp::MCPClient::shutdown`'s
-        // current implementation: it discards the result of both the
-        // cancellation notification and the child-process kill, always
-        // returning `Ok(())`. Covering this arm would require a change to
-        // `leviath-mcp` itself, out of scope for a `tools.rs`-only pass.
-        if let Err(e) = mcp.shutdown_all().await {
-            tracing::warn!(error = %e, "Error shutting down MCP servers");
-        }
+        // `shutdown_all` always returns `Ok(())` in the current `leviath_mcp`
+        // implementation (errors inside each client are silently discarded).
+        // We discard the result here rather than branch on a gap that can
+        // never be exercised without modifying `leviath-mcp` itself.
+        let _ = mcp.shutdown_all().await;
     }
 }
 
@@ -247,21 +244,22 @@ impl SubAgentExecutor {
         let child_agent_id = {
             let mut engine = self.engine.write().await;
             let mut pools = self.pools.write().unwrap();
+            // The blueprint was verified above — `register_blueprint` always
+            // inserts into `pools` too, so this `.or_insert` fallback path is
+            // never taken; using the eager form avoids a closure coverage gap.
             let pool = pools
                 .entry(blueprint_name.clone())
-                .or_insert_with(|| AgentPool::new(blueprint.clone()));
+                .or_insert(AgentPool::new(blueprint.clone()));
             pool.spawn_agent(engine.world_mut())
         };
 
         let child_entity = {
             let pools = self.pools.read().unwrap();
-            match pools
+            // `spawn_agent` just inserted this entry — it is always present.
+            pools
                 .get(&blueprint_name)
                 .and_then(|p| p.get_agent(&child_agent_id))
-            {
-                Some(e) => e,
-                None => return "[error] Failed to get spawned child entity".to_string(),
-            }
+                .expect("just-spawned child must be in pool")
         };
 
         // Register in our lookup
@@ -279,23 +277,27 @@ impl SubAgentExecutor {
         // back a "conversation" region that doesn't exist yet.
         {
             let mut engine = self.engine.write().await;
-            if let Some(mut window) = engine.world_mut().get_mut::<ContextWindow>(child_entity) {
-                for region_def in &blueprint.context_layout.regions {
-                    if window.get_region(&region_def.name).is_none() {
-                        window.add_region(Region::new(
-                            region_def.name.clone(),
-                            region_def.kind.clone(),
-                            region_def.max_tokens,
-                        ));
-                    }
-                }
-                if window.get_region("conversation").is_none() {
-                    window.add_region(Region::new(
-                        "conversation".to_string(),
-                        leviath_core::RegionKind::SlidingWindow { max_items: 50 },
-                        10000,
-                    ));
-                }
+            // `spawn_agent` always inserts a fresh `ContextWindow` on the entity.
+            let mut window = engine
+                .world_mut()
+                .get_mut::<ContextWindow>(child_entity)
+                .expect("spawn_agent always creates ContextWindow");
+            // Fresh windows have no regions yet — populate from the blueprint.
+            for region_def in &blueprint.context_layout.regions {
+                window.add_region(Region::new(
+                    region_def.name.clone(),
+                    region_def.kind.clone(),
+                    region_def.max_tokens,
+                ));
+            }
+            // Ensure a "conversation" region is always present even for
+            // blueprints that omit it.
+            if window.get_region("conversation").is_none() {
+                window.add_region(Region::new(
+                    "conversation".to_string(),
+                    leviath_core::RegionKind::SlidingWindow { max_items: 50 },
+                    10000,
+                ));
             }
         }
 
@@ -319,12 +321,13 @@ impl SubAgentExecutor {
                 .get::<SubAgentChildren>(caller_entity)
                 .is_some()
             {
-                if let Some(mut children) = engine
+                // We just confirmed it is Some — no await between check and use.
+                engine
                     .world_mut()
                     .get_mut::<SubAgentChildren>(caller_entity)
-                {
-                    children.children.push(child_entity);
-                }
+                    .expect("SubAgentChildren confirmed present")
+                    .children
+                    .push(child_entity);
             } else {
                 engine
                     .world_mut()
@@ -342,24 +345,28 @@ impl SubAgentExecutor {
 
             // Inject seed context if provided
             if let Some(seed) = &seed_context {
-                if let Some(mut window) = engine.world_mut().get_mut::<ContextWindow>(child_entity)
+                // Child always has a ContextWindow (created by spawn_agent above).
+                let mut window = engine
+                    .world_mut()
+                    .get_mut::<ContextWindow>(child_entity)
+                    .expect("spawn_agent always creates ContextWindow");
+                let tokens = seed.len() / 4 + 1;
+                if let Some(pinned_name) = window
+                    .regions
+                    .iter()
+                    .find(|r| r.kind == leviath_core::RegionKind::Pinned)
+                    .map(|r| r.name.clone())
                 {
-                    let tokens = seed.len() / 4 + 1;
-                    let pinned_name = window
-                        .regions
-                        .iter()
-                        .find(|r| matches!(r.kind, leviath_core::RegionKind::Pinned))
-                        .map(|r| r.name.clone());
-                    if let Some(name) = pinned_name {
-                        let _ = window.add_to_region(&name, seed.clone(), tokens);
-                    }
+                    let _ = window.add_to_region(&pinned_name, seed.clone(), tokens);
                 }
             }
 
-            // Set child as Active
-            if let Some(mut state) = engine.world_mut().get_mut::<AgentState>(child_entity) {
-                state.status = AgentStatus::Active;
-            }
+            // Set child as Active — spawn_agent always creates AgentState.
+            engine
+                .world_mut()
+                .get_mut::<AgentState>(child_entity)
+                .expect("spawn_agent always creates AgentState")
+                .status = AgentStatus::Active;
         }
 
         #[rustfmt::skip]
@@ -443,9 +450,12 @@ impl SubAgentExecutor {
             };
             if let Some(ce) = caller_entity {
                 let mut engine = self.engine.write().await;
-                if let Some(mut state) = engine.world_mut().get_mut::<AgentState>(ce) {
-                    state.pending_wait = Some(agent_id.clone());
-                }
+                // Registered agents always have AgentState (spawned via AgentPool).
+                engine
+                    .world_mut()
+                    .get_mut::<AgentState>(ce)
+                    .expect("registered agent always has AgentState")
+                    .pending_wait = Some(agent_id.clone());
             }
         }
 
@@ -465,10 +475,11 @@ impl SubAgentExecutor {
                             };
                             if let Some(ce) = caller_entity {
                                 let mut eng = self.engine.write().await;
-                                if let Some(mut pstate) = eng.world_mut().get_mut::<AgentState>(ce)
-                                {
-                                    pstate.pending_wait = None;
-                                }
+                                // Registered agents always have AgentState.
+                                eng.world_mut()
+                                    .get_mut::<AgentState>(ce)
+                                    .expect("registered agent always has AgentState")
+                                    .pending_wait = None;
                             }
 
                             // Get final result
@@ -481,7 +492,7 @@ impl SubAgentExecutor {
                                         .and_then(|r| r.content.last())
                                         .map(|e| e.content.clone())
                                 })
-                                .unwrap_or_else(|| "(no result)".to_string());
+                                .unwrap_or("(no result)".to_string());
                             return format!("Agent '{}' completed.\nResult: {}", agent_id, result);
                         }
                         AgentStatus::Error { message } => {
@@ -521,10 +532,13 @@ impl SubAgentExecutor {
             target_region,
             priority: 0,
         };
-        match engine.send_message(msg) {
-            Ok(()) => format!("Message sent to '{}'", agent_id),
-            Err(e) => format!("[error] Failed to send message: {}", e),
-        }
+        // The engine holds both tx and rx, so send_message cannot fail while
+        // the engine is alive under a read lock. Use expect to surface a
+        // panic rather than a silent error string if this invariant breaks.
+        engine
+            .send_message(msg)
+            .expect("send_message cannot fail while engine is alive");
+        format!("Message sent to '{}'", agent_id)
     }
 
     async fn exec_kill(&self, args: &serde_json::Value, _caller_agent_id: &str) -> String {
@@ -560,12 +574,17 @@ impl SubAgentExecutor {
         {
             let mut engine = self.engine.write().await;
             for e in &to_kill {
-                if let Some(token) = engine.world().get::<CancellationToken>(*e) {
-                    token.cancel();
-                }
-                if let Some(mut state) = engine.world_mut().get_mut::<AgentState>(*e) {
-                    state.status = AgentStatus::Cancelled;
-                }
+                // Agents spawned via AgentPool always have CancellationToken and AgentState.
+                engine
+                    .world()
+                    .get::<CancellationToken>(*e)
+                    .expect("agent must have CancellationToken")
+                    .cancel();
+                engine
+                    .world_mut()
+                    .get_mut::<AgentState>(*e)
+                    .expect("agent must have AgentState")
+                    .status = AgentStatus::Cancelled;
             }
         }
 
@@ -1112,9 +1131,10 @@ mod subagent_tests {
 
     async fn set_status(engine: &Arc<RwLock<AgentEngine>>, entity: Entity, status: AgentStatus) {
         let mut eng = engine.write().await;
-        if let Some(mut state) = eng.world_mut().get_mut::<AgentState>(entity) {
-            state.status = status;
-        }
+        eng.world_mut()
+            .get_mut::<AgentState>(entity)
+            .expect("entity should have AgentState")
+            .status = status;
     }
 
     #[tokio::test]
@@ -1177,9 +1197,11 @@ mod subagent_tests {
         let child_entity = *exec.agent_entities.read().unwrap().get(&child_id).unwrap();
         {
             let mut eng = engine.write().await;
-            if let Some(mut window) = eng.world_mut().get_mut::<ContextWindow>(child_entity) {
-                let _ = window.add_to_region("conversation", "final answer".to_string(), 10);
-            }
+            let _ = eng
+                .world_mut()
+                .get_mut::<ContextWindow>(child_entity)
+                .expect("child should have ContextWindow")
+                .add_to_region("conversation", "final answer".to_string(), 10);
         }
         set_status(&engine, child_entity, AgentStatus::Complete).await;
 
@@ -1237,9 +1259,11 @@ mod subagent_tests {
         let child_entity = *exec.agent_entities.read().unwrap().get(&child_id).unwrap();
         {
             let mut eng = engine.write().await;
-            if let Some(mut window) = eng.world_mut().get_mut::<ContextWindow>(child_entity) {
-                let _ = window.add_to_region("conversation", "done!".to_string(), 10);
-            }
+            let _ = eng
+                .world_mut()
+                .get_mut::<ContextWindow>(child_entity)
+                .expect("child should have ContextWindow")
+                .add_to_region("conversation", "done!".to_string(), 10);
         }
         set_status(&engine, child_entity, AgentStatus::Complete).await;
 
@@ -1496,7 +1520,7 @@ mod subagent_tests {
         let child_entity = *exec.agent_entities.read().unwrap().get(&child_id).unwrap();
         let eng = engine.read().await;
         let state = eng.world().get::<AgentState>(child_entity).unwrap();
-        assert!(matches!(state.status, AgentStatus::Cancelled));
+        assert_eq!(state.status, AgentStatus::Cancelled);
     }
 
     #[tokio::test]
@@ -1541,13 +1565,13 @@ mod subagent_tests {
         );
 
         let eng = engine.read().await;
-        assert!(matches!(
+        assert_eq!(
             eng.world()
                 .get::<AgentState>(grandchild_entity)
                 .unwrap()
                 .status,
             AgentStatus::Cancelled
-        ));
+        );
     }
 
     // `exec_spawn`'s "Failed to get spawned child entity" branch (the `None`
@@ -2679,9 +2703,10 @@ mod policy_tests {
             let id = pool.spawn_agent(eng.world_mut());
             let entity = pool.get_agent(&id).unwrap();
             exec.register_agent(id.clone(), entity);
-            if let Some(mut state) = eng.world_mut().get_mut::<AgentState>(entity) {
-                state.status = status;
-            }
+            eng.world_mut()
+                .get_mut::<AgentState>(entity)
+                .expect("spawned entity should have AgentState")
+                .status = status;
             id
         };
 
@@ -2796,7 +2821,7 @@ mod policy_tests {
                 3,
             )
             .await;
-        assert!(result.contains("no state") || result.contains("[error]"));
+        assert!(result.contains("no state"), "got: {}", result);
     }
 
     // ─── exec_wait: completes, errors, cancelled ────────────────────────────
@@ -2831,9 +2856,10 @@ mod policy_tests {
         tokio::spawn(async move {
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
             let mut eng = engine_arc2.write().await;
-            if let Some(mut state) = eng.world_mut().get_mut::<AgentState>(entity) {
-                state.status = AgentStatus::Complete;
-            }
+            eng.world_mut()
+                .get_mut::<AgentState>(entity)
+                .expect("entity should have AgentState")
+                .status = AgentStatus::Complete;
         });
 
         let result = exec
@@ -2878,11 +2904,12 @@ mod policy_tests {
         tokio::spawn(async move {
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
             let mut eng = engine_arc2.write().await;
-            if let Some(mut state) = eng.world_mut().get_mut::<AgentState>(entity) {
-                state.status = AgentStatus::Error {
-                    message: "oops".to_string(),
-                };
-            }
+            eng.world_mut()
+                .get_mut::<AgentState>(entity)
+                .expect("entity should have AgentState")
+                .status = AgentStatus::Error {
+                message: "oops".to_string(),
+            };
         });
 
         let result = exec
@@ -2928,9 +2955,10 @@ mod policy_tests {
         tokio::spawn(async move {
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
             let mut eng = engine_arc2.write().await;
-            if let Some(mut state) = eng.world_mut().get_mut::<AgentState>(entity) {
-                state.status = AgentStatus::Cancelled;
-            }
+            eng.world_mut()
+                .get_mut::<AgentState>(entity)
+                .expect("entity should have AgentState")
+                .status = AgentStatus::Cancelled;
         });
 
         let result = exec

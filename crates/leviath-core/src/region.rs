@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 /// when the context window fills up. This is inspired by hardware memory
 /// architectures like SNES VRAM, where different memory regions serve
 /// distinct purposes with their own access patterns and constraints.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum RegionKind {
     /// Never evicted or compacted. Architecture diagrams, constraints, identity.
     ///
@@ -69,6 +69,32 @@ pub enum RegionKind {
         source_region: String,
     },
 }
+
+impl PartialEq for RegionKind {
+    #[inline(never)]
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Pinned, Self::Pinned)
+            | (Self::Temporary, Self::Temporary)
+            | (Self::Clearable, Self::Clearable) => true,
+            (Self::SlidingWindow { max_items: a }, Self::SlidingWindow { max_items: b }) => a == b,
+            (
+                Self::Compacting {
+                    threshold_tokens: a,
+                },
+                Self::Compacting {
+                    threshold_tokens: b,
+                },
+            ) => a == b,
+            (
+                Self::CompactHistory { source_region: a },
+                Self::CompactHistory { source_region: b },
+            ) => a == b,
+            _ => false,
+        }
+    }
+}
+impl Eq for RegionKind {}
 
 impl RegionKind {
     /// Return the cache hint appropriate for this region kind.

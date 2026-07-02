@@ -361,10 +361,7 @@ pub async fn check_http_response(
         return Err(ProviderError::RateLimitExceeded);
     }
     if !status.is_success() {
-        let error_body = response
-            .text()
-            .await
-            .unwrap_or_else(|e| e.to_string());
+        let error_body = response.text().await.unwrap_or_else(|e| e.to_string());
         return Err(ProviderError::ApiError(format!(
             "HTTP {}: {}",
             status, error_body
@@ -639,7 +636,10 @@ mod tests {
         let waker = Waker::noop();
         let mut cx = Context::from_waker(waker);
 
-        assert_eq!(Pin::new(&mut stream).poll_next(&mut cx), Poll::Ready(Some(42)));
+        assert_eq!(
+            Pin::new(&mut stream).poll_next(&mut cx),
+            Poll::Ready(Some(42))
+        );
         assert_eq!(Pin::new(&mut stream).poll_next(&mut cx), Poll::Ready(None));
     }
 
@@ -813,7 +813,10 @@ mod tests {
     async fn check_http_response_rate_limited_without_limiter_returns_rate_limit_exceeded() {
         let response = spawn_mock_response(429, "Too Many Requests", &[], b"slow down").await;
         let err = check_http_response(response, None).await.unwrap_err();
-        assert_eq!(std::mem::discriminant(&err), std::mem::discriminant(&ProviderError::RateLimitExceeded));
+        assert_eq!(
+            std::mem::discriminant(&err),
+            std::mem::discriminant(&ProviderError::RateLimitExceeded)
+        );
     }
 
     #[tokio::test]
@@ -833,7 +836,10 @@ mod tests {
         let err = check_http_response(response, Some(&limiter))
             .await
             .unwrap_err();
-        assert_eq!(std::mem::discriminant(&err), std::mem::discriminant(&ProviderError::RateLimitExceeded));
+        assert_eq!(
+            std::mem::discriminant(&err),
+            std::mem::discriminant(&ProviderError::RateLimitExceeded)
+        );
     }
 
     #[tokio::test]
@@ -853,6 +859,9 @@ mod tests {
         let err = check_http_response(response, Some(&limiter))
             .await
             .unwrap_err();
-        assert_eq!(std::mem::discriminant(&err), std::mem::discriminant(&ProviderError::RateLimitExceeded));
+        assert_eq!(
+            std::mem::discriminant(&err),
+            std::mem::discriminant(&ProviderError::RateLimitExceeded)
+        );
     }
 }

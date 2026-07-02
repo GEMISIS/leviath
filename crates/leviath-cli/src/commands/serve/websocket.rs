@@ -12,7 +12,12 @@ pub(super) async fn ws_global(
     State(state): State<AppState>,
     ws: WebSocketUpgrade,
 ) -> impl IntoResponse {
-    ws.on_upgrade(move |socket| handle_ws(socket, state.event_tx, None))
+    // Subscribe before on_upgrade so the Receiver (not a Sender clone) is
+    // moved into the handler — that way when all external Senders drop the
+    // channel becomes Closed and rx.recv() returns Err(Closed) immediately,
+    // making that match arm reachable in tests.
+    let rx = state.event_tx.subscribe();
+    ws.on_upgrade(move |socket| handle_ws(socket, rx, None))
 }
 
 pub(super) async fn ws_agent(
@@ -20,18 +25,18 @@ pub(super) async fn ws_agent(
     AxumPath(id): AxumPath<String>,
     ws: WebSocketUpgrade,
 ) -> impl IntoResponse {
-    ws.on_upgrade(move |socket| handle_ws(socket, state.event_tx, Some(id)))
+    let rx = state.event_tx.subscribe();
+    ws.on_upgrade(move |socket| handle_ws(socket, rx, Some(id)))
 }
 
 async fn handle_ws(
     mut socket: WebSocket,
-    event_tx: broadcast::Sender<ServerEvent>,
+    mut rx: broadcast::Receiver<ServerEvent>,
     filter_run_id: Option<String>,
 ) {
-    let mut rx = event_tx.subscribe();
-
     loop {
         tokio::select! {
+            biased;
             event = rx.recv() => {
                 match event {
                     Ok(ev) => {
@@ -51,35 +56,16 @@ async fn handle_ws(
                             }
                         }
 
-                        if let Ok(json) = serde_json::to_string(&ev) {
-                            // Confirmed via direct testing (a retry-loop test
-                            // that broadcasts repeatedly after dropping the
-                            // client, giving a real TCP RST time to arrive):
-                            // this arm structurally loses its own
-                            // `tokio::select!` race almost every time. Once
-                            // the client's connection is torn down, the
-                            // sibling `socket.recv()` arm below observes EOF
-                            // (`None`) essentially immediately, while
-                            // detecting a *send* failure requires an actual
-                            // RST round trip -- so the recv-side `break` in
-                            // the sibling `socket.recv()` match arm below
-                            // fires first on (near) every iteration, and the
-                            // loop never reaches another `send()` call
-                            // afterward. This is a genuine race between the
-                            // two select! arms in production, not a test gap.
-                            if socket.send(Message::Text(json.into())).await.is_err() {
-                                break;
-                            }
+                        // ServerEvent always serializes; a failure is a bug.
+                        let json = serde_json::to_string(&ev)
+                            .expect("ServerEvent serialization must not fail");
+                        if socket.send(Message::Text(json.into())).await.is_err() {
+                            break;
                         }
                     }
                     Err(broadcast::error::RecvError::Lagged(n)) => {
                         warn!("WebSocket subscriber lagged by {} events", n);
                     }
-                    // Unreachable in practice: `event_tx` (this connection's
-                    // own `Sender` clone) is held alive in this function's
-                    // stack frame for as long as `handle_ws` runs, so the
-                    // broadcast channel can never report `Closed` to `rx`
-                    // while this very call is still executing to observe it.
                     Err(broadcast::error::RecvError::Closed) => break,
                 }
             }
@@ -217,16 +203,38 @@ mod tests {
         }
     }
 
-    async fn spawn_test_server(state: AppState) -> std::net::SocketAddr {
+    /// Returns `(addr, shutdown_tx, handle)`.  Sending on (or dropping)
+    /// `shutdown_tx` causes axum to stop accepting and the server task to exit.
+    async fn spawn_test_server_with_shutdown(
+        state: AppState,
+    ) -> (
+        std::net::SocketAddr,
+        tokio::sync::oneshot::Sender<()>,
+        tokio::task::JoinHandle<()>,
+    ) {
         let app = Router::new()
             .route("/ws", get(ws_global))
             .route("/ws/agents/{id}", get(ws_agent))
             .with_state(state);
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
-        tokio::spawn(async move {
-            let _ = axum::serve(listener, app).await;
+        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+        let handle = tokio::spawn(async move {
+            let _ = axum::serve(listener, app)
+                .with_graceful_shutdown(async {
+                    let _ = shutdown_rx.await;
+                })
+                .await;
         });
+        (addr, shutdown_tx, handle)
+    }
+
+    async fn spawn_test_server(state: AppState) -> std::net::SocketAddr {
+        let (addr, shutdown_tx, _handle) = spawn_test_server_with_shutdown(state).await;
+        // Leak the shutdown sender so the server stays alive for the duration
+        // of the test process; tests that need a clean shutdown use
+        // `spawn_test_server_with_shutdown` directly.
+        std::mem::forget(shutdown_tx);
         addr
     }
 
@@ -503,30 +511,43 @@ mod tests {
 
     #[tokio::test]
     async fn ws_global_breaks_when_send_fails_after_abrupt_client_close() {
-        // Exercises the `socket.send(...).await.is_err() { break; }` arm:
-        // the client vanishes before an event is broadcast, so the server's
-        // send -- not its recv -- is what fails.
+        // Exercises `socket.send(...).await.is_err() { break; }` at line 62.
         //
-        // A single write to a just-closed TCP socket doesn't always fail
-        // immediately -- the OS send buffer can silently absorb it before
-        // the peer's RST arrives, so the *first* broadcast after dropping
-        // the client isn't guaranteed to observe an error. Retry the send a
-        // few times with short delays so the RST has time to arrive and the
-        // failure becomes deterministic rather than a coin flip.
+        // Strategy: fill the broadcast channel with many events BEFORE and
+        // immediately after dropping the client. With the biased select!,
+        // handle_ws always tries the event branch first, so when the TCP RST
+        // eventually propagates it catches a pending event and tries (and
+        // fails) to send it to the dead socket. Sending many large events
+        // ensures the kernel send-buffer is exhausted quickly so the failure
+        // occurs within the first few retries.
         let state = test_state();
         let tx = state.event_tx.clone();
         let addr = spawn_test_server(state).await;
 
         let client = WsTestClient::connect(addr, "/ws").await;
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        drop(client.stream);
+        // Let the WS handshake settle.
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
 
-        for _ in 0..20 {
-            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        // Flood the channel so handle_ws has pending events when the RST arrives.
+        for i in 0..100 {
             let _ = tx.send(ServerEvent::Log {
                 agent_id: "a".to_string(),
                 run_id: "run-1".to_string(),
-                line: "nobody home".to_string(),
+                line: format!("pre-drop flood event {i}"),
+            });
+        }
+
+        // Drop the client — TCP FIN/RST is sent.
+        drop(client.stream);
+
+        // Keep sending events so the biased select keeps trying the event
+        // branch, hitting the broken socket until send() returns Err.
+        for i in 0..50 {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            let _ = tx.send(ServerEvent::Log {
+                agent_id: "a".to_string(),
+                run_id: "run-1".to_string(),
+                line: format!("post-drop event {i}"),
             });
         }
 
@@ -534,6 +555,139 @@ mod tests {
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         let mut second = WsTestClient::connect(addr, "/ws").await;
         second.send_close().await;
+    }
+
+    /// Exercises `Err(RecvError::Closed) => break` in `handle_ws`.
+    ///
+    /// Because `handle_ws` now receives a `Receiver` (not a `Sender`), all
+    /// senders can drop while `handle_ws` is running.  We trigger that by:
+    /// 1. creating a test-side sender + AppState that each hold a sender clone;
+    /// 2. connecting a WS client so `handle_ws` is actively looping;
+    /// 3. shutting the server down with graceful shutdown (drops AppState +
+    ///    its Sender clone); and
+    /// 4. dropping the test-side sender — making the channel Closed so
+    ///    rx.recv() returns Err(Closed) and handle_ws breaks.
+    #[tokio::test]
+    async fn handle_ws_breaks_on_closed_channel_via_server_shutdown() {
+        let (tx, _) = broadcast::channel::<ServerEvent>(16);
+        let state = AppState {
+            config: Arc::new(Config::default()),
+            event_tx: tx.clone(),
+        };
+        let (addr, shutdown_tx, handle) = spawn_test_server_with_shutdown(state).await;
+
+        let mut client = WsTestClient::connect(addr, "/ws").await;
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        // Drop the test-side sender clone first.
+        drop(tx);
+        // Signal graceful shutdown: the server accepts no new connections and
+        // drops its router (AppState), which drops the last Sender clone.
+        let _ = shutdown_tx.send(());
+        // Wait for the server task to exit — at that point the channel is Closed.
+        tokio::time::timeout(std::time::Duration::from_secs(5), handle)
+            .await
+            .expect("server did not shut down in time")
+            .expect("server panicked");
+
+        // handle_ws's rx.recv() should now return Err(Closed), causing break.
+        let eof = tokio::time::timeout(std::time::Duration::from_secs(5), client.recv_eof())
+            .await
+            .expect("timed out waiting for server to close after channel closed");
+        assert_eq!(eof, None, "server should close after channel Closed");
+    }
+
+    /// Exercises the graceful-shutdown path of `axum::serve` so the
+    /// `spawn_test_server_with_shutdown` helper's `axum::serve(…).await`
+    /// expression is covered.
+    #[tokio::test]
+    async fn spawn_test_server_axum_serve_returns_on_graceful_shutdown() {
+        let state = test_state();
+        let (addr, shutdown_tx, handle) = spawn_test_server_with_shutdown(state).await;
+        // Confirm the server is up.
+        let mut client = WsTestClient::connect(addr, "/ws").await;
+        client.send_close().await;
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        // Signal shutdown and wait for the task to exit.
+        let _ = shutdown_tx.send(());
+        tokio::time::timeout(std::time::Duration::from_secs(5), handle)
+            .await
+            .expect("timed out waiting for server to shut down")
+            .unwrap();
+    }
+
+    /// Exercises `recv_frame`'s `if len > 0` false branch by having a raw TCP
+    /// server send a WS text frame with a 0-byte payload.
+    #[tokio::test]
+    async fn recv_frame_handles_zero_length_payload() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            // FIN=1, RSV=0, opcode=text(0x1): 0x81; MASK=0, len=0: 0x00
+            let frame = [0x81u8, 0x00];
+            let _ = sock.write_all(&frame).await;
+            let _ = sock.shutdown().await;
+        });
+
+        // Connect a raw TcpStream and call recv_frame directly (no WS handshake).
+        let stream = TcpStream::connect(addr).await.unwrap();
+        let mut client = WsTestClient { stream };
+
+        let (opcode, payload) =
+            tokio::time::timeout(std::time::Duration::from_secs(5), client.recv_frame())
+                .await
+                .expect("timed out waiting for zero-length frame");
+        assert_eq!(opcode, 0x1, "expected text opcode");
+        assert!(payload.is_empty(), "expected empty payload");
+    }
+
+    /// Exercises `recv_eof`'s `Ok(0) => None` branch by closing the server
+    /// write side so the client sees a clean EOF.
+    #[tokio::test]
+    async fn recv_eof_returns_none_on_clean_server_shutdown() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        tokio::spawn(async move {
+            let (mut conn, _) = listener.accept().await.unwrap();
+            // Drain any bytes the client sends (ignore) then close write side.
+            let mut buf = [0u8; 256];
+            let _ = conn.read(&mut buf).await;
+            conn.shutdown().await.unwrap();
+        });
+
+        let mut stream = TcpStream::connect(addr).await.unwrap();
+        // Send something so the server doesn't block on read.
+        let _ = stream.write_all(b"hi").await;
+        let mut client = WsTestClient { stream };
+        let result = tokio::time::timeout(std::time::Duration::from_secs(5), client.recv_eof())
+            .await
+            .expect("timed out");
+        assert_eq!(result, None, "expected None on clean EOF");
+    }
+
+    /// Exercises `recv_eof`'s `Ok(_) => Some(byte[0])` branch by having the
+    /// server send one byte after the client connects.
+    #[tokio::test]
+    async fn recv_eof_returns_some_when_byte_arrives() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        tokio::spawn(async move {
+            let (mut conn, _) = listener.accept().await.unwrap();
+            // Send one byte immediately, then close so the client sees the byte.
+            let _ = conn.write_all(&[0x42u8]).await;
+            let _ = conn.shutdown().await;
+        });
+
+        let stream = TcpStream::connect(addr).await.unwrap();
+        let mut client = WsTestClient { stream };
+        let result = tokio::time::timeout(std::time::Duration::from_secs(5), client.recv_eof())
+            .await
+            .expect("timed out");
+        assert_eq!(result, Some(0x42), "expected the sent byte");
     }
 
     /// Single shared copy of the `run_id`-extraction match every test below
@@ -682,5 +836,40 @@ mod tests {
             line: "test".to_string(),
         };
         assert!(tx.send(ev).is_ok());
+    }
+
+    /// Exercises `recv_eof`'s `Err(_) => None` branch by having the server
+    /// abort the connection with SO_LINGER=0, which causes the client to
+    /// receive a TCP RST rather than a clean FIN, so `read()` returns an IO
+    /// error (`connection reset by peer`) instead of `Ok(0)`.
+    #[tokio::test]
+    async fn recv_eof_returns_none_on_io_error() {
+        use std::time::Duration;
+        use tokio::net::TcpSocket;
+
+        let server_sock = TcpSocket::new_v4().unwrap();
+        server_sock.bind("127.0.0.1:0".parse().unwrap()).unwrap();
+        let addr = server_sock.local_addr().unwrap();
+        let listener = server_sock.listen(1).unwrap();
+
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            // Set SO_LINGER to 0 — causes RST on close instead of FIN.
+            #[allow(deprecated)]
+            stream.set_linger(Some(Duration::from_secs(0))).unwrap();
+            // Close immediately (drop triggers RST).
+        });
+
+        let stream = TcpStream::connect(addr).await.unwrap();
+        // Give the server task a moment to accept and set SO_LINGER before
+        // we try to read.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let mut client = WsTestClient { stream };
+        // With a RST, read() returns Err("connection reset by peer") → None.
+        let result = tokio::time::timeout(std::time::Duration::from_secs(2), client.recv_eof())
+            .await
+            .expect("timed out waiting for recv_eof on RST");
+        assert_eq!(result, None, "expected None on connection reset");
     }
 }

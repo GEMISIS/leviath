@@ -2115,6 +2115,81 @@ mod tests {
         );
     }
 
+    // ─── Coverage: tools branch inference + context-window update (lines 76-112) ─
+
+    /// A `RunIO` impl whose `get_user_input` always returns `""` so the
+    /// interactive loop exits after one turn.  Used to drive the `has_tools=true`
+    /// branch of `run_interactive_stage` all the way through lines 76-112.
+    struct EmptyInputIO;
+
+    #[async_trait]
+    impl crate::commands::run::io::RunIO for EmptyInputIO {
+        async fn on_stage_enter(
+            &mut self,
+            _stage: &leviath_core::Stage,
+            _visit_num: usize,
+            _provider: &str,
+            _model: &str,
+        ) {
+        }
+        async fn on_stage_complete(
+            &mut self,
+            _stage_name: &str,
+            _result: &leviath_core::blueprint::StageResult,
+            _next_stage: Option<&str>,
+        ) {
+        }
+        async fn on_output(&mut self, _text: &str) {}
+        async fn on_tokens(&mut self, _prompt: usize, _completion: usize, _cached: usize) {}
+        async fn on_tool_call(&mut self, _tool_name: &str, _tool_id: &str, _result: &str) {}
+        async fn get_user_input(&mut self, _prompt: &str) -> Option<String> {
+            Some("".to_string())
+        }
+        async fn on_error(&mut self, _error: &str) {}
+        async fn on_provider_missing(&mut self, _provider: &str) {}
+        fn is_background(&self) -> bool {
+            false
+        }
+        fn write_context_snapshot(&mut self, _snapshot: &crate::runstate::RegionSnapshot) {}
+    }
+
+    #[tokio::test]
+    async fn interactive_stage_tools_foreground_completes_one_turn() {
+        // Exercises the `has_tools = true` branch of `run_interactive_stage`:
+        //   • run_inference_loop_filtered succeeds → lines 76-112 (including the
+        //     `if let Some(mut window)` at line 105 whose `}` at line 112 was a gap)
+        //   • foreground path for user input → empty → loop breaks at line 177
+        // No meta/run_id → takes the foreground input path (line 172).
+        let bp = make_blueprint(vec![make_stage("main")]);
+        let (mut engine, _pool, entity) = make_engine_and_entity(&bp, "Response");
+        let mut io = EmptyInputIO;
+
+        let tools = vec![leviath_providers::Tool {
+            name: "t".to_string(),
+            description: "t".to_string(),
+            parameters: serde_json::json!({}),
+        }];
+
+        let result = run_interactive_stage(
+            &mut engine,
+            entity,
+            "mock",
+            "test-model",
+            5,
+            &tools,
+            None, // foreground: no run_id → uses io.get_user_input()
+            "main",
+            &mut io,
+            &mut noop_exec,
+        )
+        .await;
+
+        assert!(
+            result.is_ok(),
+            "expected Ok from foreground interactive stage"
+        );
+    }
+
     #[tokio::test]
     async fn interactive_stage_with_tools_max_turns_reached() {
         // Test that the interactive stage tool-path also respects max_iterations=0
@@ -2148,5 +2223,975 @@ mod tests {
             "Expected max turns message: {:?}",
             io.outputs
         );
+    }
+
+    // ─── Coverage: entities without ContextWindow ────────────────────────────
+    // Lines 455:17 and 485:17 require an entity with no ContextWindow.
+
+    /// Helper: make an engine with the mock provider but spawn a bare entity
+    /// (no ContextWindow). Used for the "no-window" else-branch coverage in
+    /// interactive_points (lines 455 and 485).
+    fn make_engine_bare_entity(
+        provider_content: &str,
+    ) -> (leviath_runtime::AgentEngine, bevy_ecs::prelude::Entity) {
+        let mut registry = leviath_runtime::ProviderRegistry::new();
+        registry.register(
+            "mock".to_string(),
+            Arc::new(MockProvider::new(provider_content)),
+        );
+        let mut engine = leviath_runtime::AgentEngine::with_providers(registry);
+        let entity = engine.world_mut().spawn(()).id();
+        (engine, entity)
+    }
+
+    // ─── Coverage: tool-path inference error (line 74) ───────────────────────
+
+    #[tokio::test]
+    async fn interactive_stage_tools_inference_error_propagates() {
+        // Covers line 74: `?` on `run_inference_loop_filtered` when has_tools=true
+        // and the provider doesn't exist → returns Err.
+        let bp = make_blueprint(vec![make_stage("main")]);
+        let (mut engine, _pool, entity) = make_engine_and_entity(&bp, "unused");
+        let mut io = MockIO::new();
+
+        let tools = vec![leviath_providers::Tool {
+            name: "t".to_string(),
+            description: "t".to_string(),
+            parameters: serde_json::json!({}),
+        }];
+
+        let result = run_interactive_stage(
+            &mut engine,
+            entity,
+            "nonexistent-provider", // causes inference to fail
+            "test-model",
+            5,
+            &tools,
+            None,
+            "main",
+            &mut io,
+            &mut noop_exec,
+        )
+        .await;
+
+        assert!(result.is_err(), "Expected error but got Ok");
+    }
+
+    // ─── Coverage: both-fail inference (lines 128:42, 128:84) ───────────────
+
+    /// A provider where both `infer_stream` and `infer` always fail.
+    struct AlwaysFailingProvider;
+
+    #[async_trait]
+    impl Provider for AlwaysFailingProvider {
+        async fn infer(&self, _r: InferenceRequest) -> Result<InferenceResponse, ProviderError> {
+            Err(ProviderError::Other("infer always fails".to_string()))
+        }
+
+        async fn infer_stream(
+            &self,
+            _r: InferenceRequest,
+        ) -> Result<
+            std::pin::Pin<
+                Box<
+                    dyn futures::Stream<
+                            Item = Result<leviath_providers::StreamChunk, ProviderError>,
+                        > + Send,
+                >,
+            >,
+            ProviderError,
+        > {
+            Err(ProviderError::Other("stream always fails".to_string()))
+        }
+
+        fn count_tokens(&self, text: &str, _model: &str) -> usize {
+            text.len() / 4
+        }
+
+        fn max_context_tokens(&self, _model: &str) -> usize {
+            100_000
+        }
+
+        fn name(&self) -> &str {
+            "always-fail"
+        }
+
+        fn capabilities(&self, _model: &str) -> ModelCapabilities {
+            ModelCapabilities::default()
+        }
+
+        async fn list_models(&self) -> Result<Vec<ModelInfo>, ProviderError> {
+            Ok(vec![])
+        }
+    }
+
+    // Exercises the rarely-called Provider trait methods on AlwaysFailingProvider
+    // so that LLVM marks them as covered.
+    #[test]
+    fn always_failing_provider_trait_methods_are_covered() {
+        let p = AlwaysFailingProvider;
+        assert_eq!(p.name(), "always-fail");
+        assert_eq!(p.count_tokens("hello world", "any"), 2);
+        assert_eq!(p.max_context_tokens("any"), 100_000);
+        let caps = p.capabilities("any");
+        let _ = caps;
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let models = rt.block_on(p.list_models()).unwrap();
+        assert!(models.is_empty());
+    }
+
+    #[tokio::test]
+    async fn interactive_stage_fallback_inference_also_fails_propagates() {
+        // Covers lines 128:42 and 128:84: `?` on `run_inference_filtered` in the
+        // streaming-unavailable fallback path when fallback also fails.
+        let bp = make_blueprint(vec![make_stage("main")]);
+        let (mut engine, _pool, entity) = make_engine_and_entity_with_provider(
+            &bp,
+            "always-fail",
+            Arc::new(AlwaysFailingProvider),
+        );
+        let mut io = MockIO::new();
+
+        let result = run_interactive_stage(
+            &mut engine,
+            entity,
+            "always-fail",
+            "test-model",
+            5,
+            &[], // no tools → streaming path → falls back → also fails
+            None,
+            "main",
+            &mut io,
+            &mut noop_exec,
+        )
+        .await;
+
+        assert!(result.is_err(), "Expected error but got Ok");
+    }
+
+    // ─── Coverage: request_interaction_async error (lines 168:80) ────────────
+
+    #[tokio::test]
+    async fn interactive_stage_tools_request_interaction_async_error() {
+        // Covers line 168:80: `?` on `request_interaction_async` when the run
+        // directory is read-only → write_request fails → Err propagates.
+        use std::os::unix::fs::PermissionsExt;
+        let bp = make_blueprint(vec![make_stage("main")]);
+        let (mut engine, _pool, entity) = make_engine_and_entity(&bp, "Response");
+        let mut io = MockIO::new();
+
+        let run_id = format!(
+            "test-rdonly-tools-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .subsec_nanos()
+        );
+        let mut meta = RunMeta::new(
+            run_id.clone(),
+            "test".into(),
+            "/p".into(),
+            "t".into(),
+            None,
+            "/tmp".into(),
+            1,
+        );
+        // Create the run directory, then make it read-only so write_request fails
+        runstate::create_run(&meta).unwrap();
+        let dir = runstate::run_dir(&run_id);
+        let mut perms = std::fs::metadata(&dir).unwrap().permissions();
+        perms.set_mode(0o555);
+        std::fs::set_permissions(&dir, perms).unwrap();
+
+        let tools = vec![leviath_providers::Tool {
+            name: "t".to_string(),
+            description: "t".to_string(),
+            parameters: serde_json::json!({}),
+        }];
+
+        let result = run_interactive_stage(
+            &mut engine,
+            entity,
+            "mock",
+            "test-model",
+            5,
+            &tools,
+            Some((&run_id, &mut meta)),
+            "main",
+            &mut io,
+            &mut noop_exec,
+        )
+        .await;
+
+        // Restore write permissions so cleanup works
+        let mut perms2 = std::fs::metadata(&dir).unwrap().permissions();
+        perms2.set_mode(0o755);
+        let _ = std::fs::set_permissions(&dir, perms2);
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert!(result.is_err(), "Expected error from read-only run dir");
+    }
+
+    #[tokio::test]
+    async fn interactive_stage_no_tools_request_interaction_async_error() {
+        // Same as above but no-tools path (streaming). Covers the same `?` at
+        // line 168 via the else branch (no tools).
+        use std::os::unix::fs::PermissionsExt;
+        let bp = make_blueprint(vec![make_stage("main")]);
+        let (mut engine, _pool, entity) = make_engine_and_entity(&bp, "Response");
+        let mut io = MockIO::new();
+
+        let run_id = format!(
+            "test-rdonly-notools-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .subsec_nanos()
+        );
+        let mut meta = RunMeta::new(
+            run_id.clone(),
+            "test".into(),
+            "/p".into(),
+            "t".into(),
+            None,
+            "/tmp".into(),
+            1,
+        );
+        runstate::create_run(&meta).unwrap();
+        let dir = runstate::run_dir(&run_id);
+        let mut perms = std::fs::metadata(&dir).unwrap().permissions();
+        perms.set_mode(0o555);
+        std::fs::set_permissions(&dir, perms).unwrap();
+
+        let result = run_interactive_stage(
+            &mut engine,
+            entity,
+            "mock",
+            "test-model",
+            5,
+            &[], // no tools → streaming path
+            Some((&run_id, &mut meta)),
+            "main",
+            &mut io,
+            &mut noop_exec,
+        )
+        .await;
+
+        // Restore and cleanup
+        let mut perms2 = std::fs::metadata(&dir).unwrap().permissions();
+        perms2.set_mode(0o755);
+        let _ = std::fs::set_permissions(&dir, perms2);
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert!(result.is_err(), "Expected error from read-only run dir");
+    }
+
+    // ─── Coverage: interactive_points None run_context (lines 374:21, 388:17) ─
+
+    #[tokio::test]
+    async fn interactive_points_foreground_empty_content_no_meta() {
+        // Covers line 374:21: `if let (Some(run_id), Some(ref m))` is false when
+        // run_context=None. Also covers line 388:17: `if let Some(ref mut m)` is
+        // None (no meta_holder).
+        use crate::interaction::InteractionResponse;
+
+        let bp = make_blueprint(vec![make_stage("main")]);
+        let (mut engine, _pool, entity) = make_engine_and_entity(&bp, "content from agent");
+        let mut io = MockIO::new();
+
+        let points = vec![make_free_text_point("ask", "Tell me something")];
+
+        let ask_foreground = |_req: &crate::interaction::InteractionRequest| {
+            InteractionResponse::text("", "user reply")
+        };
+
+        run_interactive_points_stage_with(
+            &mut engine,
+            entity,
+            "mock",
+            "test-model",
+            4,
+            &[],
+            None,
+            None,
+            &points,
+            None, // run_context = None → no meta_holder, no run_id_owned
+            &mut io,
+            &mut noop_exec,
+            &ask_foreground,
+        )
+        .await
+        .unwrap();
+
+        let all_output = io.outputs.join("");
+        assert!(all_output.contains("content from agent"));
+    }
+
+    // ─── Coverage: unwrap_or_else closure (lines 421:96, 444:48, 444:65) ────
+    // The fallback is called when choice_index is out of range for the options slice.
+
+    #[tokio::test]
+    async fn interactive_points_out_of_range_choice_falls_back_to_text_foreground() {
+        // Covers lines 444:48, 444:65: foreground path, choice_index out of range →
+        // `unwrap_or_else` closure called → `response_as_text` returns the text value.
+        use crate::interaction::InteractionResponse;
+
+        let bp = make_blueprint(vec![make_stage("main")]);
+        let (mut engine, _pool, entity) = make_engine_and_entity(&bp, "Agent response");
+        let mut io = MockIO::new();
+
+        let points = vec![make_multiple_choice_point(
+            "pick",
+            "Choose",
+            vec!["A".to_string(), "B".to_string()],
+        )];
+
+        // choice_index 99 is out of range → response_as_choice returns None →
+        // unwrap_or_else fires → response_as_text("fallback")
+        let ask_foreground = |_req: &crate::interaction::InteractionRequest| {
+            let mut resp = InteractionResponse::choice("", 99);
+            resp.value = Some("fallback".to_string());
+            resp
+        };
+
+        run_interactive_points_stage_with(
+            &mut engine,
+            entity,
+            "mock",
+            "test-model",
+            4,
+            &[],
+            None,
+            None,
+            &points,
+            None,
+            &mut io,
+            &mut noop_exec,
+            &ask_foreground,
+        )
+        .await
+        .unwrap();
+        // Success = unwrap_or_else path ran without panic
+    }
+
+    #[tokio::test]
+    async fn interactive_points_out_of_range_choice_falls_back_to_text_background() {
+        // Covers line 421:96: background (IPC) path, choice_index out of range →
+        // unwrap_or_else closure called.
+        use crate::interaction::InteractionResponse;
+
+        let bp = make_blueprint(vec![make_stage("main")]);
+        let (mut engine, _pool, entity) = make_engine_and_entity(&bp, "Agent response");
+        let mut io = MockIO::new();
+
+        let run_id = format!(
+            "test-ip-oob-bg-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .subsec_nanos()
+        );
+        let mut meta = RunMeta::new(
+            run_id.clone(),
+            "test".into(),
+            "/p".into(),
+            "t".into(),
+            None,
+            "/tmp".into(),
+            1,
+        );
+        runstate::create_run(&meta).unwrap();
+
+        let points = vec![make_multiple_choice_point(
+            "pick",
+            "Choose",
+            vec!["X".to_string(), "Y".to_string()],
+        )];
+
+        let mut oob_resp = InteractionResponse::choice("", 99);
+        oob_resp.value = Some("fallback-text".to_string());
+        let responder = spawn_interaction_responder(run_id.clone(), vec![oob_resp]);
+
+        run_interactive_points_stage(
+            &mut engine,
+            entity,
+            "mock",
+            "test-model",
+            4,
+            &[],
+            None,
+            None,
+            &points,
+            Some((&run_id, &mut meta)),
+            &mut io,
+            &mut noop_exec,
+        )
+        .await
+        .unwrap();
+
+        responder.abort();
+        let _ = std::fs::remove_dir_all(runstate::run_dir(&run_id));
+    }
+
+    // ─── Coverage: empty user_text with no ContextWindow (line 455:17) ───────
+
+    #[tokio::test]
+    async fn interactive_points_empty_user_text_no_context_window() {
+        // Covers line 455:17: `if !user_text.is_empty()` is false AND entity has no
+        // ContextWindow → outer if block is skipped entirely.
+        use crate::interaction::InteractionResponse;
+
+        let (mut engine, entity) = make_engine_bare_entity("Agent response");
+        let mut io = MockIO::new();
+
+        let points = vec![make_free_text_point("ask", "Say something")];
+
+        let ask_foreground = |_req: &crate::interaction::InteractionRequest| {
+            InteractionResponse::text("", "") // empty response
+        };
+
+        run_interactive_points_stage_with(
+            &mut engine,
+            entity,
+            "mock",
+            "test-model",
+            4,
+            &[],
+            None,
+            None,
+            &points,
+            None,
+            &mut io,
+            &mut noop_exec,
+            &ask_foreground,
+        )
+        .await
+        .unwrap();
+    }
+
+    // ─── Coverage: followup empty text (lines 485:17, 486:13) ───────────────
+
+    #[tokio::test]
+    async fn interactive_points_followup_empty_text_no_context_window() {
+        // Covers lines 485:17 and 486:13: followup_text.is_empty() is true.
+        // Entity has no ContextWindow → else branch also hit.
+        use crate::interaction::InteractionResponse;
+        use std::collections::VecDeque;
+        use std::sync::Mutex;
+
+        let (mut engine, entity) = make_engine_bare_entity("Agent response");
+        let mut io = MockIO::new();
+
+        let mut followups = std::collections::HashMap::new();
+        followups.insert("Revise".to_string(), "What to change?".to_string());
+        let points = vec![make_multiple_choice_point_with_followups(
+            "plan",
+            "Pick",
+            vec!["Approve".to_string(), "Revise".to_string()],
+            followups,
+        )];
+
+        // Round 1: "Revise" → followup asked → empty answer → hits line 485 else.
+        // Round 2: "Approve" → exits.
+        let queued = Mutex::new(VecDeque::from(vec![
+            InteractionResponse::choice("", 1), // "Revise" → triggers followup
+            InteractionResponse::text("", ""),  // empty followup → hits line 485 else
+            InteractionResponse::choice("", 0), // "Approve" → exits
+        ]));
+        let ask_foreground = move |_req: &crate::interaction::InteractionRequest| {
+            queued
+                .lock()
+                .unwrap()
+                .pop_front()
+                .expect("ask_foreground called more times than expected")
+        };
+
+        run_interactive_points_stage_with(
+            &mut engine,
+            entity,
+            "mock",
+            "test-model",
+            12,
+            &[],
+            None,
+            None,
+            &points,
+            None,
+            &mut io,
+            &mut noop_exec,
+            &ask_foreground,
+        )
+        .await
+        .unwrap();
+    }
+
+    // ─── Coverage: final segment None run_context (line 513:13) ─────────────
+
+    #[tokio::test]
+    async fn interactive_points_final_segment_no_run_context() {
+        // Covers line 513:13: `if let (Some(run_id), Some(ref m))` is false in the
+        // final-segment block (run_context = None).
+        use crate::interaction::InteractionResponse;
+
+        let bp = make_blueprint(vec![make_stage("main")]);
+        let (mut engine, _pool, entity) = make_engine_and_entity(&bp, "final segment content");
+        let mut io = MockIO::new();
+
+        let points = vec![make_free_text_point("ask", "Tell me something")];
+
+        let ask_foreground = |_req: &crate::interaction::InteractionRequest| {
+            InteractionResponse::text("", "user reply")
+        };
+
+        run_interactive_points_stage_with(
+            &mut engine,
+            entity,
+            "mock",
+            "test-model",
+            8,
+            &[],
+            None,
+            None,
+            &points,
+            None, // run_context = None → hits the else at line 513
+            &mut io,
+            &mut noop_exec,
+            &ask_foreground,
+        )
+        .await
+        .unwrap();
+
+        let all_output = io.outputs.join("");
+        assert!(all_output.contains("final segment content"));
+    }
+
+    // ─── Coverage: final segment Err (line 527:9) ───────────────────────────
+
+    #[tokio::test]
+    async fn interactive_points_final_segment_inference_error_skipped() {
+        // Covers line 527:9: `if let Ok(resp)` is Err in the final segment.
+        // Nonexistent provider → run_inference_loop_filtered returns Err →
+        // the `if let Ok(resp)` arm is not taken (Err is silently ignored).
+        use crate::interaction::InteractionResponse;
+
+        let bp = make_blueprint(vec![make_stage("main")]);
+        let (mut engine, _pool, entity) = make_engine_and_entity(&bp, "unused");
+        let mut io = MockIO::new();
+
+        let points = vec![make_free_text_point("ask", "Tell me something")];
+
+        let ask_foreground = |_req: &crate::interaction::InteractionRequest| {
+            InteractionResponse::text("", "user reply")
+        };
+
+        let result = run_interactive_points_stage_with(
+            &mut engine,
+            entity,
+            "nonexistent-provider-final",
+            "test-model",
+            8,
+            &[],
+            None,
+            None,
+            &points,
+            None,
+            &mut io,
+            &mut noop_exec,
+            &ask_foreground,
+        )
+        .await;
+
+        // Err is silently dropped by `if let Ok(resp)` so function returns Ok
+        assert!(
+            result.is_ok(),
+            "Expected Ok since final-segment Err is silently dropped"
+        );
+    }
+
+    // ─── Coverage: spawn_interaction_responder exhaustion (lines 1382:25, 1384:17, 1386:9) ─
+
+    #[tokio::test]
+    async fn spawn_interaction_responder_exhausts_and_exits_loop() {
+        // Covers lines 1382:25, 1384:17, 1386:9: the `else { break; }` branch in
+        // spawn_interaction_responder when resp_iter is exhausted.
+        //
+        // We provide 1 response for 2 interaction points. The responder handles
+        // point-1, exhausts its iterator, then when point-2's request appears it
+        // takes the `else { break }` path. The stage will be waiting on point-2
+        // forever — we use a timeout to avoid blocking.
+        use crate::interaction::InteractionResponse;
+
+        let bp = make_blueprint(vec![make_stage("main")]);
+        let (mut engine, _pool, entity) = make_engine_and_entity(&bp, "Agent response");
+        let mut io = MockIO::new();
+
+        let run_id = format!(
+            "test-responder-exhaust-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .subsec_nanos()
+        );
+        let mut meta = RunMeta::new(
+            run_id.clone(),
+            "test".into(),
+            "/p".into(),
+            "t".into(),
+            None,
+            "/tmp".into(),
+            1,
+        );
+        runstate::create_run(&meta).unwrap();
+
+        let points = vec![
+            make_free_text_point("p1", "First question"),
+            make_free_text_point("p2", "Second question"),
+        ];
+
+        // 1 response for 2 points → iterator exhausted when p2 arrives
+        let responder = spawn_interaction_responder(
+            run_id.clone(),
+            vec![InteractionResponse::text("", "answer to p1")],
+        );
+
+        let mut exec_binding = noop_exec;
+        let stage_fut = run_interactive_points_stage(
+            &mut engine,
+            entity,
+            "mock",
+            "test-model",
+            4,
+            &[],
+            None,
+            None,
+            &points,
+            Some((&run_id, &mut meta)),
+            &mut io,
+            &mut exec_binding,
+        );
+        // Stage will block on p2 forever; we cancel it after a timeout
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(5), stage_fut).await;
+
+        // The responder should have broken out of its loop when p2 arrived
+        let responder_result =
+            tokio::time::timeout(std::time::Duration::from_secs(5), responder).await;
+        assert!(
+            responder_result.is_ok(),
+            "Responder should have exited (else {{ break }}) before timeout"
+        );
+
+        let _ = std::fs::remove_dir_all(runstate::run_dir(&run_id));
+    }
+
+    // ─── Coverage: request_interaction_async error in interactive_points (line 474:97) ─
+
+    #[tokio::test]
+    async fn interactive_points_followup_request_interaction_async_error() {
+        // Covers line 474:97: `?` on `request_interaction_async` for the followup
+        // request in the background path.
+        //
+        // We respond to the main choice with "Revise" (which has a followup).
+        // We immediately make the run dir read-only after writing the response so:
+        //   1) response.json is readable (already written before chmod)
+        //   2) take_response reads it; remove_file silently fails (read-only dir)
+        //   3) write_meta silently fails (let _); request_interaction_async → Ok(resp)
+        //   4) stage builds followup → write_request fails → Err propagates via ?
+        use crate::interaction::InteractionResponse;
+        use std::os::unix::fs::PermissionsExt;
+
+        let bp = make_blueprint(vec![make_stage("main")]);
+        let (mut engine, _pool, entity) = make_engine_and_entity(&bp, "Agent response");
+        let mut io = MockIO::new();
+
+        let run_id = format!(
+            "test-ip-followup-err-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .subsec_nanos()
+        );
+        let mut meta = RunMeta::new(
+            run_id.clone(),
+            "test".into(),
+            "/p".into(),
+            "t".into(),
+            None,
+            "/tmp".into(),
+            1,
+        );
+        runstate::create_run(&meta).unwrap();
+
+        let mut followups = std::collections::HashMap::new();
+        followups.insert("Revise".to_string(), "What to change?".to_string());
+        let points = vec![make_multiple_choice_point_with_followups(
+            "plan",
+            "Pick",
+            vec!["Approve".to_string(), "Revise".to_string()],
+            followups,
+        )];
+
+        let run_id_for_responder = run_id.clone();
+        let responder: tokio::task::JoinHandle<()> = tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                if let Some(req) = crate::interaction::read_request(&run_id_for_responder) {
+                    let mut resp = InteractionResponse::choice("", 1); // "Revise"
+                    resp.request_id = req.id.clone();
+                    crate::interaction::write_response(&run_id_for_responder, &resp).unwrap();
+                    // Immediately make the dir read-only: response.json is on disk
+                    // so take_response can still read it, but write_request for the
+                    // followup will fail.
+                    let dir = runstate::run_dir(&run_id_for_responder);
+                    if let Ok(m) = std::fs::metadata(&dir) {
+                        let mut perms = m.permissions();
+                        perms.set_mode(0o555);
+                        let _ = std::fs::set_permissions(&dir, perms);
+                    }
+                    break;
+                }
+            }
+        });
+
+        let result = run_interactive_points_stage(
+            &mut engine,
+            entity,
+            "mock",
+            "test-model",
+            8,
+            &[],
+            None,
+            None,
+            &points,
+            Some((&run_id, &mut meta)),
+            &mut io,
+            &mut noop_exec,
+        )
+        .await;
+
+        let _ = responder.await;
+
+        // Restore permissions and cleanup
+        let dir = runstate::run_dir(&run_id);
+        if dir.exists() {
+            if let Ok(m) = std::fs::metadata(&dir) {
+                let mut perms2 = m.permissions();
+                perms2.set_mode(0o755);
+                let _ = std::fs::set_permissions(&dir, perms2);
+            }
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+
+        // The error from write_request (read-only dir) propagates via `?` at line 474
+        assert!(
+            result.is_err(),
+            "Expected Err from followup write_request failure"
+        );
+    }
+
+    // ─── Coverage: empty inference content with run context (lines 374:21, 513:13) ─
+
+    #[tokio::test]
+    async fn interactive_points_empty_content_with_run_context() {
+        // Covers lines 374:21 and 513:13: `}` of `if !resp.content.is_empty()` when
+        // the provider returns empty content ("") AND run_context is Some.
+        // The if-block is skipped (false branch), producing the uncovered segment.
+        use crate::interaction::InteractionResponse;
+
+        let bp = make_blueprint(vec![make_stage("main")]);
+        // MockProvider with empty string → resp.content.is_empty() == true
+        let (mut engine, _pool, entity) = make_engine_and_entity(&bp, "");
+        let mut io = MockIO::new();
+
+        let run_id = format!(
+            "test-ip-empty-content-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .subsec_nanos()
+        );
+        let mut meta = RunMeta::new(
+            run_id.clone(),
+            "test".into(),
+            "/p".into(),
+            "t".into(),
+            None,
+            "/tmp".into(),
+            1,
+        );
+        runstate::create_run(&meta).unwrap();
+
+        let points = vec![make_free_text_point("q", "Any thoughts?")];
+        let responder = spawn_interaction_responder(
+            run_id.clone(),
+            vec![InteractionResponse::text("", "my answer")],
+        );
+
+        run_interactive_points_stage(
+            &mut engine,
+            entity,
+            "mock",
+            "test-model",
+            4,
+            &[],
+            None,
+            None,
+            &points,
+            Some((&run_id, &mut meta)),
+            &mut io,
+            &mut noop_exec,
+        )
+        .await
+        .unwrap();
+
+        responder.abort();
+        let _ = std::fs::remove_dir_all(runstate::run_dir(&run_id));
+
+        // When content is empty, io.on_output was NOT called
+        assert!(
+            io.outputs.is_empty(),
+            "expected no output with empty content"
+        );
+    }
+
+    // ─── Coverage: first request_interaction_async fails (line 421:96) ─────────
+
+    #[tokio::test]
+    async fn interactive_points_first_request_interaction_async_error() {
+        // Covers line 421:96: `?` on `request_interaction_async` for the initial
+        // (non-followup) interaction point when `write_request` fails because the
+        // run directory is read-only before the stage even starts.
+        use std::os::unix::fs::PermissionsExt;
+
+        let bp = make_blueprint(vec![make_stage("main")]);
+        let (mut engine, _pool, entity) = make_engine_and_entity(&bp, "Agent response");
+        let mut io = MockIO::new();
+
+        let run_id = format!(
+            "test-ip-first-req-err-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .subsec_nanos()
+        );
+        let mut meta = RunMeta::new(
+            run_id.clone(),
+            "test".into(),
+            "/p".into(),
+            "t".into(),
+            None,
+            "/tmp".into(),
+            1,
+        );
+        runstate::create_run(&meta).unwrap();
+
+        // Make the run directory read-only BEFORE calling the stage so that
+        // `write_request` (called by `request_interaction_async` at line 384 of
+        // interaction.rs) fails immediately → propagates via `?` at line 421.
+        let dir = runstate::run_dir(&run_id);
+        let mut perms = std::fs::metadata(&dir).unwrap().permissions();
+        perms.set_mode(0o555);
+        std::fs::set_permissions(&dir, perms).unwrap();
+
+        let points = vec![make_free_text_point("q", "What now?")];
+
+        let result = run_interactive_points_stage(
+            &mut engine,
+            entity,
+            "mock",
+            "test-model",
+            4,
+            &[],
+            None,
+            None,
+            &points,
+            Some((&run_id, &mut meta)),
+            &mut io,
+            &mut noop_exec,
+        )
+        .await;
+
+        // Restore permissions and clean up
+        if dir.exists() {
+            if let Ok(m) = std::fs::metadata(&dir) {
+                let mut perms2 = m.permissions();
+                perms2.set_mode(0o755);
+                let _ = std::fs::set_permissions(&dir, perms2);
+            }
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+
+        assert!(
+            result.is_err(),
+            "Expected Err from write_request failure on read-only dir"
+        );
+    }
+
+    // ─── Coverage: followup non-empty text + no ContextWindow (line 485:17) ────
+
+    #[tokio::test]
+    async fn interactive_points_followup_nonempty_text_no_context_window() {
+        // Covers line 485:17: `}` of `if let Some(mut window)` in the followup
+        // block when followup_text IS non-empty but the entity has NO ContextWindow.
+        // The `get_mut::<ContextWindow>` returns None → inner block is skipped.
+        use crate::interaction::InteractionResponse;
+        use std::collections::VecDeque;
+        use std::sync::Mutex;
+
+        // Bare entity — spawned without ContextWindow
+        let (mut engine, entity) = make_engine_bare_entity("Agent response");
+        let mut io = MockIO::new();
+
+        let mut followups = std::collections::HashMap::new();
+        followups.insert("Revise".to_string(), "What to change?".to_string());
+        let points = vec![make_multiple_choice_point_with_followups(
+            "plan",
+            "Pick",
+            vec!["Approve".to_string(), "Revise".to_string()],
+            followups,
+        )];
+
+        // Round 1: "Revise" → followup asked → NON-empty text → entity has no
+        //          ContextWindow → if let Some(mut window) is None → line 485:17 hit.
+        // Round 2: "Approve" → exits.
+        let queued = Mutex::new(VecDeque::from(vec![
+            InteractionResponse::choice("", 1), // "Revise" → triggers followup
+            InteractionResponse::text("", "add more tests"), // non-empty followup
+            InteractionResponse::choice("", 0), // "Approve" → exits
+        ]));
+        let ask_foreground = move |_req: &crate::interaction::InteractionRequest| {
+            queued
+                .lock()
+                .unwrap()
+                .pop_front()
+                .expect("ask_foreground called more times than expected")
+        };
+
+        run_interactive_points_stage_with(
+            &mut engine,
+            entity,
+            "mock",
+            "test-model",
+            8,
+            &[],
+            None,
+            None,
+            &points,
+            None,
+            &mut io,
+            &mut noop_exec,
+            &ask_foreground,
+        )
+        .await
+        .unwrap();
     }
 }

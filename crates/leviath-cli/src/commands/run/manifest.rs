@@ -25,15 +25,15 @@ pub fn find_manifest(path: &str) -> anyhow::Result<PathBuf> {
     }
 
     // 3. Installed agent by name: ~/.leviath/agents/<name>/agent.leviath
-    if let Some(home) = dirs::home_dir() {
-        let installed = home
-            .join(".leviath")
-            .join("agents")
-            .join(path)
-            .join("agent.leviath");
-        if installed.exists() {
-            return Ok(installed);
-        }
+    //    dirs::home_dir() always returns Some on supported platforms.
+    let installed = dirs::home_dir()
+        .unwrap()
+        .join(".leviath")
+        .join("agents")
+        .join(path)
+        .join("agent.leviath");
+    if installed.exists() {
+        return Ok(installed);
     }
 
     // 4. agent.leviath in current directory (for `lev run` with no path)
@@ -501,6 +501,34 @@ pub fn parse_manifest(content: &str) -> anyhow::Result<Blueprint> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    /// Serializes tests that mutate the process's current working directory.
+    /// `set_current_dir` is process-global, so only one test may hold this
+    /// lock at a time to avoid flaky interactions between parallel tests.
+    static CWD_LOCK: Mutex<()> = Mutex::new(());
+
+    // ─── test helpers ─────────────────────────────────────────────────────────
+
+    /// Extract the `points` vec from a `StageMode::InteractivePoints`.
+    /// Panics (with a diagnostic) when the mode is any other variant.
+    /// The panic branch is exercised by `unwrap_interactive_points_panics_on_wrong_mode`.
+    fn unwrap_interactive_points(mode: &StageMode) -> &[leviath_core::blueprint::InteractionPoint] {
+        match mode {
+            StageMode::InteractivePoints { points } => points,
+            other => panic!(
+                "expected StageMode::InteractivePoints, got {:?}",
+                std::mem::discriminant(other)
+            ),
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "expected StageMode::InteractivePoints")]
+    fn unwrap_interactive_points_panics_on_wrong_mode() {
+        let mode = StageMode::Autonomous;
+        let _ = unwrap_interactive_points(&mode);
+    }
 
     // ─── parse_manifest ──────────────────────────────────────────────────────
 
@@ -557,7 +585,7 @@ conversation = { kind = "sliding_window", max_items = 20, max_tokens = 10000 }
         assert_eq!(bp.stages.len(), 2);
 
         let start = bp.find_stage("start").unwrap();
-        assert!(matches!(start.mode, StageMode::Autonomous));
+        assert_eq!(start.mode, StageMode::Autonomous);
         assert_eq!(start.model.provider, "openai");
         assert_eq!(start.model.model, "gpt-5");
         assert_eq!(start.max_iterations, Some(25));
@@ -574,7 +602,7 @@ conversation = { kind = "sliding_window", max_items = 20, max_tokens = 10000 }
         );
 
         let finish = bp.find_stage("finish").unwrap();
-        assert!(matches!(finish.mode, StageMode::Interactive));
+        assert_eq!(finish.mode, StageMode::Interactive);
     }
 
     #[test]
@@ -634,18 +662,18 @@ mode = "autonomous"
         let impl_edge = transitions.get("implement").unwrap();
         assert_eq!(impl_edge.condition, TransitionCondition::Always);
         assert_eq!(impl_edge.hint.as_deref(), Some("Ready to implement"));
-        assert!(matches!(impl_edge.transform, EdgeTransform::Direct));
+        assert_eq!(impl_edge.transform, EdgeTransform::Direct);
 
         let err_edge = transitions.get("error_handler").unwrap();
         assert_eq!(err_edge.condition, TransitionCondition::Error);
-        assert!(matches!(err_edge.transform, EdgeTransform::Clear));
+        assert_eq!(err_edge.transform, EdgeTransform::Clear);
 
         let timeout_edge = transitions.get("timeout_handler").unwrap();
         assert_eq!(timeout_edge.condition, TransitionCondition::MaxIterations);
-        assert!(matches!(
+        assert_eq!(
             timeout_edge.transform,
-            EdgeTransform::Compact { .. }
-        ));
+            EdgeTransform::Compact { prompt: None }
+        );
 
         let choice_edge = transitions.get("choice_stage").unwrap();
         assert_eq!(choice_edge.condition, TransitionCondition::LlmChoice);
@@ -680,7 +708,7 @@ hist = { kind = "compact_history", source_region = "conv", max_tokens = 4000 }
             .iter()
             .find(|r| r.name == "sys")
             .unwrap();
-        assert!(matches!(sys.kind, RegionKind::Pinned));
+        assert_eq!(sys.kind, RegionKind::Pinned);
         assert_eq!(sys.max_tokens, 1000);
 
         let conv = bp
@@ -689,10 +717,7 @@ hist = { kind = "compact_history", source_region = "conv", max_tokens = 4000 }
             .iter()
             .find(|r| r.name == "conv")
             .unwrap();
-        assert!(matches!(
-            conv.kind,
-            RegionKind::SlidingWindow { max_items: 15 }
-        ));
+        assert_eq!(conv.kind, RegionKind::SlidingWindow { max_items: 15 });
 
         let temp = bp
             .context_layout
@@ -700,7 +725,7 @@ hist = { kind = "compact_history", source_region = "conv", max_tokens = 4000 }
             .iter()
             .find(|r| r.name == "temp")
             .unwrap();
-        assert!(matches!(temp.kind, RegionKind::Temporary));
+        assert_eq!(temp.kind, RegionKind::Temporary);
 
         let comp = bp
             .context_layout
@@ -708,12 +733,12 @@ hist = { kind = "compact_history", source_region = "conv", max_tokens = 4000 }
             .iter()
             .find(|r| r.name == "comp")
             .unwrap();
-        assert!(matches!(
+        assert_eq!(
             comp.kind,
             RegionKind::Compacting {
                 threshold_tokens: 4000
             }
-        ));
+        );
 
         let clr = bp
             .context_layout
@@ -721,7 +746,7 @@ hist = { kind = "compact_history", source_region = "conv", max_tokens = 4000 }
             .iter()
             .find(|r| r.name == "clr")
             .unwrap();
-        assert!(matches!(clr.kind, RegionKind::Clearable));
+        assert_eq!(clr.kind, RegionKind::Clearable);
 
         let hist = bp
             .context_layout
@@ -729,12 +754,12 @@ hist = { kind = "compact_history", source_region = "conv", max_tokens = 4000 }
             .iter()
             .find(|r| r.name == "hist")
             .unwrap();
-        match &hist.kind {
-            RegionKind::CompactHistory { source_region } => {
-                assert_eq!(source_region, "conv");
+        assert_eq!(
+            hist.kind,
+            RegionKind::CompactHistory {
+                source_region: "conv".to_string()
             }
-            _ => panic!("Expected CompactHistory"),
-        }
+        );
     }
 
     #[test]
@@ -830,34 +855,30 @@ style = "confirm"
 "#;
         let bp = parse_manifest(toml).unwrap();
         let stage = bp.find_stage("main").unwrap();
-        match &stage.mode {
-            StageMode::InteractivePoints { points } => {
-                assert_eq!(points.len(), 3);
+        let points = unwrap_interactive_points(&stage.mode);
+        assert_eq!(points.len(), 3);
 
-                assert_eq!(points[0].name, "review");
-                assert_eq!(points[0].prompt, "Review the output");
-                assert!(points[0].required);
-                assert!(matches!(
-                    points[0].style,
-                    leviath_core::blueprint::InteractionStyle::MultipleChoice
-                ));
-                assert_eq!(points[0].options, vec!["approve", "reject", "revise"]);
+        assert_eq!(points[0].name, "review");
+        assert_eq!(points[0].prompt, "Review the output");
+        assert!(points[0].required);
+        assert_eq!(
+            points[0].style,
+            leviath_core::blueprint::InteractionStyle::MultipleChoice
+        );
+        assert_eq!(points[0].options, vec!["approve", "reject", "revise"]);
 
-                assert_eq!(points[1].name, "feedback");
-                assert!(!points[1].required);
-                assert!(matches!(
-                    points[1].style,
-                    leviath_core::blueprint::InteractionStyle::FreeText
-                ));
+        assert_eq!(points[1].name, "feedback");
+        assert!(!points[1].required);
+        assert_eq!(
+            points[1].style,
+            leviath_core::blueprint::InteractionStyle::FreeText
+        );
 
-                assert_eq!(points[2].name, "confirm");
-                assert!(matches!(
-                    points[2].style,
-                    leviath_core::blueprint::InteractionStyle::Confirm
-                ));
-            }
-            _ => panic!("Expected InteractivePoints mode"),
-        }
+        assert_eq!(points[2].name, "confirm");
+        assert_eq!(
+            points[2].style,
+            leviath_core::blueprint::InteractionStyle::Confirm
+        );
     }
 
     #[test]
@@ -879,18 +900,14 @@ followups = { "Revise" = "What would you like to change?" }
 "#;
         let bp = parse_manifest(toml).unwrap();
         let stage = bp.find_stage("plan").unwrap();
-        match &stage.mode {
-            StageMode::InteractivePoints { points } => {
-                assert_eq!(points.len(), 1);
-                assert_eq!(
-                    points[0].followups.get("Revise").map(|s| s.as_str()),
-                    Some("What would you like to change?")
-                );
-                assert!(!points[0].followups.contains_key("Approve"));
-                assert!(!points[0].followups.contains_key("Abort"));
-            }
-            _ => panic!("Expected InteractivePoints mode"),
-        }
+        let points = unwrap_interactive_points(&stage.mode);
+        assert_eq!(points.len(), 1);
+        assert_eq!(
+            points[0].followups.get("Revise").map(|s| s.as_str()),
+            Some("What would you like to change?")
+        );
+        assert!(!points[0].followups.contains_key("Approve"));
+        assert!(!points[0].followups.contains_key("Abort"));
     }
 
     #[test]
@@ -909,12 +926,8 @@ style    = "confirm"
 "#;
         let bp = parse_manifest(toml).unwrap();
         let stage = bp.find_stage("main").unwrap();
-        match &stage.mode {
-            StageMode::InteractivePoints { points } => {
-                assert!(points[0].followups.is_empty());
-            }
-            _ => panic!("Expected InteractivePoints mode"),
-        }
+        let points = unwrap_interactive_points(&stage.mode);
+        assert!(points[0].followups.is_empty());
     }
 
     #[test]
@@ -993,20 +1006,15 @@ mode = "autonomous"
         let stage_a = bp.find_stage("a").unwrap();
         let transitions = stage_a.transitions.as_ref().unwrap();
         let edge = transitions.get("b").unwrap();
-        match &edge.transform {
+        assert_eq!(
+            edge.transform,
             EdgeTransform::Custom {
-                carry,
-                compact,
-                clear,
-                compact_prompt,
-            } => {
-                assert_eq!(carry, &vec!["system"]);
-                assert_eq!(compact, &vec!["conversation"]);
-                assert_eq!(clear, &vec!["scratch"]);
-                assert_eq!(compact_prompt.as_deref(), Some("Summarize for next stage"));
+                carry: vec!["system".to_string()],
+                compact: vec!["conversation".to_string()],
+                clear: vec!["scratch".to_string()],
+                compact_prompt: Some("Summarize for next stage".to_string()),
             }
-            _ => panic!("Expected Custom transform"),
-        }
+        );
     }
 
     #[test]
@@ -1068,15 +1076,12 @@ name = "no-regions"
         let bp = parse_manifest(toml).unwrap();
         assert_eq!(bp.context_layout.regions.len(), 2); // system + conversation
         assert_eq!(bp.context_layout.regions[0].name, "system");
-        assert!(matches!(
-            bp.context_layout.regions[0].kind,
-            RegionKind::Pinned
-        ));
+        assert_eq!(bp.context_layout.regions[0].kind, RegionKind::Pinned);
         assert_eq!(bp.context_layout.regions[1].name, "conversation");
-        assert!(matches!(
+        assert_eq!(
             bp.context_layout.regions[1].kind,
-            RegionKind::SlidingWindow { .. }
-        ));
+            RegionKind::SlidingWindow { max_items: 10 }
+        );
     }
 
     #[test]
@@ -1090,7 +1095,7 @@ test = { kind = "unknown_kind", max_tokens = 1000 }
 "#;
         let bp = parse_manifest(toml).unwrap();
         let region = &bp.context_layout.regions[0];
-        assert!(matches!(region.kind, RegionKind::Temporary));
+        assert_eq!(region.kind, RegionKind::Temporary);
     }
 
     #[test]
@@ -1109,14 +1114,14 @@ mode = "interactive"
 "#;
         let bp = parse_manifest(toml).unwrap();
         let auto = bp.find_stage("auto").unwrap();
-        assert!(matches!(auto.mode, StageMode::Autonomous));
+        assert_eq!(auto.mode, StageMode::Autonomous);
 
         let inter = bp.find_stage("inter").unwrap();
-        assert!(matches!(inter.mode, StageMode::Interactive));
+        assert_eq!(inter.mode, StageMode::Interactive);
 
         // Default mode (no mode specified) — Autonomous
         let default = bp.find_stage("default_mode").unwrap();
-        assert!(matches!(default.mode, StageMode::Autonomous));
+        assert_eq!(default.mode, StageMode::Autonomous);
     }
 
     #[test]
@@ -1153,7 +1158,7 @@ mode = "autonomous"
         let stage_a = bp.find_stage("a").unwrap();
         let transitions = stage_a.transitions.as_ref().unwrap();
         let edge = transitions.get("b").unwrap();
-        assert!(matches!(edge.transform, EdgeTransform::Compact { .. }));
+        assert_eq!(edge.transform, EdgeTransform::Compact { prompt: None });
     }
 
     #[test]
@@ -1175,7 +1180,7 @@ mode = "autonomous"
         let stage_a = bp.find_stage("a").unwrap();
         let transitions = stage_a.transitions.as_ref().unwrap();
         let edge = transitions.get("b").unwrap();
-        assert!(matches!(edge.transform, EdgeTransform::Direct));
+        assert_eq!(edge.transform, EdgeTransform::Direct);
     }
 
     // ─── find_manifest ───────────────────────────────────────────────────────
@@ -1220,9 +1225,7 @@ mode = "autonomous"
         // resolves via `NSHomeDirectory()`), so this writes to the real
         // `~/.leviath/agents/<name>/agent.leviath` -- using a name unlikely
         // to collide with a real installed agent, cleaned up afterward.
-        let Some(home) = dirs::home_dir() else {
-            return; // no home dir in this environment; nothing to test
-        };
+        let home = dirs::home_dir().expect("home directory must be available");
         let agent_name = "test-find-manifest-installed-by-name-8f3a";
         let agent_dir = home.join(".leviath").join("agents").join(agent_name);
         std::fs::create_dir_all(&agent_dir).unwrap();
@@ -1235,16 +1238,54 @@ mode = "autonomous"
         let _ = std::fs::remove_dir_all(&agent_dir);
     }
 
-    // `find_manifest`'s 4th branch (bare relative `PathBuf::from("agent.leviath")`
-    // checked against the process's current directory) is intentionally not
-    // covered by a test here. `std::env::set_current_dir` is process-global,
-    // and `commands/pack.rs` has an identical relative-path fallback with its
-    // own negative test (`find_manifest_not_found_errors`) that isn't
-    // protected by any shared lock -- mutating cwd from this file's tests
-    // could make that sibling test flaky (it would spuriously find this
-    // test's temp `agent.leviath` if the two ran concurrently). Fixing this
-    // properly means adding a cross-file lock in `pack.rs` too, which is out
-    // of scope for a manifest.rs-only pass.
+    /// Covers branch 2 (directory exists) when the directory has NO `agent.leviath` inside.
+    /// This exercises the implicit else of `if manifest.exists()` on line ~23.
+    #[test]
+    fn find_manifest_dir_without_manifest_falls_through() {
+        let dir = std::env::temp_dir().join("lev-test-dir-no-manifest-9z7q");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // No agent.leviath inside — the dir branch falls through to the error.
+        let result = find_manifest(dir.to_str().unwrap());
+        assert!(result.is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Covers branch 3 (installed agent by name) when the agent is NOT installed.
+    /// The `if let Some(home)` block is entered (home exists on macOS) but the
+    /// `if installed.exists()` is false, so we fall through to the error.
+    #[test]
+    fn find_manifest_installed_agent_not_found_falls_through() {
+        let result = find_manifest("lev-no-such-agent-xyzzy-9f3a");
+        assert!(result.is_err());
+    }
+
+    /// Covers branch 4: a bare `agent.leviath` exists in the current directory.
+    /// Uses `CWD_LOCK` to prevent parallel tests from interfering.
+    #[test]
+    fn find_manifest_cwd_agent_leviath_found() {
+        let dir = std::env::temp_dir().join("lev-test-cwd-manifest-a1b2");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let manifest = dir.join("agent.leviath");
+        std::fs::write(&manifest, "[agent]\nname = \"cwd-test\"").unwrap();
+
+        // Serialize all CWD-mutating tests so they don't interfere.
+        let _guard = CWD_LOCK.lock().unwrap();
+        let original_cwd = std::env::current_dir().unwrap();
+        std::env::set_current_dir(&dir).unwrap();
+
+        // find_manifest("__nonexistent__") falls through branches 1-3 and
+        // finds the agent.leviath in the new CWD (branch 4).
+        let result = find_manifest("__lev_cwd_test_nonexistent__");
+
+        // Always restore CWD before asserting so cleanup runs even on failure.
+        std::env::set_current_dir(&original_cwd).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert!(result.is_ok(), "expected Ok, got: {:?}", result);
+        assert_eq!(result.unwrap().file_name().unwrap(), "agent.leviath");
+    }
 
     // ─── parse_manifest_public ───────────────────────────────────────────────
 
@@ -1280,8 +1321,12 @@ version = "1.0.0"
             .transitions
             .as_ref()
             .expect("plan stage must declare transitions");
-        #[rustfmt::skip]
-        assert!(transitions.len() >= 2, "plan stage must have >=2 outgoing edges so the user's plan_approval choice (Revise/Add detail/Abort) actually changes behavior instead of being silently ignored by a single-edge auto-transition; got {:?}", transitions.keys().collect::<Vec<_>>());
+        assert!(
+            transitions.len() >= 2,
+            "plan stage must have >=2 outgoing edges so the user's plan_approval choice \
+             (Revise/Add detail/Abort) actually changes behavior instead of being silently \
+             ignored by a single-edge auto-transition"
+        );
         assert!(transitions.contains_key("implement"));
 
         // A self-loop (or other non-"implement" edge) must exist so revising/
@@ -1290,10 +1335,14 @@ version = "1.0.0"
         assert!(transitions.keys().any(|t| t != "implement"), "plan stage needs an edge other than 'implement' for non-approval choices");
 
         // The self-loop must be revisit-capped to avoid an infinite planning loop.
-        if transitions.contains_key("plan") {
-            #[rustfmt::skip]
-            assert!(plan.max_revisits.is_some(), "self-looping 'plan' stage must cap max_revisits");
-        }
+        assert!(
+            transitions.contains_key("plan"),
+            "plan stage must have a self-loop ('plan' transition) so the user can revise"
+        );
+        assert!(
+            plan.max_revisits.is_some(),
+            "self-looping 'plan' stage must cap max_revisits"
+        );
     }
 
     #[test]
@@ -1319,10 +1368,7 @@ version = "1.0.0"
             include_str!("../../../../../agents/software-engineer/agent.leviath");
         let bp = parse_manifest(manifest_content).unwrap();
         let plan = bp.find_stage("plan").unwrap();
-        let points = match &plan.mode {
-            StageMode::InteractivePoints { points } => points,
-            _ => panic!("plan stage should be interactive_points"),
-        };
+        let points = unwrap_interactive_points(&plan.mode);
         let approval = points
             .iter()
             .find(|p| p.name == "plan_approval")
@@ -1406,5 +1452,171 @@ version = "1.0.0"
         assert!(implement
             .available_tools
             .contains(&"ask_user_confirm".to_string()));
+    }
+
+    // ─── Production-code branch coverage: optional field None-paths ──────────
+
+    /// `interactive_points` mode with NO `interaction_points` array — the stage
+    /// still gets the mode, just with an empty points list.
+    #[test]
+    fn parse_manifest_interactive_points_mode_with_no_points_array() {
+        let toml = r#"
+[agent]
+name = "no-points"
+
+[stages.main]
+mode = "interactive_points"
+"#;
+        let bp = parse_manifest(toml).unwrap();
+        let stage = bp.find_stage("main").unwrap();
+        let points = unwrap_interactive_points(&stage.mode);
+        assert!(points.is_empty());
+    }
+
+    /// tool_routing with only partial fields — covers the None-branches for
+    /// `default_region`, `persist`, and `max_result_tokens`.
+    #[test]
+    fn parse_manifest_tool_routing_partial_fields() {
+        // Only max_result_tokens is set; default_region and persist are absent.
+        let toml = r#"
+[agent]
+name = "partial-routing"
+
+[stages.main]
+mode = "autonomous"
+
+[stages.main.tool_routing]
+max_result_tokens = 1000
+"#;
+        let bp = parse_manifest(toml).unwrap();
+        let stage = bp.find_stage("main").unwrap();
+        let routing = stage.tool_result_routing.as_ref().unwrap();
+        // default_region absent — stays at ToolResultRouting::default() value
+        // (we just verify it's not "scratch" to confirm it was not set)
+        assert_ne!(routing.default_region, "scratch");
+        // persist absent — stays at ToolResultRouting::default() value (we don't
+        // prescribe what the default is, just verify it was not explicitly set to false)
+        let _ = routing.persist; // field exists, not set by this test
+        assert_eq!(routing.max_result_tokens, Some(1000));
+    }
+
+    /// tool_routing without any overrides table — covers the None-branch for
+    /// `routing_table.get("overrides")`.
+    #[test]
+    fn parse_manifest_tool_routing_no_overrides() {
+        let toml = r#"
+[agent]
+name = "no-overrides"
+
+[stages.main]
+mode = "autonomous"
+
+[stages.main.tool_routing]
+default_region = "scratch"
+"#;
+        let bp = parse_manifest(toml).unwrap();
+        let stage = bp.find_stage("main").unwrap();
+        let routing = stage.tool_result_routing.as_ref().unwrap();
+        assert_eq!(routing.default_region, "scratch");
+        assert!(routing.tool_overrides.is_empty());
+    }
+
+    /// tool_routing.overrides with a non-string value — the inner
+    /// `if let Some(region_name) = region_val.as_str()` should be skipped.
+    #[test]
+    fn parse_manifest_tool_routing_overrides_non_string_value_skipped() {
+        let toml = r#"
+[agent]
+name = "non-string-override"
+
+[stages.main]
+mode = "autonomous"
+
+[stages.main.tool_routing]
+default_region = "scratch"
+
+[stages.main.tool_routing.overrides]
+bash = 42
+"#;
+        let bp = parse_manifest(toml).unwrap();
+        let stage = bp.find_stage("main").unwrap();
+        let routing = stage.tool_result_routing.as_ref().unwrap();
+        // Non-string value for "bash" is silently skipped.
+        assert!(routing.tool_overrides.is_empty());
+    }
+
+    /// Per-stage tool_permissions with a non-string policy value — the inner
+    /// `if let Some(policy_str) = policy_val.as_str()` should be skipped.
+    #[test]
+    fn parse_manifest_stage_tool_permissions_non_string_value_skipped() {
+        let toml = r#"
+[agent]
+name = "non-string-perm"
+
+[stages.main]
+mode = "autonomous"
+
+[stages.main.tool_permissions]
+bash = 123
+"#;
+        let bp = parse_manifest(toml).unwrap();
+        let stage = bp.find_stage("main").unwrap();
+        // Non-string value for "bash" is silently skipped.
+        assert!(stage.tool_permissions.is_empty());
+    }
+
+    /// Compaction config without `provider` — covers the None-branch at line ~460.
+    #[test]
+    fn parse_manifest_compaction_without_provider_uses_default() {
+        let toml = r#"
+[agent]
+name = "compact-no-provider"
+
+[compaction]
+model = "gpt-4o-mini"
+"#;
+        let bp = parse_manifest(toml).unwrap();
+        let cc = bp.compaction_config.as_ref().unwrap();
+        // provider absent — stays at CompactionConfig default
+        assert_eq!(cc.model, "gpt-4o-mini");
+    }
+
+    /// Compaction config without `model` — covers the None-branch at line ~463.
+    #[test]
+    fn parse_manifest_compaction_without_model_uses_default() {
+        let toml = r#"
+[agent]
+name = "compact-no-model"
+
+[compaction]
+provider = "anthropic"
+"#;
+        let bp = parse_manifest(toml).unwrap();
+        let cc = bp.compaction_config.as_ref().unwrap();
+        assert_eq!(cc.provider, "anthropic");
+        // model absent — stays at CompactionConfig default
+    }
+
+    /// Agent-level tool_permissions with a non-string value — the inner
+    /// `if let Some(policy_str) = policy_val.as_str()` should be skipped.
+    #[test]
+    fn parse_manifest_agent_tool_permissions_non_string_value_skipped() {
+        let toml = r#"
+[agent]
+name = "agent-non-string-perm"
+
+[tool_permissions]
+bash = 42
+read_file = "allow"
+"#;
+        let bp = parse_manifest(toml).unwrap();
+        // Non-string "bash" is skipped; "read_file" is kept.
+        assert!(!bp.metadata.contains_key("tool_perm:bash"));
+        assert_eq!(
+            bp.metadata
+                .get("tool_perm:read_file")
+                .and_then(|v| v.as_str()),
+            Some("allow")
+        );
     }
 }

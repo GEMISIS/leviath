@@ -247,7 +247,7 @@ impl Blueprint {
 }
 
 /// Interaction mode for a stage.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub enum StageMode {
     /// Runs without user input, fully autonomous
     #[default]
@@ -263,8 +263,22 @@ pub enum StageMode {
     },
 }
 
+impl PartialEq for StageMode {
+    #[inline(never)]
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Autonomous, Self::Autonomous) | (Self::Interactive, Self::Interactive) => true,
+            (Self::InteractivePoints { points: a }, Self::InteractivePoints { points: b }) => {
+                a == b
+            }
+            _ => false,
+        }
+    }
+}
+impl Eq for StageMode {}
+
 /// Style of interaction at an interaction point.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum InteractionStyle {
     /// Free-form text answer (default).
@@ -275,6 +289,14 @@ pub enum InteractionStyle {
     /// Simple yes/no confirmation.
     Confirm,
 }
+
+impl PartialEq for InteractionStyle {
+    #[inline(never)]
+    fn eq(&self, other: &Self) -> bool {
+        std::mem::discriminant(self) == std::mem::discriminant(other)
+    }
+}
+impl Eq for InteractionStyle {}
 
 /// A point where a stage can request user input.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -597,7 +619,7 @@ pub struct TransitionEdge {
 }
 
 /// Condition that determines when a transition edge is available.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TransitionCondition {
     /// Always available (LLM chooses)
@@ -613,8 +635,23 @@ pub enum TransitionCondition {
     Custom(String),
 }
 
+impl PartialEq for TransitionCondition {
+    #[inline(never)]
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Always, Self::Always)
+            | (Self::Error, Self::Error)
+            | (Self::MaxIterations, Self::MaxIterations)
+            | (Self::LlmChoice, Self::LlmChoice) => true,
+            (Self::Custom(a), Self::Custom(b)) => a == b,
+            _ => false,
+        }
+    }
+}
+impl Eq for TransitionCondition {}
+
 /// How context transforms when crossing a transition edge.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum EdgeTransform {
     /// Copy everything as-is (default for single-transition linear stages)
@@ -639,8 +676,34 @@ pub enum EdgeTransform {
     },
 }
 
+impl PartialEq for EdgeTransform {
+    #[inline(never)]
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Direct, Self::Direct) | (Self::Clear, Self::Clear) => true,
+            (Self::Compact { prompt: a }, Self::Compact { prompt: b }) => a == b,
+            (
+                Self::Custom {
+                    carry: ca,
+                    compact: coa,
+                    clear: cla,
+                    compact_prompt: cpa,
+                },
+                Self::Custom {
+                    carry: cb,
+                    compact: cob,
+                    clear: clb,
+                    compact_prompt: cpb,
+                },
+            ) => ca == cb && coa == cob && cla == clb && cpa == cpb,
+            _ => false,
+        }
+    }
+}
+impl Eq for EdgeTransform {}
+
 /// Result of running a stage, used for transition condition evaluation.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub enum StageResult {
     /// Stage completed normally
     Success,
@@ -649,6 +712,14 @@ pub enum StageResult {
     /// Stage hit max_iterations without LLM signaling completion
     MaxIterations,
 }
+
+impl PartialEq for StageResult {
+    #[inline(never)]
+    fn eq(&self, other: &Self) -> bool {
+        std::mem::discriminant(self) == std::mem::discriminant(other)
+    }
+}
+impl Eq for StageResult {}
 
 /// Content transformation type.
 #[derive(Debug, Clone, Serialize, Deserialize)]
