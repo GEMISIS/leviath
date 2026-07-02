@@ -853,6 +853,9 @@ mod tests {
 
     #[tokio::test]
     async fn execute_list_command_runs_without_error() {
+        let _guard = crate::config::isolate_config_path_for_test(
+            "models-execute_list_command_runs_without_error",
+        );
         let args = ModelsArgs {
             command: ModelsCommand::List(ListArgs {
                 provider: None,
@@ -866,6 +869,9 @@ mod tests {
 
     #[tokio::test]
     async fn execute_list_with_provider_filter_runs_without_error() {
+        let _guard = crate::config::isolate_config_path_for_test(
+            "models-execute_list_with_provider_filter_runs_without_error",
+        );
         let args = ModelsArgs {
             command: ModelsCommand::List(ListArgs {
                 provider: Some("anthropic".to_string()),
@@ -878,6 +884,9 @@ mod tests {
 
     #[tokio::test]
     async fn execute_list_with_nonexistent_provider_filter() {
+        let _guard = crate::config::isolate_config_path_for_test(
+            "models-execute_list_with_nonexistent_provider_filter",
+        );
         let args = ModelsArgs {
             command: ModelsCommand::List(ListArgs {
                 provider: Some("nonexistent_provider".to_string()),
@@ -891,6 +900,9 @@ mod tests {
 
     #[tokio::test]
     async fn execute_show_known_model_runs_without_error() {
+        let _guard = crate::config::isolate_config_path_for_test(
+            "models-execute_show_known_model_runs_without_error",
+        );
         let args = ModelsArgs {
             command: ModelsCommand::Show(ShowArgs {
                 model: "claude-sonnet-4-6".to_string(),
@@ -905,6 +917,9 @@ mod tests {
 
     #[tokio::test]
     async fn execute_show_unknown_model_runs_without_error() {
+        let _guard = crate::config::isolate_config_path_for_test(
+            "models-execute_show_unknown_model_runs_without_error",
+        );
         let args = ModelsArgs {
             command: ModelsCommand::Show(ShowArgs {
                 model: "totally-unknown-model-xyz".to_string(),
@@ -919,6 +934,9 @@ mod tests {
 
     #[tokio::test]
     async fn execute_show_unknown_model_with_remote_no_provider() {
+        let _guard = crate::config::isolate_config_path_for_test(
+            "models-execute_show_unknown_model_with_remote_no_provider",
+        );
         let args = ModelsArgs {
             command: ModelsCommand::Show(ShowArgs {
                 model: "totally-unknown-model-xyz".to_string(),
@@ -932,6 +950,9 @@ mod tests {
 
     #[tokio::test]
     async fn execute_show_unknown_model_with_remote_unconfigured_provider() {
+        let _guard = crate::config::isolate_config_path_for_test(
+            "models-execute_show_unknown_model_with_remote_unconfigured_provider",
+        );
         let args = ModelsArgs {
             command: ModelsCommand::Show(ShowArgs {
                 model: "totally-unknown-model-xyz".to_string(),
@@ -1095,6 +1116,8 @@ mod tests {
 
     #[tokio::test]
     async fn list_builtin_no_filter_succeeds() {
+        let _guard =
+            crate::config::isolate_config_path_for_test("models-list_builtin_no_filter_succeeds");
         let args = ListArgs {
             remote: false,
             provider: None,
@@ -1105,6 +1128,9 @@ mod tests {
 
     #[tokio::test]
     async fn list_builtin_with_provider_filter_succeeds() {
+        let _guard = crate::config::isolate_config_path_for_test(
+            "models-list_builtin_with_provider_filter_succeeds",
+        );
         let args = ListArgs {
             remote: false,
             provider: Some("anthropic".to_string()),
@@ -1115,6 +1141,9 @@ mod tests {
 
     #[tokio::test]
     async fn list_unknown_provider_filter_finds_nothing() {
+        let _guard = crate::config::isolate_config_path_for_test(
+            "models-list_unknown_provider_filter_finds_nothing",
+        );
         let args = ListArgs {
             remote: false,
             provider: Some("no-such-provider".to_string()),
@@ -1126,6 +1155,8 @@ mod tests {
 
     #[tokio::test]
     async fn show_builtin_model_succeeds() {
+        let _guard =
+            crate::config::isolate_config_path_for_test("models-show_builtin_model_succeeds");
         // Use a model ID guaranteed to be in the builtin table.
         let known_id = builtin_table()[0].model_id.to_string();
         let args = ShowArgs {
@@ -1139,6 +1170,9 @@ mod tests {
 
     #[tokio::test]
     async fn show_unknown_model_without_remote_succeeds_with_warning() {
+        let _guard = crate::config::isolate_config_path_for_test(
+            "models-show_unknown_model_without_remote_succeeds_with_warning",
+        );
         let args = ShowArgs {
             model: "totally-unknown-model-xyz".to_string(),
             remote: false,
@@ -1151,6 +1185,9 @@ mod tests {
 
     #[tokio::test]
     async fn show_remote_without_provider_falls_through_gracefully() {
+        let _guard = crate::config::isolate_config_path_for_test(
+            "models-show_remote_without_provider_falls_through_gracefully",
+        );
         // args.remote = true but no --provider given -> the remote-fetch
         // branch's inner `if let Some(ref provider_name)` is skipped.
         let args = ShowArgs {
@@ -1232,6 +1269,9 @@ mod tests {
 
     #[tokio::test]
     async fn list_remote_merges_new_model_from_provider() {
+        let _guard = crate::config::isolate_config_path_for_test(
+            "models-list_remote_merges_new_model_from_provider",
+        );
         let args = ListArgs {
             remote: true,
             provider: Some("mock".to_string()),
@@ -1248,6 +1288,9 @@ mod tests {
 
     #[tokio::test]
     async fn list_remote_overrides_builtin_entry_with_same_id() {
+        let _guard = crate::config::isolate_config_path_for_test(
+            "models-list_remote_overrides_builtin_entry_with_same_id",
+        );
         let known_id = builtin_table()[0].model_id.to_string();
         let args = ListArgs {
             remote: true,
@@ -1266,6 +1309,9 @@ mod tests {
 
     #[tokio::test]
     async fn list_remote_provider_error_warns_and_continues() {
+        let _guard = crate::config::isolate_config_path_for_test(
+            "models-list_remote_provider_error_warns_and_continues",
+        );
         let args = ListArgs {
             remote: true,
             provider: Some("mock".to_string()),
@@ -1276,6 +1322,9 @@ mod tests {
 
     #[tokio::test]
     async fn list_remote_skips_providers_not_matching_filter() {
+        let _guard = crate::config::isolate_config_path_for_test(
+            "models-list_remote_skips_providers_not_matching_filter",
+        );
         // provider filter is "mock-other", but the registry only has "mock"
         // registered -> the `if filter != provider_name { continue; }`
         // branch is exercised, and the mock is never queried.
@@ -1289,6 +1338,9 @@ mod tests {
 
     #[tokio::test]
     async fn show_remote_finds_model_from_provider() {
+        let _guard = crate::config::isolate_config_path_for_test(
+            "models-show_remote_finds_model_from_provider",
+        );
         let args = ShowArgs {
             model: "mock-remote-model".to_string(),
             remote: true,
@@ -1307,6 +1359,9 @@ mod tests {
 
     #[tokio::test]
     async fn show_remote_model_not_found_in_provider_list_falls_through() {
+        let _guard = crate::config::isolate_config_path_for_test(
+            "models-show_remote_model_not_found_in_provider_list_falls_through",
+        );
         let args = ShowArgs {
             model: "totally-unknown-model-xyz".to_string(),
             remote: true,
@@ -1318,6 +1373,9 @@ mod tests {
 
     #[tokio::test]
     async fn show_remote_provider_error_warns_and_falls_through() {
+        let _guard = crate::config::isolate_config_path_for_test(
+            "models-show_remote_provider_error_warns_and_falls_through",
+        );
         let args = ShowArgs {
             model: "totally-unknown-model-xyz".to_string(),
             remote: true,
@@ -1329,6 +1387,9 @@ mod tests {
 
     #[tokio::test]
     async fn show_remote_unconfigured_provider_warns_and_falls_through() {
+        let _guard = crate::config::isolate_config_path_for_test(
+            "models-show_remote_unconfigured_provider_warns_and_falls_through",
+        );
         // provider filter names a provider that isn't in the registry at all
         // -> the `if let Some(provider) = registry.get(...)` else branch.
         let args = ShowArgs {
