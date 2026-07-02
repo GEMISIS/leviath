@@ -665,26 +665,14 @@ mod tests {
     #[test]
     fn builtin_entries_have_valid_capabilities() {
         for entry in builtin_table() {
-            assert!(
-                entry.caps.max_context_tokens > 0,
-                "model {} has zero context tokens",
-                entry.model_id
-            );
-            assert!(
-                entry.caps.max_output_tokens > 0,
-                "model {} has zero output tokens",
-                entry.model_id
-            );
-            assert!(
-                entry.caps.supports_streaming,
-                "model {} doesn't support streaming",
-                entry.model_id
-            );
-            assert!(
-                entry.caps.supports_system_prompt,
-                "model {} doesn't support system prompt",
-                entry.model_id
-            );
+            #[rustfmt::skip]
+            assert!(entry.caps.max_context_tokens > 0, "model {} has zero context tokens", entry.model_id);
+            #[rustfmt::skip]
+            assert!(entry.caps.max_output_tokens > 0, "model {} has zero output tokens", entry.model_id);
+            #[rustfmt::skip]
+            assert!(entry.caps.supports_streaming, "model {} doesn't support streaming", entry.model_id);
+            #[rustfmt::skip]
+            assert!(entry.caps.supports_system_prompt, "model {} doesn't support system prompt", entry.model_id);
         }
     }
 
@@ -693,11 +681,8 @@ mod tests {
         let table = builtin_table();
         let ids: Vec<&str> = table.iter().map(|e| e.model_id).collect();
         let unique: std::collections::HashSet<&str> = ids.iter().copied().collect();
-        assert_eq!(
-            ids.len(),
-            unique.len(),
-            "duplicate model IDs in builtin table"
-        );
+        #[rustfmt::skip]
+        assert_eq!(ids.len(), unique.len(), "duplicate model IDs in builtin table");
     }
 
     #[test]
@@ -705,11 +690,8 @@ mod tests {
         let table = builtin_table();
         for entry in &table {
             if entry.model_id.contains("deepseek-r1") {
-                assert!(
-                    !entry.caps.supports_tools,
-                    "DeepSeek R1 model {} should not support tools",
-                    entry.model_id
-                );
+                #[rustfmt::skip]
+                assert!(!entry.caps.supports_tools, "DeepSeek R1 model {} should not support tools", entry.model_id);
             }
         }
     }
@@ -751,11 +733,8 @@ mod tests {
         let table = builtin_table();
         for entry in &table {
             if entry.model_id == "claude-opus-4-8" || entry.model_id == "claude-opus-4-7" {
-                assert!(
-                    !entry.caps.supports_temperature,
-                    "{} should not support temperature",
-                    entry.model_id
-                );
+                #[rustfmt::skip]
+                assert!(!entry.caps.supports_temperature, "{} should not support temperature", entry.model_id);
             }
         }
     }
@@ -774,11 +753,8 @@ mod tests {
     fn builtin_table_has_display_names() {
         let table = builtin_table();
         for entry in &table {
-            assert!(
-                !entry.display_name.is_empty(),
-                "model {} has empty display name",
-                entry.model_id
-            );
+            #[rustfmt::skip]
+            assert!(!entry.display_name.is_empty(), "model {} has empty display name", entry.model_id);
         }
     }
 
@@ -786,11 +762,8 @@ mod tests {
     fn builtin_table_context_larger_than_output() {
         let table = builtin_table();
         for entry in &table {
-            assert!(
-                entry.caps.max_context_tokens >= entry.caps.max_output_tokens,
-                "model {} has output > context",
-                entry.model_id
-            );
+            #[rustfmt::skip]
+            assert!(entry.caps.max_context_tokens >= entry.caps.max_output_tokens, "model {} has output > context", entry.model_id);
         }
     }
 
@@ -810,11 +783,8 @@ mod tests {
         let table = builtin_table();
         for entry in &table {
             if entry.provider == "openai" {
-                assert!(
-                    entry.caps.supports_temperature,
-                    "OpenAI model {} should support temperature",
-                    entry.model_id
-                );
+                #[rustfmt::skip]
+                assert!(entry.caps.supports_temperature, "OpenAI model {} should support temperature", entry.model_id);
             }
         }
     }
@@ -826,10 +796,8 @@ mod tests {
             .iter()
             .filter(|e| e.model_id.contains("gemini") && e.model_id.contains("flash"))
             .collect();
-        assert!(
-            !flash.is_empty(),
-            "Expected at least one Gemini Flash model"
-        );
+        #[rustfmt::skip]
+        assert!(!flash.is_empty(), "Expected at least one Gemini Flash model");
     }
 
     #[test]
@@ -837,11 +805,8 @@ mod tests {
         let table = builtin_table();
         for entry in &table {
             if entry.model_id.contains("deepseek-r1") {
-                assert!(
-                    !entry.caps.supports_temperature,
-                    "DeepSeek R1 {} should not support temperature",
-                    entry.model_id
-                );
+                #[rustfmt::skip]
+                assert!(!entry.caps.supports_temperature, "DeepSeek R1 {} should not support temperature", entry.model_id);
             }
         }
     }
@@ -870,11 +835,8 @@ mod tests {
     fn builtin_table_all_entries_have_provider() {
         let table = builtin_table();
         for entry in &table {
-            assert!(
-                !entry.provider.is_empty(),
-                "model {} has empty provider",
-                entry.model_id
-            );
+            #[rustfmt::skip]
+            assert!(!entry.provider.is_empty(), "model {} has empty provider", entry.model_id);
         }
     }
 
@@ -882,11 +844,8 @@ mod tests {
     fn builtin_table_all_entries_have_model_id() {
         let table = builtin_table();
         for entry in &table {
-            assert!(
-                !entry.model_id.is_empty(),
-                "entry has empty model_id for provider {}",
-                entry.provider
-            );
+            #[rustfmt::skip]
+            assert!(!entry.model_id.is_empty(), "entry has empty model_id for provider {}", entry.provider);
         }
     }
 

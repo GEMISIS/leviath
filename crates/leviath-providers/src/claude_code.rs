@@ -297,9 +297,14 @@ impl Stream for ClaudeCodeStream {
     }
 }
 
-#[async_trait]
-impl Provider for ClaudeCodeProvider {
-    async fn infer(&self, request: InferenceRequest) -> Result<InferenceResponse> {
+impl ClaudeCodeProvider {
+    /// Core of [`Provider::infer`], with the process timeout injected so
+    /// tests can exercise the timeout branch without a real 5-minute wait.
+    async fn infer_with_timeout(
+        &self,
+        request: InferenceRequest,
+        timeout_duration: std::time::Duration,
+    ) -> Result<InferenceResponse> {
         let mut cmd = tokio::process::Command::new(&self.binary_path);
         cmd.args([
             "--bare",
@@ -334,18 +339,17 @@ impl Provider for ClaudeCodeProvider {
             ))
         })?;
 
-        // 5-minute timeout
-        let output = tokio::time::timeout(
-            std::time::Duration::from_secs(300),
-            child.wait_with_output(),
-        )
-        .await
-        .map_err(|_| {
-            ProviderError::RequestFailed(
-                "Claude Code process timed out after 5 minutes".to_string(),
-            )
-        })?
-        .map_err(|e| ProviderError::RequestFailed(format!("Claude Code process failed: {e}")))?;
+        let output = tokio::time::timeout(timeout_duration, child.wait_with_output())
+            .await
+            .map_err(|_| {
+                ProviderError::RequestFailed(format!(
+                    "Claude Code process timed out after {}s",
+                    timeout_duration.as_secs()
+                ))
+            })?
+            .map_err(|e| {
+                ProviderError::RequestFailed(format!("Claude Code process failed: {e}"))
+            })?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -357,6 +361,14 @@ impl Provider for ClaudeCodeProvider {
 
         let stdout = String::from_utf8_lossy(&output.stdout);
         parse_claude_response(&stdout)
+    }
+}
+
+#[async_trait]
+impl Provider for ClaudeCodeProvider {
+    async fn infer(&self, request: InferenceRequest) -> Result<InferenceResponse> {
+        self.infer_with_timeout(request, std::time::Duration::from_secs(300))
+            .await
     }
 
     async fn infer_stream(
@@ -943,6 +955,24 @@ mod tests {
         let provider = ClaudeCodeProvider::with_binary_path(script.to_str().unwrap().to_string());
         let resp = provider.infer(make_request()).await.unwrap();
         assert_eq!(resp.content, "hello from stub");
+        let _ = std::fs::remove_file(&script);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn infer_with_timeout_fires_on_slow_process() {
+        // A stub that outlives a short injected timeout, exercising the
+        // real `tokio::time::timeout` branch in `infer_with_timeout` --
+        // `infer()` itself hardcodes a real 5-minute timeout, far too long
+        // to wait for in a test.
+        let script = write_stub_script("infer-slow", "sleep 5\necho '{\"result\": \"late\"}'\n");
+        let provider = ClaudeCodeProvider::with_binary_path(script.to_str().unwrap().to_string());
+        let err = provider
+            .infer_with_timeout(make_request(), std::time::Duration::from_millis(100))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ProviderError::RequestFailed(_)));
+        assert!(err.to_string().contains("timed out"));
         let _ = std::fs::remove_file(&script);
     }
 

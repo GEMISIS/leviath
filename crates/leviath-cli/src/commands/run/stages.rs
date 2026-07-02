@@ -914,11 +914,8 @@ mod tests {
         assert_eq!(meta.prompt_tokens, 10);
         assert_eq!(meta.completion_tokens, 5);
         let output = crate::runstate::tail_stage_output(&run_id, meta.stage_index, 65536);
-        assert!(
-            output.contains("Agent reply with tools"),
-            "expected stage output to be recorded, got: {}",
-            output
-        );
+        #[rustfmt::skip]
+        assert!(output.contains("Agent reply with tools"), "expected stage output to be recorded, got: {}", output);
 
         let _ = std::fs::remove_dir_all(runstate::run_dir(&run_id));
     }
@@ -1590,11 +1587,8 @@ mod tests {
             .map(|e| e.content.as_str())
             .collect::<Vec<_>>()
             .join("\n");
-        assert!(
-            all_content.contains("please add error handling"),
-            "expected the followup elaboration in context, got: {}",
-            all_content
-        );
+        #[rustfmt::skip]
+        assert!(all_content.contains("please add error handling"), "expected the followup elaboration in context, got: {}", all_content);
         assert!(all_content.contains("Revise"));
         assert!(all_content.contains("Approve"));
 
@@ -1776,11 +1770,8 @@ mod tests {
             .map(|e| e.content.as_str())
             .collect::<Vec<_>>()
             .join("\n");
-        assert!(
-            all_content.contains("please add error handling"),
-            "expected the followup elaboration in context, got: {}",
-            all_content
-        );
+        #[rustfmt::skip]
+        assert!(all_content.contains("please add error handling"), "expected the followup elaboration in context, got: {}", all_content);
         assert!(all_content.contains("Revise"));
         assert!(all_content.contains("Approve"));
     }

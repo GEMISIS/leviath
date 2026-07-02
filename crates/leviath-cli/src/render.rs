@@ -482,6 +482,26 @@ mod tests {
     use super::*;
 
     #[test]
+    fn push_line_flushes_pending_spans_first() {
+        // No current caller ever invokes `push_line` while `current_spans`
+        // is non-empty (each call site flushes its own pending spans via a
+        // separate check first) -- but the method itself is directly
+        // testable by constructing that state manually, without needing a
+        // real caller to reach it.
+        let mut r = Renderer::new(80);
+        r.current_spans.push(Span::raw("pending"));
+        r.push_line(Line::from("new line"));
+        assert_eq!(r.lines.len(), 2);
+        assert!(r.current_spans.is_empty());
+        let flushed: String = r.lines[0]
+            .spans
+            .iter()
+            .map(|s| s.content.as_ref())
+            .collect();
+        assert_eq!(flushed, "pending");
+    }
+
+    #[test]
     fn plain_text_renders_as_single_line() {
         let text = markdown_to_text("Hello, world!", 80);
         assert!(!text.lines.is_empty());
@@ -517,11 +537,8 @@ mod tests {
             .collect::<String>();
         assert!(all.contains("fn main() {}"), "got: {}", all);
         // Should have a border glyph
-        assert!(
-            all.contains("╭") || all.contains("│"),
-            "no border found in: {}",
-            all
-        );
+        #[rustfmt::skip]
+        assert!(all.contains("╭") || all.contains("│"), "no border found in: {}", all);
     }
 
     #[test]
@@ -534,11 +551,8 @@ mod tests {
             .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
             .collect::<String>();
         assert!(all.contains("mermaid"), "got: {}", all);
-        assert!(
-            all.contains("mmdc") || all.contains("Install"),
-            "got: {}",
-            all
-        );
+        #[rustfmt::skip]
+        assert!(all.contains("mmdc") || all.contains("Install"), "got: {}", all);
     }
 
     #[test]
@@ -647,11 +661,8 @@ mod tests {
             .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
             .collect::<String>();
         // H1 should produce a horizontal rule line underneath
-        assert!(
-            all.contains("\u{2500}"),
-            "H1 should have underline rule, got: {}",
-            all
-        );
+        #[rustfmt::skip]
+        assert!(all.contains("\u{2500}"), "H1 should have underline rule, got: {}", all);
     }
 
     // ─── Horizontal rule ───────────────────────────────────────────────────
@@ -666,11 +677,8 @@ mod tests {
             .collect::<String>();
         assert!(all.contains("above"), "got: {}", all);
         assert!(all.contains("below"), "got: {}", all);
-        assert!(
-            all.contains("\u{2500}"),
-            "Expected horizontal rule char, got: {}",
-            all
-        );
+        #[rustfmt::skip]
+        assert!(all.contains("\u{2500}"), "Expected horizontal rule char, got: {}", all);
     }
 
     // ─── Blockquote ────────────────────────────────────────────────────────
@@ -774,11 +782,8 @@ mod tests {
         let md = "First paragraph.\n\nSecond paragraph.";
         let text = markdown_to_text(md, 80);
         // Should have more than 2 lines (paragraphs + blank separators)
-        assert!(
-            text.lines.len() >= 3,
-            "Expected at least 3 lines, got {}",
-            text.lines.len()
-        );
+        #[rustfmt::skip]
+        assert!(text.lines.len() >= 3, "Expected at least 3 lines, got {}", text.lines.len());
     }
 
     // ─── Additional heading levels (H4/H5/H6) ───────────────────────────────
@@ -851,11 +856,8 @@ mod tests {
         assert!(all.contains("alpha"), "got: {}", all);
         assert!(all.contains("beta"), "got: {}", all);
         assert!(all.contains("gamma"), "got: {}", all);
-        assert!(
-            all.contains("\u{25cf}"),
-            "expected bullet glyph, got: {}",
-            all
-        );
+        #[rustfmt::skip]
+        assert!(all.contains("\u{25cf}"), "expected bullet glyph, got: {}", all);
     }
 
     #[test]
@@ -1029,10 +1031,8 @@ mod tests {
                     && s.style.add_modifier.contains(Modifier::BOLD)
             })
         });
-        assert!(
-            has_strikethrough_bold,
-            "expected a span with both CROSSED_OUT and BOLD modifiers for 'bold inside'"
-        );
+        #[rustfmt::skip]
+        assert!(has_strikethrough_bold, "expected a span with both CROSSED_OUT and BOLD modifiers for 'bold inside'");
     }
 
     // `push_line`'s own `if !self.current_spans.is_empty() { self.flush_line() }`

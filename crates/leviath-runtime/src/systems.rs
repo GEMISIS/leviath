@@ -431,10 +431,8 @@ mod tests {
         schedule.add_systems(pool_management_system);
         schedule.run(&mut world);
 
-        assert!(
-            world.get_entity(entity).is_err(),
-            "Completed agent should be despawned"
-        );
+        #[rustfmt::skip]
+        assert!(world.get_entity(entity).is_err(), "Completed agent should be despawned");
     }
 
     #[test]
@@ -453,10 +451,8 @@ mod tests {
         schedule.add_systems(pool_management_system);
         schedule.run(&mut world);
 
-        assert!(
-            world.get_entity(entity).is_err(),
-            "Error agent should be despawned"
-        );
+        #[rustfmt::skip]
+        assert!(world.get_entity(entity).is_err(), "Error agent should be despawned");
     }
 
     #[test]
@@ -470,10 +466,8 @@ mod tests {
         schedule.add_systems(pool_management_system);
         schedule.run(&mut world);
 
-        assert!(
-            world.get_entity(entity).is_err(),
-            "Cancelled agent should be despawned"
-        );
+        #[rustfmt::skip]
+        assert!(world.get_entity(entity).is_err(), "Cancelled agent should be despawned");
     }
 
     #[test]
@@ -487,10 +481,8 @@ mod tests {
         schedule.add_systems(pool_management_system);
         schedule.run(&mut world);
 
-        assert!(
-            world.get_entity(entity).is_ok(),
-            "Active agent should remain"
-        );
+        #[rustfmt::skip]
+        assert!(world.get_entity(entity).is_ok(), "Active agent should remain");
     }
 
     #[test]
@@ -504,10 +496,8 @@ mod tests {
         schedule.add_systems(pool_management_system);
         schedule.run(&mut world);
 
-        assert!(
-            world.get_entity(entity).is_ok(),
-            "Waiting agent should remain"
-        );
+        #[rustfmt::skip]
+        assert!(world.get_entity(entity).is_ok(), "Waiting agent should remain");
     }
 
     #[test]
@@ -669,10 +659,8 @@ mod tests {
 
         // Should have NeedsCompaction component
         let compaction = world.get::<NeedsCompaction>(entity);
-        assert!(
-            compaction.is_some(),
-            "Should add NeedsCompaction when compacting regions need it"
-        );
+        #[rustfmt::skip]
+        assert!(compaction.is_some(), "Should add NeedsCompaction when compacting regions need it");
         assert!(compaction.unwrap().regions.contains(&"impl".to_string()));
     }
 
@@ -747,10 +735,8 @@ mod tests {
         with_tracing(|| schedule.run(&mut world));
 
         let compaction = world.get::<NeedsCompaction>(entity);
-        assert!(
-            compaction.is_some(),
-            "eviction_system should add NeedsCompaction when compacting regions need it"
-        );
+        #[rustfmt::skip]
+        assert!(compaction.is_some(), "eviction_system should add NeedsCompaction when compacting regions need it");
         assert!(compaction.unwrap().regions.contains(&"impl".to_string()));
     }
 
@@ -997,23 +983,19 @@ mod tests {
         with_tracing(|| schedule.run(&mut world));
 
         let parent_state = world.get::<AgentState>(parent_entity).unwrap();
-        assert!(
-            parent_state.pending_wait.is_none(),
-            "pending_wait should be cleared"
-        );
-        assert!(
-            parent_state.spawned_children_ids.is_empty(),
-            "child should be removed from spawned list"
-        );
+        #[rustfmt::skip]
+        assert!(parent_state.pending_wait.is_none(), "pending_wait should be cleared");
+        #[rustfmt::skip]
+        assert!(parent_state.spawned_children_ids.is_empty(), "child should be removed from spawned list");
 
         let parent_window = world.get::<ContextWindow>(parent_entity).unwrap();
         let conv = parent_window.get_region("conversation").unwrap();
-        assert!(
-            conv.content
-                .iter()
-                .any(|e| e.content.contains("completed successfully")),
-            "Completion message should be injected"
-        );
+        let has_completion_msg = conv
+            .content
+            .iter()
+            .any(|e| e.content.contains("completed successfully"));
+        #[rustfmt::skip]
+        assert!(has_completion_msg, "Completion message should be injected");
     }
 
     #[test]

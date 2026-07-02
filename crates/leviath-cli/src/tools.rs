@@ -50,11 +50,8 @@ impl ToolRegistry {
                         tracing::info!(server = %server_cfg.name, "Connected MCP server");
                     }
                     Err(e) => {
-                        tracing::warn!(
-                            server = %server_cfg.name,
-                            error = %e,
-                            "Failed to connect MCP server — skipping"
-                        );
+                        #[rustfmt::skip]
+                        tracing::warn!(server = %server_cfg.name, error = %e, "Failed to connect MCP server — skipping");
                     }
                 }
             }
@@ -365,13 +362,8 @@ impl SubAgentExecutor {
             }
         }
 
-        tracing::info!(
-            parent = %caller_agent_id,
-            child = %child_agent_id,
-            blueprint = %blueprint_name,
-            depth = child_depth,
-            "Spawned sub-agent"
-        );
+        #[rustfmt::skip]
+        tracing::info!(parent = %caller_agent_id, child = %child_agent_id, blueprint = %blueprint_name, depth = child_depth, "Spawned sub-agent");
 
         let _ = task; // Task is used by the caller to set up the child's context
         format!(
@@ -2571,11 +2563,8 @@ mod policy_tests {
                 3,
             )
             .await;
-        assert!(
-            result.contains("Spawned sub-agent"),
-            "Expected spawn success, got: {}",
-            result
-        );
+        #[rustfmt::skip]
+        assert!(result.contains("Spawned sub-agent"), "Expected spawn success, got: {}", result);
         assert!(result.contains("spawn-bp"));
     }
 
@@ -2614,11 +2603,8 @@ mod policy_tests {
                 3,
             )
             .await;
-        assert!(
-            result.contains("Spawned sub-agent"),
-            "Expected spawn success, got: {}",
-            result
-        );
+        #[rustfmt::skip]
+        assert!(result.contains("Spawned sub-agent"), "Expected spawn success, got: {}", result);
     }
 
     // ─── exec_check with a real spawned agent ─────────────────────────────
@@ -3077,11 +3063,8 @@ mod policy_tests {
                 3,
             )
             .await;
-        assert!(
-            result.contains("Killed agent"),
-            "Expected kill confirmation, got: {}",
-            result
-        );
+        #[rustfmt::skip]
+        assert!(result.contains("Killed agent"), "Expected kill confirmation, got: {}", result);
         // Single agent killed (no descendants)
         assert!(
             result.contains(&agent_id),

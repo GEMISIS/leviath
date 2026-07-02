@@ -915,22 +915,16 @@ mod tests {
 
         // First non-system message has cache_breakpoint: true
         let first_msg = &messages[0];
-        assert!(
-            first_msg.get("content").unwrap().is_array(),
-            "Cache breakpoint message should use content blocks array"
-        );
+        #[rustfmt::skip]
+        assert!(first_msg.get("content").unwrap().is_array(), "Cache breakpoint message should use content blocks array");
         let content_block = &first_msg["content"][0];
-        assert_eq!(
-            content_block["cache_control"]["type"], "ephemeral",
-            "Cache breakpoint should have cache_control"
-        );
+        #[rustfmt::skip]
+        assert_eq!(content_block["cache_control"]["type"], "ephemeral", "Cache breakpoint should have cache_control");
 
         // Second non-system message has no cache_breakpoint
         let second_msg = &messages[1];
-        assert!(
-            second_msg.get("content").unwrap().is_string(),
-            "Non-breakpoint message should use simple string content"
-        );
+        #[rustfmt::skip]
+        assert!(second_msg.get("content").unwrap().is_string(), "Non-breakpoint message should use simple string content");
     }
 
     #[test]

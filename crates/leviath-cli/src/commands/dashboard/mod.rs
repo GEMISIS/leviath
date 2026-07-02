@@ -294,13 +294,8 @@ mod tests {
         let config = Config::default();
         let (dashboard, engine) = init_dashboard(&config).await;
 
-        assert!(
-            dashboard
-                .log
-                .iter()
-                .any(|entry| entry.message.contains("Dashboard started")),
-            "expected the startup message to be logged"
-        );
+        #[rustfmt::skip]
+        assert!(dashboard.log.iter().any(|entry| entry.message.contains("Dashboard started")), "expected the startup message to be logged");
 
         // The background loop is live: a CancelAgent command sent on
         // dashboard's own cmd_tx should be processed without panicking.
