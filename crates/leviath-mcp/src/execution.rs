@@ -104,26 +104,17 @@ impl ToolExecutor {
     }
 
     /// Shutdown all connected MCP clients.
+    ///
+    /// `MCPClient::shutdown` always returns `Ok` by design (it swallows
+    /// subprocess errors so a dead server cannot block cleanup), so errors
+    /// are discarded here too.
     pub async fn shutdown_all(&mut self) -> anyhow::Result<()> {
         tracing::info!("Shutting down all MCP clients");
-
-        let mut errors = Vec::new();
-        for (name, client) in self.clients.iter_mut() {
-            if let Err(e) = client.shutdown().await {
-                tracing::warn!(server = %name, error = %e, "Failed to shutdown MCP client");
-                errors.push(format!("{}: {}", name, e));
-            }
+        for (_, client) in self.clients.iter_mut() {
+            let _ = client.shutdown().await;
         }
         self.clients.clear();
-
-        if errors.is_empty() {
-            Ok(())
-        } else {
-            Err(anyhow::anyhow!(
-                "Some MCP clients failed to shutdown: {}",
-                errors.join(", ")
-            ))
-        }
+        Ok(())
     }
 
     /// Get the number of connected servers.
@@ -491,5 +482,63 @@ for line in sys.stdin:
         let debug = format!("{:?}", result);
         assert!(debug.contains("success"));
         assert!(debug.contains("false"));
+    }
+
+    // ─── execute_on: call_tool error propagation ────────────────────────
+    //
+    // Server returns a JSON-RPC error for tools/call, which causes
+    // execute_on's `client.call_tool(...).await?` to propagate the error.
+
+    const STUB_CALL_ERROR: &str = r#"
+import sys, json
+
+def respond(id, result):
+    msg = json.dumps({"jsonrpc": "2.0", "id": id, "result": result})
+    sys.stdout.write(msg + "\n")
+    sys.stdout.flush()
+
+def error(id, message):
+    msg = json.dumps({"jsonrpc": "2.0", "id": id, "error": {"code": -32603, "message": message}})
+    sys.stdout.write(msg + "\n")
+    sys.stdout.flush()
+
+for line in sys.stdin:
+    line = line.strip()
+    if not line:
+        continue
+    req = json.loads(line)
+    method = req.get("method", "")
+    id_ = req.get("id")
+    if method == "initialize":
+        respond(id_, {"capabilities": {"tools": {}}, "protocolVersion": "2024-11-05"})
+    elif method == "notifications/initialized":
+        pass
+    elif method == "tools/list":
+        respond(id_, {"tools": [{"name": "echo", "description": "echo", "inputSchema": {}}]})
+    elif method == "tools/call":
+        error(id_, "tool execution failed")
+    elif method == "notifications/cancelled":
+        pass
+"#;
+
+    #[tokio::test]
+    async fn execute_on_propagates_call_tool_error() {
+        let mut client = MCPClient::spawn("python3", &["-c", STUB_CALL_ERROR], &HashMap::new())
+            .await
+            .expect("spawn");
+        client.connect().await.expect("connect");
+        client.list_tools().await.expect("list_tools");
+
+        let mut executor = ToolExecutor::new();
+        executor.add_client("server1".to_string(), client);
+
+        let result = executor
+            .execute_on("server1", "echo", serde_json::json!({}))
+            .await;
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("tool execution failed"));
     }
 }

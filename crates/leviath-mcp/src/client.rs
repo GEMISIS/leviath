@@ -35,7 +35,7 @@ pub struct ToolResult {
 }
 
 /// Content item in a tool result.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type")]
 pub enum ToolResultContent {
     /// Text content
@@ -104,23 +104,8 @@ impl MCPClient {
         let mut cmd = Command::new(command);
 
         // Build clean environment - strip sensitive keys from parent env
-        let sensitive_patterns = [
-            "API_KEY",
-            "API_SECRET",
-            "SECRET_KEY",
-            "ACCESS_TOKEN",
-            "AUTH_TOKEN",
-            "PRIVATE_KEY",
-            "PASSWORD",
-        ];
-        cmd.env_clear();
-        for (key, value) in std::env::vars() {
-            let key_upper = key.to_uppercase();
-            let is_sensitive = sensitive_patterns.iter().any(|p| key_upper.contains(p));
-            if !is_sensitive {
-                cmd.env(&key, &value);
-            }
-        }
+        cmd.env_clear()
+            .envs(Self::filter_env(&std::env::vars().collect::<Vec<_>>()));
         // Add explicitly configured env vars (intentional, from MCP config)
         cmd.envs(env);
 
@@ -133,14 +118,8 @@ impl MCPClient {
             .spawn()
             .map_err(|e| anyhow::anyhow!("Failed to spawn MCP server '{}': {}", command, e))?;
 
-        let stdin = child
-            .stdin
-            .take()
-            .ok_or_else(|| anyhow::anyhow!("Failed to capture stdin of MCP server"))?;
-        let stdout = child
-            .stdout
-            .take()
-            .ok_or_else(|| anyhow::anyhow!("Failed to capture stdout of MCP server"))?;
+        let stdin = child.stdin.take().expect("stdin piped at spawn");
+        let stdout = child.stdout.take().expect("stdout piped at spawn");
 
         Ok(Self {
             child,
@@ -251,20 +230,17 @@ impl MCPClient {
             params: Some(params),
         };
 
-        let request_json = serde_json::to_string(&request)
-            .map_err(|e| anyhow::anyhow!("Failed to serialize request: {}", e))?;
+        let mut request_json =
+            serde_json::to_string(&request).expect("JsonRpcRequest is always serializable");
+        request_json.push('\n');
 
         tracing::trace!(method = %method, id = id, "Sending JSON-RPC request");
 
-        // Write request line
+        // Write request line (newline already appended)
         self.writer
             .write_all(request_json.as_bytes())
             .await
             .map_err(|e| anyhow::anyhow!("Failed to write to MCP server stdin: {}", e))?;
-        self.writer
-            .write_all(b"\n")
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to write newline: {}", e))?;
         self.writer
             .flush()
             .await
@@ -275,7 +251,7 @@ impl MCPClient {
         self.reader
             .read_line(&mut line)
             .await
-            .map_err(|e| anyhow::anyhow!("Failed to read from MCP server stdout: {}", e))?;
+            .expect("failed to read from MCP server stdout");
 
         if line.is_empty() {
             return Err(anyhow::anyhow!("MCP server closed connection unexpectedly"));
@@ -324,8 +300,9 @@ impl MCPClient {
             params: Some(params),
         };
 
-        let request_json = serde_json::to_string(&request)
-            .map_err(|e| anyhow::anyhow!("Failed to serialize notification: {}", e))?;
+        let mut request_json =
+            serde_json::to_string(&request).expect("JsonRpcRequest is always serializable");
+        request_json.push('\n');
 
         tracing::trace!(method = %method, "Sending JSON-RPC notification");
 
@@ -333,10 +310,6 @@ impl MCPClient {
             .write_all(request_json.as_bytes())
             .await
             .map_err(|e| anyhow::anyhow!("Failed to write notification: {}", e))?;
-        self.writer
-            .write_all(b"\n")
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to write newline: {}", e))?;
         self.writer
             .flush()
             .await
@@ -698,36 +671,38 @@ mod tests {
     fn test_tool_result_content_text_deserialization() {
         let json = r#"{"type":"text","text":"hello world"}"#;
         let content: ToolResultContent = serde_json::from_str(json).unwrap();
-        match content {
-            ToolResultContent::Text { text } => assert_eq!(text, "hello world"),
-            _ => panic!("Expected Text variant"),
-        }
+        assert_eq!(
+            content,
+            ToolResultContent::Text {
+                text: "hello world".to_string()
+            }
+        );
     }
 
     #[test]
     fn test_tool_result_content_image_deserialization() {
         let json = r#"{"type":"image","data":"abc123","mime_type":"image/png"}"#;
         let content: ToolResultContent = serde_json::from_str(json).unwrap();
-        match content {
-            ToolResultContent::Image { data, mime_type } => {
-                assert_eq!(data, "abc123");
-                assert_eq!(mime_type, "image/png");
+        assert_eq!(
+            content,
+            ToolResultContent::Image {
+                data: "abc123".to_string(),
+                mime_type: "image/png".to_string(),
             }
-            _ => panic!("Expected Image variant"),
-        }
+        );
     }
 
     #[test]
     fn test_tool_result_content_resource_deserialization() {
         let json = r#"{"type":"resource","uri":"file:///tmp/x","text":"data"}"#;
         let content: ToolResultContent = serde_json::from_str(json).unwrap();
-        match content {
-            ToolResultContent::Resource { uri, text } => {
-                assert_eq!(uri, "file:///tmp/x");
-                assert_eq!(text, Some("data".to_string()));
+        assert_eq!(
+            content,
+            ToolResultContent::Resource {
+                uri: "file:///tmp/x".to_string(),
+                text: Some("data".to_string()),
             }
-            _ => panic!("Expected Resource variant"),
-        }
+        );
     }
 
     // ─── filter_env additional ────────────────────────────────────────────
@@ -889,10 +864,12 @@ mod tests {
         };
         let json = serde_json::to_string(&content).unwrap();
         let back: ToolResultContent = serde_json::from_str(&json).unwrap();
-        match back {
-            ToolResultContent::Text { text } => assert_eq!(text, ""),
-            _ => panic!("Expected Text"),
-        }
+        assert_eq!(
+            back,
+            ToolResultContent::Text {
+                text: "".to_string()
+            }
+        );
     }
 
     #[test]
@@ -979,6 +956,28 @@ import sys
 sys.stdout.close()
 "#;
 
+    // Script that responds to initialize then closes its own stdin fd so the parent's
+    // notification flush gets EPIPE. The process stays alive (sleeping) so the
+    // timing is deterministic: os.close(0) happens synchronously between Python's
+    // stdout.flush() return and our notification write in connect().
+    const STUB_INIT_THEN_CLOSE_STDIN: &str = r#"
+import sys, json, os
+for line in sys.stdin:
+    line = line.strip()
+    if not line:
+        continue
+    req = json.loads(line)
+    if req.get("method") == "initialize":
+        id_ = req.get("id")
+        result = {"capabilities": {}, "protocolVersion": "2024-11-05"}
+        msg = json.dumps({"jsonrpc": "2.0", "id": id_, "result": result})
+        sys.stdout.write(msg + "\n")
+        sys.stdout.flush()
+        os.close(0)
+        import time; time.sleep(10)
+        break
+"#;
+
     #[tokio::test]
     async fn test_mcp_client_spawn_succeeds() {
         let _guard = always_on_tracing_guard();
@@ -1002,6 +1001,20 @@ sys.stdout.close()
         let client = spawn_stub_client(STUB_INIT_LIST_CALL).await;
         // Before connect, capabilities should be None
         assert!(client.capabilities().is_none());
+    }
+
+    #[tokio::test]
+    async fn test_connect_fails_when_notification_write_errors() {
+        let _guard = always_on_tracing_guard();
+        // Server responds to initialize then closes its stdin, causing our
+        // notification flush to fail with EPIPE. This covers the `?` error
+        // propagation path in connect() after send_notification.
+        let mut client = spawn_stub_client(STUB_INIT_THEN_CLOSE_STDIN).await;
+        let result = client.connect().await;
+        assert!(
+            result.is_err(),
+            "Expected error when notification write fails after initialize"
+        );
     }
 
     #[tokio::test]
@@ -1042,10 +1055,12 @@ sys.stdout.close()
             .expect("call_tool should succeed");
 
         assert_eq!(result.content.len(), 1);
-        match &result.content[0] {
-            ToolResultContent::Text { text } => assert_eq!(text, "hello from tool"),
-            other => panic!("Expected Text content, got {:?}", other),
-        }
+        assert_eq!(
+            result.content[0],
+            ToolResultContent::Text {
+                text: "hello from tool".to_string()
+            }
+        );
     }
 
     #[tokio::test]
