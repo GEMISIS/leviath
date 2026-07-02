@@ -375,6 +375,17 @@ fn set_dir_permissions(_path: &std::path::Path) {
 #[cfg(test)]
 pub(crate) static CONFIG_PATH_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+/// Serializes any test, anywhere in the crate, that mutates the
+/// process-global `PATH` env var (e.g. to starve editor/clipboard-tool
+/// resolution). Declared here for the same reason as `CONFIG_PATH_ENV_LOCK`
+/// above: `commands/run/session.rs`'s `launch_editor` tests and
+/// `commands/dashboard/helpers.rs`'s clipboard-fallback test each used to
+/// hold only their own file-local lock, which doesn't actually serialize
+/// against each other since each is a distinct Rust item despite the shared
+/// name -- a real (if narrow) cross-file race window.
+#[cfg(test)]
+pub(crate) static PATH_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// Provider API key env vars that `Config::load()` (via `dotenvy::dotenv()`)
 /// loads into the process env regardless of which config file path is used --
 /// so redirecting the config path alone isn't enough; these must be cleared
@@ -658,6 +669,78 @@ mod tests {
 
         let mode = std::fs::metadata(&path).unwrap().permissions().mode();
         assert_eq!(mode & 0o777, 0o600);
+    }
+
+    // On macOS/BSD, `chflags uchg` sets the user-immutable flag -- settable
+    // by a regular file owner without root -- which blocks `chmod` (and thus
+    // `std::fs::set_permissions`) with EPERM while leaving `exists()`/
+    // `metadata()` reads (and thus `path.exists()`/mode inspection) working
+    // normally. This is the one deterministic, non-racy way found to force
+    // `set_permissions`'s real `Err` arm without root or a TOCTOU race.
+    // Linux's nearest equivalent (`chattr +i`) requires CAP_LINUX_IMMUTABLE
+    // (root), so this is macOS-only.
+    #[cfg(target_os = "macos")]
+    fn set_uchg(path: &std::path::Path) {
+        let status = std::process::Command::new("chflags")
+            .arg("uchg")
+            .arg(path)
+            .status()
+            .expect("chflags should be available on macOS");
+        assert!(status.success(), "chflags uchg failed");
+    }
+
+    #[cfg(target_os = "macos")]
+    struct UchgGuard(std::path::PathBuf);
+    #[cfg(target_os = "macos")]
+    impl Drop for UchgGuard {
+        fn drop(&mut self) {
+            // Clear the flag so tempfile's own cleanup can remove the file/dir.
+            let _ = std::process::Command::new("chflags")
+                .arg("nouchg")
+                .arg(&self.0)
+                .status();
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn check_permissions_at_chmod_failure_logs_warning_not_panic() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "").unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        set_uchg(&path);
+        let _guard = UchgGuard(path.clone());
+
+        // Must not panic; the chmod attempt fails and is only logged.
+        with_tracing(|| check_permissions_at(&path));
+
+        // The flag prevented the fix -- mode is unchanged (still permissive).
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o644);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn set_file_permissions_chmod_failure_logs_warning_not_panic() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("f.toml");
+        std::fs::write(&path, "").unwrap();
+        set_uchg(&path);
+        let _guard = UchgGuard(path.clone());
+
+        with_tracing(|| set_file_permissions(&path)); // must not panic
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn set_dir_permissions_chmod_failure_logs_warning_not_panic() {
+        let dir = tempfile::tempdir().unwrap();
+        set_uchg(dir.path());
+        let _guard = UchgGuard(dir.path().to_path_buf());
+
+        with_tracing(|| set_dir_permissions(dir.path())); // must not panic
     }
 
     // ─── create_config_dir / set_file_permissions / set_dir_permissions ───

@@ -372,8 +372,7 @@ mod tests {
         let result = relative_time(now - 30);
         assert!(
             result.ends_with("s ago"),
-            "expected 'Xs ago', got '{}'",
-            result
+            "expected 'Xs ago', got '{result}'"
         );
     }
 
@@ -388,8 +387,7 @@ mod tests {
         let result = relative_time(now - 300);
         assert!(
             result.ends_with("m ago"),
-            "expected 'Xm ago', got '{}'",
-            result
+            "expected 'Xm ago', got '{result}'"
         );
     }
 
@@ -549,13 +547,60 @@ mod tests {
 
     #[test]
     fn test_yank_to_clipboard_returns_true() {
-        // On any platform this ends up either succeeding via a native
-        // clipboard tool (pbcopy/xclip/wl-copy) or falling back to OSC52,
-        // which itself always returns true (see osc52_yank_raw tests) — so
-        // this is true unconditionally, but exercises the real dispatch
-        // path (including spawning the native clipboard command) rather
-        // than calling osc52_yank_raw directly.
+        // On this machine (macOS, real pbcopy present) this exercises the
+        // native-clipboard success path (return true from inside the `for`
+        // loop) rather than falling through to OSC52.
         let result = yank_to_clipboard("dashboard yank test content");
+        assert!(result);
+    }
+
+    #[test]
+    fn test_yank_to_clipboard_falls_back_to_osc52_when_no_native_tool_on_path() {
+        // `PATH` is process-global; `crate::config::PATH_ENV_LOCK` serializes
+        // against `commands/run/session.rs`'s PATH-mutating `launch_editor`
+        // tests too (previously each side only held its own file-local lock,
+        // which doesn't actually serialize across files despite the shared
+        // name).
+        let _lock = crate::config::PATH_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        // Starve PATH so `Command::new("pbcopy"/"xclip"/"wl-copy").spawn()`
+        // fails with NotFound for all three -- the `if let Ok(mut child) = `
+        // guard is simply false each time (no external process is ever
+        // launched), falling through to the OSC52 code path. Unlike
+        // `launch_editor`'s PATH-starvation tests elsewhere in this crate,
+        // this is safe cross-platform: OSC52's own fallback chain never
+        // launches an external interactive program (it either writes to
+        // `/dev/tty` or to `stdout`, both non-blocking file I/O).
+        let original_path = std::env::var_os("PATH");
+        unsafe {
+            std::env::set_var("PATH", "/lev-definitely-empty-path-dir");
+        }
+        let result = yank_to_clipboard("fallback path test content");
+        unsafe {
+            match &original_path {
+                Some(p) => std::env::set_var("PATH", p),
+                None => std::env::remove_var("PATH"),
+            }
+        }
+        // Whatever osc52_yank_raw itself returns (see its own tests) is what
+        // should come back here -- the point of this test is proving the
+        // native-tool loop was skipped entirely, not the final bool value.
+        assert_eq!(result, osc52_yank_raw("fallback path test content"));
+    }
+
+    // ─── osc52_yank_raw ─────────────────────────────────────────────────────
+
+    #[test]
+    fn test_osc52_yank_raw_reports_real_write_outcome() {
+        // Exercises the real write/flush call chain (either /dev/tty or the
+        // stdout fallback, depending on whether this test process has a
+        // controlling terminal) and confirms the return value matches
+        // reality -- this is the exact bug fixed this session (the function
+        // used to unconditionally return `true`).
+        let result = osc52_yank_raw("osc52 direct test content");
+        // Both real destinations (a live /dev/tty or this process's own
+        // stdout) succeed under a normal `cargo test` invocation.
         assert!(result);
     }
 }

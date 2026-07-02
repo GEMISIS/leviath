@@ -848,6 +848,13 @@ mod tests {
     #[test]
     fn launch_editor_no_editor_found_when_path_has_no_candidates() {
         let _lock = ENV_LOCK.lock().unwrap();
+        // `PATH` is process-global; this also serializes against any other
+        // test in the crate (e.g. `dashboard::helpers`'s clipboard-fallback
+        // test) that mutates it, since `ENV_LOCK` here only covers
+        // VISUAL/EDITOR, not PATH.
+        let _path_lock = crate::config::PATH_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let _guard = EnvGuard;
 
         /// Restores the real `PATH` on drop -- separate from `EnvGuard`
@@ -944,6 +951,10 @@ mod tests {
     #[test]
     fn resolve_task_with_editor_path_propagates_launch_editor_error() {
         let _lock = ENV_LOCK.lock().unwrap();
+        // See the comment in `launch_editor_no_editor_found_when_path_has_no_candidates`.
+        let _path_lock = crate::config::PATH_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let _guard = EnvGuard;
         struct PathGuard(Option<std::ffi::OsString>);
         impl Drop for PathGuard {
