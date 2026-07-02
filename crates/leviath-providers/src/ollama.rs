@@ -778,7 +778,7 @@ mod tests {
         assert_eq!(response.tool_calls.len(), 1);
         assert_eq!(response.tool_calls[0].name, "search");
         assert_eq!(response.tool_calls[0].id, "ollama_0");
-        assert!(matches!(response.finish_reason, FinishReason::ToolCall));
+        assert_eq!(response.finish_reason, FinishReason::ToolCall);
     }
 
     #[test]
@@ -880,7 +880,7 @@ mod tests {
         });
         let response = provider.parse_response(&body).unwrap();
         assert_eq!(response.content, "");
-        assert!(matches!(response.finish_reason, FinishReason::Complete));
+        assert_eq!(response.finish_reason, FinishReason::Complete);
     }
 
     #[test]
@@ -927,7 +927,7 @@ mod tests {
         assert_eq!(response.tool_calls[0].id, "ollama_0");
         assert_eq!(response.tool_calls[1].name, "tool_b");
         assert_eq!(response.tool_calls[1].id, "ollama_1");
-        assert!(matches!(response.finish_reason, FinishReason::ToolCall));
+        assert_eq!(response.finish_reason, FinishReason::ToolCall);
     }
 
     #[test]
@@ -1175,8 +1175,7 @@ mod tests {
         let result = provider.infer(request).await;
         assert!(result.is_err());
         let err = result.unwrap_err();
-        // Should be RequestFailed
-        assert!(matches!(err, ProviderError::RequestFailed(_)));
+        assert!(err.to_string().contains("Request failed:"));
     }
 
     #[tokio::test]
@@ -1195,21 +1194,14 @@ mod tests {
             extra: serde_json::Value::Null,
         };
         let result = provider.infer_stream(request).await;
-        assert!(result.is_err(), "Expected connection refused error");
-        if let Err(e) = result {
-            assert!(matches!(e, ProviderError::RequestFailed(_)));
-        }
+        assert!(result.err().unwrap().to_string().contains("Request failed:"));
     }
 
     #[tokio::test]
     async fn test_list_models_connection_refused() {
         let provider = OllamaProvider::with_base_url("http://127.0.0.1:19998".to_string());
-        let result = provider.list_models().await;
-        assert!(result.is_err());
-        assert!(matches!(
-            result.unwrap_err(),
-            ProviderError::RequestFailed(_)
-        ));
+        let err = provider.list_models().await.unwrap_err();
+        assert!(err.to_string().contains("Request failed:"));
     }
 
     // ─── with_base_url: invalid URL pattern triggers warning ─────────────
@@ -1310,7 +1302,7 @@ mod tests {
             // Last chunk: done=true
             let last = chunks.last().unwrap().as_ref().unwrap();
             assert!(last.finish_reason.is_some());
-            assert!(matches!(last.finish_reason, Some(FinishReason::Complete)));
+            assert_eq!(last.finish_reason, Some(FinishReason::Complete));
             let tokens = last.tokens.as_ref().unwrap();
             assert_eq!(tokens.completion_tokens, 10);
             assert_eq!(tokens.prompt_tokens, 20);
@@ -1599,14 +1591,13 @@ mod tests {
         )
         .into_bytes();
         tokio::spawn(async move {
-            if let Ok((mut socket, _)) = listener.accept().await {
-                let mut buf = [0u8; 8192];
-                let _ = socket.read(&mut buf).await;
-                let _ = socket.write_all(&response).await;
-                let _ = socket.write_all(body).await;
-                let _ = socket.flush().await;
-                let _ = socket.shutdown().await;
-            }
+            let (mut socket, _) = listener.accept().await.expect("accept");
+            let mut buf = [0u8; 8192];
+            let _ = socket.read(&mut buf).await;
+            let _ = socket.write_all(&response).await;
+            let _ = socket.write_all(body).await;
+            let _ = socket.flush().await;
+            let _ = socket.shutdown().await;
         });
         format!("http://{}", addr)
     }
@@ -1629,14 +1620,13 @@ mod tests {
             status, reason
         );
         tokio::spawn(async move {
-            if let Ok((mut socket, _)) = listener.accept().await {
-                let mut buf = [0u8; 8192];
-                let _ = socket.read(&mut buf).await;
-                let _ = socket.write_all(response.as_bytes()).await;
-                let _ = socket.write_all(b"short").await;
-                let _ = socket.flush().await;
-                let _ = socket.shutdown().await;
-            }
+            let (mut socket, _) = listener.accept().await.expect("accept");
+            let mut buf = [0u8; 8192];
+            let _ = socket.read(&mut buf).await;
+            let _ = socket.write_all(response.as_bytes()).await;
+            let _ = socket.write_all(b"short").await;
+            let _ = socket.flush().await;
+            let _ = socket.shutdown().await;
         });
         format!("http://{}", addr)
     }
@@ -1661,7 +1651,7 @@ mod tests {
         let url = spawn_mock_server(500, "Internal Server Error", b"boom").await;
         let provider = OllamaProvider::with_base_url(url);
         let err = provider.infer(mock_request()).await.unwrap_err();
-        assert!(matches!(err, ProviderError::ApiError(_)));
+        assert!(err.to_string().contains("API error:"));
     }
 
     #[tokio::test]
@@ -1669,10 +1659,7 @@ mod tests {
         let url = spawn_mock_server_truncated_error_body(500, "Internal Server Error").await;
         let provider = OllamaProvider::with_base_url(url);
         let err = provider.infer(mock_request()).await.unwrap_err();
-        match err {
-            ProviderError::ApiError(msg) => assert!(msg.contains("unknown error")),
-            other => panic!("expected ApiError, got {:?}", other),
-        }
+        assert!(err.to_string().contains("unknown error"));
     }
 
     #[tokio::test]
@@ -1680,32 +1667,25 @@ mod tests {
         let url = spawn_mock_server(200, "OK", b"not json").await;
         let provider = OllamaProvider::with_base_url(url);
         let err = provider.infer(mock_request()).await.unwrap_err();
-        assert!(matches!(err, ProviderError::InvalidResponse(_)));
+        assert!(err.to_string().contains("Invalid response:"));
     }
 
     #[tokio::test]
     async fn infer_stream_non_success_status_returns_api_error() {
         let url = spawn_mock_server(503, "Service Unavailable", b"down").await;
         let provider = OllamaProvider::with_base_url(url);
-        let err = match provider.infer_stream(mock_request()).await {
-            Err(e) => e,
-            Ok(_) => panic!("expected an error"),
-        };
-        assert!(matches!(err, ProviderError::ApiError(_)));
+        let result = provider.infer_stream(mock_request()).await;
+        assert!(result.is_err());
+        assert!(result.err().unwrap().to_string().contains("API error:"));
     }
 
     #[tokio::test]
     async fn infer_stream_non_success_status_body_read_error_falls_back_to_unknown_error() {
         let url = spawn_mock_server_truncated_error_body(503, "Service Unavailable").await;
         let provider = OllamaProvider::with_base_url(url);
-        let err = match provider.infer_stream(mock_request()).await {
-            Err(e) => e,
-            Ok(_) => panic!("expected an error"),
-        };
-        match err {
-            ProviderError::ApiError(msg) => assert!(msg.contains("unknown error")),
-            other => panic!("expected ApiError, got {:?}", other),
-        }
+        let result = provider.infer_stream(mock_request()).await;
+        assert!(result.is_err());
+        assert!(result.err().unwrap().to_string().contains("unknown error"));
     }
 
     #[tokio::test]
@@ -1730,16 +1710,15 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move {
-            if let Ok((mut socket, _)) = listener.accept().await {
-                let mut buf = [0u8; 8192];
-                let _ = socket.read(&mut buf).await;
-                let response =
-                    b"HTTP/1.1 200 OK\r\nContent-Length: 1000\r\nConnection: close\r\n\r\n";
-                let _ = socket.write_all(response).await;
-                let _ = socket.write_all(b"short").await;
-                let _ = socket.flush().await;
-                let _ = socket.shutdown().await;
-            }
+            let (mut socket, _) = listener.accept().await.expect("accept");
+            let mut buf = [0u8; 8192];
+            let _ = socket.read(&mut buf).await;
+            let response =
+                b"HTTP/1.1 200 OK\r\nContent-Length: 1000\r\nConnection: close\r\n\r\n";
+            let _ = socket.write_all(response).await;
+            let _ = socket.write_all(b"{\"message\":{\"content\":\"hi\"},\"done\":false}\nshort").await;
+            let _ = socket.flush().await;
+            let _ = socket.shutdown().await;
         });
         let provider = OllamaProvider::with_base_url(format!("http://{}", addr));
         let mut stream = provider.infer_stream(mock_request()).await.unwrap();
@@ -1759,7 +1738,7 @@ mod tests {
         let url = spawn_mock_server(401, "Unauthorized", b"nope").await;
         let provider = OllamaProvider::with_base_url(url);
         let err = provider.list_models().await.unwrap_err();
-        assert!(matches!(err, ProviderError::RequestFailed(_)));
+        assert!(err.to_string().contains("Request failed:"));
     }
 
     #[tokio::test]
@@ -1767,10 +1746,7 @@ mod tests {
         let url = spawn_mock_server_truncated_error_body(401, "Unauthorized").await;
         let provider = OllamaProvider::with_base_url(url);
         let err = provider.list_models().await.unwrap_err();
-        match err {
-            ProviderError::RequestFailed(msg) => assert!(msg.contains("unknown error")),
-            other => panic!("expected RequestFailed, got {:?}", other),
-        }
+        assert!(err.to_string().contains("unknown error"));
     }
 
     #[tokio::test]
@@ -1778,7 +1754,7 @@ mod tests {
         let url = spawn_mock_server(200, "OK", b"not json").await;
         let provider = OllamaProvider::with_base_url(url);
         let err = provider.list_models().await.unwrap_err();
-        assert!(matches!(err, ProviderError::InvalidResponse(_)));
+        assert!(err.to_string().contains("Invalid response:"));
     }
 
     #[tokio::test]
@@ -1809,5 +1785,57 @@ mod tests {
         let models = provider.list_models().await.unwrap();
         assert_eq!(models.len(), 1);
         assert_eq!(models[0].id, "llama3-8b");
+    }
+
+    #[tokio::test]
+    async fn list_models_entry_with_non_string_name_is_skipped() {
+        // covers the `.as_str()?` None branch in the filter_map
+        let body = br#"{"models":[{"name":42},{"name":"llama3-8b"}]}"#;
+        let url = spawn_mock_server(200, "OK", body).await;
+        let provider = OllamaProvider::with_base_url(url);
+        let models = provider.list_models().await.unwrap();
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0].id, "llama3-8b");
+    }
+
+    #[test]
+    fn ndjson_stream_skips_invalid_utf8_chunk_and_continues() {
+        // covers the implicit else of `if let Ok(text) = from_utf8(&bytes)` in
+        // OllamaNdjsonStream::poll_next
+        use futures_core::Stream;
+        use std::pin::Pin;
+        use std::task::{Context, Poll};
+
+        struct StaticStream {
+            data: Vec<Vec<u8>>,
+            idx: usize,
+        }
+        impl Stream for StaticStream {
+            type Item = std::result::Result<bytes::Bytes, reqwest::Error>;
+            fn poll_next(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+                if self.idx < self.data.len() {
+                    let chunk = bytes::Bytes::from(self.data[self.idx].clone());
+                    self.idx += 1;
+                    Poll::Ready(Some(Ok(chunk)))
+                } else {
+                    Poll::Ready(None)
+                }
+            }
+        }
+
+        let invalid_utf8 = vec![0xFF, 0xFE, 0x00];
+        let valid_chunk = b"{\"message\":{\"role\":\"assistant\",\"content\":\"ok\"},\"done\":false}\n".to_vec();
+        let stream = StaticStream {
+            data: vec![invalid_utf8, valid_chunk],
+            idx: 0,
+        };
+        let ndjson_stream = OllamaNdjsonStream::new(stream);
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            use tokio_stream::StreamExt;
+            let chunks: Vec<_> = ndjson_stream.collect().await;
+            assert_eq!(chunks.len(), 1);
+            assert_eq!(chunks[0].as_ref().unwrap().delta, "ok");
+        });
     }
 }

@@ -379,7 +379,7 @@ mod tests {
         let response = parse_openai_response(&body).unwrap();
         assert_eq!(response.content, "Hello!");
         assert_eq!(response.tokens_used.prompt_tokens, 10);
-        assert!(matches!(response.finish_reason, FinishReason::Complete));
+        assert_eq!(response.finish_reason, FinishReason::Complete);
     }
 
     #[test]
@@ -406,7 +406,7 @@ mod tests {
         let response = parse_openai_response(&body).unwrap();
         assert_eq!(response.tool_calls.len(), 1);
         assert_eq!(response.tool_calls[0].name, "search");
-        assert!(matches!(response.finish_reason, FinishReason::ToolCall));
+        assert_eq!(response.finish_reason, FinishReason::ToolCall);
     }
 
     #[test]
@@ -523,7 +523,7 @@ mod tests {
             "usage": { "prompt_tokens": 5, "completion_tokens": 100 }
         });
         let response = parse_openai_response(&body).unwrap();
-        assert!(matches!(response.finish_reason, FinishReason::TokenLimit));
+        assert_eq!(response.finish_reason, FinishReason::TokenLimit);
     }
 
     // ─── HTTP-call-level tests via a raw-TCP mock server ───────────────────
@@ -539,14 +539,13 @@ mod tests {
         )
         .into_bytes();
         tokio::spawn(async move {
-            if let Ok((mut socket, _)) = listener.accept().await {
-                let mut buf = [0u8; 8192];
-                let _ = socket.read(&mut buf).await;
-                let _ = socket.write_all(&response).await;
-                let _ = socket.write_all(body).await;
-                let _ = socket.flush().await;
-                let _ = socket.shutdown().await;
-            }
+            let (mut socket, _) = listener.accept().await.expect("accept");
+            let mut buf = [0u8; 8192];
+            let _ = socket.read(&mut buf).await;
+            let _ = socket.write_all(&response).await;
+            let _ = socket.write_all(body).await;
+            let _ = socket.flush().await;
+            let _ = socket.shutdown().await;
         });
         format!("http://{}", addr)
     }
@@ -588,7 +587,7 @@ mod tests {
         let url = spawn_mock_server(500, "Internal Server Error", b"boom").await;
         let provider = provider_with_url(url);
         let err = provider.infer(simple_request()).await.unwrap_err();
-        assert!(matches!(err, ProviderError::ApiError(_)));
+        assert!(err.to_string().contains("API error:"));
     }
 
     #[tokio::test]
@@ -596,18 +595,16 @@ mod tests {
         let url = spawn_mock_server(200, "OK", b"not json").await;
         let provider = provider_with_url(url);
         let err = provider.infer(simple_request()).await.unwrap_err();
-        assert!(matches!(err, ProviderError::InvalidResponse(_)));
+        assert!(err.to_string().contains("Invalid response:"));
     }
 
     #[tokio::test]
     async fn infer_stream_non_success_status_returns_error() {
         let url = spawn_mock_server(503, "Service Unavailable", b"down").await;
         let provider = provider_with_url(url);
-        let err = match provider.infer_stream(simple_request()).await {
-            Err(e) => e,
-            Ok(_) => panic!("expected an error"),
-        };
-        assert!(matches!(err, ProviderError::ApiError(_)));
+        let result = provider.infer_stream(simple_request()).await;
+        assert!(result.is_err());
+        assert!(result.err().unwrap().to_string().contains("API error:"));
     }
 
     #[tokio::test]
@@ -638,10 +635,7 @@ mod tests {
         let url = spawn_mock_server(401, "Unauthorized", b"bad key").await;
         let provider = provider_with_url(url);
         let err = provider.list_models().await.unwrap_err();
-        match err {
-            ProviderError::ApiError(msg) => assert!(msg.contains("401")),
-            other => panic!("expected ApiError, got {other:?}"),
-        }
+        assert!(err.to_string().contains("401"));
     }
 
     #[tokio::test]
@@ -649,7 +643,7 @@ mod tests {
         let url = spawn_mock_server(200, "OK", b"not json").await;
         let provider = provider_with_url(url);
         let err = provider.list_models().await.unwrap_err();
-        assert!(matches!(err, ProviderError::InvalidResponse(_)));
+        assert!(err.to_string().contains("Invalid response:"));
     }
 
     #[tokio::test]
@@ -657,7 +651,7 @@ mod tests {
         let url = spawn_mock_server(200, "OK", b"{}").await;
         let provider = provider_with_url(url);
         let err = provider.list_models().await.unwrap_err();
-        assert!(matches!(err, ProviderError::InvalidResponse(_)));
+        assert!(err.to_string().contains("Invalid response:"));
     }
 
     #[tokio::test]
@@ -670,36 +664,38 @@ mod tests {
         assert_eq!(models[0].id, "valid-model");
     }
 
+    #[tokio::test]
+    async fn list_models_skips_entries_with_non_string_id() {
+        // covers the `.as_str()?` None branch in the filter_map
+        let body = br#"{"data":[{"id": 42}, {"id":"valid-model"}]}"#;
+        let url = spawn_mock_server(200, "OK", body).await;
+        let provider = provider_with_url(url);
+        let models = provider.list_models().await.unwrap();
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0].id, "valid-model");
+    }
+
     // ─── HTTP error paths (connection refused) ─────────────────────────────
 
     #[tokio::test]
     async fn infer_connection_refused_returns_error() {
         let provider = provider_with_url("http://127.0.0.1:19997".to_string());
-        let result = provider.infer(simple_request()).await;
-        assert!(matches!(
-            result.unwrap_err(),
-            ProviderError::RequestFailed(_)
-        ));
+        let err = provider.infer(simple_request()).await.unwrap_err();
+        assert!(err.to_string().contains("Request failed:"));
     }
 
     #[tokio::test]
     async fn infer_stream_connection_refused_returns_error() {
         let provider = provider_with_url("http://127.0.0.1:19997".to_string());
         let result = provider.infer_stream(simple_request()).await;
-        assert!(result.is_err());
-        if let Err(e) = result {
-            assert!(matches!(e, ProviderError::RequestFailed(_)));
-        }
+        assert!(result.err().unwrap().to_string().contains("Request failed:"));
     }
 
     #[tokio::test]
     async fn list_models_connection_refused_returns_error() {
         let provider = provider_with_url("http://127.0.0.1:19997".to_string());
-        let result = provider.list_models().await;
-        assert!(matches!(
-            result.unwrap_err(),
-            ProviderError::RequestFailed(_)
-        ));
+        let err = provider.list_models().await.unwrap_err();
+        assert!(err.to_string().contains("Request failed:"));
     }
 
     /// Declares a `Content-Length` larger than the bytes actually sent, then
@@ -716,14 +712,13 @@ mod tests {
         )
         .into_bytes();
         tokio::spawn(async move {
-            if let Ok((mut socket, _)) = listener.accept().await {
-                let mut buf = [0u8; 8192];
-                let _ = socket.read(&mut buf).await;
-                let _ = socket.write_all(&response).await;
-                let _ = socket.write_all(b"short").await;
-                let _ = socket.flush().await;
-                let _ = socket.shutdown().await;
-            }
+            let (mut socket, _) = listener.accept().await.expect("accept");
+            let mut buf = [0u8; 8192];
+            let _ = socket.read(&mut buf).await;
+            let _ = socket.write_all(&response).await;
+            let _ = socket.write_all(b"short").await;
+            let _ = socket.flush().await;
+            let _ = socket.shutdown().await;
         });
         format!("http://{}", addr)
     }
@@ -733,9 +728,6 @@ mod tests {
         let url = spawn_mock_server_truncated_body(500, "Internal Server Error").await;
         let provider = provider_with_url(url);
         let err = provider.list_models().await.unwrap_err();
-        match err {
-            ProviderError::ApiError(msg) => assert!(msg.contains("unknown error")),
-            other => panic!("expected ApiError, got {other:?}"),
-        }
+        assert!(err.to_string().contains("unknown error"));
     }
 }

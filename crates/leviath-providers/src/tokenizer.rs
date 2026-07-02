@@ -21,16 +21,9 @@ pub fn count_tokens(text: &str, model: &str) -> usize {
 
 /// Count tokens using tiktoken for OpenAI models.
 fn count_tokens_tiktoken(text: &str, model: &str) -> usize {
-    match get_bpe_from_model(model) {
-        Ok(bpe) => bpe.encode_with_special_tokens(text).len(),
-        Err(_) => {
-            // Fall back to cl100k_base (GPT-4 encoding) if model not recognized
-            match tiktoken_rs::cl100k_base() {
-                Ok(bpe) => bpe.encode_with_special_tokens(text).len(),
-                Err(_) => approximate_count(text),
-            }
-        }
-    }
+    let bpe = get_bpe_from_model(model)
+        .unwrap_or_else(|_| tiktoken_rs::cl100k_base().expect("cl100k_base is always available"));
+    bpe.encode_with_special_tokens(text).len()
 }
 
 /// Approximate token count for Anthropic models (~3.5 chars per token).

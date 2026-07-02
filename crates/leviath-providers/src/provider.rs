@@ -191,6 +191,13 @@ pub enum FinishReason {
     Stop,
 }
 
+impl PartialEq for FinishReason {
+    #[inline(never)]
+    fn eq(&self, other: &Self) -> bool {
+        std::mem::discriminant(self) == std::mem::discriminant(other)
+    }
+}
+
 /// A tool call from the model.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolCall {
@@ -357,7 +364,7 @@ pub async fn check_http_response(
         let error_body = response
             .text()
             .await
-            .unwrap_or_else(|_| "unknown error".to_string());
+            .unwrap_or_else(|e| e.to_string());
         return Err(ProviderError::ApiError(format!(
             "HTTP {}: {}",
             status, error_body
@@ -451,34 +458,31 @@ mod tests {
 
     #[test]
     fn parse_finish_reason_stop() {
-        assert!(matches!(
-            parse_openai_finish_reason("stop"),
-            FinishReason::Complete
-        ));
+        assert_eq!(parse_openai_finish_reason("stop"), FinishReason::Complete);
     }
 
     #[test]
     fn parse_finish_reason_tool_calls() {
-        assert!(matches!(
+        assert_eq!(
             parse_openai_finish_reason("tool_calls"),
             FinishReason::ToolCall
-        ));
+        );
     }
 
     #[test]
     fn parse_finish_reason_length() {
-        assert!(matches!(
+        assert_eq!(
             parse_openai_finish_reason("length"),
             FinishReason::TokenLimit
-        ));
+        );
     }
 
     #[test]
     fn parse_finish_reason_unknown_defaults_to_complete() {
-        assert!(matches!(
+        assert_eq!(
             parse_openai_finish_reason("unknown"),
             FinishReason::Complete
-        ));
+        );
     }
 
     // ─── Serialization round-trips ──────────────────────────────────────────
@@ -635,15 +639,8 @@ mod tests {
         let waker = Waker::noop();
         let mut cx = Context::from_waker(waker);
 
-        match Pin::new(&mut stream).poll_next(&mut cx) {
-            Poll::Ready(Some(val)) => assert_eq!(val, 42),
-            other => panic!("Expected Ready(Some(42)), got {:?}", other),
-        }
-
-        match Pin::new(&mut stream).poll_next(&mut cx) {
-            Poll::Ready(None) => {}
-            other => panic!("Expected Ready(None), got {:?}", other),
-        }
+        assert_eq!(Pin::new(&mut stream).poll_next(&mut cx), Poll::Ready(Some(42)));
+        assert_eq!(Pin::new(&mut stream).poll_next(&mut cx), Poll::Ready(None));
     }
 
     // ─── Default trait method impls (infer_stream, list_models) ────────────
@@ -709,7 +706,7 @@ mod tests {
         assert_eq!(chunk.tool_calls[0].id.as_deref(), Some("call_1"));
         assert_eq!(chunk.tool_calls[0].name.as_deref(), Some("search"));
         assert_eq!(chunk.tokens.as_ref().unwrap().total_tokens, 2);
-        assert!(matches!(chunk.finish_reason, Some(FinishReason::Complete)));
+        assert_eq!(chunk.finish_reason, Some(FinishReason::Complete));
         assert!(stream.next().await.is_none());
     }
 
@@ -756,14 +753,34 @@ mod tests {
         header_lines.push_str("\r\n");
         let response_bytes = header_lines.into_bytes();
         tokio::spawn(async move {
-            if let Ok((mut socket, _)) = listener.accept().await {
-                let mut buf = [0u8; 8192];
-                let _ = socket.read(&mut buf).await;
-                let _ = socket.write_all(&response_bytes).await;
-                let _ = socket.write_all(body).await;
-                let _ = socket.flush().await;
-                let _ = socket.shutdown().await;
-            }
+            let (mut socket, _) = listener.accept().await.expect("accept");
+            let mut buf = [0u8; 8192];
+            let _ = socket.read(&mut buf).await;
+            let _ = socket.write_all(&response_bytes).await;
+            let _ = socket.write_all(body).await;
+            let _ = socket.flush().await;
+            let _ = socket.shutdown().await;
+        });
+        reqwest::get(format!("http://{}", addr)).await.unwrap()
+    }
+
+    async fn spawn_truncated_error_response(status: u16, reason: &str) -> reqwest::Response {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let header = format!(
+            "HTTP/1.1 {} {}\r\nContent-Length: 9999\r\nConnection: close\r\n\r\nshort",
+            status, reason
+        )
+        .into_bytes();
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("accept");
+            let mut buf = [0u8; 8192];
+            let _ = socket.read(&mut buf).await;
+            let _ = socket.write_all(&header).await;
+            let _ = socket.flush().await;
+            let _ = socket.shutdown().await;
         });
         reqwest::get(format!("http://{}", addr)).await.unwrap()
     }
@@ -779,20 +796,24 @@ mod tests {
     async fn check_http_response_non_success_returns_api_error() {
         let response = spawn_mock_response(500, "Internal Server Error", &[], b"boom").await;
         let err = check_http_response(response, None).await.unwrap_err();
-        match err {
-            ProviderError::ApiError(msg) => {
-                assert!(msg.contains("500"));
-                assert!(msg.contains("boom"));
-            }
-            other => panic!("expected ApiError, got {:?}", other),
-        }
+        let msg = err.to_string();
+        assert!(msg.contains("500"));
+        assert!(msg.contains("boom"));
+    }
+
+    #[tokio::test]
+    async fn check_http_response_non_success_body_read_error_falls_back_to_error_string() {
+        let response = spawn_truncated_error_response(500, "Internal Server Error").await;
+        let err = check_http_response(response, None).await.unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("500"), "expected 500 in: {msg}");
     }
 
     #[tokio::test]
     async fn check_http_response_rate_limited_without_limiter_returns_rate_limit_exceeded() {
         let response = spawn_mock_response(429, "Too Many Requests", &[], b"slow down").await;
         let err = check_http_response(response, None).await.unwrap_err();
-        assert!(matches!(err, ProviderError::RateLimitExceeded));
+        assert_eq!(std::mem::discriminant(&err), std::mem::discriminant(&ProviderError::RateLimitExceeded));
     }
 
     #[tokio::test]
@@ -812,7 +833,7 @@ mod tests {
         let err = check_http_response(response, Some(&limiter))
             .await
             .unwrap_err();
-        assert!(matches!(err, ProviderError::RateLimitExceeded));
+        assert_eq!(std::mem::discriminant(&err), std::mem::discriminant(&ProviderError::RateLimitExceeded));
     }
 
     #[tokio::test]
@@ -832,6 +853,6 @@ mod tests {
         let err = check_http_response(response, Some(&limiter))
             .await
             .unwrap_err();
-        assert!(matches!(err, ProviderError::RateLimitExceeded));
+        assert_eq!(std::mem::discriminant(&err), std::mem::discriminant(&ProviderError::RateLimitExceeded));
     }
 }

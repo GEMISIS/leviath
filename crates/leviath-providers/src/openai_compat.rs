@@ -428,10 +428,7 @@ mod tests {
         assert_eq!(resp.tokens_used.prompt_tokens, 10);
         assert_eq!(resp.tokens_used.completion_tokens, 5);
         assert_eq!(resp.tokens_used.total_tokens, 15);
-        assert!(matches!(
-            resp.finish_reason,
-            crate::provider::FinishReason::Complete
-        ));
+        assert_eq!(resp.finish_reason, crate::provider::FinishReason::Complete);
     }
 
     #[test]
@@ -474,10 +471,7 @@ mod tests {
         assert_eq!(resp.tool_calls[0].id, "call_1");
         assert_eq!(resp.tool_calls[0].name, "get_weather");
         assert_eq!(resp.tool_calls[0].arguments["city"], "NYC");
-        assert!(matches!(
-            resp.finish_reason,
-            crate::provider::FinishReason::ToolCall
-        ));
+        assert_eq!(resp.finish_reason, crate::provider::FinishReason::ToolCall);
     }
 
     #[test]
@@ -522,10 +516,7 @@ mod tests {
             "usage": {"prompt_tokens": 5, "completion_tokens": 5}
         });
         let resp = parse_openai_response(&body).unwrap();
-        assert!(matches!(
-            resp.finish_reason,
-            crate::provider::FinishReason::TokenLimit
-        ));
+        assert_eq!(resp.finish_reason, crate::provider::FinishReason::TokenLimit);
     }
 
     // ─── parse_openai_sse_event ─────────────────────────────────────────────
@@ -540,7 +531,7 @@ mod tests {
     fn sse_event_done_returns_stream_end() {
         let mut buf = "data: [DONE]\n\n".to_string();
         let result = parse_openai_sse_event(&mut buf);
-        assert!(matches!(result, Some(None)));
+        assert!(result.is_some() && result.unwrap().is_none());
         assert!(buf.is_empty());
     }
 
@@ -574,10 +565,7 @@ mod tests {
             })
         );
         let chunk = parse_openai_sse_event(&mut buf).unwrap().unwrap();
-        assert!(matches!(
-            chunk.finish_reason,
-            Some(crate::provider::FinishReason::Complete)
-        ));
+        assert_eq!(chunk.finish_reason, Some(crate::provider::FinishReason::Complete));
     }
 
     #[test]
@@ -787,7 +775,7 @@ mod tests {
         // No choices and no usage → should continue, effectively None since
         // no data line produces a result
         let result = parse_openai_sse_event(&mut buf);
-        assert!(result.is_none() || matches!(result, Some(None)));
+        assert!(result.is_none());
     }
 
     // ─── OpenAiSseStream (Stream-level, not just parse_openai_sse_event) ───
@@ -889,6 +877,22 @@ mod tests {
         assert!(sse.next().await.is_none());
     }
 
+    #[tokio::test]
+    async fn openai_sse_stream_skips_invalid_utf8_chunk_and_continues() {
+        // covers the implicit else of `if let Ok(text) = from_utf8(&bytes)`
+        use tokio_stream::StreamExt;
+        let stream = StaticByteStream {
+            data: vec![
+                vec![0xFF, 0xFE, 0x00],
+                b"data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\n".to_vec(),
+            ],
+            idx: 0,
+        };
+        let mut sse = OpenAiSseStream::new(stream);
+        let chunk = sse.next().await.unwrap().unwrap();
+        assert_eq!(chunk.delta, "ok");
+    }
+
     /// Declares a `Content-Length` far larger than the bytes actually sent,
     /// then closes the connection -- forcing a genuine `reqwest::Error` when
     /// the byte stream itself is polled (not just `.text()`), so
@@ -904,13 +908,12 @@ mod tests {
         let response = b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: 10000\r\nConnection: close\r\n\r\nshort".to_vec();
 
         tokio::spawn(async move {
-            if let Ok((mut socket, _)) = listener.accept().await {
-                let mut buf = [0u8; 8192];
-                let _ = socket.read(&mut buf).await;
-                let _ = socket.write_all(&response).await;
-                let _ = socket.flush().await;
-                let _ = socket.shutdown().await;
-            }
+            let (mut socket, _) = listener.accept().await.expect("accept");
+            let mut buf = [0u8; 8192];
+            let _ = socket.read(&mut buf).await;
+            let _ = socket.write_all(&response).await;
+            let _ = socket.flush().await;
+            let _ = socket.shutdown().await;
         });
 
         format!("http://{}", addr)
@@ -926,13 +929,8 @@ mod tests {
         let byte_stream = resp.bytes_stream();
         let mut sse = OpenAiSseStream::new(byte_stream);
 
-        let result = sse.next().await;
-        match result {
-            Some(Err(ProviderError::RequestFailed(_))) => {}
-            other => panic!(
-                "expected RequestFailed, got: {:?}",
-                other.map(|r| r.is_ok())
-            ),
-        }
+        let item = sse.next().await.expect("stream should yield an item");
+        let err = item.unwrap_err();
+        assert!(err.to_string().contains("Request failed:"));
     }
 }
