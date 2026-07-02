@@ -124,6 +124,42 @@ impl Default for ToolDiscovery {
 mod tests {
     use super::*;
 
+    /// Minimal `tracing::Subscriber` that reports every callsite as enabled.
+    /// Without a registered subscriber, `tracing::info!`'s multi-line field
+    /// arguments (e.g. `discover_from_client`'s `tool_count = tools.len()`
+    /// line) show as 0-hit in coverage even though the call demonstrably
+    /// executes -- the macro short-circuits field evaluation before ever
+    /// checking for a subscriber.
+    struct AlwaysOnSubscriber;
+    impl tracing::Subscriber for AlwaysOnSubscriber {
+        fn enabled(&self, _metadata: &tracing::Metadata<'_>) -> bool {
+            true
+        }
+        fn new_span(&self, _span: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+            tracing::span::Id::from_u64(1)
+        }
+        fn record(&self, _span: &tracing::span::Id, _values: &tracing::span::Record<'_>) {}
+        fn record_follows_from(&self, _span: &tracing::span::Id, _follows: &tracing::span::Id) {}
+        fn event(&self, _event: &tracing::Event<'_>) {}
+        fn enter(&self, _span: &tracing::span::Id) {}
+        fn exit(&self, _span: &tracing::span::Id) {}
+    }
+
+    fn always_on_tracing_guard() -> tracing::subscriber::DefaultGuard {
+        tracing::subscriber::set_default(AlwaysOnSubscriber)
+    }
+
+    #[test]
+    fn always_on_subscriber_span_methods_are_all_no_ops() {
+        let _guard = always_on_tracing_guard();
+        let span = tracing::info_span!("test-span", field = 1);
+        span.record("field", 2);
+        span.follows_from(&span);
+        span.in_scope(|| {
+            tracing::info!("inside span");
+        });
+    }
+
     // --- ToolMetadata serde ---
 
     #[test]
@@ -256,6 +292,7 @@ for line in sys.stdin:
 
     #[tokio::test]
     async fn discover_from_client_returns_tools_and_indexes_by_server_name() {
+        let _guard = always_on_tracing_guard();
         let mut client = MCPClient::spawn("python3", &["-c", STUB_INIT_AND_LIST], &HashMap::new())
             .await
             .expect("failed to spawn stub server");
@@ -330,6 +367,111 @@ for line in sys.stdin:
             name: "bad-server".to_string(),
             command: "this-command-does-not-exist-anywhere".to_string(),
             args: vec![],
+            env: HashMap::new(),
+        };
+
+        let mut discovery = ToolDiscovery::new();
+        let result = discovery.discover_from_config(&config).await;
+        assert!(result.is_err());
+        assert_eq!(discovery.server_count(), 0);
+    }
+
+    /// Responds with a JSON-RPC error to "initialize", so `connect()` fails.
+    const STUB_INIT_ERRORS: &str = r#"
+import sys, json
+
+def respond(id, result=None, error=None):
+    msg = {"jsonrpc": "2.0", "id": id}
+    if error is not None:
+        msg["error"] = error
+    else:
+        msg["result"] = result
+    sys.stdout.write(json.dumps(msg) + "\n")
+    sys.stdout.flush()
+
+for line in sys.stdin:
+    line = line.strip()
+    if not line:
+        continue
+    req = json.loads(line)
+    method = req.get("method", "")
+    id_ = req.get("id")
+    if method == "initialize":
+        respond(id_, error={"code": -32000, "message": "initialize failed"})
+    else:
+        respond(id_, error={"code": -32601, "message": "method not found"})
+"#;
+
+    /// Initializes successfully but responds with a JSON-RPC error to
+    /// "tools/list", so `list_tools()` (and therefore `discover_from_client`)
+    /// fails.
+    const STUB_INIT_OK_LIST_ERRORS: &str = r#"
+import sys, json
+
+def respond(id, result=None, error=None):
+    msg = {"jsonrpc": "2.0", "id": id}
+    if error is not None:
+        msg["error"] = error
+    else:
+        msg["result"] = result
+    sys.stdout.write(json.dumps(msg) + "\n")
+    sys.stdout.flush()
+
+for line in sys.stdin:
+    line = line.strip()
+    if not line:
+        continue
+    req = json.loads(line)
+    method = req.get("method", "")
+    id_ = req.get("id")
+    if method == "initialize":
+        respond(id_, {"capabilities": {}, "protocolVersion": "2024-11-05"})
+    elif method == "notifications/initialized":
+        pass
+    elif method == "tools/list":
+        respond(id_, error={"code": -32000, "message": "listing failed"})
+    else:
+        respond(id_, error={"code": -32601, "message": "method not found"})
+"#;
+
+    #[tokio::test]
+    async fn discover_from_client_list_tools_error_propagates() {
+        let mut client = MCPClient::spawn(
+            "python3",
+            &["-c", STUB_INIT_OK_LIST_ERRORS],
+            &HashMap::new(),
+        )
+        .await
+        .expect("failed to spawn stub server");
+        client.connect().await.expect("connect should succeed");
+
+        let mut discovery = ToolDiscovery::new();
+        let result = discovery.discover_from_client("server1", &mut client).await;
+        assert!(result.is_err());
+        assert_eq!(discovery.server_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn discover_from_config_connect_error_propagates() {
+        let config = MCPServerConfig {
+            name: "server1".to_string(),
+            command: "python3".to_string(),
+            args: vec!["-c".to_string(), STUB_INIT_ERRORS.to_string()],
+            env: HashMap::new(),
+        };
+
+        let mut discovery = ToolDiscovery::new();
+        let result = discovery.discover_from_config(&config).await;
+        assert!(result.is_err());
+        assert_eq!(discovery.server_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn discover_from_config_discover_error_propagates() {
+        let config = MCPServerConfig {
+            name: "server1".to_string(),
+            command: "python3".to_string(),
+            args: vec!["-c".to_string(), STUB_INIT_OK_LIST_ERRORS.to_string()],
             env: HashMap::new(),
         };
 
