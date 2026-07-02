@@ -424,6 +424,42 @@ fn truncate_str(s: &str, max: usize) -> String {
 mod tests {
     use super::*;
 
+    /// Without a registered `tracing::Subscriber`, `tracing::info!`'s
+    /// multi-line field-argument lines show as uncovered even though the
+    /// call itself demonstrably executes -- the macro short-circuits field
+    /// evaluation when no subscriber is listening.
+    struct AlwaysOnSubscriber;
+    impl tracing::Subscriber for AlwaysOnSubscriber {
+        fn enabled(&self, _metadata: &tracing::Metadata<'_>) -> bool {
+            true
+        }
+        fn new_span(&self, _span: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+            tracing::span::Id::from_u64(1)
+        }
+        fn record(&self, _span: &tracing::span::Id, _values: &tracing::span::Record<'_>) {}
+        fn record_follows_from(&self, _span: &tracing::span::Id, _follows: &tracing::span::Id) {}
+        fn event(&self, _event: &tracing::Event<'_>) {}
+        fn enter(&self, _span: &tracing::span::Id) {}
+        fn exit(&self, _span: &tracing::span::Id) {}
+    }
+    fn always_on_tracing_guard() -> tracing::subscriber::DefaultGuard {
+        tracing::subscriber::set_default(AlwaysOnSubscriber)
+    }
+
+    #[test]
+    fn always_on_subscriber_span_methods_are_all_no_ops() {
+        // This file only ever uses `tracing::info!` event macros, never
+        // `tracing::span!` -- so `Subscriber::{new_span,record,
+        // record_follows_from,enter,exit}` are otherwise never invoked.
+        let _guard = always_on_tracing_guard();
+        let span_a = tracing::info_span!("a", value = tracing::field::Empty);
+        span_a.record("value", 1);
+        let span_b = tracing::info_span!("b");
+        span_b.follows_from(&span_a);
+        let _enter_a = span_a.enter();
+        let _enter_b = span_b.enter();
+    }
+
     // ─── validate_test_case ────────────────────────────────────────────────
 
     #[test]
@@ -1286,7 +1322,16 @@ model = { provider = "anthropic", model = "claude-sonnet-4-6" }
             "anthropic".to_string(),
             Arc::new(MockProvider {
                 content: "no tools here".to_string(),
-                tool_calls: vec![],
+                // A non-matching (rather than empty) tool call list still
+                // fails the "has_tool" check but also exercises the
+                // subsequent `tool_names` diagnostic's `.map()` closure,
+                // which an empty Vec's `.iter().map(...)` never invokes at
+                // all.
+                tool_calls: vec![ToolCall {
+                    id: "call_1".to_string(),
+                    name: "write_file".to_string(),
+                    arguments: serde_json::json!({}),
+                }],
             }),
         );
 
@@ -1440,6 +1485,7 @@ model = { provider = "anthropic", model = "claude-sonnet-4-6" }
 
     #[tokio::test]
     async fn execute_with_registry_non_dry_run_all_pass() {
+        let _guard = always_on_tracing_guard();
         let dir = tempfile::tempdir().unwrap();
         let project = dir.path();
         write_project_with_test_file(
@@ -1461,6 +1507,27 @@ expect_contains = "world"
         let result =
             execute_with_registry(args, mock_registry_builder("Hello, world!", vec![])).await;
         assert!(result.is_ok(), "expected success, got: {:?}", result.err());
+    }
+
+    #[tokio::test]
+    async fn execute_with_registry_none_path_defaults_to_current_dir() {
+        // Covers the `unwrap_or_else(|| ".".to_string())` closure, never
+        // invoked by any other test (all of which pass an explicit `path`).
+        // `cargo test`'s cwd is this crate's own source directory, which
+        // has no `agent.leviath`, so this deterministically hits the
+        // "No agent.leviath found" bail -- proving the closure ran without
+        // depending on (or mutating) any real project directory.
+        let args = TestArgs {
+            path: None,
+            filter: None,
+            dry_run: true,
+        };
+        let result = execute_with_registry(args, |_| ProviderRegistry::new()).await;
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("No agent.leviath found"));
     }
 
     #[tokio::test]
