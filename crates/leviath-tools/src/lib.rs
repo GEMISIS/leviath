@@ -819,13 +819,19 @@ mod tests {
         // More ".." segments than the workdir itself has components, so
         // `normalized.pop()` fails on an already-empty path (distinct from
         // the "popped below workdir root" case covered by
-        // resolve_rejects_path_escape).
+        // resolve_rejects_path_escape). Which of the two bail messages
+        // fires ("escapes the working directory" vs "would escape the
+        // working directory") can depend on how many path components the
+        // platform's own temp-dir path decomposes into (e.g. Windows'
+        // drive-prefix + UNC handling), so this only asserts the common
+        // "escape" substring both share, not the exact message -- either
+        // is an equally correct rejection.
         let dir = tempfile::tempdir().unwrap();
         let tools = make_tools(dir.path());
         let deep_traversal = "../".repeat(64) + "etc/passwd";
         let result = tools.resolve(&deep_traversal);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("escapes"));
+        assert!(result.unwrap_err().to_string().contains("escape"));
     }
 
     #[tokio::test]
@@ -1168,6 +1174,17 @@ mod tests {
         assert_eq!(result, "(command succeeded with no output)");
     }
 
+    // `detect_shell()` resolves to `cmd.exe /C` on Windows, which doesn't
+    // understand Unix shell syntax (`;` as a command separator, `1>&2`
+    // redirection the way `sh`/`bash` do) -- `cmd.exe` treats the whole
+    // string as one literal `echo` argument instead, so the command
+    // "succeeds" with no [exit code 1] at all. Gated `#[cfg(unix)]` rather
+    // than attempting an unverified `cmd.exe`-syntax equivalent (this
+    // session already hit multiple real Windows CI failures from
+    // insufficiently-verified platform-specific test code; not worth
+    // risking a new one here without access to a real Windows run to
+    // confirm the exact `cmd.exe` redirection/chaining syntax first).
+    #[cfg(unix)]
     #[tokio::test]
     async fn shell_failing_command_reports_stdout_and_stderr() {
         let dir = tempfile::tempdir().unwrap();

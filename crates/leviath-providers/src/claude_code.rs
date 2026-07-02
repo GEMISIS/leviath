@@ -1103,7 +1103,15 @@ mod tests {
         // `std::io::BufRead::read_line`) -- a raw invalid byte sequence on
         // stdout surfaces as a genuine `io::Error`, exercising
         // `ClaudeCodeStream::poll_next`'s `Poll::Ready(Err(e))` arm.
-        let script = write_stub_script("stream-badutf8", "printf '\\xff\\xfe\\n'\n");
+        //
+        // Uses octal (`\NNN`) rather than hex (`\xHH`) escapes: `\xHH` is a
+        // bash/ksh printf extension, not POSIX -- Debian/Ubuntu's `/bin/sh`
+        // (dash) doesn't support it and this script's shebang is `#!/bin/sh`,
+        // so on Ubuntu CI `printf` wrote something other than the intended
+        // invalid bytes and the stream produced no output at all instead of
+        // a read error. `\NNN` octal escapes are POSIX-standard printf and
+        // portable across dash/bash/zsh alike. 0377=0xff, 0376=0xfe.
+        let script = write_stub_script("stream-badutf8", "printf '\\377\\376\\n'\n");
         let provider = ClaudeCodeProvider::with_binary_path(script.to_str().unwrap().to_string());
         let mut stream = provider.infer_stream(make_request()).await.unwrap();
         use tokio_stream::StreamExt;
