@@ -518,16 +518,10 @@ mod tests {
 
         // Check that io captured the output
         let all_output: String = io.outputs.join("");
-        assert!(
-            all_output.contains("Assistant:"),
-            "Expected 'Assistant:' prefix in output: {:?}",
-            io.outputs
-        );
-        assert!(
-            all_output.contains("Streamed response"),
-            "Expected streamed content in output: {:?}",
-            io.outputs
-        );
+        #[rustfmt::skip]
+        assert!(all_output.contains("Assistant:"), "Expected 'Assistant:' prefix in output: {:?}", io.outputs);
+        #[rustfmt::skip]
+        assert!(all_output.contains("Streamed response"), "Expected streamed content in output: {:?}", io.outputs);
     }
 
     #[tokio::test]

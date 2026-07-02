@@ -1477,11 +1477,8 @@ mod tests {
         )
         .await;
 
-        assert!(
-            result.is_none(),
-            "allow_complete stage must be able to terminate via DONE instead of \
-             being forced down its only edge"
-        );
+        #[rustfmt::skip]
+        assert!(result.is_none(), "allow_complete stage must be able to terminate via DONE instead of being forced down its only edge");
     }
 
     #[tokio::test]
@@ -1849,12 +1846,8 @@ mod tests {
 
         let window = engine.world().get::<ContextWindow>(entity).unwrap();
         let conv = window.get_region("conversation").unwrap();
-        assert!(
-            conv.content
-                .iter()
-                .any(|e| e.content.contains("concise summary of the conversation")),
-            "summary should have been written into the conversation region"
-        );
+        #[rustfmt::skip]
+        assert!(conv.content.iter().any(|e| e.content.contains("concise summary of the conversation")), "summary should have been written into the conversation region");
         assert!(
             !conv
                 .content

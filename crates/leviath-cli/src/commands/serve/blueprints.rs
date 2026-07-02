@@ -87,15 +87,18 @@ pub(super) async fn get_blueprint(
 pub(super) async fn create_blueprint(
     Json(body): Json<CreateBlueprintReq>,
 ) -> Result<Json<BlueprintInfo>, (StatusCode, Json<ErrorResponse>)> {
-    // Validate manifest first
-    if let Err(e) = parse_manifest_public(&body.manifest) {
-        return Err((
+    // Validate manifest first, keeping the parsed Blueprint so the response
+    // can be built from it directly below instead of re-reading the file we
+    // just wrote (which used to make the re-read's error arm a TOCTOU-only,
+    // untestable dead branch).
+    let bp = parse_manifest_public(&body.manifest).map_err(|e| {
+        (
             StatusCode::BAD_REQUEST,
             Json(ErrorResponse {
                 error: format!("Invalid manifest: {}", e),
             }),
-        ));
-    }
+        )
+    })?;
 
     let dir = agents_dir().join(&body.name);
     std::fs::create_dir_all(&dir).map_err(|e| {
@@ -117,36 +120,27 @@ pub(super) async fn create_blueprint(
         )
     })?;
 
-    // Untested by design: `read_blueprint_info` re-parses the exact content
-    // this function just wrote via `parse_manifest_public`, which already
-    // succeeded on the same bytes moments earlier -- only a TOCTOU race
-    // (something else replacing the file between write and read-back) could
-    // hit this arm, and there's no seam to inject that without unsafely
-    // mutating shared filesystem state mid-request.
-    read_blueprint_info(&manifest_path, &dir)
-        .map(Json)
-        .ok_or_else(|| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse {
-                    error: "Failed to read back created blueprint".to_string(),
-                }),
-            )
-        })
+    Ok(Json(BlueprintInfo {
+        name: bp.name,
+        version: bp.version,
+        description: bp.description,
+        path: dir.to_string_lossy().to_string(),
+        stages: bp.stages.iter().map(|s| s.name.clone()).collect(),
+    }))
 }
 
 pub(super) async fn update_blueprint(
     AxumPath(name): AxumPath<String>,
     Json(body): Json<UpdateBlueprintReq>,
 ) -> Result<Json<BlueprintInfo>, (StatusCode, Json<ErrorResponse>)> {
-    if let Err(e) = parse_manifest_public(&body.manifest) {
-        return Err((
+    let bp = parse_manifest_public(&body.manifest).map_err(|e| {
+        (
             StatusCode::BAD_REQUEST,
             Json(ErrorResponse {
                 error: format!("Invalid manifest: {}", e),
             }),
-        ));
-    }
+        )
+    })?;
 
     let dir = agents_dir().join(&name);
     let manifest_path = dir.join("agent.leviath");
@@ -168,17 +162,13 @@ pub(super) async fn update_blueprint(
         )
     })?;
 
-    // Same TOCTOU-only reasoning as create_blueprint's identical pattern above.
-    read_blueprint_info(&manifest_path, &dir)
-        .map(Json)
-        .ok_or_else(|| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse {
-                    error: "Failed to read back updated blueprint".to_string(),
-                }),
-            )
-        })
+    Ok(Json(BlueprintInfo {
+        name: bp.name,
+        version: bp.version,
+        description: bp.description,
+        path: dir.to_string_lossy().to_string(),
+        stages: bp.stages.iter().map(|s| s.name.clone()).collect(),
+    }))
 }
 
 pub(super) async fn delete_blueprint(

@@ -522,17 +522,12 @@ prompt = "Do the thing"
         };
 
         let result = execute(args).await;
-        assert!(
-            result.is_ok(),
-            "expected background execute to succeed, got: {:?}",
-            result.err()
-        );
+        #[rustfmt::skip]
+        assert!(result.is_ok(), "expected background execute to succeed, got: {:?}", result.err());
 
         let runs = runstate::list_runs();
-        assert!(
-            runs.iter().any(|m| m.agent_name == agent_name),
-            "expected a run to have been created for {agent_name}"
-        );
+        #[rustfmt::skip]
+        assert!(runs.iter().any(|m| m.agent_name == agent_name), "expected a run to have been created for {agent_name}");
 
         let _ = std::fs::remove_dir_all(&temp_dir);
     }
@@ -559,11 +554,8 @@ prompt = "Do the thing"
         };
 
         let result = execute(args).await;
-        assert!(
-            result.is_ok(),
-            "expected multi-count background execute to succeed, got: {:?}",
-            result.err()
-        );
+        #[rustfmt::skip]
+        assert!(result.is_ok(), "expected multi-count background execute to succeed, got: {:?}", result.err());
 
         let runs = runstate::list_runs();
         let matching = runs.iter().filter(|m| m.agent_name == agent_name).count();

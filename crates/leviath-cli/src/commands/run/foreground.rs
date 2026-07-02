@@ -666,10 +666,8 @@ mod tests {
         let engine = leviath_runtime::AgentEngine::with_providers(registry);
         // When accepts=true, a JoinHandle is spawned for stdin reading
         let handle = cb.start_message_reader(&engine, "agent-1", true);
-        assert!(
-            handle.is_some(),
-            "Should return Some(JoinHandle) when accepts is true"
-        );
+        #[rustfmt::skip]
+        assert!(handle.is_some(), "Should return Some(JoinHandle) when accepts is true");
         // Abort it immediately to avoid blocking
         if let Some(h) = handle {
             h.abort();
@@ -1082,11 +1080,8 @@ bash = "ask"
         // abort cleanly via `on_provider_missing` returning `true` -- which
         // `run_stage_loop` surfaces as `Ok(())`, not an error.
         let result = run_foreground(args).await;
-        assert!(
-            result.is_ok(),
-            "expected clean abort on missing provider, got: {:?}",
-            result.err()
-        );
+        #[rustfmt::skip]
+        assert!(result.is_ok(), "expected clean abort on missing provider, got: {:?}", result.err());
 
         let _ = std::fs::remove_dir_all(&temp_dir);
     }
@@ -1221,11 +1216,8 @@ model = "mock-model"
         })
         .await;
 
-        assert!(
-            result.is_ok(),
-            "expected clean completion, got: {:?}",
-            result.err()
-        );
+        #[rustfmt::skip]
+        assert!(result.is_ok(), "expected clean completion, got: {:?}", result.err());
 
         // Cover the remaining `Provider` trait methods that this particular
         // run never exercises through the engine.

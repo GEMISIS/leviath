@@ -352,23 +352,15 @@ mod tests {
         let registry = build_provider_registry(&config);
         // Should always have ollama and claude-code registered
         assert!(registry.has("ollama"), "ollama should be registered");
-        assert!(
-            registry.has("claude-code"),
-            "claude-code should be registered"
-        );
+        #[rustfmt::skip]
+        assert!(registry.has("claude-code"), "claude-code should be registered");
         // Should NOT have anthropic, openai, google without keys
-        assert!(
-            !registry.has("anthropic"),
-            "anthropic should not be registered without key"
-        );
-        assert!(
-            !registry.has("openai"),
-            "openai should not be registered without key"
-        );
-        assert!(
-            !registry.has("google"),
-            "google should not be registered without key"
-        );
+        #[rustfmt::skip]
+        assert!(!registry.has("anthropic"), "anthropic should not be registered without key");
+        #[rustfmt::skip]
+        assert!(!registry.has("openai"), "openai should not be registered without key");
+        #[rustfmt::skip]
+        assert!(!registry.has("google"), "google should not be registered without key");
     }
 
     #[test]
@@ -417,10 +409,8 @@ mod tests {
             ..Config::default()
         };
         let registry = build_provider_registry(&config);
-        assert!(
-            registry.has("openrouter"),
-            "openrouter should be registered"
-        );
+        #[rustfmt::skip]
+        assert!(registry.has("openrouter"), "openrouter should be registered");
     }
 
     #[test]

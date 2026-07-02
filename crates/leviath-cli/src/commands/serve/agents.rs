@@ -12,9 +12,77 @@ use super::types::*;
 use crate::commands::run::parse_manifest_public;
 use crate::runstate::{self, ContextSnapshot, RunMeta, RunStatus};
 
+/// Every fallible external effect `spawn_agent` performs beyond the pure
+/// blueprint-lookup step, behind one seam. Production uses
+/// [`RealSpawnAgentIo`] (the real filesystem/process calls); tests inject a
+/// mock that can selectively fail any single operation while the rest behave
+/// exactly as production -- eliminating the need for either a genuine OS
+/// resource failure or racing `LEVIATH_RUNS_DIR` against concurrently-running
+/// tests and real background `lev` processes on the machine (both tried and
+/// rejected in earlier passes at this file).
+trait SpawnAgentIo: Send + Sync {
+    fn read_manifest(&self, path: &std::path::Path) -> std::io::Result<String>;
+    fn parse_manifest(&self, content: &str) -> anyhow::Result<leviath_core::Blueprint>;
+    fn create_run(&self, meta: &RunMeta) -> anyhow::Result<()>;
+    /// Opens the log file and clones the handle (stdout gets the original,
+    /// stderr gets the clone) in one step, so a mock can inject either the
+    /// open or the `try_clone` failure without needing a real fd-exhaustion
+    /// trick to force the latter.
+    fn open_log_files(
+        &self,
+        path: &std::path::Path,
+    ) -> std::io::Result<(std::fs::File, std::fs::File)>;
+    fn current_exe(&self) -> std::io::Result<PathBuf>;
+    fn spawn(&self, cmd: std::process::Command) -> std::io::Result<std::process::Child>;
+}
+
+struct RealSpawnAgentIo;
+
+impl SpawnAgentIo for RealSpawnAgentIo {
+    fn read_manifest(&self, path: &std::path::Path) -> std::io::Result<String> {
+        std::fs::read_to_string(path)
+    }
+
+    fn parse_manifest(&self, content: &str) -> anyhow::Result<leviath_core::Blueprint> {
+        parse_manifest_public(content)
+    }
+
+    fn create_run(&self, meta: &RunMeta) -> anyhow::Result<()> {
+        runstate::create_run(meta)
+    }
+
+    fn open_log_files(
+        &self,
+        path: &std::path::Path,
+    ) -> std::io::Result<(std::fs::File, std::fs::File)> {
+        let log_file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)?;
+        let log_file2 = log_file.try_clone()?;
+        Ok((log_file, log_file2))
+    }
+
+    fn current_exe(&self) -> std::io::Result<PathBuf> {
+        std::env::current_exe()
+    }
+
+    fn spawn(&self, mut cmd: std::process::Command) -> std::io::Result<std::process::Child> {
+        cmd.spawn()
+    }
+}
+
 pub(super) async fn spawn_agent(
     State(state): State<AppState>,
     Json(body): Json<SpawnAgentReq>,
+) -> Result<Json<SpawnAgentResp>, (StatusCode, Json<ErrorResponse>)> {
+    spawn_agent_with(state, body, &RealSpawnAgentIo).await
+}
+
+async fn spawn_agent_with(
+    state: AppState,
+    body: SpawnAgentReq,
+    io: &dyn SpawnAgentIo,
 ) -> Result<Json<SpawnAgentResp>, (StatusCode, Json<ErrorResponse>)> {
     // Find the blueprint manifest
     let blueprints = discover_blueprints(&state.config);
@@ -28,19 +96,15 @@ pub(super) async fn spawn_agent(
             }),
         ))?;
 
-    // The two `.map_err` arms below (read + parse failure) are not covered by
-    // tests: `discover_blueprints` -> `read_blueprint_info` already performs
-    // this exact read-then-parse on the same path before a `BlueprintInfo`
-    // is ever returned, so any manifest that reaches `bp_info` here has
-    // already been proven readable and parseable moments earlier. The only
-    // way to hit these arms from the public API is a genuine TOCTOU race
-    // (the file changing between discovery and this second read within the
-    // same request), which would require an artificial delay hook to
-    // reproduce deterministically -- see also
-    // `spawn_agent_manifest_removed_after_discovery_returns_404`'s comment,
-    // which documents the same double-check for the "file removed" case.
+    // Re-reading and re-parsing the manifest here (rather than trusting
+    // `bp_info`, which already has `name`/`stages.len()`) is deliberate, not
+    // redundant: it gives the API caller an immediate 400 on an invalid
+    // manifest instead of a spawned-but-doomed-to-fail worker process they'd
+    // only find out about by polling run status later. `io.read_manifest`/
+    // `io.parse_manifest` let tests force these to fail deterministically
+    // without a real TOCTOU race.
     let manifest_path = PathBuf::from(&bp_info.path).join("agent.leviath");
-    let manifest_content = std::fs::read_to_string(&manifest_path).map_err(|e| {
+    let manifest_content = io.read_manifest(&manifest_path).map_err(|e| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(ErrorResponse {
@@ -48,7 +112,7 @@ pub(super) async fn spawn_agent(
             }),
         )
     })?;
-    let blueprint = parse_manifest_public(&manifest_content).map_err(|e| {
+    let blueprint = io.parse_manifest(&manifest_content).map_err(|e| {
         (
             StatusCode::BAD_REQUEST,
             Json(ErrorResponse {
@@ -76,21 +140,7 @@ pub(super) async fn spawn_agent(
     meta.metadata = body.metadata.clone();
     meta.callback_url = body.callback_url.clone();
 
-    // The remaining `.map_err` arms in this function (create_run, open/clone
-    // the log file, locate the current executable, spawn the worker process)
-    // and the `libc::setsid()` call below are not covered by tests: each
-    // wraps a real OS-level failure mode (disk full or permission-denied on
-    // `~/.leviath/runs`, file-descriptor exhaustion, a corrupted/deleted
-    // running executable, `fork`/`exec` failure) that isn't safely
-    // reproducible from a test without either mutating process-global state
-    // shared with concurrently-running tests (e.g. `LEVIATH_RUNS_DIR`, which
-    // has no dedicated lock the way `LEVIATH_CONFIG_PATH` does) or actually
-    // exhausting a real OS resource. `setsid()` itself only ever runs inside
-    // the forked child right before `exec`, so it can't be observed by the
-    // parent test process's coverage instrumentation at all. This mirrors
-    // the same category of gap already accepted for the equivalent code in
-    // `commands/run/mod.rs::execute()`.
-    runstate::create_run(&meta).map_err(|e| {
+    io.create_run(&meta).map_err(|e| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(ErrorResponse {
@@ -101,28 +151,16 @@ pub(super) async fn spawn_agent(
 
     // Spawn background worker process (same as `lev run`)
     let log_path = runstate::run_dir(&run_id).join("output.log");
-    let log_file = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&log_path)
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse {
-                    error: format!("Failed to open log file: {}", e),
-                }),
-            )
-        })?;
-    let log_file2 = log_file.try_clone().map_err(|e| {
+    let (log_file, log_file2) = io.open_log_files(&log_path).map_err(|e| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(ErrorResponse {
-                error: format!("Failed to clone log file: {}", e),
+                error: format!("Failed to open log file: {}", e),
             }),
         )
     })?;
 
-    let exe = std::env::current_exe().map_err(|e| {
+    let exe = io.current_exe().map_err(|e| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(ErrorResponse {
@@ -157,6 +195,9 @@ pub(super) async fn spawn_agent(
         .stdout(std::process::Stdio::from(log_file))
         .stderr(std::process::Stdio::from(log_file2));
 
+    // `setsid()` only ever runs inside the forked child right before `exec`,
+    // so it can never be observed by the parent test process's coverage
+    // instrumentation -- not something dependency injection can help with.
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
@@ -168,7 +209,7 @@ pub(super) async fn spawn_agent(
         }
     }
 
-    cmd.spawn().map_err(|e| {
+    io.spawn(cmd).map_err(|e| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(ErrorResponse {
@@ -343,6 +384,8 @@ pub(super) async fn kill_agent(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
+
     use axum::body::Body;
     use axum::http::Request;
     use axum::routing::get;
@@ -627,6 +670,172 @@ prompt = "Plan the work"
         assert_eq!(resp.status(), axum::http::StatusCode::NOT_FOUND);
     }
 
+    // ─── spawn_agent_with: injectable I/O failure paths ─────────────────────
+    //
+    // MockSpawnAgentIo delegates every operation to the real implementation
+    // except whichever single one `fail_on` names, which returns a canned
+    // `Err` instead. This forces each of `spawn_agent`'s error-response arms
+    // deterministically, without a real OS resource failure or racing
+    // `LEVIATH_RUNS_DIR` against concurrently-running tests / real
+    // background `lev` processes on the machine (both tried and rejected in
+    // earlier passes at this file).
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum FailOn {
+        ReadManifest,
+        ParseManifest,
+        CreateRun,
+        OpenLogFile,
+        CloneLogFile,
+        CurrentExe,
+        Spawn,
+    }
+
+    struct MockSpawnAgentIo {
+        fail_on: FailOn,
+    }
+
+    impl SpawnAgentIo for MockSpawnAgentIo {
+        fn read_manifest(&self, path: &std::path::Path) -> std::io::Result<String> {
+            if self.fail_on == FailOn::ReadManifest {
+                return Err(std::io::Error::other("mock read_manifest failure"));
+            }
+            std::fs::read_to_string(path)
+        }
+
+        fn parse_manifest(&self, content: &str) -> anyhow::Result<leviath_core::Blueprint> {
+            if self.fail_on == FailOn::ParseManifest {
+                anyhow::bail!("mock parse_manifest failure");
+            }
+            parse_manifest_public(content)
+        }
+
+        fn create_run(&self, meta: &RunMeta) -> anyhow::Result<()> {
+            if self.fail_on == FailOn::CreateRun {
+                anyhow::bail!("mock create_run failure");
+            }
+            runstate::create_run(meta)
+        }
+
+        fn open_log_files(
+            &self,
+            path: &std::path::Path,
+        ) -> std::io::Result<(std::fs::File, std::fs::File)> {
+            if self.fail_on == FailOn::OpenLogFile {
+                return Err(std::io::Error::other("mock open_log_file failure"));
+            }
+            let log_file = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(path)?;
+            if self.fail_on == FailOn::CloneLogFile {
+                return Err(std::io::Error::other("mock clone_log_file failure"));
+            }
+            let log_file2 = log_file.try_clone()?;
+            Ok((log_file, log_file2))
+        }
+
+        fn current_exe(&self) -> std::io::Result<PathBuf> {
+            if self.fail_on == FailOn::CurrentExe {
+                return Err(std::io::Error::other("mock current_exe failure"));
+            }
+            std::env::current_exe()
+        }
+
+        fn spawn(&self, mut cmd: std::process::Command) -> std::io::Result<std::process::Child> {
+            if self.fail_on == FailOn::Spawn {
+                return Err(std::io::Error::other("mock spawn failure"));
+            }
+            cmd.spawn()
+        }
+    }
+
+    fn make_spawn_req(bp_name: &str, workdir: &std::path::Path) -> SpawnAgentReq {
+        SpawnAgentReq {
+            blueprint: bp_name.to_string(),
+            task: "do the thing".to_string(),
+            model: None,
+            max_depth: None,
+            yolo: false,
+            allow: vec![],
+            workdir: Some(workdir.to_string_lossy().to_string()),
+            metadata: HashMap::new(),
+            callback_url: None,
+        }
+    }
+
+    /// `CreateRun` succeeding but a later step (`OpenLogFile`/`CurrentExe`/
+    /// `Spawn`) failing still leaves a real run directory on disk (created
+    /// before the injected failure point) -- clean up by prefix, mirroring
+    /// `commands/run/mod.rs`'s identical helper for the same situation.
+    fn cleanup_runs_with_prefix(agent_name: &str) {
+        let dir = runstate::runs_dir();
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            return;
+        };
+        let prefix = format!("{agent_name}-");
+        for entry in entries.flatten() {
+            if entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with(prefix.as_str())
+            {
+                let _ = std::fs::remove_dir_all(entry.path());
+            }
+        }
+    }
+
+    async fn assert_spawn_agent_fails_on(fail_on: FailOn, expected_status: StatusCode) {
+        let dir = tempfile::tempdir().unwrap();
+        let bp_name = format!("spawn-fail-{:?}-{}", fail_on as u8, std::process::id());
+        write_test_blueprint(&dir.path().join(&bp_name), &bp_name);
+        let state = test_state_with_agent_paths(vec![dir.path().to_path_buf()]);
+        let workdir = tempfile::tempdir().unwrap();
+        let body = make_spawn_req(&bp_name, workdir.path());
+        let io = MockSpawnAgentIo { fail_on };
+
+        let result = spawn_agent_with(state, body, &io).await;
+        cleanup_runs_with_prefix(&bp_name);
+        match result {
+            Ok(_) => panic!("expected spawn_agent_with to fail"),
+            Err((status, _)) => assert_eq!(status, expected_status),
+        }
+    }
+
+    #[tokio::test]
+    async fn spawn_agent_with_read_manifest_failure_returns_500() {
+        assert_spawn_agent_fails_on(FailOn::ReadManifest, StatusCode::INTERNAL_SERVER_ERROR).await;
+    }
+
+    #[tokio::test]
+    async fn spawn_agent_with_parse_manifest_failure_returns_400() {
+        assert_spawn_agent_fails_on(FailOn::ParseManifest, StatusCode::BAD_REQUEST).await;
+    }
+
+    #[tokio::test]
+    async fn spawn_agent_with_create_run_failure_returns_500() {
+        assert_spawn_agent_fails_on(FailOn::CreateRun, StatusCode::INTERNAL_SERVER_ERROR).await;
+    }
+
+    #[tokio::test]
+    async fn spawn_agent_with_open_log_file_failure_returns_500() {
+        assert_spawn_agent_fails_on(FailOn::OpenLogFile, StatusCode::INTERNAL_SERVER_ERROR).await;
+    }
+
+    #[tokio::test]
+    async fn spawn_agent_with_clone_log_file_failure_returns_500() {
+        assert_spawn_agent_fails_on(FailOn::CloneLogFile, StatusCode::INTERNAL_SERVER_ERROR).await;
+    }
+
+    #[tokio::test]
+    async fn spawn_agent_with_current_exe_failure_returns_500() {
+        assert_spawn_agent_fails_on(FailOn::CurrentExe, StatusCode::INTERNAL_SERVER_ERROR).await;
+    }
+
+    #[tokio::test]
+    async fn spawn_agent_with_spawn_failure_returns_500() {
+        assert_spawn_agent_fails_on(FailOn::Spawn, StatusCode::INTERNAL_SERVER_ERROR).await;
+    }
+
     // ─── list_agents ──────────────────────────────────────────────────────────
 
     #[tokio::test]
@@ -788,10 +997,8 @@ prompt = "Plan the work"
             .await
             .unwrap();
         let children: Vec<RunMeta> = serde_json::from_slice(&body).unwrap();
-        assert!(
-            children.iter().any(|c| c.run_id == child_id),
-            "child run should appear"
-        );
+        #[rustfmt::skip]
+        assert!(children.iter().any(|c| c.run_id == child_id), "child run should appear");
 
         let _ = std::fs::remove_dir_all(runstate::run_dir(&parent_id));
         let _ = std::fs::remove_dir_all(runstate::run_dir(&child_id));

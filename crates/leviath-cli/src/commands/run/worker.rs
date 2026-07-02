@@ -1367,11 +1367,8 @@ mod tests {
         // Should fail because path doesn't exist
         assert!(result.is_err());
         let err_msg = result.unwrap_err().to_string();
-        assert!(
-            err_msg.contains("Could not find") || err_msg.contains("manifest"),
-            "Expected manifest error, got: {}",
-            err_msg
-        );
+        #[rustfmt::skip]
+        assert!(err_msg.contains("Could not find") || err_msg.contains("manifest"), "Expected manifest error, got: {}", err_msg);
 
         let _ = std::fs::remove_dir_all(crate::runstate::run_dir(run_id));
     }
@@ -1459,10 +1456,8 @@ model = "claude-sonnet-4-6"
 
         // Verify meta was written
         let saved_meta = crate::runstate::read_meta(run_id);
-        assert!(
-            saved_meta.is_ok(),
-            "Meta should have been written by execute_worker"
-        );
+        #[rustfmt::skip]
+        assert!(saved_meta.is_ok(), "Meta should have been written by execute_worker");
 
         let _ = std::fs::remove_dir_all(crate::runstate::run_dir(run_id));
         let _ = std::fs::remove_dir_all(&temp_dir);
@@ -1617,15 +1612,10 @@ bash = "ask"
         })
         .await;
 
-        assert!(
-            result.is_ok(),
-            "expected clean completion, got: {:?}",
-            result.err()
-        );
-        assert!(
-            meta.title.is_some(),
-            "generate_title should have produced a title via the mock provider"
-        );
+        #[rustfmt::skip]
+        assert!(result.is_ok(), "expected clean completion, got: {:?}", result.err());
+        #[rustfmt::skip]
+        assert!(meta.title.is_some(), "generate_title should have produced a title via the mock provider");
 
         let _ = std::fs::remove_dir_all(&dir);
         let _ = std::fs::remove_dir_all(&temp_dir);
