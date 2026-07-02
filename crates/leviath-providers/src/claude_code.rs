@@ -888,7 +888,17 @@ mod tests {
     // infer()/infer_stream() means substituting a fake "claude" binary — a
     // small shell script that ignores its args and prints canned output —
     // via the existing `with_binary_path` test seam.
-
+    //
+    // This whole approach (a `#!/bin/sh` shebang script, `chmod +x`'d and
+    // spawned directly) is Unix-only: Windows' `CreateProcess` doesn't
+    // understand shebangs and can't execute a `.sh` file as a native binary
+    // at all -- every test using this failed on Windows CI with "%1 is not
+    // a valid Win32 application" (os error 193). `write_stub_script` itself
+    // and every test that calls it are therefore `#[cfg(unix)]`; the two
+    // spawn-failure tests below (which point at a nonexistent path rather
+    // than a real script) remain cross-platform since a missing file fails
+    // to spawn identically on every OS.
+    #[cfg(unix)]
     fn write_stub_script(tag: &str, body: &str) -> std::path::PathBuf {
         use std::io::Write;
         let path = std::env::temp_dir().join(format!(
@@ -903,11 +913,8 @@ mod tests {
         writeln!(f, "#!/bin/sh").unwrap();
         f.write_all(body.as_bytes()).unwrap();
         drop(f);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
-        }
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
         path
     }
 
@@ -926,6 +933,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn infer_success_parses_response() {
         let script = write_stub_script(
@@ -938,6 +946,7 @@ mod tests {
         let _ = std::fs::remove_file(&script);
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn infer_is_error_response_returns_api_error() {
         let script = write_stub_script(
@@ -951,6 +960,7 @@ mod tests {
         let _ = std::fs::remove_file(&script);
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn infer_nonzero_exit_returns_request_failed() {
         let script = write_stub_script("infer-fail", "echo 'boom' >&2\nexit 1\n");
@@ -971,6 +981,7 @@ mod tests {
         assert!(err.to_string().contains("Is Claude Code installed?"));
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn infer_with_system_prompt_and_tools_still_succeeds() {
         let script = write_stub_script("infer-tools", "echo '{\"result\": \"ok\"}'\n");
@@ -994,6 +1005,7 @@ mod tests {
         let _ = std::fs::remove_file(&script);
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn infer_stream_yields_chunks_from_ndjson() {
         let script = write_stub_script(
@@ -1012,6 +1024,7 @@ mod tests {
         let _ = std::fs::remove_file(&script);
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn infer_stream_with_system_prompt_and_tools_still_succeeds() {
         let script = write_stub_script(
@@ -1040,6 +1053,7 @@ mod tests {
         let _ = std::fs::remove_file(&script);
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn infer_stream_content_block_delta_variant() {
         let script = write_stub_script(
@@ -1054,6 +1068,7 @@ mod tests {
         let _ = std::fs::remove_file(&script);
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn infer_stream_skips_blank_and_unparseable_lines() {
         let script = write_stub_script(
@@ -1081,6 +1096,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn infer_stream_invalid_utf8_output_yields_read_error() {
         // tokio's `Lines::poll_next_line` requires valid UTF-8 (like
