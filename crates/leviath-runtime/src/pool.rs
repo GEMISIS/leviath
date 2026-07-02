@@ -184,4 +184,28 @@ mod tests {
         let pool = AgentPool::new(blueprint);
         assert_eq!(pool.blueprint().name, expected_name);
     }
+
+    #[test]
+    fn test_spawn_agent_with_no_stages_uses_default_stage_name() {
+        let regions = vec![RegionDefinition::new(
+            "test".to_string(),
+            RegionKind::Pinned,
+            5000,
+        )];
+        let layout = ContextLayout::new(regions, 10000);
+        // Blueprint with empty stages vec — triggers the `unwrap_or_else(|| "default")` path
+        let blueprint = Blueprint::new(
+            "no-stages-agent".to_string(),
+            "No Stages".to_string(),
+            vec![],
+            layout,
+        );
+        let mut pool = AgentPool::new(blueprint);
+        let mut world = World::new();
+
+        let agent_id = pool.spawn_agent(&mut world);
+        let entity = pool.get_agent(&agent_id).unwrap();
+        let state = world.get::<AgentState>(entity).unwrap();
+        assert_eq!(state.current_stage, "default");
+    }
 }

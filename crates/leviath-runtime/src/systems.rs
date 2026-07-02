@@ -810,7 +810,7 @@ mod tests {
         schedule.run(&mut world);
 
         let state = world.get::<AgentState>(entity).unwrap();
-        assert!(matches!(state.status, AgentStatus::Waiting));
+        assert_eq!(state.status, AgentStatus::Waiting);
     }
 
     #[test]
@@ -827,7 +827,7 @@ mod tests {
         with_tracing(|| schedule.run(&mut world));
 
         let state = world.get::<AgentState>(entity).unwrap();
-        assert!(matches!(state.status, AgentStatus::Active));
+        assert_eq!(state.status, AgentStatus::Active);
     }
 
     #[test]
@@ -844,7 +844,7 @@ mod tests {
         schedule.run(&mut world);
 
         let state = world.get::<AgentState>(entity).unwrap();
-        assert!(matches!(state.status, AgentStatus::Waiting));
+        assert_eq!(state.status, AgentStatus::Waiting);
     }
 
     #[test]
@@ -859,7 +859,7 @@ mod tests {
         schedule.run(&mut world);
 
         let state = world.get::<AgentState>(entity).unwrap();
-        assert!(matches!(state.status, AgentStatus::Active));
+        assert_eq!(state.status, AgentStatus::Active);
     }
 
     // ── cascade_kill_system ────────────────────────────────────────────────
@@ -888,7 +888,7 @@ mod tests {
         with_tracing(|| schedule.run(&mut world));
 
         let child_state = world.get::<AgentState>(child_entity).unwrap();
-        assert!(matches!(child_state.status, AgentStatus::Cancelled));
+        assert_eq!(child_state.status, AgentStatus::Cancelled);
 
         let token = world.get::<CancellationToken>(child_entity).unwrap();
         assert!(token.is_cancelled());
@@ -918,7 +918,7 @@ mod tests {
         schedule.run(&mut world);
 
         let child_state = world.get::<AgentState>(child_entity).unwrap();
-        assert!(matches!(child_state.status, AgentStatus::Active));
+        assert_eq!(child_state.status, AgentStatus::Active);
     }
 
     #[test]
@@ -946,7 +946,7 @@ mod tests {
 
         // Should still be cancelled but not error
         let child_state = world.get::<AgentState>(child_entity).unwrap();
-        assert!(matches!(child_state.status, AgentStatus::Cancelled));
+        assert_eq!(child_state.status, AgentStatus::Cancelled);
     }
 
     // ── child_completion_system ────────────────────────────────────────────
@@ -1214,5 +1214,87 @@ mod tests {
             .content
             .iter()
             .any(|e| e.content.contains("Test message")));
+    }
+
+    // ─── child_completion with despawned parent entity ────────────────────
+
+    #[test]
+    fn child_completion_skips_when_parent_entity_no_longer_exists() {
+        let mut world = World::new();
+
+        // Create a phantom parent entity ID and immediately despawn it
+        let phantom_parent = world.spawn_empty().id();
+        world.despawn(phantom_parent);
+
+        // Spawn a child that references the despawned parent
+        world.spawn((
+            make_agent_state("child-orphan", AgentStatus::Complete),
+            ParentRef {
+                parent_entity: phantom_parent,
+                parent_agent_id: "ghost-parent".to_string(),
+                depth: 1,
+            },
+        ));
+
+        let mut schedule = Schedule::default();
+        schedule.add_systems(child_completion_system);
+        // Must not panic when parent entity is gone
+        schedule.run(&mut world);
+    }
+
+    // ─── child_completion with parent having no ContextWindow ─────────────
+
+    #[test]
+    fn child_completion_skips_context_injection_when_parent_has_no_window() {
+        let mut world = World::new();
+
+        let mut parent_state = make_agent_state("parent", AgentStatus::Active);
+        parent_state.spawned_children_ids = vec!["child-1".to_string()];
+        parent_state.pending_wait = Some("child-1".to_string());
+
+        // Spawn parent WITHOUT a ContextWindow
+        let parent_entity = world.spawn(parent_state).id();
+
+        // Spawn child with Complete status and a ParentRef pointing at the parent
+        world.spawn((
+            make_agent_state("child-1", AgentStatus::Complete),
+            ParentRef {
+                parent_entity,
+                parent_agent_id: "parent".to_string(),
+                depth: 1,
+            },
+        ));
+
+        let mut schedule = Schedule::default();
+        schedule.add_systems(child_completion_system);
+        with_tracing(|| schedule.run(&mut world));
+
+        // Parent pending_wait should be cleared (state updates still happen)
+        let state = world.get::<AgentState>(parent_entity).unwrap();
+        assert!(state.pending_wait.is_none());
+    }
+
+    // ─── cascade_kill with non-existent child entity ──────────────────────
+
+    #[test]
+    fn cascade_kill_skips_nonexistent_child_entity() {
+        let mut world = World::new();
+
+        // Spawn a parent that references a child entity that was never spawned
+        let phantom_child = world.spawn_empty().id();
+        world.despawn(phantom_child); // now it doesn't exist
+
+        world.spawn((
+            make_agent_state("parent", AgentStatus::Cancelled),
+            SubAgentChildren {
+                children: vec![phantom_child],
+                max_child_depth: 3,
+            },
+        ));
+
+        let mut schedule = Schedule::default();
+        schedule.add_systems(cascade_kill_system);
+        // Must not panic when the child entity is missing
+        schedule.run(&mut world);
     }
 }

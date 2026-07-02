@@ -181,6 +181,15 @@ impl AgentEngine {
         self.message_tx.clone()
     }
 
+    /// Replace the internal sender with a disconnected one, making the next
+    /// `send_message` call fail. Test-only; not compiled in release.
+    #[cfg(test)]
+    fn poison_sender(&mut self) {
+        let (new_tx, _dropped_rx) = mpsc::unbounded_channel();
+        self.message_tx = new_tx;
+        // _dropped_rx is dropped here → new_tx is immediately disconnected
+    }
+
     /// Process pending messages from the channel, delivering them to agent inboxes.
     pub fn process_messages(&mut self) {
         let mut messages = Vec::new();
@@ -482,72 +491,75 @@ impl AgentEngine {
             let tool_calls_snapshot = response.tool_calls.clone();
             let tool_results = tool_executor(tool_calls_snapshot.clone()).await;
 
-            // Add tool results to context window
-            if let Some(mut window) = self.world.get_mut::<ContextWindow>(entity) {
-                // Add assistant response
-                let response_tokens = response.content.len() / 4;
-                let _ = window.add_to_region(
-                    "conversation",
-                    format!("Assistant: {}", response.content),
-                    response_tokens,
-                );
+            // Add tool results to context window.
+            // Safety: `run_inference_filtered` already confirmed the entity has
+            // a ContextWindow; it cannot be removed between that call and here.
+            let mut window = self.world.get_mut::<ContextWindow>(entity).unwrap();
 
-                // Route tool results based on routing config
-                for (tool_call_id, result) in &tool_results {
-                    let mut result_text = result.clone();
+            // Add assistant response
+            let response_tokens = response.content.len() / 4;
+            let _ = window.add_to_region(
+                "conversation",
+                format!("Assistant: {}", response.content),
+                response_tokens,
+            );
 
-                    // Apply max_result_tokens truncation if configured
-                    if let Some(routing) = tool_result_routing {
-                        if let Some(max_tokens) = routing.max_result_tokens {
-                            let max_chars = max_tokens * 4; // approximate
-                            if result_text.len() > max_chars {
-                                result_text.truncate(max_chars);
-                                result_text.push_str("\n[...truncated]");
-                            }
+            // Route tool results based on routing config
+            for (tool_call_id, result) in &tool_results {
+                let mut result_text = result.clone();
+
+                // Apply max_result_tokens truncation if configured
+                if let Some(routing) = tool_result_routing {
+                    if let Some(max_tokens) = routing.max_result_tokens {
+                        let max_chars = max_tokens * 4; // approximate
+                        if result_text.len() > max_chars {
+                            result_text.truncate(max_chars);
+                            result_text.push_str("\n[...truncated]");
                         }
                     }
+                }
 
-                    let result_tokens = result_text.len() / 4 + 1;
-                    let formatted = format!("[Tool {}]: {}", tool_call_id, result_text);
+                let result_tokens = result_text.len() / 4 + 1;
+                let formatted = format!("[Tool {}]: {}", tool_call_id, result_text);
 
-                    // Find the tool name for this tool_call_id to use for routing lookup
-                    let tool_name = tool_calls_snapshot
-                        .iter()
-                        .find(|tc| tc.id == *tool_call_id)
-                        .map(|tc| tc.name.as_str())
-                        .unwrap_or("");
+                // Find the tool name for this tool_call_id to use for routing lookup
+                let tool_name = tool_calls_snapshot
+                    .iter()
+                    .find(|tc| tc.id == *tool_call_id)
+                    .map(|tc| tc.name.as_str())
+                    .unwrap_or("");
 
-                    // Determine target region
-                    let target_region = if let Some(routing) = tool_result_routing {
-                        // Check per-tool overrides using tool NAME (not call ID)
-                        if let Some(override_region) = routing.tool_overrides.get(tool_name) {
-                            override_region.as_str()
-                        } else {
-                            routing.default_region.as_str()
-                        }
+                // Determine target region
+                let target_region = if let Some(routing) = tool_result_routing {
+                    // Check per-tool overrides using tool NAME (not call ID)
+                    if let Some(override_region) = routing.tool_overrides.get(tool_name) {
+                        override_region.as_str()
                     } else {
-                        "tool_results"
-                    };
+                        routing.default_region.as_str()
+                    }
+                } else {
+                    "tool_results"
+                };
 
-                    // If persist is false in routing, add to a clearable region instead
-                    let actual_region = if let Some(routing) = tool_result_routing {
-                        if !routing.persist {
-                            // Try clearable scratch region, fall back to target
-                            if window.get_region("scratch").is_some() {
-                                "scratch"
-                            } else {
-                                target_region
-                            }
+                // If persist is false in routing, add to a clearable region instead
+                let actual_region = if let Some(routing) = tool_result_routing {
+                    if !routing.persist {
+                        // Try clearable scratch region, fall back to target
+                        if window.get_region("scratch").is_some() {
+                            "scratch"
                         } else {
                             target_region
                         }
                     } else {
                         target_region
-                    };
+                    }
+                } else {
+                    target_region
+                };
 
-                    let _ = window.add_to_region(actual_region, formatted, result_tokens);
-                }
+                let _ = window.add_to_region(actual_region, formatted, result_tokens);
             }
+            let _ = window; // release borrow before process_messages
 
             // Check for any user messages that arrived during tool execution
             self.process_messages();
@@ -688,29 +700,27 @@ impl AgentEngine {
         let summary = response.content;
         let summary_tokens = summary.len() / 4; // Approximate
 
-        // Find the paired CompactHistory region and store summary
-        if let Some(mut window) = self.world.get_mut::<ContextWindow>(entity) {
-            // Find CompactHistory region paired with this source
-            let history_region_name = window
-                .regions
-                .iter()
-                .find(|r| {
-                    matches!(&r.kind, leviath_core::RegionKind::CompactHistory { source_region }
-                        if source_region == region_name)
-                })
-                .map(|r| r.name.clone());
+        // Find the paired CompactHistory region and store summary.
+        // Safety: the entity has a ContextWindow — we confirmed it above when
+        // reading the region content; it cannot disappear across this await.
+        let mut window = self.world.get_mut::<ContextWindow>(entity).unwrap();
 
-            if let Some(history_name) = history_region_name {
-                let _ = window.add_to_region(&history_name, summary, summary_tokens);
-            }
+        let history_region_name = window
+            .regions
+            .iter()
+            .find(|r| {
+                matches!(&r.kind, leviath_core::RegionKind::CompactHistory { source_region }
+                    if source_region == region_name)
+            })
+            .map(|r| r.name.clone());
 
-            // Clear the compacting region
-            if let Some(region) = window.get_region_mut(region_name) {
-                region.clear();
-            }
-
-            window.current_tokens = window.calculate_tokens();
+        if let Some(history_name) = history_region_name {
+            let _ = window.add_to_region(&history_name, summary, summary_tokens);
         }
+
+        // Clear the compacting region (it exists — we read from it above).
+        window.get_region_mut(region_name).unwrap().clear();
+        window.current_tokens = window.calculate_tokens();
 
         tracing::info!(region = region_name, "Compaction complete");
 
@@ -791,6 +801,12 @@ mod tests {
     async fn with_tracing_async<T>(f: impl std::future::Future<Output = T>) -> T {
         let _guard = tracing::subscriber::set_default(AlwaysOnSubscriber);
         f.await
+    }
+
+    async fn noop_tool_exec(
+        _tool_calls: Vec<leviath_providers::ToolCall>,
+    ) -> Vec<(String, String)> {
+        vec![]
     }
 
     #[test]
@@ -1090,10 +1106,10 @@ mod tests {
     #[test]
     fn test_cancel_agent_with_cancellation_token() {
         let mut engine = AgentEngine::new();
-        let token = CancellationToken::new();
+        // Spawn a SECOND agent first so the loop must skip it before matching "cancel-me"
         engine.world_mut().spawn((
             AgentState {
-                agent_id: "cancel-me".to_string(),
+                agent_id: "not-me".to_string(),
                 current_stage: "main".to_string(),
                 iteration: 0,
                 status: AgentStatus::Active,
@@ -1101,19 +1117,31 @@ mod tests {
                 pending_wait: None,
                 accepts_messages: true,
             },
-            token,
+            CancellationToken::new(),
         ));
+        let token = CancellationToken::new();
+        let entity = engine
+            .world_mut()
+            .spawn((
+                AgentState {
+                    agent_id: "cancel-me".to_string(),
+                    current_stage: "main".to_string(),
+                    iteration: 0,
+                    status: AgentStatus::Active,
+                    spawned_children_ids: Vec::new(),
+                    pending_wait: None,
+                    accepts_messages: true,
+                },
+                token,
+            ))
+            .id();
 
         let result = engine.cancel_agent("cancel-me");
         assert!(result.is_ok());
 
         // Verify status changed
-        let mut query = engine.world.query::<&AgentState>();
-        for state in query.iter(&engine.world) {
-            if state.agent_id == "cancel-me" {
-                assert!(matches!(state.status, AgentStatus::Cancelled));
-            }
-        }
+        let state = engine.world.get::<AgentState>(entity).unwrap();
+        assert_eq!(state.status, AgentStatus::Cancelled);
     }
 
     #[test]
@@ -1392,9 +1420,7 @@ mod tests {
             user_prompt_template: None,
         };
 
-        let result = engine.evict_and_compact(entity, &cc).await;
-        #[rustfmt::skip]
-        assert!(result.is_ok(), "expected compaction to succeed: {:?}", result.err());
+        engine.evict_and_compact(entity, &cc).await.unwrap();
 
         // The compacting region should have been cleared by compact_region.
         let w = engine.world().get::<ContextWindow>(entity).unwrap();
@@ -1510,7 +1536,7 @@ mod tests {
         // Wrapped in `with_tracing_async` so the "Auto-eviction during
         // inference loop" tracing::info! call's field expressions actually
         // execute.
-        let result = with_tracing_async(engine.run_inference_loop_filtered(
+        with_tracing_async(engine.run_inference_loop_filtered(
             entity,
             "mock",
             "test-model",
@@ -1521,9 +1547,8 @@ mod tests {
             Some(&cc),
             &mut |_tool_calls| async { vec![("call_1".to_string(), "ok".to_string())] },
         ))
-        .await;
-        #[rustfmt::skip]
-        assert!(result.is_ok(), "expected loop to complete: {:?}", result.err());
+        .await
+        .unwrap();
     }
 
     #[tokio::test]
@@ -1603,11 +1628,7 @@ mod tests {
                 &mut |_tool_calls| async { vec![("call_1".to_string(), "ok".to_string())] },
             )
             .await;
-        assert!(
-            result.is_ok(),
-            "auto-eviction errors must be logged, not propagated: {:?}",
-            result.err()
-        );
+        result.unwrap();
     }
 
     #[tokio::test]
@@ -1949,7 +1970,7 @@ mod tests {
             "test-model",
             Vec::new(),
             10,
-            |_tool_calls| async { vec![] },
+            noop_tool_exec,
         ))
         .await;
         assert!(result.is_ok());
@@ -1968,14 +1989,7 @@ mod tests {
         }
 
         let result = engine
-            .run_inference_loop(
-                entity,
-                "mock",
-                "test-model",
-                Vec::new(),
-                10,
-                |_tool_calls| async { vec![] },
-            )
+            .run_inference_loop(entity, "mock", "test-model", Vec::new(), 10, noop_tool_exec)
             .await;
         // Should return error since cancelled before any response
         assert!(result.is_err());
@@ -1984,7 +1998,7 @@ mod tests {
 
         // Status should be Cancelled
         let state = engine.world().get::<AgentState>(entity).unwrap();
-        assert!(matches!(state.status, AgentStatus::Cancelled));
+        assert_eq!(state.status, AgentStatus::Cancelled);
     }
 
     #[tokio::test]
@@ -2049,14 +2063,7 @@ mod tests {
             .id();
 
         let result = engine
-            .run_inference_loop(
-                entity,
-                "mock",
-                "test-model",
-                Vec::new(),
-                10,
-                |_tool_calls| async { vec![("call_1".to_string(), "file1\nfile2".to_string())] },
-            )
+            .run_inference_loop(entity, "mock", "test-model", Vec::new(), 10, noop_tool_exec)
             .await;
 
         assert!(result.is_ok());
@@ -2672,5 +2679,562 @@ mod tests {
         assert_eq!(no_temp.count_tokens("anything", "any-model"), 4);
         assert_eq!(no_temp.max_context_tokens("any-model"), 100_000);
         assert_eq!(no_temp.name(), "no-temp-mock");
+    }
+
+    // ─── FailingMockProvider ───────────────────────────────────────────────
+    // Used to cover inference error paths.
+
+    struct FailingMockProvider;
+
+    #[async_trait::async_trait]
+    impl leviath_providers::Provider for FailingMockProvider {
+        async fn infer(
+            &self,
+            _req: InferenceRequest,
+        ) -> leviath_providers::Result<InferenceResponse> {
+            Err(leviath_providers::ProviderError::Other(
+                "intentional test failure".to_string(),
+            ))
+        }
+        fn name(&self) -> &str {
+            "failing-mock"
+        }
+        fn count_tokens(&self, text: &str, _model: &str) -> usize {
+            text.len() / 4 + 1
+        }
+        fn max_context_tokens(&self, _model: &str) -> usize {
+            100_000
+        }
+        fn capabilities(&self, _model: &str) -> leviath_providers::ModelCapabilities {
+            leviath_providers::ModelCapabilities::default()
+        }
+    }
+
+    // ─── send_message with dropped receiver ───────────────────────────────
+
+    #[test]
+    fn send_message_with_dropped_receiver_returns_err() {
+        let mut engine = AgentEngine::new();
+        engine.poison_sender(); // replaces tx with a disconnected one
+        let msg = AgentMessage {
+            agent_id: "x".to_string(),
+            content: "hi".to_string(),
+            target_region: None,
+            priority: 0,
+        };
+        assert!(engine.send_message(msg).is_err());
+    }
+
+    // ─── process_messages with non-matching agent ─────────────────────────
+
+    #[test]
+    fn process_messages_logs_warning_for_unknown_agent_id() {
+        let mut engine = AgentEngine::new();
+        // Spawn an agent with id "known"
+        engine.world_mut().spawn((
+            AgentState {
+                agent_id: "known".to_string(),
+                current_stage: "main".to_string(),
+                iteration: 0,
+                status: AgentStatus::Active,
+                spawned_children_ids: Vec::new(),
+                pending_wait: None,
+                accepts_messages: true,
+            },
+            MessageInbox::new(),
+        ));
+
+        // Send a message targeting "unknown" via the public sender — process_messages must warn
+        engine
+            .get_message_sender()
+            .send(AgentMessage {
+                agent_id: "unknown".to_string(),
+                content: "hello".to_string(),
+                target_region: None,
+                priority: 0,
+            })
+            .unwrap();
+
+        with_tracing(|| engine.process_messages());
+    }
+
+    // ─── deliver_inbox_messages without ContextWindow ─────────────────────
+
+    #[test]
+    fn deliver_inbox_messages_skips_entity_without_context_window() {
+        let mut engine = AgentEngine::new();
+        // Spawn entity with inbox but NO ContextWindow
+        let mut inbox = MessageInbox::new();
+        inbox.push(AgentMessage {
+            agent_id: "no-window".to_string(),
+            content: "orphan msg".to_string(),
+            target_region: None,
+            priority: 0,
+        });
+        engine.world_mut().spawn((
+            AgentState {
+                agent_id: "no-window".to_string(),
+                current_stage: "main".to_string(),
+                iteration: 0,
+                status: AgentStatus::Active,
+                spawned_children_ids: Vec::new(),
+                pending_wait: None,
+                accepts_messages: true,
+            },
+            inbox,
+        ));
+        // deliver_inbox_messages must not panic even without a ContextWindow
+        engine.deliver_inbox_messages();
+    }
+
+    // ─── cancel_agent for non-existent agent returns Err ─────────────────
+
+    #[test]
+    fn cancel_agent_for_unknown_id_returns_err() {
+        let mut engine = AgentEngine::new();
+        let result = engine.cancel_agent("does-not-exist");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("not found"));
+    }
+
+    // ─── run_inference_filtered with failing provider ─────────────────────
+
+    #[tokio::test]
+    async fn run_inference_filtered_propagates_provider_error() {
+        let mut registry = ProviderRegistry::new();
+        registry.register("failing".to_string(), Arc::new(FailingMockProvider));
+        let mut engine = AgentEngine::with_providers(registry);
+
+        let mut window = ContextWindow::new(10000);
+        window.add_region(leviath_core::Region::new(
+            "conversation".to_string(),
+            leviath_core::RegionKind::SlidingWindow { max_items: 50 },
+            9000,
+        ));
+        let _ = window.add_to_region("conversation", "User: hi".to_string(), 2);
+
+        let entity = engine
+            .world_mut()
+            .spawn((
+                AgentState {
+                    agent_id: "fail-agent".to_string(),
+                    current_stage: "main".to_string(),
+                    iteration: 0,
+                    status: AgentStatus::Active,
+                    spawned_children_ids: Vec::new(),
+                    pending_wait: None,
+                    accepts_messages: true,
+                },
+                MessageInbox::new(),
+                CancellationToken::new(),
+                window,
+            ))
+            .id();
+
+        let result = engine
+            .run_inference_filtered(entity, "failing", "test-model", Vec::new(), None)
+            .await;
+        assert!(result.is_err());
+    }
+
+    // ─── run_inference_loop max_iterations=0 (no response generated) ──────
+
+    #[tokio::test]
+    async fn run_inference_loop_with_zero_max_iterations_returns_err() {
+        let mut registry = ProviderRegistry::new();
+        registry.register("mock".to_string(), Arc::new(MockProvider::new("mock")));
+        let mut engine = AgentEngine::with_providers(registry);
+
+        let mut window = ContextWindow::new(10000);
+        window.add_region(leviath_core::Region::new(
+            "conversation".to_string(),
+            leviath_core::RegionKind::SlidingWindow { max_items: 50 },
+            9000,
+        ));
+        let _ = window.add_to_region("conversation", "User: hi".to_string(), 2);
+
+        let entity = engine
+            .world_mut()
+            .spawn((
+                AgentState {
+                    agent_id: "zero-iter".to_string(),
+                    current_stage: "main".to_string(),
+                    iteration: 0,
+                    status: AgentStatus::Active,
+                    spawned_children_ids: Vec::new(),
+                    pending_wait: None,
+                    accepts_messages: true,
+                },
+                MessageInbox::new(),
+                CancellationToken::new(),
+                window,
+            ))
+            .id();
+
+        // max_iterations=0 means the loop body never runs, last_response=None,
+        // ok_or_else closure fires → Err("No response generated")
+        let result = engine
+            .run_inference_loop_filtered(
+                entity,
+                "mock",
+                "test-model",
+                Vec::new(),
+                0,
+                None,
+                None,
+                None,
+                &mut noop_tool_exec,
+            )
+            .await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("No response"));
+    }
+
+    // ─── compact_region without registered provider ────────────────────────
+
+    #[tokio::test]
+    async fn compact_region_returns_err_when_provider_not_registered() {
+        let mut engine = AgentEngine::new();
+
+        let mut window = ContextWindow::new(10000);
+        window.add_region(leviath_core::Region::new(
+            "analysis".to_string(),
+            leviath_core::RegionKind::CompactHistory {
+                source_region: "analysis".to_string(),
+            },
+            5000,
+        ));
+        let _ = window.add_to_region("analysis", "some content".to_string(), 10);
+
+        let entity = engine.world_mut().spawn(window).id();
+
+        let cc = leviath_core::CompactionConfig {
+            provider: "nonexistent".to_string(),
+            model: "model".to_string(),
+            max_summary_tokens: 500,
+            temperature: 0.3,
+            system_prompt: None,
+            user_prompt_template: None,
+        };
+
+        let result = engine.compact_region(entity, "analysis", &cc).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("not registered"));
+    }
+
+    // ─── compact_region with entity having no ContextWindow ───────────────
+
+    #[tokio::test]
+    async fn compact_region_returns_err_when_entity_has_no_context_window() {
+        let mut registry = ProviderRegistry::new();
+        registry.register("mock".to_string(), Arc::new(MockProvider::new("mock")));
+        let mut engine = AgentEngine::with_providers(registry);
+
+        // Entity without ContextWindow
+        let entity = engine
+            .world_mut()
+            .spawn(AgentState {
+                agent_id: "no-window".to_string(),
+                current_stage: "main".to_string(),
+                iteration: 0,
+                status: AgentStatus::Active,
+                spawned_children_ids: Vec::new(),
+                pending_wait: None,
+                accepts_messages: true,
+            })
+            .id();
+
+        let cc = leviath_core::CompactionConfig {
+            provider: "mock".to_string(),
+            model: "model".to_string(),
+            max_summary_tokens: 500,
+            temperature: 0.3,
+            system_prompt: None,
+            user_prompt_template: None,
+        };
+
+        let result = engine.compact_region(entity, "analysis", &cc).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("no ContextWindow"));
+    }
+
+    // ─── compact_region with failing provider (inference fails) ───────────
+
+    #[tokio::test]
+    async fn compact_region_propagates_inference_error() {
+        let mut registry = ProviderRegistry::new();
+        registry.register("failing".to_string(), Arc::new(FailingMockProvider));
+        let mut engine = AgentEngine::with_providers(registry);
+
+        let mut window = ContextWindow::new(10000);
+        window.add_region(leviath_core::Region::new(
+            "analysis".to_string(),
+            leviath_core::RegionKind::Temporary,
+            5000,
+        ));
+        let _ = window.add_to_region("analysis", "some long content".to_string(), 10);
+
+        let entity = engine.world_mut().spawn(window).id();
+
+        let cc = leviath_core::CompactionConfig {
+            provider: "failing".to_string(),
+            model: "model".to_string(),
+            max_summary_tokens: 500,
+            temperature: 0.3,
+            system_prompt: None,
+            user_prompt_template: None,
+        };
+
+        let result = engine.compact_region(entity, "analysis", &cc).await;
+        assert!(result.is_err());
+    }
+
+    // ─── add_to_region error path (TokenBudgetExceeded) ───────────────────
+    // This covers components.rs:149 (the `?` propagation in add_to_region).
+
+    #[test]
+    fn add_to_region_returns_err_when_token_budget_exceeded() {
+        let mut window = ContextWindow::new(10000);
+        window.add_region(leviath_core::Region::new(
+            "tiny".to_string(),
+            leviath_core::RegionKind::Pinned,
+            5, // only 5 tokens allowed
+        ));
+        // Try to add 100 tokens — exceeds the region budget
+        let result = window.add_to_region("tiny", "content".to_string(), 100);
+        assert!(result.is_err());
+    }
+
+    // ─── Cancellation with entity having no AgentState ────────────────────
+
+    #[tokio::test]
+    async fn run_inference_loop_cancelled_entity_without_agent_state() {
+        let mut registry = ProviderRegistry::new();
+        registry.register("mock".to_string(), Arc::new(MockProvider::new("mock")));
+        let mut engine = AgentEngine::with_providers(registry);
+
+        // Entity with CancellationToken + ContextWindow but NO AgentState
+        let token = CancellationToken::new();
+        token.cancel(); // pre-cancel so the loop hits the cancellation check
+        let mut window = ContextWindow::new(10000);
+        window.add_region(leviath_core::Region::new(
+            "conversation".to_string(),
+            leviath_core::RegionKind::SlidingWindow { max_items: 50 },
+            9000,
+        ));
+        let _ = window.add_to_region("conversation", "User: hi".to_string(), 2);
+
+        let entity = engine.world_mut().spawn((token, window)).id();
+
+        // max_iterations=1 so the loop tries once; cancellation triggers at top
+        let result = engine
+            .run_inference_loop_filtered(
+                entity,
+                "mock",
+                "test-model",
+                Vec::new(),
+                1,
+                None,
+                None,
+                None,
+                &mut noop_tool_exec,
+            )
+            .await;
+        // Cancelled before any response → Err
+        assert!(result.is_err());
+    }
+
+    // ─── Inference fails inside run_inference_loop_filtered ───────────────
+
+    #[tokio::test]
+    async fn run_inference_loop_filtered_propagates_inference_error() {
+        let mut registry = ProviderRegistry::new();
+        registry.register("failing".to_string(), Arc::new(FailingMockProvider));
+        let mut engine = AgentEngine::with_providers(registry);
+
+        let mut window = ContextWindow::new(10000);
+        window.add_region(leviath_core::Region::new(
+            "conversation".to_string(),
+            leviath_core::RegionKind::SlidingWindow { max_items: 50 },
+            9000,
+        ));
+        let _ = window.add_to_region("conversation", "User: hi".to_string(), 2);
+
+        let entity = engine
+            .world_mut()
+            .spawn((
+                AgentState {
+                    agent_id: "fail-loop".to_string(),
+                    current_stage: "main".to_string(),
+                    iteration: 0,
+                    status: AgentStatus::Active,
+                    spawned_children_ids: Vec::new(),
+                    pending_wait: None,
+                    accepts_messages: true,
+                },
+                MessageInbox::new(),
+                CancellationToken::new(),
+                window,
+            ))
+            .id();
+
+        let result = engine
+            .run_inference_loop_filtered(
+                entity,
+                "failing",
+                "test-model",
+                Vec::new(),
+                5,
+                None,
+                None,
+                None,
+                &mut noop_tool_exec,
+            )
+            .await;
+        assert!(result.is_err());
+    }
+
+    // ─── Routing with short result (no truncation) ────────────────────────
+    // Covers the `if result_text.len() > max_chars { ... }` FALSE path.
+
+    #[tokio::test]
+    async fn run_inference_loop_filtered_routing_with_short_result_no_truncation() {
+        let responses = vec![
+            InferenceResponse {
+                content: "calling tool".to_string(),
+                tool_calls: vec![leviath_providers::ToolCall {
+                    id: "call_1".to_string(),
+                    name: "bash".to_string(),
+                    arguments: serde_json::json!({}),
+                }],
+                tokens_used: leviath_providers::TokenUsage {
+                    prompt_tokens: 10,
+                    completion_tokens: 5,
+                    total_tokens: 15,
+                    cached_tokens: 0,
+                    cache_write_tokens: 0,
+                },
+                finish_reason: leviath_providers::FinishReason::ToolCall,
+            },
+            default_response(),
+        ];
+
+        let mut registry = ProviderRegistry::new();
+        registry.register(
+            "mock".to_string(),
+            Arc::new(MockProvider::with_responses("mock", responses)),
+        );
+        let mut engine = AgentEngine::with_providers(registry);
+
+        let mut window = ContextWindow::new(10000);
+        window.add_region(leviath_core::Region::new(
+            "conversation".to_string(),
+            leviath_core::RegionKind::SlidingWindow { max_items: 50 },
+            6000,
+        ));
+        window.add_region(leviath_core::Region::new(
+            "tool_results".to_string(),
+            leviath_core::RegionKind::SlidingWindow { max_items: 50 },
+            2000,
+        ));
+        let _ = window.add_to_region("conversation", "User: hi".to_string(), 2);
+
+        let entity = engine
+            .world_mut()
+            .spawn((
+                AgentState {
+                    agent_id: "short-result".to_string(),
+                    current_stage: "main".to_string(),
+                    iteration: 0,
+                    status: AgentStatus::Active,
+                    spawned_children_ids: Vec::new(),
+                    pending_wait: None,
+                    accepts_messages: true,
+                },
+                MessageInbox::new(),
+                CancellationToken::new(),
+                window,
+            ))
+            .id();
+
+        let routing = ToolResultRoutingConfig {
+            default_region: "tool_results".to_string(),
+            tool_overrides: HashMap::new(),
+            persist: true,
+            max_result_tokens: Some(1000), // 4000 chars — much larger than "ok"
+        };
+
+        engine
+            .run_inference_loop_filtered(
+                entity,
+                "mock",
+                "test-model",
+                Vec::new(),
+                10,
+                None,
+                Some(&routing),
+                None,
+                &mut |_| async {
+                    vec![("call_1".to_string(), "ok".to_string())] // "ok" is short → no truncation
+                },
+            )
+            .await
+            .unwrap();
+    }
+
+    // ─── evict_and_compact where compact_region fails ─────────────────────
+
+    #[tokio::test]
+    async fn evict_and_compact_propagates_compact_region_error() {
+        let mut registry = ProviderRegistry::new();
+        registry.register("failing".to_string(), Arc::new(FailingMockProvider));
+        let mut engine = AgentEngine::with_providers(registry);
+
+        // Build a window that's >90% full with a Compacting region so
+        // try_evict reaches Phase 3 and adds it to needs_compaction.
+        // No Temporary/Clearable regions → eviction can't free space → Phase 3 triggers.
+        let mut window = ContextWindow::new(100);
+
+        let mut compacting = leviath_core::Region::new(
+            "notes".to_string(),
+            leviath_core::RegionKind::Compacting {
+                threshold_tokens: 1,
+            },
+            100,
+        );
+        // Add 95 tokens so window is 95% full (>90% threshold) and region.needs_compaction()
+        compacting
+            .add_entry("lots of content here".to_string(), 95)
+            .unwrap();
+        window.add_region(compacting);
+        window.current_tokens = 95;
+
+        let entity = engine.world_mut().spawn(window).id();
+
+        let cc = leviath_core::CompactionConfig {
+            provider: "failing".to_string(),
+            model: "model".to_string(),
+            max_summary_tokens: 20,
+            temperature: 0.0,
+            system_prompt: None,
+            user_prompt_template: None,
+        };
+
+        // evict_and_compact will identify "notes" as needing compaction, call
+        // compact_region("notes", ...) which fails → propagates Err via `?`
+        let result = engine.evict_and_compact(entity, &cc).await;
+        assert!(result.is_err());
+    }
+
+    // ─── FailingMockProvider trivial methods ──────────────────────────────
+
+    #[test]
+    fn failing_mock_provider_trivial_methods() {
+        use leviath_providers::Provider;
+        let p = FailingMockProvider;
+        assert_eq!(p.name(), "failing-mock");
+        assert_eq!(p.count_tokens("hi", "m"), 1);
+        assert_eq!(p.max_context_tokens("m"), 100_000);
+        let _ = p.capabilities("m");
     }
 }
