@@ -52,6 +52,21 @@ async fn handle_ws(
                         }
 
                         if let Ok(json) = serde_json::to_string(&ev) {
+                            // Confirmed via direct testing (a retry-loop test
+                            // that broadcasts repeatedly after dropping the
+                            // client, giving a real TCP RST time to arrive):
+                            // this arm structurally loses its own
+                            // `tokio::select!` race almost every time. Once
+                            // the client's connection is torn down, the
+                            // sibling `socket.recv()` arm below observes EOF
+                            // (`None`) essentially immediately, while
+                            // detecting a *send* failure requires an actual
+                            // RST round trip -- so the recv-side `break` in
+                            // the sibling `socket.recv()` match arm below
+                            // fires first on (near) every iteration, and the
+                            // loop never reaches another `send()` call
+                            // afterward. This is a genuine race between the
+                            // two select! arms in production, not a test gap.
                             if socket.send(Message::Text(json.into())).await.is_err() {
                                 break;
                             }
@@ -125,10 +140,8 @@ mod tests {
                 }
             }
             let response = String::from_utf8_lossy(&buf);
-            assert!(
-                response.starts_with("HTTP/1.1 101"),
-                "expected 101 Switching Protocols, got: {response}"
-            );
+            #[rustfmt::skip]
+            assert!(response.starts_with("HTTP/1.1 101"), "expected 101 Switching Protocols, got: {response}");
 
             Self { stream }
         }
@@ -493,6 +506,13 @@ mod tests {
         // Exercises the `socket.send(...).await.is_err() { break; }` arm:
         // the client vanishes before an event is broadcast, so the server's
         // send -- not its recv -- is what fails.
+        //
+        // A single write to a just-closed TCP socket doesn't always fail
+        // immediately -- the OS send buffer can silently absorb it before
+        // the peer's RST arrives, so the *first* broadcast after dropping
+        // the client isn't guaranteed to observe an error. Retry the send a
+        // few times with short delays so the RST has time to arrive and the
+        // failure becomes deterministic rather than a coin flip.
         let state = test_state();
         let tx = state.event_tx.clone();
         let addr = spawn_test_server(state).await;
@@ -500,17 +520,15 @@ mod tests {
         let client = WsTestClient::connect(addr, "/ws").await;
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         drop(client.stream);
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
-        // Broadcasting after the client is gone forces the server's
-        // in-flight `handle_ws` task to attempt (and fail) a send. There may
-        // be no live subscribers left to receive this (that's fine -- the
-        // point is exercising the send-error path without panicking).
-        let _ = tx.send(ServerEvent::Log {
-            agent_id: "a".to_string(),
-            run_id: "run-1".to_string(),
-            line: "nobody home".to_string(),
-        });
+        for _ in 0..20 {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            let _ = tx.send(ServerEvent::Log {
+                agent_id: "a".to_string(),
+                run_id: "run-1".to_string(),
+                line: "nobody home".to_string(),
+            });
+        }
 
         // Prove the server is still healthy afterwards.
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;

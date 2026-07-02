@@ -159,14 +159,15 @@ fn print_warnings(blueprint: &leviath_core::Blueprint) {
         if !reachable.insert(name.clone()) {
             continue;
         }
-        if let Some(stage) = blueprint.find_stage(&name) {
-            if let Some(ref transitions) = stage.transitions {
-                for target in transitions.keys() {
-                    if !reachable.contains(target.as_str()) && stage_names.contains(target.as_str())
-                    {
-                        queue.push_back(target.clone());
-                    }
-                }
+        let Some(stage) = blueprint.find_stage(&name) else {
+            continue;
+        };
+        let Some(ref transitions) = stage.transitions else {
+            continue;
+        };
+        for target in transitions.keys() {
+            if !reachable.contains(target.as_str()) && stage_names.contains(target.as_str()) {
+                queue.push_back(target.clone());
             }
         }
     }
@@ -182,21 +183,23 @@ fn print_warnings(blueprint: &leviath_core::Blueprint) {
 
     // Check for loops without max_revisits
     for stage in &blueprint.stages {
-        if let Some(ref transitions) = stage.transitions {
-            for target in transitions.keys() {
-                if target != &stage.name {
-                    // Check if target can reach back to this stage (cycle)
-                    if let Some(target_stage) = blueprint.find_stage(target) {
-                        if let Some(ref t2) = target_stage.transitions {
-                            if t2.contains_key(&stage.name) && target_stage.max_revisits.is_none() {
-                                println!(
-                                    "  ⚠ Warning: stage '{}' is in a cycle but has no max_revisits set",
-                                    target
-                                );
-                            }
-                        }
-                    }
-                }
+        let Some(ref transitions) = stage.transitions else {
+            continue;
+        };
+        for target in transitions.keys() {
+            if target == &stage.name {
+                continue;
+            }
+            // Check if target can reach back to this stage (cycle)
+            let Some(target_stage) = blueprint.find_stage(target) else {
+                continue;
+            };
+            let Some(ref t2) = target_stage.transitions else {
+                continue;
+            };
+            if t2.contains_key(&stage.name) && target_stage.max_revisits.is_none() {
+                #[rustfmt::skip]
+                println!("  ⚠ Warning: stage '{}' is in a cycle but has no max_revisits set", target);
             }
         }
     }
@@ -393,6 +396,103 @@ max_iterations = 5
 "#,
         );
         let bp = parse(&toml);
+        print_warnings(&bp);
+    }
+
+    // ─── print_warnings: self-loop cycle (target == stage.name skip) ────
+
+    #[test]
+    fn print_warnings_self_loop_with_max_revisits_no_panic() {
+        let toml = make_blueprint_toml(
+            r#"
+[stages.a]
+mode = "autonomous"
+model = { provider = "anthropic", model = "claude-sonnet-4-6" }
+description = "Stage A"
+max_iterations = 5
+entry = true
+max_revisits = 3
+[stages.a.transitions]
+a = "true"
+"#,
+        );
+        let bp = parse(&toml);
+        // Self-loop transition should hit the `target == stage.name` skip in
+        // the cycle-detection loop without panicking or false-warning.
+        print_warnings(&bp);
+    }
+
+    // ─── print_warnings: Blueprint constructed directly (not via parse +
+    // validate), so it can carry invariants `Blueprint::validate` would
+    // normally reject. `print_warnings` takes a bare `&Blueprint` and has
+    // no way to know whether its caller validated it first, so these
+    // "malformed but structurally valid Rust" shapes are reachable through
+    // its public API even though `execute_reporting_outcome` (the only
+    // production caller) always validates first. ────────────────────────
+
+    fn make_model() -> leviath_core::blueprint::ModelConfig {
+        leviath_core::blueprint::ModelConfig::new(
+            "anthropic".to_string(),
+            "claude-sonnet-4-6".to_string(),
+        )
+    }
+
+    #[test]
+    fn print_warnings_entry_stage_missing_no_panic() {
+        use leviath_core::{Blueprint, ContextLayout, Stage};
+
+        // Stage "a" is valid on its own, but the blueprint's entry_stage
+        // points at a name that doesn't exist among `stages` -- impossible
+        // via `Blueprint::validate`, but not impossible via this struct's
+        // public fields/constructors.
+        let mut stage_a = Stage::new("a".to_string(), make_model());
+        stage_a.transitions = Some(std::collections::HashMap::new());
+
+        let layout = ContextLayout::new(Vec::new(), 1000);
+        let mut bp = Blueprint::new(
+            "test".to_string(),
+            "test".to_string(),
+            vec![stage_a],
+            layout,
+        );
+        bp.entry_stage = Some("ghost".to_string());
+
+        // Hits the BFS's `find_stage(&name) else { continue }` arm: "ghost"
+        // is queued as the entry but resolves to no real stage.
+        print_warnings(&bp);
+    }
+
+    #[test]
+    fn print_warnings_transition_target_missing_no_panic() {
+        use leviath_core::{Blueprint, ContextLayout, Stage, TransitionEdge};
+
+        // Stage "a" transitions to "ghost", a name with no corresponding
+        // Stage entry -- impossible via `Blueprint::validate` (which
+        // requires every transition target to exist), but constructible
+        // directly since `transitions` is a public field.
+        let mut transitions = std::collections::HashMap::new();
+        transitions.insert(
+            "ghost".to_string(),
+            TransitionEdge {
+                target: "ghost".to_string(),
+                condition: Default::default(),
+                hint: None,
+                transform: Default::default(),
+            },
+        );
+        let mut stage_a = Stage::new("a".to_string(), make_model());
+        stage_a.transitions = Some(transitions);
+
+        let layout = ContextLayout::new(Vec::new(), 1000);
+        let bp = Blueprint::new(
+            "test".to_string(),
+            "test".to_string(),
+            vec![stage_a],
+            layout,
+        );
+
+        // Hits the cycle-check loop's `find_stage(target) else { continue }`
+        // arm: "ghost" is a transition target but not a real stage.
         print_warnings(&bp);
     }
 
@@ -642,10 +742,10 @@ max_iterations = 5
     fn check_manifest_missing_directory_manifest_is_io_error() {
         let dir = tempfile::tempdir().unwrap();
         let err = check_manifest(dir.path()).unwrap_err();
-        assert!(matches!(err, ManifestCheckError::Io(_)));
-        if let ManifestCheckError::Io(e) = err {
-            assert!(e.to_string().contains("No agent.leviath found"));
-        }
+        let ManifestCheckError::Io(e) = err else {
+            panic!("expected ManifestCheckError::Io, got {err:?}");
+        };
+        assert!(e.to_string().contains("No agent.leviath found"));
     }
 
     #[test]
@@ -678,10 +778,10 @@ max_iterations = 5
         std::fs::set_permissions(&manifest_path, std::fs::Permissions::from_mode(0o644)).unwrap();
 
         let err = result.unwrap_err();
-        assert!(matches!(err, ManifestCheckError::Io(_)));
-        if let ManifestCheckError::Io(e) = err {
-            assert!(e.to_string().contains("Failed to read"));
-        }
+        let ManifestCheckError::Io(e) = err else {
+            panic!("expected ManifestCheckError::Io, got {err:?}");
+        };
+        assert!(e.to_string().contains("Failed to read"));
     }
 
     #[test]

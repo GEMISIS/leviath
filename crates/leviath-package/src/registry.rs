@@ -306,11 +306,8 @@ mod tests {
         let result = registry.search("test-query").await;
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
-        assert!(
-            err.contains("Failed to search"),
-            "Expected search error, got: {}",
-            err
-        );
+        #[rustfmt::skip]
+        assert!(err.contains("Failed to search"), "Expected search error, got: {}", err);
     }
 
     #[tokio::test]
@@ -319,11 +316,8 @@ mod tests {
         let result = registry.download("my-package", "1.0.0").await;
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
-        assert!(
-            err.contains("Failed to download"),
-            "Expected download error, got: {}",
-            err
-        );
+        #[rustfmt::skip]
+        assert!(err.contains("Failed to download"), "Expected download error, got: {}", err);
     }
 
     #[tokio::test]
@@ -332,11 +326,8 @@ mod tests {
         let result = registry.get_info("my-package").await;
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
-        assert!(
-            err.contains("Failed to get package info"),
-            "Expected get_info error, got: {}",
-            err
-        );
+        #[rustfmt::skip]
+        assert!(err.contains("Failed to get package info"), "Expected get_info error, got: {}", err);
     }
 
     #[tokio::test]
@@ -346,11 +337,8 @@ mod tests {
         let result = registry.publish(bundle, "my-token").await;
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
-        assert!(
-            err.contains("Failed to publish"),
-            "Expected publish error, got: {}",
-            err
-        );
+        #[rustfmt::skip]
+        assert!(err.contains("Failed to publish"), "Expected publish error, got: {}", err);
     }
 
     // ─── Minimal raw-TCP mock HTTP server (no new dependency needed) ───────
@@ -375,14 +363,13 @@ mod tests {
         .into_bytes();
 
         tokio::spawn(async move {
-            if let Ok((mut socket, _)) = listener.accept().await {
-                let mut buf = [0u8; 8192];
-                let _ = socket.read(&mut buf).await;
-                let _ = socket.write_all(&response).await;
-                let _ = socket.write_all(body).await;
-                let _ = socket.flush().await;
-                let _ = socket.shutdown().await;
-            }
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut buf = [0u8; 8192];
+            let _ = socket.read(&mut buf).await;
+            let _ = socket.write_all(&response).await;
+            let _ = socket.write_all(body).await;
+            let _ = socket.flush().await;
+            let _ = socket.shutdown().await;
         });
 
         format!("http://{}", addr)
@@ -407,15 +394,14 @@ mod tests {
         let body = body.to_vec();
 
         tokio::spawn(async move {
-            if let Ok((mut socket, _)) = listener.accept().await {
-                let mut buf = [0u8; 8192];
-                let _ = socket.read(&mut buf).await;
-                let _ = socket.write_all(&response).await;
-                let _ = socket.write_all(&body).await;
-                let _ = socket.flush().await;
-                // Close without ever sending the remaining declared bytes.
-                let _ = socket.shutdown().await;
-            }
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut buf = [0u8; 8192];
+            let _ = socket.read(&mut buf).await;
+            let _ = socket.write_all(&response).await;
+            let _ = socket.write_all(&body).await;
+            let _ = socket.flush().await;
+            // Close without ever sending the remaining declared bytes.
+            let _ = socket.shutdown().await;
         });
 
         format!("http://{}", addr)

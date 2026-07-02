@@ -60,25 +60,31 @@ impl AgentBundler {
             anyhow::bail!("No agent.leviath found in '{}'", project_path.display());
         }
 
-        let mut buf = Vec::new();
-        {
-            let encoder = GzEncoder::new(&mut buf, Compression::default());
-            let mut tar = tar::Builder::new(encoder);
-
-            // Walk the project directory and add files
-            self.add_directory_to_tar(&mut tar, project_path, project_path)?;
-
-            let encoder = tar
-                .into_inner()
-                .map_err(|e| anyhow::anyhow!("Failed to finalize tar archive: {}", e))?;
-            encoder
-                .finish()
-                .map_err(|e| anyhow::anyhow!("Failed to finalize gzip: {}", e))?;
-        }
+        let buf = self.write_bundle(project_path, Vec::new())?;
 
         tracing::info!(size_bytes = buf.len(), "Bundle created");
 
         Ok(buf)
+    }
+
+    /// Walk `project_path` and write a tar.gz archive to `sink`, returning it
+    /// once finalized. Generic over `W: Write` (rather than hardcoded to
+    /// `&mut Vec<u8>`) so tests can inject a sink that fails on write,
+    /// exercising the tar/gzip finalization error paths below without
+    /// needing an actually-broken filesystem.
+    fn write_bundle<W: Write>(&self, project_path: &Path, sink: W) -> anyhow::Result<W> {
+        let encoder = GzEncoder::new(sink, Compression::default());
+        let mut tar = tar::Builder::new(encoder);
+
+        // Walk the project directory and add files
+        self.add_directory_to_tar(&mut tar, project_path, project_path)?;
+
+        let encoder = tar
+            .into_inner()
+            .map_err(|e| anyhow::anyhow!("Failed to finalize tar archive: {}", e))?;
+        encoder
+            .finish()
+            .map_err(|e| anyhow::anyhow!("Failed to finalize gzip: {}", e))
     }
 
     /// Bundle an agent and write to a file.
@@ -127,6 +133,12 @@ impl AgentBundler {
         for entry in fs::read_dir(dir)
             .map_err(|e| anyhow::anyhow!("Failed to read directory '{}': {}", dir.display(), e))?
         {
+            // `ReadDir::next()`'s `Err` arm surfaces OS-level directory-read
+            // faults (not TOCTOU races): on both macOS and Linux, `readdir`
+            // returns entry names without `stat`-ing them, so deleting a
+            // file mid-iteration doesn't make this `?` fail -- the failure
+            // path would need an actual OS/filesystem-driver-level error
+            // while listing, which isn't reproducible from userland tests.
             let entry = entry?;
             let path = entry.path();
             let file_name = entry.file_name();
@@ -143,11 +155,14 @@ impl AgentBundler {
 
             if path.is_dir() {
                 self.add_directory_to_tar(tar, &path, base)?;
-            } else if path.is_file() {
-                tar.append_path_with_name(&path, relative).map_err(|e| {
-                    anyhow::anyhow!("Failed to add '{}' to bundle: {}", relative.display(), e)
-                })?;
+                continue;
             }
+            if !path.is_file() {
+                continue;
+            }
+            tar.append_path_with_name(&path, relative).map_err(|e| {
+                anyhow::anyhow!("Failed to add '{}' to bundle: {}", relative.display(), e)
+            })?;
         }
         Ok(())
     }
@@ -514,5 +529,215 @@ mod tests {
             .collect();
 
         assert!(!names.iter().any(|n| n.contains(".git")));
+    }
+
+    // ─── bundle_to_file: bundle() itself fails ──────────────────────────
+
+    #[test]
+    fn test_bundle_to_file_missing_manifest_propagates_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path().join("project");
+        fs::create_dir_all(&project).unwrap();
+        // No agent.leviath written -- `bundle()` must fail before ever
+        // reaching the write step, and `bundle_to_file` must propagate that
+        // failure via its `?` rather than attempting to write anything.
+        let output = dir.path().join("output.leviath-bundle");
+
+        let bundler = AgentBundler::new();
+        let result = bundler.bundle_to_file(&project, &output);
+
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("agent.leviath"));
+        assert!(!output.exists());
+    }
+
+    // ─── add_directory_to_tar: entries that are neither dir nor file ────
+
+    #[cfg(unix)]
+    #[test]
+    fn test_bundle_skips_broken_symlink() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path();
+
+        fs::write(
+            project.join("agent.leviath"),
+            "[agent]\nname = \"test\"\nversion = \"1.0.0\"\ndescription = \"test\"\n",
+        )
+        .unwrap();
+
+        // A symlink whose target doesn't exist: `Path::is_dir`/`is_file`
+        // both follow symlinks and return `false` when the target is
+        // missing, so this entry is neither -- exercising the "skip
+        // anything that isn't a plain file or directory" branch.
+        std::os::unix::fs::symlink(project.join("does-not-exist"), project.join("dangling"))
+            .unwrap();
+
+        let bundler = AgentBundler::new();
+        let data = bundler.bundle(project).unwrap();
+        assert!(!data.is_empty());
+
+        let decoder = flate2::read::GzDecoder::new(&data[..]);
+        let mut archive = tar::Archive::new(decoder);
+        let names: Vec<String> = archive
+            .entries()
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.path().unwrap().to_string_lossy().to_string())
+            .collect();
+        assert!(!names.iter().any(|n| n.contains("dangling")));
+    }
+
+    // ─── add_directory_to_tar: recursive read_dir failure propagates ────
+
+    #[cfg(unix)]
+    #[test]
+    fn test_bundle_unreadable_subdirectory_returns_error() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path();
+        fs::write(
+            project.join("agent.leviath"),
+            "[agent]\nname = \"test\"\nversion = \"1.0.0\"\ndescription = \"test\"\n",
+        )
+        .unwrap();
+
+        let locked = project.join("locked");
+        fs::create_dir_all(&locked).unwrap();
+        fs::write(locked.join("secret.txt"), "shh").unwrap();
+        // Remove all permissions so `fs::read_dir` fails when the walk
+        // recurses into this subdirectory, propagating an `Err` back up
+        // through the parent call's `?`.
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
+
+        let bundler = AgentBundler::new();
+        let result = bundler.bundle(project);
+
+        // Restore permissions so tempdir cleanup can remove the directory.
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).unwrap();
+
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Failed to read directory"));
+    }
+
+    // ─── add_directory_to_tar: strip_prefix failure (direct unit test) ──
+    //
+    // Every real caller of `add_directory_to_tar` passes the same
+    // `project_path` as both `dir` and `base` on the initial call, and
+    // recursion only ever descends from `dir` into its own children --
+    // so `path.strip_prefix(base)` can never fail via the public `bundle()`
+    // API. It's still a private method, so a test in this module can call
+    // it directly with a `base` that isn't an ancestor of `dir`, exercising
+    // the defensive `map_err` without fabricating a broken filesystem.
+    #[test]
+    fn test_add_directory_to_tar_direct_strip_prefix_failure() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path();
+        fs::write(project.join("file.txt"), "content").unwrap();
+
+        let unrelated = tempfile::tempdir().unwrap();
+
+        let bundler = AgentBundler::new();
+        let mut tar = tar::Builder::new(Vec::new());
+        let result = bundler.add_directory_to_tar(&mut tar, project, unrelated.path());
+
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Failed to compute relative path"));
+    }
+
+    // ─── write_bundle: tar/gzip finalize failure paths ──────────────────
+
+    /// A `Write` sink that fails immediately, used to force
+    /// `tar::Builder::into_inner`'s write of the gzip header (which happens
+    /// on the very first byte written through the encoder) to fail.
+    #[derive(Debug, Default)]
+    struct AlwaysFailingWriter;
+    impl Write for AlwaysFailingWriter {
+        fn write(&mut self, _buf: &[u8]) -> std::io::Result<usize> {
+            Err(std::io::Error::other("simulated write failure"))
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Err(std::io::Error::other("simulated flush failure"))
+        }
+    }
+
+    #[test]
+    fn test_write_bundle_into_inner_failure_returns_error() {
+        // An empty directory (no files at all, not even a manifest --
+        // `write_bundle` itself has no manifest check; that lives in the
+        // public `bundle()` wrapper) means `add_directory_to_tar` writes
+        // nothing during the walk. The very first byte `write_bundle`
+        // writes to the sink is the gzip header, written lazily by
+        // `GzEncoder` on `tar::Builder::into_inner`'s first `write` call --
+        // so an always-failing sink fails there, at `tar.into_inner()`.
+        let dir = tempfile::tempdir().unwrap();
+
+        let bundler = AgentBundler::new();
+        let result = bundler.write_bundle(dir.path(), AlwaysFailingWriter);
+
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Failed to finalize tar archive"));
+    }
+
+    /// A `Write` sink that succeeds exactly once (letting the gzip header
+    /// through `tar::Builder::into_inner` succeed) and fails on every
+    /// subsequent call, forcing `GzEncoder::finish`'s write of the
+    /// compressed body/trailer to fail instead.
+    #[derive(Debug, Default)]
+    struct FailsAfterFirstWriteWriter {
+        calls: usize,
+    }
+    impl Write for FailsAfterFirstWriteWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.calls += 1;
+            if self.calls == 1 {
+                Ok(buf.len())
+            } else {
+                Err(std::io::Error::other("simulated write failure"))
+            }
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn test_write_bundle_gzip_finish_failure_returns_error() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let bundler = AgentBundler::new();
+        let result = bundler.write_bundle(dir.path(), FailsAfterFirstWriteWriter::default());
+
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Failed to finalize gzip"));
+    }
+
+    // Neither `tar::Builder::into_inner` nor `GzEncoder::finish` ever calls
+    // `Write::flush` on the underlying sink directly (confirmed empirically:
+    // a sink whose `flush` always errors but whose `write` always succeeds
+    // makes `write_bundle` succeed) -- so these `flush` impls are
+    // unreachable via `write_bundle` no matter how the sink is configured.
+    // Test them directly, matching `always_on_subscriber_span_methods_are_all_no_ops`'s
+    // precedent elsewhere in this file for otherwise-unreachable trait-impl methods.
+    #[test]
+    fn always_failing_writer_flush_returns_error() {
+        assert!(AlwaysFailingWriter.flush().is_err());
+    }
+
+    #[test]
+    fn fails_after_first_write_writer_flush_returns_ok() {
+        assert!(FailsAfterFirstWriteWriter::default().flush().is_ok());
     }
 }

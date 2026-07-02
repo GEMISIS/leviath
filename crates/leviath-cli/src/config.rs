@@ -487,6 +487,7 @@ mod tests {
 
     impl tracing::Subscriber for AlwaysOnSubscriber {
         fn enabled(&self, _metadata: &tracing::Metadata<'_>) -> bool {
+            eprintln!("PROBE: enabled() called for {}", _metadata.name());
             true
         }
         fn new_span(&self, _span: &tracing::span::Attributes<'_>) -> tracing::span::Id {
@@ -525,7 +526,7 @@ mod tests {
     fn load_from_path_missing_file_returns_defaults() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
-        let config = Config::load_from_path(&path).unwrap();
+        let config = with_tracing(|| Config::load_from_path(&path)).unwrap();
         assert_eq!(config.default_provider, "anthropic");
     }
 
@@ -538,8 +539,76 @@ mod tests {
             ..Config::default()
         };
         std::fs::write(&path, toml::to_string_pretty(&original).unwrap()).unwrap();
-        let config = Config::load_from_path(&path).unwrap();
+        let config = with_tracing(|| Config::load_from_path(&path)).unwrap();
         assert_eq!(config.default_provider, "openai");
+    }
+
+    #[test]
+    fn load_from_path_existing_provider_keys_skip_env_fallback() {
+        // Every one of the 5 "env var fallback" `if field.is_none()` checks
+        // in `load_from_path` has only ever been exercised on its `true`
+        // (field absent, fall back to env) arm elsewhere in this file --
+        // never on the `false` (field already set from the TOML file, skip
+        // the env lookup) arm. Hold the shared lock while clearing these
+        // process-global env vars so a concurrently-running test elsewhere
+        // in the crate can't be mid-set when we read them.
+        let _lock = CONFIG_PATH_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let saved: Vec<_> = PROVIDER_KEY_ENV_VARS
+            .iter()
+            .chain(["OLLAMA_HOST"].iter())
+            .map(|&key| (key, std::env::var_os(key)))
+            .collect();
+        for &(key, _) in &saved {
+            std::env::remove_var(key);
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            r#"
+default_provider = "anthropic"
+openrouter_api_key = "sk-or-existing"
+ollama_base_url = "http://existing-ollama:11434"
+registries = []
+agent_paths = []
+
+[providers]
+anthropic_api_key = "sk-ant-existing"
+openai_api_key = "sk-openai-existing"
+google_api_key = "AIza-existing"
+"#,
+        )
+        .unwrap();
+
+        let config = with_tracing(|| Config::load_from_path(&path)).unwrap();
+
+        for (key, original) in saved {
+            match original {
+                Some(v) => std::env::set_var(key, v),
+                None => std::env::remove_var(key),
+            }
+        }
+
+        assert_eq!(
+            config.providers.anthropic_api_key.as_deref(),
+            Some("sk-ant-existing")
+        );
+        assert_eq!(
+            config.providers.openai_api_key.as_deref(),
+            Some("sk-openai-existing")
+        );
+        assert_eq!(
+            config.providers.google_api_key.as_deref(),
+            Some("AIza-existing")
+        );
+        assert_eq!(config.openrouter_api_key.as_deref(), Some("sk-or-existing"));
+        assert_eq!(
+            config.ollama_base_url.as_deref(),
+            Some("http://existing-ollama:11434")
+        );
     }
 
     #[test]
@@ -568,9 +637,9 @@ mod tests {
             default_provider: "google".to_string(),
             ..Config::default()
         };
-        config.save_to_path(&path).unwrap();
+        with_tracing(|| config.save_to_path(&path)).unwrap();
 
-        let loaded = Config::load_from_path(&path).unwrap();
+        let loaded = with_tracing(|| Config::load_from_path(&path)).unwrap();
         assert_eq!(loaded.default_provider, "google");
     }
 
@@ -579,8 +648,20 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("a").join("b").join("config.toml");
         let config = Config::default();
-        config.save_to_path(&path).unwrap();
+        with_tracing(|| config.save_to_path(&path)).unwrap();
         assert!(path.exists());
+    }
+
+    #[test]
+    fn save_to_path_with_no_parent_skips_create_config_dir() {
+        // `Path::parent()` returns `None` only for an empty path or a
+        // filesystem root -- `PathBuf::from("")` triggers the empty case
+        // cross-platform, hitting the `if let Some(parent) = ...` block's
+        // `None` arm (skip `create_config_dir`) without a platform-specific
+        // root path. The subsequent `fs::write("")` then fails, which is
+        // fine: this test only cares about the `None` branch being taken.
+        let result = Config::default().save_to_path(&std::path::PathBuf::from(""));
+        assert!(result.is_err());
     }
 
     #[cfg(unix)]
@@ -625,10 +706,24 @@ mod tests {
             ..Config::default()
         };
 
-        config.save().unwrap();
+        with_tracing(|| config.save()).unwrap();
 
-        let loaded = Config::load_from_path(&Config::config_path()).unwrap();
+        let loaded = with_tracing(|| Config::load_from_path(&Config::config_path())).unwrap();
         assert_eq!(loaded.default_provider, "openai");
+    }
+
+    #[test]
+    fn load_propagates_error_when_real_config_file_is_malformed() {
+        // Every other `Config::load()` test sees either no file (defaults)
+        // or a well-formed one, so `load()`'s `?` on `load_from_path(...)`
+        // has never actually propagated an `Err`. Writing malformed TOML to
+        // the guard's redirected `LEVIATH_CONFIG_PATH` forces that.
+        let guard = isolate_config_path_for_test("load-malformed");
+        std::fs::write(guard.fake_dir.join("config.toml"), "not valid toml [[[").unwrap();
+
+        let result = Config::load();
+
+        assert!(result.is_err());
     }
 
     // ─── check_permissions_at ────────────────────────────────────────────

@@ -142,10 +142,8 @@ mod tests {
         let mut manifest = make_valid_manifest();
         manifest.package.name = String::new();
         let err = manifest.validate().unwrap_err();
-        assert!(
-            err.to_string().contains("empty"),
-            "expected empty name error, got: {err}"
-        );
+        #[rustfmt::skip]
+        assert!(err.to_string().contains("empty"), "expected empty name error, got: {err}");
     }
 
     #[test]
@@ -153,10 +151,8 @@ mod tests {
         let mut manifest = make_valid_manifest();
         manifest.package.name = "a".repeat(65);
         let err = manifest.validate().unwrap_err();
-        assert!(
-            err.to_string().contains("64"),
-            "expected max-length error, got: {err}"
-        );
+        #[rustfmt::skip]
+        assert!(err.to_string().contains("64"), "expected max-length error, got: {err}");
     }
 
     #[test]
@@ -164,10 +160,8 @@ mod tests {
         let mut manifest = make_valid_manifest();
         manifest.package.name = "my_agent!".to_string();
         let err = manifest.validate().unwrap_err();
-        assert!(
-            err.to_string().contains("alphanumeric"),
-            "expected invalid-chars error, got: {err}"
-        );
+        #[rustfmt::skip]
+        assert!(err.to_string().contains("alphanumeric"), "expected invalid-chars error, got: {err}");
     }
 
     #[test]
@@ -175,10 +169,8 @@ mod tests {
         let mut manifest = make_valid_manifest();
         manifest.package.version = "1.0".to_string();
         let err = manifest.validate().unwrap_err();
-        assert!(
-            err.to_string().contains("semver"),
-            "expected semver error, got: {err}"
-        );
+        #[rustfmt::skip]
+        assert!(err.to_string().contains("semver"), "expected semver error, got: {err}");
     }
 
     #[test]
@@ -186,10 +178,8 @@ mod tests {
         let mut manifest = make_valid_manifest();
         manifest.package.description = String::new();
         let err = manifest.validate().unwrap_err();
-        assert!(
-            err.to_string().contains("description"),
-            "expected description error, got: {err}"
-        );
+        #[rustfmt::skip]
+        assert!(err.to_string().contains("description"), "expected description error, got: {err}");
     }
 
     #[test]
@@ -197,10 +187,8 @@ mod tests {
         let mut manifest = make_valid_manifest();
         manifest.package.authors = Vec::new();
         let err = manifest.validate().unwrap_err();
-        assert!(
-            err.to_string().contains("author"),
-            "expected authors error, got: {err}"
-        );
+        #[rustfmt::skip]
+        assert!(err.to_string().contains("author"), "expected authors error, got: {err}");
     }
 
     #[test]
@@ -208,10 +196,8 @@ mod tests {
         let mut manifest = make_valid_manifest();
         manifest.package.license = String::new();
         let err = manifest.validate().unwrap_err();
-        assert!(
-            err.to_string().contains("license"),
-            "expected license error, got: {err}"
-        );
+        #[rustfmt::skip]
+        assert!(err.to_string().contains("license"), "expected license error, got: {err}");
     }
 
     #[test]

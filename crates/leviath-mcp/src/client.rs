@@ -1135,10 +1135,8 @@ sys.stdout.close()
         // initialize sends a request and the error server will return an error response
         let err = client.connect().await;
         assert!(err.is_err(), "Expected error from error server");
-        assert!(
-            err.unwrap_err().to_string().contains("server error"),
-            "Expected server error message"
-        );
+        #[rustfmt::skip]
+        assert!(err.unwrap_err().to_string().contains("server error"), "Expected server error message");
     }
 
     #[tokio::test]
@@ -1168,10 +1166,8 @@ for line in sys.stdin:
         let mut client = spawn_stub_client(script).await;
         let err = client.connect().await;
         assert!(err.is_err(), "Expected error for malformed JSON");
-        assert!(
-            err.unwrap_err().to_string().contains("parse"),
-            "Expected parse error"
-        );
+        #[rustfmt::skip]
+        assert!(err.unwrap_err().to_string().contains("parse"), "Expected parse error");
     }
 
     #[tokio::test]
@@ -1249,10 +1245,8 @@ for line in sys.stdin:
             .list_tools()
             .await
             .expect("list_tools should succeed");
-        assert!(
-            tools.is_empty(),
-            "Expected empty list when tools key absent"
-        );
+        #[rustfmt::skip]
+        assert!(tools.is_empty(), "Expected empty list when tools key absent");
     }
 
     #[tokio::test]

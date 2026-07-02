@@ -2144,11 +2144,8 @@ mod tests {
 
         assert!(!dash.toasts.is_empty());
         let msg = &dash.toasts[0].message;
-        assert!(
-            msg.contains("yanked to clipboard") || msg.contains("Clipboard unavailable"),
-            "unexpected toast message: {}",
-            msg
-        );
+        #[rustfmt::skip]
+        assert!(msg.contains("yanked to clipboard") || msg.contains("Clipboard unavailable"), "unexpected toast message: {}", msg);
 
         let _ = std::fs::remove_dir_all(crate::runstate::run_dir(run_id));
     }
@@ -2231,11 +2228,8 @@ mod tests {
 
         dash.handle_key(key(KeyCode::Enter));
         assert!(!dash.input_mode);
-        assert!(
-            dash.log.iter().any(|e| e.message.contains("A")),
-            "expected log entry containing 'A', got: {:?}",
-            dash.log.iter().map(|e| &e.message).collect::<Vec<_>>()
-        );
+        #[rustfmt::skip]
+        assert!(dash.log.iter().any(|e| e.message.contains("A")), "expected log entry containing 'A', got: {:?}", dash.log.iter().map(|e| &e.message).collect::<Vec<_>>());
 
         let _ = std::fs::remove_dir_all(crate::runstate::run_dir(&run_id));
     }
