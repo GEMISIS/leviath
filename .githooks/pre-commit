@@ -1,8 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-REQUIRED_COVERAGE=75
-
 # Colors (suppressed when not a terminal)
 if [ -t 1 ]; then
   RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; NC='\033[0m'
@@ -34,36 +32,10 @@ cargo test --all \
   || fail "Tests failed. Fix the failing tests above."
 pass "Tests OK"
 
-# 4. Coverage
-info "Checking coverage (minimum: ${REQUIRED_COVERAGE}%)..."
-COVERAGE_OUTPUT=$(cargo llvm-cov --all-features --workspace --summary-only 2>&1)
-echo "$COVERAGE_OUTPUT"
-
-# Parse the "TOTAL" line for the region/line coverage percentage
-COVERAGE=$(echo "$COVERAGE_OUTPUT" \
-  | grep -E '^TOTAL' \
-  | awk '{
-      for (i=1; i<=NF; i++) {
-        if ($i ~ /^[0-9]+\.[0-9]+%$/) {
-          gsub(/%/, "", $i)
-          pct = $i + 0
-          # Take the last percentage column (line coverage)
-          last = pct
-        }
-      }
-      print last
-    }')
-
-if [ -z "$COVERAGE" ]; then
-  fail "Could not parse coverage output. Check that cargo-llvm-cov is installed."
-fi
-
-# Compare using awk (bc may not be available everywhere)
-MEETS=$(awk -v cov="$COVERAGE" -v req="$REQUIRED_COVERAGE" 'BEGIN { print (cov >= req) ? "yes" : "no" }')
-
-if [ "$MEETS" != "yes" ]; then
-  fail "Coverage ${COVERAGE}% is below required ${REQUIRED_COVERAGE}%. Add tests to proceed."
-fi
-pass "Coverage ${COVERAGE}% >= ${REQUIRED_COVERAGE}% OK"
+# 4. No coverage-suppression markers
+info "Checking for coverage suppression markers..."
+cargo xtask check-exclusions \
+  || fail "Coverage suppression markers found. Remove them and refactor instead."
+pass "No suppression markers OK"
 
 pass "All pre-commit checks passed."

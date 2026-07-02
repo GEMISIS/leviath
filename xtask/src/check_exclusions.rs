@@ -1,0 +1,627 @@
+//! Check that no coverage-suppression escape hatches exist in the codebase.
+//!
+//! The zero-exclusions policy means developers must refactor code until it is
+//! testable rather than hiding it from coverage instrumentation.  This scanner
+//! enforces that policy mechanically by refusing to let any of the known
+//! suppression markers land in source or CI config files.
+//!
+//! Scanned locations
+//! -----------------
+//! * `crates/**/*.rs`       — all Rust source files (not `target/`, not `xtask/`)
+//! * `.github/workflows/`  — CI YAML files
+//! * `.githooks/`           — commit hooks
+//! * `.cargo/config.toml`  — cargo configuration
+
+use anyhow::Result;
+use std::path::{Path, PathBuf};
+
+// ── Public entry point ──────────────────────────────────────────────────────
+
+pub fn run() -> Result<()> {
+    run_with_root(Path::new("."))
+}
+
+/// Run the scan from an explicit root directory (extracted for testability).
+pub fn run_with_root(root: &Path) -> Result<()> {
+    let violations = scan_workspace_from(root)?;
+    report_violations(violations)
+}
+
+/// Report violations and fail if any exist.
+pub fn report_violations(violations: Vec<Violation>) -> Result<()> {
+    if violations.is_empty() {
+        println!("[check-exclusions] No coverage suppression markers found. ✓");
+        return Ok(());
+    }
+
+    eprintln!(
+        "[check-exclusions] {} violation(s) found:",
+        violations.len()
+    );
+    for v in &violations {
+        eprintln!("  {}:{}", v.file.display(), v.line_num);
+        eprintln!("    pattern : {:?}", v.pattern);
+        eprintln!("    reason  : {}", v.reason);
+        eprintln!("    content : {}", v.line.trim());
+    }
+
+    anyhow::bail!(
+        "[check-exclusions] {} coverage suppression violation(s). Remove them and refactor.",
+        violations.len()
+    );
+}
+
+// ── Banned patterns ──────────────────────────────────────────────────────────
+
+/// A string pattern that must not appear in the codebase.
+pub struct BannedPattern {
+    /// Exact substring to search for (case-sensitive).
+    pub pattern: &'static str,
+    /// Human-readable explanation for the error message.
+    pub reason: &'static str,
+    /// Apply this check to Rust `.rs` source files.
+    pub check_rs: bool,
+    /// Apply this check to CI / config / hook files.
+    pub check_config: bool,
+}
+
+pub const BANNED: &[BannedPattern] = &[
+    // ── Coverage-attribute suppression (nightly feature) ────────────────────
+    BannedPattern {
+        pattern: "coverage(off)",
+        reason: "coverage(off) suppression is forbidden — refactor the code to be testable instead",
+        check_rs: true,
+        check_config: false,
+    },
+    // ── Tarpaulin markers ────────────────────────────────────────────────────
+    BannedPattern {
+        pattern: "tarpaulin_include",
+        reason: "tarpaulin coverage annotation is forbidden",
+        check_rs: true,
+        check_config: true,
+    },
+    BannedPattern {
+        pattern: "cfg(tarpaulin)",
+        reason: "tarpaulin cfg gate is forbidden",
+        check_rs: true,
+        check_config: false,
+    },
+    BannedPattern {
+        pattern: "cfg(not(tarpaulin))",
+        reason: "tarpaulin cfg gate is forbidden",
+        check_rs: true,
+        check_config: false,
+    },
+    // ── grcov / lcov exclusion comments ─────────────────────────────────────
+    BannedPattern {
+        pattern: "LCOV_EXCL",
+        reason: "LCOV exclusion marker is forbidden",
+        check_rs: true,
+        check_config: true,
+    },
+    BannedPattern {
+        pattern: "GRCOV_EXCL",
+        reason: "grcov exclusion marker is forbidden",
+        check_rs: true,
+        check_config: true,
+    },
+    // ── Tarpaulin as a CI tool ───────────────────────────────────────────────
+    BannedPattern {
+        pattern: "cargo-tarpaulin",
+        reason: "tarpaulin is not the designated coverage tool; use `cargo xtask coverage` instead",
+        check_rs: false,
+        check_config: true,
+    },
+    BannedPattern {
+        pattern: "cargo tarpaulin",
+        reason: "tarpaulin is not the designated coverage tool; use `cargo xtask coverage` instead",
+        check_rs: false,
+        check_config: true,
+    },
+];
+
+// ── Scanning ─────────────────────────────────────────────────────────────────
+
+/// A single policy violation found during scanning.
+#[derive(Debug)]
+pub struct Violation {
+    /// Path to the file that contains the violation.
+    pub file: PathBuf,
+    /// 1-indexed line number.
+    pub line_num: usize,
+    /// The raw line content (untrimmed).
+    pub line: String,
+    /// The banned pattern that matched.
+    pub pattern: &'static str,
+    /// Human-readable reason.
+    pub reason: &'static str,
+}
+
+/// Scan the workspace rooted at `root` for banned coverage-suppression markers.
+///
+/// Takes an explicit root so tests can pass either a temp directory or
+/// `CARGO_MANIFEST_DIR/../..` (the real workspace root) without changing the
+/// process working directory.
+pub fn scan_workspace_from(root: &Path) -> Result<Vec<Violation>> {
+    let mut violations = Vec::new();
+
+    // Rust source files under crates/ (skips target/ and hidden dirs)
+    let crates_dir = root.join("crates");
+    if crates_dir.exists() {
+        scan_dir(&crates_dir, true, &mut violations)?;
+    }
+
+    // CI and config files
+    for rel in &[
+        ".github/workflows/ci.yml",
+        ".github/workflows/alpha.yml",
+        ".github/workflows/beta.yml",
+        ".github/workflows/prod.yml",
+        ".githooks/pre-commit",
+        ".cargo/config.toml",
+    ] {
+        let p = root.join(rel);
+        if p.exists() {
+            scan_file(&p, false, &mut violations);
+        }
+    }
+
+    Ok(violations)
+}
+
+/// Recursively scan a directory, treating each `.rs` file as `is_rs = true`.
+pub fn scan_dir(dir: &Path, is_rs: bool, violations: &mut Vec<Violation>) -> Result<()> {
+    for entry in std::fs::read_dir(dir)?.flatten() {
+        let path = entry.path();
+
+        if path.is_dir() {
+            let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            // Skip target, hidden dirs, and the xtask crate itself (its tests
+            // contain the banned strings as string literals).
+            if name != "target" && !name.starts_with('.') && name != "xtask" {
+                // Silently skip any subdirectory that can't be read — the path
+                // just came from read_dir so failures are transient (race on
+                // deletion, permission change mid-scan).  Top-level directories
+                // propagate errors via the `?` in scan_workspace_from.
+                let _ = scan_dir(&path, is_rs, violations);
+            }
+        } else if is_rs && path.extension().is_some_and(|e| e == "rs") {
+            scan_file(&path, true, violations);
+        }
+    }
+    Ok(())
+}
+
+/// Scan a single file for banned patterns.
+///
+/// Unreadable files are silently skipped — the caller never sees an error.
+pub fn scan_file(path: &Path, is_rs: bool, violations: &mut Vec<Violation>) {
+    let content = match std::fs::read_to_string(path) {
+        Ok(c) => c,
+        Err(_) => return, // skip unreadable files silently
+    };
+
+    for (line_idx, line) in content.lines().enumerate() {
+        for banned in BANNED {
+            let applies = (is_rs && banned.check_rs) || (!is_rs && banned.check_config);
+            if applies && line.contains(banned.pattern) {
+                violations.push(Violation {
+                    file: path.to_owned(),
+                    line_num: line_idx + 1,
+                    line: line.to_owned(),
+                    pattern: banned.pattern,
+                    reason: banned.reason,
+                });
+            }
+        }
+    }
+}
+
+// ── Tests ────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    /// Write `content` to a temp file and scan it.
+    fn scan_content(content: &str, is_rs: bool) -> Vec<Violation> {
+        let dir = TempDir::new().unwrap();
+        let name = if is_rs { "test.rs" } else { "ci.yml" };
+        let path = dir.path().join(name);
+        std::fs::write(&path, content).unwrap();
+        let mut violations = Vec::new();
+        scan_file(&path, is_rs, &mut violations);
+        violations
+    }
+
+    // ── report_violations ────────────────────────────────────────────────────
+
+    #[test]
+    fn report_violations_empty_is_ok() {
+        assert!(report_violations(vec![]).is_ok());
+    }
+
+    #[test]
+    fn report_violations_nonempty_is_err() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("a.rs");
+        std::fs::write(&path, "#[coverage(off)]").unwrap();
+        let v = Violation {
+            file: path,
+            line_num: 1,
+            line: "#[coverage(off)]".to_owned(),
+            pattern: "coverage(off)",
+            reason: "test",
+        };
+        assert!(report_violations(vec![v]).is_err());
+    }
+
+    // ── scan_workspace_from on real workspace ─────────────────────────────────
+
+    #[test]
+    fn scan_workspace_clean_on_real_workspace() {
+        // CARGO_MANIFEST_DIR is xtask/, so parent() is the workspace root.
+        let xtask_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let workspace_root = xtask_dir
+            .parent()
+            .expect("xtask must have a parent = workspace root");
+
+        let violations =
+            scan_workspace_from(workspace_root).expect("scan_workspace_from should not error");
+
+        assert!(
+            violations.is_empty(),
+            "Real workspace has suppression violations — review the output above",
+        );
+    }
+
+    // ── scan_workspace_from on temp dirs ─────────────────────────────────────
+
+    #[test]
+    fn scan_workspace_from_empty_dir_is_ok() {
+        let dir = TempDir::new().unwrap();
+        let violations = scan_workspace_from(dir.path()).unwrap();
+        assert!(violations.is_empty());
+    }
+
+    #[test]
+    fn scan_workspace_from_finds_violation_in_crates_dir() {
+        let root = TempDir::new().unwrap();
+        let crates = root.path().join("crates");
+        let crate_a = crates.join("crate-a").join("src");
+        std::fs::create_dir_all(&crate_a).unwrap();
+        std::fs::write(crate_a.join("lib.rs"), "#[coverage(off)]\nfn x() {}").unwrap();
+
+        let violations = scan_workspace_from(root.path()).unwrap();
+        assert!(!violations.is_empty());
+        assert!(violations[0].pattern.contains("coverage(off)"));
+    }
+
+    #[test]
+    fn scan_workspace_from_finds_violation_in_ci_yml() {
+        let root = TempDir::new().unwrap();
+        let workflows = root.path().join(".github").join("workflows");
+        std::fs::create_dir_all(&workflows).unwrap();
+        std::fs::write(
+            workflows.join("ci.yml"),
+            "run: cargo install cargo-tarpaulin",
+        )
+        .unwrap();
+
+        let violations = scan_workspace_from(root.path()).unwrap();
+        assert!(!violations.is_empty());
+        assert_eq!(violations[0].pattern, "cargo-tarpaulin");
+    }
+
+    #[test]
+    fn scan_workspace_from_skips_nonexistent_config_files() {
+        // A root with no .github/, .githooks/, or .cargo/ should not error.
+        let root = TempDir::new().unwrap();
+        let result = scan_workspace_from(root.path());
+        assert!(result.is_ok());
+    }
+
+    // ── Clean files ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn clean_rs_file_has_no_violations() {
+        let v = scan_content("fn foo() { let x = 1 + 1; }\n#[test]\nfn bar() {}", true);
+        assert!(v.is_empty(), "unexpected violations: {v:?}");
+    }
+
+    #[test]
+    fn clean_config_file_has_no_violations() {
+        let v = scan_content(
+            "name: CI\non: push\njobs:\n  test:\n    runs-on: ubuntu-latest",
+            false,
+        );
+        assert!(v.is_empty(), "unexpected violations: {v:?}");
+    }
+
+    // ── coverage(off) ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn detects_coverage_off_in_rs() {
+        let v = scan_content("#[coverage(off)]\nfn foo() {}", true);
+        assert!(!v.is_empty());
+        assert_eq!(v[0].line_num, 1);
+        assert!(v[0].pattern.contains("coverage(off)"));
+    }
+
+    #[test]
+    fn detects_cfg_attr_coverage_off_in_rs() {
+        let v = scan_content("#[cfg_attr(test, coverage(off))]\nfn foo() {}", true);
+        assert!(!v.is_empty());
+    }
+
+    #[test]
+    fn coverage_off_not_flagged_in_config_files() {
+        // coverage(off) is RS-only; config files should not trigger it.
+        let v = scan_content("# coverage(off) comment in yaml", false);
+        assert!(
+            v.is_empty(),
+            "should not flag coverage(off) in config: {v:?}"
+        );
+    }
+
+    // ── Tarpaulin markers ─────────────────────────────────────────────────────
+
+    #[test]
+    fn detects_tarpaulin_include_in_rs() {
+        let v = scan_content("// tarpaulin_include\nfn foo() {}", true);
+        assert!(!v.is_empty());
+        assert_eq!(v[0].line_num, 1);
+    }
+
+    #[test]
+    fn detects_tarpaulin_include_in_config() {
+        let v = scan_content("tarpaulin_include: yes", false);
+        assert!(!v.is_empty());
+    }
+
+    #[test]
+    fn detects_cfg_tarpaulin_in_rs() {
+        let v = scan_content("#[cfg(tarpaulin)]\nfn foo() {}", true);
+        assert!(!v.is_empty());
+        assert_eq!(v[0].line_num, 1);
+    }
+
+    #[test]
+    fn detects_cfg_not_tarpaulin_in_rs() {
+        let v = scan_content("#[cfg(not(tarpaulin))]\nfn foo() {}", true);
+        assert!(!v.is_empty());
+    }
+
+    #[test]
+    fn tarpaulin_cfg_not_flagged_in_config_file() {
+        // cfg(tarpaulin) is RS-only; yaml mention should be ignored.
+        // `v` is empty (no config-applicable patterns match), so we assert
+        // directly rather than using .all() on an empty iterator (which would
+        // leave the predicate closure uncovered by LLVM).
+        let v = scan_content("# This explains cfg(tarpaulin) usage", false);
+        assert!(
+            v.is_empty(),
+            "should not flag cfg(tarpaulin) in config: {v:?}"
+        );
+    }
+
+    // ── LCOV / GRCOV ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn detects_lcov_excl_start_in_rs() {
+        let v = scan_content("// LCOV_EXCL_START\nlet x = 1;\n// LCOV_EXCL_END", true);
+        assert!(!v.is_empty());
+    }
+
+    #[test]
+    fn detects_lcov_excl_in_config() {
+        let v = scan_content("flags: LCOV_EXCL_LINE", false);
+        assert!(!v.is_empty());
+    }
+
+    #[test]
+    fn detects_grcov_excl_line_in_rs() {
+        let v = scan_content("// GRCOV_EXCL_LINE\nlet x = 1;", true);
+        assert!(!v.is_empty());
+    }
+
+    #[test]
+    fn detects_grcov_excl_in_config() {
+        let v = scan_content("flags: GRCOV_EXCL_START", false);
+        assert!(!v.is_empty());
+    }
+
+    // ── Tarpaulin as a CI tool ────────────────────────────────────────────────
+
+    #[test]
+    fn detects_cargo_tarpaulin_in_config() {
+        let v = scan_content("run: cargo install cargo-tarpaulin", false);
+        assert!(!v.is_empty());
+        assert_eq!(v[0].line_num, 1);
+    }
+
+    #[test]
+    fn detects_cargo_tarpaulin_command_in_config() {
+        let v = scan_content("run: cargo tarpaulin --workspace", false);
+        assert!(!v.is_empty());
+    }
+
+    #[test]
+    fn cargo_tarpaulin_not_flagged_in_rs_files() {
+        // tarpaulin-as-CI-tool is a config-only check; a comment in RS is fine.
+        // `v` is empty (RS scans don't apply the config-only patterns), so we
+        // assert directly rather than filtering an empty iterator (which would
+        // leave the predicate closure uncovered by LLVM).
+        let v = scan_content("// We used to use cargo tarpaulin here", true);
+        assert!(
+            v.is_empty(),
+            "cargo tarpaulin should not be flagged in RS: {v:?}"
+        );
+    }
+
+    // ── Line numbers ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn violation_reports_correct_line_number() {
+        let v = scan_content("fn ok() {}\n#[coverage(off)]\nfn bad() {}", true);
+        assert!(v.iter().any(|v| v.line_num == 2));
+    }
+
+    #[test]
+    fn multiple_violations_on_different_lines() {
+        let content = "#[coverage(off)]\nfn a() {}\n// LCOV_EXCL_LINE\nfn b() {}";
+        let v = scan_content(content, true);
+        let line_nums: Vec<usize> = v.iter().map(|v| v.line_num).collect();
+        assert!(line_nums.contains(&1));
+        assert!(line_nums.contains(&3));
+    }
+
+    #[test]
+    fn unreadable_file_is_skipped_gracefully() {
+        // scan_file silently skips unreadable/missing files; violations stays empty.
+        let mut violations = Vec::new();
+        scan_file(
+            Path::new("/tmp/no_such_file_xyz_abc.rs"),
+            true,
+            &mut violations,
+        );
+        assert!(violations.is_empty());
+    }
+
+    // ── Directory scanning ────────────────────────────────────────────────────
+
+    #[test]
+    fn scan_dir_finds_violations_in_nested_rs_files() {
+        let dir = TempDir::new().unwrap();
+        let sub = dir.path().join("sub");
+        std::fs::create_dir(&sub).unwrap();
+        std::fs::write(sub.join("mod.rs"), "#[coverage(off)]\nfn x() {}").unwrap();
+        std::fs::write(dir.path().join("clean.rs"), "fn y() {}").unwrap();
+
+        let mut violations = Vec::new();
+        scan_dir(dir.path(), true, &mut violations).unwrap();
+        assert!(!violations.is_empty());
+        assert!(violations.iter().any(|v| v.line_num == 1));
+    }
+
+    #[test]
+    fn scan_dir_skips_target_directory() {
+        let dir = TempDir::new().unwrap();
+        let target = dir.path().join("target");
+        std::fs::create_dir(&target).unwrap();
+        std::fs::write(target.join("gen.rs"), "#[coverage(off)]\nfn x() {}").unwrap();
+
+        let mut violations = Vec::new();
+        scan_dir(dir.path(), true, &mut violations).unwrap();
+        // Nothing found — target/ was skipped.
+        assert!(violations.is_empty());
+    }
+
+    #[test]
+    fn scan_dir_skips_hidden_directories() {
+        let dir = TempDir::new().unwrap();
+        let hidden = dir.path().join(".hidden");
+        std::fs::create_dir(&hidden).unwrap();
+        std::fs::write(hidden.join("secret.rs"), "#[coverage(off)]\nfn x() {}").unwrap();
+
+        let mut violations = Vec::new();
+        scan_dir(dir.path(), true, &mut violations).unwrap();
+        assert!(violations.is_empty());
+    }
+
+    #[test]
+    fn scan_dir_ignores_non_rs_files_in_rs_mode() {
+        let dir = TempDir::new().unwrap();
+        // A yaml file with a banned pattern should not trigger when scanning in RS mode.
+        std::fs::write(dir.path().join("ci.yml"), "cargo-tarpaulin").unwrap();
+
+        let mut violations = Vec::new();
+        scan_dir(dir.path(), true, &mut violations).unwrap();
+        assert!(violations.is_empty());
+    }
+
+    #[test]
+    fn scan_dir_skips_xtask_directory() {
+        let dir = TempDir::new().unwrap();
+        let xtask = dir.path().join("xtask");
+        std::fs::create_dir(&xtask).unwrap();
+        std::fs::write(xtask.join("main.rs"), "#[coverage(off)]\nfn x() {}").unwrap();
+
+        let mut violations = Vec::new();
+        scan_dir(dir.path(), true, &mut violations).unwrap();
+        // xtask/ should be skipped entirely.
+        assert!(violations.is_empty());
+    }
+
+    #[test]
+    fn scan_dir_with_extensionless_file_is_skipped() {
+        // A file with no extension (like LICENSE or Makefile) causes
+        // path.extension() to return None, so is_some_and(|e| e == "rs")
+        // returns false without calling the predicate.  This exercises the
+        // None-case branch of is_some_and (block=1, branch=3) at line 177.
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("LICENSE"), "#[coverage(off)]").unwrap();
+        let mut violations = Vec::new();
+        scan_dir(dir.path(), true, &mut violations).unwrap();
+        // Extensionless file must be ignored even if it contains banned text.
+        assert!(violations.is_empty());
+    }
+
+    #[test]
+    fn scan_dir_is_rs_false_short_circuits_extension_check() {
+        // Exercises BRDA:177,block=0,branch=1 — the `is_rs=false` short-circuit
+        // of `is_rs && path.extension().is_some_and(...)`.
+        // When is_rs=false the entire else-if is false without evaluating the
+        // extension predicate, so scan_file is never called even for .rs files.
+        let dir = TempDir::new().unwrap();
+        std::fs::write(dir.path().join("gen.rs"), "#[coverage(off)]\nfn x() {}").unwrap();
+        let mut violations = Vec::new();
+        scan_dir(dir.path(), false, &mut violations).unwrap();
+        assert!(
+            violations.is_empty(),
+            "is_rs=false should skip all files: {violations:?}"
+        );
+    }
+
+    // ── scan_dir error path ───────────────────────────────────────────────────
+
+    #[test]
+    fn scan_dir_returns_err_for_nonexistent_directory() {
+        // read_dir on a nonexistent path returns Err; scan_dir propagates it.
+        let mut violations = Vec::new();
+        let result = scan_dir(
+            Path::new("/tmp/no_such_directory_xyz_abc_123"),
+            true,
+            &mut violations,
+        );
+        assert!(
+            result.is_err(),
+            "scan_dir should fail on a missing directory"
+        );
+    }
+
+    // ── run_with_root ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn run_with_root_ok_on_empty_dir() {
+        let dir = TempDir::new().unwrap();
+        assert!(run_with_root(dir.path()).is_ok());
+    }
+
+    #[test]
+    fn run_with_root_propagates_scan_error_when_crates_is_a_file() {
+        // If "crates/" is a *file* instead of a directory, scan_dir will fail
+        // when it tries to read_dir(crates_file), and run_with_root propagates
+        // that error instead of panicking or swallowing it.
+        let dir = TempDir::new().unwrap();
+        // Create a plain file named "crates" so crates_dir.exists() is true
+        // but read_dir fails because it's not a directory.
+        std::fs::write(dir.path().join("crates"), "not a dir").unwrap();
+        let result = run_with_root(dir.path());
+        assert!(
+            result.is_err(),
+            "expected Err when crates is a file, got: {result:?}"
+        );
+    }
+}

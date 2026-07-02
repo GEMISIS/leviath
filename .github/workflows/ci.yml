@@ -19,8 +19,11 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: nightly-2026-01-15
+          components: rustfmt,clippy
       - uses: Swatinem/rust-cache@v2
       - name: Build
         run: cargo build --all-targets
@@ -31,51 +34,94 @@ jobs:
     name: Clippy
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
+          toolchain: nightly-2026-01-15
           components: clippy
       - uses: Swatinem/rust-cache@v2
       - name: Clippy
         run: cargo clippy --all-targets -- -D warnings
 
-  coverage:
-    name: Coverage
-    runs-on: ubuntu-latest
-    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
-    steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - name: Install cargo-tarpaulin
-        run: cargo install cargo-tarpaulin
-      - name: Generate coverage
-        run: cargo tarpaulin --workspace --out json --output-dir coverage
-      - name: Extract coverage percentage
-        id: cov
-        run: |
-          COV=$(python3 -c "import json; d=json.load(open('coverage/tarpaulin-report.json')); print(f\"{d['coverage']:.1f}\")")
-          echo "pct=$COV" >> "$GITHUB_OUTPUT"
-          echo "Coverage: $COV%"
-      - name: Update coverage badge
-        uses: schneegans/dynamic-badges-action@v1.7.0
-        with:
-          auth: ${{ secrets.GIST_TOKEN }}
-          gistID: ${{ vars.COVERAGE_GIST_ID }}
-          filename: leviath-coverage.json
-          label: coverage
-          message: ${{ steps.cov.outputs.pct }}%
-          valColorRange: ${{ steps.cov.outputs.pct }}
-          minColorRange: 50
-          maxColorRange: 90
-
   fmt:
     name: Format
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
+          toolchain: nightly-2026-01-15
           components: rustfmt
       - name: Check formatting
         run: cargo fmt --all -- --check
+
+  coverage:
+    name: Coverage (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: nightly-2026-01-15
+          components: llvm-tools-preview,rustfmt,clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Install cargo-llvm-cov
+        run: cargo install cargo-llvm-cov --locked
+      - name: Check coverage suppression markers
+        run: cargo xtask check-exclusions
+      - name: Enforce 100% coverage (regions / lines / functions / branches)
+        id: cov
+        run: cargo xtask coverage
+      # Update the four coverage badges — only from ubuntu on push to main.
+      - name: Update regions badge
+        if: matrix.os == 'ubuntu-latest' && github.ref == 'refs/heads/main' && github.event_name == 'push'
+        uses: schneegans/dynamic-badges-action@v1.7.0
+        with:
+          auth: ${{ secrets.GIST_TOKEN }}
+          gistID: ${{ vars.COVERAGE_GIST_ID }}
+          filename: leviath-coverage-regions.json
+          label: regions
+          message: ${{ steps.cov.outputs.regions }}%
+          valColorRange: ${{ steps.cov.outputs.regions }}
+          minColorRange: 50
+          maxColorRange: 100
+      - name: Update lines badge
+        if: matrix.os == 'ubuntu-latest' && github.ref == 'refs/heads/main' && github.event_name == 'push'
+        uses: schneegans/dynamic-badges-action@v1.7.0
+        with:
+          auth: ${{ secrets.GIST_TOKEN }}
+          gistID: ${{ vars.COVERAGE_GIST_ID }}
+          filename: leviath-coverage-lines.json
+          label: lines
+          message: ${{ steps.cov.outputs.lines }}%
+          valColorRange: ${{ steps.cov.outputs.lines }}
+          minColorRange: 50
+          maxColorRange: 100
+      - name: Update functions badge
+        if: matrix.os == 'ubuntu-latest' && github.ref == 'refs/heads/main' && github.event_name == 'push'
+        uses: schneegans/dynamic-badges-action@v1.7.0
+        with:
+          auth: ${{ secrets.GIST_TOKEN }}
+          gistID: ${{ vars.COVERAGE_GIST_ID }}
+          filename: leviath-coverage-functions.json
+          label: functions
+          message: ${{ steps.cov.outputs.functions }}%
+          valColorRange: ${{ steps.cov.outputs.functions }}
+          minColorRange: 50
+          maxColorRange: 100
+      - name: Update branches badge
+        if: matrix.os == 'ubuntu-latest' && github.ref == 'refs/heads/main' && github.event_name == 'push'
+        uses: schneegans/dynamic-badges-action@v1.7.0
+        with:
+          auth: ${{ secrets.GIST_TOKEN }}
+          gistID: ${{ vars.COVERAGE_GIST_ID }}
+          filename: leviath-coverage-branches.json
+          label: branches
+          message: ${{ steps.cov.outputs.branches }}%
+          valColorRange: ${{ steps.cov.outputs.branches }}
+          minColorRange: 50
+          maxColorRange: 100

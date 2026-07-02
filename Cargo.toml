@@ -9,6 +9,7 @@ members = [
     "crates/leviath-package",
     "crates/leviath-cli",
     "crates/leviath-tools",
+    "xtask",
 ]
 
 [workspace.package]
