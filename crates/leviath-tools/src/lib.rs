@@ -348,7 +348,6 @@ impl BuiltinTools {
                         anyhow::bail!("path '{}' escapes the working directory", requested);
                     }
                 }
-                Component::CurDir => {}
                 c => normalized.push(c),
             }
         }
@@ -392,13 +391,16 @@ impl BuiltinTools {
             Err(e) => return format!("[error] {}", e),
         };
 
-        if let Some(parent) = path.parent() {
-            if let Err(e) = std::fs::create_dir_all(parent) {
-                return format!(
-                    "[error] Failed to create directories for '{}': {}",
-                    path_str, e
-                );
-            }
+        let parent = {
+            let mut p = path.clone();
+            p.pop();
+            p
+        };
+        if let Err(e) = std::fs::create_dir_all(&parent) {
+            return format!(
+                "[error] Failed to create directories for '{}': {}",
+                path_str, e
+            );
         }
 
         match std::fs::write(&path, content) {
@@ -503,32 +505,36 @@ impl BuiltinTools {
 
         #[cfg(not(windows))]
         {
-            // Check user's preferred shell first
-            if let Ok(shell) = std::env::var("SHELL") {
-                if shell.ends_with("/zsh") || shell.ends_with("/bash") || shell.ends_with("/sh") {
-                    // Leak the string so we can return a static ref — this only runs once per detect
-                    // and the shell path lives for the process lifetime anyway
-                    let shell: &'static str = Box::leak(shell.into_boxed_str());
-                    return (shell, "-c");
-                }
-            }
-
-            // Fallback: try common shells in order
-            for shell in &[
-                "/bin/bash",
-                "/usr/bin/bash",
-                "/bin/zsh",
-                "/usr/bin/zsh",
-                "/bin/sh",
-            ] {
-                if std::path::Path::new(shell).exists() {
-                    return (shell, "-c");
-                }
-            }
-
-            // Last resort
-            ("sh", "-c")
+            Self::detect_shell_impl(std::env::var("SHELL").ok(), |s| {
+                std::path::Path::new(s).exists()
+            })
         }
+    }
+
+    /// Core shell-detection logic with injectable env and filesystem checks for testing.
+    #[cfg(not(windows))]
+    fn detect_shell_impl(
+        env_shell: Option<String>,
+        shell_exists: impl Fn(&str) -> bool,
+    ) -> (&'static str, &'static str) {
+        if let Some(shell) = env_shell {
+            if shell.ends_with("/zsh") || shell.ends_with("/bash") || shell.ends_with("/sh") {
+                let shell: &'static str = Box::leak(shell.into_boxed_str());
+                return (shell, "-c");
+            }
+        }
+        for &shell in &[
+            "/bin/bash",
+            "/usr/bin/bash",
+            "/bin/zsh",
+            "/usr/bin/zsh",
+            "/bin/sh",
+        ] {
+            if shell_exists(shell) {
+                return (shell, "-c");
+            }
+        }
+        ("sh", "-c")
     }
 
     async fn shell(&self, args: &Value) -> String {
@@ -1245,54 +1251,100 @@ mod tests {
 
     // ── detect_shell ──────────────────────────────────────────────────────
 
+    // Serialize tests that read or write $SHELL to prevent races.
+    #[cfg(not(windows))]
+    static SHELL_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn detect_shell_returns_valid_shell() {
+        #[cfg(not(windows))]
+        let _g = SHELL_ENV_LOCK.lock().unwrap();
         let (shell, flag) = BuiltinTools::detect_shell();
         assert!(!shell.is_empty());
         assert!(!flag.is_empty());
-        // On unix, flag should be "-c"
         #[cfg(not(windows))]
         assert_eq!(flag, "-c");
     }
 
-    // `detect_shell` is the only reader of `$SHELL` in this crate, but the
-    // env var is still process-global -- serialize any test that overrides
-    // it so a concurrently-running `detect_shell_returns_valid_shell` (which
-    // relies on the real, unmodified `$SHELL`) can't observe a torn value.
+    /// Forces `detect_shell()` to exercise the real `shell_exists` closure by
+    /// temporarily setting $SHELL to an unrecognized path, causing the candidate
+    /// loop (and the closure) to be reached.
     #[cfg(not(windows))]
-    static SHELL_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    #[test]
+    fn detect_shell_queries_real_filesystem_for_unrecognized_shell() {
+        let _g = SHELL_ENV_LOCK.lock().unwrap();
+        unsafe {
+            std::env::set_var("SHELL", "/opt/not-a-recognized-shell");
+        }
+        let (shell, flag) = BuiltinTools::detect_shell();
+        // Restore: set SHELL to the found shell (always a valid shell on Unix)
+        unsafe {
+            std::env::set_var("SHELL", shell);
+        }
+        assert_eq!(flag, "-c");
+        assert!([
+            "/bin/bash",
+            "/usr/bin/bash",
+            "/bin/zsh",
+            "/usr/bin/zsh",
+            "/bin/sh"
+        ]
+        .contains(&shell));
+    }
+
+    // ── detect_shell_impl() — inject env and filesystem for full branch coverage ──
 
     #[cfg(not(windows))]
     #[test]
-    fn detect_shell_falls_back_to_common_shells_when_shell_env_unrecognized() {
-        let _lock = SHELL_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let original = std::env::var_os("SHELL");
-        // Doesn't end in /zsh, /bash, or /sh -- skips the $SHELL fast path
-        // and falls into the "try common shells in order" loop, which finds
-        // whichever of /bin/bash, /usr/bin/bash, /bin/zsh, /usr/bin/zsh,
-        // /bin/sh actually exists on this machine (always true on any real
-        // Unix system, including every CI runner).
-        unsafe {
-            std::env::set_var("SHELL", "/opt/definitely-not-a-recognized-shell");
-        }
-        let (shell, flag) = BuiltinTools::detect_shell();
+    fn detect_shell_impl_returns_zsh_from_env() {
+        let (shell, flag) =
+            BuiltinTools::detect_shell_impl(Some("/usr/local/bin/zsh".to_string()), |_| false);
+        assert_eq!(shell, "/usr/local/bin/zsh");
         assert_eq!(flag, "-c");
-        assert!(
-            [
-                "/bin/bash",
-                "/usr/bin/bash",
-                "/bin/zsh",
-                "/usr/bin/zsh",
-                "/bin/sh"
-            ]
-            .contains(&shell),
-            "expected a fallback candidate, got {shell}"
-        );
-        unsafe {
-            match original {
-                Some(v) => std::env::set_var("SHELL", v),
-                None => std::env::remove_var("SHELL"),
-            }
-        }
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn detect_shell_impl_returns_bash_from_env() {
+        let (shell, flag) =
+            BuiltinTools::detect_shell_impl(Some("/usr/local/bin/bash".to_string()), |_| false);
+        assert_eq!(shell, "/usr/local/bin/bash");
+        assert_eq!(flag, "-c");
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn detect_shell_impl_returns_sh_from_env() {
+        let (shell, flag) =
+            BuiltinTools::detect_shell_impl(Some("/usr/bin/sh".to_string()), |_| false);
+        assert_eq!(shell, "/usr/bin/sh");
+        assert_eq!(flag, "-c");
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn detect_shell_impl_falls_through_when_env_unrecognized() {
+        // /opt/fish doesn't end with /zsh, /bash, or /sh → falls to candidate loop
+        let (shell, flag) =
+            BuiltinTools::detect_shell_impl(Some("/opt/fish".to_string()), |s| s == "/bin/bash");
+        assert_eq!(shell, "/bin/bash");
+        assert_eq!(flag, "-c");
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn detect_shell_impl_skips_missing_candidates_and_finds_zsh() {
+        // bash paths return false; /bin/zsh exists — covers shell_exists false branch
+        let (shell, flag) = BuiltinTools::detect_shell_impl(None, |s| s == "/bin/zsh");
+        assert_eq!(shell, "/bin/zsh");
+        assert_eq!(flag, "-c");
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn detect_shell_impl_returns_last_resort_when_nothing_exists() {
+        let (shell, flag) = BuiltinTools::detect_shell_impl(None, |_| false);
+        assert_eq!(shell, "sh");
+        assert_eq!(flag, "-c");
     }
 }

@@ -205,7 +205,10 @@ mod tests {
         let script = "this is not valid rhai {{{";
         let result = engine.transform(script, input);
         assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), Error::ExecutionFailed(_)));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .starts_with("Script execution failed:"));
     }
 
     #[test]
@@ -239,7 +242,10 @@ mod tests {
 
         let result = engine.execute("undefined_function_call()", &mut scope);
         assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), Error::ExecutionFailed(_)));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .starts_with("Script execution failed:"));
     }
 
     #[test]
