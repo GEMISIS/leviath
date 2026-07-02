@@ -1080,4 +1080,26 @@ mod tests {
             _ => panic!("expected RequestFailed"),
         }
     }
+
+    #[tokio::test]
+    async fn infer_stream_invalid_utf8_output_yields_read_error() {
+        // tokio's `Lines::poll_next_line` requires valid UTF-8 (like
+        // `std::io::BufRead::read_line`) -- a raw invalid byte sequence on
+        // stdout surfaces as a genuine `io::Error`, exercising
+        // `ClaudeCodeStream::poll_next`'s `Poll::Ready(Err(e))` arm.
+        let script = write_stub_script("stream-badutf8", "printf '\\xff\\xfe\\n'\n");
+        let provider = ClaudeCodeProvider::with_binary_path(script.to_str().unwrap().to_string());
+        let mut stream = provider.infer_stream(make_request()).await.unwrap();
+        use tokio_stream::StreamExt;
+        let err = stream
+            .next()
+            .await
+            .expect("stream should yield an item")
+            .expect_err("expected a read error from invalid UTF-8");
+        assert!(matches!(err, ProviderError::RequestFailed(_)));
+        assert!(err
+            .to_string()
+            .contains("Failed to read Claude Code output"));
+        let _ = std::fs::remove_file(&script);
+    }
 }

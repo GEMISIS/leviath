@@ -695,6 +695,54 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn poll_once_webhook_send_failure_is_logged_not_panicked() {
+        // Points callback_url at a closed local port so the spawned webhook
+        // task's `client.post(&url)...send().await` genuinely fails,
+        // exercising the `Err(e) => error!(...)` arm -- previously
+        // unreached since the only other webhook test uses a real,
+        // responding mock server.
+        use crate::runstate::{RunMeta, RunStatus};
+
+        let (state, mut evt_rx) = make_test_state();
+        let mut poll = PollState {
+            last_status: HashMap::new(),
+            last_context_tokens: HashMap::new(),
+            last_pending: HashMap::new(),
+            callback_fired: HashMap::new(),
+        };
+        let client = reqwest::Client::new();
+
+        let mut meta = RunMeta::new(
+            "run-webhook-fail".into(),
+            "agent".into(),
+            "/p".into(),
+            "task".into(),
+            None,
+            "/tmp".into(),
+            1,
+        );
+        meta.callback_url = Some("http://127.0.0.1:19997".to_string());
+        meta.status = RunStatus::Running;
+        poll_once(&state, &mut poll, &client, &[meta.clone()]);
+        while evt_rx.try_recv().is_ok() {}
+
+        meta.status = RunStatus::Complete;
+        meta.touch();
+        poll_once(&state, &mut poll, &client, &[meta]);
+
+        // callback_fired is recorded synchronously, before the (failing)
+        // webhook send is even attempted.
+        assert!(poll
+            .callback_fired
+            .get("run-webhook-fail")
+            .copied()
+            .unwrap_or(false));
+
+        // Give the spawned task time to attempt the connection and fail.
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    }
+
+    #[tokio::test]
     async fn poll_once_does_not_refire_callback_on_repeated_completion() {
         use crate::runstate::{RunMeta, RunStatus};
 
