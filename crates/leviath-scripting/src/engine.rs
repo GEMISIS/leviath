@@ -242,6 +242,19 @@ mod tests {
         assert!(matches!(result.unwrap_err(), Error::ExecutionFailed(_)));
     }
 
+    #[test]
+    fn test_print_and_debug_statements_invoke_noop_callbacks() {
+        // `print`/`debug` are wired to no-op closures in `new()` to prevent
+        // data leakage from sandboxed scripts; a script that never calls
+        // them leaves those closures registered but never invoked. This
+        // exercises both, proving the sandbox tolerates (and silently
+        // discards) print/debug output instead of erroring.
+        let engine = ScriptEngine::new();
+        let mut scope = Scope::new();
+        let result = engine.execute(r#"print("hello"); debug("world"); true"#, &mut scope);
+        assert!(result.unwrap().as_bool().unwrap());
+    }
+
     // ─── Default ────────────────────────────────────────────────────────────
 
     #[test]

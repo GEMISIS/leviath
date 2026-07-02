@@ -802,6 +802,45 @@ mod tests {
     }
 
     #[test]
+    fn draw_graph_view_stale_active_stage_on_done_run_renders_success_color() {
+        // A non-current stage still marked Active in its stage record, on a
+        // run whose overall status is Complete, hits the
+        // `StageRunStatus::Active if run_done => C_SUCCESS` arm (as opposed
+        // to the live `StageRunStatus::Active => C_ACCENT` arm, which only
+        // applies while the run is still going).
+        let backend = TestBackend::new(120, 10);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let dash = make_test_dashboard();
+        let mut agent = make_test_agent("run-stale-active-done", AgentDisplayStatus::Complete);
+        agent.stage = "plan".to_string();
+        agent.stages = vec![
+            make_stage_record("plan", StageRunStatus::Complete),
+            make_stage_record("implement", StageRunStatus::Active),
+        ];
+        let mut edges = HashMap::new();
+        edges.insert(
+            "plan".to_string(),
+            vec![GraphEdge {
+                target: "implement".to_string(),
+                hint: None,
+                condition: "always".to_string(),
+                transform: "replace".to_string(),
+            }],
+        );
+        let graph = GraphTransitionInfo {
+            edges,
+            entry_stage: "plan".to_string(),
+            stage_names: vec!["plan".to_string(), "implement".to_string()],
+        };
+        terminal
+            .draw(|f| {
+                let area = Rect::new(0, 0, 120, 7);
+                dash.draw_graph_view(f, area, &agent, &graph);
+            })
+            .unwrap();
+    }
+
+    #[test]
     fn draw_graph_view_no_visible_stages_shows_placeholder() {
         // No stage records, no reachable stages, and an entry_stage that
         // isn't in stage_names at all -> visible_stages ends up empty.
