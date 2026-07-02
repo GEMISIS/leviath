@@ -559,7 +559,7 @@ mod tests {
         // name).
         let _lock = crate::config::PATH_ENV_LOCK
             .lock()
-            .unwrap_or_else(|e| e.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         // Starve PATH so `Command::new("pbcopy"/"xclip"/"wl-copy").spawn()`
         // fails with NotFound for all three -- the `if let Ok(mut child) = `
         // guard is simply false each time (no external process is ever

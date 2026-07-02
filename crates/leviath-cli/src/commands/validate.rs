@@ -129,14 +129,8 @@ fn execute_reporting_outcome(args: &ValidateArgs) -> anyhow::Result<ValidateOutc
 pub async fn execute(args: ValidateArgs) -> anyhow::Result<()> {
     match execute_reporting_outcome(&args)? {
         ValidateOutcome::Success => Ok(()),
-        ValidateOutcome::ParseError(e) => {
-            eprintln!("✗ Parse error: {}", e);
-            std::process::exit(1);
-        }
-        ValidateOutcome::ValidationError(e) => {
-            eprintln!("✗ Validation failed: {}", e);
-            std::process::exit(1);
-        }
+        ValidateOutcome::ParseError(e) => anyhow::bail!("✗ Parse error: {}", e),
+        ValidateOutcome::ValidationError(e) => anyhow::bail!("✗ Validation failed: {}", e),
     }
 }
 
@@ -494,6 +488,49 @@ a = "true"
         // Hits the cycle-check loop's `find_stage(target) else { continue }`
         // arm: "ghost" is a transition target but not a real stage.
         print_warnings(&bp);
+    }
+
+    // ─── execute: parse and validation error arms ──────────────────────────
+    //
+    // These call execute() directly (not execute_reporting_outcome) so the
+    // ParseError and ValidationError match arms in execute() are exercised.
+
+    #[tokio::test]
+    async fn execute_parse_error_returns_error() {
+        let dir = tempfile::tempdir().unwrap();
+        write_manifest(dir.path(), "not valid toml [[[");
+        let args = ValidateArgs {
+            path: dir.path().to_str().unwrap().to_string(),
+        };
+        let err = execute(args).await.unwrap_err();
+        assert!(err.to_string().contains("Parse error"));
+    }
+
+    #[tokio::test]
+    async fn execute_validation_error_returns_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = r#"
+[agent]
+name = "bad-entry-agent"
+version = "0.1.0"
+description = "Entry stage does not exist"
+entry_stage = "does-not-exist"
+
+[stages.main]
+mode = "autonomous"
+model = { provider = "anthropic", model = "claude-sonnet-4-6" }
+description = "Main"
+max_iterations = 5
+
+[context.regions]
+system = { kind = "pinned", max_tokens = 1000 }
+"#;
+        write_manifest(dir.path(), manifest);
+        let args = ValidateArgs {
+            path: dir.path().to_str().unwrap().to_string(),
+        };
+        let err = execute(args).await.unwrap_err();
+        assert!(err.to_string().contains("Validation failed"));
     }
 
     // ─── execute: no manifest ──────────────────────────────────────────

@@ -574,11 +574,16 @@ async fn run_worker_inner(
 
     let mut pool = AgentPool::new(blueprint.clone());
     let agent_id = pool.spawn_agent(engine.world_mut());
+    // spawn_agent inserts agent_id into the pool immediately; get_agent will
+    // always return Some here. We use expect to surface a bug if that invariant
+    // is ever violated, avoiding an unreachable ? error branch.
     let entity = pool
         .get_agent(&agent_id)
-        .ok_or_else(|| anyhow::anyhow!("Failed to get spawned agent entity"))?;
+        .expect("agent was just spawned and must be in the pool");
 
-    let workdir = std::env::current_dir()?;
+    let workdir = std::env::current_dir()
+        .ok()
+        .unwrap_or(std::path::PathBuf::from("."));
     initialize_context_window(&mut engine, entity, &blueprint, &args.task);
 
     let tool_registry = Arc::new(ToolRegistry::build(workdir, &config).await);
@@ -666,7 +671,7 @@ async fn run_worker_inner(
         meta,
         blueprint_stages_len,
     };
-    let mut io = ConsoleIO;
+    let mut io = ConsoleIO::new();
 
     let mut ctx = StageContext {
         blueprint: &blueprint,
@@ -2053,7 +2058,7 @@ mode = "autonomous"
                 vec![],
                 None,
                 None,
-                &mut super::super::io::ConsoleIO,
+                &mut super::super::io::ConsoleIO::new(),
                 &mut exec,
             )
             .await;

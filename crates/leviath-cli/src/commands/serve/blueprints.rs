@@ -33,21 +33,15 @@ pub(super) fn discover_blueprints(config: &crate::config::Config) -> Vec<Bluepri
         // Check dir itself
         let manifest = dir.join("agent.leviath");
         if manifest.exists() {
-            if let Some(info) = read_blueprint_info(&manifest, &dir) {
-                results.push(info);
-            }
+            results.extend(read_blueprint_info(&manifest, &dir));
         }
         // Check subdirs
-        if let Ok(entries) = std::fs::read_dir(&dir) {
-            for entry in entries.flatten() {
-                let p = entry.path();
-                if p.is_dir() {
-                    let m = p.join("agent.leviath");
-                    if m.exists() {
-                        if let Some(info) = read_blueprint_info(&m, &p) {
-                            results.push(info);
-                        }
-                    }
+        for entry in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
+            let p = entry.path();
+            if p.is_dir() {
+                let m = p.join("agent.leviath");
+                if m.exists() {
+                    results.extend(read_blueprint_info(&m, &p));
                 }
             }
         }

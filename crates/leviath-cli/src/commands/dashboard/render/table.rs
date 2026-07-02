@@ -855,6 +855,18 @@ mod tests {
     }
 
     #[test]
+    fn build_main_list_help_bar_selected_complete_no_kill() {
+        let mut dash = make_test_dashboard();
+        dash.agents
+            .push(make_test_agent("run-done", AgentDisplayStatus::Complete));
+        dash.update_display_indices();
+        let line = dash.build_main_list_help_bar();
+        let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(text.contains("select"));
+        assert!(!text.contains("kill"));
+    }
+
+    #[test]
     fn build_detail_help_bar_with_accepts_messages() {
         let mut dash = make_test_dashboard();
         let mut agent = make_test_agent("run-msg", AgentDisplayStatus::Active);

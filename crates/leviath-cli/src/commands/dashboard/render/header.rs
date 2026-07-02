@@ -396,9 +396,8 @@ mod tests {
         let mut terminal = Terminal::new(backend).unwrap();
         let dash = make_test_dashboard();
         let mut agent = make_test_agent("run-home", AgentDisplayStatus::Active);
-        if let Some(home) = dirs::home_dir() {
-            agent.workdir = format!("{}/projects/test", home.to_string_lossy());
-        }
+        let home = dirs::home_dir().unwrap_or(std::path::PathBuf::from("/home/user"));
+        agent.workdir = format!("{}/projects/test", home.to_string_lossy());
         terminal
             .draw(|f| {
                 let area = Rect::new(0, 0, 120, 4);

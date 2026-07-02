@@ -62,7 +62,7 @@ pub trait RunIO: Send {
 /// implementation). Generic over `R` (rather than hardcoding real stdin)
 /// purely so tests can drive it with an in-memory reader instead of blocking
 /// on real process stdin.
-fn get_user_input_from_reader(reader: &mut impl std::io::BufRead) -> Option<String> {
+fn get_user_input_from_reader<R: std::io::BufRead + ?Sized>(reader: &mut R) -> Option<String> {
     let mut buf = String::new();
     reader.read_line(&mut buf).ok()?;
     Some(buf.trim().to_string())
@@ -70,7 +70,30 @@ fn get_user_input_from_reader(reader: &mut impl std::io::BufRead) -> Option<Stri
 
 /// Console I/O implementation: prints to stdout, reads from stdin.
 /// Used by both foreground and worker modes at runtime.
-pub struct ConsoleIO;
+pub struct ConsoleIO {
+    reader: Box<dyn std::io::BufRead + Send>,
+}
+
+impl ConsoleIO {
+    pub fn new() -> Self {
+        Self {
+            reader: Box::new(std::io::BufReader::new(std::io::stdin())),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_reader(r: impl std::io::BufRead + Send + 'static) -> Self {
+        Self {
+            reader: Box::new(r),
+        }
+    }
+}
+
+impl Default for ConsoleIO {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 #[async_trait]
 impl RunIO for ConsoleIO {
@@ -103,17 +126,12 @@ impl RunIO for ConsoleIO {
 
     async fn on_tool_call(&mut self, _tool_name: &str, _tool_id: &str, _result: &str) {}
 
-    // This thin wrapper (real stdin lock + prompt printing) is intentionally
-    // not driven by a test: doing so would block on real process stdin,
-    // which is a TTY (not EOF) when tests run from an interactive terminal.
-    // The actual line-reading logic is fully covered via
-    // `get_user_input_from_reader` with an in-memory reader below.
     async fn get_user_input(&mut self, prompt: &str) -> Option<String> {
         use std::io::Write;
         println!("{}", prompt);
         print!("You: ");
         std::io::stdout().flush().ok();
-        get_user_input_from_reader(&mut std::io::stdin().lock())
+        get_user_input_from_reader(&mut *self.reader)
     }
 
     async fn on_error(&mut self, error: &str) {
@@ -144,14 +162,14 @@ mod console_io_tests {
 
     #[tokio::test]
     async fn console_io_on_stage_enter_is_noop() {
-        let mut io = ConsoleIO;
+        let mut io = ConsoleIO::new();
         let stage = make_stage("main");
         io.on_stage_enter(&stage, 0, "anthropic", "claude").await;
     }
 
     #[tokio::test]
     async fn console_io_on_stage_complete_is_noop() {
-        let mut io = ConsoleIO;
+        let mut io = ConsoleIO::new();
         io.on_stage_complete("main", &StageResult::Success, Some("next"))
             .await;
         io.on_stage_complete("final", &StageResult::MaxIterations, None)
@@ -160,43 +178,43 @@ mod console_io_tests {
 
     #[tokio::test]
     async fn console_io_on_output_prints_and_flushes() {
-        let mut io = ConsoleIO;
+        let mut io = ConsoleIO::new();
         io.on_output("hello").await;
     }
 
     #[tokio::test]
     async fn console_io_on_tokens_prints() {
-        let mut io = ConsoleIO;
+        let mut io = ConsoleIO::new();
         io.on_tokens(100, 50, 25).await;
     }
 
     #[tokio::test]
     async fn console_io_on_tool_call_is_noop() {
-        let mut io = ConsoleIO;
+        let mut io = ConsoleIO::new();
         io.on_tool_call("read_file", "tc-1", "contents").await;
     }
 
     #[tokio::test]
     async fn console_io_on_error_prints_to_stderr() {
-        let mut io = ConsoleIO;
+        let mut io = ConsoleIO::new();
         io.on_error("something broke").await;
     }
 
     #[tokio::test]
     async fn console_io_on_provider_missing_is_noop() {
-        let mut io = ConsoleIO;
+        let mut io = ConsoleIO::new();
         io.on_provider_missing("anthropic").await;
     }
 
     #[test]
     fn console_io_is_not_background() {
-        let io = ConsoleIO;
+        let io = ConsoleIO::new();
         assert!(!io.is_background());
     }
 
     #[test]
     fn console_io_write_context_snapshot_is_noop() {
-        let mut io = ConsoleIO;
+        let mut io = ConsoleIO::new();
         let snapshot = RegionSnapshot {
             name: "conversation".to_string(),
             kind: "sliding".to_string(),
@@ -205,6 +223,32 @@ mod console_io_tests {
             entries: vec![],
         };
         io.write_context_snapshot(&snapshot);
+    }
+
+    struct ErrorReader;
+    impl std::io::Read for ErrorReader {
+        fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+            Err(std::io::Error::new(std::io::ErrorKind::BrokenPipe, "test"))
+        }
+    }
+    impl std::io::BufRead for ErrorReader {
+        fn fill_buf(&mut self) -> std::io::Result<&[u8]> {
+            Err(std::io::Error::new(std::io::ErrorKind::BrokenPipe, "test"))
+        }
+        fn consume(&mut self, _: usize) {}
+    }
+
+    #[test]
+    fn get_user_input_from_reader_read_error_returns_none() {
+        let mut reader = ErrorReader;
+        assert_eq!(get_user_input_from_reader(&mut reader), None);
+    }
+
+    #[tokio::test]
+    async fn console_io_get_user_input_reads_from_injected_reader() {
+        let mut io = ConsoleIO::with_reader(std::io::Cursor::new(b"hello world\n".to_vec()));
+        let result = io.get_user_input("Enter:").await;
+        assert_eq!(result, Some("hello world".to_string()));
     }
 
     #[test]

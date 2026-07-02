@@ -170,6 +170,28 @@ impl Renderer {
             .push(Span::styled(text.to_owned(), style));
     }
 
+    /// Handle a non-code-block text payload, splitting on embedded newlines if
+    /// present. Factored out so the newline-split path can be exercised in
+    /// tests directly (pulldown_cmark never produces a non-code Text event with
+    /// a literal `\n` under current Options, so this path is unreachable via
+    /// the parser alone).
+    fn handle_text_content(&mut self, t: &str) {
+        if t.contains('\n') {
+            let mut first = true;
+            for part in t.split('\n') {
+                if !first {
+                    self.flush_line();
+                }
+                first = false;
+                if !part.is_empty() {
+                    self.emit_text(part);
+                }
+            }
+        } else {
+            self.emit_text(t);
+        }
+    }
+
     /// Render a complete code block (fenced or mermaid).
     fn flush_code_block(&mut self) {
         let lang = self.code_lang.take().unwrap_or_default();
@@ -310,9 +332,8 @@ impl Renderer {
                     }
                     let indent = self.list_indent();
                     let bullet = match self.list_stack.last() {
-                        Some(None) => "● ".to_string(),
                         Some(Some(n)) => format!("{}. ", n),
-                        None => "● ".to_string(),
+                        Some(None) | None => "● ".to_string(),
                     };
                     // Increment ordered list counter
                     if let Some(Some(ref mut n)) = self.list_stack.last_mut() {
@@ -418,20 +439,7 @@ impl Renderer {
                         }
                     } else {
                         let t = text.into_string();
-                        if t.contains('\n') {
-                            let mut first = true;
-                            for part in t.split('\n') {
-                                if !first {
-                                    self.flush_line();
-                                }
-                                first = false;
-                                if !part.is_empty() {
-                                    self.emit_text(part);
-                                }
-                            }
-                        } else {
-                            self.emit_text(&t);
-                        }
+                        self.handle_text_content(&t);
                     }
                 }
 

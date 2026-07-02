@@ -16,7 +16,7 @@ pub struct CreateArgs {
 }
 
 pub async fn execute(args: CreateArgs) -> anyhow::Result<()> {
-    tracing::info!(name = %args.name, template = %args.template, "Creating agent blueprint");
+    tracing::info!("Creating agent blueprint");
 
     let blueprint_dir = Path::new(&args.name);
 
@@ -179,8 +179,8 @@ mod tests {
         let name = r"C:\Users\RUNNER~1\AppData\Local\Temp\.tmpmAlPt3\default-template-agent";
         for template in ["software-engineer", "coder", "researcher"] {
             let manifest = create_manifest(name, template);
-            let parsed: toml::Value = toml::from_str(&manifest)
-                .unwrap_or_else(|e| panic!("template {template} produced invalid TOML: {e}"));
+            let parsed: toml::Value =
+                toml::from_str(&manifest).expect("template produced invalid TOML");
             let agent = parsed.get("agent").unwrap();
             assert_eq!(agent.get("name").unwrap().as_str().unwrap(), name);
         }

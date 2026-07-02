@@ -25,18 +25,19 @@ pub(super) async fn get_models(State(state): State<AppState>) -> Json<Vec<ModelE
     let mut models = Vec::new();
 
     for provider_name in registry.provider_names() {
-        if let Some(provider) = registry.get(provider_name) {
-            if let Ok(list) = provider.list_models().await {
-                for m in list {
-                    models.push(ModelEntry {
-                        id: m.id,
-                        provider: m.provider,
-                        display_name: m.display_name,
-                        max_context_tokens: m.capabilities.max_context_tokens,
-                        max_output_tokens: m.capabilities.max_output_tokens,
-                        supports_tools: m.capabilities.supports_tools,
-                    });
-                }
+        let provider = registry
+            .get(provider_name)
+            .expect("provider_names returns registered names");
+        if let Ok(list) = provider.list_models().await {
+            for m in list {
+                models.push(ModelEntry {
+                    id: m.id,
+                    provider: m.provider,
+                    display_name: m.display_name,
+                    max_context_tokens: m.capabilities.max_context_tokens,
+                    max_output_tokens: m.capabilities.max_output_tokens,
+                    supports_tools: m.capabilities.supports_tools,
+                });
             }
         }
     }

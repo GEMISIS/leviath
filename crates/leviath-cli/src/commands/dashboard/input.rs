@@ -560,21 +560,13 @@ impl Dashboard {
                 }
                 InteractionKind::MultipleChoice => {
                     let idx = self.choice_selected;
-                    let label = r
-                        .options
-                        .get(idx)
-                        .cloned()
-                        .unwrap_or_else(|| idx.to_string());
+                    let label = r.options.get(idx).cloned().unwrap_or(idx.to_string());
                     let d = truncate(&label, 40);
                     (InteractionResponse::choice(&r.id, idx), d)
                 }
                 InteractionKind::ToolApproval => {
                     let idx = self.choice_selected;
-                    let label = r
-                        .options
-                        .get(idx)
-                        .cloned()
-                        .unwrap_or_else(|| idx.to_string());
+                    let label = r.options.get(idx).cloned().unwrap_or(idx.to_string());
                     let d = truncate(&label, 40);
                     let (approved, scope) = match idx {
                         0 => (true, ApprovalScope::Once),

@@ -445,7 +445,7 @@ impl Drop for ConfigPathTestGuard {
 pub(crate) fn isolate_config_path_for_test(unique: &str) -> ConfigPathTestGuard {
     let lock = CONFIG_PATH_ENV_LOCK
         .lock()
-        .unwrap_or_else(|e| e.into_inner());
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let original_config_path = std::env::var_os("LEVIATH_CONFIG_PATH");
     let original_skip_dotenv = std::env::var_os("LEVIATH_SKIP_DOTENV");
     let original_keys: Vec<_> = PROVIDER_KEY_ENV_VARS
@@ -554,7 +554,7 @@ mod tests {
         // in the crate can't be mid-set when we read them.
         let _lock = CONFIG_PATH_ENV_LOCK
             .lock()
-            .unwrap_or_else(|e| e.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let saved: Vec<_> = PROVIDER_KEY_ENV_VARS
             .iter()
             .chain(["OLLAMA_HOST"].iter())
@@ -1193,7 +1193,7 @@ max_output_tokens = 2048
         // when we read the real default here.
         let _lock = CONFIG_PATH_ENV_LOCK
             .lock()
-            .unwrap_or_else(|e| e.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let path = Config::config_path();
         assert!(path.to_str().unwrap().contains(".leviath"));
         assert!(path.to_str().unwrap().ends_with("config.toml"));
@@ -1211,7 +1211,7 @@ max_output_tokens = 2048
         // observe or clobber the sentinel values in between.
         let lock = CONFIG_PATH_ENV_LOCK
             .lock()
-            .unwrap_or_else(|e| e.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         std::env::set_var("LEVIATH_CONFIG_PATH", "/sentinel/config-path");
         std::env::set_var("LEVIATH_SKIP_DOTENV", "sentinel-value");
 

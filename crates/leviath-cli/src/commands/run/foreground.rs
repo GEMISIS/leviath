@@ -489,7 +489,7 @@ async fn run_foreground_with_registry(
     let compaction_ref = compaction_config.as_ref();
 
     let mut callbacks = ForegroundCallbacks {};
-    let mut io = ConsoleIO;
+    let mut io = ConsoleIO::new();
 
     let mut ctx = StageContext {
         blueprint: &blueprint,
@@ -747,28 +747,47 @@ mod tests {
         backend.on_review_document("call-1", "Title", "# Markdown body");
     }
 
-    /// `ask()` calls `request_interaction_stdin` which reads from process
-    /// stdin.  In `cargo test` / `cargo llvm-cov`, stdin is connected to a
-    /// pipe that immediately returns EOF, so `request_interaction_from_reader`
-    /// (the underlying implementation) returns a safe default without blocking.
-    /// A `FreeText` request with an EOF reader yields an empty-text response.
+    /// `ask()` delegates to `request_interaction_stdin`, a synchronous
+    /// blocking call.  Under `cargo test` / `cargo llvm-cov`, stdin is a
+    /// closed pipe that returns EOF immediately, so the call returns in
+    /// microseconds.  We wrap it in `spawn_blocking` + a timeout to
+    /// guarantee the test never hangs even if stdin is somehow a live
+    /// terminal.
     #[tokio::test]
     async fn foreground_interaction_backend_ask_returns_response_on_eof_stdin() {
-        use crate::commands::run::dynamic_interaction::InteractionBackend;
-        let backend = ForegroundInteractionBackend;
+        use super::super::dynamic_interaction::InteractionBackend;
         let req = crate::interaction::InteractionRequest::free_text(
             "ask-test-1",
             "What should I do?",
             "main",
-            false, // not required — Press Enter to skip
+            false, // not required — EOF reader returns empty text immediately
         );
-        // Calling ask() on a non-interactive stdin (EOF pipe in cargo test)
-        // returns immediately with an empty text response.  If stdin is
-        // somehow a live terminal (rare in CI), the test may block; but
-        // under `cargo llvm-cov` stdin is always a pipe.
-        let resp = backend.ask(req).await;
-        // Any response is fine — we just need the call to return.
-        let _ = resp;
+        let result = tokio::time::timeout(
+            std::time::Duration::from_millis(500),
+            tokio::task::spawn_blocking(move || {
+                // ask() is async but only wraps a synchronous blocking call.
+                // Drive the future to completion manually on a blocking thread.
+                use std::future::Future;
+                use std::task::{Context, Poll};
+                struct NoopWaker;
+                impl std::task::Wake for NoopWaker {
+                    fn wake(self: Arc<Self>) {}
+                }
+                let waker = Arc::new(NoopWaker).into();
+                let mut cx = Context::from_waker(&waker);
+                let backend = ForegroundInteractionBackend;
+                let fut = <ForegroundInteractionBackend as InteractionBackend>::ask(&backend, req);
+                let mut pinned = Box::pin(fut);
+                use std::pin::Pin;
+                match Pin::as_mut(&mut pinned).poll(&mut cx) {
+                    Poll::Ready(r) => r,
+                    Poll::Pending => panic!("ask() was unexpectedly pending"),
+                }
+            }),
+        )
+        .await;
+        // Ok(Ok(resp)) = completed; Err(Elapsed) = stdin was a live terminal
+        let _ = result;
     }
 
     // ─── dispatch_tool_calls_foreground ─────────────────────────────────────

@@ -293,7 +293,7 @@ impl Dashboard {
                 let name = agent
                     .title
                     .clone()
-                    .unwrap_or_else(|| truncate(&agent.blueprint_name, 20));
+                    .unwrap_or(truncate(&agent.blueprint_name, 20));
                 if prev_status_was_active {
                     if let AgentDisplayStatus::Error(msg) = &status {
                         let preview = if msg.is_empty() {
@@ -367,7 +367,7 @@ impl Dashboard {
                                 let name = agent
                                     .title
                                     .clone()
-                                    .unwrap_or_else(|| truncate(&agent.blueprint_name, 20));
+                                    .unwrap_or(truncate(&agent.blueprint_name, 20));
                                 self.toasts.push(Toast {
                                     message: format!("Agent '{}' needs input", name),
                                     remaining_ticks: 35,
@@ -390,10 +390,7 @@ impl Dashboard {
                         && waiting_prompt.is_some()
                         && matches!(run.status, RunStatus::WaitingInput)
                     {
-                        let name = run
-                            .title
-                            .clone()
-                            .unwrap_or_else(|| truncate(&run.agent_name, 20));
+                        let name = run.title.clone().unwrap_or(truncate(&run.agent_name, 20));
                         self.toasts.push(Toast {
                             message: format!("Agent '{}' needs input", name),
                             remaining_ticks: 35,
@@ -404,10 +401,7 @@ impl Dashboard {
                         run.status,
                         RunStatus::Complete | RunStatus::CompleteInteractive
                     ) {
-                        let name = run
-                            .title
-                            .clone()
-                            .unwrap_or_else(|| truncate(&run.agent_name, 20));
+                        let name = run.title.clone().unwrap_or(truncate(&run.agent_name, 20));
                         self.toasts.push(Toast {
                             message: format!("Agent '{}' completed", name),
                             remaining_ticks: 35,

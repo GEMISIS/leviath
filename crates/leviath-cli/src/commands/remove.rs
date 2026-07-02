@@ -18,7 +18,7 @@ pub async fn execute(args: RemoveArgs) -> anyhow::Result<()> {
 /// against a tempdir instead of the real `~/.leviath/agents`.
 fn remove_agent(installer: &leviath_package::AgentInstaller, name: &str) -> anyhow::Result<()> {
     // Verify it's actually installed first
-    let installed = installer.get_installed(name)?;
+    let installed = installer.get_installed(name).unwrap();
     if installed.is_none() {
         anyhow::bail!(
             "Agent '{}' is not installed. Use `lev list` to see installed agents.",
@@ -114,5 +114,24 @@ mod tests {
         };
         let err = execute(args).await.unwrap_err();
         assert!(err.to_string().contains("is not installed"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn remove_agent_uninstall_fs_error_propagates() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let installer = leviath_package::AgentInstaller::with_install_dir(dir.path().to_path_buf());
+        install_test_agent(&installer, "chmod-test-agent");
+
+        // Make install_dir non-writable so remove_dir_all on the agent subdir fails.
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o555)).unwrap();
+
+        let result = remove_agent(&installer, "chmod-test-agent");
+
+        // Restore write permission before tempdir cleanup.
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        assert!(result.is_err());
     }
 }

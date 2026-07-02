@@ -537,24 +537,4 @@ mod tests {
         assert_eq!(req.message, "hi");
         assert_eq!(req.target_region.unwrap(), "conversation");
     }
-
-    #[test]
-    fn scope_mapping_session() {
-        let scope_str = "session";
-        let scope = match scope_str {
-            "session" => interaction::ApprovalScope::Session,
-            _ => interaction::ApprovalScope::Once,
-        };
-        assert_eq!(scope, interaction::ApprovalScope::Session);
-    }
-
-    #[test]
-    fn scope_mapping_defaults_to_once() {
-        let scope_str = "anything_else";
-        let scope = match scope_str {
-            "session" => interaction::ApprovalScope::Session,
-            _ => interaction::ApprovalScope::Once,
-        };
-        assert_eq!(scope, interaction::ApprovalScope::Once);
-    }
 }

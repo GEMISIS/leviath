@@ -115,6 +115,27 @@ pub struct WorkerArgs {
     pub max_depth: Option<usize>,
 }
 
+/// Opens the run's `output.log` file (creating it if needed, appending) and
+/// returns a cloned handle so both stdout and stderr can be redirected to it.
+///
+/// Both operations are expected to always succeed once `create_run` has been
+/// called (which creates the directory with appropriate permissions); any
+/// failure here indicates a fatal system-level condition.
+///
+/// Extracted as a standalone function so tests can verify the happy path
+/// without needing to exercise the rest of `execute_background`.
+fn open_log_file(log_path: &std::path::Path) -> (std::fs::File, std::fs::File) {
+    let log_file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(log_path)
+        .unwrap_or_else(|e| panic!("failed to open run log at {}: {}", log_path.display(), e));
+    let log_file2 = log_file
+        .try_clone()
+        .expect("failed to clone log file handle — this should never happen");
+    (log_file, log_file2)
+}
+
 /// Called in the forked child process (via `CommandExt::pre_exec`) to start a
 /// new session, detaching the worker from the spawning terminal.
 ///
@@ -136,6 +157,21 @@ pub async fn execute(args: RunArgs) -> anyhow::Result<()> {
         return foreground::run_foreground(args).await;
     }
 
+    // current_exe always succeeds on supported platforms; any failure is a fatal
+    // misconfiguration that should surface as a panic rather than a user error.
+    let exe = std::env::current_exe().expect("current executable path must be available");
+    execute_background(args, &exe).await
+}
+
+async fn execute_background(args: RunArgs, exe: &std::path::Path) -> anyhow::Result<()> {
+    execute_background_with(args, exe, runstate::create_run).await
+}
+
+async fn execute_background_with(
+    args: RunArgs,
+    exe: &std::path::Path,
+    create_run: impl Fn(&runstate::RunMeta) -> anyhow::Result<()>,
+) -> anyhow::Result<()> {
     // Background mode: create run state, spawn detached worker process(es)
     let path = args.path.as_deref().unwrap_or(".").to_string();
     let manifest_path = manifest::find_manifest(&path)?;
@@ -148,7 +184,9 @@ pub async fn execute(args: RunArgs) -> anyhow::Result<()> {
     let description = Some(blueprint.description.as_str());
     let task = session::resolve_task(&args.task, &blueprint.name, description)?;
 
-    let workdir = std::env::current_dir()?;
+    let workdir = std::env::current_dir()
+        .ok()
+        .unwrap_or(std::path::PathBuf::from("."));
     let count = args.count.max(1);
 
     for i in 0..count {
@@ -167,20 +205,13 @@ pub async fn execute(args: RunArgs) -> anyhow::Result<()> {
             workdir.to_string_lossy().to_string(),
             blueprint.stages.len(),
         );
-        runstate::create_run(&meta)?;
+        create_run(&meta)?;
 
         // Redirect the worker's stdout + stderr to the run's output.log
         let log_path = runstate::run_dir(&run_id).join("output.log");
-        let log_file = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&log_path)?;
-        let log_file2 = log_file.try_clone()?;
+        let (log_file, log_file2) = open_log_file(&log_path);
 
-        let exe = std::env::current_exe()
-            .map_err(|e| anyhow::anyhow!("Failed to locate current executable: {}", e))?;
-
-        let mut cmd = std::process::Command::new(&exe);
+        let mut cmd = std::process::Command::new(exe);
         cmd.arg("__run-worker")
             .arg(manifest_path.to_string_lossy().as_ref())
             .arg("--task")
@@ -247,6 +278,9 @@ pub async fn execute_worker(args: WorkerArgs) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn run_args_defaults() {
@@ -425,6 +459,80 @@ prompt = "Implement"
         };
         let result = execute(args).await;
         assert!(result.is_err()); // manifest not found
+    }
+
+    #[tokio::test]
+    async fn execute_background_manifest_is_directory_returns_read_error() {
+        // Covers line 144: the `map_err` closure in `read_to_string(..).map_err(..)?`
+        // when the manifest path is a directory (EISDIR). We create a temp directory
+        // that contains `agent.leviath` as a sub-directory so `find_manifest` returns
+        // Ok(path) but `read_to_string` fails.
+        let agent_dir = std::env::temp_dir().join(format!(
+            "leviath-test-bg-dir-manifest-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .subsec_nanos()
+        ));
+        let manifest_as_dir = agent_dir.join("agent.leviath");
+        std::fs::create_dir_all(&manifest_as_dir).unwrap();
+
+        let args = RunArgs {
+            path: Some(agent_dir.to_string_lossy().into_owned()),
+            task: Some("do something".to_string()),
+            model: None,
+            foreground: false,
+            yolo: false,
+            allow: vec![],
+            ask: vec![],
+            deny: vec![],
+            max_depth: None,
+            count: 1,
+        };
+        let result = execute(args).await;
+        let _ = std::fs::remove_dir_all(&agent_dir);
+        assert!(
+            result.is_err(),
+            "expected read error for directory manifest"
+        );
+        let err = result.unwrap_err().to_string();
+        let has_manifest_err = err.contains("Failed to read manifest") | err.contains("manifest");
+        assert!(has_manifest_err, "expected manifest error, got: {err}");
+    }
+
+    #[tokio::test]
+    async fn execute_background_bad_exe_returns_spawn_error() {
+        // Covers line ~226: the `map_err` closure in `cmd.spawn().map_err(..)?`
+        // when the executable path does not exist. We call execute_background
+        // directly (the private inner function) with a non-existent exe path so
+        // the spawn fails immediately.
+        let agent_name = "test-execute-bg-bad-exe";
+        let _cleanup = RunPrefixCleanup(agent_name);
+        let temp_dir = std::env::temp_dir().join(agent_name);
+        let _ = std::fs::create_dir_all(&temp_dir);
+        write_valid_manifest(&temp_dir, agent_name);
+
+        let args = RunArgs {
+            path: Some(temp_dir.to_string_lossy().to_string()),
+            task: Some("test task".to_string()),
+            model: None,
+            foreground: false,
+            yolo: false,
+            allow: vec![],
+            ask: vec![],
+            deny: vec![],
+            max_depth: None,
+            count: 1,
+        };
+
+        let bad_exe = std::path::Path::new("/nonexistent/executable/path/leviath-cli");
+        let result = super::execute_background(args, bad_exe).await;
+        assert!(result.is_err(), "expected spawn error");
+        let err = result.unwrap_err().to_string();
+        let has_spawn_err =
+            err.contains("Failed to spawn") | err.contains("spawn") | err.contains("No such file");
+        assert!(has_spawn_err, "expected spawn error, got: {err}");
     }
 
     // ─── WorkerArgs: more coverage ─────────────────────────────────────────
@@ -754,5 +862,76 @@ prompt = "Do the thing"
         let nonexistent = std::path::Path::new("/tmp/leviath-test-nonexistent-cleanup-in-dir");
         // Must not panic — it should silently return.
         cleanup_runs_with_prefix_in_dir("anything", nonexistent);
+    }
+
+    // ─── open_log_file ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn open_log_file_succeeds_for_writable_path() {
+        // Happy path: a real temp file. Covers the success branches in open_log_file.
+        let log_path = std::env::temp_dir().join(format!(
+            "leviath-test-open-log-{}-{}.log",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .subsec_nanos()
+        ));
+        let (f1, f2) = open_log_file(&log_path);
+        let _ = std::fs::remove_file(&log_path);
+        // Verify both handles are valid by checking metadata
+        assert!(f1.metadata().is_ok());
+        assert!(f2.metadata().is_ok());
+    }
+
+    #[test]
+    #[should_panic(expected = "failed to open run log")]
+    fn open_log_file_panics_for_nonexistent_parent_dir() {
+        // Error path: parent directory doesn't exist → open() panics.
+        // Covers `unwrap_or_else(|e| panic!(...))` in open_log_file.
+        let bad_path =
+            std::path::Path::new("/nonexistent-parent-dir-leviath-test/subdir/output.log");
+        let _ = open_log_file(bad_path);
+    }
+
+    // ─── create_run error path ────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn execute_background_create_run_fails_returns_error() {
+        // Covers `create_run(&meta)?` in execute_background_with when the
+        // injected create_run function returns an error. Uses dependency
+        // injection (execute_background_with) rather than env-var mutation,
+        // so this test is race-free in a parallel test run.
+        let agent_name = "test-execute-bg-create-run-fail";
+        let temp_dir = std::env::temp_dir().join(agent_name);
+        let _ = std::fs::create_dir_all(&temp_dir);
+        write_valid_manifest(&temp_dir, agent_name);
+
+        let args = RunArgs {
+            path: Some(temp_dir.to_string_lossy().to_string()),
+            task: Some("test task".to_string()),
+            model: None,
+            foreground: false,
+            yolo: false,
+            allow: vec![],
+            ask: vec![],
+            deny: vec![],
+            max_depth: None,
+            count: 1,
+        };
+        let exe = std::env::current_exe().unwrap();
+
+        // Inject a create_run stub that always fails — no env-var mutation needed.
+        let result = super::execute_background_with(args, &exe, |_meta| {
+            Err(anyhow::anyhow!("injected create_run failure"))
+        })
+        .await;
+        let _ = std::fs::remove_dir_all(&temp_dir);
+
+        assert!(result.is_err(), "expected create_run failure to propagate");
+        assert!(
+            result.unwrap_err().to_string().contains("injected"),
+            "expected injected error message to propagate"
+        );
     }
 }

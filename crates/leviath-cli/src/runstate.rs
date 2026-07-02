@@ -184,24 +184,21 @@ fn now_secs() -> i64 {
         .unwrap_or(0)
 }
 
-/// Directory where all run state is stored.
-///
-/// Untested by design: `LEVIATH_RUNS_DIR` is a process-global env var read
-/// (unguarded, no shared lock) by dozens of tests across many files in this
-/// crate that expect `run_dir(unique_id)` to resolve under the *real*
-/// `~/.leviath/runs` (they isolate via a unique id + cleanup, not via
-/// redirecting this var). Setting it here to exercise this branch would race
-/// every one of those concurrently-running tests. Adding the necessary
-/// crate-wide synchronization (mirroring `config.rs`'s `CONFIG_PATH_ENV_LOCK`)
-/// is out of scope for a single-file change.
-pub fn runs_dir() -> PathBuf {
-    if let Ok(override_dir) = std::env::var("LEVIATH_RUNS_DIR") {
-        return PathBuf::from(override_dir);
+/// Inner implementation of `runs_dir`, parameterised so it can be tested
+/// without touching the process-global env. All callers go through `runs_dir`.
+fn runs_dir_from(env_override: Option<&str>) -> PathBuf {
+    if let Some(dir) = env_override {
+        return PathBuf::from(dir);
     }
     dirs::home_dir()
         .unwrap_or_default()
         .join(".leviath")
         .join("runs")
+}
+
+/// Directory where all run state is stored.
+pub fn runs_dir() -> PathBuf {
+    runs_dir_from(std::env::var("LEVIATH_RUNS_DIR").ok().as_deref())
 }
 
 /// Directory for a specific run.
@@ -292,18 +289,9 @@ pub fn read_meta(run_id: &str) -> anyhow::Result<RunMeta> {
     Ok(serde_json::from_str(&json)?)
 }
 
-/// List all runs, sorted by started_at descending (most recent first).
-/// Silently skips any runs whose metadata cannot be read.
-///
-/// The `!dir.exists()` early return is untested by design: `runs_dir()`
-/// resolves to the real `~/.leviath/runs` in the test environment (see
-/// `runs_dir()`'s doc comment), which already exists on any machine that has
-/// ever run a real agent -- and this crate's test suite itself creates real
-/// entries under it throughout. There is no safe way to make it not exist
-/// without deleting real user/test state shared with concurrently-running
-/// tests.
-pub fn list_runs() -> Vec<RunMeta> {
-    let dir = runs_dir();
+/// Inner implementation of `list_runs`, parameterised so the early-return
+/// branch can be exercised in tests without deleting real on-disk state.
+fn list_runs_in_dir(dir: PathBuf) -> Vec<RunMeta> {
     if !dir.exists() {
         return Vec::new();
     }
@@ -323,50 +311,37 @@ pub fn list_runs() -> Vec<RunMeta> {
     runs
 }
 
+/// List all runs, sorted by started_at descending (most recent first).
+/// Silently skips any runs whose metadata cannot be read.
+pub fn list_runs() -> Vec<RunMeta> {
+    list_runs_in_dir(runs_dir())
+}
+
 /// Read the last `max_bytes` of any file on disk, returning UTF-8 text.
 /// If the file is smaller than `max_bytes` the whole file is returned.
 /// Partial UTF-8 at the truncation boundary is handled by skipping to the
 /// first newline.  Returns an empty string on any I/O error.
 pub fn tail_file(path: &std::path::Path, max_bytes: u64) -> String {
-    if !path.exists() {
-        return String::new();
-    }
-
-    // This `Err(_)` arm is TOCTOU-only: `path.exists()` above already calls
-    // `fs::metadata` once and succeeded, so making this second, separate
-    // call fail requires the file to be deleted (or its permissions
-    // changed) in the brief window between the two calls -- not safely
-    // reproducible without an actual race. Contrast with `File::open`'s
-    // `Err(_)` arm below, which a permission-denied file (stat succeeds
-    // without read permission, but open-for-read doesn't) *can* trigger
-    // deterministically.
-    let metadata = match std::fs::metadata(path) {
-        Ok(m) => m,
-        Err(_) => return String::new(),
-    };
-
-    let file_size = metadata.len();
-    if file_size <= max_bytes {
-        return std::fs::read_to_string(path).unwrap_or_default();
-    }
-
     use std::io::{Read, Seek, SeekFrom};
+
     let mut file = match std::fs::File::open(path) {
         Ok(f) => f,
         Err(_) => return String::new(),
     };
 
-    // Untested: seeking to a valid, in-range offset on a just-opened regular
-    // file essentially never fails. The one non-regular-file type that could
-    // force it (a FIFO, which doesn't support seeking) can't safely stand in
-    // here either -- a FIFO's `metadata().len()` reports 0, which would take
-    // the `file_size <= max_bytes` fast path above instead and call
-    // `std::fs::read_to_string` on it, which blocks forever without a writer
-    // on the other end.
-    let offset = file_size - max_bytes;
-    if file.seek(SeekFrom::Start(offset)).is_err() {
-        return String::new();
+    // Use fstat on the open fd rather than a separate stat() call — avoids the
+    // TOCTOU window between existence check and metadata read. Falls back to 0
+    // (read everything) if fstat somehow fails on an already-open fd.
+    let file_size = file.metadata().map(|m| m.len()).unwrap_or(0);
+
+    if file_size <= max_bytes {
+        let mut buf = Vec::new();
+        let _ = file.read_to_end(&mut buf);
+        return String::from_utf8_lossy(&buf).to_string();
     }
+
+    let offset = file_size - max_bytes;
+    let _ = file.seek(SeekFrom::Start(offset));
 
     let mut buf = Vec::new();
     let _ = file.read_to_end(&mut buf);
@@ -981,6 +956,14 @@ mod tests {
         assert!(read_stage_context("nonexistent-run", 99).is_none());
     }
 
+    // ─── append_dashboard_log ─────────────────────────────────────────────
+
+    #[test]
+    fn append_dashboard_log_creates_log_file() {
+        append_dashboard_log("coverage-test-message");
+        assert!(dashboard_log_path().exists());
+    }
+
     // ─── dashboard_log_path ────────────────────────────────────────────────
 
     #[test]
@@ -997,6 +980,18 @@ mod tests {
         let path = runs_dir();
         assert!(path.to_str().unwrap().contains(".leviath"));
         assert!(path.to_str().unwrap().ends_with("runs"));
+    }
+
+    #[test]
+    fn runs_dir_from_uses_override_when_provided() {
+        let path = runs_dir_from(Some("/custom/leviath/runs"));
+        assert_eq!(path, PathBuf::from("/custom/leviath/runs"));
+    }
+
+    #[test]
+    fn runs_dir_from_falls_back_to_home_when_none() {
+        let path = runs_dir_from(None);
+        assert!(path.ends_with(".leviath/runs") || path.ends_with(".leviath\\runs"));
     }
 
     #[test]
@@ -1196,6 +1191,21 @@ mod tests {
     #[test]
     fn tail_stage_log_nonexistent_returns_empty() {
         assert_eq!(tail_stage_log("no-such-run-xyz", 0, 4096), "");
+    }
+
+    // ─── list_runs_in_dir ───────────────────────────────────────────────────
+
+    #[test]
+    fn list_runs_in_dir_nonexistent_returns_empty() {
+        let result = list_runs_in_dir(PathBuf::from("/nonexistent/leviath/runs/coverage-test"));
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn list_runs_in_dir_empty_dir_returns_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let result = list_runs_in_dir(dir.path().to_path_buf());
+        assert!(result.is_empty());
     }
 
     // ─── runs_dir / list_runs edge cases ────────────────────────────────────

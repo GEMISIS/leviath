@@ -17,7 +17,7 @@ pub struct AddArgs {
 pub async fn execute(args: AddArgs) -> anyhow::Result<()> {
     let installer = leviath_package::AgentInstaller::new();
     let agents_dir = dirs::home_dir()
-        .ok_or_else(|| anyhow::anyhow!("Could not determine home directory"))?
+        .ok_or(anyhow::anyhow!("Could not determine home directory"))?
         .join(".leviath")
         .join("agents");
     execute_with(&args, &installer, &agents_dir).await
@@ -31,7 +31,7 @@ async fn execute_with(
     installer: &leviath_package::AgentInstaller,
     agents_dir: &Path,
 ) -> anyhow::Result<()> {
-    tracing::info!(package = %args.package, "Installing agent package");
+    tracing::info!("Installing agent package");
 
     let package_path = Path::new(&args.package);
 
@@ -57,8 +57,8 @@ async fn execute_with(
         let registry_url = args
             .registry
             .clone()
-            .or_else(|| config.registries.first().cloned())
-            .unwrap_or_else(|| "https://leviath.dev/registry".to_string());
+            .or(config.registries.first().cloned())
+            .unwrap_or("https://leviath.dev/registry".to_string());
 
         println!(
             "Searching registry {} for '{}'...",

@@ -21,7 +21,7 @@ pub async fn execute(args: PackArgs) -> anyhow::Result<()> {
     let path = args.path.unwrap_or_else(|| ".".to_string());
     let project_path = Path::new(&path);
 
-    tracing::info!(path = %project_path.display(), "Packing agent");
+    tracing::info!("Packing agent");
 
     // Find and parse agent.leviath to get name + version
     let manifest_path = find_manifest(project_path)?;
@@ -218,8 +218,25 @@ mod tests {
     // Mirrors the pattern in leviath-package/src/bundler.rs.
 
     #[test]
+    fn diagnose_tracing_setup() {
+        install_tracing_once();
+        tracing::callsite::rebuild_interest_cache();
+        let lvl = tracing::level_filters::LevelFilter::current();
+        println!("LevelFilter::current() = {:?}", lvl);
+        let set = tracing::dispatcher::has_been_set();
+        println!("dispatcher has_been_set = {}", set);
+        tracing::info!("test event");
+        println!("info! executed successfully");
+    }
+
+    #[test]
     fn always_on_subscriber_all_methods_execute() {
         use tracing::Subscriber;
+        // Install AlwaysOn as the global subscriber so that info_span! below
+        // uses it (through get_global), without incrementing SCOPED_COUNT and
+        // risking a race where another thread's callsite registration falls
+        // through to NoSubscriber and caches interest = never.
+        install_tracing_once();
         let sub = AlwaysOn;
         let span_id = tracing::span::Id::from_u64(1);
         // Directly call the three methods not triggered by event!/info_span!.
@@ -227,11 +244,11 @@ mod tests {
         sub.exit(&span_id);
         sub.record_follows_from(&span_id, &span_id);
         // new_span + record + enter/exit via the span API.
-        tracing::subscriber::with_default(AlwaysOn, || {
-            let s = tracing::info_span!("test-span", field = tracing::field::Empty);
-            s.record("field", 1_u64);
-            s.in_scope(|| {});
-        });
+        // Using the global subscriber (installed above) rather than with_default
+        // avoids bumping SCOPED_COUNT and creating the race described above.
+        let s = tracing::info_span!("test-span", field = tracing::field::Empty);
+        s.record("field", 1_u64);
+        s.in_scope(|| {});
     }
 
     // ─── format_size ───────────────────────────────────────────────────────

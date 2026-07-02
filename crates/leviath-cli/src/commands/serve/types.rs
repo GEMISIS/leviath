@@ -86,7 +86,7 @@ pub struct AppState {
 
 // ─── Error response ─────────────────────────────────────────────────────────
 
-#[derive(Serialize)]
+#[derive(Debug, Serialize)]
 pub(super) struct ErrorResponse {
     pub(super) error: String,
 }
@@ -183,7 +183,7 @@ pub(super) struct AgentTreeNode {
     pub(super) children: Vec<AgentTreeNode>,
 }
 
-#[derive(Serialize)]
+#[derive(Debug, Serialize)]
 pub(super) struct TreeStatusNode {
     pub(super) run_id: String,
     pub(super) agent_name: String,

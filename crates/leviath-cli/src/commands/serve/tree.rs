@@ -249,14 +249,12 @@ mod tests {
 
     #[tokio::test]
     async fn agent_tree_status_returns_not_found_for_missing_id() {
-        let result = agent_tree_status(AxumPath("definitely-not-a-real-run-id".to_string())).await;
-        match result {
-            Err((status, Json(body))) => {
-                assert_eq!(status, StatusCode::NOT_FOUND);
-                assert!(body.error.contains("definitely-not-a-real-run-id"));
-            }
-            Ok(_) => panic!("expected NOT_FOUND for a nonexistent run id"),
-        }
+        let (status, Json(body)) =
+            agent_tree_status(AxumPath("definitely-not-a-real-run-id".to_string()))
+                .await
+                .unwrap_err();
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert!(body.error.contains("definitely-not-a-real-run-id"));
     }
 
     #[tokio::test]
@@ -275,16 +273,13 @@ mod tests {
         child.completion_tokens = 3;
         runstate::create_run(&child).unwrap();
 
-        let result = agent_tree_status(AxumPath(run_id.to_string())).await;
-        match result {
-            Ok(Json(node)) => {
-                assert_eq!(node.run_id, run_id);
-                assert_eq!(node.subtree_prompt_tokens, 30);
-                assert_eq!(node.subtree_completion_tokens, 5);
-                assert_eq!(node.children.len(), 1);
-                assert_eq!(node.children[0].run_id, child_id);
-            }
-            Err(_) => panic!("expected Ok tree status for a real run id"),
-        }
+        let Json(node) = agent_tree_status(AxumPath(run_id.to_string()))
+            .await
+            .unwrap();
+        assert_eq!(node.run_id, run_id);
+        assert_eq!(node.subtree_prompt_tokens, 30);
+        assert_eq!(node.subtree_completion_tokens, 5);
+        assert_eq!(node.children.len(), 1);
+        assert_eq!(node.children[0].run_id, child_id);
     }
 }

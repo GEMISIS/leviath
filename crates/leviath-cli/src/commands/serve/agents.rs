@@ -489,6 +489,20 @@ prompt = "Plan the work"
         assert_eq!(resp.status(), axum::http::StatusCode::NOT_FOUND);
     }
 
+    /// Exercises the `?` error path in `RealSpawnAgentIo::open_log_files`
+    /// (line 61) by passing a path whose parent directory does not exist so
+    /// `OpenOptions::open` returns an I/O error.
+    #[test]
+    fn real_spawn_agent_io_open_log_files_fails_on_missing_parent_dir() {
+        let io = RealSpawnAgentIo;
+        let bad_path = std::path::Path::new("/nonexistent-dir-abc123/output.log");
+        let result = io.open_log_files(bad_path);
+        assert!(
+            result.is_err(),
+            "opening a log file under a missing directory should fail"
+        );
+    }
+
     #[tokio::test]
     async fn spawn_agent_valid_blueprint_creates_run_and_returns_ok() {
         let dir = tempfile::tempdir().unwrap();
@@ -497,6 +511,14 @@ prompt = "Plan the work"
 
         let state = test_state_with_agent_paths(vec![dir.path().to_path_buf()]);
         let mut rx = state.event_tx.subscribe();
+        // Pre-broadcast a non-AgentSpawned event so the drain loop below sees
+        // it and exercises the `if let` non-matching branch (line 536 else-path).
+        let _ = state.event_tx.send(ServerEvent::Tokens {
+            agent_id: "pre-event".to_string(),
+            run_id: "pre-event-run".to_string(),
+            prompt_tokens: 0,
+            completion_tokens: 0,
+        });
         let app = Router::new()
             .route("/api/agents", axum::routing::post(spawn_agent))
             .with_state(state);
@@ -529,8 +551,9 @@ prompt = "Plan the work"
         let meta = runstate::read_meta(&run_id).expect("run meta should exist");
         assert_eq!(meta.agent_name, bp_name);
 
-        // An AgentSpawned event should have been broadcast. Drain all events
-        // and count how many match our run_id (unique per test via bp_name).
+        // Drain all events: the pre-broadcast Tokens event exercises the
+        // `if let ServerEvent::AgentSpawned` else-path; the real AgentSpawned
+        // event exercises the if-branch.
         let mut spawned_events: Vec<String> = Vec::new();
         while let Ok(ev) = rx.try_recv() {
             if let ServerEvent::AgentSpawned { run_id: ev_rid, .. } = ev {
@@ -814,10 +837,8 @@ prompt = "Plan the work"
 
         let result = spawn_agent_with(state, body, &io).await;
         cleanup_runs_with_prefix(&bp_name);
-        match result {
-            Ok(_) => panic!("expected spawn_agent_with to fail"),
-            Err((status, _)) => assert_eq!(status, expected_status),
-        }
+        let (status, _) = result.expect_err("expected spawn_agent_with to fail");
+        assert_eq!(status, expected_status);
     }
 
     #[tokio::test]
@@ -870,10 +891,11 @@ prompt = "Plan the work"
             fail_on: FailOn::None,
         };
         let result = spawn_agent_with(state, body, &io).await;
-        let run_id = match &result {
-            Ok(resp) => resp.0.run_id.clone(),
-            Err(_) => panic!("expected spawn_agent_with to succeed"),
-        };
+        let run_id = result
+            .expect("expected spawn_agent_with to succeed")
+            .0
+            .run_id
+            .clone();
         cleanup_runs_with_prefix(&bp_name);
         // Give the spawned child a moment to exit cleanly.
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
@@ -943,8 +965,12 @@ prompt = "Plan the work"
             .await
             .unwrap();
         let runs: Vec<RunMeta> = serde_json::from_slice(&body).unwrap();
-        let found = runs.iter().any(|r| r.run_id == run_id);
-        assert!(!found, "complete run should not appear in 'running' filter");
+        // None of the returned runs should be the complete one we created.
+        let run_ids: Vec<&str> = runs.iter().map(|r| r.run_id.as_str()).collect();
+        assert!(
+            !run_ids.contains(&run_id.as_str()),
+            "complete run should not appear in 'running' filter"
+        );
 
         let _ = std::fs::remove_dir_all(runstate::run_dir(&run_id));
     }
@@ -1067,8 +1093,10 @@ prompt = "Plan the work"
             .await
             .unwrap();
         let children: Vec<RunMeta> = serde_json::from_slice(&body).unwrap();
-        let has_our_run = children.iter().any(|c| c.run_id == run_id);
-        assert!(!has_our_run, "run itself should not be in its own children");
+        assert!(
+            children.is_empty(),
+            "run itself should not appear in its own children list"
+        );
 
         let _ = std::fs::remove_dir_all(runstate::run_dir(&run_id));
     }

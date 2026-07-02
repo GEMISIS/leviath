@@ -1851,12 +1851,13 @@ mod tests {
             .fold(0usize, |a, b| a.wrapping_add(b as usize));
         let req_id = make_interaction_id(hash, 0);
 
-        let run_id_clone = run_id.to_string();
+        let resp_path = response_path(run_id);
         let req_id_clone = req_id.clone();
         tokio::spawn(async move {
             tokio::time::sleep(Duration::from_millis(150)).await;
             let resp = InteractionResponse::approval(&req_id_clone, true, ApprovalScope::Once);
-            write_response(&run_id_clone, &resp).ok();
+            let json = serde_json::to_string_pretty(&resp).unwrap();
+            std::fs::write(&resp_path, json).ok();
         });
 
         let args = serde_json::json!({"command": "ls"});
@@ -1865,7 +1866,7 @@ mod tests {
             tool_name,
             &args,
             "code",
-            TOOL_APPROVAL_TIMEOUT,
+            Duration::from_secs(10),
         )
         .await;
         assert!(approved);
@@ -1887,12 +1888,13 @@ mod tests {
             .fold(0usize, |a, b| a.wrapping_add(b as usize));
         let req_id = make_interaction_id(hash, 0);
 
-        let run_id_clone = run_id.to_string();
+        let resp_path = response_path(run_id);
         let req_id_clone = req_id.clone();
         tokio::spawn(async move {
             tokio::time::sleep(Duration::from_millis(150)).await;
             let resp = InteractionResponse::approval(&req_id_clone, false, ApprovalScope::Once);
-            write_response(&run_id_clone, &resp).ok();
+            let json = serde_json::to_string_pretty(&resp).unwrap();
+            std::fs::write(&resp_path, json).ok();
         });
 
         let args = serde_json::json!({"path": "/tmp/f.txt"});
@@ -1901,7 +1903,7 @@ mod tests {
             tool_name,
             &args,
             "code",
-            TOOL_APPROVAL_TIMEOUT,
+            Duration::from_secs(10),
         )
         .await;
         assert!(!approved);
@@ -1933,12 +1935,17 @@ mod tests {
             .fold(0usize, |a, b| a.wrapping_add(b as usize));
         let req_id = make_interaction_id(hash, 0);
 
-        let run_id_clone = run_id.to_string();
+        // Capture the response path NOW (before spawning) so the spawned task
+        // doesn't re-read LEVIATH_RUNS_DIR at execution time — a concurrent test
+        // in commands/run/mod.rs temporarily sets LEVIATH_RUNS_DIR to a
+        // read-only dir, which would silently break write_response.
+        let resp_path = response_path(run_id);
         let req_id_clone = req_id.clone();
         tokio::spawn(async move {
             tokio::time::sleep(Duration::from_millis(150)).await;
             let resp = InteractionResponse::approval(&req_id_clone, true, ApprovalScope::Session);
-            write_response(&run_id_clone, &resp).ok();
+            let json = serde_json::to_string_pretty(&resp).unwrap();
+            std::fs::write(&resp_path, json).ok();
         });
 
         let args = serde_json::json!({});
@@ -1947,7 +1954,7 @@ mod tests {
             tool_name,
             &args,
             "impl",
-            TOOL_APPROVAL_TIMEOUT,
+            Duration::from_secs(10),
         )
         .await;
         assert!(approved);
@@ -1968,17 +1975,19 @@ mod tests {
             .fold(0usize, |a, b| a.wrapping_add(b as usize));
         let req_id = make_interaction_id(hash, 0);
 
-        let run_id_clone = run_id.to_string();
+        let resp_path = response_path(run_id);
         let req_id_clone = req_id.clone();
         tokio::spawn(async move {
             tokio::time::sleep(Duration::from_millis(120)).await;
             // Write a stale response first
             let stale = InteractionResponse::approval("wrong-id", true, ApprovalScope::Once);
-            write_response(&run_id_clone, &stale).ok();
+            let json = serde_json::to_string_pretty(&stale).unwrap();
+            std::fs::write(&resp_path, json).ok();
             tokio::time::sleep(Duration::from_millis(200)).await;
             // Write the correct response
             let correct = InteractionResponse::approval(&req_id_clone, false, ApprovalScope::Once);
-            write_response(&run_id_clone, &correct).ok();
+            let json = serde_json::to_string_pretty(&correct).unwrap();
+            std::fs::write(&resp_path, json).ok();
         });
 
         let args = serde_json::json!({"command": "rm -rf"});
@@ -1987,7 +1996,7 @@ mod tests {
             tool_name,
             &args,
             "code",
-            TOOL_APPROVAL_TIMEOUT,
+            Duration::from_secs(10),
         )
         .await;
         assert!(!approved);
@@ -2285,5 +2294,26 @@ mod tests {
         // public wrapper still exists with the expected signature by
         // referencing it as a value, without calling it.
         let _f: fn(&InteractionRequest) -> InteractionResponse = request_interaction_stdin;
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stdin_request_interaction_stdin_with_dev_null_exercises_wrapper_body() {
+        use std::fs::File;
+        use std::os::unix::io::AsRawFd;
+
+        let devnull = File::open("/dev/null").unwrap();
+        let devnull_fd = devnull.as_raw_fd();
+        let old_stdin = unsafe { libc::dup(0) };
+        unsafe { libc::dup2(devnull_fd, 0) };
+        drop(devnull);
+
+        let req = InteractionRequest::free_text("stdin-wrap-test", "Q?", "stage", false);
+        let resp = request_interaction_stdin(&req);
+
+        unsafe { libc::dup2(old_stdin, 0) };
+        unsafe { libc::close(old_stdin) };
+
+        assert_eq!(resp.request_id, "stdin-wrap-test");
     }
 }
