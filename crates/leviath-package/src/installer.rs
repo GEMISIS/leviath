@@ -26,6 +26,13 @@ pub struct AgentInstaller {
 impl AgentInstaller {
     /// Create a new installer using the default installation directory.
     pub fn new() -> Self {
+        // `.unwrap_or_else(|| PathBuf::from("."))`'s fallback closure is not
+        // covered by any test: `dirs::home_dir()` returns `None` only on a
+        // system with no resolvable home directory at all, which is true of
+        // no real dev machine or CI runner. There's no portable, safe way to
+        // force this (mutating `$HOME` doesn't work on macOS, where
+        // `dirs::home_dir()` resolves via `NSHomeDirectory()`, and it's a
+        // process-global env var shared with every other test besides).
         let install_dir = dirs::home_dir()
             .unwrap_or_else(|| PathBuf::from("."))
             .join(".leviath")
@@ -235,6 +242,41 @@ mod tests {
     use flate2::write::GzEncoder;
     use flate2::Compression;
 
+    /// Minimal `tracing::Subscriber` that reports every callsite/level as
+    /// enabled. Without a registered subscriber, `tracing::info!`'s
+    /// multi-line field-expression arguments show as uncovered in llvm-cov
+    /// even though the call itself demonstrably executes -- the macro
+    /// short-circuits field evaluation before ever reaching them.
+    struct AlwaysOnSubscriber;
+    impl tracing::Subscriber for AlwaysOnSubscriber {
+        fn enabled(&self, _metadata: &tracing::Metadata<'_>) -> bool {
+            true
+        }
+        fn new_span(&self, _span: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+            tracing::span::Id::from_u64(1)
+        }
+        fn record(&self, _span: &tracing::span::Id, _values: &tracing::span::Record<'_>) {}
+        fn record_follows_from(&self, _span: &tracing::span::Id, _follows: &tracing::span::Id) {}
+        fn event(&self, _event: &tracing::Event<'_>) {}
+        fn enter(&self, _span: &tracing::span::Id) {}
+        fn exit(&self, _span: &tracing::span::Id) {}
+    }
+
+    fn with_tracing<T>(f: impl FnOnce() -> T) -> T {
+        tracing::subscriber::with_default(AlwaysOnSubscriber, f)
+    }
+
+    #[test]
+    fn always_on_subscriber_span_methods_are_all_no_ops() {
+        tracing::subscriber::with_default(AlwaysOnSubscriber, || {
+            let span = tracing::info_span!("test-span", val = tracing::field::Empty);
+            span.record("val", 2);
+            let other = tracing::info_span!("other-span");
+            span.follows_from(&other);
+            let _entered = span.enter();
+        });
+    }
+
     /// Create a minimal tar.gz bundle with an agent.leviath manifest.
     fn make_bundle(name: &str, version: &str, description: &str) -> Vec<u8> {
         let manifest = format!(
@@ -271,17 +313,19 @@ description = "{}"
 
     #[test]
     fn install_from_bytes_creates_directory() {
-        let dir = tempfile::tempdir().unwrap();
-        let installer = AgentInstaller::with_install_dir(dir.path().to_path_buf());
+        with_tracing(|| {
+            let dir = tempfile::tempdir().unwrap();
+            let installer = AgentInstaller::with_install_dir(dir.path().to_path_buf());
 
-        let bundle = make_bundle("test-agent", "1.0.0", "A test agent");
-        let result = installer.install_from_bytes("test-agent", &bundle).unwrap();
+            let bundle = make_bundle("test-agent", "1.0.0", "A test agent");
+            let result = installer.install_from_bytes("test-agent", &bundle).unwrap();
 
-        assert_eq!(result.name, "test-agent");
-        assert_eq!(result.version, "1.0.0");
-        assert_eq!(result.description, "A test agent");
-        assert!(result.path.exists());
-        assert!(result.path.join("agent.leviath").exists());
+            assert_eq!(result.name, "test-agent");
+            assert_eq!(result.version, "1.0.0");
+            assert_eq!(result.description, "A test agent");
+            assert!(result.path.exists());
+            assert!(result.path.join("agent.leviath").exists());
+        });
     }
 
     #[test]
@@ -314,15 +358,17 @@ description = "{}"
 
     #[test]
     fn uninstall_removes_directory() {
-        let dir = tempfile::tempdir().unwrap();
-        let installer = AgentInstaller::with_install_dir(dir.path().to_path_buf());
+        with_tracing(|| {
+            let dir = tempfile::tempdir().unwrap();
+            let installer = AgentInstaller::with_install_dir(dir.path().to_path_buf());
 
-        let bundle = make_bundle("to-remove", "1.0.0", "remove me");
-        installer.install_from_bytes("to-remove", &bundle).unwrap();
+            let bundle = make_bundle("to-remove", "1.0.0", "remove me");
+            installer.install_from_bytes("to-remove", &bundle).unwrap();
 
-        assert!(dir.path().join("to-remove").exists());
-        installer.uninstall("to-remove").unwrap();
-        assert!(!dir.path().join("to-remove").exists());
+            assert!(dir.path().join("to-remove").exists());
+            installer.uninstall("to-remove").unwrap();
+            assert!(!dir.path().join("to-remove").exists());
+        });
     }
 
     #[test]
@@ -416,18 +462,20 @@ description = "{}"
 
     #[test]
     fn install_from_file_path_derives_name_from_filename() {
-        let dir = tempfile::tempdir().unwrap();
-        let installer = AgentInstaller::with_install_dir(dir.path().join("agents"));
+        with_tracing(|| {
+            let dir = tempfile::tempdir().unwrap();
+            let installer = AgentInstaller::with_install_dir(dir.path().join("agents"));
 
-        let bundle = make_bundle("file-agent", "1.2.3", "Installed from a file");
-        let package_path = dir.path().join("file-agent.leviath-bundle");
-        fs::write(&package_path, &bundle).unwrap();
+            let bundle = make_bundle("file-agent", "1.2.3", "Installed from a file");
+            let package_path = dir.path().join("file-agent.leviath-bundle");
+            fs::write(&package_path, &bundle).unwrap();
 
-        let result = installer.install(&package_path).unwrap();
-        assert_eq!(result.name, "file-agent");
-        assert_eq!(result.version, "1.2.3");
-        assert_eq!(result.description, "Installed from a file");
-        assert!(result.path.exists());
+            let result = installer.install(&package_path).unwrap();
+            assert_eq!(result.name, "file-agent");
+            assert_eq!(result.version, "1.2.3");
+            assert_eq!(result.description, "Installed from a file");
+            assert!(result.path.exists());
+        });
     }
 
     #[test]
@@ -459,5 +507,66 @@ description = "{}"
         assert!(err
             .to_string()
             .contains("Failed to create install directory"));
+    }
+
+    #[test]
+    fn install_from_bytes_corrupt_tar_after_valid_gzip_returns_extract_error() {
+        // Valid gzip framing wrapping bytes that are NOT a valid tar
+        // archive -- `GzDecoder` decompresses fine, but `Archive::unpack`
+        // fails on the malformed header, exercising the "Failed to extract
+        // package" error arm that every other test's well-formed bundle
+        // never reaches.
+        let dir = tempfile::tempdir().unwrap();
+        let installer = AgentInstaller::with_install_dir(dir.path().to_path_buf());
+
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::fast());
+        use std::io::Write;
+        encoder
+            .write_all(&[b'x'; 600]) // not a valid 512-byte tar header
+            .unwrap();
+        let bundle = encoder.finish().unwrap();
+
+        let err = installer
+            .install_from_bytes("corrupt-tar", &bundle)
+            .unwrap_err();
+        assert!(err.to_string().contains("Failed to extract package"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn uninstall_remove_dir_all_failure_returns_error() {
+        // Removing write permission on the *parent* directory (not the
+        // agent directory itself) means `remove_dir_all` can't unlink the
+        // agent directory's entry from it, even though the agent
+        // directory's own contents are otherwise removable -- exercising
+        // the "Failed to remove agent" error arm no other test reaches.
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let installer = AgentInstaller::with_install_dir(dir.path().to_path_buf());
+        let agent_dir = dir.path().join("locked-agent");
+        fs::create_dir_all(&agent_dir).unwrap();
+
+        let mut locked = fs::metadata(dir.path()).unwrap().permissions();
+        locked.set_mode(0o555);
+        fs::set_permissions(dir.path(), locked).unwrap();
+
+        let result = installer.uninstall("locked-agent");
+
+        // Restore permissions unconditionally so tempdir cleanup succeeds.
+        let mut restored = fs::metadata(dir.path()).unwrap().permissions();
+        restored.set_mode(0o755);
+        fs::set_permissions(dir.path(), restored).unwrap();
+
+        // Skip the assertion (rather than the whole test up front) when
+        // running as root: root ignores Unix permission bits entirely, so
+        // `remove_dir_all` would succeed despite the locked parent dir --
+        // detected here, after the fact, via the actual outcome rather than
+        // a separate root-detection dependency.
+        if result.is_ok() {
+            return;
+        }
+        let err = result.unwrap_err();
+        assert!(err.to_string().contains("Failed to remove agent"));
     }
 }

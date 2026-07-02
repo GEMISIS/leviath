@@ -185,6 +185,15 @@ fn now_secs() -> i64 {
 }
 
 /// Directory where all run state is stored.
+///
+/// Untested by design: `LEVIATH_RUNS_DIR` is a process-global env var read
+/// (unguarded, no shared lock) by dozens of tests across many files in this
+/// crate that expect `run_dir(unique_id)` to resolve under the *real*
+/// `~/.leviath/runs` (they isolate via a unique id + cleanup, not via
+/// redirecting this var). Setting it here to exercise this branch would race
+/// every one of those concurrently-running tests. Adding the necessary
+/// crate-wide synchronization (mirroring `config.rs`'s `CONFIG_PATH_ENV_LOCK`)
+/// is out of scope for a single-file change.
 pub fn runs_dir() -> PathBuf {
     if let Ok(override_dir) = std::env::var("LEVIATH_RUNS_DIR") {
         return PathBuf::from(override_dir);
@@ -285,6 +294,14 @@ pub fn read_meta(run_id: &str) -> anyhow::Result<RunMeta> {
 
 /// List all runs, sorted by started_at descending (most recent first).
 /// Silently skips any runs whose metadata cannot be read.
+///
+/// The `!dir.exists()` early return is untested by design: `runs_dir()`
+/// resolves to the real `~/.leviath/runs` in the test environment (see
+/// `runs_dir()`'s doc comment), which already exists on any machine that has
+/// ever run a real agent -- and this crate's test suite itself creates real
+/// entries under it throughout. There is no safe way to make it not exist
+/// without deleting real user/test state shared with concurrently-running
+/// tests.
 pub fn list_runs() -> Vec<RunMeta> {
     let dir = runs_dir();
     if !dir.exists() {
@@ -315,6 +332,14 @@ pub fn tail_file(path: &std::path::Path, max_bytes: u64) -> String {
         return String::new();
     }
 
+    // This `Err(_)` arm is TOCTOU-only: `path.exists()` above already calls
+    // `fs::metadata` once and succeeded, so making this second, separate
+    // call fail requires the file to be deleted (or its permissions
+    // changed) in the brief window between the two calls -- not safely
+    // reproducible without an actual race. Contrast with `File::open`'s
+    // `Err(_)` arm below, which a permission-denied file (stat succeeds
+    // without read permission, but open-for-read doesn't) *can* trigger
+    // deterministically.
     let metadata = match std::fs::metadata(path) {
         Ok(m) => m,
         Err(_) => return String::new(),
@@ -331,6 +356,13 @@ pub fn tail_file(path: &std::path::Path, max_bytes: u64) -> String {
         Err(_) => return String::new(),
     };
 
+    // Untested: seeking to a valid, in-range offset on a just-opened regular
+    // file essentially never fails. The one non-regular-file type that could
+    // force it (a FIFO, which doesn't support seeking) can't safely stand in
+    // here either -- a FIFO's `metadata().len()` reports 0, which would take
+    // the `file_size <= max_bytes` fast path above instead and call
+    // `std::fs::read_to_string` on it, which blocks forever without a writer
+    // on the other end.
     let offset = file_size - max_bytes;
     if file.seek(SeekFrom::Start(offset)).is_err() {
         return String::new();
@@ -1223,9 +1255,54 @@ mod tests {
 
     #[test]
     fn tail_file_directory_path_returns_empty() {
-        // metadata() succeeds on a directory but read_to_string/File::open
-        // will fail — exercises the graceful-empty-string fallback.
+        // metadata() and File::open() both succeed on a directory (confirmed
+        // empirically on macOS/Linux); it's read_to_end() that fails with
+        // "Is a directory" -- and that error is deliberately discarded (`let
+        // _ = file.read_to_end(&mut buf);`), so this exercises the
+        // graceful-empty-buffer fallback at the bottom of the function, not
+        // either of the two `Err(_) => return String::new()` early returns.
         let dir = tempfile::tempdir().unwrap();
         assert_eq!(tail_file(dir.path(), 4), "");
+    }
+
+    #[test]
+    fn tail_log_reads_output_log_for_run_id() {
+        // tail_log() itself (as opposed to tail_file(), which every other
+        // test here calls directly) had zero coverage -- it's a one-line
+        // wrapper joining run_dir(run_id) with "output.log".
+        let run_id = "test-tail-log-run";
+        let dir = run_dir(run_id);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("output.log"), "hello from output.log").unwrap();
+
+        assert_eq!(tail_log(run_id, 1024), "hello from output.log");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn tail_file_open_permission_denied_returns_empty() {
+        // A file with no permissions at all: `Path::exists()`/`fs::metadata()`
+        // only need search (execute) permission on the *parent* directories
+        // to stat a path, not read permission on the file itself -- so both
+        // succeed here. `std::fs::File::open()` in read mode, however,
+        // genuinely fails with `PermissionDenied`. Unlike the metadata-error
+        // arm (only reachable via a delete-between-calls race), this is a
+        // deterministic way to exercise the `File::open` `Err(_)` arm.
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("no-permissions.log");
+        // Content must exceed max_bytes so the "whole file" fast path
+        // (`file_size <= max_bytes`) doesn't short-circuit before reaching
+        // the `File::open` call under test.
+        std::fs::write(&path, "x".repeat(100)).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+        assert_eq!(tail_file(&path, 4), "");
+
+        // Restore permissions so the tempdir can clean itself up on drop.
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
     }
 }
