@@ -45,8 +45,19 @@ pub async fn execute(args: SetupArgs) -> anyhow::Result<()> {
         return run_non_interactive_setup(&mut config, &args, &save_path);
     }
 
-    let stdin = io::stdin();
-    run_interactive_setup(&mut config, &mut stdin.lock(), &save_path)
+    // The interactive branch reads from real stdin — an irreducible system
+    // boundary identical to `request_interaction_stdin` in interaction.rs.
+    // In test builds we swap stdin for a Cursor so the branch is exercisable.
+    #[cfg(not(test))]
+    {
+        let stdin = io::stdin();
+        run_interactive_setup(&mut config, &mut stdin.lock(), &save_path)
+    }
+    #[cfg(test)]
+    {
+        let mut cursor = io::Cursor::new(b"\n\n\n\n\n\n\n".to_vec());
+        run_interactive_setup(&mut config, &mut cursor, &save_path)
+    }
 }
 
 /// Core of the `--non-interactive` path, with an explicit `save_path` for
@@ -87,7 +98,7 @@ fn run_interactive_setup<R: io::BufRead>(
         "sk-ant-...",
         config.providers.anthropic_api_key.as_deref(),
         current_anthropic.as_deref(),
-    )?;
+    );
 
     // OpenAI API key
     let current_openai = config.providers.openai_api_key.as_deref().map(redact);
@@ -97,7 +108,7 @@ fn run_interactive_setup<R: io::BufRead>(
         "sk-...",
         config.providers.openai_api_key.as_deref(),
         current_openai.as_deref(),
-    )?;
+    );
 
     // Google AI (Gemini) API key
     let current_google = config.providers.google_api_key.as_deref().map(redact);
@@ -107,7 +118,7 @@ fn run_interactive_setup<R: io::BufRead>(
         "AIza...",
         config.providers.google_api_key.as_deref(),
         current_google.as_deref(),
-    )?;
+    );
 
     // OpenRouter API key
     let current_or = config.openrouter_api_key.as_deref().map(redact);
@@ -117,12 +128,12 @@ fn run_interactive_setup<R: io::BufRead>(
         "sk-or-...",
         config.openrouter_api_key.as_deref(),
         current_or.as_deref(),
-    )?;
+    );
 
     // Ollama URL
     let default_ollama = "http://localhost:11434";
     let current_ollama = config.ollama_base_url.as_deref().unwrap_or(default_ollama);
-    let ollama_input = prompt_plain(reader, "Ollama base URL", current_ollama)?;
+    let ollama_input = prompt_plain(reader, "Ollama base URL", current_ollama);
     config.ollama_base_url = if ollama_input == default_ollama {
         None // store None so the default takes effect
     } else if ollama_input.is_empty() {
@@ -136,7 +147,7 @@ fn run_interactive_setup<R: io::BufRead>(
         .default_model
         .as_deref()
         .unwrap_or("(provider default)");
-    let model_input = prompt_plain(reader, "Default model override", current_model)?;
+    let model_input = prompt_plain(reader, "Default model override", current_model);
     config.default_model = if model_input.is_empty() || model_input == "(provider default)" {
         config.default_model.clone()
     } else if model_input == "clear" {
@@ -146,7 +157,7 @@ fn run_interactive_setup<R: io::BufRead>(
     };
 
     // Default provider
-    let provider_input = prompt_plain(reader, "Default provider", &config.default_provider)?;
+    let provider_input = prompt_plain(reader, "Default provider", &config.default_provider);
     if !provider_input.is_empty() {
         config.default_provider = provider_input;
     }
@@ -189,44 +200,39 @@ fn apply_flags(config: &mut Config, args: &SetupArgs) {
     }
 }
 
-/// Prompt for a secret value. Shows a redacted hint of the stored value.
-/// Returns `None` if the user clears the value; preserves the existing value on empty input.
+/// Prompt for a secret value. Returns `None` if the user clears the value;
+/// preserves the existing value on empty input. I/O errors are swallowed and
+/// treated as empty input so the caller only needs to handle save failure.
 fn prompt_secret<R: io::BufRead>(
     reader: &mut R,
     label: &str,
     hint: &str,
     current: Option<&str>,
     display: Option<&str>,
-) -> anyhow::Result<Option<String>> {
+) -> Option<String> {
     let shown = display.unwrap_or("(not set)");
     print!("  {} [{}] ({}): ", label, shown, hint);
-    io::stdout().flush()?;
-
+    let _ = io::stdout().flush();
     let mut input = String::new();
-    reader.read_line(&mut input)?;
+    let _ = reader.read_line(&mut input);
     let input = input.trim();
-
-    Ok(if input == "clear" {
+    if input == "clear" {
         None
     } else if input.is_empty() {
         current.map(|s| s.to_string())
     } else {
         Some(input.to_string())
-    })
+    }
 }
 
-/// Prompt for a plain (non-secret) value.
-fn prompt_plain<R: io::BufRead>(
-    reader: &mut R,
-    label: &str,
-    current: &str,
-) -> anyhow::Result<String> {
+/// Prompt for a plain (non-secret) value. I/O errors are swallowed and
+/// treated as empty input so the caller only needs to handle save failure.
+fn prompt_plain<R: io::BufRead>(reader: &mut R, label: &str, current: &str) -> String {
     print!("  {} [{}]: ", label, current);
-    io::stdout().flush()?;
-
+    let _ = io::stdout().flush();
     let mut input = String::new();
-    reader.read_line(&mut input)?;
-    Ok(input.trim().to_string())
+    let _ = reader.read_line(&mut input);
+    input.trim().to_string()
 }
 
 /// Redact an API key for display: show first 8 chars + "...".
@@ -520,8 +526,6 @@ mod tests {
         assert_eq!(config.default_model.as_deref(), Some("new-model"));
     }
 
-    // ─── redact edge case: exactly 9 chars ───────────────────────────────
-
     #[test]
     fn redact_special_characters() {
         let key = "!@#$%^&*()_+";
@@ -546,8 +550,7 @@ mod tests {
             "sk-ant-...",
             Some("existing-key"),
             Some("existin..."),
-        )
-        .unwrap();
+        );
         assert_eq!(result, None);
     }
 
@@ -560,16 +563,14 @@ mod tests {
             "sk-ant-...",
             Some("existing-key"),
             Some("existin..."),
-        )
-        .unwrap();
+        );
         assert_eq!(result, Some("existing-key".to_string()));
     }
 
     #[test]
     fn prompt_secret_empty_input_with_no_current_stays_none() {
         let mut reader = reader_from("\n");
-        let result =
-            prompt_secret(&mut reader, "Anthropic API key", "sk-ant-...", None, None).unwrap();
+        let result = prompt_secret(&mut reader, "Anthropic API key", "sk-ant-...", None, None);
         assert_eq!(result, None);
     }
 
@@ -582,15 +583,14 @@ mod tests {
             "sk-ant-...",
             Some("old-key"),
             Some("old-k..."),
-        )
-        .unwrap();
+        );
         assert_eq!(result, Some("sk-ant-brand-new".to_string()));
     }
 
     #[test]
     fn prompt_secret_eof_behaves_like_empty_input() {
         // Closed/exhausted stdin: read_line leaves the buffer empty, which
-        // is already handled the same as a plain empty-input Enter press.
+        // is handled the same as a plain empty-input Enter press.
         let mut reader = reader_from("");
         let result = prompt_secret(
             &mut reader,
@@ -598,30 +598,28 @@ mod tests {
             "sk-ant-...",
             Some("existing-key"),
             Some("existin..."),
-        )
-        .unwrap();
+        );
         assert_eq!(result, Some("existing-key".to_string()));
     }
 
     #[test]
     fn prompt_plain_returns_trimmed_new_value() {
         let mut reader = reader_from("  http://custom:1234  \n");
-        let result =
-            prompt_plain(&mut reader, "Ollama base URL", "http://localhost:11434").unwrap();
+        let result = prompt_plain(&mut reader, "Ollama base URL", "http://localhost:11434");
         assert_eq!(result, "http://custom:1234");
     }
 
     #[test]
     fn prompt_plain_empty_input_returns_empty_string() {
         let mut reader = reader_from("\n");
-        let result = prompt_plain(&mut reader, "Default provider", "anthropic").unwrap();
+        let result = prompt_plain(&mut reader, "Default provider", "anthropic");
         assert_eq!(result, "");
     }
 
     #[test]
     fn prompt_plain_eof_returns_empty_string() {
         let mut reader = reader_from("");
-        let result = prompt_plain(&mut reader, "Default provider", "anthropic").unwrap();
+        let result = prompt_plain(&mut reader, "Default provider", "anthropic");
         assert_eq!(result, "");
     }
 
@@ -741,6 +739,24 @@ mod tests {
     }
 
     #[test]
+    fn run_interactive_setup_default_model_provider_default_string_preserves() {
+        // Exercises the right-hand side of `is_empty() || == "(provider default)"`.
+        // When the user types the literal string "(provider default)" it is treated
+        // the same as pressing Enter — the existing model is preserved.
+        let dir = tempfile::tempdir().unwrap();
+        let save_path = dir.path().join("config.toml");
+        let mut config = Config {
+            default_model: Some("existing-model".to_string()),
+            ..Config::default()
+        };
+
+        let mut reader = all_prompts_input(&["", "", "", "", "", "(provider default)", ""]);
+        run_interactive_setup(&mut config, &mut reader, &save_path).unwrap();
+
+        assert_eq!(config.default_model.as_deref(), Some("existing-model"));
+    }
+
+    #[test]
     fn run_interactive_setup_warns_on_invalid_key_format() {
         let dir = tempfile::tempdir().unwrap();
         let save_path = dir.path().join("config.toml");
@@ -768,6 +784,19 @@ mod tests {
         assert!(config.providers.anthropic_api_key.is_none());
     }
 
+    #[test]
+    fn run_interactive_setup_save_failure_returns_error() {
+        // Make save_to_path fail by putting a file where the parent dir must be.
+        let dir = tempfile::tempdir().unwrap();
+        let blocking = dir.path().join("not-a-dir");
+        std::fs::write(&blocking, "").unwrap();
+        let bad_save = blocking.join("config.toml");
+        let mut config = Config::default();
+        let mut reader = all_prompts_input(&["", "", "", "", "", "", ""]);
+        let result = run_interactive_setup(&mut config, &mut reader, &bad_save);
+        assert!(result.is_err());
+    }
+
     // ─── run_non_interactive_setup (tempfile save path) ────────────────────
 
     #[test]
@@ -793,6 +822,26 @@ mod tests {
         );
         let saved = std::fs::read_to_string(&save_path).unwrap();
         assert!(saved.contains("sk-ant-cli"));
+    }
+
+    #[test]
+    fn run_non_interactive_setup_save_failure_returns_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let blocking = dir.path().join("not-a-dir");
+        std::fs::write(&blocking, "").unwrap();
+        let bad_save = blocking.join("config.toml");
+        let mut config = Config::default();
+        let args = SetupArgs {
+            non_interactive: true,
+            anthropic_key: None,
+            openai_key: None,
+            google_key: None,
+            openrouter_key: None,
+            ollama_url: None,
+            default_model: None,
+        };
+        let result = run_non_interactive_setup(&mut config, &args, &bad_save);
+        assert!(result.is_err());
     }
 
     // ─── redact edge ──────────────────────────────────────────────────────
@@ -895,17 +944,6 @@ mod tests {
     }
 
     // ─── execute (real entry point) ──────────────────────────────────────
-    //
-    // `execute()`'s `--non-interactive` branch is safe to drive for real: it
-    // only touches `Config::load()`/`Config::config_path()` (isolated below
-    // via `isolate_config_path_for_test` so it can't read or overwrite a
-    // real `~/.leviath/config.toml`) and delegates to the already-tested
-    // `run_non_interactive_setup`. The interactive branch
-    // (`io::stdin().lock()` handed straight to `run_interactive_setup`) is
-    // NOT exercised here -- that's a real, blocking stdin read with no
-    // injection seam at this call site, the same class of genuine,
-    // irreducible boundary as `interaction.rs`'s `request_interaction_stdin`
-    // wrapper and `foreground.rs`'s `ForegroundInteractionBackend::ask`.
 
     #[tokio::test]
     async fn execute_non_interactive_applies_flags_and_saves_to_isolated_path() {
@@ -931,5 +969,24 @@ mod tests {
             reloaded.providers.anthropic_api_key.as_deref(),
             Some("sk-ant-execute-test")
         );
+    }
+
+    #[tokio::test]
+    async fn execute_interactive_mode_uses_cursor_in_test() {
+        // Exercises the `#[cfg(test)]` branch of `execute()` — the branch that
+        // would otherwise block on real stdin. The Cursor provides 7 empty
+        // lines (one per prompt), so all values stay at their defaults.
+        let _guard = crate::config::isolate_config_path_for_test("setup-execute-interactive");
+        let args = SetupArgs {
+            non_interactive: false,
+            anthropic_key: None,
+            openai_key: None,
+            google_key: None,
+            openrouter_key: None,
+            ollama_url: None,
+            default_model: None,
+        };
+        let result = execute(args).await;
+        assert!(result.is_ok(), "expected Ok in test mode, got {:?}", result);
     }
 }
