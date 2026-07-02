@@ -229,17 +229,6 @@ impl Blueprint {
                 // If all targets are exhaustible (already visited + have max_revisits),
                 // the stage will eventually have zero available edges → terminal
                 let all_exhaustible = transitions.keys().all(|target| {
-                    // Unreachable: reaching this closure means the `for` loop
-                    // above completed without any `has_terminal_path(target, ..)`
-                    // call returning `true`. Each such call either short-circuits
-                    // immediately because `target` is already in `visited`, or
-                    // it isn't yet -- in which case the call itself inserts
-                    // `target` into `visited` right after that check, before
-                    // doing anything else. Either way, every `target` this
-                    // closure sees is already in `visited` by construction.
-                    if !visited.contains(target) {
-                        return false;
-                    }
                     self.stages
                         .iter()
                         .find(|s| s.name == *target)
@@ -258,7 +247,7 @@ impl Blueprint {
 }
 
 /// Interaction mode for a stage.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub enum StageMode {
     /// Runs without user input, fully autonomous
     #[default]
@@ -288,7 +277,7 @@ pub enum InteractionStyle {
 }
 
 /// A point where a stage can request user input.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct InteractionPoint {
     /// Unique name for this interaction point
     pub name: String,
@@ -625,7 +614,7 @@ pub enum TransitionCondition {
 }
 
 /// How context transforms when crossing a transition edge.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum EdgeTransform {
     /// Copy everything as-is (default for single-transition linear stages)
@@ -762,7 +751,13 @@ mod tests {
             }],
         });
         let err = bp.validate().unwrap_err();
-        assert!(matches!(err, ValidationError::Region { .. }));
+        assert_eq!(
+            err,
+            ValidationError::Region {
+                region: "nonexistent".to_string(),
+                message: "transform target region not found in layout".to_string(),
+            }
+        );
     }
 
     #[test]
@@ -845,7 +840,7 @@ mod tests {
     fn test_stage_with_mode() {
         let stage = Stage::new("test".to_string(), make_model())
             .with_mode(StageMode::InteractivePoints { points: vec![] });
-        assert!(matches!(stage.mode, StageMode::InteractivePoints { .. }));
+        assert_eq!(stage.mode, StageMode::InteractivePoints { points: vec![] });
     }
 
     #[test]
@@ -1169,7 +1164,7 @@ mod tests {
     #[test]
     fn test_edge_transform_default() {
         let t = EdgeTransform::default();
-        assert!(matches!(t, EdgeTransform::Direct));
+        assert_eq!(t, EdgeTransform::Direct);
     }
 
     #[test]
@@ -1224,6 +1219,48 @@ mod tests {
         assert!(
             stage.accepts_messages,
             "accepts_messages should default to true when not specified"
+        );
+    }
+
+    #[test]
+    fn test_has_terminal_path_unknown_stage_returns_false() {
+        // `has_terminal_path` is private; this test is in the same module.
+        // Calling it with a stage name that doesn't exist in the Blueprint
+        // exercises the `None => return false` arm (blueprint.rs line 203).
+        let stages = vec![Stage::new("start".to_string(), make_model())];
+        let bp = Blueprint::new("t".into(), "d".into(), stages, make_layout());
+        let mut visited = std::collections::HashSet::new();
+        assert!(!bp.has_terminal_path("nonexistent_stage", &mut visited));
+    }
+
+    #[test]
+    fn test_blueprint_validate_fails_when_layout_has_duplicate_region() {
+        let regions = vec![
+            RegionDefinition::new("dup".to_string(), RegionKind::Pinned, 100),
+            RegionDefinition::new("dup".to_string(), RegionKind::Temporary, 100),
+        ];
+        let layout = ContextLayout::new(regions, 200);
+        let stages = vec![Stage::new("start".to_string(), make_model())];
+        let bp = Blueprint::new("t".into(), "d".into(), stages, layout);
+        assert_eq!(
+            bp.validate().unwrap_err(),
+            ValidationError::Region {
+                region: "dup".to_string(),
+                message: "duplicate region name".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn test_blueprint_validate_fails_when_stage_has_empty_name() {
+        let stages = vec![Stage::new("".to_string(), make_model())];
+        let bp = Blueprint::new("t".into(), "d".into(), stages, make_layout());
+        assert_eq!(
+            bp.validate().unwrap_err(),
+            ValidationError::Stage {
+                stage: "(empty)".to_string(),
+                message: "stage name cannot be empty".to_string(),
+            }
         );
     }
 }

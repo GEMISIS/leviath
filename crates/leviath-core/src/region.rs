@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 /// when the context window fills up. This is inspired by hardware memory
 /// architectures like SNES VRAM, where different memory regions serve
 /// distinct purposes with their own access patterns and constraints.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum RegionKind {
     /// Never evicted or compacted. Architecture diagrams, constraints, identity.
     ///
@@ -203,9 +203,7 @@ impl Region {
         if let RegionKind::SlidingWindow { max_items } = &self.kind {
             let max = *max_items;
             while self.content.len() > max {
-                if let Some(removed) = self.content.first() {
-                    self.current_tokens -= removed.tokens;
-                }
+                self.current_tokens -= self.content[0].tokens;
                 self.content.remove(0);
             }
         }
@@ -350,7 +348,7 @@ impl RegionSchema {
 }
 
 /// Content format types that can be enforced via schemas.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum ContentFormat {
     /// Plain text, no formatting requirements
     Text,
@@ -399,11 +397,8 @@ mod tests {
     #[test]
     fn test_sliding_window_config() {
         let kind = RegionKind::SlidingWindow { max_items: 10 };
-        let region = Region::new("history".to_string(), kind, 5000);
-        match region.kind {
-            RegionKind::SlidingWindow { max_items } => assert_eq!(max_items, 10),
-            _ => panic!("Wrong region kind"),
-        }
+        let region = Region::new("history".to_string(), kind.clone(), 5000);
+        assert_eq!(region.kind, kind);
     }
 
     #[test]
@@ -483,12 +478,12 @@ mod tests {
     #[test]
     fn test_cache_hint_sliding_window() {
         let kind = RegionKind::SlidingWindow { max_items: 10 };
-        match kind.cache_hint() {
-            crate::cache::CacheHint::SlidingPrefix { stable_fraction } => {
-                assert!((stable_fraction - 0.75).abs() < f32::EPSILON);
+        assert_eq!(
+            kind.cache_hint(),
+            crate::cache::CacheHint::SlidingPrefix {
+                stable_fraction: 0.75
             }
-            other => panic!("Expected SlidingPrefix, got {:?}", other),
-        }
+        );
     }
 
     #[test]
@@ -541,10 +536,10 @@ mod tests {
     fn test_add_entry_rejects_over_budget() {
         let mut region = Region::new("data".to_string(), RegionKind::Temporary, 10);
         let result = region.add_entry("too much".to_string(), 20);
-        assert!(matches!(
-            result,
-            Err(crate::error::Error::TokenBudgetExceeded { used: 20, max: 10 })
-        ));
+        assert_eq!(
+            result.unwrap_err().to_string(),
+            "Content exceeds token budget: 20 > 10"
+        );
         assert_eq!(region.entry_count(), 0);
     }
 
@@ -563,10 +558,10 @@ mod tests {
         let mut region = Region::new("data".to_string(), RegionKind::Temporary, 10);
         let result =
             region.add_entry_with_metadata("too much".to_string(), 20, serde_json::json!({}));
-        assert!(matches!(
-            result,
-            Err(crate::error::Error::TokenBudgetExceeded { used: 20, max: 10 })
-        ));
+        assert_eq!(
+            result.unwrap_err().to_string(),
+            "Content exceeds token budget: 20 > 10"
+        );
     }
 
     #[test]
@@ -668,7 +663,10 @@ mod tests {
     fn test_validate_json_invalid() {
         let schema = RegionSchema::new(ContentFormat::Json);
         let err = schema.validate("not json").unwrap_err();
-        assert!(matches!(err, crate::error::Error::ValidationFailed(_)));
+        assert!(
+            err.to_string().starts_with("Region validation failed:"),
+            "unexpected: {err}"
+        );
     }
 
     #[test]
@@ -703,7 +701,10 @@ mod tests {
     fn test_validate_mermaid_invalid() {
         let schema = RegionSchema::new(ContentFormat::Mermaid);
         let err = schema.validate("just some text").unwrap_err();
-        assert!(matches!(err, crate::error::Error::ValidationFailed(_)));
+        assert!(
+            err.to_string().starts_with("Region validation failed:"),
+            "unexpected: {err}"
+        );
     }
 
     #[test]
@@ -720,7 +721,10 @@ mod tests {
             language: "rust".to_string(),
         });
         let err = schema.validate("   ").unwrap_err();
-        assert!(matches!(err, crate::error::Error::ValidationFailed(_)));
+        assert!(
+            err.to_string().starts_with("Region validation failed:"),
+            "unexpected: {err}"
+        );
     }
 
     #[test]
@@ -733,7 +737,10 @@ mod tests {
     fn test_validate_markdown_empty_is_error() {
         let schema = RegionSchema::new(ContentFormat::Markdown);
         let err = schema.validate("").unwrap_err();
-        assert!(matches!(err, crate::error::Error::ValidationFailed(_)));
+        assert!(
+            err.to_string().starts_with("Region validation failed:"),
+            "unexpected: {err}"
+        );
     }
 
     #[test]
@@ -761,6 +768,6 @@ mod tests {
         let schema = RegionSchema::new(ContentFormat::Text).with_custom_script("s".to_string());
         let cloned = schema.clone();
         assert_eq!(cloned.custom_script.as_deref(), Some("s"));
-        assert!(matches!(cloned.format, ContentFormat::Text));
+        assert_eq!(cloned.format, ContentFormat::Text);
     }
 }

@@ -6,7 +6,7 @@ use thiserror::Error;
 pub type Result<T> = std::result::Result<T, Error>;
 
 /// Errors from blueprint, stage, region, and layout validation.
-#[derive(Debug, Clone, Error)]
+#[derive(Debug, Clone, Error, PartialEq)]
 pub enum ValidationError {
     /// Blueprint-level validation failure
     #[error("Invalid blueprint: {0}")]

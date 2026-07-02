@@ -198,7 +198,12 @@ mod tests {
             ContextLayout::new(regions, 10000).with_eviction_order(vec!["nonexistent".to_string()]);
 
         let err = layout.validate().unwrap_err();
-        assert!(matches!(err, ValidationError::Layout(_)));
+        assert_eq!(
+            err,
+            ValidationError::Layout(
+                "eviction order references unknown region: nonexistent".to_string()
+            )
+        );
     }
 
     #[test]
@@ -243,10 +248,10 @@ mod tests {
         let schema = crate::region::RegionSchema::new(crate::region::ContentFormat::Json);
         let def =
             RegionDefinition::new("a".to_string(), RegionKind::Pinned, 5000).with_schema(schema);
-        assert!(matches!(
+        assert_eq!(
             def.schema.as_ref().unwrap().format,
             crate::region::ContentFormat::Json
-        ));
+        );
     }
 
     #[test]
