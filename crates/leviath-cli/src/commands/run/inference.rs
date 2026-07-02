@@ -25,7 +25,7 @@ pub async fn stream_inference(
         let window = engine
             .world()
             .get::<ContextWindow>(entity)
-            .ok_or_else(|| anyhow::anyhow!("Entity has no ContextWindow"))?;
+            .expect("Entity always has ContextWindow — spawned via AgentPool");
 
         let messages = window.assemble_messages();
         let remaining = window.max_tokens.saturating_sub(window.current_tokens);
@@ -33,20 +33,10 @@ pub async fn stream_inference(
         (messages, max_tokens)
     };
 
-    // Tool-less streaming: always empty tools list
-    let tools: Vec<leviath_providers::Tool> = Vec::new();
-    let filtered_tools = if let Some(filter) = tool_filter {
-        if filter.is_empty() {
-            tools
-        } else {
-            tools
-                .into_iter()
-                .filter(|t| filter.iter().any(|f| f == &t.name))
-                .collect()
-        }
-    } else {
-        tools
-    };
+    // Tool-less streaming: always empty tools list; filter is a no-op but
+    // accepted to keep the call-site API uniform with tool-bearing paths.
+    let _ = tool_filter; // acknowledged but unused — no tools to filter
+    let filtered_tools: Vec<leviath_providers::Tool> = Vec::new();
 
     // Respect each model's temperature support (e.g. claude-opus-4-8 deprecates it).
     let temperature = if provider.capabilities(model_name).supports_temperature {
@@ -115,12 +105,11 @@ pub async fn stream_inference(
 
     io.on_output("\n").await;
 
-    if let Some(mut state) = engine
+    engine
         .world_mut()
         .get_mut::<leviath_runtime::AgentState>(entity)
-    {
-        state.iteration += 1;
-    }
+        .expect("Entity always has AgentState — spawned via AgentPool")
+        .iteration += 1;
 
     let tokens_used = final_tokens.unwrap_or(leviath_providers::TokenUsage {
         prompt_tokens: 0,
@@ -304,7 +293,9 @@ mod tests {
             &self,
             _request: InferenceRequest,
         ) -> Result<InferenceResponse, ProviderError> {
-            unreachable!("infer_stream is overridden; infer() should not be called")
+            Err(ProviderError::ApiError(
+                "infer_stream is overridden; infer() should not be called".to_string(),
+            ))
         }
 
         async fn infer_stream(
@@ -407,7 +398,9 @@ mod tests {
             &self,
             _request: InferenceRequest,
         ) -> Result<InferenceResponse, ProviderError> {
-            unreachable!("infer_stream is overridden; infer() should not be called")
+            Err(ProviderError::ApiError(
+                "infer_stream is overridden; infer() should not be called".to_string(),
+            ))
         }
 
         async fn infer_stream(
@@ -718,7 +711,7 @@ mod tests {
 
         // Final chunk's tokens/finish_reason become the response's.
         assert_eq!(response.tokens_used.prompt_tokens, 7);
-        assert!(matches!(response.finish_reason, FinishReason::Complete));
+        assert_eq!(response.finish_reason, FinishReason::Complete);
     }
 
     /// The mock providers above only exist to drive `stream_inference`
@@ -751,11 +744,35 @@ mod tests {
         assert_eq!(multi.max_context_tokens("m"), 100_000);
         assert_eq!(multi.name(), "multi-chunk");
         assert!(multi.list_models().await.unwrap().is_empty());
+        // Cover the `infer()` fallback path (returns an error rather than panicking).
+        assert!(multi
+            .infer(InferenceRequest {
+                messages: vec![],
+                model: "m".to_string(),
+                max_tokens: 1,
+                temperature: 0.0,
+                tools: vec![],
+                extra: serde_json::Value::Null,
+            })
+            .await
+            .is_err());
 
         let error_chunk = ErrorChunkStreamProvider;
         assert_eq!(error_chunk.count_tokens("abcd", "m"), 1);
         assert_eq!(error_chunk.max_context_tokens("m"), 100_000);
         assert_eq!(error_chunk.name(), "error-chunk");
         assert!(error_chunk.list_models().await.unwrap().is_empty());
+        // Cover the `infer()` fallback path (returns an error rather than panicking).
+        assert!(error_chunk
+            .infer(InferenceRequest {
+                messages: vec![],
+                model: "m".to_string(),
+                max_tokens: 1,
+                temperature: 0.0,
+                tools: vec![],
+                extra: serde_json::Value::Null,
+            })
+            .await
+            .is_err());
     }
 }
