@@ -29,6 +29,15 @@ struct ForegroundInteractionBackend;
 
 #[async_trait]
 impl super::dynamic_interaction::InteractionBackend for ForegroundInteractionBackend {
+    // Deliberately not called from any test. `request_interaction_stdin`
+    // blocks on real stdin via `std::io::stdin().lock()`; the underlying
+    // logic is fully covered by `request_interaction_from_reader`'s
+    // in-memory-reader tests in `interaction.rs`. A previous test here drove
+    // this for real through `spawn_blocking` + a timeout, which doesn't
+    // help: on a live TTY the read never reaches EOF, that blocking-pool
+    // thread is tracked by tokio, and tearing down the test's runtime
+    // blocks forever waiting for it regardless of what the test does with
+    // the `JoinHandle`. Hit exactly this hang running interactively.
     async fn ask(
         &self,
         req: crate::interaction::InteractionRequest,
@@ -197,6 +206,39 @@ async fn forward_lines_as_messages<R: tokio::io::AsyncBufRead + Unpin>(
     }
 }
 
+/// Core logic behind [`StageCallbacks::start_message_reader`], parameterized
+/// over how the reader is constructed so tests can supply e.g.
+/// `tokio::io::empty()` instead of real stdin.
+///
+/// This distinction matters more than it looks: merely *calling* the
+/// production reader-factory (`tokio::io::stdin()`) starts a real blocking
+/// read on a tokio blocking-pool thread the moment the spawned task runs --
+/// regardless of whether the caller ever awaits or aborts the returned
+/// handle. On a live TTY that read never reaches EOF, and tokio's blocking
+/// pool tracks it, so tearing down the runtime (e.g. at the end of a
+/// `#[tokio::test]`) blocks waiting for it to finish -- forever. There is no
+/// way to bound or cancel that from the outside once started, so the only
+/// safe fix is to never let a test construct the real reader at all.
+fn start_message_reader_with<R, F>(
+    engine: &leviath_runtime::AgentEngine,
+    agent_id: &str,
+    accepts: bool,
+    make_reader: F,
+) -> Option<tokio::task::JoinHandle<()>>
+where
+    R: tokio::io::AsyncBufRead + Unpin + Send + 'static,
+    F: FnOnce() -> R + Send + 'static,
+{
+    if !accepts {
+        return None;
+    }
+    let message_tx = engine.get_message_sender();
+    let stdin_agent_id = agent_id.to_string();
+    Some(tokio::spawn(async move {
+        forward_lines_as_messages(make_reader(), stdin_agent_id, message_tx).await;
+    }))
+}
+
 /// Foreground-specific callbacks for the unified stage loop.
 struct ForegroundCallbacks {}
 
@@ -248,24 +290,9 @@ impl StageCallbacks for ForegroundCallbacks {
         agent_id: &str,
         accepts: bool,
     ) -> Option<tokio::task::JoinHandle<()>> {
-        if !accepts {
-            return None;
-        }
-        let message_tx = engine.get_message_sender();
-        let stdin_agent_id = agent_id.to_string();
-        // The 4-line body of this spawned task (real `tokio::io::stdin()` plus
-        // the `forward_lines_as_messages` call) is intentionally not driven by
-        // a test: awaiting it would block on real process stdin, which is a
-        // TTY (not EOF) when tests run from an interactive terminal -- the
-        // same class of hang risk already hit and fixed once this session
-        // (see `resolve_task_with`'s `stdin_is_terminal` injection). The
-        // line-forwarding logic itself is fully covered via
-        // `forward_lines_as_messages` with an in-memory reader below.
-        Some(tokio::spawn(async move {
-            let stdin = tokio::io::stdin();
-            let reader = tokio::io::BufReader::new(stdin);
-            forward_lines_as_messages(reader, stdin_agent_id, message_tx).await;
-        }))
+        start_message_reader_with(engine, agent_id, accepts, || {
+            tokio::io::BufReader::new(tokio::io::stdin())
+        })
     }
 
     fn get_run_context(&mut self) -> Option<(&str, &mut RunMeta)> {
@@ -658,26 +685,28 @@ mod tests {
 
     #[tokio::test]
     async fn foreground_start_message_reader_returns_handle_when_accepts() {
-        let mut cb = ForegroundCallbacks {};
         let registry = leviath_runtime::ProviderRegistry::new();
         let engine = leviath_runtime::AgentEngine::with_providers(registry);
-        // When accepts=true, a JoinHandle is spawned for stdin reading.
-        let handle = cb.start_message_reader(&engine, "agent-1", true);
+        // Drives the real spawn+forward logic via `start_message_reader_with`
+        // (what `StageCallbacks::start_message_reader` delegates to) with
+        // `tokio::io::empty()` instead of real stdin. This previously called
+        // the trait method directly, which constructs `tokio::io::stdin()`
+        // for real the moment the spawned task starts running -- on a live
+        // TTY that read never reaches EOF, and since it's tracked by tokio's
+        // blocking pool, awaiting/timing-out/aborting the handle doesn't
+        // matter: tearing down this test's runtime at the end of the test
+        // still blocks forever waiting for that leaked real stdin read.
+        // `tokio::io::empty()` reaches EOF immediately with no blocking-pool
+        // involvement at all, so this is fully bounded regardless of
+        // environment.
+        let handle = start_message_reader_with(&engine, "agent-1", true, || {
+            tokio::io::BufReader::new(tokio::io::empty())
+        });
         assert!(
             handle.is_some(),
             "Should return Some(JoinHandle) when accepts is true"
         );
-        // Give the spawned task a brief window to start executing (enters the
-        // async block, covers lines 265-267 in the spawn body).  If stdin is
-        // EOF (the usual cargo-test / llvm-cov environment) the task completes
-        // naturally; if it is still open we abort it after the timeout so the
-        // test never hangs.
-        let result =
-            tokio::time::timeout(std::time::Duration::from_millis(50), handle.unwrap()).await;
-        // result is Ok(Ok(())) on clean completion, Err(Elapsed) on timeout
-        // (which happens only when stdin is a live terminal; the spawn body
-        // still ran up to the first await point, covering lines 265-267).
-        drop(result);
+        handle.unwrap().await.unwrap();
     }
 
     #[tokio::test]
@@ -747,38 +776,15 @@ mod tests {
         backend.on_review_document("call-1", "Title", "# Markdown body");
     }
 
-    /// `ask()` delegates to `request_interaction_stdin`, a synchronous
-    /// blocking call.  Under `cargo test` / `cargo llvm-cov`, stdin is a
-    /// closed pipe that returns EOF immediately, so the call returns in
-    /// microseconds.  We wrap it in `spawn_blocking` + a timeout to
-    /// guarantee the test never hangs even if stdin is somehow a live
-    /// terminal.
-    #[tokio::test]
-    async fn foreground_interaction_backend_ask_returns_response_on_eof_stdin() {
-        use super::super::dynamic_interaction::InteractionBackend;
-        let req = crate::interaction::InteractionRequest::free_text(
-            "ask-test-1",
-            "What should I do?",
-            "main",
-            false, // not required — EOF reader returns empty text immediately
-        );
-        // ask() is a thin async wrapper over a synchronous blocking call.
-        // Drive it on a blocking thread using futures::executor::block_on so
-        // we don't need a manual NoopWaker + Poll match, which would leave the
-        // `Poll::Pending` arm and `Wake::wake` body permanently uncovered.
-        let result = tokio::time::timeout(
-            std::time::Duration::from_millis(500),
-            tokio::task::spawn_blocking(move || {
-                let backend = ForegroundInteractionBackend;
-                futures::executor::block_on(
-                    <ForegroundInteractionBackend as InteractionBackend>::ask(&backend, req),
-                )
-            }),
-        )
-        .await;
-        // Ok(Ok(resp)) = completed; Err(Elapsed) = stdin was a live terminal
-        let _ = result;
-    }
+    // `ask()`'s real body (`request_interaction_stdin`) is deliberately not
+    // called from any test -- see the doc comment on the `ask` impl above.
+    // The `spawn_blocking` + timeout wrapper this test used to have doesn't
+    // bound anything real: on a live TTY the underlying blocking stdin read
+    // never reaches EOF, tokio's blocking pool tracks it regardless of
+    // whether the `JoinHandle` is awaited/timed-out/aborted, and this test's
+    // runtime teardown hung waiting for it. `request_interaction_from_reader`
+    // (interaction.rs) has full in-memory-reader coverage of the actual
+    // logic `ask()` delegates to.
 
     // ─── dispatch_tool_calls_foreground ─────────────────────────────────────
 
@@ -1446,11 +1452,18 @@ model = "mock-model"
         let _ = std::fs::remove_dir_all(&temp_dir);
     }
 
-    /// Covers `resolve_task(...)? ` error branch (line 389) — task is None
-    /// and stdin is not a TTY (always true in cargo test), so resolve_task
-    /// returns "No task provided" error.
+    /// Covers `resolve_task(...)? ` error branch (line 389) via the "empty
+    /// task file" error, not `task: None`. `task: None` reaches
+    /// `resolve_task`'s real, un-injected `std::io::stdin().is_terminal()`
+    /// check (see `session.rs`) -- under `cargo test` run from a real
+    /// interactive terminal that's actually true, so this used to launch a
+    /// real editor (`vim`/`nano`/`vi`, whichever is found first with no
+    /// `$EDITOR`/`$VISUAL` set) with the test process's real inherited
+    /// stdio, hanging the whole test run on real keyboard input. An empty
+    /// task file hits a `resolve_task` error deterministically, in every
+    /// environment, without depending on whether stdin happens to be a TTY.
     #[tokio::test]
-    async fn run_foreground_with_registry_fails_when_task_is_none_in_non_tty() {
+    async fn run_foreground_with_registry_fails_when_task_file_is_empty() {
         let _config_guard = crate::config::isolate_config_path_for_test("fg-no-task");
 
         let temp_dir = std::env::temp_dir().join("lev-test-fg-no-task");
@@ -1460,10 +1473,12 @@ model = "mock-model"
             "[agent]\nname = \"x\"\nversion = \"1.0.0\"\ndescription = \"x\"\n",
         )
         .unwrap();
+        let empty_task_file = temp_dir.join("empty-task.txt");
+        std::fs::write(&empty_task_file, "").unwrap();
 
         let args = RunArgs {
             path: Some(temp_dir.to_string_lossy().to_string()),
-            task: None, // ← exercises resolve_task None path
+            task: Some(empty_task_file.to_string_lossy().to_string()),
             model: None,
             foreground: true,
             yolo: false,
@@ -1474,18 +1489,11 @@ model = "mock-model"
             count: 1,
         };
 
-        // In cargo test stdin is never a TTY, so resolve_task returns Err
         let result =
             run_foreground_with_registry(args, |_c| leviath_runtime::ProviderRegistry::new()).await;
-        assert!(
-            result.is_err(),
-            "expected error when task is None and stdin is not a TTY"
-        );
+        assert!(result.is_err(), "expected error for empty task file");
         let err_msg = result.unwrap_err().to_string();
-        assert!(
-            err_msg.contains("No task provided") || err_msg.contains("not a TTY"),
-            "unexpected error: {err_msg}",
-        );
+        assert!(err_msg.contains("is empty"), "unexpected error: {err_msg}",);
 
         let _ = std::fs::remove_dir_all(&temp_dir);
     }

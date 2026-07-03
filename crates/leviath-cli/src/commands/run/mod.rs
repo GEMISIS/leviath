@@ -813,10 +813,17 @@ prompt = "Do the thing"
 
     // ─── resolve_task error path (line 136) ──────────────────────────────────
 
+    /// Covers `resolve_task(...)? ` (line 136) via the "empty task file"
+    /// error, not `task: None`. `task: None` reaches `resolve_task`'s real,
+    /// un-injected `std::io::stdin().is_terminal()` check -- under `cargo
+    /// test` run from a real interactive terminal that's actually true
+    /// (not the "always non-TTY" assumption this test used to make), so it
+    /// launched a real editor (`vim`/`nano`/`vi`) with the test process's
+    /// real inherited stdio, hanging the whole run on real keyboard input.
+    /// An empty task file hits a `resolve_task` error deterministically in
+    /// every environment, without depending on whether stdin is a TTY.
     #[tokio::test]
-    async fn execute_background_no_task_in_non_tty_returns_error() {
-        // In the test runner stdin is not a TTY, so resolve_task(None, ...) will
-        // bail! with "No task provided."  This covers the `?` at line 136.
+    async fn execute_background_empty_task_file_returns_error() {
         let pid = std::process::id();
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -827,10 +834,12 @@ prompt = "Do the thing"
         let temp_dir = std::env::temp_dir().join(&agent_name);
         let _ = std::fs::create_dir_all(&temp_dir);
         write_valid_manifest(&temp_dir, &agent_name);
+        let empty_task_file = temp_dir.join("empty-task.txt");
+        std::fs::write(&empty_task_file, "").unwrap();
 
         let args = RunArgs {
             path: Some(temp_dir.to_string_lossy().to_string()),
-            task: None, // no task — will fail in non-TTY test environment
+            task: Some(empty_task_file.to_string_lossy().to_string()),
             model: None,
             foreground: false,
             yolo: false,
@@ -841,11 +850,10 @@ prompt = "Do the thing"
             count: 1,
         };
         let result = execute(args).await;
-        // Either: error from resolve_task (non-TTY) OR editor opened and returned
-        // content (TTY). Either way the test must not panic. In CI it's always non-TTY.
+        assert!(result.is_err(), "expected error for empty task file");
+        let err_msg = result.unwrap_err().to_string();
+        assert!(err_msg.contains("is empty"), "unexpected error: {err_msg}");
         let _ = std::fs::remove_dir_all(&temp_dir);
-        // We just verify no panic; the error/ok depends on the test environment.
-        let _ = result;
     }
 
     // ─── new_session_pre_exec: lines 208-211 ─────────────────────────────────
