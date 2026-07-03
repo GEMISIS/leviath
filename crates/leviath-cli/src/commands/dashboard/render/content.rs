@@ -1113,6 +1113,93 @@ mod tests {
         let _ = std::fs::remove_dir_all(runstate::run_dir(run_id));
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn render_content_pane_file_path_hint_shows_raw_path_when_outside_home() {
+        // `isolate_runs_dir_for_test` deliberately roots its temp runs dir
+        // under the real home directory (see its own doc comment), so every
+        // other test using it can only ever exercise the `~`-shortened
+        // branch of the file-path hint below. Point `LEVIATH_RUNS_DIR` at
+        // `/tmp` directly instead (outside `$HOME` on macOS/Linux, and much
+        // shorter than `std::env::temp_dir()`'s real path so the hint can't
+        // get clipped by the render width) to cover the other branch: the
+        // raw, non-shortened path.
+        let _lock = crate::runstate::RUNS_DIR_ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let original_runs_dir = std::env::var_os("LEVIATH_RUNS_DIR");
+        let original_log_path = std::env::var_os("LEVIATH_DASHBOARD_LOG_PATH");
+
+        let home = dirs::home_dir().unwrap_or_default();
+        let base = std::path::PathBuf::from("/tmp/lvroh");
+        assert!(
+            !base.starts_with(&home),
+            "test precondition: {:?} must be outside $HOME ({:?})",
+            base,
+            home
+        );
+        let _ = std::fs::remove_dir_all(&base);
+        let runs_dir = base.join("runs");
+        std::fs::create_dir_all(&runs_dir).unwrap();
+        unsafe {
+            std::env::set_var("LEVIATH_RUNS_DIR", &runs_dir);
+            std::env::set_var("LEVIATH_DASHBOARD_LOG_PATH", base.join("dashboard.log"));
+        }
+
+        let run_id = "t-oh";
+        let meta = runstate::RunMeta::new(
+            run_id.to_string(),
+            "agent".to_string(),
+            "/p".to_string(),
+            "task".to_string(),
+            None,
+            "/tmp".to_string(),
+            1,
+        );
+        runstate::create_run(&meta).unwrap();
+        runstate::append_stage_output(run_id, 0, "hello output");
+
+        let mut agent = make_test_agent(run_id, AgentDisplayStatus::Active);
+        agent.is_run_state = true;
+
+        let backend = TestBackend::new(120, 40);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut dash = make_test_dashboard();
+        dash.stage_content_mode = StageContentMode::Output;
+        terminal
+            .draw(|f| {
+                let area = Rect::new(0, 0, 100, 20);
+                dash.render_content_pane(f, area, &agent, 100);
+            })
+            .unwrap();
+
+        let content: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|c| c.symbol())
+            .collect();
+        assert!(content.contains("output.log"), "got: {}", content);
+        assert!(
+            !content.contains('~'),
+            "expected the raw (non-`~`-shortened) path since it's outside $HOME, got: {}",
+            content
+        );
+
+        let _ = std::fs::remove_dir_all(&base);
+        unsafe {
+            match original_runs_dir {
+                Some(v) => std::env::set_var("LEVIATH_RUNS_DIR", v),
+                None => std::env::remove_var("LEVIATH_RUNS_DIR"),
+            }
+            match original_log_path {
+                Some(v) => std::env::set_var("LEVIATH_DASHBOARD_LOG_PATH", v),
+                None => std::env::remove_var("LEVIATH_DASHBOARD_LOG_PATH"),
+            }
+        }
+    }
+
     #[test]
     fn build_output_lines_logs_mode_colors_by_line_prefix() {
         let _guard = crate::runstate::isolate_runs_dir_for_test(

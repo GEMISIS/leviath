@@ -12,7 +12,11 @@ pub use types::{AgentDisplayStatus, AgentEvent, DashboardAgent, DashboardArgs};
 
 use crossterm::{
     event::{Event, KeyEventKind},
-    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+    terminal::{disable_raw_mode, enable_raw_mode},
+};
+#[cfg(not(test))]
+use crossterm::{
+    terminal::{EnterAlternateScreen, LeaveAlternateScreen},
     ExecutableCommand,
 };
 use leviath_runtime::AgentEngine;
@@ -96,11 +100,32 @@ impl EventSource for CrosstermEventSource {
 
 /// Free-function wrappers for crossterm alternate-screen entry/exit, stored
 /// as `fn` pointers in [`CrosstermSetup`] so tests can stub them out.
+///
+/// The real bodies are `#[cfg(not(test))]`-gated; under `cargo test` they're
+/// replaced with the no-op twins below, so the real alternate-screen-mutating
+/// code is structurally absent from the test binary rather than merely
+/// "present but never called." That in turn makes it safe for a test to
+/// invoke these two functions *by name* (through a real `CrosstermSetup`
+/// whose `enable_raw`/`disable_raw` are still faked -- crossterm's real
+/// `enable_raw_mode`/`disable_raw_mode` have no such test-only twin) to
+/// exercise `CrosstermSetup::enable`/`disable`'s wiring without ever
+/// touching the real alternate screen.
+#[cfg(not(test))]
 fn enter_alt_screen() -> std::io::Result<()> {
     stdout().execute(EnterAlternateScreen).map(|_| ())
 }
+#[cfg(not(test))]
 fn leave_alt_screen() -> std::io::Result<()> {
     stdout().execute(LeaveAlternateScreen).map(|_| ())
+}
+
+#[cfg(test)]
+fn enter_alt_screen() -> std::io::Result<()> {
+    Ok(())
+}
+#[cfg(test)]
+fn leave_alt_screen() -> std::io::Result<()> {
+    Ok(())
 }
 
 /// Abstracts terminal setup/teardown so [`execute_core`] can be tested with
@@ -895,6 +920,74 @@ mod tests {
         };
         let result = src.poll_event(Duration::from_millis(0)).unwrap();
         assert!(result.is_none());
+    }
+
+    // ─── CrosstermEventSource::new / CrosstermSetup::new constructors ───────
+    //
+    // Both constructors only ever *store* fn pointers (crossterm's real
+    // `poll`/`read`/`enable_raw_mode`/`disable_raw_mode`, plus this module's
+    // own `enter_alt_screen`/`leave_alt_screen`) and, for `CrosstermSetup`,
+    // a `Viewport` value -- taking a function's address never invokes it, so
+    // merely constructing either type touches no real terminal state. Only
+    // *calling* the methods on a `CrosstermSetup::new()`-built instance would
+    // (see the dedicated test further below for how that's done safely).
+
+    #[test]
+    fn crossterm_event_source_new_constructs_without_touching_real_events() {
+        let _src = CrosstermEventSource::new();
+    }
+
+    #[test]
+    fn crossterm_setup_new_constructs_without_touching_real_terminal() {
+        let setup = CrosstermSetup::new();
+        assert!(matches!(setup.viewport, Viewport::Fullscreen));
+    }
+
+    #[test]
+    fn crossterm_setup_enable_disable_exercise_real_alt_screen_fn_pointers_via_test_stub() {
+        // `enter_alt_screen`/`leave_alt_screen` are `#[cfg(test)]`-gated to
+        // no-op stubs (see their definitions above) specifically so this
+        // test can reference them *by their real names* -- the same values
+        // `CrosstermSetup::new()` would use in production -- without ever
+        // touching the real alternate screen. `enable_raw`/`disable_raw` are
+        // still faked here since crossterm's real `enable_raw_mode`/
+        // `disable_raw_mode` have no such test-only twin.
+        fn noop() -> std::io::Result<()> {
+            Ok(())
+        }
+        let mut setup = CrosstermSetup {
+            enable_raw: noop,
+            disable_raw: noop,
+            enter_alt: enter_alt_screen,
+            leave_alt: leave_alt_screen,
+            viewport: Viewport::Fixed(ratatui::layout::Rect::new(0, 0, 80, 24)),
+        };
+        assert!(setup.enable().is_ok());
+        setup.disable();
+    }
+
+    // ─── FailingDrawBackend: non-draw trait methods ──────────────────────────
+
+    #[test]
+    fn failing_draw_backend_non_draw_methods_return_ok() {
+        // `run_dashboard_loop_propagates_draw_error` above only exercises
+        // `draw()` (which errors) -- ratatui's `Terminal::draw()` returns as
+        // soon as the backend's `draw()` fails, without calling any of this
+        // fake backend's other trait methods, so they're never reached
+        // through that path. Call them directly instead; they're trivial
+        // fakes with no real I/O either way.
+        use ratatui::backend::Backend as _;
+        let mut backend = FailingDrawBackend;
+        assert!(backend.hide_cursor().is_ok());
+        assert!(backend.show_cursor().is_ok());
+        assert!(backend.get_cursor_position().is_ok());
+        assert!(backend
+            .set_cursor_position(ratatui::layout::Position::new(1, 1))
+            .is_ok());
+        assert!(backend.clear().is_ok());
+        assert!(backend.size().is_ok());
+        assert!(backend.window_size().is_ok());
+        assert!(backend.flush().is_ok());
     }
 
     // ─── execute_core / CrosstermSetup ──────────────────────────────────────

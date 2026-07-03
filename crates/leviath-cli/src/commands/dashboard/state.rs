@@ -2225,6 +2225,44 @@ mod tests {
     }
 
     #[test]
+    fn sync_from_run_state_existing_agent_was_already_terminal_skips_transition_toast_block() {
+        // `prev_status_was_active` (and therefore the whole "failed"/
+        // "completed" transition-toast check) is only ever exercised as
+        // `true` by every `sync_from_run_state_existing_agent_*` test above,
+        // since they all start from an Active/Waiting agent. Start from an
+        // agent that's already `Complete` instead, so that block is skipped
+        // entirely on the next sync -- even though the underlying
+        // `RunStatus` does change -- covering the `prev_status_was_active ==
+        // false` path.
+        let _guard = crate::runstate::isolate_runs_dir_for_test(
+            "sync_from_run_state_existing_agent_was_already_terminal_skips_transition_toast_block",
+        );
+        let run_id = "test-sync-existing-already-terminal";
+        cleanup_run(run_id);
+        let meta = make_run_meta(run_id, RunStatus::Complete);
+        runstate::create_run(&meta).unwrap();
+
+        let mut dash = make_test_dashboard();
+        dash.sync_from_run_state(); // first sync: creates the agent, already Complete
+        assert!(matches!(
+            dash.agents.iter().find(|a| a.id == run_id).unwrap().status,
+            AgentDisplayStatus::Complete
+        ));
+
+        let meta2 = make_run_meta(run_id, RunStatus::Error);
+        runstate::write_meta(&meta2).unwrap();
+        dash.sync_from_run_state(); // second sync: transitions Complete -> Error
+
+        let agent = dash.agents.iter().find(|a| a.id == run_id).unwrap();
+        assert!(matches!(agent.status, AgentDisplayStatus::Error(_)));
+        // No transition toast fires -- the block only runs when the agent
+        // was previously Active/Waiting, which it wasn't here.
+        assert!(!dash.toasts.iter().any(|t| t.message.contains(run_id)));
+
+        cleanup_run(run_id);
+    }
+
+    #[test]
     fn sync_from_run_state_existing_agent_stays_active_no_toast() {
         let _guard = crate::runstate::isolate_runs_dir_for_test(
             "sync_from_run_state_existing_agent_stays_active_no_toast",

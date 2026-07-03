@@ -536,6 +536,54 @@ mod tests {
         assert!(result);
     }
 
+    // ── yank_to_clipboard_via: native-tool success branch ────────────────────
+
+    #[cfg(unix)]
+    #[test]
+    fn test_yank_to_clipboard_via_native_tool_success_returns_true_without_fallback() {
+        // Shadows `pbcopy` with a fake, harmless script on `PATH` so the
+        // native-tool success path (the `return true` from inside the spawn
+        // loop) is exercised deterministically -- without this, whether that
+        // specific branch runs depends on whether a real `pbcopy`/`xclip`/
+        // `wl-copy` happens to be installed and reachable in the environment
+        // `cargo test` runs in. The fake script never touches the real
+        // clipboard or a terminal; it just drains stdin and exits 0.
+        let _lock = crate::config::PATH_ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+
+        let dir = std::env::temp_dir().join("lev_test_fake_pbcopy_bin");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let script_path = dir.join("pbcopy");
+        std::fs::write(&script_path, "#!/bin/sh\ncat > /dev/null\nexit 0\n").unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(&script_path).unwrap().permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&script_path, perms).unwrap();
+        }
+
+        fn unreachable_osc52_fallback(_text: &str) -> bool {
+            panic!("OSC52 fallback must not run when the fake pbcopy succeeds");
+        }
+
+        let original_path = std::env::var_os("PATH");
+        unsafe {
+            std::env::set_var("PATH", &dir);
+        }
+        let result = yank_to_clipboard_via("native tool success test", unreachable_osc52_fallback);
+        unsafe {
+            match &original_path {
+                Some(p) => std::env::set_var("PATH", p),
+                None => std::env::remove_var("PATH"),
+            }
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert!(result);
+    }
+
     // ── OSC52 base64 edge cases (pure `osc52_sequence`, no I/O) ───────────────
 
     #[test]
