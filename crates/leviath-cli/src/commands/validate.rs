@@ -610,6 +610,16 @@ system = { kind = "pinned", max_tokens = 1000 }
     // branches, which would kill the test process -- `execute_reporting_outcome`
     // exists precisely so these can be exercised without that.
 
+    fn assert_is_parse_error(outcome: &ValidateOutcome) {
+        assert!(matches!(outcome, ValidateOutcome::ParseError(_)));
+    }
+
+    #[test]
+    #[should_panic(expected = "assertion failed")]
+    fn assert_is_parse_error_panics_on_non_parse_error() {
+        assert_is_parse_error(&ValidateOutcome::Success);
+    }
+
     #[test]
     fn execute_reporting_outcome_malformed_toml_is_parse_error() {
         let dir = tempfile::tempdir().unwrap();
@@ -618,7 +628,7 @@ system = { kind = "pinned", max_tokens = 1000 }
             path: dir.path().to_str().unwrap().to_string(),
         };
         let outcome = execute_reporting_outcome(&args).unwrap();
-        assert!(matches!(outcome, ValidateOutcome::ParseError(_)));
+        assert_is_parse_error(&outcome);
     }
 
     #[test]
@@ -645,7 +655,17 @@ system = { kind = "pinned", max_tokens = 1000 }
             path: dir.path().to_str().unwrap().to_string(),
         };
         let outcome = execute_reporting_outcome(&args).unwrap();
+        assert_is_validation_error(&outcome);
+    }
+
+    fn assert_is_validation_error(outcome: &ValidateOutcome) {
         assert!(matches!(outcome, ValidateOutcome::ValidationError(_)));
+    }
+
+    #[test]
+    #[should_panic(expected = "assertion failed")]
+    fn assert_is_validation_error_panics_on_non_validation_error() {
+        assert_is_validation_error(&ValidateOutcome::Success);
     }
 
     #[test]
@@ -680,7 +700,17 @@ system = { kind = "pinned", max_tokens = 1000 }
             path: dir.path().to_str().unwrap().to_string(),
         };
         let outcome = execute_reporting_outcome(&args).unwrap();
+        assert_is_success(&outcome);
+    }
+
+    fn assert_is_success(outcome: &ValidateOutcome) {
         assert!(matches!(outcome, ValidateOutcome::Success));
+    }
+
+    #[test]
+    #[should_panic(expected = "assertion failed")]
+    fn assert_is_success_panics_on_non_success() {
+        assert_is_success(&ValidateOutcome::ParseError("x".to_string()));
     }
 
     // ─── print_warnings: multiple stages all reachable ──────────────────
@@ -841,7 +871,17 @@ max_iterations = 5
         let dir = tempfile::tempdir().unwrap();
         write_manifest(dir.path(), "not valid toml [[[");
         let err = check_manifest(dir.path()).unwrap_err();
+        assert_is_manifest_parse_error(&err);
+    }
+
+    fn assert_is_manifest_parse_error(err: &ManifestCheckError) {
         assert!(matches!(err, ManifestCheckError::Parse(_)));
+    }
+
+    #[test]
+    #[should_panic(expected = "assertion failed")]
+    fn assert_is_manifest_parse_error_panics_on_non_parse_error() {
+        assert_is_manifest_parse_error(&ManifestCheckError::Io(anyhow::anyhow!("x")));
     }
 
     #[test]

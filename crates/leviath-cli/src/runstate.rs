@@ -998,6 +998,20 @@ mod tests {
         assert_eq!(back.model.as_deref(), Some("model-x"));
     }
 
+    #[test]
+    fn read_meta_returns_err_on_corrupted_json() {
+        // Exercises `read_meta_from`'s `serde_json::from_str(&json)?` Err
+        // arm: a `meta.json` that exists but doesn't parse as a `RunMeta`.
+        let _guard = isolate_runs_dir_for_test("read-meta-returns-err-on-corrupted-json");
+        let run_id = "corrupted-meta-run";
+        let dir = run_dir(run_id);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("meta.json"), "not valid json").unwrap();
+
+        let result = read_meta(run_id);
+        assert!(result.is_err());
+    }
+
     // ─── write_stages_index / read_stages_index roundtrip ───────────────────
 
     #[test]
@@ -1152,7 +1166,9 @@ mod tests {
         // `LEVIATH_DASHBOARD_LOG_PATH` process-wide, and without the lock a
         // concurrently-running isolated test would make this assertion
         // race and intermittently fail.
-        let _lock = RUNS_DIR_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _lock = RUNS_DIR_ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let prev = std::env::var("LEVIATH_DASHBOARD_LOG_PATH").ok();
         unsafe { std::env::remove_var("LEVIATH_DASHBOARD_LOG_PATH") };
         let path = dashboard_log_path();
@@ -1167,7 +1183,9 @@ mod tests {
     fn runs_dir_structure() {
         // See the comment on `dashboard_log_path_structure` above -- same
         // race, same fix, for `LEVIATH_RUNS_DIR`.
-        let _lock = RUNS_DIR_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _lock = RUNS_DIR_ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let prev = std::env::var("LEVIATH_RUNS_DIR").ok();
         unsafe { std::env::remove_var("LEVIATH_RUNS_DIR") };
         let path = runs_dir();
@@ -1469,7 +1487,9 @@ mod tests {
 
     #[test]
     fn runs_dir_with_override_set_returns_override() {
-        let _lock = RUNS_DIR_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _lock = RUNS_DIR_ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let tmpdir = tempfile::tempdir().unwrap();
         let prev = std::env::var("LEVIATH_RUNS_DIR").ok();
         unsafe { std::env::set_var("LEVIATH_RUNS_DIR", tmpdir.path()) };
@@ -1480,7 +1500,9 @@ mod tests {
 
     #[test]
     fn runs_dir_without_override_falls_back_to_home() {
-        let _lock = RUNS_DIR_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _lock = RUNS_DIR_ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let prev = std::env::var("LEVIATH_RUNS_DIR").ok();
         unsafe { std::env::remove_var("LEVIATH_RUNS_DIR") };
         let dir = runs_dir();
@@ -1786,6 +1808,39 @@ mod tests {
         // list_runs_in_dir now reads meta.json directly from the dir, no env var needed
         let runs = list_runs_in_dir(tmpdir.path().to_path_buf());
         assert!(runs.iter().any(|r| r.run_id == run_id));
+    }
+
+    #[test]
+    fn list_runs_in_dir_skips_entry_with_corrupted_meta_json() {
+        // Exercises the `if let Ok(meta) = serde_json::from_str::<RunMeta>(...)`
+        // else arm: a subdirectory whose meta.json exists and is readable as
+        // a string, but doesn't parse as a `RunMeta`, is silently skipped
+        // rather than propagating an error.
+        let tmpdir = tempfile::tempdir().unwrap();
+        let good_run_id = "cov-listed-good-run";
+        let bad_run_id = "cov-listed-corrupted-run";
+
+        let good_subdir = tmpdir.path().join(good_run_id);
+        std::fs::create_dir_all(&good_subdir).unwrap();
+        let meta = RunMeta::new(
+            good_run_id.into(),
+            "list-agent".into(),
+            "/agents/list".into(),
+            "list task".into(),
+            None,
+            "/tmp".into(),
+            1,
+        );
+        let json = serde_json::to_string_pretty(&meta).unwrap();
+        std::fs::write(good_subdir.join("meta.json"), &json).unwrap();
+
+        let bad_subdir = tmpdir.path().join(bad_run_id);
+        std::fs::create_dir_all(&bad_subdir).unwrap();
+        std::fs::write(bad_subdir.join("meta.json"), "not valid json").unwrap();
+
+        let runs = list_runs_in_dir(tmpdir.path().to_path_buf());
+        assert!(runs.iter().any(|r| r.run_id == good_run_id));
+        assert!(!runs.iter().any(|r| r.run_id == bad_run_id));
     }
 
     #[test]

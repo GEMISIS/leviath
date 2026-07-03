@@ -1578,6 +1578,48 @@ mod tests {
     }
 
     #[test]
+    fn test_request_interaction_sync_no_timeout_waits_indefinitely_for_response() {
+        // `timeout: None` means the poll loop never checks elapsed time — cover
+        // that branch explicitly so it isn't left to the `Some(t)` tests.
+        let _guard = crate::runstate::isolate_runs_dir_for_test(
+            "test_request_interaction_sync_no_timeout_waits_indefinitely_for_response",
+        );
+        let run_id = "test-sync-request-no-timeout";
+        let dir = crate::runstate::run_dir(run_id);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let mut meta = crate::runstate::RunMeta::new(
+            run_id.to_string(),
+            "agent".to_string(),
+            "/tmp/agent.toml".to_string(),
+            "task".to_string(),
+            None,
+            "/tmp".to_string(),
+            1,
+        );
+        crate::runstate::create_run(&meta).unwrap();
+
+        let req_id = "sync-no-timeout-1".to_string();
+        let run_id_clone = run_id.to_string();
+        let req_id_clone = req_id.clone();
+
+        // Spawn thread that writes the response after a couple of poll cycles.
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(150));
+            let resp = InteractionResponse::text(&req_id_clone, "no-timeout answer");
+            write_response(&run_id_clone, &resp).ok();
+        });
+
+        let req = InteractionRequest::free_text(&req_id, "What?", "plan", true);
+        let result = request_interaction(run_id, &mut meta, req, None);
+        assert!(result.is_ok());
+        let resp = result.unwrap();
+        assert_eq!(resp.value.as_deref(), Some("no-timeout answer"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn test_request_interaction_sync_timeout() {
         let _guard =
             crate::runstate::isolate_runs_dir_for_test("test_request_interaction_sync_timeout");
@@ -2236,6 +2278,33 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    #[tokio::test]
+    async fn test_request_tool_approval_background_timeout_with_no_meta_file() {
+        let _guard = crate::runstate::isolate_runs_dir_for_test(
+            "test_request_tool_approval_background_timeout_with_no_meta_file",
+        );
+        let run_id = "test-tool-approval-timeout-no-meta";
+        let dir = crate::runstate::run_dir(run_id);
+        // Deliberately skip `create_run` — no meta.json ever exists, so every
+        // `read_meta` call (including the one on the timeout path) fails,
+        // exercising the `if let Ok(...)` else arm at the timeout branch.
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let args = serde_json::json!({"command": "rm -rf /"});
+        let (approved, scope) = request_tool_approval_background(
+            run_id,
+            "bash",
+            &args,
+            "code",
+            Duration::from_millis(150),
+        )
+        .await;
+        assert!(!approved);
+        assert_eq!(scope, ApprovalScope::Once);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     // ─── request_interaction_from_reader (mocked stdin) ────────────────────
 
     use std::io::Cursor;
@@ -2475,6 +2544,28 @@ mod tests {
         let mut reader = reader_from("3\n");
         let resp = request_interaction_from_reader(&req, &mut reader);
         assert_eq!(resp.approved, Some(false));
+    }
+
+    #[test]
+    fn stdin_tool_approval_with_tool_name_but_no_arguments_skips_arguments_printing() {
+        // tool_name is present but tool_arguments is None (e.g. a hand-built
+        // request) — the tool-name line should still print, but the nested
+        // `if let Some(ref args) = req.tool_arguments` block is skipped.
+        let req = InteractionRequest {
+            id: "ta8".to_string(),
+            kind: InteractionKind::ToolApproval,
+            prompt: "Allow this?".to_string(),
+            options: vec!["Allow once".into(), "Allow session".into(), "Deny".into()],
+            tool_name: Some("read_file".to_string()),
+            tool_arguments: None,
+            required: true,
+            stage_name: "code".to_string(),
+            body: None,
+            body_format: BodyFormat::Plain,
+        };
+        let mut reader = reader_from("1\n");
+        let resp = request_interaction_from_reader(&req, &mut reader);
+        assert_eq!(resp.approved, Some(true));
     }
 
     #[test]

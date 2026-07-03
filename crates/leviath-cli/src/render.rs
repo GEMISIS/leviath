@@ -544,9 +544,10 @@ mod tests {
             .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
             .collect::<String>();
         assert!(all.contains("fn main() {}"));
-        // Should have a border glyph
-        let has_border = all.contains('╭') || all.contains('│');
-        assert!(has_border);
+        // Should have a border glyph. Code-block borders only ever render
+        // with '╭' (never '│'), so checking a single glyph avoids a
+        // redundant `||` whose right-hand side could never be reached.
+        assert!(all.contains('╭'));
     }
 
     #[test]
@@ -559,8 +560,10 @@ mod tests {
             .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
             .collect::<String>();
         assert!(all.contains("mermaid"));
-        let has_hint = all.contains("mmdc") || all.contains("Install");
-        assert!(has_hint);
+        // The fallback hint always contains both substrings together, so
+        // checking one avoids a redundant `||` whose right-hand side could
+        // never be reached.
+        assert!(all.contains("mmdc"));
     }
 
     #[test]
@@ -581,8 +584,12 @@ mod tests {
     #[test]
     fn empty_input_returns_empty() {
         let text = markdown_to_text("", 80);
-        // Empty input produces zero lines (no content to render).
-        assert!(text.lines.iter().all(|l| l.spans.is_empty()));
+        // Empty input produces zero lines (no content to render). Checked
+        // directly (rather than via `.iter().all(|l| ...)`) since `all()`
+        // short-circuits without invoking its predicate on an empty
+        // iterator, which would otherwise leave that closure's body
+        // permanently unreachable.
+        assert!(text.lines.is_empty());
     }
 
     // ─── Inline styles ────────────────────────────────────────────────────
@@ -739,6 +746,20 @@ mod tests {
             .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
             .collect::<String>();
         assert!(all.contains("click here"));
+    }
+
+    #[test]
+    fn link_with_empty_url_skips_bracket_span() {
+        // Exercises the `!url.is_empty()` false arm (a link whose destination
+        // URL is empty), which skips pushing the trailing "[" span.
+        let md = "[no url]()";
+        let text = markdown_to_text(md, 80);
+        let all: String = text
+            .lines
+            .iter()
+            .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
+            .collect::<String>();
+        assert!(all.contains("no url"));
     }
 
     // ─── Narrow width ──────────────────────────────────────────────────────
@@ -946,9 +967,12 @@ mod tests {
             .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
             .collect();
         // Table structural events are ignored (catch-all arm), but the text
-        // content inside cells still comes through as Text events.
-        let has_cell_text = all.contains('1') || all.contains('A');
-        assert!(has_cell_text);
+        // content inside cells still comes through as Text events. Both
+        // substrings are always present together, so check each directly
+        // rather than via a redundant `||` whose right-hand side could
+        // never be reached.
+        assert!(all.contains('1'));
+        assert!(all.contains('A'));
     }
 
     // ─── Renderer state-machine edge cases ──────────────────────────────────
@@ -1080,6 +1104,11 @@ mod tests {
     #[test]
     fn handle_text_content_without_newline_emits_directly() {
         let mut r = Renderer::new(80);
+        // Flush a real line into `r.lines` first (text ending in a newline
+        // gets flushed), so the `r.lines` iteration below actually visits an
+        // element instead of running over an always-empty `Vec` and leaving
+        // its closure unreachable.
+        r.handle_text_content("first line\n");
         r.handle_text_content("no newline here");
         let all: String = r
             .lines
@@ -1092,5 +1121,6 @@ mod tests {
                 .collect::<String>()
                 .as_str();
         assert!(all.contains("no newline here"));
+        assert!(all.contains("first line"));
     }
 }

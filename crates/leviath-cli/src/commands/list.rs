@@ -163,9 +163,16 @@ fn print_agent_listing(
     Ok(())
 }
 
-fn get_agents_dir() -> anyhow::Result<PathBuf> {
-    let home = dirs::home_dir().ok_or(anyhow::anyhow!("Could not determine home directory"))?;
+/// Core `get_agents_dir` logic, parameterized by the home directory so the
+/// "could not determine home directory" error path can be unit tested
+/// without depending on the real environment.
+fn get_agents_dir_from_home(home: Option<PathBuf>) -> anyhow::Result<PathBuf> {
+    let home = home.ok_or(anyhow::anyhow!("Could not determine home directory"))?;
     Ok(home.join(".leviath").join("agents"))
+}
+
+fn get_agents_dir() -> anyhow::Result<PathBuf> {
+    get_agents_dir_from_home(dirs::home_dir())
 }
 
 #[cfg(test)]
@@ -224,6 +231,32 @@ system = {{ kind = "pinned", max_tokens = 1000 }}
     #[test]
     fn scan_directory_nonexistent_returns_empty() {
         let agents = scan_directory_for_agents(Path::new("/nonexistent/path"));
+        assert!(agents.is_empty());
+    }
+
+    #[test]
+    fn scan_directory_path_is_a_file_returns_empty() {
+        // `dir.exists()` is true for a plain file too, so this reaches
+        // `fs::read_dir(dir)` -- which fails with "not a directory",
+        // exercising the `if let Ok(entries) = ...` construct's implicit
+        // (no-`else`) false arm that no other test hits.
+        let tmp = tempfile::tempdir().unwrap();
+        let file_path = tmp.path().join("not-a-directory.txt");
+        fs::write(&file_path, "hello").unwrap();
+        let agents = scan_directory_for_agents(&file_path);
+        assert!(agents.is_empty());
+    }
+
+    #[test]
+    fn scan_directory_direct_manifest_invalid_is_skipped() {
+        // The direct-manifest branch (as opposed to the subdirectory-scan
+        // branch, covered separately by `scan_directory_subdir_with_invalid_manifest`)
+        // has its own `if let Some(info) = read_agent_info(...)` — this
+        // exercises that branch's `None` arm when the manifest at the
+        // directory's own root is present but unparseable.
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("agent.leviath"), "not valid toml {{{{").unwrap();
+        let agents = scan_directory_for_agents(dir.path());
         assert!(agents.is_empty());
     }
 
@@ -333,6 +366,21 @@ system = {{ kind = "pinned", max_tokens = 1000 }}
         assert!(dir.to_str().unwrap().ends_with("agents"));
     }
 
+    #[test]
+    fn get_agents_dir_from_home_some_returns_path() {
+        let home = PathBuf::from("/home/testuser");
+        let dir = get_agents_dir_from_home(Some(home)).unwrap();
+        assert_eq!(dir, PathBuf::from("/home/testuser/.leviath/agents"));
+    }
+
+    #[test]
+    fn get_agents_dir_from_home_none_returns_error() {
+        let err = get_agents_dir_from_home(None).unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("Could not determine home directory"));
+    }
+
     // ─── read_agent_info: minimal manifest ──────────────────────────────
 
     #[test]
@@ -402,6 +450,22 @@ system = { kind = "pinned", max_tokens = 1000 }
         let agents_dir = tempfile::tempdir().unwrap();
         let cwd = tempfile::tempdir().unwrap();
         write_manifest(cwd.path(), "local-agent");
+        let config = Config::default();
+
+        let result = print_agent_listing(agents_dir.path(), cwd.path(), None, &config);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn print_agent_listing_local_manifest_invalid_is_skipped() {
+        // The local-manifest section has its own `if let Some(info) = ...`
+        // construct with no `else`; this exercises its false arm (an
+        // existing but unparseable `agent.leviath` in the cwd), which
+        // `print_agent_listing_finds_local_manifest` (valid manifest) never
+        // reaches.
+        let agents_dir = tempfile::tempdir().unwrap();
+        let cwd = tempfile::tempdir().unwrap();
+        fs::write(cwd.path().join("agent.leviath"), "not valid toml {{{{").unwrap();
         let config = Config::default();
 
         let result = print_agent_listing(agents_dir.path(), cwd.path(), None, &config);
