@@ -542,6 +542,67 @@ mod tests {
     use super::*;
     use leviath_providers::Provider;
 
+    /// Minimal no-op `Subscriber` that reports every callsite as enabled.
+    ///
+    /// Without an active subscriber, `tracing::warn!`/`info!`/`debug!` calls
+    /// short-circuit their field-argument evaluation before ever reaching it
+    /// (no subscriber means the "is this level enabled" check fails first) --
+    /// so a multi-line `tracing::info!(...)` call's field-list lines show as
+    /// uncovered by `cargo llvm-cov` even when the surrounding branch
+    /// genuinely executes and is asserted on. See `crate::config`'s test
+    /// module for the proven-working canonical copy of this helper.
+    struct AlwaysOnSubscriber;
+
+    impl tracing::Subscriber for AlwaysOnSubscriber {
+        fn enabled(&self, _metadata: &tracing::Metadata<'_>) -> bool {
+            true
+        }
+        fn register_callsite(
+            &self,
+            _metadata: &'static tracing::Metadata<'static>,
+        ) -> tracing::subscriber::Interest {
+            tracing::subscriber::Interest::always()
+        }
+        fn new_span(&self, _span: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+            tracing::span::Id::from_u64(1)
+        }
+        fn record(&self, _span: &tracing::span::Id, _values: &tracing::span::Record<'_>) {}
+        fn record_follows_from(&self, _span: &tracing::span::Id, _follows: &tracing::span::Id) {}
+        fn event(&self, _event: &tracing::Event<'_>) {}
+        fn enter(&self, _span: &tracing::span::Id) {}
+        fn exit(&self, _span: &tracing::span::Id) {}
+        fn max_level_hint(&self) -> Option<tracing::metadata::LevelFilter> {
+            Some(tracing::metadata::LevelFilter::TRACE)
+        }
+    }
+
+    fn with_tracing<T>(f: impl FnOnce() -> T) -> T {
+        static INSTALLED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+        INSTALLED.get_or_init(|| {
+            let _ = tracing::subscriber::set_global_default(AlwaysOnSubscriber);
+            tracing::callsite::rebuild_interest_cache();
+        });
+        f()
+    }
+
+    #[test]
+    fn always_on_subscriber_span_methods_are_all_no_ops() {
+        // This file only ever uses `tracing::info!` event macros, never
+        // `tracing::span!`, so the span-related trait methods above are
+        // otherwise dead code from `with_tracing`'s callers. Exercise them
+        // directly via a real span so they're not left uncovered themselves.
+        // See `commands/run/stages.rs`/`graph.rs` for the canonical copy of
+        // this test.
+        with_tracing(|| {
+            let span = tracing::info_span!("test-span", field = tracing::field::Empty);
+            span.record("field", 1);
+            let other = tracing::info_span!("other-span");
+            span.follows_from(&other);
+            let _enter = span.enter();
+            tracing::info!(parent: &span, "inside span");
+        });
+    }
+
     #[test]
     fn foreground_callbacks_construction() {
         let _cb = ForegroundCallbacks {};
@@ -1148,8 +1209,10 @@ bash = "ask"
 
         // No provider is configured (config isolated above), so this should
         // abort cleanly via `on_provider_missing` returning `true` -- which
-        // `run_stage_loop` surfaces as `Ok(())`, not an error.
-        run_foreground(args).await.unwrap();
+        // `run_stage_loop` surfaces as `Ok(())`, not an error. Wrapped in
+        // `with_tracing` because this path reaches the `tracing::info!` at
+        // the top of `run_foreground_with_registry`.
+        with_tracing(|| run_foreground(args)).await.unwrap();
 
         let _ = std::fs::remove_dir_all(&temp_dir);
     }
@@ -1277,10 +1340,14 @@ model = "mock-model"
             count: 1,
         };
 
-        run_foreground_with_registry(args, |_config| {
-            let mut registry = leviath_runtime::ProviderRegistry::new();
-            registry.register("mock".to_string(), Arc::new(MockProvider::new()));
-            registry
+        // Wrapped in `with_tracing` because this path reaches the
+        // `tracing::info!` at the top of `run_foreground_with_registry`.
+        with_tracing(|| {
+            run_foreground_with_registry(args, |_config| {
+                let mut registry = leviath_runtime::ProviderRegistry::new();
+                registry.register("mock".to_string(), Arc::new(MockProvider::new()));
+                registry
+            })
         })
         .await
         .unwrap();
@@ -1498,6 +1565,107 @@ model = "mock-model"
         let _ = std::fs::remove_dir_all(&temp_dir);
     }
 
+    /// Covers `Config::load()?`'s error branch — a manifest and task both
+    /// resolve successfully, but the isolated config path contains invalid
+    /// TOML, so `Config::load()` (via `load_from_path`'s `toml::from_str`)
+    /// fails and `run_foreground_with_registry` propagates that error before
+    /// ever reaching provider-registry construction.
+    #[tokio::test]
+    async fn run_foreground_with_registry_fails_on_invalid_config() {
+        let _config_guard = crate::config::isolate_config_path_for_test("fg-invalid-config");
+        std::fs::write(
+            crate::config::Config::config_path(),
+            "this is not valid toml }{",
+        )
+        .unwrap();
+
+        let temp_dir = std::env::temp_dir().join("lev-test-fg-invalid-config");
+        let _ = std::fs::create_dir_all(&temp_dir);
+        std::fs::write(
+            temp_dir.join("agent.leviath"),
+            "[agent]\nname = \"x\"\nversion = \"1.0.0\"\ndescription = \"x\"\n",
+        )
+        .unwrap();
+
+        let args = RunArgs {
+            path: Some(temp_dir.to_string_lossy().to_string()),
+            task: Some("test task".to_string()),
+            model: None,
+            foreground: true,
+            yolo: false,
+            allow: vec![],
+            ask: vec![],
+            deny: vec![],
+            max_depth: None,
+            count: 1,
+        };
+
+        // Wrapped in `with_tracing` because this path reaches the
+        // `tracing::info!` at the top of `run_foreground_with_registry`
+        // (after manifest parsing, before `Config::load()` fails).
+        let result = with_tracing(|| {
+            run_foreground_with_registry(args, |_c| leviath_runtime::ProviderRegistry::new())
+        })
+        .await;
+        assert!(result.is_err(), "expected error for invalid config TOML");
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("Failed to parse config"),
+            "unexpected error: {err_msg}",
+        );
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    /// Covers the `if args.yolo { ... }` false arm (the "skip" branch) in a
+    /// run that actually reaches that point in the function -- every other
+    /// test reaching this far in the function uses `yolo: true`, so the
+    /// no-op "yolo is false, don't insert a wildcard override" path was
+    /// otherwise never taken by a run that gets past manifest/task/config
+    /// resolution. Reuses the same "abort at missing provider" shape as
+    /// `run_foreground_with_valid_manifest_aborts_at_missing_provider`.
+    #[tokio::test]
+    async fn run_foreground_with_registry_yolo_false_reaches_provider_missing() {
+        let _config_guard = crate::config::isolate_config_path_for_test("fg-yolo-false");
+
+        let temp_dir = std::env::temp_dir().join("lev-test-fg-yolo-false");
+        let _ = std::fs::create_dir_all(&temp_dir);
+        let manifest_content = r#"
+[agent]
+name = "test-fg-yolo-false-agent"
+version = "1.0.0"
+description = "Test agent"
+
+[stages.main]
+mode = "autonomous"
+max_iterations = 1
+
+[stages.main.model]
+provider = "anthropic"
+model = "claude-sonnet-4-6"
+"#;
+        std::fs::write(temp_dir.join("agent.leviath"), manifest_content).unwrap();
+
+        let args = RunArgs {
+            path: Some(temp_dir.to_string_lossy().to_string()),
+            task: Some("test task".to_string()),
+            model: None,
+            foreground: true,
+            yolo: false, // ← exercises the `if args.yolo` false/skip branch
+            allow: vec![],
+            ask: vec![],
+            deny: vec![],
+            max_depth: None,
+            count: 1,
+        };
+
+        // No provider configured (config isolated above) → aborts cleanly at
+        // `on_provider_missing`, same as the yolo:true counterpart above.
+        with_tracing(|| run_foreground(args)).await.unwrap();
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
     /// Covers `run_stage_loop(...)?.await` error branch (line 507) — a
     /// provider that always errors on an interactive stage with tools causes
     /// `run_interactive_stage` to propagate the inference error directly
@@ -1591,10 +1759,14 @@ allowed = ["read_file"]
         let _ = probe.capabilities("model");
         let _ = probe.list_models().await;
 
-        let result = run_foreground_with_registry(args, |_config| {
-            let mut registry = leviath_runtime::ProviderRegistry::new();
-            registry.register("error-mock".to_string(), Arc::new(ErrorProvider));
-            registry
+        // Wrapped in `with_tracing` because this path reaches the
+        // `tracing::info!` at the top of `run_foreground_with_registry`.
+        let result = with_tracing(|| {
+            run_foreground_with_registry(args, |_config| {
+                let mut registry = leviath_runtime::ProviderRegistry::new();
+                registry.register("error-mock".to_string(), Arc::new(ErrorProvider));
+                registry
+            })
         })
         .await;
 

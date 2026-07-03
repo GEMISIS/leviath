@@ -765,6 +765,59 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    // ─── launch_editor: truly-empty VISUAL/EDITOR are skipped entirely ────
+
+    // Unlike the whitespace-only case above (non-empty string, pushed as a
+    // candidate that then fails to split into any usable parts), a truly
+    // empty `VISUAL`/`EDITOR` value never even gets pushed onto the
+    // candidates list -- exercising the `!v.is_empty()`/`!e.is_empty()`
+    // false arm for both, which no other test reaches (every other test
+    // either leaves the var unset or sets it to a non-empty value).
+    //
+    // With both vars empty, resolution falls through to the unix platform
+    // defaults (vim/nano/vi) unless PATH is also starved -- so this test
+    // combines the empty-string case with the same PATH-starvation trick as
+    // `launch_editor_no_editor_found_when_path_has_no_candidates` below,
+    // guaranteeing a deterministic `Err` instead of ever risking a real,
+    // blocking, interactive editor launch.
+    #[cfg(unix)]
+    #[test]
+    fn launch_editor_empty_visual_and_editor_are_skipped() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _path_lock = crate::config::PATH_ENV_LOCK.lock().unwrap();
+        let _guard = EnvGuard;
+
+        struct PathGuard(std::ffi::OsString);
+        impl Drop for PathGuard {
+            fn drop(&mut self) {
+                unsafe {
+                    std::env::set_var("PATH", &self.0);
+                }
+            }
+        }
+        let _path_guard = PathGuard(std::env::var_os("PATH").unwrap_or_default());
+
+        unsafe {
+            std::env::set_var("VISUAL", "");
+            std::env::set_var("EDITOR", "");
+            std::env::set_var("PATH", "/lev-definitely-empty-path-dir");
+        }
+        let dir = std::env::temp_dir().join("lev-test-launch-editor-empty-visual-editor");
+        let _ = std::fs::create_dir_all(&dir);
+        let file = dir.join("edit.txt");
+        std::fs::write(&file, "content").unwrap();
+
+        // Neither empty var is pushed as a candidate, and PATH starvation
+        // means even the unix platform defaults (vim/nano/vi) fail to
+        // resolve -- so this deterministically reaches "no editor found"
+        // rather than ever spawning a real editor.
+        let result = launch_editor(&file);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("No editor found"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     // ─── launch_editor: NotFound candidate is skipped, next one used ─────
 
     #[cfg(unix)]

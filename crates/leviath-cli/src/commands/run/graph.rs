@@ -2167,6 +2167,100 @@ mod tests {
         assert!(result.is_none());
     }
 
+    // ─── prompt_llm_transition: provider present, ContextWindow missing ─────
+
+    #[tokio::test]
+    async fn prompt_llm_transition_no_context_window_returns_none() {
+        // A registered provider makes `get_provider` succeed, but the
+        // `ContextWindow` that `initialize_context_window` just added is
+        // then explicitly removed (same pattern as
+        // `apply_compact_transform_missing_context_window_returns_early`
+        // above -- `AgentPool::spawn_agent` unconditionally inserts a
+        // `ContextWindow`, so merely skipping `initialize_context_window`
+        // does NOT produce a windowless entity), so `window()?` short-
+        // circuits to `None` before any inference call is attempted.
+        let bp = make_blueprint(vec![make_stage("a"), make_stage("b")]);
+        let (mut engine, entity) = make_engine_with_mock_provider(&bp, "b");
+        engine
+            .world_mut()
+            .entity_mut(entity)
+            .remove::<ContextWindow>();
+
+        let stage = &bp.stages[0];
+        let edge_b = TransitionEdge {
+            target: "b".to_string(),
+            condition: TransitionCondition::LlmChoice,
+            hint: None,
+            transform: EdgeTransform::Direct,
+        };
+        let name_b = "b".to_string();
+        let edges: Vec<(&String, &TransitionEdge)> = vec![(&name_b, &edge_b)];
+
+        let result =
+            prompt_llm_transition(stage, &edges, &mut engine, entity, "mock", "test").await;
+
+        assert!(result.is_none());
+    }
+
+    // ─── prompt_llm_transition: provider infer() errors ──────────────────────
+
+    #[tokio::test]
+    async fn prompt_llm_transition_provider_infer_error_returns_none() {
+        // A provider whose `infer()` always errors exercises the
+        // `.ok()?` branch that converts an inference error into `None`,
+        // distinct from `apply_compact_transform`'s own error handling.
+        let bp = make_blueprint(vec![
+            make_stage("a"),
+            make_stage("stage_alpha"),
+            make_stage("stage_beta"),
+        ]);
+        let (mut engine, entity) =
+            make_engine_with_provider(&bp, "failing", Arc::new(FailingProvider));
+
+        let stage = &bp.stages[0];
+        let edge_alpha = TransitionEdge {
+            target: "stage_alpha".to_string(),
+            condition: TransitionCondition::LlmChoice,
+            hint: None,
+            transform: EdgeTransform::Direct,
+        };
+        let edge_beta = TransitionEdge {
+            target: "stage_beta".to_string(),
+            condition: TransitionCondition::LlmChoice,
+            hint: None,
+            transform: EdgeTransform::Direct,
+        };
+        let name_alpha = "stage_alpha".to_string();
+        let name_beta = "stage_beta".to_string();
+        let edges: Vec<(&String, &TransitionEdge)> =
+            vec![(&name_alpha, &edge_alpha), (&name_beta, &edge_beta)];
+
+        let result =
+            prompt_llm_transition(stage, &edges, &mut engine, entity, "failing", "test-model")
+                .await;
+
+        assert!(result.is_none(), "provider infer() error should yield None");
+    }
+
+    // ─── prompt_llm_transition: empty edges slice ────────────────────────────
+
+    #[tokio::test]
+    async fn prompt_llm_transition_empty_edges_returns_none() {
+        // Called directly with an empty `edges` slice (never happens via
+        // `resolve_transition`, which only calls this with >=1 choosable
+        // edge, but the function is `pub` and defensively handles it) --
+        // exercises `edges.first()?` at the end of the no-match fallback.
+        let bp = make_blueprint(vec![make_stage("a")]);
+        let (mut engine, entity) = make_engine_with_mock_provider(&bp, "anything");
+        let stage = &bp.stages[0];
+        let edges: Vec<(&String, &TransitionEdge)> = vec![];
+
+        let result =
+            prompt_llm_transition(stage, &edges, &mut engine, entity, "mock", "test-model").await;
+
+        assert!(result.is_none(), "empty edges should fall back to None");
+    }
+
     #[tokio::test]
     async fn mock_and_failing_provider_trivial_trait_methods() {
         let mock = MockProvider::new("x");
