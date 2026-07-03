@@ -1160,32 +1160,16 @@ mod tests {
         let line = dash.build_stage_tab_title(0, &stale_plan, &agent);
 
         let rendered: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
-        assert!(
-            rendered.contains(GLYPH_COMPLETE),
-            "stale Active stage on a non-current tab must render as Complete, got: {:?}",
-            rendered
-        );
+        assert!(rendered.contains(GLYPH_COMPLETE));
         for spin in SPINNER.iter() {
-            assert!(
-                !rendered.contains(spin),
-                "stale Active stage on a non-current tab must not show a spinner, got: {:?}",
-                rendered
-            );
+            assert!(!rendered.contains(spin));
         }
-        assert!(
-            !rendered.contains('*'),
-            "stale Active stage on a non-current tab must not show the live marker, got: {:?}",
-            rendered
-        );
+        assert!(!rendered.contains('*'));
 
         // The actually-live tab (index == agent.stage_index) should still spin.
         let live_implement = make_stage_record("implement", StageRunStatus::Active);
         let live_line = dash.build_stage_tab_title(1, &live_implement, &agent);
         let live_rendered: String = live_line.spans.iter().map(|s| s.content.as_ref()).collect();
-        assert!(
-            SPINNER.iter().any(|spin| live_rendered.contains(spin)),
-            "the actually-live tab must still show a spinner, got: {:?}",
-            live_rendered
-        );
+        assert!(SPINNER.iter().any(|spin| live_rendered.contains(spin)));
     }
 }

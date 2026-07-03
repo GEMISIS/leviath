@@ -584,6 +584,54 @@ mod tests {
         assert!(result);
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn test_yank_to_clipboard_via_native_tool_nonzero_exit_falls_through_to_fallback() {
+        // Shadows `pbcopy`/`xclip`/`wl-copy` with fake scripts that spawn
+        // successfully but exit non-zero, so `child.wait().map(|s|
+        // s.success()).unwrap_or(false)` is `false` and the loop falls
+        // through to the OSC52 fallback instead of returning `true` early --
+        // the one branch `test_yank_to_clipboard_via_native_tool_success_*`
+        // above doesn't reach. The fake scripts never touch the real
+        // clipboard or a terminal; they just drain stdin and exit 1.
+        let _lock = crate::config::PATH_ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+
+        let dir = std::env::temp_dir().join("lev_test_fake_failing_clipboard_bins");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        for name in ["pbcopy", "xclip", "wl-copy"] {
+            let script_path = dir.join(name);
+            std::fs::write(&script_path, "#!/bin/sh\ncat > /dev/null\nexit 1\n").unwrap();
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(&script_path).unwrap().permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&script_path, perms).unwrap();
+        }
+
+        fn fallback_reached(_text: &str) -> bool {
+            true
+        }
+
+        let original_path = std::env::var_os("PATH");
+        unsafe {
+            std::env::set_var("PATH", &dir);
+        }
+        let result = yank_to_clipboard_via("nonzero exit test", fallback_reached);
+        unsafe {
+            match &original_path {
+                Some(p) => std::env::set_var("PATH", p),
+                None => std::env::remove_var("PATH"),
+            }
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+
+        // All three native tools "ran" but failed, so control must have
+        // reached the injected fallback for the result to be true.
+        assert!(result);
+    }
+
     // ── OSC52 base64 edge cases (pure `osc52_sequence`, no I/O) ───────────────
 
     #[test]
@@ -653,6 +701,33 @@ mod tests {
         let result = osc52_write_via("fallback data", fail_to_open_tty, &mut stdout_fallback);
         assert!(result);
         assert_eq!(stdout_fallback, osc52_sequence("fallback data").as_bytes());
+    }
+
+    #[test]
+    fn test_osc52_write_via_tty_open_succeeds_but_write_fails_falls_back_to_injected_writer() {
+        // Distinct from the two tests above: the "tty" open itself succeeds
+        // (unlike `..._tty_open_fails_...`), but the write to it fails --
+        // opening the fake tty read-only means the write syscall itself
+        // errors, exercising the `if let Ok(mut tty) = open_tty()` /
+        // `tty.write_all(...).is_ok() && ...` fallthrough (falling out of
+        // the inner `if` without returning `true`) that neither existing
+        // test reaches.
+        let path = std::env::temp_dir().join("lev_test_osc52_readonly_fake_tty");
+        std::fs::write(&path, b"").unwrap();
+        fn open_readonly_tty() -> std::io::Result<std::fs::File> {
+            std::fs::OpenOptions::new()
+                .read(true)
+                .open(std::env::temp_dir().join("lev_test_osc52_readonly_fake_tty"))
+        }
+        let mut stdout_fallback = Vec::new();
+        let result = osc52_write_via("readonly tty test", open_readonly_tty, &mut stdout_fallback);
+        let _ = std::fs::remove_file(&path);
+
+        assert!(result);
+        assert_eq!(
+            stdout_fallback,
+            osc52_sequence("readonly tty test").as_bytes()
+        );
     }
 
     // ─── kill_write_cancelled ───────────────────────────────────────────────

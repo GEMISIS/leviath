@@ -2686,13 +2686,10 @@ mod tests {
 
         dash.handle_yank_with_fn(|_| false);
 
-        assert!(
-            dash.toasts
-                .iter()
-                .any(|t| t.message.contains("Clipboard unavailable")),
-            "expected Clipboard unavailable toast, got: {:?}",
-            dash.toasts.iter().map(|t| &t.message).collect::<Vec<_>>()
-        );
+        assert!(dash
+            .toasts
+            .iter()
+            .any(|t| t.message.contains("Clipboard unavailable")));
 
         let _ = std::fs::remove_dir_all(runstate::run_dir(run_id));
     }

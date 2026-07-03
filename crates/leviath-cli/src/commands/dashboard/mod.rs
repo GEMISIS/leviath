@@ -458,18 +458,9 @@ mod tests {
         // Verify via Debug representation to avoid dead else-branches in
         // pattern matching (LLVM would mark the not-matched arm as uncovered).
         let dbg = format!("{ev:?}");
-        assert!(
-            dbg.contains("StatusChanged"),
-            "expected StatusChanged event, got: {dbg}"
-        );
-        assert!(
-            dbg.contains("agent-nonexistent"),
-            "expected agent_id in: {dbg}"
-        );
-        assert!(
-            dbg.contains("Cancelled"),
-            "expected Cancelled status in: {dbg}"
-        );
+        assert!(dbg.contains("StatusChanged"));
+        assert!(dbg.contains("agent-nonexistent"));
+        assert!(dbg.contains("Cancelled"));
     }
 
     #[tokio::test]

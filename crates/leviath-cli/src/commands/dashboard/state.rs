@@ -1621,11 +1621,7 @@ mod tests {
         assert!(dash.log.last().unwrap().message == "hello from test");
         // Timestamp should look like HH:MM:SS
         let ts = &dash.log.last().unwrap().timestamp;
-        assert!(
-            ts.contains(':'),
-            "timestamp should contain ':', got '{}'",
-            ts
-        );
+        assert!(ts.contains(':'));
     }
 
     #[test]
@@ -1806,10 +1802,7 @@ mod tests {
         dash.delete_selected_agent();
 
         // Agent should have been removed from the list
-        assert!(
-            dash.agents.is_empty(),
-            "agent should have been removed from agents vec"
-        );
+        assert!(dash.agents.is_empty());
     }
 
     #[cfg(unix)]
@@ -1821,8 +1814,13 @@ mod tests {
         // Spawns a real, throwaway child process we fully own (so sending it
         // SIGTERM is safe, unlike an arbitrary PID) to exercise the
         // `#[cfg(unix)] if _pid > 0 { libc::kill(...) }` branch, which every
-        // other `delete_selected_agent` test avoids via `pid = 0`.
-        let mut child = std::process::Command::new("sleep")
+        // other `delete_selected_agent` test avoids via `pid = 0`. Uses the
+        // absolute path rather than a bare `"sleep"` looked up via `PATH` --
+        // other tests in this module momentarily narrow `PATH` down to a
+        // temp dir of fake clipboard binaries (see `helpers.rs`'s
+        // PATH-swapping tests), and a bare-name spawn racing against that
+        // window fails with `NotFound`.
+        let mut child = std::process::Command::new("/bin/sleep")
             .arg("30")
             .spawn()
             .expect("failed to spawn a throwaway child process");
@@ -1845,10 +1843,7 @@ mod tests {
         let status = child
             .wait()
             .expect("failed to wait on the throwaway child process");
-        assert!(
-            !status.success(),
-            "expected the child to be terminated by SIGTERM, not exit successfully"
-        );
+        assert!(!status.success());
     }
 
     #[test]
@@ -1869,11 +1864,7 @@ mod tests {
 
         dash.delete_selected_agent();
 
-        assert!(
-            dash.log.iter().any(|l| l.message.contains("Delete failed")),
-            "expected a 'Delete failed' log entry, got: {:?}",
-            dash.log
-        );
+        assert!(dash.log.iter().any(|l| l.message.contains("Delete failed")));
     }
 
     // ─── selected_stage_can_respond: empty stage_name falls back ──────────
@@ -1991,11 +1982,7 @@ mod tests {
         dash.sync_from_run_state();
 
         let agent = dash.agents.iter().find(|a| a.id == run_id).unwrap();
-        assert!(
-            matches!(&agent.status, AgentDisplayStatus::Error(msg) if msg == "boom"),
-            "expected Error(\"boom\") status, got {:?}",
-            agent.status
-        );
+        assert!(matches!(&agent.status, AgentDisplayStatus::Error(msg) if msg == "boom"));
 
         cleanup_run(run_id);
     }
@@ -2257,6 +2244,14 @@ mod tests {
         assert!(matches!(agent.status, AgentDisplayStatus::Error(_)));
         // No transition toast fires -- the block only runs when the agent
         // was previously Active/Waiting, which it wasn't here.
+        // Seed an unrelated toast first so `.any()` below actually invokes
+        // its predicate at least once instead of short-circuiting on an
+        // empty vec (which would leave the closure itself uncalled).
+        dash.toasts.push(Toast {
+            message: "unrelated toast".to_string(),
+            remaining_ticks: 1,
+            level: ToastLevel::Info,
+        });
         assert!(!dash.toasts.iter().any(|t| t.message.contains(run_id)));
 
         cleanup_run(run_id);
@@ -2280,6 +2275,14 @@ mod tests {
         // `dash.toasts.is_empty()` — the dashboard also picks up any other
         // real/concurrently-running-test runs on disk via list_runs(), whose
         // own transitions may toast independently of this one.
+        // Seed an unrelated toast first so `.any()` below actually invokes
+        // its predicate at least once instead of short-circuiting on an
+        // empty vec (which would leave the closure itself uncalled).
+        dash.toasts.push(Toast {
+            message: "unrelated toast".to_string(),
+            remaining_ticks: 1,
+            level: ToastLevel::Info,
+        });
         assert!(!dash.toasts.iter().any(|t| t.message.contains(run_id)));
 
         cleanup_run(run_id);
@@ -2420,6 +2423,14 @@ mod tests {
 
         // Still waiting, same kind of request — re-sync must not toast again.
         dash.sync_from_run_state();
+        // Seed an unrelated toast first so `.any()` below actually invokes
+        // its predicate at least once instead of short-circuiting on an
+        // empty vec (which would leave the closure itself uncalled).
+        dash.toasts.push(Toast {
+            message: "unrelated toast".to_string(),
+            remaining_ticks: 1,
+            level: ToastLevel::Info,
+        });
         assert!(!dash.toasts.iter().any(|t| t.message.contains(run_id)));
 
         cleanup_run(run_id);
@@ -2565,10 +2576,7 @@ mod tests {
             let has_tag = t.message.contains("needs input");
             has_id && has_tag
         });
-        assert!(
-            needs_input_toast.is_none(),
-            "should not toast 'needs input' for CompleteInteractive"
-        );
+        assert!(needs_input_toast.is_none());
 
         cleanup_run(run_id);
     }

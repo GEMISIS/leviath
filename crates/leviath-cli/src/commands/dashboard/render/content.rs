@@ -1132,12 +1132,7 @@ mod tests {
 
         let home = dirs::home_dir().unwrap_or_default();
         let base = std::path::PathBuf::from("/tmp/lvroh");
-        assert!(
-            !base.starts_with(&home),
-            "test precondition: {:?} must be outside $HOME ({:?})",
-            base,
-            home
-        );
+        assert!(!base.starts_with(&home));
         let _ = std::fs::remove_dir_all(&base);
         let runs_dir = base.join("runs");
         std::fs::create_dir_all(&runs_dir).unwrap();
@@ -1181,11 +1176,7 @@ mod tests {
             .map(|c| c.symbol())
             .collect();
         assert!(content.contains("output.log"), "got: {}", content);
-        assert!(
-            !content.contains('~'),
-            "expected the raw (non-`~`-shortened) path since it's outside $HOME, got: {}",
-            content
-        );
+        assert!(!content.contains('~'));
 
         let _ = std::fs::remove_dir_all(&base);
         unsafe {

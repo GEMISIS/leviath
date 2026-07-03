@@ -383,11 +383,7 @@ mod tests {
             .iter()
             .map(|c| c.symbol())
             .collect();
-        assert!(
-            rendered.contains("Provide input while this is running"),
-            "expected the mid-run message input pane to render, got buffer: {:?}",
-            rendered
-        );
+        assert!(rendered.contains("Provide input while this is running"));
     }
 
     #[test]
