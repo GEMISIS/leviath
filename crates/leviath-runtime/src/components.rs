@@ -973,6 +973,34 @@ mod tests {
     }
 
     #[test]
+    fn test_clearable_eviction_continues_past_insufficient_first_region() {
+        // Phase 1 clears Clearable regions one at a time and returns early as
+        // soon as enough space has been freed. If clearing the *first*
+        // Clearable region alone isn't enough, the loop must fall through and
+        // keep clearing subsequent Clearable regions rather than stopping.
+        let mut window = ContextWindow::new(2000);
+
+        let mut region_a = Region::new("a".to_string(), RegionKind::Clearable, 1000);
+        region_a.add_entry("small".to_string(), 500).unwrap();
+        window.add_region(region_a);
+
+        let mut region_b = Region::new("b".to_string(), RegionKind::Clearable, 1000);
+        region_b.add_entry("large".to_string(), 1000).unwrap();
+        window.add_region(region_b);
+
+        assert_eq!(window.current_tokens, 1500);
+
+        // After clearing only "a" (frees 500), 2000 - 1000 = 1000 free tokens,
+        // which is still below the 1400 target, so the loop must continue on
+        // to clear "b" as well before it can satisfy the request.
+        let result = with_tracing(|| window.try_evict(1400)).unwrap();
+        assert_eq!(result.tokens_freed, 1500);
+        assert_eq!(window.current_tokens, 0);
+        assert_eq!(window.get_region("a").unwrap().current_tokens, 0);
+        assert_eq!(window.get_region("b").unwrap().current_tokens, 0);
+    }
+
+    #[test]
     fn test_needs_compaction_component() {
         let comp = NeedsCompaction {
             regions: vec!["impl".to_string(), "analysis".to_string()],
