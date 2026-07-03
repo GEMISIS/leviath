@@ -11,6 +11,10 @@ pub mod engine;
 pub mod pool;
 pub mod scheduler;
 pub mod systems;
+// test_support.rs gates itself with an inner `#![cfg(test)]` attribute, so no
+// `#[cfg(test)]` is needed here (adding one would trigger clippy's
+// `duplicated_attributes` lint under `-D warnings`).
+mod test_support;
 
 pub use components::{
     AgentMessage, AgentState, AgentStatus, CancellationToken, ContextWindow, EvictionResult,

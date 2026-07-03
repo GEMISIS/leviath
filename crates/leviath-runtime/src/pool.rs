@@ -100,62 +100,11 @@ impl AgentPool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::with_tracing;
     use leviath_core::blueprint::ModelConfig;
     use leviath_core::{
         layout::RegionDefinition, region::RegionKind, Blueprint, ContextLayout, Stage,
     };
-
-    /// Minimal `tracing::Subscriber` that reports every level as enabled.
-    ///
-    /// The multi-line `tracing::debug!`/`info!`/`warn!` calls in this file
-    /// (structured fields spread across several lines) internally check
-    /// "is this level enabled" *before* evaluating their field expressions.
-    /// With no subscriber registered (the default in unit tests), that check
-    /// is always false, so the field-expression lines are never executed --
-    /// llvm-cov reports them as 0-hit even when the surrounding branch runs.
-    /// Single-line tracing calls elsewhere in this file don't show this gap
-    /// because the whole call collapses onto one already-covered line.
-    /// Running a test under this no-op subscriber makes the level check
-    /// pass so the field expressions actually execute, without pulling in
-    /// `tracing-subscriber` as a new dependency.
-    struct AlwaysOnSubscriber;
-
-    impl tracing::Subscriber for AlwaysOnSubscriber {
-        fn enabled(&self, _metadata: &tracing::Metadata<'_>) -> bool {
-            true
-        }
-        fn new_span(&self, _span: &tracing::span::Attributes<'_>) -> tracing::span::Id {
-            tracing::span::Id::from_u64(1)
-        }
-        fn record(&self, _span: &tracing::span::Id, _values: &tracing::span::Record<'_>) {}
-        fn record_follows_from(&self, _span: &tracing::span::Id, _follows: &tracing::span::Id) {}
-        fn event(&self, _event: &tracing::Event<'_>) {}
-        fn enter(&self, _span: &tracing::span::Id) {}
-        fn exit(&self, _span: &tracing::span::Id) {}
-    }
-
-    fn with_tracing<T>(f: impl FnOnce() -> T) -> T {
-        tracing::subscriber::with_default(AlwaysOnSubscriber, f)
-    }
-
-    #[test]
-    fn always_on_subscriber_span_methods_are_all_no_ops() {
-        // The code in this file only ever uses `tracing::info!` event
-        // macros, never `tracing::span!` -- so
-        // `Subscriber::{new_span,record,record_follows_from,enter,exit}`
-        // are never invoked by `with_tracing`'s callers. Exercise them here
-        // via a real span (entered twice, to also hit `record_follows_from`
-        // through a causal link) so this test doesn't hand-roll low-level
-        // `tracing-core` metadata construction.
-        with_tracing(|| {
-            let span_a = tracing::info_span!("a", value = tracing::field::Empty);
-            span_a.record("value", 1);
-            let span_b = tracing::info_span!("b");
-            span_b.follows_from(&span_a);
-            let _enter_a = span_a.enter();
-            let _enter_b = span_b.enter();
-        });
-    }
 
     fn create_test_blueprint() -> Blueprint {
         let regions = vec![RegionDefinition::new(

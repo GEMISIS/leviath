@@ -761,45 +761,17 @@ impl Default for AgentEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::with_tracing;
 
-    /// No `tracing::Subscriber` is registered during unit tests, so
-    /// multi-line `tracing::info!`/`warn!` calls' field-expression lines
-    /// show as 0-hit in `cargo llvm-cov` even when the surrounding branch
-    /// runs (the macro's internal "is this level enabled" check
-    /// short-circuits before evaluating the fields). Running a test under
-    /// this no-op subscriber makes the check pass so the fields actually
-    /// execute. Mirrors the identical harness in `systems.rs`.
-    struct AlwaysOnSubscriber;
-
-    impl tracing::Subscriber for AlwaysOnSubscriber {
-        fn enabled(&self, _metadata: &tracing::Metadata<'_>) -> bool {
-            true
-        }
-        fn new_span(&self, _span: &tracing::span::Attributes<'_>) -> tracing::span::Id {
-            tracing::span::Id::from_u64(1)
-        }
-        fn record(&self, _span: &tracing::span::Id, _values: &tracing::span::Record<'_>) {}
-        fn record_follows_from(&self, _span: &tracing::span::Id, _follows: &tracing::span::Id) {}
-        fn event(&self, _event: &tracing::Event<'_>) {}
-        fn enter(&self, _span: &tracing::span::Id) {}
-        fn exit(&self, _span: &tracing::span::Id) {}
-    }
-
-    fn with_tracing<T>(f: impl FnOnce() -> T) -> T {
-        tracing::subscriber::with_default(AlwaysOnSubscriber, f)
-    }
-
-    /// Async-safe variant of `with_tracing`: `tracing::subscriber::with_default`
-    /// only wraps a synchronous closure, so calling it around an unawaited
-    /// `async fn` call only covers the (instant, side-effect-free) future
-    /// *construction*, not the tracing calls that execute later when the
-    /// future is polled/awaited. `set_default` instead installs a guard that
-    /// stays active for its lifetime, correctly covering every `.await`
-    /// point -- valid here because `#[tokio::test]` defaults to a
-    /// single-threaded (current-thread) runtime, so the task never hops
-    /// threads mid-poll.
+    /// Async-safe variant of `with_tracing`: unlike `tracing::subscriber::
+    /// with_default` (a thread-local override scoped to a synchronous
+    /// closure), `test_support::with_tracing`'s `set_global_default` install
+    /// is process-wide and persists for the lifetime of the test binary, so
+    /// simply triggering that one-time install before `.await`-ing the
+    /// future correctly covers every await point, even across a
+    /// multi-threaded runtime.
     async fn with_tracing_async<T>(f: impl std::future::Future<Output = T>) -> T {
-        let _guard = tracing::subscriber::set_default(AlwaysOnSubscriber);
+        with_tracing(|| {});
         f.await
     }
 
@@ -807,21 +779,6 @@ mod tests {
         _tool_calls: Vec<leviath_providers::ToolCall>,
     ) -> Vec<(String, String)> {
         vec![]
-    }
-
-    #[test]
-    fn always_on_subscriber_span_methods_are_all_no_ops() {
-        // This file's tracing calls are all events, never spans -- exercise
-        // the subscriber's own otherwise-dead span methods directly via a
-        // real span (entered twice, to also hit `record_follows_from`).
-        with_tracing(|| {
-            let span_a = tracing::info_span!("a", value = tracing::field::Empty);
-            span_a.record("value", 1);
-            let span_b = tracing::info_span!("b");
-            span_b.follows_from(&span_a);
-            let _enter_a = span_a.enter();
-            let _enter_b = span_b.enter();
-        });
     }
 
     #[test]
