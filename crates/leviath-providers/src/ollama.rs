@@ -541,41 +541,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// No-op `tracing::Subscriber` that reports every callsite enabled.
-    /// Without a registered subscriber during tests, `tracing::debug!`/`warn!`
-    /// short-circuit field-expression evaluation before the enclosing
-    /// branch's field-list lines ever execute, even though the branch itself
-    /// demonstrably runs -- this makes those lines genuinely exercised
-    /// instead of an unexplained coverage gap.
-    struct AlwaysOnSubscriber;
-    impl tracing::Subscriber for AlwaysOnSubscriber {
-        fn enabled(&self, _metadata: &tracing::Metadata<'_>) -> bool {
-            true
-        }
-        fn new_span(&self, _span: &tracing::span::Attributes<'_>) -> tracing::span::Id {
-            tracing::span::Id::from_u64(1)
-        }
-        fn record(&self, _span: &tracing::span::Id, _values: &tracing::span::Record<'_>) {}
-        fn record_follows_from(&self, _span: &tracing::span::Id, _follows: &tracing::span::Id) {}
-        fn event(&self, _event: &tracing::Event<'_>) {}
-        fn enter(&self, _span: &tracing::span::Id) {}
-        fn exit(&self, _span: &tracing::span::Id) {}
-    }
-
-    #[test]
-    fn always_on_subscriber_span_methods_are_all_no_ops() {
-        use tracing::Subscriber;
-        let sub = AlwaysOnSubscriber;
-        let span = tracing::span::Id::from_u64(1);
-        let _guard = tracing::subscriber::set_default(AlwaysOnSubscriber);
-        let s = tracing::info_span!("test-span", field = tracing::field::Empty);
-        s.record("field", 1);
-        s.in_scope(|| {});
-        sub.enter(&span);
-        sub.exit(&span);
-        sub.record_follows_from(&span, &span);
-    }
+    use crate::test_support::always_on_tracing_guard;
 
     #[test]
     fn test_provider_creation() {
@@ -1251,7 +1217,7 @@ mod tests {
         // arguments in with_base_url's "bad protocol" branch are actually
         // exercised, rather than short-circuited by the "is this level
         // enabled" check with no subscriber installed.
-        let _guard = tracing::subscriber::set_default(AlwaysOnSubscriber);
+        let _guard = always_on_tracing_guard();
         // Should log a warning but not panic
         let provider = OllamaProvider::with_base_url("ftp://invalid:11434".to_string());
         assert_eq!(provider.base_url, "ftp://invalid:11434");
@@ -1262,7 +1228,7 @@ mod tests {
         // Registers a real Subscriber so the tracing::warn! call's field
         // arguments in with_overrides's "bad protocol" branch are actually
         // exercised.
-        let _guard = tracing::subscriber::set_default(AlwaysOnSubscriber);
+        let _guard = always_on_tracing_guard();
         let provider =
             OllamaProvider::with_overrides("ftp://invalid:11434".to_string(), HashMap::new());
         assert_eq!(provider.base_url, "ftp://invalid:11434");

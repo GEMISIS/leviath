@@ -21,6 +21,9 @@ pub mod provider;
 pub mod rate_limit;
 pub mod tokenizer;
 
+#[cfg(test)]
+mod test_support;
+
 pub use anthropic::AnthropicProvider;
 pub use claude_code::ClaudeCodeProvider;
 pub use gemini::GeminiProvider;
