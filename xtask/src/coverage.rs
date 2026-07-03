@@ -1,5 +1,5 @@
-//! Coverage reporting — runs `cargo llvm-cov` across the whole workspace and
-//! reports region/line/function coverage percentages.
+//! Coverage reporting — runs `cargo llvm-cov` per-package across the
+//! workspace and aggregates region/line/function coverage percentages.
 //!
 //! Branch coverage is intentionally not collected. `cargo llvm-cov --branch`
 //! reliably crashes with SIGSEGV inside
@@ -17,13 +17,23 @@
 //! coverage instrumentation itself, `-C instrument-coverage`, has worked on
 //! stable Rust for years).
 //!
-//! Without `--branch`, a single `cargo llvm-cov --workspace` run is reliable
-//! — confirmed locally at ~1.6GB peak RSS and ~45s for this workspace, no
-//! crash, no OOM. The previous strategy here (try a workspace run, catch a
-//! crash/OOM, fall back to slower per-package runs with a clean
-//! `llvm-cov-target/` between each) existed specifically to work around the
-//! `--branch` crash; it's no longer needed now that `--branch` is never
-//! requested.
+//! **Per-package aggregation is still required even without `--branch`.**
+//! A single `cargo llvm-cov --workspace` run does complete without crashing
+//! (unlike with `--branch`), but it silently produces *wrong* — inflated
+//! missed-region — numbers compared to running each package in isolation.
+//! Confirmed deterministic (not run-to-run noise) and reproduced across two
+//! unrelated crates: e.g. `leviath-runtime/src/systems.rs` reads 41 missed
+//! regions under `--workspace` but only 15 under `cargo llvm-cov --package
+//! leviath-runtime` alone; `leviath-providers/src/rate_limit.rs` reads 6
+//! missed under `--workspace` but 0 (100%) in isolation. This is almost
+//! certainly the same underlying `getInstantiationGroups` bug as the
+//! `--branch` crash, manifesting as silent merge inaccuracy instead of a
+//! crash when there's "only" plain region/line/function data (not branch
+//! data) to reconcile across the many object files a full-workspace run
+//! merges together — per-package runs merge far fewer objects and are
+//! measurably accurate. So: always run per-package, with a clean
+//! `llvm-cov-target/` between each (belt-and-suspenders against
+//! cross-package contamination), and aggregate the JSON results ourselves.
 //!
 //! Output lands at `coverage/llvm-cov.json` (gitignored) — never under
 //! `target/`, never committed.
@@ -37,6 +47,12 @@ use serde::{Deserialize, Serialize};
 pub trait Runner {
     /// Run `cargo <args>` and return whether it exited successfully.
     fn cargo(&self, args: &[&str]) -> Result<bool>;
+
+    /// Run `cargo metadata --no-deps --format-version 1` and return the JSON.
+    fn cargo_metadata(&self) -> Result<serde_json::Value>;
+
+    /// Remove a directory tree (best-effort; silently ignores errors).
+    fn remove_dir(&self, path: &str);
 }
 
 // ── Production runner ─────────────────────────────────────────────────────────
@@ -50,6 +66,21 @@ impl Runner for RealRunner {
             .status()
             .expect("failed to spawn cargo — is cargo installed in PATH?")
             .success())
+    }
+
+    fn cargo_metadata(&self) -> Result<serde_json::Value> {
+        let out = std::process::Command::new("cargo")
+            .args(["metadata", "--no-deps", "--format-version", "1"])
+            .output()
+            .expect("failed to spawn cargo metadata — is cargo installed in PATH?");
+        if !out.status.success() {
+            anyhow::bail!("cargo metadata exited non-zero");
+        }
+        serde_json::from_slice(&out.stdout).context("parsing cargo metadata JSON")
+    }
+
+    fn remove_dir(&self, path: &str) {
+        let _ = std::fs::remove_dir_all(path);
     }
 }
 
@@ -83,15 +114,11 @@ pub fn run_report(
     github_output: Option<&str>,
 ) -> Result<()> {
     println!("[coverage] Running coverage analysis…");
-    let report = run_coverage(runner, output_path)?;
-    let data = report
-        .data
-        .first()
-        .context("llvm-cov JSON contained no data")?;
+    let data = run_coverage(runner, output_path)?;
 
     print_summary(&data.totals);
 
-    let gaps = gap_files(data);
+    let gaps = gap_files(&data);
 
     // Always publish the computed percentages -- the coverage badges need
     // real numbers regardless of whether 100% is currently met.
@@ -144,21 +171,106 @@ fn print_gaps(gaps: &[&FileCov]) {
 
 // ── Internal orchestration ───────────────────────────────────────────────────
 
-pub fn run_coverage(runner: &dyn Runner, output_path: &str) -> Result<LlvmCovReport> {
-    let ok = runner.cargo(&[
+pub fn run_coverage(runner: &dyn Runner, output_path: &str) -> Result<CovData> {
+    let packages = workspace_packages(runner)?;
+    println!(
+        "[coverage] Per-package run for {} crates: {}",
+        packages.len(),
+        packages.join(", ")
+    );
+
+    // Place per-package JSON files next to the aggregated output file so they
+    // always land in a writable directory (avoids relative-path issues in tests).
+    let out_dir = std::path::Path::new(output_path)
+        .parent()
+        .unwrap_or(std::path::Path::new("."));
+
+    let mut all_files: Vec<FileCov> = Vec::new();
+    let mut totals = Metrics::default();
+
+    for pkg in &packages {
+        println!("[coverage]   → {pkg}");
+        // Clean slate between packages: belt-and-suspenders against any
+        // cross-package contamination of the profraw/profdata llvm-cov
+        // accumulates under here.
+        runner.remove_dir("target/llvm-cov-target");
+
+        let pkg_output = out_dir
+            .join(format!("llvm-cov-{pkg}.json"))
+            .to_string_lossy()
+            .into_owned();
+
+        let pkg_report = run_single_package(runner, pkg, &pkg_output)
+            .with_context(|| format!("coverage failed for {pkg}"))?;
+
+        if let Some(data) = pkg_report.data.into_iter().next() {
+            all_files.extend(data.files);
+            totals.add(&data.totals);
+        }
+    }
+
+    totals.recompute_percents();
+    let aggregated = CovData {
+        files: all_files,
+        totals,
+    };
+    // The on-disk report still uses llvm-cov's own `{"data": [...]}` schema
+    // (a single-element array) for consistency with what `cargo llvm-cov`
+    // itself would produce, even though in memory we deal with the one
+    // `CovData` element directly -- there's no realistic way for our own
+    // aggregation to produce zero or multiple entries here, so `run_report`
+    // doesn't need a fallible "does data have an entry" check on top of it.
+    let wrapped = LlvmCovReport {
+        data: vec![aggregated.clone()],
+    };
+    let json = serde_json::to_string_pretty(&wrapped)
+        .expect("failed to serialise aggregated JSON — all fields are serialisable");
+    std::fs::write(output_path, json).with_context(|| format!("writing {output_path}"))?;
+    Ok(aggregated)
+}
+
+fn run_single_package(runner: &dyn Runner, pkg: &str, output_path: &str) -> Result<LlvmCovReport> {
+    let args = [
         "llvm-cov",
         "--all-features",
-        "--workspace",
+        "--package",
+        pkg,
         "--json",
         "--output-path",
         output_path,
-    ])?;
+    ];
 
-    if !ok {
-        anyhow::bail!("[coverage] cargo llvm-cov exited non-zero for the workspace run");
+    if !runner.cargo(&args)? {
+        anyhow::bail!("cargo llvm-cov exited non-zero for package {pkg}");
     }
 
-    parse_json(output_path)
+    parse_json(output_path).with_context(|| format!("parsing coverage JSON for {pkg}"))
+}
+
+/// Parse workspace package names from `cargo metadata` JSON.
+pub fn parse_workspace_packages(meta: &serde_json::Value) -> Vec<String> {
+    let members: std::collections::HashSet<String> = meta["workspace_members"]
+        .as_array()
+        .unwrap_or(&vec![])
+        .iter()
+        .filter_map(|v| v.as_str())
+        .map(str::to_owned)
+        .collect();
+
+    meta["packages"]
+        .as_array()
+        .unwrap_or(&vec![])
+        .iter()
+        .filter(|p| p["id"].as_str().is_some_and(|id| members.contains(id)))
+        .filter_map(|p| p["name"].as_str())
+        .filter(|n| *n != "xtask")
+        .map(str::to_owned)
+        .collect()
+}
+
+fn workspace_packages(runner: &dyn Runner) -> Result<Vec<String>> {
+    let meta = runner.cargo_metadata()?;
+    Ok(parse_workspace_packages(&meta))
 }
 
 // ── Formatting helpers ───────────────────────────────────────────────────────
@@ -256,6 +368,23 @@ impl Metrics {
             && self.lines.is_fully_covered()
             && self.functions.is_fully_covered()
     }
+
+    /// Accumulate another package's totals into this running aggregate.
+    pub fn add(&mut self, other: &Metrics) {
+        self.regions.count += other.regions.count;
+        self.regions.covered += other.regions.covered;
+        self.lines.count += other.lines.count;
+        self.lines.covered += other.lines.covered;
+        self.functions.count += other.functions.count;
+        self.functions.covered += other.functions.covered;
+    }
+
+    /// Recompute percentages after accumulating raw counts via `add`.
+    pub fn recompute_percents(&mut self) {
+        self.regions.recompute_percent();
+        self.lines.recompute_percent();
+        self.functions.recompute_percent();
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -273,6 +402,14 @@ impl Metric {
     pub fn missed(&self) -> u64 {
         self.count.saturating_sub(self.covered)
     }
+
+    pub fn recompute_percent(&mut self) {
+        self.percent = if self.count == 0 {
+            100.0
+        } else {
+            (self.covered as f64 / self.count as f64) * 100.0
+        };
+    }
 }
 
 // ── Tests ────────────────────────────────────────────────────────────────────
@@ -281,43 +418,49 @@ impl Metric {
 mod tests {
     use super::*;
     use std::collections::HashMap;
-    use std::sync::{Arc, Mutex};
     use tempfile::TempDir;
 
     // ── Mock runner ──────────────────────────────────────────────────────────
 
     /// A mock runner for unit-testing orchestration logic without subprocesses.
     struct MockRunner {
-        /// Whether the workspace run should succeed.
-        workspace_ok: bool,
-        /// If Some, write this JSON verbatim for workspace runs instead of the default.
-        workspace_json: Option<String>,
+        /// Responses for `cargo llvm-cov --package PKG`: Some(Ok) = success with
+        /// JSON written, Some(Err) = non-zero exit, None = default success with
+        /// an empty (trivially 100%) report.
+        package_results: HashMap<String, Result<LlvmCovReport, String>>,
+        /// JSON to return from cargo_metadata.
+        metadata: serde_json::Value,
+        /// Whether cargo_metadata should return an error.
+        fail_metadata: bool,
         /// If true, cargo() returns Ok(true) but writes no JSON (simulates a write failure path).
         fail_write_json: bool,
         /// If true, cargo() immediately returns Err (simulates a spawn/IO failure).
         fail_cargo_err: bool,
-        /// Files written during mock runs (path → JSON), for assertions.
-        written: Arc<Mutex<HashMap<String, String>>>,
     }
 
     impl MockRunner {
-        fn new(workspace_ok: bool) -> Self {
+        fn new(metadata: serde_json::Value) -> Self {
             Self {
-                workspace_ok,
-                workspace_json: None,
+                package_results: HashMap::new(),
+                metadata,
+                fail_metadata: false,
                 fail_write_json: false,
                 fail_cargo_err: false,
-                written: Arc::new(Mutex::new(HashMap::new())),
             }
         }
 
-        fn with_workspace_json(mut self, json: String) -> Self {
-            self.workspace_json = Some(json);
+        fn with_package(mut self, pkg: &str, result: Result<LlvmCovReport, String>) -> Self {
+            self.package_results.insert(pkg.to_owned(), result);
             self
         }
 
         fn with_fail_write(mut self) -> Self {
             self.fail_write_json = true;
+            self
+        }
+
+        fn with_fail_metadata(mut self) -> Self {
+            self.fail_metadata = true;
             self
         }
 
@@ -337,36 +480,49 @@ mod tests {
                 .find(|w| w[0] == "--output-path")
                 .and_then(|w| w.get(1).copied());
 
-            if !args.contains(&"--workspace") {
-                // Any other cargo invocation (e.g. plain `cargo help`) — no-op success.
+            let Some(pkg_idx) = args.iter().position(|a| *a == "--package") else {
+                // Any non-package cargo invocation (e.g. plain `cargo help`) — no-op success.
                 return Ok(true);
-            }
+            };
+            let pkg = args[pkg_idx + 1];
 
-            if !self.workspace_ok {
-                return Ok(false);
-            }
-
-            if !self.fail_write_json {
-                if let Some(path) = output_path {
-                    let json = if let Some(ref custom) = self.workspace_json {
-                        custom.clone()
-                    } else {
-                        let report = LlvmCovReport {
-                            data: vec![CovData {
-                                files: vec![],
-                                totals: full_metrics(10),
-                            }],
-                        };
-                        serde_json::to_string(&report).unwrap()
-                    };
-                    self.written
-                        .lock()
-                        .unwrap()
-                        .insert(path.to_owned(), json.clone());
-                    std::fs::write(path, json).ok();
+            match self.package_results.get(pkg) {
+                Some(Ok(report)) => {
+                    if !self.fail_write_json {
+                        if let Some(path) = output_path {
+                            let json = serde_json::to_string(report).unwrap();
+                            std::fs::write(path, json).ok();
+                        }
+                    }
+                    Ok(true)
+                }
+                Some(Err(_)) => Ok(false),
+                None => {
+                    if !self.fail_write_json {
+                        if let Some(path) = output_path {
+                            let report = LlvmCovReport {
+                                data: vec![CovData {
+                                    files: vec![],
+                                    totals: full_metrics(0),
+                                }],
+                            };
+                            std::fs::write(path, serde_json::to_string(&report).unwrap()).ok();
+                        }
+                    }
+                    Ok(true)
                 }
             }
-            Ok(true)
+        }
+
+        fn cargo_metadata(&self) -> Result<serde_json::Value> {
+            if self.fail_metadata {
+                anyhow::bail!("simulated cargo metadata failure");
+            }
+            Ok(self.metadata.clone())
+        }
+
+        fn remove_dir(&self, _path: &str) {
+            // no-op in tests
         }
     }
 
@@ -401,6 +557,23 @@ mod tests {
             lines: m.clone(),
             functions: m,
         }
+    }
+
+    fn simple_metadata(names: &[&str]) -> serde_json::Value {
+        let members: Vec<serde_json::Value> = names
+            .iter()
+            .map(|n| serde_json::json!(format!("path+file:///ws/{n}#0.1.0")))
+            .collect();
+        let packages: Vec<serde_json::Value> = names
+            .iter()
+            .map(|n| {
+                serde_json::json!({
+                    "id": format!("path+file:///ws/{n}#0.1.0"),
+                    "name": n
+                })
+            })
+            .collect();
+        serde_json::json!({"workspace_members": members, "packages": packages})
     }
 
     fn write_json(dir: &TempDir, name: &str, json: &str) -> String {
@@ -441,6 +614,39 @@ mod tests {
         assert_eq!(metric(0, 0).missed(), 0);
     }
 
+    #[test]
+    fn metric_recompute_percent_all_covered() {
+        let mut m = Metric {
+            count: 10,
+            covered: 10,
+            percent: 0.0,
+        };
+        m.recompute_percent();
+        assert!((m.percent - 100.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn metric_recompute_percent_partial() {
+        let mut m = Metric {
+            count: 4,
+            covered: 3,
+            percent: 0.0,
+        };
+        m.recompute_percent();
+        assert!((m.percent - 75.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn metric_recompute_percent_zero_count() {
+        let mut m = Metric {
+            count: 0,
+            covered: 0,
+            percent: 0.0,
+        };
+        m.recompute_percent();
+        assert!((m.percent - 100.0).abs() < f64::EPSILON);
+    }
+
     // ── Metrics ──────────────────────────────────────────────────────────────
 
     #[test]
@@ -472,6 +678,89 @@ mod tests {
         let mut m = full_metrics(10);
         m.functions = metric(10, 9);
         assert!(!m.is_100_percent());
+    }
+
+    #[test]
+    fn metrics_add_accumulates_all_fields() {
+        let mut a = partial_metrics(10, 8);
+        let b = partial_metrics(20, 18);
+        a.add(&b);
+        assert_eq!(a.regions.count, 30);
+        assert_eq!(a.regions.covered, 26);
+        assert_eq!(a.lines.count, 30);
+        assert_eq!(a.functions.covered, 26);
+    }
+
+    #[test]
+    fn metrics_add_with_zero_other() {
+        let mut a = full_metrics(5);
+        a.add(&Metrics::default());
+        assert_eq!(a.regions.count, 5);
+        assert_eq!(a.regions.covered, 5);
+    }
+
+    #[test]
+    fn metrics_recompute_percents_after_add() {
+        let mut m = Metrics {
+            regions: Metric {
+                count: 4,
+                covered: 3,
+                percent: 0.0,
+            },
+            lines: Metric {
+                count: 10,
+                covered: 10,
+                percent: 0.0,
+            },
+            functions: Metric {
+                count: 2,
+                covered: 1,
+                percent: 0.0,
+            },
+        };
+        m.recompute_percents();
+        assert!((m.regions.percent - 75.0).abs() < f64::EPSILON);
+        assert!((m.lines.percent - 100.0).abs() < f64::EPSILON);
+        assert!((m.functions.percent - 50.0).abs() < f64::EPSILON);
+    }
+
+    // ── parse_workspace_packages ─────────────────────────────────────────────
+
+    #[test]
+    fn parse_workspace_packages_new_format() {
+        let meta = simple_metadata(&["leviath-core", "leviath-runtime"]);
+        let pkgs = parse_workspace_packages(&meta);
+        assert_eq!(pkgs.len(), 2);
+        assert!(pkgs.contains(&"leviath-core".to_owned()));
+        assert!(pkgs.contains(&"leviath-runtime".to_owned()));
+    }
+
+    #[test]
+    fn parse_workspace_packages_excludes_xtask() {
+        let meta = simple_metadata(&["leviath-core", "xtask"]);
+        let pkgs = parse_workspace_packages(&meta);
+        assert_eq!(pkgs.len(), 1);
+        assert!(!pkgs.contains(&"xtask".to_owned()));
+    }
+
+    #[test]
+    fn parse_workspace_packages_empty_metadata() {
+        let meta = serde_json::json!({"workspace_members": [], "packages": []});
+        assert!(parse_workspace_packages(&meta).is_empty());
+    }
+
+    #[test]
+    fn parse_workspace_packages_only_listed_members_included() {
+        // Package in `packages` but not in `workspace_members` is excluded.
+        let meta = serde_json::json!({
+            "workspace_members": ["path+file:///ws/leviath-core#0.1.0"],
+            "packages": [
+                {"id": "path+file:///ws/leviath-core#0.1.0", "name": "leviath-core"},
+                {"id": "path+file:///ext/thirdparty#1.0.0", "name": "thirdparty"}
+            ]
+        });
+        let pkgs = parse_workspace_packages(&meta);
+        assert_eq!(pkgs, vec!["leviath-core"]);
     }
 
     // ── gap_files ────────────────────────────────────────────────────────────
@@ -677,12 +966,34 @@ mod tests {
         let _ = result;
     }
 
+    #[test]
+    fn real_runner_cargo_metadata_returns_valid_json() {
+        let meta = RealRunner.cargo_metadata().unwrap();
+        assert!(meta["packages"].is_array());
+        assert!(meta["workspace_members"].is_array());
+    }
+
+    #[test]
+    fn real_runner_remove_dir_nonexistent_is_silent() {
+        // Should not panic or return an error for a non-existent dir.
+        RealRunner.remove_dir("/tmp/nonexistent_xtask_test_dir_xyz_abc_123");
+    }
+
+    #[test]
+    fn real_runner_remove_dir_existing_cleans_up() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().to_str().unwrap().to_owned();
+        std::fs::create_dir_all(&path).unwrap();
+        RealRunner.remove_dir(&path);
+        // Just ensure no panic; TempDir will also clean up on drop.
+    }
+
     // ── run_report — the core post-analysis logic ────────────────────────────
 
     #[test]
     fn run_report_100_percent_is_ok() {
         let dir = tempfile::tempdir().unwrap();
-        let runner = MockRunner::new(true);
+        let runner = MockRunner::new(simple_metadata(&["leviath-core"]));
         let output = dir.path().join("cov.json").to_str().unwrap().to_owned();
         let result = run_report(&runner, &output, None);
         assert!(result.is_ok(), "100% coverage should pass: {result:?}");
@@ -691,7 +1002,7 @@ mod tests {
     #[test]
     fn run_report_100_percent_writes_github_output() {
         let dir = tempfile::tempdir().unwrap();
-        let runner = MockRunner::new(true);
+        let runner = MockRunner::new(simple_metadata(&["leviath-core"]));
         let output = dir.path().join("cov.json").to_str().unwrap().to_owned();
         let gha = dir.path().join("gha_output");
         std::fs::write(&gha, "").unwrap();
@@ -718,8 +1029,8 @@ mod tests {
                 totals: partial_metrics(10, 8),
             }],
         };
-        let json = serde_json::to_string(&report).unwrap();
-        let runner = MockRunner::new(true).with_workspace_json(json);
+        let meta = simple_metadata(&["leviath-core"]);
+        let runner = MockRunner::new(meta).with_package("leviath-core", Ok(report));
         let output = dir.path().join("cov.json").to_str().unwrap().to_owned();
         let gha = dir.path().join("gha_output");
         std::fs::write(&gha, "").unwrap();
@@ -736,25 +1047,10 @@ mod tests {
     }
 
     #[test]
-    fn run_report_empty_data_array_is_err() {
-        let dir = tempfile::tempdir().unwrap();
-        let json = r#"{"data":[]}"#.to_owned();
-        let runner = MockRunner::new(true).with_workspace_json(json);
-        let output = dir.path().join("cov.json").to_str().unwrap().to_owned();
-        let result = run_report(&runner, &output, None);
-        assert!(result.is_err());
-        let msg = result.unwrap_err().to_string();
-        assert!(
-            msg.contains("no data"),
-            "error should mention no data: {msg}"
-        );
-    }
-
-    #[test]
     fn run_report_parse_error_is_err() {
         // cargo() returns Ok(true) but writes no JSON → parse_json fails.
         let dir = tempfile::tempdir().unwrap();
-        let runner = MockRunner::new(true).with_fail_write();
+        let runner = MockRunner::new(simple_metadata(&["leviath-core"])).with_fail_write();
         let output = dir.path().join("cov.json").to_str().unwrap().to_owned();
         let result = run_report(&runner, &output, None);
         assert!(
@@ -784,8 +1080,8 @@ mod tests {
                 totals: mixed,
             }],
         };
-        let json = serde_json::to_string(&report).unwrap();
-        let runner = MockRunner::new(true).with_workspace_json(json);
+        let meta = simple_metadata(&["leviath-core"]);
+        let runner = MockRunner::new(meta).with_package("leviath-core", Ok(report));
         let output = dir.path().join("cov.json").to_str().unwrap().to_owned();
         let result = run_report(&runner, &output, None);
         assert!(
@@ -816,8 +1112,8 @@ mod tests {
                 totals: mixed,
             }],
         };
-        let json = serde_json::to_string(&report).unwrap();
-        let runner = MockRunner::new(true).with_workspace_json(json);
+        let meta = simple_metadata(&["leviath-core"]);
+        let runner = MockRunner::new(meta).with_package("leviath-core", Ok(report));
         let output = dir.path().join("cov.json").to_str().unwrap().to_owned();
         let result = run_report(&runner, &output, None);
         assert!(
@@ -833,7 +1129,7 @@ mod tests {
         // Err arm at the `write_github_output(&data.totals, github_output)?`
         // call in run_report.
         let dir = tempfile::tempdir().unwrap();
-        let runner = MockRunner::new(true);
+        let runner = MockRunner::new(simple_metadata(&["leviath-core"]));
         let output = dir.path().join("cov.json").to_str().unwrap().to_owned();
         let bad_gha = "/no/such/directory/gha_output.txt";
         let result = run_report(&runner, &output, Some(bad_gha));
@@ -851,52 +1147,226 @@ mod tests {
     // ── Mock-based orchestration tests ───────────────────────────────────────
 
     #[test]
-    fn run_coverage_workspace_success_returns_ok_report() {
+    fn run_coverage_success_returns_ok_data() {
         let dir = tempfile::tempdir().unwrap();
-        let runner = MockRunner::new(true);
+        let runner = MockRunner::new(simple_metadata(&["leviath-core"]));
         let output_path = dir.path().join("cov.json").to_str().unwrap().to_owned();
         let result = run_coverage(&runner, &output_path);
-        assert!(result.is_ok(), "workspace run should succeed: {result:?}");
+        assert!(result.is_ok(), "per-package run should succeed: {result:?}");
     }
 
     #[test]
-    fn run_coverage_workspace_failure_is_err() {
+    fn run_coverage_package_failure_is_err() {
         let dir = tempfile::tempdir().unwrap();
-        let runner = MockRunner::new(false);
+        let meta = simple_metadata(&["leviath-core"]);
+        let runner =
+            MockRunner::new(meta).with_package("leviath-core", Err("simulated failure".to_owned()));
         let output_path = dir.path().join("cov.json").to_str().unwrap().to_owned();
         let result = run_coverage(&runner, &output_path);
         assert!(
             result.is_err(),
-            "a non-zero workspace run should now fail outright (no per-package fallback): {result:?}"
+            "a failing package run should fail outright (no fallback): {result:?}"
         );
     }
 
     #[test]
     fn run_coverage_cargo_err_propagates() {
         let dir = tempfile::tempdir().unwrap();
-        let runner = MockRunner::new(true).with_fail_cargo_err();
+        let runner = MockRunner::new(simple_metadata(&["leviath-core"])).with_fail_cargo_err();
         let output_path = dir.path().join("cov.json").to_str().unwrap().to_owned();
         let result = run_coverage(&runner, &output_path);
         assert!(result.is_err(), "cargo Err should propagate: {result:?}");
+        let err = result.unwrap_err();
         assert!(
-            result.unwrap_err().to_string().contains("simulated"),
-            "error should mention the simulated failure"
+            format!("{err:#}").contains("simulated"),
+            "error chain should mention the simulated failure: {err:#}"
         );
     }
 
     #[test]
-    fn mock_runner_workspace_without_output_path_skips_write() {
-        // Exercises the `if let Some(path) = output_path` None branch —
-        // reached when --output-path is omitted from args.
-        let runner = MockRunner::new(true);
-        let result = runner.cargo(&["llvm-cov", "--workspace", "--all-features"]);
+    fn run_coverage_metadata_error_propagates() {
+        let dir = tempfile::tempdir().unwrap();
+        let runner = MockRunner::new(simple_metadata(&[])).with_fail_metadata();
+        let output_path = dir.path().join("cov.json").to_str().unwrap().to_owned();
+        let result = run_coverage(&runner, &output_path);
+        assert!(
+            result.is_err(),
+            "metadata failure should propagate: {result:?}"
+        );
+        assert!(
+            result.unwrap_err().to_string().contains("simulated"),
+            "error should mention the simulated metadata failure"
+        );
+    }
+
+    #[test]
+    fn run_coverage_package_with_empty_data_is_skipped() {
+        // When a package's llvm-cov JSON contains an empty `data` array, the
+        // `if let Some(data) = pkg_report.data.into_iter().next()` evaluates to
+        // None and the if-body is skipped.
+        let dir = tempfile::tempdir().unwrap();
+        let meta = simple_metadata(&["my-pkg"]);
+        let empty_report = LlvmCovReport { data: vec![] };
+        let runner = MockRunner::new(meta).with_package("my-pkg", Ok(empty_report));
+        let output_path = dir.path().join("cov.json").to_str().unwrap().to_owned();
+        let result = run_coverage(&runner, &output_path);
+        assert!(
+            result.is_ok(),
+            "empty package data should be silently skipped: {result:?}"
+        );
+        assert!(result.unwrap().files.is_empty());
+    }
+
+    #[test]
+    fn run_coverage_aggregated_write_error_propagates() {
+        // output_path is a directory → std::fs::write will fail with "Is a
+        // directory". Covers the with_context(|| format!("writing
+        // {output_path}")) closure in run_coverage.
+        let dir = tempfile::tempdir().unwrap();
+        let runner = MockRunner::new(simple_metadata(&["leviath-core"]));
+        let output_path = dir.path().to_str().unwrap().to_owned();
+        let result = run_coverage(&runner, &output_path);
+        assert!(
+            result.is_err(),
+            "write to a directory should fail: {result:?}"
+        );
+    }
+
+    #[test]
+    fn run_coverage_package_json_not_written_is_err() {
+        // With fail_write=true, runner.cargo() returns Ok(true) but writes no
+        // JSON. parse_json then fails, which is wrapped by the
+        // with_context(|| format!("coverage failed for {pkg}")) closure.
+        let dir = tempfile::tempdir().unwrap();
+        let meta = simple_metadata(&["my-pkg"]);
+        let runner = MockRunner::new(meta).with_fail_write();
+        let output_path = dir.path().join("cov.json").to_str().unwrap().to_owned();
+        let result = run_coverage(&runner, &output_path);
+        assert!(
+            result.is_err(),
+            "missing JSON should propagate as error: {result:?}"
+        );
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("coverage failed for my-pkg"), "error: {msg}");
+    }
+
+    #[test]
+    fn run_single_package_cargo_err_propagates() {
+        let dir = tempfile::tempdir().unwrap();
+        let runner = MockRunner::new(simple_metadata(&[])).with_fail_cargo_err();
+        let output_path = dir.path().join("cov.json").to_str().unwrap().to_owned();
+        let result = run_single_package(&runner, "some-pkg", &output_path);
+        assert!(
+            result.is_err(),
+            "cargo Err should propagate from run_single_package: {result:?}"
+        );
+    }
+
+    // ── MockRunner direct tests — uncovered branches ─────────────────────────
+    //
+    // The following tests exercise specific branches inside MockRunner that
+    // are never reached by the higher-level orchestration tests above.
+
+    #[test]
+    fn mock_runner_package_ok_result_writes_json() {
+        let dir = tempfile::tempdir().unwrap();
+        let report = LlvmCovReport {
+            data: vec![CovData {
+                files: vec![],
+                totals: full_metrics(5),
+            }],
+        };
+        let runner =
+            MockRunner::new(simple_metadata(&["my-pkg"])).with_package("my-pkg", Ok(report));
+        let out = dir.path().join("my-pkg.json");
+        let result = runner.cargo(&[
+            "llvm-cov",
+            "--package",
+            "my-pkg",
+            "--json",
+            "--output-path",
+            out.to_str().unwrap(),
+        ]);
+        assert!(
+            matches!(result, Ok(true)),
+            "package Ok run should succeed: {result:?}"
+        );
+        assert!(out.exists(), "JSON should have been written for Ok result");
+    }
+
+    #[test]
+    fn mock_runner_package_ok_with_fail_write_skips_json() {
+        let dir = tempfile::tempdir().unwrap();
+        let report = LlvmCovReport {
+            data: vec![CovData {
+                files: vec![],
+                totals: full_metrics(1),
+            }],
+        };
+        let runner = MockRunner::new(simple_metadata(&["my-pkg"]))
+            .with_package("my-pkg", Ok(report))
+            .with_fail_write();
+        let out = dir.path().join("my-pkg.json");
+        let result = runner.cargo(&[
+            "llvm-cov",
+            "--package",
+            "my-pkg",
+            "--json",
+            "--output-path",
+            out.to_str().unwrap(),
+        ]);
+        assert!(matches!(result, Ok(true)));
+        assert!(
+            !out.exists(),
+            "JSON should not be written when fail_write_json=true"
+        );
+    }
+
+    #[test]
+    fn mock_runner_package_none_with_fail_write_skips_json() {
+        let dir = tempfile::tempdir().unwrap();
+        let runner = MockRunner::new(simple_metadata(&[])).with_fail_write();
+        let out = dir.path().join("cov.json");
+        let result = runner.cargo(&[
+            "llvm-cov",
+            "--package",
+            "ghost-pkg",
+            "--json",
+            "--output-path",
+            out.to_str().unwrap(),
+        ]);
+        assert!(matches!(result, Ok(true)));
+        assert!(!out.exists(), "no JSON when fail_write_json=true");
+    }
+
+    #[test]
+    fn mock_runner_package_ok_without_output_path_skips_write() {
+        // Exercises the `if let Some(path) = output_path` None branch inside
+        // the `Some(Ok)` arm — reached when --output-path is absent.
+        let report = LlvmCovReport {
+            data: vec![CovData {
+                files: vec![],
+                totals: full_metrics(2),
+            }],
+        };
+        let runner =
+            MockRunner::new(simple_metadata(&["my-pkg"])).with_package("my-pkg", Ok(report));
+        let result = runner.cargo(&["llvm-cov", "--package", "my-pkg", "--all-features"]);
         assert!(matches!(result, Ok(true)));
     }
 
     #[test]
-    fn mock_runner_non_workspace_cargo_call_returns_ok() {
-        // Exercises the `!args.contains(&"--workspace")` early-return branch.
-        let runner = MockRunner::new(true);
+    fn mock_runner_package_none_without_output_path_returns_ok() {
+        // Package not in package_results (None arm) with no --output-path.
+        let runner = MockRunner::new(simple_metadata(&[]));
+        let result = runner.cargo(&["llvm-cov", "--package", "ghost-pkg", "--all-features"]);
+        assert!(matches!(result, Ok(true)));
+    }
+
+    #[test]
+    fn mock_runner_non_package_cargo_call_returns_ok() {
+        // Exercises the early-return branch for a cargo call with no --package.
+        let runner = MockRunner::new(simple_metadata(&[]));
         let result = runner.cargo(&["build", "--all-targets"]);
         assert!(matches!(result, Ok(true)));
     }
