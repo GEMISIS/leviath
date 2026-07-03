@@ -503,9 +503,15 @@ mod tests {
     use super::*;
     use std::sync::Mutex;
 
-    /// Serializes tests that mutate the process's current working directory.
-    /// `set_current_dir` is process-global, so only one test may hold this
-    /// lock at a time to avoid flaky interactions between parallel tests.
+    /// Serializes tests that mutate OR depend on the process's current
+    /// working directory. `set_current_dir` is process-global, so any test
+    /// whose assertion implicitly depends on CWD state (like `find_manifest`'s
+    /// "no agent.leviath in CWD" branch) must also hold this lock, not just
+    /// the tests that call `set_current_dir` themselves -- otherwise it can
+    /// observe a CWD another test temporarily pointed elsewhere and fail
+    /// nondeterministically. Confirmed exactly this: `find_manifest_dir_without_manifest_falls_through`
+    /// didn't hold this lock and intermittently failed on CI by observing
+    /// `find_manifest_cwd_agent_leviath_found`'s CWD mid-swap.
     static CWD_LOCK: Mutex<()> = Mutex::new(());
 
     // ─── test helpers ─────────────────────────────────────────────────────────
@@ -1215,6 +1221,8 @@ mode = "autonomous"
 
     #[test]
     fn find_manifest_with_invalid_path() {
+        // See CWD_LOCK's doc comment -- branch 4 depends on CWD state.
+        let _guard = CWD_LOCK.lock().unwrap();
         let result = find_manifest("/nonexistent/path/to/nothing");
         assert!(result.is_err());
     }
@@ -1242,6 +1250,14 @@ mode = "autonomous"
     /// This exercises the implicit else of `if manifest.exists()` on line ~23.
     #[test]
     fn find_manifest_dir_without_manifest_falls_through() {
+        // Branch 4 of find_manifest checks for a bare "agent.leviath" in the
+        // process's current working directory -- process-global state that
+        // find_manifest_cwd_agent_leviath_found deliberately mutates. Without
+        // holding CWD_LOCK here too, this test can run while CWD is
+        // temporarily pointed at that other test's directory (which does
+        // contain agent.leviath), observe branch 4 succeed, and fail this
+        // assertion nondeterministically -- confirmed on CI.
+        let _guard = CWD_LOCK.lock().unwrap();
         let dir = std::env::temp_dir().join("lev-test-dir-no-manifest-9z7q");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
@@ -1256,6 +1272,8 @@ mode = "autonomous"
     /// `if installed.exists()` is false, so we fall through to the error.
     #[test]
     fn find_manifest_installed_agent_not_found_falls_through() {
+        // See CWD_LOCK's doc comment -- branch 4 depends on CWD state.
+        let _guard = CWD_LOCK.lock().unwrap();
         let result = find_manifest("lev-no-such-agent-xyzzy-9f3a");
         assert!(result.is_err());
     }

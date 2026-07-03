@@ -1585,7 +1585,19 @@ mod tests {
 
     #[test]
     fn create_run_in_fails_on_bad_parent() {
-        let bad = std::path::Path::new("/nonexistent-cov-parent-xyzzy/run");
+        // A hardcoded "/nonexistent-.../run" path isn't reliably bad across
+        // platforms: on Windows CI runners (which typically have write
+        // access to create directories at the drive root), that path
+        // resolves under the current drive's root and create_dir_all
+        // actually succeeds there, while on Unix it fails because writing
+        // to the real filesystem root needs privileges the CI user lacks --
+        // this passed locally but failed on Windows CI. Use a path with a
+        // regular file as a parent component instead: create_dir_all can
+        // never succeed under a file, on any platform or set of permissions.
+        let dir = tempfile::tempdir().unwrap();
+        let not_a_dir = dir.path().join("not-a-directory");
+        std::fs::write(&not_a_dir, "x").unwrap();
+        let bad = not_a_dir.join("run");
         let meta = RunMeta::new(
             "run".into(),
             "a".into(),
@@ -1595,7 +1607,7 @@ mod tests {
             "/tmp".into(),
             1,
         );
-        let result = create_run_in(bad, &meta);
+        let result = create_run_in(&bad, &meta);
         assert!(result.is_err());
     }
 
