@@ -13,6 +13,14 @@
 //!    (not against downstream crates' tests), which is the stricter definition.
 //! 3. Parse the resulting JSON and fail if any metric is below 100%.
 //!    Every gap is reported with filename and per-metric missed count.
+//!
+//! Output lands under the gitignored `coverage/` directory
+//! (`coverage/llvm-cov.json`, or `coverage/llvm-cov-<pkg>.json` per package in
+//! the fallback path) — never under `target/`, and never committed.
+//!
+//! Run this via `cargo xtask coverage`, not `cargo llvm-cov --workspace`
+//! directly — the raw workspace command skips the fallback above and is what
+//! triggers the SIGSEGV/OOM this module works around.
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -75,11 +83,11 @@ pub fn run() -> Result<()> {
 pub fn run_with(runner: &dyn Runner) -> Result<()> {
     let in_ci = std::env::var("GITHUB_ACTIONS").is_ok();
     let github_output = std::env::var("GITHUB_OUTPUT").ok();
-    std::fs::create_dir_all("target")
-        .expect("failed to create target/ directory — check filesystem permissions");
+    std::fs::create_dir_all("coverage")
+        .expect("failed to create coverage/ directory — check filesystem permissions");
     run_report(
         runner,
-        "target/llvm-cov.json",
+        "coverage/llvm-cov.json",
         in_ci,
         github_output.as_deref(),
     )

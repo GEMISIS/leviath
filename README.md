@@ -248,7 +248,18 @@ cargo test --workspace
 cargo clippy --workspace
 ```
 
-The `git config` line is a one-time step per clone. It points git at the `.githooks/` directory where the pre-commit hook lives. The hook enforces formatting, clippy (warnings-as-errors), all tests passing, and ≥75% line coverage via `cargo-llvm-cov`. CI enforces the same rules.
+The `git config` line is a one-time step per clone. It points git at the `.githooks/` directory where the pre-commit hook lives. The hook enforces formatting, clippy (warnings-as-errors), and all tests passing. CI additionally enforces 100% coverage (regions/lines/functions/branches) via `cargo xtask coverage`.
+
+### Running coverage locally
+
+Use **`cargo xtask coverage`** — it runs `cargo-llvm-cov` per-package with a clean `llvm-cov-target/` between each crate, which avoids an upstream LLVM aggregation crash that raw `cargo llvm-cov --workspace` can trigger on macOS (it OOMs the machine trying to merge branch data for all crates and ~3000 tests in one process). Output is written to the gitignored `coverage/` folder.
+
+```bash
+cargo xtask coverage              # full workspace, per-package fallback, safe on macOS
+cargo llvm-cov --package <crate> --lib   # coverage for a single crate
+```
+
+**Do not run `cargo llvm-cov --workspace` directly** — see `xtask/src/coverage.rs` for details on why.
 
 ## License
 

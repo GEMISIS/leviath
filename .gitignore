@@ -31,3 +31,6 @@ tarpaulin-report.json
 # LLVM coverage profiling data
 *.profraw
 *.profdata
+
+# Coverage reports (cargo xtask coverage / cargo llvm-cov output)
+/coverage/
