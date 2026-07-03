@@ -272,6 +272,18 @@ mod console_io_tests {
         assert_eq!(result, Some("hello world".to_string()));
     }
 
+    #[tokio::test]
+    async fn console_io_get_user_input_returns_none_on_read_error() {
+        // Drives the read-error branch through `ConsoleIO`'s boxed
+        // `dyn BufRead + Send` reader (as opposed to calling
+        // `get_user_input_from_reader` directly with a concrete, sized
+        // `ErrorReader`) so the error path is covered for the same
+        // monomorphization used by production code.
+        let mut io = ConsoleIO::with_reader(ErrorReader);
+        let result = io.get_user_input("Enter:").await;
+        assert_eq!(result, None);
+    }
+
     #[test]
     fn get_user_input_from_reader_returns_trimmed_line() {
         let mut reader = Cursor::new(b"  hello world  \n".to_vec());

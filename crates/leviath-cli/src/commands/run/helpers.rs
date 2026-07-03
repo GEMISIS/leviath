@@ -404,6 +404,38 @@ mod tests {
     }
 
     #[test]
+    fn initialize_context_window_skips_default_regions_already_present() {
+        // Blueprint that already defines both auto-added regions explicitly,
+        // so `initialize_context_window` must not add duplicates.
+        let bp = make_blueprint_with_regions(vec![
+            RegionDefinition::new("tool_results".to_string(), RegionKind::Temporary, 1234),
+            RegionDefinition::new(
+                "conversation".to_string(),
+                RegionKind::SlidingWindow { max_items: 5 },
+                4321,
+            ),
+        ]);
+        let (mut engine, entity) = make_engine_and_entity(&bp);
+
+        initialize_context_window(&mut engine, entity, &bp, "task");
+
+        let window = engine.world().get::<ContextWindow>(entity).unwrap();
+        let tool_results: Vec<_> = window
+            .regions
+            .iter()
+            .filter(|r| r.name == "tool_results")
+            .collect();
+        let conversation: Vec<_> = window
+            .regions
+            .iter()
+            .filter(|r| r.name == "conversation")
+            .collect();
+        // Must not add a duplicate region.
+        assert_eq!(tool_results.len(), 1);
+        assert_eq!(conversation.len(), 1);
+    }
+
+    #[test]
     fn swap_context_layout_preserves_existing_content() {
         let bp = make_blueprint_with_regions(vec![
             RegionDefinition::new("system".to_string(), RegionKind::Pinned, 2000),
@@ -417,9 +449,8 @@ mod tests {
         initialize_context_window(&mut engine, entity, &bp, "task");
 
         // Add some content
-        if let Some(mut window) = engine.world_mut().get_mut::<ContextWindow>(entity) {
-            let _ = window.add_to_region("conversation", "existing content".to_string(), 5);
-        }
+        let mut window = engine.world_mut().get_mut::<ContextWindow>(entity).unwrap();
+        let _ = window.add_to_region("conversation", "existing content".to_string(), 5);
 
         // Swap to a new layout that keeps conversation but adds scratch
         let new_layout = ContextLayout::new(
@@ -482,9 +513,8 @@ mod tests {
         let (mut engine, entity) = make_engine_and_entity(&bp);
         initialize_context_window(&mut engine, entity, &bp, "task");
 
-        if let Some(mut window) = engine.world_mut().get_mut::<ContextWindow>(entity) {
-            let _ = window.add_to_region("conversation", "hello".to_string(), 2);
-        }
+        let mut window = engine.world_mut().get_mut::<ContextWindow>(entity).unwrap();
+        let _ = window.add_to_region("conversation", "hello".to_string(), 2);
 
         let snap = build_context_snapshot(&engine, entity, "main").unwrap();
         assert_eq!(snap.stage_name, "main");
@@ -574,6 +604,27 @@ mod tests {
         assert!(window.get_region("notes").is_some());
     }
 
+    #[test]
+    fn swap_context_layout_missing_component_is_noop() {
+        let new_layout = ContextLayout::new(
+            vec![RegionDefinition::new(
+                "system".to_string(),
+                RegionKind::Pinned,
+                2000,
+            )],
+            2000,
+        );
+        let registry = ProviderRegistry::new();
+        let mut engine = AgentEngine::with_providers(registry);
+        // Bare entity, no `ContextWindow` component, to exercise the `if let
+        // Some(..) = get_mut(..)` `None` branch — should not panic.
+        let entity = engine.world_mut().spawn(()).id();
+
+        swap_context_layout(&mut engine, entity, &new_layout);
+
+        assert!(engine.world().get::<ContextWindow>(entity).is_none());
+    }
+
     // ─── initialize_context_window: no pinned region ────────────────────
 
     #[test]
@@ -590,6 +641,24 @@ mod tests {
 
         let window = engine.world().get::<ContextWindow>(entity).unwrap();
         assert!(window.get_region("conversation").is_some());
+    }
+
+    #[test]
+    fn initialize_context_window_missing_component_is_noop() {
+        let bp = make_blueprint_with_regions(vec![RegionDefinition::new(
+            "system".to_string(),
+            RegionKind::Pinned,
+            2000,
+        )]);
+        let registry = ProviderRegistry::new();
+        let mut engine = AgentEngine::with_providers(registry);
+        // Bare entity, no `ContextWindow` component, to exercise the `if let
+        // Some(..) = get_mut(..)` `None` branch — should not panic.
+        let entity = engine.world_mut().spawn(()).id();
+
+        initialize_context_window(&mut engine, entity, &bp, "task");
+
+        assert!(engine.world().get::<ContextWindow>(entity).is_none());
     }
 
     // ─── build_context_snapshot: region kind strings ────────────────────

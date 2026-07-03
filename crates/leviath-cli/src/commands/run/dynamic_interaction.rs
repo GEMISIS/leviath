@@ -285,7 +285,7 @@ mod tests {
                 "main",
             )
             .await;
-            assert!(result.is_some(), "{name} should be handled");
+            assert!(result.is_some());
         }
     }
 

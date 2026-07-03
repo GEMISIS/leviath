@@ -945,10 +945,8 @@ mod tests {
         )
         .await;
 
-        assert!(
-            result.is_ok(),
-            "graph mode should recover from the error via on_stage_error, not propagate it"
-        );
+        // Graph mode should recover from the error via on_stage_error, not propagate it.
+        assert!(result.is_ok());
         assert_eq!(cb.errors.len(), 1);
         assert_eq!(cb.errors[0].0, "main");
         assert!(cb.errors[0].1.contains("simulated autonomous failure"));
@@ -990,7 +988,8 @@ mod tests {
         )
         .await;
 
-        assert!(result.is_err(), "linear mode must propagate the error");
+        // Linear mode must propagate the error.
+        assert!(result.is_err());
         assert!(result
             .unwrap_err()
             .to_string()
@@ -1491,10 +1490,10 @@ mod tests {
         .await
         .unwrap();
 
+        // Interactive stage must report on_stage_result so its stage record is marked Complete.
         assert_eq!(
             cb.stage_results,
-            vec![("plan".to_string(), StageResult::Success)],
-            "Interactive stage must report on_stage_result so its stage record is marked Complete"
+            vec![("plan".to_string(), StageResult::Success)]
         );
         assert_eq!(cb.completed_at, Some(0));
     }
@@ -1532,10 +1531,10 @@ mod tests {
         .await
         .unwrap();
 
+        // InteractivePoints stage must report on_stage_result so its stage record is marked Complete.
         assert_eq!(
             cb.stage_results,
-            vec![("plan".to_string(), StageResult::Success)],
-            "InteractivePoints stage must report on_stage_result so its stage record is marked Complete"
+            vec![("plan".to_string(), StageResult::Success)]
         );
         assert_eq!(cb.completed_at, Some(0));
     }
@@ -1577,7 +1576,8 @@ mod tests {
         )
         .await;
 
-        assert!(result.is_err(), "missing provider should propagate Err");
+        // Missing provider should propagate Err.
+        assert!(result.is_err());
     }
 
     #[tokio::test]
@@ -1644,9 +1644,7 @@ mod tests {
         )
         .await;
 
-        assert!(
-            result.is_err(),
-            "IPC write failure should propagate Err from InteractivePoints"
-        );
+        // IPC write failure should propagate Err from InteractivePoints.
+        assert!(result.is_err());
     }
 }

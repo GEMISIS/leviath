@@ -511,10 +511,8 @@ mod tests {
 
         // Check that io captured the output
         let all_output: String = io.outputs.join("");
-        #[rustfmt::skip]
-        assert!(all_output.contains("Assistant:"), "Expected 'Assistant:' prefix in output: {:?}", io.outputs);
-        #[rustfmt::skip]
-        assert!(all_output.contains("Streamed response"), "Expected streamed content in output: {:?}", io.outputs);
+        assert!(all_output.contains("Assistant:"));
+        assert!(all_output.contains("Streamed response"));
     }
 
     #[tokio::test]
@@ -548,10 +546,7 @@ mod tests {
         .await;
 
         assert!(result.is_err());
-        assert!(
-            result.unwrap_err().to_string().contains("not registered"),
-            "Expected 'not registered' error"
-        );
+        assert!(result.unwrap_err().to_string().contains("not registered"));
     }
 
     #[tokio::test]
@@ -565,12 +560,7 @@ mod tests {
             .unwrap();
 
         // Last output should be a newline
-        assert_eq!(
-            io.outputs.last().map(|s| s.as_str()),
-            Some("\n"),
-            "Expected trailing newline in outputs: {:?}",
-            io.outputs
-        );
+        assert_eq!(io.outputs.last().map(|s| s.as_str()), Some("\n"));
     }
 
     #[tokio::test]
@@ -643,10 +633,7 @@ mod tests {
             stream_inference(&mut engine, entity, "mock", "test-model", None, &mut io).await;
 
         assert!(result.is_err());
-        assert!(
-            result.unwrap_err().to_string().contains("Stream error"),
-            "Expected 'Stream error' in the error message"
-        );
+        assert!(result.unwrap_err().to_string().contains("Stream error"));
     }
 
     #[tokio::test]
@@ -660,13 +647,10 @@ mod tests {
             stream_inference(&mut engine, entity, "mock", "test-model", None, &mut io).await;
 
         assert!(result.is_err());
-        assert!(
-            result
-                .unwrap_err()
-                .to_string()
-                .contains("Stream chunk error"),
-            "Expected 'Stream chunk error' in the error message"
-        );
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Stream chunk error"));
     }
 
     #[tokio::test]

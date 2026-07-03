@@ -432,11 +432,8 @@ prompt = "Implement"
         let result = execute(args).await;
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
-        assert!(
-            err.contains("count") | err.contains("foreground"),
-            "Expected error about --count with --foreground, got: {}",
-            err
-        );
+        // Expected error about --count with --foreground.
+        assert!(err.contains("count") | err.contains("foreground"));
     }
 
     #[tokio::test]
@@ -488,13 +485,11 @@ prompt = "Implement"
         };
         let result = execute(args).await;
         let _ = std::fs::remove_dir_all(&agent_dir);
-        assert!(
-            result.is_err(),
-            "expected read error for directory manifest"
-        );
+        // Expected read error for directory manifest.
+        assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         let has_manifest_err = err.contains("Failed to read manifest") | err.contains("manifest");
-        assert!(has_manifest_err, "expected manifest error, got: {err}");
+        assert!(has_manifest_err);
     }
 
     #[tokio::test]
@@ -524,11 +519,12 @@ prompt = "Implement"
 
         let bad_exe = std::path::Path::new("/nonexistent/executable/path/leviath-cli");
         let result = super::execute_background(args, bad_exe).await;
-        assert!(result.is_err(), "expected spawn error");
+        // Expected spawn error.
+        assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         let has_spawn_err =
             err.contains("Failed to spawn") | err.contains("spawn") | err.contains("No such file");
-        assert!(has_spawn_err, "expected spawn error, got: {err}");
+        assert!(has_spawn_err);
     }
 
     // ─── WorkerArgs: more coverage ─────────────────────────────────────────
@@ -668,7 +664,8 @@ prompt = "Do the thing"
 
         let runs = runstate::list_runs();
         let run_was_created = runs.iter().any(|m| m.agent_name == agent_name);
-        assert!(run_was_created, "expected a run to have been created");
+        // Expected a run to have been created.
+        assert!(run_was_created);
 
         let _ = std::fs::remove_dir_all(&temp_dir);
     }
@@ -816,7 +813,8 @@ prompt = "Do the thing"
             count: 1,
         };
         let result = execute(args).await;
-        assert!(result.is_err(), "expected error for invalid manifest TOML");
+        // Expected error for invalid manifest TOML.
+        assert!(result.is_err());
         let _ = std::fs::remove_dir_all(&temp_dir);
     }
 
@@ -859,9 +857,10 @@ prompt = "Do the thing"
             count: 1,
         };
         let result = execute(args).await;
-        assert!(result.is_err(), "expected error for empty task file");
+        // Expected error for empty task file.
+        assert!(result.is_err());
         let err_msg = result.unwrap_err().to_string();
-        assert!(err_msg.contains("is empty"), "unexpected error: {err_msg}");
+        assert!(err_msg.contains("is empty"));
         let _ = std::fs::remove_dir_all(&temp_dir);
     }
 
@@ -894,6 +893,33 @@ prompt = "Do the thing"
         let nonexistent = std::path::Path::new("/tmp/leviath-test-nonexistent-cleanup-in-dir");
         // Must not panic — it should silently return.
         cleanup_runs_with_prefix_in_dir("anything", nonexistent);
+    }
+
+    #[test]
+    fn cleanup_runs_with_prefix_in_dir_skips_non_matching_entries() {
+        // Exercises the `if entry starts_with(prefix)` false branch: a
+        // directory entry that does NOT match the prefix must be left alone.
+        let dir = std::env::temp_dir().join(format!(
+            "leviath-test-cleanup-in-dir-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .subsec_nanos()
+        ));
+        let agent_name = "match-me";
+        let matching = dir.join(format!("{agent_name}-123"));
+        let non_matching = dir.join("unrelated-entry");
+        std::fs::create_dir_all(&matching).unwrap();
+        std::fs::create_dir_all(&non_matching).unwrap();
+
+        cleanup_runs_with_prefix_in_dir(agent_name, &dir);
+
+        // Matching entry should be removed, non-matching entry kept.
+        assert!(!matching.exists());
+        assert!(non_matching.exists());
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     // ─── open_log_file ─────────────────────────────────────────────────────────
@@ -960,10 +986,8 @@ prompt = "Do the thing"
         .await;
         let _ = std::fs::remove_dir_all(&temp_dir);
 
-        assert!(result.is_err(), "expected create_run failure to propagate");
-        assert!(
-            result.unwrap_err().to_string().contains("injected"),
-            "expected injected error message to propagate"
-        );
+        // Expected create_run failure to propagate, with the injected error message.
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("injected"));
     }
 }

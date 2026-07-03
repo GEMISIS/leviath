@@ -866,7 +866,8 @@ mod tests {
         let registry = leviath_runtime::ProviderRegistry::new();
         let engine = leviath_runtime::AgentEngine::with_providers(registry);
         let handle = cb.start_message_reader(&engine, "agent-1", true);
-        assert!(handle.is_none(), "Worker should not start a message reader");
+        // Worker should not start a message reader.
+        assert!(handle.is_none());
     }
 
     #[tokio::test]
@@ -967,7 +968,8 @@ mod tests {
             blueprint_stages_len: 1,
         };
         let result = cb.on_provider_missing("nonexistent", 0).await;
-        assert!(result, "on_provider_missing should return true (abort)");
+        // on_provider_missing should return true (abort).
+        assert!(result);
         assert_eq!(cb.meta.status, RunStatus::Error);
         assert!(cb.meta.error.is_some());
         assert!(cb.meta.error.as_ref().unwrap().contains("nonexistent"));
@@ -1420,7 +1422,8 @@ mod tests {
         assert!(result.is_err());
         let err_msg = result.unwrap_err().to_string();
         let has_manifest_err = err_msg.contains("Could not find") | err_msg.contains("manifest");
-        assert!(has_manifest_err, "Expected manifest error");
+        // Expected manifest error.
+        assert!(has_manifest_err);
 
         let _ = std::fs::remove_dir_all(crate::runstate::run_dir(run_id));
     }
@@ -1557,15 +1560,10 @@ model = "claude-sonnet-4-6"
         };
 
         let result = execute_worker(args).await;
-        assert!(
-            result.is_err(),
-            "expected read error for directory manifest"
-        );
+        // Expected read error for directory manifest.
+        assert!(result.is_err());
         let err = result.unwrap_err().to_string();
-        assert!(
-            err.contains("Failed to read manifest") | err.contains("directory"),
-            "unexpected error: {err}"
-        );
+        assert!(err.contains("Failed to read manifest") | err.contains("directory"));
 
         let _ = std::fs::remove_dir_all(&agent_dir);
         let _ = std::fs::remove_dir_all(crate::runstate::run_dir(&run_id));
@@ -1857,7 +1855,8 @@ model = "fail-model"
         })
         .await;
 
-        assert!(result.is_err(), "Expected error from failing provider");
+        // Expected error from failing provider.
+        assert!(result.is_err());
 
         let _ = std::fs::remove_dir_all(&dir);
         let _ = std::fs::remove_dir_all(&temp_dir);
@@ -1936,10 +1935,8 @@ model = "claude-sonnet-4-6"
         .await;
 
         // generate_title returns None → meta.title stays None
-        assert!(
-            meta.title.is_none(),
-            "title should be None when provider is not registered"
-        );
+        // Title should be None when provider is not registered.
+        assert!(meta.title.is_none());
 
         let _ = std::fs::remove_dir_all(&dir);
         let _ = std::fs::remove_dir_all(&temp_dir);
@@ -2020,10 +2017,8 @@ bash = "ask"
         .await;
 
         result.expect("expected clean completion from run_worker_inner");
-        assert!(
-            meta.title.is_some(),
-            "generate_title should have produced a title via the mock provider"
-        );
+        // generate_title should have produced a title via the mock provider.
+        assert!(meta.title.is_some());
 
         let _ = std::fs::remove_dir_all(&dir);
         let _ = std::fs::remove_dir_all(&temp_dir);
@@ -2196,7 +2191,8 @@ mode = "autonomous"
         };
 
         let result = cb.on_provider_missing("missing-provider", 0).await;
-        assert!(result, "Should abort run");
+        // Should abort run.
+        assert!(result);
         assert_eq!(cb.meta.status, RunStatus::Error);
 
         let _ = std::fs::remove_dir_all(crate::runstate::run_dir(run_id));
@@ -2999,7 +2995,8 @@ for line in sys.stdin:
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].0, "call-stub_mcp_tool");
         let has_ok_text = out[0].1.contains("ok result from stub");
-        assert!(has_ok_text, "expected success text");
+        // Expected success text.
+        assert!(has_ok_text);
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -3026,7 +3023,8 @@ for line in sys.stdin:
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].0, "call-stub_mcp_tool");
         let has_error_prefix = out[0].1.starts_with("[error]");
-        assert!(has_error_prefix, "expected [error] prefix");
+        // Expected [error] prefix.
+        assert!(has_error_prefix);
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -3070,7 +3068,8 @@ for line in sys.stdin:
 
         assert_eq!(out.len(), 1);
         let has_ok_text = out[0].1.contains("ok result from stub");
-        assert!(has_ok_text, "expected success text");
+        // Expected success text.
+        assert!(has_ok_text);
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -3111,7 +3110,8 @@ for line in sys.stdin:
 
         assert_eq!(out.len(), 1);
         let has_error_prefix = out[0].1.starts_with("[error]");
-        assert!(has_error_prefix, "expected [error] prefix");
+        // Expected [error] prefix.
+        assert!(has_error_prefix);
 
         let _ = std::fs::remove_dir_all(&dir);
     }

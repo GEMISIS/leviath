@@ -1301,7 +1301,7 @@ mode = "autonomous"
         std::env::set_current_dir(&original_cwd).unwrap();
         let _ = std::fs::remove_dir_all(&dir);
 
-        assert!(result.is_ok(), "expected Ok, got: {:?}", result);
+        assert!(result.is_ok());
         assert_eq!(result.unwrap().file_name().unwrap(), "agent.leviath");
     }
 
@@ -1339,28 +1339,21 @@ version = "1.0.0"
             .transitions
             .as_ref()
             .expect("plan stage must declare transitions");
-        assert!(
-            transitions.len() >= 2,
-            "plan stage must have >=2 outgoing edges so the user's plan_approval choice \
-             (Revise/Add detail/Abort) actually changes behavior instead of being silently \
-             ignored by a single-edge auto-transition"
-        );
+        // plan stage must have >=2 outgoing edges so the user's plan_approval
+        // choice (Revise/Add detail/Abort) actually changes behavior instead
+        // of being silently ignored by a single-edge auto-transition.
+        assert!(transitions.len() >= 2);
         assert!(transitions.contains_key("implement"));
 
         // A self-loop (or other non-"implement" edge) must exist so revising/
         // aborting doesn't fall through to implementation.
-        #[rustfmt::skip]
-        assert!(transitions.keys().any(|t| t != "implement"), "plan stage needs an edge other than 'implement' for non-approval choices");
+        assert!(transitions.keys().any(|t| t != "implement"));
 
         // The self-loop must be revisit-capped to avoid an infinite planning loop.
-        assert!(
-            transitions.contains_key("plan"),
-            "plan stage must have a self-loop ('plan' transition) so the user can revise"
-        );
-        assert!(
-            plan.max_revisits.is_some(),
-            "self-looping 'plan' stage must cap max_revisits"
-        );
+        // plan stage must have a self-loop ('plan' transition) so the user can revise.
+        assert!(transitions.contains_key("plan"));
+        // self-looping 'plan' stage must cap max_revisits.
+        assert!(plan.max_revisits.is_some());
     }
 
     #[test]
@@ -1371,13 +1364,15 @@ version = "1.0.0"
         let plan = bp.find_stage("plan").unwrap();
         let transitions = plan.transitions.as_ref().unwrap();
 
-        #[rustfmt::skip]
-        assert!(transitions.get("error_recovery").map(|e| e.condition == leviath_core::blueprint::TransitionCondition::Error).unwrap_or(false), "plan stage should route errors to error_recovery, like implement/review do");
+        // plan stage should route errors to error_recovery, like implement/review do.
+        assert!(transitions
+            .get("error_recovery")
+            .map(|e| e.condition == leviath_core::blueprint::TransitionCondition::Error)
+            .unwrap_or(false));
 
         // allow_complete lets the model respond DONE (e.g. when the user
         // chose "Abort") instead of being forced into 'implement' or 'plan'.
-        #[rustfmt::skip]
-        assert!(plan.allow_complete, "plan stage must allow_complete so 'Abort' can actually end the run");
+        assert!(plan.allow_complete);
     }
 
     #[test]
@@ -1405,17 +1400,15 @@ version = "1.0.0"
             .iter()
             .find(|o| o.starts_with("Add detail"))
             .expect("an Add detail option must exist");
-        #[rustfmt::skip]
-        assert!(approval.followups.contains_key(revise_key), "Revise option must have a followup prompt asking what to change");
-        #[rustfmt::skip]
-        assert!(approval.followups.contains_key(detail_key), "Add detail option must have a followup prompt asking which section");
+        // Revise/Add detail options must have a followup prompt asking for details.
+        assert!(approval.followups.contains_key(revise_key));
+        assert!(approval.followups.contains_key(detail_key));
 
         // Approve/Abort are terminal/decisive — they must NOT have followups
         // (no further elaboration needed).
         for opt in &approval.options {
             if opt.starts_with("Approve") || opt.starts_with("Abort") {
-                #[rustfmt::skip]
-                assert!(!approval.followups.contains_key(opt), "terminal option '{}' should not have a followup", opt);
+                assert!(!approval.followups.contains_key(opt));
             }
         }
     }
@@ -1427,15 +1420,19 @@ version = "1.0.0"
         let bp = parse_manifest(manifest_content).unwrap();
         let review = bp.find_stage("review").unwrap();
 
-        #[rustfmt::skip]
-        assert!(review.allow_complete, "review stage must allow_complete — an approving review has no real next stage and must not be forced back into 'implement'");
+        // review stage must allow_complete — an approving review has no real
+        // next stage and must not be forced back into 'implement'.
+        assert!(review.allow_complete);
 
         let transitions = review
             .transitions
             .as_ref()
             .expect("review stage must declare transitions");
-        #[rustfmt::skip]
-        assert!(transitions.get("error_recovery").map(|e| e.condition == leviath_core::blueprint::TransitionCondition::Error).unwrap_or(false), "review stage should route errors to error_recovery, like implement does");
+        // review stage should route errors to error_recovery, like implement does.
+        assert!(transitions
+            .get("error_recovery")
+            .map(|e| e.condition == leviath_core::blueprint::TransitionCondition::Error)
+            .unwrap_or(false));
     }
 
     #[test]
