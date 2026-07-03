@@ -958,8 +958,22 @@ sys.stdout.close()
 
     // Script that responds to initialize then closes its own stdin fd so the parent's
     // notification flush gets EPIPE. The process stays alive (sleeping) so the
-    // timing is deterministic: os.close(0) happens synchronously between Python's
-    // stdout.flush() return and our notification write in connect().
+    // process itself doesn't exit before our write attempt.
+    //
+    // Ordering note: os.close(0) happens BEFORE the response is written to
+    // stdout, not after. A previous version closed stdin after flushing the
+    // response, reasoning that "os.close(0) happens synchronously between
+    // Python's stdout.flush() return and our notification write" -- but
+    // that's not actually a happens-before relationship from our side: our
+    // client can finish reading the response and race ahead to the
+    // notification write while the child is still merely *about* to execute
+    // the next line, before the close(0) syscall has actually completed.
+    // That race was flaky (passed on some CI runners, failed on others,
+    // depending on process-scheduling speed). Closing stdin first guarantees
+    // the read end is fully closed before the response bytes can even be
+    // sent, which our client necessarily observes only after they're sent --
+    // so by the time we read the response and attempt the notification
+    // write, the close has unconditionally already happened.
     const STUB_INIT_THEN_CLOSE_STDIN: &str = r#"
 import sys, json, os
 for line in sys.stdin:
@@ -969,11 +983,11 @@ for line in sys.stdin:
     req = json.loads(line)
     if req.get("method") == "initialize":
         id_ = req.get("id")
+        os.close(0)
         result = {"capabilities": {}, "protocolVersion": "2024-11-05"}
         msg = json.dumps({"jsonrpc": "2.0", "id": id_, "result": result})
         sys.stdout.write(msg + "\n")
         sys.stdout.flush()
-        os.close(0)
         import time; time.sleep(10)
         break
 "#;
