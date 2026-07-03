@@ -762,27 +762,17 @@ mod tests {
             "main",
             false, // not required — EOF reader returns empty text immediately
         );
+        // ask() is a thin async wrapper over a synchronous blocking call.
+        // Drive it on a blocking thread using futures::executor::block_on so
+        // we don't need a manual NoopWaker + Poll match, which would leave the
+        // `Poll::Pending` arm and `Wake::wake` body permanently uncovered.
         let result = tokio::time::timeout(
             std::time::Duration::from_millis(500),
             tokio::task::spawn_blocking(move || {
-                // ask() is async but only wraps a synchronous blocking call.
-                // Drive the future to completion manually on a blocking thread.
-                use std::future::Future;
-                use std::task::{Context, Poll};
-                struct NoopWaker;
-                impl std::task::Wake for NoopWaker {
-                    fn wake(self: Arc<Self>) {}
-                }
-                let waker = Arc::new(NoopWaker).into();
-                let mut cx = Context::from_waker(&waker);
                 let backend = ForegroundInteractionBackend;
-                let fut = <ForegroundInteractionBackend as InteractionBackend>::ask(&backend, req);
-                let mut pinned = Box::pin(fut);
-                use std::pin::Pin;
-                match Pin::as_mut(&mut pinned).poll(&mut cx) {
-                    Poll::Ready(r) => r,
-                    Poll::Pending => panic!("ask() was unexpectedly pending"),
-                }
+                futures::executor::block_on(
+                    <ForegroundInteractionBackend as InteractionBackend>::ask(&backend, req),
+                )
             }),
         )
         .await;
@@ -1584,6 +1574,14 @@ allowed = ["read_file"]
             max_depth: None,
             count: 1,
         };
+
+        // Exercise the trivial trait methods so their bodies are covered.
+        let probe = ErrorProvider;
+        assert_eq!(probe.count_tokens("hello", "model"), 0);
+        assert_eq!(probe.max_context_tokens("model"), 100_000);
+        assert_eq!(probe.name(), "error-mock");
+        let _ = probe.capabilities("model");
+        let _ = probe.list_models().await;
 
         let result = run_foreground_with_registry(args, |_config| {
             let mut registry = leviath_runtime::ProviderRegistry::new();

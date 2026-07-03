@@ -213,6 +213,12 @@ mod console_io_tests {
     }
 
     #[test]
+    fn console_io_default_is_not_background() {
+        let io = ConsoleIO::default();
+        assert!(!io.is_background());
+    }
+
+    #[test]
     fn console_io_write_context_snapshot_is_noop() {
         let mut io = ConsoleIO::new();
         let snapshot = RegionSnapshot {
@@ -242,6 +248,21 @@ mod console_io_tests {
     fn get_user_input_from_reader_read_error_returns_none() {
         let mut reader = ErrorReader;
         assert_eq!(get_user_input_from_reader(&mut reader), None);
+    }
+
+    #[test]
+    fn error_reader_read_impl_returns_error() {
+        use std::io::Read;
+        let mut reader = ErrorReader;
+        let mut buf = [0u8; 4];
+        assert!(reader.read(&mut buf).is_err());
+    }
+
+    #[test]
+    fn error_reader_consume_is_noop() {
+        use std::io::BufRead;
+        let mut reader = ErrorReader;
+        reader.consume(4);
     }
 
     #[tokio::test]

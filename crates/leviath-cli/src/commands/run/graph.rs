@@ -465,31 +465,32 @@ pub async fn apply_compact_transform(
 
     match provider.infer(request).await {
         Ok(response) => {
-            if let Some(mut window) = engine.world_mut().get_mut::<ContextWindow>(entity) {
-                // Clear compactable regions
-                for region in &mut window.regions {
-                    if matches!(
-                        region.kind,
-                        RegionKind::SlidingWindow { .. }
-                            | RegionKind::Compacting { .. }
-                            | RegionKind::Temporary
-                            | RegionKind::Clearable
-                    ) {
-                        region.clear();
-                    }
+            // ContextWindow was confirmed present above; it cannot be removed while
+            // infer() holds only a provider reference, so this unwrap is safe.
+            let mut window = engine.world_mut().get_mut::<ContextWindow>(entity).unwrap();
+            // Clear compactable regions
+            for region in &mut window.regions {
+                if matches!(
+                    region.kind,
+                    RegionKind::SlidingWindow { .. }
+                        | RegionKind::Compacting { .. }
+                        | RegionKind::Temporary
+                        | RegionKind::Clearable
+                ) {
+                    region.clear();
                 }
-                // Add the summary to conversation
-                let tokens = response.content.len() / 4 + 1;
-                let _ = window.add_to_region(
-                    "conversation",
-                    format!(
-                        "[Context summary from previous stage]: {}",
-                        response.content
-                    ),
-                    tokens,
-                );
-                window.current_tokens = window.calculate_tokens();
             }
+            // Add the summary to conversation
+            let tokens = response.content.len() / 4 + 1;
+            let _ = window.add_to_region(
+                "conversation",
+                format!(
+                    "[Context summary from previous stage]: {}",
+                    response.content
+                ),
+                tokens,
+            );
+            window.current_tokens = window.calculate_tokens();
         }
         Err(e) => {
             tracing::warn!(error = %e, "Failed to compact context during edge transform");
@@ -2472,5 +2473,169 @@ mod tests {
             "Expected b or c, got {}",
             edge.target
         );
+    }
+
+    // ─── line-89: Error result but no Error edge → if-let None branch ────────
+
+    #[tokio::test]
+    async fn resolve_transition_error_result_no_error_edge_falls_through_to_always() {
+        // stage_result == Error but the only available edge is Always, not Error.
+        // This causes the `if let Some(...)` at the Error-check to NOT match,
+        // exercising the None-branch closing `}` at line 89, then falling
+        // through to Step 3 which picks the Always edge.
+        let mut stage_a = make_stage("a");
+        let stage_b = make_stage("b");
+        let mut transitions = HashMap::new();
+        transitions.insert(
+            "b".to_string(),
+            TransitionEdge {
+                target: "b".to_string(),
+                condition: TransitionCondition::Always,
+                hint: None,
+                transform: EdgeTransform::Direct,
+            },
+        );
+        stage_a.transitions = Some(transitions);
+
+        let bp = make_blueprint(vec![stage_a, stage_b]);
+        let (mut engine, entity) = make_engine_and_entity(&bp);
+        let visit_counts = HashMap::new();
+
+        // StageResult::Error but no Error-condition edge → falls through to Always
+        let result = resolve_transition(
+            &bp.stages[0],
+            0,
+            &bp,
+            &visit_counts,
+            &StageResult::Error,
+            &mut engine,
+            entity,
+            "anthropic",
+            "claude-sonnet-4-6",
+        )
+        .await;
+
+        let (edge, _idx) = result.unwrap();
+        assert_eq!(edge.target, "b");
+    }
+
+    // ─── line-104: MaxIterations result but no MaxIterations edge → if-let None
+
+    #[tokio::test]
+    async fn resolve_transition_max_iterations_result_no_max_iter_edge_falls_through() {
+        // stage_result == MaxIterations but the only available edge is Always.
+        // The `if let Some(...)` at the MaxIterations-check does NOT match,
+        // exercising the None-branch closing `}` at line 104, then falling
+        // through to Step 3 which picks the Always edge.
+        let mut stage_a = make_stage("a");
+        let stage_b = make_stage("b");
+        let mut transitions = HashMap::new();
+        transitions.insert(
+            "b".to_string(),
+            TransitionEdge {
+                target: "b".to_string(),
+                condition: TransitionCondition::Always,
+                hint: None,
+                transform: EdgeTransform::Direct,
+            },
+        );
+        stage_a.transitions = Some(transitions);
+
+        let bp = make_blueprint(vec![stage_a, stage_b]);
+        let (mut engine, entity) = make_engine_and_entity(&bp);
+        let visit_counts = HashMap::new();
+
+        let result = resolve_transition(
+            &bp.stages[0],
+            0,
+            &bp,
+            &visit_counts,
+            &StageResult::MaxIterations,
+            &mut engine,
+            entity,
+            "anthropic",
+            "claude-sonnet-4-6",
+        )
+        .await;
+
+        let (edge, _idx) = result.unwrap();
+        assert_eq!(edge.target, "b");
+    }
+
+    // ─── line-325: Clear transform on entity without ContextWindow ────────────
+
+    fn make_engine_and_entity_no_window(
+        blueprint: &Blueprint,
+    ) -> (AgentEngine, bevy_ecs::prelude::Entity) {
+        let registry = ProviderRegistry::new();
+        let mut engine = AgentEngine::with_providers(registry);
+        let mut pool = AgentPool::new(blueprint.clone());
+        let agent_id = pool.spawn_agent(engine.world_mut());
+        let entity = pool.get_agent(&agent_id).unwrap();
+        // Deliberately skip initialize_context_window so the entity has no ContextWindow.
+        (engine, entity)
+    }
+
+    #[tokio::test]
+    async fn apply_edge_transform_clear_no_context_window_is_noop() {
+        // Entity has no ContextWindow → `get_mut::<ContextWindow>` returns None,
+        // exercising the None-branch closing `}` at line 325. Should not panic.
+        let bp = make_blueprint(vec![make_stage("a"), make_stage("b")]);
+        let (mut engine, entity) = make_engine_and_entity_no_window(&bp);
+
+        let edge = TransitionEdge {
+            target: "b".to_string(),
+            condition: TransitionCondition::Always,
+            hint: None,
+            transform: EdgeTransform::Clear,
+        };
+        let visit_counts = HashMap::new();
+
+        apply_edge_transform(
+            &edge,
+            &visit_counts,
+            &mut engine,
+            entity,
+            "anthropic",
+            "test",
+            None,
+        )
+        .await;
+        // No panic = success; nothing to assert since there was no window.
+    }
+
+    // ─── line-360: Custom transform on entity without ContextWindow ───────────
+
+    #[tokio::test]
+    async fn apply_edge_transform_custom_no_context_window_is_noop() {
+        // Entity has no ContextWindow → `get_mut::<ContextWindow>` returns None,
+        // exercising the None-branch closing `}` at line 360. Should not panic.
+        let bp = make_blueprint(vec![make_stage("a"), make_stage("b")]);
+        let (mut engine, entity) = make_engine_and_entity_no_window(&bp);
+
+        let edge = TransitionEdge {
+            target: "b".to_string(),
+            condition: TransitionCondition::Always,
+            hint: None,
+            transform: EdgeTransform::Custom {
+                carry: vec![],
+                compact: vec![],
+                clear: vec!["conversation".to_string()],
+                compact_prompt: None,
+            },
+        };
+        let visit_counts = HashMap::new();
+
+        apply_edge_transform(
+            &edge,
+            &visit_counts,
+            &mut engine,
+            entity,
+            "anthropic",
+            "test",
+            None,
+        )
+        .await;
+        // No panic = success.
     }
 }

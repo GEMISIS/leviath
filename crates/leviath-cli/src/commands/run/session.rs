@@ -55,21 +55,12 @@ fn resolve_task_with(
             }
 
             // Build a commented template file for the editor
-            let mut template = format!("# Task for agent: {}\n", agent_name);
-            if let Some(desc) = description {
-                if !desc.is_empty() {
-                    template.push_str(&format!("# {}\n", desc));
-                }
-            }
-            template.push_str(
-                "#\n# Describe your task below. Lines starting with '#' are ignored.\n\n",
-            );
+            let template = build_task_template(agent_name, description);
 
             // Write to a temp file
             let tmp_path =
                 std::env::temp_dir().join(format!("lev-task-{}.txt", std::process::id()));
-            std::fs::write(&tmp_path, &template)
-                .map_err(|e| anyhow::anyhow!("Failed to create task temp file: {}", e))?;
+            write_task_template(&tmp_path, &template)?;
 
             // Launch the editor (exits only when the user closes it)
             let result = launch_editor(&tmp_path);
@@ -92,6 +83,22 @@ fn resolve_task_with(
             Ok(task)
         }
     }
+}
+
+fn build_task_template(agent_name: &str, description: Option<&str>) -> String {
+    let mut template = format!("# Task for agent: {}\n", agent_name);
+    if let Some(desc) = description {
+        if !desc.is_empty() {
+            template.push_str(&format!("# {}\n", desc));
+        }
+    }
+    template.push_str("#\n# Describe your task below. Lines starting with '#' are ignored.\n\n");
+    template
+}
+
+fn write_task_template(path: &std::path::Path, content: &str) -> anyhow::Result<()> {
+    std::fs::write(path, content)
+        .map_err(|e| anyhow::anyhow!("Failed to create task temp file: {}", e))
 }
 
 /// Launch the user's preferred editor on `path` and wait for it to exit.
@@ -124,14 +131,6 @@ fn launch_editor(path: &std::path::Path) -> anyhow::Result<()> {
     {
         candidates.push("notepad".to_string());
     }
-    // Final fallback -- unreachable under the `#[cfg(unix)]`/`#[cfg(windows)]`
-    // targets this crate actually ships for, since both of those blocks
-    // unconditionally push at least one candidate already. Only relevant on
-    // a hypothetical third target platform with neither cfg set.
-    if candidates.is_empty() {
-        candidates.push("nano".to_string());
-    }
-
     let path_str = path.to_string_lossy();
 
     for editor in &candidates {
@@ -842,27 +841,22 @@ mod tests {
         // test in the crate (e.g. `dashboard::helpers`'s clipboard-fallback
         // test) that mutates it, since `ENV_LOCK` here only covers
         // VISUAL/EDITOR, not PATH.
-        let _path_lock = crate::config::PATH_ENV_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let _path_lock = crate::config::PATH_ENV_LOCK.lock().unwrap();
         let _guard = EnvGuard;
 
         /// Restores the real `PATH` on drop -- separate from `EnvGuard`
         /// (which only handles `VISUAL`/`EDITOR`) since breaking `PATH` for
         /// the rest of the test process would be far more disruptive than
         /// leaving those two unset.
-        struct PathGuard(Option<std::ffi::OsString>);
+        struct PathGuard(std::ffi::OsString);
         impl Drop for PathGuard {
             fn drop(&mut self) {
                 unsafe {
-                    match self.0.take() {
-                        Some(p) => std::env::set_var("PATH", p),
-                        None => std::env::remove_var("PATH"),
-                    }
+                    std::env::set_var("PATH", &self.0);
                 }
             }
         }
-        let _path_guard = PathGuard(std::env::var_os("PATH"));
+        let _path_guard = PathGuard(std::env::var_os("PATH").unwrap_or_default());
         unsafe {
             // No VISUAL/EDITOR (cleared by EnvGuard already), and PATH
             // points nowhere -- so even the unix platform-default
@@ -942,22 +936,17 @@ mod tests {
     fn resolve_task_with_editor_path_propagates_launch_editor_error() {
         let _lock = ENV_LOCK.lock().unwrap();
         // See the comment in `launch_editor_no_editor_found_when_path_has_no_candidates`.
-        let _path_lock = crate::config::PATH_ENV_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let _path_lock = crate::config::PATH_ENV_LOCK.lock().unwrap();
         let _guard = EnvGuard;
-        struct PathGuard(Option<std::ffi::OsString>);
+        struct PathGuard(std::ffi::OsString);
         impl Drop for PathGuard {
             fn drop(&mut self) {
                 unsafe {
-                    match self.0.take() {
-                        Some(p) => std::env::set_var("PATH", p),
-                        None => std::env::remove_var("PATH"),
-                    }
+                    std::env::set_var("PATH", &self.0);
                 }
             }
         }
-        let _path_guard = PathGuard(std::env::var_os("PATH"));
+        let _path_guard = PathGuard(std::env::var_os("PATH").unwrap_or_default());
         unsafe {
             std::env::set_var("PATH", "/lev-definitely-empty-path-dir");
         }
@@ -965,5 +954,75 @@ mod tests {
         let result = resolve_task_with(&None, "test-agent", None, || true);
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("No editor found"));
+    }
+
+    // ─── build_task_template: description branch ──────────────────────────
+
+    #[test]
+    fn build_task_template_with_empty_description_skips_desc_line() {
+        let t = build_task_template("agent", Some(""));
+        assert!(!t.contains("# \n"), "empty desc should not add a line");
+        assert!(t.contains("# Task for agent: agent\n"));
+    }
+
+    #[test]
+    fn build_task_template_with_non_empty_description_adds_desc_line() {
+        let t = build_task_template("my-agent", Some("Build a web server"));
+        assert!(t.contains("# Task for agent: my-agent\n"));
+        assert!(t.contains("# Build a web server\n"));
+    }
+
+    #[test]
+    fn build_task_template_with_no_description() {
+        let t = build_task_template("my-agent", None);
+        assert!(t.contains("# Task for agent: my-agent\n"));
+        assert!(t.contains("Describe your task below"));
+    }
+
+    // ─── write_task_template: error path ─────────────────────────────────
+
+    #[cfg(unix)]
+    #[test]
+    fn write_task_template_error_on_bad_path() {
+        let bad_path = std::path::Path::new("/lev-nonexistent-dir/task.txt");
+        let result = write_task_template(bad_path, "content");
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Failed to create task temp file"));
+    }
+
+    // ─── resolve_task: unreadable file errors ────────────────────────────
+
+    #[cfg(unix)]
+    #[test]
+    fn resolve_task_unreadable_file_returns_error() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join("lev-test-resolve-unreadable");
+        let _ = std::fs::create_dir_all(&dir);
+        let file = dir.join("secret.txt");
+        std::fs::write(&file, "secret content").unwrap();
+        let mut perms = std::fs::metadata(&file).unwrap().permissions();
+        perms.set_mode(0o000);
+        std::fs::set_permissions(&file, perms).unwrap();
+
+        let result = resolve_task_with(
+            &Some(file.to_str().unwrap().to_string()),
+            "test-agent",
+            None,
+            || false,
+        );
+        // Restore perms before asserting (so cleanup works)
+        let mut perms2 = std::fs::metadata(&file).unwrap().permissions();
+        perms2.set_mode(0o644);
+        std::fs::set_permissions(&file, perms2).ok();
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Failed to read task file"));
     }
 }

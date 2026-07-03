@@ -170,7 +170,7 @@ where
         let stage = ctx
             .blueprint
             .find_stage(&current_stage_name_val)
-            .ok_or_else(|| anyhow::anyhow!("Stage '{}' not found", current_stage_name_val))?;
+            .expect("resolve_entry_stage_name and resolve_transition both guarantee a valid name");
 
         let stage_idx = current_stage_idx_val;
         let provider_name = &stage.model.provider;
@@ -219,10 +219,12 @@ where
             cb.on_claude_code_warning(stage_idx).await;
         }
 
-        // Update accepts_messages
-        if let Some(mut state) = ctx.engine.world_mut().get_mut::<AgentState>(ctx.entity) {
-            state.accepts_messages = stage.accepts_messages;
-        }
+        // Update accepts_messages (AgentState is always present after spawn_agent)
+        ctx.engine
+            .world_mut()
+            .get_mut::<AgentState>(ctx.entity)
+            .expect("AgentState always present after spawn_agent")
+            .accepts_messages = stage.accepts_messages;
 
         if stage.accepts_messages {
             println!("\u{1f4ac} Type a message and press Enter to send input to the agent while it runs.");
@@ -233,16 +235,19 @@ where
             swap_context_layout(ctx.engine, ctx.entity, stage_layout);
         }
 
-        // System prompt injection
+        // System prompt injection (ContextWindow is always present after spawn_agent)
         if let Some(sp) = stage.config.get("system_prompt").and_then(|v| v.as_str()) {
-            if let Some(mut window) = ctx.engine.world_mut().get_mut::<ContextWindow>(ctx.entity) {
-                let tokens = sp.len() / 4 + 1;
-                let _ = window.add_to_region(
+            let tokens = sp.len() / 4 + 1;
+            let _ = ctx
+                .engine
+                .world_mut()
+                .get_mut::<ContextWindow>(ctx.entity)
+                .expect("ContextWindow always present after spawn_agent")
+                .add_to_region(
                     "conversation",
                     format!("[Stage instructions: {}]", sp),
                     tokens,
                 );
-            }
         }
 
         // Tool filtering
@@ -422,12 +427,13 @@ where
                     "[Stage complete: {}, transitioning to: {}]",
                     stage_name_owned, next_name
                 );
-                if let Some(mut window) =
-                    ctx.engine.world_mut().get_mut::<ContextWindow>(ctx.entity)
-                {
-                    let tokens = marker.len() / 4 + 1;
-                    let _ = window.add_to_region("conversation", marker, tokens);
-                }
+                let tokens = marker.len() / 4 + 1;
+                let _ = ctx
+                    .engine
+                    .world_mut()
+                    .get_mut::<ContextWindow>(ctx.entity)
+                    .expect("ContextWindow always present after spawn_agent")
+                    .add_to_region("conversation", marker, tokens);
 
                 // Apply edge transform
                 apply_edge_transform(
@@ -482,6 +488,8 @@ mod tests {
         graph_error_result: bool,
         /// If true, run_autonomous returns Err instead of Ok.
         run_autonomous_should_error: bool,
+        /// When Some, get_run_context returns a borrow of this pair instead of None.
+        run_context: Option<(String, RunMeta)>,
     }
 
     impl MockCallbacks {
@@ -498,6 +506,7 @@ mod tests {
                 abort_on_provider_missing: false,
                 graph_error_result: true,
                 run_autonomous_should_error: false,
+                run_context: None,
             }
         }
     }
@@ -534,14 +543,16 @@ mod tests {
             // spawn a reader task (and therefore return `Some`) when the
             // stage actually accepts messages.
             if accepts {
-                Some(tokio::spawn(async {}))
+                Some(tokio::spawn(std::future::ready(())))
             } else {
                 None
             }
         }
 
         fn get_run_context(&mut self) -> Option<(&str, &mut RunMeta)> {
-            None
+            self.run_context
+                .as_mut()
+                .map(|(id, meta)| (id.as_str(), meta))
         }
 
         async fn run_autonomous<F, Fut>(
@@ -1574,84 +1585,8 @@ mod tests {
         // InteractivePoints with a non-empty points slice and a run_context whose
         // run_dir doesn't exist → write_request fails inside request_interaction_async
         // → Err propagates via the ? at the InteractivePoints match arm.
-        //
-        // Uses an inline mock with get_run_context returning Some so the IPC path
-        // is taken (MockCallbacks always returns None for get_run_context).
         use crate::runstate::RunMeta;
         use leviath_core::blueprint::InteractionPoint;
-
-        struct IpcMock {
-            run_id: String,
-            meta: RunMeta,
-        }
-
-        #[async_trait]
-        impl StageCallbacks for IpcMock {
-            async fn on_provider_missing(&mut self, _p: &str, _i: usize) -> bool {
-                false
-            }
-            async fn on_stage_enter(&mut self, _n: &str, _i: usize, _pv: &str, _m: &str, _v: &str) {
-            }
-            async fn on_claude_code_warning(&mut self, _i: usize) {}
-            fn start_message_reader(
-                &mut self,
-                _e: &AgentEngine,
-                _a: &str,
-                _b: bool,
-            ) -> Option<tokio::task::JoinHandle<()>> {
-                None
-            }
-            fn get_run_context(&mut self) -> Option<(&str, &mut RunMeta)> {
-                Some((&self.run_id, &mut self.meta))
-            }
-            async fn run_autonomous<F, Fut>(
-                &mut self,
-                _e: &mut AgentEngine,
-                _en: bevy_ecs::prelude::Entity,
-                _p: &str,
-                _m: &str,
-                _mx: usize,
-                _t: Vec<leviath_providers::Tool>,
-                _r: Option<&ToolResultRoutingConfig>,
-                _c: Option<&leviath_core::lifecycle::CompactionConfig>,
-                _io: &mut dyn RunIO,
-                _ex: &mut F,
-            ) -> anyhow::Result<(StageResult, Option<InferenceResponse>)>
-            where
-                F: FnMut(Vec<ToolCall>) -> Fut + Send,
-                Fut: std::future::Future<Output = Vec<(String, String)>> + Send,
-            {
-                Ok((StageResult::Success, None))
-            }
-            async fn on_stage_result(
-                &mut self,
-                _n: &str,
-                _i: usize,
-                _r: &StageResult,
-                _resp: Option<&InferenceResponse>,
-                _e: &mut AgentEngine,
-                _en: bevy_ecs::prelude::Entity,
-            ) {
-            }
-            async fn on_stage_error(
-                &mut self,
-                _n: &str,
-                _i: usize,
-                _e: &anyhow::Error,
-                _g: bool,
-            ) -> Option<StageResult> {
-                None
-            }
-            async fn on_transition(&mut self, _f: &str, _t: &str, _i: usize) {}
-            async fn on_complete(&mut self, _i: usize) {}
-            async fn on_post_stage(
-                &mut self,
-                _e: &AgentEngine,
-                _en: bevy_ecs::prelude::Entity,
-                _n: &str,
-            ) {
-            }
-        }
 
         let mut stage = make_stage("main");
         stage.mode = StageMode::InteractivePoints {
@@ -1666,17 +1601,14 @@ mod tests {
         };
         stage.accepts_messages = false;
         let bp = make_blueprint(vec![stage]);
-        // No provider → inference fails silently (if-let skips record_stage_log),
-        // so the run directory is NOT created before write_request is called.
-        // write_request then fails with ENOENT → Err propagates from InteractivePoints.
         let (mut engine, mut pool, entity) = make_engine_and_entity(&bp);
         let tool_registry = make_tool_registry().await;
-        // Ensure the test directory doesn't exist from a prior run
         let _ = std::fs::remove_dir_all(crate::runstate::run_dir("executor-test-no-dir-ipc"));
 
-        let mut cb = IpcMock {
-            run_id: "executor-test-no-dir-ipc".to_string(),
-            meta: RunMeta::new(
+        let mut cb = MockCallbacks::new();
+        cb.run_context = Some((
+            "executor-test-no-dir-ipc".to_string(),
+            RunMeta::new(
                 "executor-test-no-dir-ipc".to_string(),
                 "test-agent".to_string(),
                 "/path".to_string(),
@@ -1685,7 +1617,7 @@ mod tests {
                 "/tmp".to_string(),
                 1,
             ),
-        };
+        ));
 
         let mut ctx = StageContext {
             blueprint: &bp,

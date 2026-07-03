@@ -278,10 +278,6 @@ pub async fn execute_worker(args: WorkerArgs) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
-
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
-
     #[test]
     fn run_args_defaults() {
         let args = RunArgs {
@@ -625,6 +621,22 @@ prompt = "Do the thing"
         }
     }
 
+    // These two tests drive `execute_background` (not the public `execute`)
+    // with `/usr/bin/true` standing in for the worker executable, rather than
+    // letting it resolve `std::env::current_exe()` and spawn a detached copy
+    // of *this test binary*. Spawning the real test binary here was the
+    // source of a runaway-process/OOM risk: under `cargo llvm-cov` each
+    // detached child is itself coverage-instrumented and writes its own
+    // `.profraw` file (hundreds accumulated in the repo from a single test
+    // run), and — since the child is a copy of the whole suite re-invoked
+    // with unrecognized args — any future harness change that makes it run
+    // instead of erroring out fast would re-trigger this same fork-bomb
+    // shape. `/usr/bin/true` ignores all arguments and exits immediately, so
+    // this still exercises run-state creation and the successful `spawn()`
+    // path without any of that risk. Matches the existing Unix-only
+    // `/usr/bin/true` convention used throughout `session.rs`'s
+    // `launch_editor` tests.
+    #[cfg(unix)]
     #[tokio::test]
     async fn execute_background_happy_path_spawns_single_worker() {
         let agent_name = "test-execute-bg-happy-single";
@@ -646,7 +658,8 @@ prompt = "Do the thing"
             count: 1,
         };
 
-        execute(args)
+        let harmless_exe = std::path::Path::new("/usr/bin/true");
+        super::execute_background(args, harmless_exe)
             .await
             .expect("expected background execute to succeed");
 
@@ -657,6 +670,7 @@ prompt = "Do the thing"
         let _ = std::fs::remove_dir_all(&temp_dir);
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn execute_background_happy_path_spawns_multiple_workers() {
         let agent_name = "test-execute-bg-happy-multi";
@@ -678,7 +692,8 @@ prompt = "Do the thing"
             count: 3,
         };
 
-        execute(args)
+        let harmless_exe = std::path::Path::new("/usr/bin/true");
+        super::execute_background(args, harmless_exe)
             .await
             .expect("expected multi-count background execute to succeed");
 
