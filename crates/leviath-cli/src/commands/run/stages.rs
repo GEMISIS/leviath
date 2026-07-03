@@ -860,6 +860,9 @@ mod tests {
 
     #[tokio::test]
     async fn interactive_stage_with_run_context_and_tools_records_meta_and_output() {
+        let _guard = crate::runstate::isolate_runs_dir_for_test(
+            "interactive_stage_with_run_context_and_tools_records_meta_and_output",
+        );
         let bp = make_blueprint(vec![make_stage("main")]);
         let (mut engine, _pool, entity) = make_engine_and_entity(&bp, "Agent reply with tools");
         let mut io = MockIO::new();
@@ -920,6 +923,9 @@ mod tests {
 
     #[tokio::test]
     async fn interactive_stage_with_run_context_no_tools_records_meta() {
+        let _guard = crate::runstate::isolate_runs_dir_for_test(
+            "interactive_stage_with_run_context_no_tools_records_meta",
+        );
         let bp = make_blueprint(vec![make_stage("main")]);
         let (mut engine, _pool, entity) = make_engine_and_entity(&bp, "Streamed agent reply");
         let mut io = MockIO::new();
@@ -1386,6 +1392,9 @@ mod tests {
 
     #[tokio::test]
     async fn interactive_points_single_free_text_point_stdin() {
+        let _guard = crate::runstate::isolate_runs_dir_for_test(
+            "interactive_points_single_free_text_point_stdin",
+        );
         use crate::interaction::InteractionResponse;
 
         let bp = make_blueprint(vec![make_stage("main")]);
@@ -1441,6 +1450,8 @@ mod tests {
 
     #[tokio::test]
     async fn interactive_points_multiple_choice_stdin() {
+        let _guard =
+            crate::runstate::isolate_runs_dir_for_test("interactive_points_multiple_choice_stdin");
         use crate::interaction::InteractionResponse;
 
         let bp = make_blueprint(vec![make_stage("main")]);
@@ -1503,6 +1514,9 @@ mod tests {
     // ever reaches the model.
     #[tokio::test]
     async fn interactive_points_choice_with_followup_loops_back_for_revision() {
+        let _guard = crate::runstate::isolate_runs_dir_for_test(
+            "interactive_points_choice_with_followup_loops_back_for_revision",
+        );
         use crate::interaction::InteractionResponse;
 
         let bp = make_blueprint(vec![make_stage("main")]);
@@ -1845,6 +1859,7 @@ mod tests {
 
     #[tokio::test]
     async fn interactive_points_confirm_stdin() {
+        let _guard = crate::runstate::isolate_runs_dir_for_test("interactive_points_confirm_stdin");
         use crate::interaction::InteractionResponse;
 
         let bp = make_blueprint(vec![make_stage("main")]);
@@ -1898,6 +1913,9 @@ mod tests {
 
     #[tokio::test]
     async fn interactive_points_multiple_points_all_visited() {
+        let _guard = crate::runstate::isolate_runs_dir_for_test(
+            "interactive_points_multiple_points_all_visited",
+        );
         use crate::interaction::InteractionResponse;
 
         let bp = make_blueprint(vec![make_stage("main")]);
@@ -1961,6 +1979,9 @@ mod tests {
 
     #[tokio::test]
     async fn interactive_points_with_zero_remaining_iterations() {
+        let _guard = crate::runstate::isolate_runs_dir_for_test(
+            "interactive_points_with_zero_remaining_iterations",
+        );
         use crate::interaction::InteractionResponse;
 
         // max_iterations = 1, points = 2 → iterations_per_segment rounds down to 0
@@ -2024,6 +2045,8 @@ mod tests {
 
     #[tokio::test]
     async fn interactive_points_empty_user_input_is_ok() {
+        let _guard =
+            crate::runstate::isolate_runs_dir_for_test("interactive_points_empty_user_input_is_ok");
         use crate::interaction::InteractionResponse;
 
         // Empty answer → nothing injected into context window (branch coverage)
@@ -2399,6 +2422,9 @@ mod tests {
 
     #[tokio::test]
     async fn interactive_stage_tools_request_interaction_async_error() {
+        let _guard = crate::runstate::isolate_runs_dir_for_test(
+            "interactive_stage_tools_request_interaction_async_error",
+        );
         // Covers line 168:80: `?` on `request_interaction_async` when the run
         // directory is read-only → write_request fails → Err propagates.
         use std::os::unix::fs::PermissionsExt;
@@ -2461,6 +2487,9 @@ mod tests {
 
     #[tokio::test]
     async fn interactive_stage_no_tools_request_interaction_async_error() {
+        let _guard = crate::runstate::isolate_runs_dir_for_test(
+            "interactive_stage_no_tools_request_interaction_async_error",
+        );
         // Same as above but no-tools path (streaming). Covers the same `?` at
         // line 168 via the else branch (no tools).
         use std::os::unix::fs::PermissionsExt;
@@ -2604,6 +2633,9 @@ mod tests {
 
     #[tokio::test]
     async fn interactive_points_out_of_range_choice_falls_back_to_text_background() {
+        let _guard = crate::runstate::isolate_runs_dir_for_test(
+            "interactive_points_out_of_range_choice_falls_back_to_text_background",
+        );
         // Covers line 421:96: background (IPC) path, choice_index out of range →
         // unwrap_or_else closure called.
         use crate::interaction::InteractionResponse;
@@ -2841,6 +2873,9 @@ mod tests {
 
     #[tokio::test]
     async fn spawn_interaction_responder_exhausts_and_exits_loop() {
+        let _guard = crate::runstate::isolate_runs_dir_for_test(
+            "spawn_interaction_responder_exhausts_and_exits_loop",
+        );
         // Covers lines 1382:25, 1384:17, 1386:9: the `else { break; }` branch in
         // spawn_interaction_responder when resp_iter is exhausted.
         //
@@ -2946,6 +2981,9 @@ mod tests {
 
     #[tokio::test]
     async fn interactive_points_followup_request_interaction_async_error() {
+        let _guard = crate::runstate::isolate_runs_dir_for_test(
+            "interactive_points_followup_request_interaction_async_error",
+        );
         // Covers line 474:97: `?` on `request_interaction_async` for the followup
         // request in the background path.
         //
@@ -3055,6 +3093,9 @@ mod tests {
 
     #[tokio::test]
     async fn interactive_points_empty_content_with_run_context() {
+        let _guard = crate::runstate::isolate_runs_dir_for_test(
+            "interactive_points_empty_content_with_run_context",
+        );
         // Covers lines 374:21 and 513:13: `}` of `if !resp.content.is_empty()` when
         // the provider returns empty content ("") AND run_context is Some.
         // The if-block is skipped (false branch), producing the uncovered segment.
@@ -3121,6 +3162,9 @@ mod tests {
 
     #[tokio::test]
     async fn interactive_points_first_request_interaction_async_error() {
+        let _guard = crate::runstate::isolate_runs_dir_for_test(
+            "interactive_points_first_request_interaction_async_error",
+        );
         // Covers line 421:96: `?` on `request_interaction_async` for the initial
         // (non-followup) interaction point when `write_request` fails because the
         // run directory is read-only before the stage even starts.

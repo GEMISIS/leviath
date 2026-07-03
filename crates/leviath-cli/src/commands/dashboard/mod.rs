@@ -260,21 +260,6 @@ async fn init_dashboard(config: &Config) -> (Dashboard, Arc<Mutex<AgentEngine>>)
     (dashboard, engine)
 }
 
-/// Run the dashboard loop with an already-initialized [`Terminal`] using a
-/// Thin wrapper used in tests: run the full dashboard loop with a
-/// [`ratatui::backend::TestBackend`], independently of the TTY
-/// setup/teardown that surrounds this call in [`execute`].
-#[cfg(test)]
-async fn run_crossterm_events_loop<B: ratatui::backend::Backend>(
-    dashboard: &mut Dashboard,
-    engine: &Arc<Mutex<AgentEngine>>,
-    terminal: &mut Terminal<B>,
-) -> anyhow::Result<()> {
-    let tick_rate = Duration::from_millis(100);
-    let mut events = CrosstermEventSource::new();
-    run_dashboard_loop(dashboard, engine, terminal, &mut events, tick_rate).await
-}
-
 /// [`CrosstermEventSource`] for real keyboard input. Separated from
 /// [`execute`] so the non-TTY logic (tick-rate setup, event source
 /// construction, and the loop invocation itself) can be exercised in tests
@@ -401,6 +386,9 @@ mod tests {
 
     #[tokio::test]
     async fn init_dashboard_seeds_startup_log_and_starts_background_loop() {
+        let _guard = crate::runstate::isolate_runs_dir_for_test(
+            "init_dashboard_seeds_startup_log_and_starts_background_loop",
+        );
         let config = Config::default();
         let (dashboard, engine) = init_dashboard(&config).await;
 
@@ -733,27 +721,24 @@ mod tests {
         assert!(result.is_ok());
     }
 
-    // `crossterm::event::poll` alone (unlike `enable_raw_mode`/
-    // `EnterAlternateScreen`) has no terminal-mutating side effects -- it
-    // only queries whether input is ready on stdin, via a non-blocking
-    // syscall with the given timeout. That makes it safe to call from a
-    // real unit test regardless of environment, unlike the rest of
-    // `execute()`'s terminal setup (see the comment there). Its outcome
-    // does vary by environment though: confirmed empirically it returns
-    // `Err(Custom { kind: Other, error: "Failed to initialize input
-    // reader" })` in this sandboxed/non-TTY environment (and presumably
-    // any headless CI runner), but a real interactive terminal would
-    // likely return `Ok(false)` instead (no input pending). Asserting on
-    // one specific outcome here would reproduce the exact TTY-dependent
-    // flakiness already found and fixed once this session
-    // (`resolve_task_none_arg_errors_when_stdin_not_tty`), so this just
-    // proves the delegation runs to completion without panicking, in
-    // either environment -- which is enough to mark the line as covered.
-    #[test]
-    fn crossterm_event_source_poll_event_runs_without_panicking() {
-        let mut source = CrosstermEventSource::new();
-        let _ = source.poll_event(Duration::from_millis(1));
-    }
+    // A previous version of this comment claimed `crossterm::event::poll`
+    // "has no terminal-mutating side effects... safe to call from a real
+    // unit test regardless of environment" and had a test call
+    // `CrosstermEventSource::new().poll_event(1ms)` for real to prove it.
+    // That claim was wrong, confirmed by hanging for 60+ seconds under a
+    // real pty, in complete isolation (`--test-threads=1`, nothing else
+    // running). Root cause: `crossterm::event::poll`'s internal
+    // `INTERNAL_EVENT_READER` is a lazily-constructed, process-wide
+    // singleton (`parking_lot::Mutex<Option<InternalEventReader>>`); the
+    // passed timeout only bounds *acquiring that mutex*
+    // (`try_lock_for(timeout)`), not the one-time construction of the
+    // underlying `mio`-based event source that happens the first time it's
+    // ever used in the process, nor whatever `mio::Poll::poll` actually
+    // observes against a `script`-allocated pty's fd. There is no
+    // "1ms-bounded, side-effect-free" way to touch real crossterm event
+    // polling from a test at all -- so this doesn't get a test, matching
+    // every other real-terminal entry point in this file (`execute`,
+    // `open_controlling_tty` equivalent, etc.).
 
     // ─── FailingDrawBackend ─────────────────────────────────────────────────
 
@@ -860,36 +845,22 @@ mod tests {
         assert!(dashboard.should_quit);
     }
 
-    // ─── run_crossterm_events_loop ──────────────────────────────────────────
-
-    /// `run_crossterm_events_loop` with a [`TestBackend`] exercises the
-    /// tick-rate setup and `CrosstermEventSource` construction lines inside
-    /// the helper (equivalent to the old lines 179-188 of `execute`), and
-    /// then delegates to `run_dashboard_loop`.
-    ///
-    /// In a non-TTY environment `CrosstermEventSource::poll_event` returns
-    /// `Err` immediately on the first tick (crossterm cannot initialise an
-    /// input reader without stdin being a TTY-like fd), so the function
-    /// returns with `Err` and the test completes quickly.  In a TTY
-    /// environment `CrosstermEventSource::poll_event` might instead loop
-    /// (returning `Ok(None)` for each poll-timeout with no keypress); a
-    /// 300 ms [`tokio::time::timeout`] bounds the test in both cases.
-    #[tokio::test]
-    async fn run_crossterm_events_loop_with_test_backend_runs_one_tick() {
-        let mut dashboard = make_test_dashboard();
-        let engine = Arc::new(Mutex::new(AgentEngine::new()));
-        let mut terminal = test_terminal();
-
-        // Bound the test: in non-TTY environments the function returns almost
-        // immediately with Err; in TTY environments we time out rather than hang.
-        let _ = tokio::time::timeout(
-            Duration::from_millis(300),
-            run_crossterm_events_loop(&mut dashboard, &engine, &mut terminal),
-        )
-        .await;
-        // Either the function returned (Ok or Err) or it timed out.  Either
-        // way the helper's lines were entered and are marked as covered.
-    }
+    // `run_crossterm_events_loop` (and this test, which was its only caller)
+    // were removed. That helper wired a real `CrosstermEventSource` into
+    // `run_dashboard_loop`, and this test tried to bound the result with a
+    // 300ms `tokio::time::timeout`. That bound does not work:
+    // `run_dashboard_loop`'s `loop { ... }` has no `.await` point anywhere in
+    // its body (`poll_event`, `try_lock`, `terminal.draw` are all
+    // synchronous), so on the default current-thread `#[tokio::test]`
+    // runtime the executor's single thread never regains control long
+    // enough for the timeout's own timer to fire -- a future that never
+    // yields can't be preempted by a sibling future racing it. In a non-TTY
+    // sandbox `CrosstermEventSource::poll_event` fails immediately, which is
+    // why this looked bounded in headless testing; on a real terminal (no
+    // scripted key ever sets `should_quit`) it hung indefinitely, observed
+    // as "has been running for over 60 seconds" in practice. This helper had
+    // no production caller (`execute`/`execute_core` call `run_dashboard_loop`
+    // directly), so there was nothing left to preserve coverage of.
 
     // ─── CrosstermEventSource poll branches ─────────────────────────────────
 
@@ -948,6 +919,8 @@ mod tests {
 
     #[tokio::test]
     async fn execute_core_happy_path_quits_on_esc() {
+        let _guard =
+            crate::runstate::isolate_runs_dir_for_test("execute_core_happy_path_quits_on_esc");
         let config = Config::default();
         let (mut dashboard, engine) = init_dashboard(&config).await;
         let mut setup = CrosstermSetup::for_test();
@@ -959,6 +932,8 @@ mod tests {
 
     #[tokio::test]
     async fn execute_core_enable_error_propagates() {
+        let _guard =
+            crate::runstate::isolate_runs_dir_for_test("execute_core_enable_error_propagates");
         fn fail() -> std::io::Result<()> {
             Err(std::io::Error::other("simulated enable_raw failure"))
         }
@@ -979,6 +954,9 @@ mod tests {
 
     #[tokio::test]
     async fn execute_core_create_terminal_error_propagates() {
+        let _guard = crate::runstate::isolate_runs_dir_for_test(
+            "execute_core_create_terminal_error_propagates",
+        );
         // `Viewport::Fullscreen` makes `create_terminal()` call `backend.size()`
         // against a *real* `CrosstermBackend`. Whether that succeeds or fails
         // is environment-dependent — it fails on some non-TTY setups but has
@@ -1019,6 +997,8 @@ mod tests {
 
     #[tokio::test]
     async fn execute_core_loop_error_propagates() {
+        let _guard =
+            crate::runstate::isolate_runs_dir_for_test("execute_core_loop_error_propagates");
         let config = Config::default();
         let (mut dashboard, engine) = init_dashboard(&config).await;
         let mut setup = CrosstermSetup::for_test();

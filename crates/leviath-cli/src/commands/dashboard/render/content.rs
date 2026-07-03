@@ -1049,6 +1049,9 @@ mod tests {
 
     #[test]
     fn render_content_pane_logs_mode_shows_tool_count_badge() {
+        let _guard = crate::runstate::isolate_runs_dir_for_test(
+            "render_content_pane_logs_mode_shows_tool_count_badge",
+        );
         let run_id = "test-content-tool-badge";
         let agent = setup_run_state_agent_with_logs(
             run_id,
@@ -1081,6 +1084,9 @@ mod tests {
 
     #[test]
     fn render_content_pane_output_mode_run_state_shows_file_path_hint() {
+        let _guard = crate::runstate::isolate_runs_dir_for_test(
+            "render_content_pane_output_mode_run_state_shows_file_path_hint",
+        );
         let run_id = "test-content-output-hint";
         let agent = setup_run_state_agent_with_logs(run_id, &[], Some("hello output"));
 
@@ -1109,6 +1115,9 @@ mod tests {
 
     #[test]
     fn build_output_lines_logs_mode_colors_by_line_prefix() {
+        let _guard = crate::runstate::isolate_runs_dir_for_test(
+            "build_output_lines_logs_mode_colors_by_line_prefix",
+        );
         let run_id = "test-content-log-prefixes";
         let agent = setup_run_state_agent_with_logs(
             run_id,
@@ -1142,6 +1151,9 @@ mod tests {
 
     #[test]
     fn build_output_lines_output_mode_renders_markdown_when_non_empty() {
+        let _guard = crate::runstate::isolate_runs_dir_for_test(
+            "build_output_lines_output_mode_renders_markdown_when_non_empty",
+        );
         let run_id = "test-content-output-markdown";
         let agent = setup_run_state_agent_with_logs(run_id, &[], Some("# Heading\n\nbody text"));
 

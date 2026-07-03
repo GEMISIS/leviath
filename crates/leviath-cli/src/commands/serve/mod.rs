@@ -646,6 +646,8 @@ prompt = "Run"
 
     #[tokio::test]
     async fn test_submit_interaction_full_router() {
+        let _guard =
+            crate::runstate::isolate_runs_dir_for_test("test_submit_interaction_full_router");
         use crate::runstate::{create_run, RunMeta};
 
         let run_id = format!(

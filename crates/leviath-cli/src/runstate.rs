@@ -210,12 +210,50 @@ pub fn run_dir(run_id: &str) -> PathBuf {
     runs_dir().join(run_id)
 }
 
-/// Path to the persistent dashboard activity log (~/.leviath/dashboard.log).
-pub fn dashboard_log_path() -> PathBuf {
+/// Inner implementation of `dashboard_log_path`, parameterised so it can be
+/// tested without touching the process-global env. All callers go through
+/// `dashboard_log_path`.
+fn dashboard_log_path_from(env_override: Option<&str>) -> PathBuf {
+    if let Some(path) = env_override {
+        return PathBuf::from(path);
+    }
     dirs::home_dir()
         .unwrap_or_default()
         .join(".leviath")
         .join("dashboard.log")
+}
+
+/// Path to the persistent dashboard activity log (~/.leviath/dashboard.log).
+///
+/// Under `#[cfg(test)]`, when `LEVIATH_DASHBOARD_LOG_PATH` isn't explicitly
+/// set, this falls back to a fixed, shared *test* location instead of the
+/// real home directory. Unlike `runs_dir()` (fully covered by per-test
+/// `isolate_runs_dir_for_test` guards), dashboard activity logging is called
+/// pervasively from production code deep inside ordinary dashboard input
+/// handling (`Dashboard::add_log`, hit by nearly every key-handler test in
+/// `dashboard/input.rs`) -- retrofitting every transitive caller with its
+/// own guard isn't practical, and this is inherently a shared, append-only,
+/// best-effort log where per-test isolation doesn't matter the way it does
+/// for `runs_dir` (no test needs a *clean* view of it). This is the one
+/// place in the crate where the test-vs-prod fallback intentionally
+/// diverges, specifically to guarantee zero test writes reach the user's
+/// real `~/.leviath/dashboard.log` even from tests nobody remembered to
+/// isolate.
+pub fn dashboard_log_path() -> PathBuf {
+    if let Ok(path) = std::env::var("LEVIATH_DASHBOARD_LOG_PATH") {
+        return dashboard_log_path_from(Some(&path));
+    }
+    #[cfg(test)]
+    {
+        dirs::home_dir()
+            .unwrap_or_default()
+            .join(".leviath-test")
+            .join("shared-dashboard.log")
+    }
+    #[cfg(not(test))]
+    {
+        dashboard_log_path_from(None)
+    }
 }
 
 /// Append a timestamped line to the persistent dashboard activity log.
@@ -521,14 +559,105 @@ pub fn tail_stage_log(run_id: &str, stage_idx: usize, max_bytes: u64) -> String 
     tail_file(&stage_dir(run_id, stage_idx).join("logs.log"), max_bytes)
 }
 
+/// Serializes any test, anywhere in the crate, that reads `runs_dir()`'s or
+/// `dashboard_log_path()`'s default (unset-env) behavior, or that mutates
+/// `LEVIATH_RUNS_DIR`/`LEVIATH_DASHBOARD_LOG_PATH`. Both env vars are
+/// process-global, so tests in different files that don't share a lock can
+/// race -- e.g. a test isolating run state via [`isolate_runs_dir_for_test`]
+/// while another, unlocked test asserts on the real home-directory fallback.
+/// Declared here (not inside `mod tests`) so it's reachable crate-wide as
+/// `crate::runstate::RUNS_DIR_ENV_LOCK`, mirroring `config.rs`'s
+/// `CONFIG_PATH_ENV_LOCK`.
+#[cfg(test)]
+pub(crate) static RUNS_DIR_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// RAII guard that restores `LEVIATH_RUNS_DIR` and
+/// `LEVIATH_DASHBOARD_LOG_PATH` to their original values, removes the
+/// isolated temp directory, and releases [`RUNS_DIR_ENV_LOCK`], on drop.
+#[cfg(test)]
+pub(crate) struct RunsDirTestGuard {
+    original_runs_dir: Option<std::ffi::OsString>,
+    original_dashboard_log_path: Option<std::ffi::OsString>,
+    base_dir: std::path::PathBuf,
+    _lock: std::sync::MutexGuard<'static, ()>,
+}
+
+#[cfg(test)]
+impl Drop for RunsDirTestGuard {
+    fn drop(&mut self) {
+        unsafe {
+            match self.original_runs_dir.take() {
+                Some(v) => std::env::set_var("LEVIATH_RUNS_DIR", v),
+                None => std::env::remove_var("LEVIATH_RUNS_DIR"),
+            }
+            match self.original_dashboard_log_path.take() {
+                Some(v) => std::env::set_var("LEVIATH_DASHBOARD_LOG_PATH", v),
+                None => std::env::remove_var("LEVIATH_DASHBOARD_LOG_PATH"),
+            }
+        }
+        let _ = std::fs::remove_dir_all(&self.base_dir);
+    }
+}
+
+/// Points `LEVIATH_RUNS_DIR` and `LEVIATH_DASHBOARD_LOG_PATH` at fresh paths
+/// inside a temp directory, for the duration of the returned guard, so tests
+/// that create real run/agent/dashboard-log state (`create_run`,
+/// `write_meta`, `append_stage_output`, `append_dashboard_log`, `list_runs`,
+/// ...) never touch the real `~/.leviath/runs/` or `~/.leviath/dashboard.log`.
+///
+/// This matters more than it looks: those are the exact files `lev dash`/
+/// `lev serve` read from. Before this guard existed, tests wrote real
+/// fixture entries (`agent_name: "test"`, `workdir: "/tmp"`, etc.) straight
+/// into the user's actual runs directory. Most got cleaned up by each test's
+/// own `remove_dir_all` at the end -- but a test process killed mid-run
+/// (e.g. Ctrl+C on a hung test) never reaches that cleanup, so the entries
+/// stayed behind permanently, showing up as orphaned "waiting" agents in the
+/// user's real dashboard.
+#[cfg(test)]
+pub(crate) fn isolate_runs_dir_for_test(unique: &str) -> RunsDirTestGuard {
+    let lock = RUNS_DIR_ENV_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let original_runs_dir = std::env::var_os("LEVIATH_RUNS_DIR");
+    let original_dashboard_log_path = std::env::var_os("LEVIATH_DASHBOARD_LOG_PATH");
+    // Keep the temp path short and hash `unique` down rather than embedding
+    // it verbatim: some dashboard render tests display a real on-disk path
+    // (e.g. stage_dir(...).join("output.log")) inside a fixed-width
+    // terminal area and assert on a substring near the *end* of that path.
+    // Test function names here can run 60+ characters.
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    unique.hash(&mut hasher);
+    let short = format!("{:x}", hasher.finish() & 0xffff_ffff);
+    // Rooted under the home dir (NOT std::env::temp_dir()) so the render
+    // code's existing `~`-shortening of displayed paths still applies --
+    // macOS's real temp dir is itself ~50 chars (`/var/folders/xy/.../T/`),
+    // which alone was enough to push realistic paths past the same render
+    // width and truncate away the asserted-on suffix. `.leviath-test` is a
+    // sibling of `.leviath`, never read by `lev dash`/`lev serve`, so this
+    // still can't leak into the user's real dashboard even if a killed test
+    // process skips this guard's own Drop-time cleanup.
+    let base_dir = dirs::home_dir()
+        .unwrap_or_default()
+        .join(".leviath-test")
+        .join(format!("rs-{short}"));
+    let runs_dir = base_dir.join("runs");
+    let _ = std::fs::create_dir_all(&runs_dir);
+    unsafe {
+        std::env::set_var("LEVIATH_RUNS_DIR", &runs_dir);
+        std::env::set_var("LEVIATH_DASHBOARD_LOG_PATH", base_dir.join("dashboard.log"));
+    }
+    RunsDirTestGuard {
+        original_runs_dir,
+        original_dashboard_log_path,
+        base_dir,
+        _lock: lock,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
-
-    /// Serialises tests that mutate `LEVIATH_RUNS_DIR` so they don't interfere
-    /// with each other when `cargo test` runs them concurrently.
-    static RUNS_DIR_ENV_LOCK: Mutex<()> = Mutex::new(());
 
     // ─── RunStatus ──────────────────────────────────────────────────────────
 
@@ -841,7 +970,10 @@ mod tests {
 
     #[test]
     fn write_and_read_meta_roundtrip() {
-        // Use the real runs_dir so write_meta/read_meta work
+        // Isolated via `isolate_runs_dir_for_test` so write_meta/read_meta
+        // never touch the real ~/.leviath/runs/ -- the temp dir is removed
+        // automatically when `_guard` drops, so no manual cleanup needed.
+        let _guard = isolate_runs_dir_for_test("write-and-read-meta-roundtrip");
         let meta = RunMeta::new(
             "test-roundtrip-unit".into(),
             "test-agent".into(),
@@ -858,15 +990,13 @@ mod tests {
         assert_eq!(back.agent_name, "test-agent");
         assert_eq!(back.task, "unit test");
         assert_eq!(back.model.as_deref(), Some("model-x"));
-
-        // Cleanup
-        let _ = std::fs::remove_dir_all(run_dir(&meta.run_id));
     }
 
     // ─── write_stages_index / read_stages_index roundtrip ───────────────────
 
     #[test]
     fn write_and_read_stages_index_roundtrip() {
+        let _guard = isolate_runs_dir_for_test("write-and-read-stages-index-roundtrip");
         let run_id = "test-stages-idx-unit";
         let dir = run_dir(run_id);
         std::fs::create_dir_all(&dir).unwrap();
@@ -880,9 +1010,6 @@ mod tests {
         assert_eq!(back.len(), 2);
         assert_eq!(back[0].name, "init");
         assert_eq!(back[1].name, "process");
-
-        // Cleanup
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -895,6 +1022,7 @@ mod tests {
 
     #[test]
     fn write_and_read_context_snapshot_roundtrip() {
+        let _guard = isolate_runs_dir_for_test("write-and-read-context-snapshot-roundtrip");
         let run_id = "test-ctx-snap-unit";
         let dir = run_dir(run_id);
         std::fs::create_dir_all(&dir).unwrap();
@@ -909,8 +1037,6 @@ mod tests {
         let back = read_context_snapshot(run_id).unwrap();
         assert_eq!(back.stage_name, "test");
         assert_eq!(back.total_tokens, 42);
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -929,32 +1055,31 @@ mod tests {
 
     #[test]
     fn append_and_tail_stage_output() {
+        let _guard = isolate_runs_dir_for_test("append-and-tail-stage-output");
         let run_id = "test-stage-output-unit";
         append_stage_output(run_id, 0, "line 1");
         append_stage_output(run_id, 0, "line 2");
         let output = tail_stage_output(run_id, 0, 4096);
         assert!(output.contains("line 1"));
         assert!(output.contains("line 2"));
-
-        let _ = std::fs::remove_dir_all(run_dir(run_id));
     }
 
     #[test]
     fn append_and_tail_stage_log() {
+        let _guard = isolate_runs_dir_for_test("append-and-tail-stage-log");
         let run_id = "test-stage-log-unit";
         append_stage_log(run_id, 0, "event A");
         append_stage_log(run_id, 0, "event B");
         let log = tail_stage_log(run_id, 0, 4096);
         assert!(log.contains("event A"));
         assert!(log.contains("event B"));
-
-        let _ = std::fs::remove_dir_all(run_dir(run_id));
     }
 
     // ─── write/read stage context ───────────────────────────────────────────
 
     #[test]
     fn write_and_read_stage_context_roundtrip() {
+        let _guard = isolate_runs_dir_for_test("write-and-read-stage-context-roundtrip");
         let run_id = "test-stage-ctx-unit";
         let snap = ContextSnapshot {
             stage_name: "stage-0".into(),
@@ -965,8 +1090,6 @@ mod tests {
         write_stage_context(run_id, 0, &snap).unwrap();
         let back = read_stage_context(run_id, 0).unwrap();
         assert_eq!(back.stage_name, "stage-0");
-
-        let _ = std::fs::remove_dir_all(run_dir(run_id));
     }
 
     #[test]
@@ -978,6 +1101,7 @@ mod tests {
 
     #[test]
     fn append_dashboard_log_creates_log_file() {
+        let _guard = isolate_runs_dir_for_test("append-dashboard-log-creates-log-file");
         append_dashboard_log("coverage-test-message");
         assert!(dashboard_log_path().exists());
     }
@@ -986,18 +1110,39 @@ mod tests {
 
     #[test]
     fn dashboard_log_path_structure() {
+        // Exercises the real (env-reading) `dashboard_log_path()` on its
+        // fallback branch, so -- like `runs_dir_structure` below -- this
+        // must hold `RUNS_DIR_ENV_LOCK` and force both env vars unset:
+        // `isolate_runs_dir_for_test` (used by many other tests) sets
+        // `LEVIATH_DASHBOARD_LOG_PATH` process-wide, and without the lock a
+        // concurrently-running isolated test would make this assertion
+        // race and intermittently fail.
+        let _lock = RUNS_DIR_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let prev = std::env::var("LEVIATH_DASHBOARD_LOG_PATH").ok();
+        unsafe { std::env::remove_var("LEVIATH_DASHBOARD_LOG_PATH") };
         let path = dashboard_log_path();
         assert!(path.to_str().unwrap().contains(".leviath"));
         assert!(path.to_str().unwrap().ends_with("dashboard.log"));
+        if let Some(v) = prev {
+            unsafe { std::env::set_var("LEVIATH_DASHBOARD_LOG_PATH", v) }
+        }
     }
 
     // ─── runs_dir / run_dir ────────────────────────────────────────────────
 
     #[test]
     fn runs_dir_structure() {
+        // See the comment on `dashboard_log_path_structure` above -- same
+        // race, same fix, for `LEVIATH_RUNS_DIR`.
+        let _lock = RUNS_DIR_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let prev = std::env::var("LEVIATH_RUNS_DIR").ok();
+        unsafe { std::env::remove_var("LEVIATH_RUNS_DIR") };
         let path = runs_dir();
         assert!(path.to_str().unwrap().contains(".leviath"));
         assert!(path.to_str().unwrap().ends_with("runs"));
+        if let Some(v) = prev {
+            unsafe { std::env::set_var("LEVIATH_RUNS_DIR", v) }
+        }
     }
 
     #[test]
@@ -1016,9 +1161,55 @@ mod tests {
     }
 
     #[test]
+    fn dashboard_log_path_from_uses_override_when_provided() {
+        let path = dashboard_log_path_from(Some("/custom/leviath/dashboard.log"));
+        assert_eq!(path, PathBuf::from("/custom/leviath/dashboard.log"));
+    }
+
+    #[test]
+    fn dashboard_log_path_from_falls_back_to_home_when_none() {
+        let path = dashboard_log_path_from(None);
+        #[cfg(unix)]
+        assert!(path.ends_with(".leviath/dashboard.log"));
+        #[cfg(windows)]
+        assert!(path.ends_with(".leviath\\dashboard.log"));
+    }
+
+    #[test]
     fn run_dir_contains_run_id() {
         let path = run_dir("my-run-123");
         assert!(path.to_str().unwrap().contains("my-run-123"));
+    }
+
+    // ─── isolate_runs_dir_for_test ──────────────────────────────────────────
+
+    #[test]
+    fn isolate_runs_dir_for_test_points_at_temp_dir_and_restores_on_drop() {
+        // Deliberately does NOT snapshot "the env var value before" from
+        // outside any lock and compare against it after -- `isolate_runs_dir_for_test`
+        // only holds `RUNS_DIR_ENV_LOCK` for its own scope, so a naive
+        // before/after comparison races a concurrently-running isolated test
+        // on another thread (observed: `left: None, right: Some(".../rs-.../runs")`
+        // when another guard's value leaked into "before" or "after" this
+        // guard's own window). Instead assert the guard's own path is live
+        // only inside its scope and gone afterward -- a property that holds
+        // no matter what other threads are doing, since no other test can
+        // legitimately produce this exact hash-derived path.
+        let guard_runs_dir;
+        let guard_log_path;
+        {
+            let guard = isolate_runs_dir_for_test("guard-self-test");
+            guard_runs_dir = guard.base_dir.join("runs");
+            guard_log_path = guard.base_dir.join("dashboard.log");
+            assert_eq!(runs_dir(), guard_runs_dir);
+            assert!(runs_dir().exists());
+            assert_eq!(dashboard_log_path(), guard_log_path);
+        }
+        // Guard dropped: env vars must no longer point at the (now-removed)
+        // temp dir this guard created.
+        assert_ne!(runs_dir(), guard_runs_dir);
+        assert_ne!(dashboard_log_path(), guard_log_path);
+        assert!(!guard_runs_dir.exists());
     }
 
     // ─── tail_file edge cases ──────────────────────────────────────────────
@@ -1146,6 +1337,7 @@ mod tests {
 
     #[test]
     fn append_stage_output_multiple_stages() {
+        let _guard = isolate_runs_dir_for_test("append-stage-output-multiple-stages");
         let run_id = "test-multi-stage-out";
         append_stage_output(run_id, 0, "stage 0 output");
         append_stage_output(run_id, 1, "stage 1 output");
@@ -1160,14 +1352,13 @@ mod tests {
         assert!(out2.contains("stage 2 output"));
         // Verify no cross-contamination
         assert!(!out0.contains("stage 1 output"));
-
-        let _ = std::fs::remove_dir_all(run_dir(run_id));
     }
 
     // ─── list_runs ─────────────────────────────────────────────────────────
 
     #[test]
     fn list_runs_returns_sorted() {
+        let _guard = isolate_runs_dir_for_test("list-runs-returns-sorted");
         let meta1 = RunMeta::new(
             "test-list-run-a".into(),
             "agent".into(),
@@ -1196,10 +1387,6 @@ mod tests {
         let ids: Vec<&str> = runs.iter().map(|r| r.run_id.as_str()).collect();
         assert!(ids.contains(&"test-list-run-a"));
         assert!(ids.contains(&"test-list-run-b"));
-
-        // Cleanup
-        let _ = std::fs::remove_dir_all(run_dir("test-list-run-a"));
-        let _ = std::fs::remove_dir_all(run_dir("test-list-run-b"));
     }
 
     // ─── tail_stage_log / tail_stage_output empty ──────────────────────────
@@ -1262,16 +1449,13 @@ mod tests {
 
     #[test]
     fn list_runs_empty_when_runs_dir_missing_or_empty() {
-        // With no runs created under a fresh unique prefix, list_runs()
-        // should not include them. We can't safely blow away the whole
-        // runs_dir (other tests use it concurrently), so instead verify
-        // list_runs() never panics and returns a Vec (covers the has-entries
-        // path already; this covers the function executing end-to-end when
-        // there happen to be zero matching/readable entries for a bogus id).
+        // Isolated via `isolate_runs_dir_for_test`, so this is a genuinely
+        // empty runs dir (not "the real dir, which we hope has no entry with
+        // this exact bogus id") -- can assert real emptiness instead of just
+        // absence of one specific id.
+        let _guard = isolate_runs_dir_for_test("list-runs-empty-when-runs-dir-missing-or-empty");
         let runs = list_runs();
-        assert!(!runs
-            .iter()
-            .any(|r| r.run_id == "definitely-not-a-real-run-id"));
+        assert!(runs.is_empty());
     }
 
     #[test]
@@ -1316,14 +1500,13 @@ mod tests {
         // tail_log() itself (as opposed to tail_file(), which every other
         // test here calls directly) had zero coverage -- it's a one-line
         // wrapper joining run_dir(run_id) with "output.log".
+        let _guard = isolate_runs_dir_for_test("tail-log-reads-output-log-for-run-id");
         let run_id = "test-tail-log-run";
         let dir = run_dir(run_id);
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("output.log"), "hello from output.log").unwrap();
 
         assert_eq!(tail_log(run_id, 1024), "hello from output.log");
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[cfg(unix)]
@@ -1501,6 +1684,7 @@ mod tests {
     #[test]
     fn append_dashboard_log_writes_message() {
         // Exercises the create_dir_all branch and writeln! branch via a unique marker.
+        let _guard = isolate_runs_dir_for_test("append-dashboard-log-writes-message");
         let unique = format!("cov-dashboard-log-{}", std::process::id());
         append_dashboard_log(&unique);
         let content = std::fs::read_to_string(dashboard_log_path()).unwrap_or_default();

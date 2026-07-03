@@ -521,6 +521,8 @@ mod tests {
 
     #[test]
     fn polling_loop_emits_context_update() {
+        let _guard =
+            crate::runstate::isolate_runs_dir_for_test("polling_loop_emits_context_update");
         use crate::runstate::{create_run, write_context_snapshot, ContextSnapshot, RunMeta};
 
         let (state, mut rx) = make_test_state();
@@ -578,6 +580,9 @@ mod tests {
     /// ContextUpdate event is emitted on the second call.
     #[test]
     fn poll_once_no_context_update_when_tokens_unchanged() {
+        let _guard = crate::runstate::isolate_runs_dir_for_test(
+            "poll_once_no_context_update_when_tokens_unchanged",
+        );
         use crate::runstate::{create_run, write_context_snapshot, ContextSnapshot, RunMeta};
 
         let (state, mut rx) = make_test_state();
@@ -667,6 +672,8 @@ mod tests {
 
     #[test]
     fn polling_loop_emits_interaction_needed() {
+        let _guard =
+            crate::runstate::isolate_runs_dir_for_test("polling_loop_emits_interaction_needed");
         use crate::interaction::{self, InteractionRequest};
         use crate::runstate::{create_run, RunMeta};
 

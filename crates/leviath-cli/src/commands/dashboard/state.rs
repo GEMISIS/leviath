@@ -1233,6 +1233,7 @@ mod tests {
 
     #[test]
     fn add_log_trims_to_200() {
+        let _guard = crate::runstate::isolate_runs_dir_for_test("add_log_trims_to_200");
         let mut dash = make_test_dashboard();
         dash.log.clear(); // Clear any seeded log entries
         for i in 0..250 {
@@ -1612,6 +1613,7 @@ mod tests {
 
     #[test]
     fn add_log_appends_entry() {
+        let _guard = crate::runstate::isolate_runs_dir_for_test("add_log_appends_entry");
         let mut dash = make_test_dashboard();
         dash.log.clear();
         dash.add_log("hello from test".to_string());
@@ -1628,6 +1630,7 @@ mod tests {
 
     #[test]
     fn add_log_trims_when_over_200() {
+        let _guard = crate::runstate::isolate_runs_dir_for_test("add_log_trims_when_over_200");
         let mut dash = make_test_dashboard();
         dash.log.clear();
         // Fill to exactly 200
@@ -1784,6 +1787,9 @@ mod tests {
 
     #[test]
     fn delete_selected_agent_removes_run_state_agent() {
+        let _guard = crate::runstate::isolate_runs_dir_for_test(
+            "delete_selected_agent_removes_run_state_agent",
+        );
         let mut dash = make_test_dashboard();
         dash.log.clear();
         // Use a real temp dir that exists to avoid "delete failed" log
@@ -1809,6 +1815,9 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn delete_selected_agent_sends_sigterm_to_real_pid() {
+        let _guard = crate::runstate::isolate_runs_dir_for_test(
+            "delete_selected_agent_sends_sigterm_to_real_pid",
+        );
         // Spawns a real, throwaway child process we fully own (so sending it
         // SIGTERM is safe, unlike an arbitrary PID) to exercise the
         // `#[cfg(unix)] if _pid > 0 { libc::kill(...) }` branch, which every
@@ -1928,6 +1937,8 @@ mod tests {
 
     #[test]
     fn sync_from_run_state_new_agent_active() {
+        let _guard =
+            crate::runstate::isolate_runs_dir_for_test("sync_from_run_state_new_agent_active");
         let run_id = "test-sync-new-active";
         cleanup_run(run_id);
         let meta = make_run_meta(run_id, RunStatus::Running);
@@ -1948,6 +1959,9 @@ mod tests {
 
     #[test]
     fn sync_from_run_state_new_agent_starting_maps_to_active() {
+        let _guard = crate::runstate::isolate_runs_dir_for_test(
+            "sync_from_run_state_new_agent_starting_maps_to_active",
+        );
         let run_id = "test-sync-new-starting";
         cleanup_run(run_id);
         let meta = make_run_meta(run_id, RunStatus::Starting);
@@ -1964,6 +1978,9 @@ mod tests {
 
     #[test]
     fn sync_from_run_state_new_agent_error_status() {
+        let _guard = crate::runstate::isolate_runs_dir_for_test(
+            "sync_from_run_state_new_agent_error_status",
+        );
         let run_id = "test-sync-new-error";
         cleanup_run(run_id);
         let mut meta = make_run_meta(run_id, RunStatus::Error);
@@ -1985,6 +2002,9 @@ mod tests {
 
     #[test]
     fn sync_from_run_state_new_agent_cancelled_status() {
+        let _guard = crate::runstate::isolate_runs_dir_for_test(
+            "sync_from_run_state_new_agent_cancelled_status",
+        );
         let run_id = "test-sync-new-cancelled";
         cleanup_run(run_id);
         let meta = make_run_meta(run_id, RunStatus::Cancelled);
@@ -2001,6 +2021,9 @@ mod tests {
 
     #[test]
     fn sync_from_run_state_new_agent_waiting_input_reads_pending_request() {
+        let _guard = crate::runstate::isolate_runs_dir_for_test(
+            "sync_from_run_state_new_agent_waiting_input_reads_pending_request",
+        );
         let run_id = "test-sync-new-waiting";
         cleanup_run(run_id);
         let meta = make_run_meta(run_id, RunStatus::WaitingInput);
@@ -2023,6 +2046,9 @@ mod tests {
 
     #[test]
     fn sync_from_run_state_new_agent_complete_interactive() {
+        let _guard = crate::runstate::isolate_runs_dir_for_test(
+            "sync_from_run_state_new_agent_complete_interactive",
+        );
         let run_id = "test-sync-new-complete-interactive";
         cleanup_run(run_id);
         let meta = make_run_meta(run_id, RunStatus::CompleteInteractive);
@@ -2051,6 +2077,9 @@ mod tests {
 
     #[test]
     fn sync_from_run_state_new_agent_toasts_after_initial_sync_waiting() {
+        let _guard = crate::runstate::isolate_runs_dir_for_test(
+            "sync_from_run_state_new_agent_toasts_after_initial_sync_waiting",
+        );
         let run_id = "test-sync-new-toast-waiting";
         cleanup_run(run_id);
 
@@ -2074,6 +2103,9 @@ mod tests {
 
     #[test]
     fn sync_from_run_state_new_agent_toasts_after_initial_sync_complete() {
+        let _guard = crate::runstate::isolate_runs_dir_for_test(
+            "sync_from_run_state_new_agent_toasts_after_initial_sync_complete",
+        );
         let run_id = "test-sync-new-toast-complete";
         cleanup_run(run_id);
 
@@ -2092,6 +2124,9 @@ mod tests {
 
     #[test]
     fn sync_from_run_state_existing_agent_active_to_error_toasts_with_message() {
+        let _guard = crate::runstate::isolate_runs_dir_for_test(
+            "sync_from_run_state_existing_agent_active_to_error_toasts_with_message",
+        );
         let run_id = "test-sync-existing-to-error";
         cleanup_run(run_id);
         let meta = make_run_meta(run_id, RunStatus::Running);
@@ -2117,6 +2152,9 @@ mod tests {
 
     #[test]
     fn sync_from_run_state_existing_agent_active_to_error_empty_message() {
+        let _guard = crate::runstate::isolate_runs_dir_for_test(
+            "sync_from_run_state_existing_agent_active_to_error_empty_message",
+        );
         let run_id = "test-sync-existing-to-error-empty";
         cleanup_run(run_id);
         let meta = make_run_meta(run_id, RunStatus::Running);
@@ -2142,6 +2180,9 @@ mod tests {
 
     #[test]
     fn sync_from_run_state_existing_agent_active_to_complete_toasts() {
+        let _guard = crate::runstate::isolate_runs_dir_for_test(
+            "sync_from_run_state_existing_agent_active_to_complete_toasts",
+        );
         let run_id = "test-sync-existing-to-complete";
         cleanup_run(run_id);
         let meta = make_run_meta(run_id, RunStatus::Running);
@@ -2163,6 +2204,9 @@ mod tests {
 
     #[test]
     fn sync_from_run_state_existing_agent_active_to_complete_interactive_toasts() {
+        let _guard = crate::runstate::isolate_runs_dir_for_test(
+            "sync_from_run_state_existing_agent_active_to_complete_interactive_toasts",
+        );
         let run_id = "test-sync-existing-to-complete-interactive";
         cleanup_run(run_id);
         let meta = make_run_meta(run_id, RunStatus::Running);
@@ -2182,6 +2226,9 @@ mod tests {
 
     #[test]
     fn sync_from_run_state_existing_agent_stays_active_no_toast() {
+        let _guard = crate::runstate::isolate_runs_dir_for_test(
+            "sync_from_run_state_existing_agent_stays_active_no_toast",
+        );
         let run_id = "test-sync-existing-stays-active";
         cleanup_run(run_id);
         let meta = make_run_meta(run_id, RunStatus::Running);
@@ -2202,6 +2249,9 @@ mod tests {
 
     #[test]
     fn sync_from_run_state_existing_agent_enters_waiting_toasts_and_freezes_timer() {
+        let _guard = crate::runstate::isolate_runs_dir_for_test(
+            "sync_from_run_state_existing_agent_enters_waiting_toasts_and_freezes_timer",
+        );
         let run_id = "test-sync-existing-enters-waiting";
         cleanup_run(run_id);
         let meta = make_run_meta(run_id, RunStatus::Running);
@@ -2238,6 +2288,9 @@ mod tests {
 
     #[test]
     fn sync_from_run_state_existing_agent_leaves_waiting_accumulates_waiting_secs() {
+        let _guard = crate::runstate::isolate_runs_dir_for_test(
+            "sync_from_run_state_existing_agent_leaves_waiting_accumulates_waiting_secs",
+        );
         let run_id = "test-sync-existing-leaves-waiting";
         cleanup_run(run_id);
         let mut meta = make_run_meta(run_id, RunStatus::WaitingInput);
@@ -2275,6 +2328,9 @@ mod tests {
 
     #[test]
     fn sync_from_run_state_already_answered_request_not_reapplied() {
+        let _guard = crate::runstate::isolate_runs_dir_for_test(
+            "sync_from_run_state_already_answered_request_not_reapplied",
+        );
         let run_id = "test-sync-already-answered";
         cleanup_run(run_id);
         let meta = make_run_meta(run_id, RunStatus::Running);
@@ -2310,6 +2366,9 @@ mod tests {
 
     #[test]
     fn sync_from_run_state_no_reptoast_when_already_waiting() {
+        let _guard = crate::runstate::isolate_runs_dir_for_test(
+            "sync_from_run_state_no_reptoast_when_already_waiting",
+        );
         let run_id = "test-sync-no-retoast";
         cleanup_run(run_id);
         let meta = make_run_meta(run_id, RunStatus::WaitingInput);
@@ -2330,6 +2389,9 @@ mod tests {
 
     #[test]
     fn sync_from_run_state_updates_stage_and_token_fields() {
+        let _guard = crate::runstate::isolate_runs_dir_for_test(
+            "sync_from_run_state_updates_stage_and_token_fields",
+        );
         let run_id = "test-sync-updates-fields";
         cleanup_run(run_id);
         let meta = make_run_meta(run_id, RunStatus::Running);
@@ -2367,6 +2429,9 @@ mod tests {
 
     #[test]
     fn sync_from_run_state_waiting_with_no_pending_request_leaves_agent_unchanged() {
+        let _guard = crate::runstate::isolate_runs_dir_for_test(
+            "sync_from_run_state_waiting_with_no_pending_request_leaves_agent_unchanged",
+        );
         // WaitingInput but no pending.json on disk (e.g. race/cleanup) — the
         // `if waiting_prompt.is_some()` branch is skipped entirely.
         let run_id = "test-sync-waiting-no-pending";
@@ -2391,6 +2456,9 @@ mod tests {
 
     #[test]
     fn sync_from_run_state_updates_workdir_and_display_indices() {
+        let _guard = crate::runstate::isolate_runs_dir_for_test(
+            "sync_from_run_state_updates_workdir_and_display_indices",
+        );
         let run_id = "test-sync-workdir";
         cleanup_run(run_id);
         let mut meta = make_run_meta(run_id, RunStatus::Running);
@@ -2414,6 +2482,9 @@ mod tests {
 
     #[test]
     fn sync_from_run_state_existing_agent_enters_complete_interactive_no_needs_input_toast() {
+        let _guard = crate::runstate::isolate_runs_dir_for_test(
+            "sync_from_run_state_existing_agent_enters_complete_interactive_no_needs_input_toast",
+        );
         // Exercise the branch where:
         //   agent.waiting_prompt.is_none()          -> true  (agent was Active, no prompt yet)
         //   && waiting_prompt.is_some()              -> true  (a pending request is present)

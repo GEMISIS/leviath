@@ -907,6 +907,9 @@ mod tests {
 
     #[test]
     fn record_stage_output_and_log_write_through_to_runstate() {
+        let _guard = crate::runstate::isolate_runs_dir_for_test(
+            "record_stage_output_and_log_write_through_to_runstate",
+        );
         let run_id = "test-helpers-record-stage";
         let dir = runstate::run_dir(run_id);
         let _ = std::fs::create_dir_all(&dir);

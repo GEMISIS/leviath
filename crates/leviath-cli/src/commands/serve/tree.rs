@@ -238,6 +238,7 @@ mod tests {
 
     #[tokio::test]
     async fn agents_tree_includes_created_run() {
+        let _guard = crate::runstate::isolate_runs_dir_for_test("agents_tree_includes_created_run");
         let run_id = "test-tree-agents-tree-1";
         let _cleanup = RunCleanup(&[run_id]);
         let meta = make_meta(run_id, "agent-tree-test", None);
@@ -259,6 +260,9 @@ mod tests {
 
     #[tokio::test]
     async fn agent_tree_status_returns_tree_with_subtree_totals() {
+        let _guard = crate::runstate::isolate_runs_dir_for_test(
+            "agent_tree_status_returns_tree_with_subtree_totals",
+        );
         let run_id = "test-tree-status-root";
         let child_id = "test-tree-status-child";
         let _cleanup = RunCleanup(&[run_id, child_id]);

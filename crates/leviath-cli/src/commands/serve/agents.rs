@@ -516,6 +516,9 @@ prompt = "Plan the work"
 
     #[tokio::test]
     async fn spawn_agent_valid_blueprint_creates_run_and_returns_ok() {
+        let _guard = crate::runstate::isolate_runs_dir_for_test(
+            "spawn_agent_valid_blueprint_creates_run_and_returns_ok",
+        );
         let dir = tempfile::tempdir().unwrap();
         let bp_name = format!("spawnable-{}", std::process::id());
         write_test_blueprint(&dir.path().join(&bp_name), &bp_name);
@@ -584,6 +587,8 @@ prompt = "Plan the work"
 
     #[tokio::test]
     async fn spawn_agent_with_full_options_creates_run() {
+        let _guard =
+            crate::runstate::isolate_runs_dir_for_test("spawn_agent_with_full_options_creates_run");
         let dir = tempfile::tempdir().unwrap();
         let bp_name = format!("spawnable-full-{}", std::process::id());
         write_test_blueprint(&dir.path().join(&bp_name), &bp_name);
@@ -632,6 +637,9 @@ prompt = "Plan the work"
 
     #[tokio::test]
     async fn spawn_agent_without_workdir_falls_back_to_current_dir() {
+        let _guard = crate::runstate::isolate_runs_dir_for_test(
+            "spawn_agent_without_workdir_falls_back_to_current_dir",
+        );
         // Every other spawn_agent test supplies `workdir` explicitly; this
         // exercises the `body.workdir.unwrap_or_else(|| current_dir())`
         // fallback branch specifically.
@@ -838,6 +846,14 @@ prompt = "Plan the work"
     }
 
     async fn assert_spawn_agent_fails_on(fail_on: FailOn, expected_status: StatusCode) {
+        // Spans this whole helper (not just the individual one-line test
+        // wrappers that call it) since `spawn_agent_with`/`cleanup_runs_with_prefix`
+        // transitively touch `runstate::run_dir`/`runs_dir` -- without a
+        // guard pinning `LEVIATH_RUNS_DIR` for this entire multi-step flow,
+        // a concurrently-running isolated test on another thread could flip
+        // the env var between this helper's create_run and open_log_files
+        // steps, resolving to two different directories.
+        let _guard = crate::runstate::isolate_runs_dir_for_test("assert_spawn_agent_fails_on");
         let dir = tempfile::tempdir().unwrap();
         let bp_name = format!("spawn-fail-{:?}-{}", fail_on as u8, std::process::id());
         write_test_blueprint(&dir.path().join(&bp_name), &bp_name);
@@ -889,6 +905,9 @@ prompt = "Plan the work"
 
     #[tokio::test]
     async fn spawn_agent_with_no_failure_succeeds_via_mock() {
+        let _guard = crate::runstate::isolate_runs_dir_for_test(
+            "spawn_agent_with_no_failure_succeeds_via_mock",
+        );
         // Exercises MockSpawnAgentIo::spawn's `cmd.spawn()` path (FailOn::None
         // means no mock fails, so the real spawn is called). The spawned
         // process exits quickly (test harness binary + unknown args).
@@ -930,6 +949,8 @@ prompt = "Plan the work"
 
     #[tokio::test]
     async fn list_agents_with_status_filter_running() {
+        let _guard =
+            crate::runstate::isolate_runs_dir_for_test("list_agents_with_status_filter_running");
         let run_id = unique_run_id("list-filter");
         let mut meta = make_run(&run_id);
         meta.status = RunStatus::Running;
@@ -958,6 +979,9 @@ prompt = "Plan the work"
 
     #[tokio::test]
     async fn list_agents_with_status_filter_excludes_others() {
+        let _guard = crate::runstate::isolate_runs_dir_for_test(
+            "list_agents_with_status_filter_excludes_others",
+        );
         let run_id = unique_run_id("list-filter-excl");
         let mut meta = make_run(&run_id);
         meta.status = RunStatus::Complete;
@@ -997,6 +1021,7 @@ prompt = "Plan the work"
 
     #[tokio::test]
     async fn list_agents_multi_status_filter() {
+        let _guard = crate::runstate::isolate_runs_dir_for_test("list_agents_multi_status_filter");
         let run_id = unique_run_id("list-multi");
         let mut meta = make_run(&run_id);
         meta.status = RunStatus::Error;
@@ -1025,6 +1050,8 @@ prompt = "Plan the work"
 
     #[tokio::test]
     async fn get_agent_existing_run_returns_ok() {
+        let _guard =
+            crate::runstate::isolate_runs_dir_for_test("get_agent_existing_run_returns_ok");
         let run_id = unique_run_id("get-agent");
         let meta = make_run(&run_id);
         create_run(&meta).unwrap();
@@ -1064,6 +1091,8 @@ prompt = "Plan the work"
 
     #[tokio::test]
     async fn agent_children_with_children_found() {
+        let _guard =
+            crate::runstate::isolate_runs_dir_for_test("agent_children_with_children_found");
         let parent_id = unique_run_id("parent");
         let child_id = unique_run_id("child");
 
@@ -1096,6 +1125,8 @@ prompt = "Plan the work"
 
     #[tokio::test]
     async fn agent_children_no_children_returns_empty() {
+        let _guard =
+            crate::runstate::isolate_runs_dir_for_test("agent_children_no_children_returns_empty");
         let run_id = unique_run_id("no-children");
         let meta = make_run(&run_id);
         create_run(&meta).unwrap();
@@ -1125,6 +1156,8 @@ prompt = "Plan the work"
 
     #[tokio::test]
     async fn agent_context_with_snapshot_returns_ok() {
+        let _guard =
+            crate::runstate::isolate_runs_dir_for_test("agent_context_with_snapshot_returns_ok");
         let run_id = unique_run_id("ctx-snap");
         let meta = make_run(&run_id);
         create_run(&meta).unwrap();
@@ -1158,6 +1191,8 @@ prompt = "Plan the work"
 
     #[tokio::test]
     async fn agent_context_no_snapshot_returns_404() {
+        let _guard =
+            crate::runstate::isolate_runs_dir_for_test("agent_context_no_snapshot_returns_404");
         let run_id = unique_run_id("ctx-none");
         let meta = make_run(&run_id);
         create_run(&meta).unwrap();
@@ -1179,6 +1214,8 @@ prompt = "Plan the work"
 
     #[tokio::test]
     async fn agent_logs_existing_run_returns_ok() {
+        let _guard =
+            crate::runstate::isolate_runs_dir_for_test("agent_logs_existing_run_returns_ok");
         let run_id = unique_run_id("logs-ok");
         let meta = make_run(&run_id);
         create_run(&meta).unwrap();
@@ -1202,6 +1239,7 @@ prompt = "Plan the work"
 
     #[tokio::test]
     async fn agent_logs_with_tail_param() {
+        let _guard = crate::runstate::isolate_runs_dir_for_test("agent_logs_with_tail_param");
         let run_id = unique_run_id("logs-tail");
         let meta = make_run(&run_id);
         create_run(&meta).unwrap();
@@ -1239,6 +1277,8 @@ prompt = "Plan the work"
 
     #[tokio::test]
     async fn agent_result_existing_run_no_stages() {
+        let _guard =
+            crate::runstate::isolate_runs_dir_for_test("agent_result_existing_run_no_stages");
         let run_id = unique_run_id("result-no-stages");
         let mut meta = make_run(&run_id);
         meta.status = RunStatus::Complete;
@@ -1269,6 +1309,8 @@ prompt = "Plan the work"
 
     #[tokio::test]
     async fn agent_result_existing_run_with_stages() {
+        let _guard =
+            crate::runstate::isolate_runs_dir_for_test("agent_result_existing_run_with_stages");
         let run_id = unique_run_id("result-stages");
         let meta = make_run(&run_id);
         create_run(&meta).unwrap();
@@ -1327,6 +1369,9 @@ prompt = "Plan the work"
 
     #[tokio::test]
     async fn kill_agent_existing_run_returns_no_content() {
+        let _guard = crate::runstate::isolate_runs_dir_for_test(
+            "kill_agent_existing_run_returns_no_content",
+        );
         use axum::routing::delete;
 
         let run_id = unique_run_id("kill-agent");
@@ -1369,6 +1414,7 @@ prompt = "Plan the work"
 
     #[tokio::test]
     async fn kill_agent_cascades_to_children() {
+        let _guard = crate::runstate::isolate_runs_dir_for_test("kill_agent_cascades_to_children");
         use axum::routing::delete;
 
         let parent_id = unique_run_id("kill-parent");

@@ -896,6 +896,7 @@ mod tests {
 
     #[test]
     fn test_write_and_read_request() {
+        let _guard = crate::runstate::isolate_runs_dir_for_test("test_write_and_read_request");
         let run_id = "test-interaction-rw-req";
         let dir = crate::runstate::run_dir(run_id);
         std::fs::create_dir_all(&dir).unwrap();
@@ -915,6 +916,7 @@ mod tests {
 
     #[test]
     fn test_write_and_read_response() {
+        let _guard = crate::runstate::isolate_runs_dir_for_test("test_write_and_read_response");
         let run_id = "test-interaction-rw-resp";
         let dir = crate::runstate::run_dir(run_id);
         std::fs::create_dir_all(&dir).unwrap();
@@ -936,6 +938,7 @@ mod tests {
 
     #[test]
     fn test_clear_interaction() {
+        let _guard = crate::runstate::isolate_runs_dir_for_test("test_clear_interaction");
         let run_id = "test-interaction-clear";
         let dir = crate::runstate::run_dir(run_id);
         std::fs::create_dir_all(&dir).unwrap();
@@ -1027,6 +1030,8 @@ mod tests {
 
     #[test]
     fn test_write_read_request_tool_approval() {
+        let _guard =
+            crate::runstate::isolate_runs_dir_for_test("test_write_read_request_tool_approval");
         let run_id = "test-interaction-rw-ta";
         let dir = crate::runstate::run_dir(run_id);
         std::fs::create_dir_all(&dir).unwrap();
@@ -1050,6 +1055,8 @@ mod tests {
 
     #[test]
     fn test_write_read_request_multiple_choice() {
+        let _guard =
+            crate::runstate::isolate_runs_dir_for_test("test_write_read_request_multiple_choice");
         let run_id = "test-interaction-rw-mc";
         let dir = crate::runstate::run_dir(run_id);
         std::fs::create_dir_all(&dir).unwrap();
@@ -1072,6 +1079,7 @@ mod tests {
 
     #[test]
     fn test_write_read_request_confirm() {
+        let _guard = crate::runstate::isolate_runs_dir_for_test("test_write_read_request_confirm");
         let run_id = "test-interaction-rw-confirm";
         let dir = crate::runstate::run_dir(run_id);
         std::fs::create_dir_all(&dir).unwrap();
@@ -1088,6 +1096,7 @@ mod tests {
 
     #[test]
     fn test_write_read_request_review() {
+        let _guard = crate::runstate::isolate_runs_dir_for_test("test_write_read_request_review");
         let run_id = "test-interaction-rw-review";
         let dir = crate::runstate::run_dir(run_id);
         std::fs::create_dir_all(&dir).unwrap();
@@ -1111,6 +1120,8 @@ mod tests {
 
     #[test]
     fn test_write_take_response_approval() {
+        let _guard =
+            crate::runstate::isolate_runs_dir_for_test("test_write_take_response_approval");
         let run_id = "test-interaction-rw-approval";
         let dir = crate::runstate::run_dir(run_id);
         std::fs::create_dir_all(&dir).unwrap();
@@ -1130,6 +1141,7 @@ mod tests {
 
     #[test]
     fn test_write_take_response_choice() {
+        let _guard = crate::runstate::isolate_runs_dir_for_test("test_write_take_response_choice");
         let run_id = "test-interaction-rw-choice";
         let dir = crate::runstate::run_dir(run_id);
         std::fs::create_dir_all(&dir).unwrap();
@@ -1314,6 +1326,8 @@ mod tests {
 
     #[test]
     fn test_write_read_response_choice_roundtrip() {
+        let _guard =
+            crate::runstate::isolate_runs_dir_for_test("test_write_read_response_choice_roundtrip");
         let run_id = "test-interaction-rw-choice-rt";
         let dir = crate::runstate::run_dir(run_id);
         std::fs::create_dir_all(&dir).unwrap();
@@ -1333,6 +1347,8 @@ mod tests {
 
     #[test]
     fn test_clear_interaction_only_request() {
+        let _guard =
+            crate::runstate::isolate_runs_dir_for_test("test_clear_interaction_only_request");
         let run_id = "test-interaction-clear-req-only";
         let dir = crate::runstate::run_dir(run_id);
         std::fs::create_dir_all(&dir).unwrap();
@@ -1352,6 +1368,9 @@ mod tests {
 
     #[test]
     fn test_read_request_corrupted_json_returns_none() {
+        let _guard = crate::runstate::isolate_runs_dir_for_test(
+            "test_read_request_corrupted_json_returns_none",
+        );
         let run_id = "test-interaction-corrupt-req";
         let dir = crate::runstate::run_dir(run_id);
         std::fs::create_dir_all(&dir).unwrap();
@@ -1366,6 +1385,9 @@ mod tests {
 
     #[test]
     fn test_take_response_corrupted_json_returns_none() {
+        let _guard = crate::runstate::isolate_runs_dir_for_test(
+            "test_take_response_corrupted_json_returns_none",
+        );
         let run_id = "test-interaction-corrupt-resp";
         let dir = crate::runstate::run_dir(run_id);
         std::fs::create_dir_all(&dir).unwrap();
@@ -1380,6 +1402,9 @@ mod tests {
 
     #[test]
     fn test_request_id_preserved_through_write_read() {
+        let _guard = crate::runstate::isolate_runs_dir_for_test(
+            "test_request_id_preserved_through_write_read",
+        );
         let run_id = "test-interaction-reqid";
         let dir = crate::runstate::run_dir(run_id);
         std::fs::create_dir_all(&dir).unwrap();
@@ -1409,6 +1434,8 @@ mod tests {
 
     #[test]
     fn test_write_request_overwrites_previous() {
+        let _guard =
+            crate::runstate::isolate_runs_dir_for_test("test_write_request_overwrites_previous");
         let run_id = "test-interaction-overwrite";
         let dir = crate::runstate::run_dir(run_id);
         std::fs::create_dir_all(&dir).unwrap();
@@ -1475,6 +1502,8 @@ mod tests {
 
     #[test]
     fn test_request_interaction_sync_success() {
+        let _guard =
+            crate::runstate::isolate_runs_dir_for_test("test_request_interaction_sync_success");
         let run_id = "test-sync-request-ok";
         let dir = crate::runstate::run_dir(run_id);
         std::fs::create_dir_all(&dir).unwrap();
@@ -1513,6 +1542,8 @@ mod tests {
 
     #[test]
     fn test_request_interaction_sync_timeout() {
+        let _guard =
+            crate::runstate::isolate_runs_dir_for_test("test_request_interaction_sync_timeout");
         let run_id = "test-sync-request-timeout";
         let dir = crate::runstate::run_dir(run_id);
         std::fs::create_dir_all(&dir).unwrap();
@@ -1539,6 +1570,9 @@ mod tests {
 
     #[test]
     fn test_request_interaction_sync_not_required_status() {
+        let _guard = crate::runstate::isolate_runs_dir_for_test(
+            "test_request_interaction_sync_not_required_status",
+        );
         let run_id = "test-sync-request-not-required";
         let dir = crate::runstate::run_dir(run_id);
         std::fs::create_dir_all(&dir).unwrap();
@@ -1572,6 +1606,9 @@ mod tests {
 
     #[test]
     fn test_request_interaction_sync_stale_response_then_correct() {
+        let _guard = crate::runstate::isolate_runs_dir_for_test(
+            "test_request_interaction_sync_stale_response_then_correct",
+        );
         let run_id = "test-sync-stale-then-correct";
         let dir = crate::runstate::run_dir(run_id);
         std::fs::create_dir_all(&dir).unwrap();
@@ -1613,6 +1650,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_request_interaction_async_success() {
+        let _guard =
+            crate::runstate::isolate_runs_dir_for_test("test_request_interaction_async_success");
         let run_id = "test-async-request-ok";
         let dir = crate::runstate::run_dir(run_id);
         std::fs::create_dir_all(&dir).unwrap();
@@ -1646,6 +1685,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_request_interaction_async_timeout() {
+        let _guard =
+            crate::runstate::isolate_runs_dir_for_test("test_request_interaction_async_timeout");
         let run_id = "test-async-request-timeout";
         let dir = crate::runstate::run_dir(run_id);
         std::fs::create_dir_all(&dir).unwrap();
@@ -1673,6 +1714,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_request_interaction_async_not_required() {
+        let _guard = crate::runstate::isolate_runs_dir_for_test(
+            "test_request_interaction_async_not_required",
+        );
         let run_id = "test-async-request-not-req";
         let dir = crate::runstate::run_dir(run_id);
         std::fs::create_dir_all(&dir).unwrap();
@@ -1706,6 +1750,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_request_interaction_async_stale_then_correct() {
+        let _guard = crate::runstate::isolate_runs_dir_for_test(
+            "test_request_interaction_async_stale_then_correct",
+        );
         let run_id = "test-async-stale-then-correct";
         let dir = crate::runstate::run_dir(run_id);
         std::fs::create_dir_all(&dir).unwrap();
@@ -1746,6 +1793,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_request_interaction_bg_review_responds() {
+        let _guard = crate::runstate::isolate_runs_dir_for_test(
+            "test_request_interaction_bg_review_responds",
+        );
         let run_id = "test-bg-review-ok";
         let dir = crate::runstate::run_dir(run_id);
         std::fs::create_dir_all(&dir).unwrap();
@@ -1780,6 +1830,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_request_interaction_bg_review_no_meta() {
+        let _guard = crate::runstate::isolate_runs_dir_for_test(
+            "test_request_interaction_bg_review_no_meta",
+        );
         // bg_review should work even when meta.json doesn't exist
         let run_id = "test-bg-review-no-meta";
         let dir = crate::runstate::run_dir(run_id);
@@ -1802,6 +1855,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_request_interaction_bg_review_stale_then_correct() {
+        let _guard = crate::runstate::isolate_runs_dir_for_test(
+            "test_request_interaction_bg_review_stale_then_correct",
+        );
         let run_id = "test-bg-review-stale";
         let dir = crate::runstate::run_dir(run_id);
         std::fs::create_dir_all(&dir).unwrap();
@@ -1829,6 +1885,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_request_tool_approval_background_approved() {
+        let _guard = crate::runstate::isolate_runs_dir_for_test(
+            "test_request_tool_approval_background_approved",
+        );
         let run_id = "test-tool-approval-bg-ok";
         let dir = crate::runstate::run_dir(run_id);
         std::fs::create_dir_all(&dir).unwrap();
@@ -1877,6 +1936,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_request_tool_approval_background_denied() {
+        let _guard = crate::runstate::isolate_runs_dir_for_test(
+            "test_request_tool_approval_background_denied",
+        );
         let run_id = "test-tool-approval-bg-denied";
         let dir = crate::runstate::run_dir(run_id);
         std::fs::create_dir_all(&dir).unwrap();
@@ -1914,6 +1976,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_request_tool_approval_background_session_scope() {
+        let _guard = crate::runstate::isolate_runs_dir_for_test(
+            "test_request_tool_approval_background_session_scope",
+        );
         let run_id = "test-tool-approval-bg-session";
         let dir = crate::runstate::run_dir(run_id);
         std::fs::create_dir_all(&dir).unwrap();
@@ -1965,6 +2030,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_request_tool_approval_background_stale_then_correct() {
+        let _guard = crate::runstate::isolate_runs_dir_for_test(
+            "test_request_tool_approval_background_stale_then_correct",
+        );
         let run_id = "test-tool-approval-bg-stale";
         let dir = crate::runstate::run_dir(run_id);
         std::fs::create_dir_all(&dir).unwrap();
@@ -2006,6 +2074,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_request_tool_approval_background_timeout_auto_denies() {
+        let _guard = crate::runstate::isolate_runs_dir_for_test(
+            "test_request_tool_approval_background_timeout_auto_denies",
+        );
         let run_id = "test-tool-approval-timeout";
         let dir = crate::runstate::run_dir(run_id);
         std::fs::create_dir_all(&dir).unwrap();

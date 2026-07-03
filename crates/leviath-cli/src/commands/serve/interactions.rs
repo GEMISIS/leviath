@@ -160,6 +160,8 @@ mod tests {
 
     #[tokio::test]
     async fn get_interaction_no_pending_returns_404() {
+        let _guard =
+            crate::runstate::isolate_runs_dir_for_test("get_interaction_no_pending_returns_404");
         let run_id = unique_run_id("get-int-none");
         let meta = make_run(&run_id);
         create_run(&meta).unwrap();
@@ -177,6 +179,8 @@ mod tests {
 
     #[tokio::test]
     async fn get_interaction_with_pending_returns_ok() {
+        let _guard =
+            crate::runstate::isolate_runs_dir_for_test("get_interaction_with_pending_returns_ok");
         let run_id = unique_run_id("get-int-ok");
         let meta = make_run(&run_id);
         create_run(&meta).unwrap();
@@ -224,6 +228,9 @@ mod tests {
 
     #[tokio::test]
     async fn submit_interaction_once_scope_returns_accepted() {
+        let _guard = crate::runstate::isolate_runs_dir_for_test(
+            "submit_interaction_once_scope_returns_accepted",
+        );
         let run_id = unique_run_id("submit-once");
         let meta = make_run(&run_id);
         create_run(&meta).unwrap();
@@ -249,6 +256,9 @@ mod tests {
 
     #[tokio::test]
     async fn submit_interaction_session_scope_returns_accepted() {
+        let _guard = crate::runstate::isolate_runs_dir_for_test(
+            "submit_interaction_session_scope_returns_accepted",
+        );
         let run_id = unique_run_id("submit-session");
         let meta = make_run(&run_id);
         create_run(&meta).unwrap();
@@ -273,6 +283,9 @@ mod tests {
 
     #[tokio::test]
     async fn submit_interaction_no_scope_returns_accepted() {
+        let _guard = crate::runstate::isolate_runs_dir_for_test(
+            "submit_interaction_no_scope_returns_accepted",
+        );
         let run_id = unique_run_id("submit-noscope");
         let meta = make_run(&run_id);
         create_run(&meta).unwrap();
@@ -296,6 +309,9 @@ mod tests {
 
     #[tokio::test]
     async fn submit_interaction_write_failure_returns_500() {
+        let _guard = crate::runstate::isolate_runs_dir_for_test(
+            "submit_interaction_write_failure_returns_500",
+        );
         let run_id = unique_run_id("submit-write-fail");
         let meta = make_run(&run_id);
         create_run(&meta).unwrap();
@@ -346,6 +362,8 @@ mod tests {
 
     #[tokio::test]
     async fn send_message_running_agent_appends_to_log() {
+        let _guard =
+            crate::runstate::isolate_runs_dir_for_test("send_message_running_agent_appends_to_log");
         let run_id = unique_run_id("msg-running");
         let mut meta = make_run(&run_id);
         meta.status = RunStatus::Running;
@@ -367,6 +385,9 @@ mod tests {
 
     #[tokio::test]
     async fn send_message_waiting_input_with_pending_writes_response() {
+        let _guard = crate::runstate::isolate_runs_dir_for_test(
+            "send_message_waiting_input_with_pending_writes_response",
+        );
         let run_id = unique_run_id("msg-waiting");
         let mut meta = make_run(&run_id);
         meta.status = RunStatus::WaitingInput;
@@ -402,6 +423,9 @@ mod tests {
 
     #[tokio::test]
     async fn send_message_complete_interactive_with_pending_writes_response() {
+        let _guard = crate::runstate::isolate_runs_dir_for_test(
+            "send_message_complete_interactive_with_pending_writes_response",
+        );
         let run_id = unique_run_id("msg-complete-interactive");
         let mut meta = make_run(&run_id);
         meta.status = RunStatus::CompleteInteractive;
@@ -432,6 +456,9 @@ mod tests {
 
     #[tokio::test]
     async fn send_message_waiting_input_no_pending_appends_to_log() {
+        let _guard = crate::runstate::isolate_runs_dir_for_test(
+            "send_message_waiting_input_no_pending_appends_to_log",
+        );
         let run_id = unique_run_id("msg-waiting-nopend");
         let mut meta = make_run(&run_id);
         meta.status = RunStatus::WaitingInput;
@@ -454,6 +481,9 @@ mod tests {
 
     #[tokio::test]
     async fn send_message_waiting_input_write_failure_returns_500() {
+        let _guard = crate::runstate::isolate_runs_dir_for_test(
+            "send_message_waiting_input_write_failure_returns_500",
+        );
         let run_id = unique_run_id("msg-write-fail");
         let mut meta = make_run(&run_id);
         meta.status = RunStatus::WaitingInput;

@@ -871,6 +871,11 @@ mod tests {
 
     #[tokio::test]
     async fn worker_callbacks_on_complete_with_positive_stages() {
+        // `on_complete` calls `record_stage_log`, which writes to the real
+        // runs dir unless isolated -- caught missing this guard when a
+        // leftover "test-complete-pos" dir turned up in the real
+        // ~/.leviath/runs/ after a full-suite run.
+        let _guard = crate::runstate::isolate_runs_dir_for_test("worker-cb-complete-pos");
         let mut meta = RunMeta::new(
             "test-complete-pos".into(),
             "agent".into(),
@@ -891,6 +896,9 @@ mod tests {
 
     #[tokio::test]
     async fn worker_callbacks_on_transition_does_not_panic() {
+        // See the comment on `worker_callbacks_on_complete_with_positive_stages`
+        // -- `on_transition` also calls `record_stage_log` for real.
+        let _guard = crate::runstate::isolate_runs_dir_for_test("worker-cb-transition");
         let mut meta = RunMeta::new(
             "test-trans".into(),
             "agent".into(),
@@ -910,6 +918,9 @@ mod tests {
 
     #[tokio::test]
     async fn worker_callbacks_on_claude_code_warning_does_not_panic() {
+        // See the comment on `worker_callbacks_on_complete_with_positive_stages`
+        // -- `on_claude_code_warning` also calls `record_stage_log` for real.
+        let _guard = crate::runstate::isolate_runs_dir_for_test("worker-cb-ccw");
         let mut meta = RunMeta::new(
             "test-ccw".into(),
             "agent".into(),
@@ -929,6 +940,9 @@ mod tests {
 
     #[tokio::test]
     async fn worker_callbacks_on_provider_missing_returns_true() {
+        let _guard = crate::runstate::isolate_runs_dir_for_test(
+            "worker_callbacks_on_provider_missing_returns_true",
+        );
         // Use a temp dir for run state
         let run_id = "test-worker-prov-miss";
         let dir = crate::runstate::run_dir(run_id);
@@ -963,6 +977,9 @@ mod tests {
 
     #[tokio::test]
     async fn worker_callbacks_on_stage_enter_updates_meta() {
+        let _guard = crate::runstate::isolate_runs_dir_for_test(
+            "worker_callbacks_on_stage_enter_updates_meta",
+        );
         let run_id = "test-worker-stage-enter";
         let dir = crate::runstate::run_dir(run_id);
         let _ = std::fs::create_dir_all(&dir);
@@ -998,6 +1015,9 @@ mod tests {
 
     #[tokio::test]
     async fn worker_callbacks_on_stage_enter_with_visit_label() {
+        let _guard = crate::runstate::isolate_runs_dir_for_test(
+            "worker_callbacks_on_stage_enter_with_visit_label",
+        );
         let run_id = "test-worker-visit-label";
         let dir = crate::runstate::run_dir(run_id);
         let _ = std::fs::create_dir_all(&dir);
@@ -1028,6 +1048,9 @@ mod tests {
 
     #[tokio::test]
     async fn worker_callbacks_on_stage_error_graph_mode() {
+        let _guard = crate::runstate::isolate_runs_dir_for_test(
+            "worker_callbacks_on_stage_error_graph_mode",
+        );
         let run_id = "test-worker-stage-err-graph";
         let dir = crate::runstate::run_dir(run_id);
         let _ = std::fs::create_dir_all(&dir);
@@ -1059,6 +1082,9 @@ mod tests {
 
     #[tokio::test]
     async fn worker_callbacks_on_stage_error_linear_mode() {
+        let _guard = crate::runstate::isolate_runs_dir_for_test(
+            "worker_callbacks_on_stage_error_linear_mode",
+        );
         let run_id = "test-worker-stage-err-linear";
         let dir = crate::runstate::run_dir(run_id);
         let _ = std::fs::create_dir_all(&dir);
@@ -1092,6 +1118,9 @@ mod tests {
 
     #[tokio::test]
     async fn worker_callbacks_on_stage_result_updates_stages() {
+        let _guard = crate::runstate::isolate_runs_dir_for_test(
+            "worker_callbacks_on_stage_result_updates_stages",
+        );
         let run_id = "test-worker-stage-result";
         let dir = crate::runstate::run_dir(run_id);
         let _ = std::fs::create_dir_all(&dir);
@@ -1161,6 +1190,9 @@ mod tests {
 
     #[tokio::test]
     async fn worker_callbacks_on_stage_result_no_response() {
+        let _guard = crate::runstate::isolate_runs_dir_for_test(
+            "worker_callbacks_on_stage_result_no_response",
+        );
         let run_id = "test-worker-stage-result-none";
         let dir = crate::runstate::run_dir(run_id);
         let _ = std::fs::create_dir_all(&dir);
@@ -1209,6 +1241,9 @@ mod tests {
 
     #[tokio::test]
     async fn worker_callbacks_on_stage_result_empty_content_skips_context_window() {
+        let _guard = crate::runstate::isolate_runs_dir_for_test(
+            "worker_callbacks_on_stage_result_empty_content_skips_context_window",
+        );
         let run_id = "test-worker-stage-result-empty-content";
         let dir = crate::runstate::run_dir(run_id);
         let _ = std::fs::create_dir_all(&dir);
@@ -1252,6 +1287,9 @@ mod tests {
 
     #[tokio::test]
     async fn worker_callbacks_on_stage_result_non_empty_content_adds_to_window() {
+        let _guard = crate::runstate::isolate_runs_dir_for_test(
+            "worker_callbacks_on_stage_result_non_empty_content_adds_to_window",
+        );
         let run_id = "test-worker-stage-result-non-empty";
         let dir = crate::runstate::run_dir(run_id);
         let _ = std::fs::create_dir_all(&dir);
@@ -1293,6 +1331,9 @@ mod tests {
 
     #[tokio::test]
     async fn worker_callbacks_on_post_stage_updates_meta_and_writes_snapshot() {
+        let _guard = crate::runstate::isolate_runs_dir_for_test(
+            "worker_callbacks_on_post_stage_updates_meta_and_writes_snapshot",
+        );
         let run_id = "test-worker-on-post-stage";
         let dir = crate::runstate::run_dir(run_id);
         let _ = std::fs::create_dir_all(&dir);
@@ -1320,6 +1361,9 @@ mod tests {
 
     #[tokio::test]
     async fn worker_callbacks_on_post_stage_without_agent_state() {
+        let _guard = crate::runstate::isolate_runs_dir_for_test(
+            "worker_callbacks_on_post_stage_without_agent_state",
+        );
         let run_id = "test-worker-on-post-stage-no-state";
         let dir = crate::runstate::run_dir(run_id);
         let _ = std::fs::create_dir_all(&dir);
@@ -1348,6 +1392,9 @@ mod tests {
 
     #[tokio::test]
     async fn execute_worker_fails_with_nonexistent_path() {
+        let _guard = crate::runstate::isolate_runs_dir_for_test(
+            "execute_worker_fails_with_nonexistent_path",
+        );
         let run_id = "test-execute-worker-bad-path";
         let dir = crate::runstate::run_dir(run_id);
         let _ = std::fs::create_dir_all(&dir);
@@ -1380,6 +1427,8 @@ mod tests {
 
     #[tokio::test]
     async fn execute_worker_creates_meta_when_missing() {
+        let _guard =
+            crate::runstate::isolate_runs_dir_for_test("execute_worker_creates_meta_when_missing");
         let run_id = "test-execute-worker-no-meta";
         // Do NOT pre-write meta — tests the fallback branch in execute_worker
         let dir = crate::runstate::run_dir(run_id);
@@ -1406,6 +1455,9 @@ mod tests {
 
     #[tokio::test]
     async fn execute_worker_with_valid_manifest_fails_at_inference() {
+        let _guard = crate::runstate::isolate_runs_dir_for_test(
+            "execute_worker_with_valid_manifest_fails_at_inference",
+        );
         // Redirect $HOME so Config::load() can't see a real config/API key —
         // otherwise this would make a real, billed inference call via
         // generate_title(). See CONFIG_PATH_ENV_LOCK/isolate_config_path above.
@@ -1477,6 +1529,9 @@ model = "claude-sonnet-4-6"
 
     #[tokio::test]
     async fn run_worker_inner_manifest_is_directory_returns_read_error() {
+        let _guard = crate::runstate::isolate_runs_dir_for_test(
+            "run_worker_inner_manifest_is_directory_returns_read_error",
+        );
         let pid = std::process::id();
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -1520,6 +1575,9 @@ model = "claude-sonnet-4-6"
 
     #[tokio::test]
     async fn run_worker_inner_invalid_manifest_toml_returns_error() {
+        let _guard = crate::runstate::isolate_runs_dir_for_test(
+            "run_worker_inner_invalid_manifest_toml_returns_error",
+        );
         // Covers the parse_manifest error path (parse_manifest fails on bad TOML).
         // Uses execute_worker (which delegates to run_worker_inner with the real
         // build_provider_registry named function) to avoid a never-called closure
@@ -1555,6 +1613,9 @@ model = "claude-sonnet-4-6"
 
     #[tokio::test]
     async fn run_worker_inner_invalid_config_toml_returns_error() {
+        let _guard = crate::runstate::isolate_runs_dir_for_test(
+            "run_worker_inner_invalid_config_toml_returns_error",
+        );
         // Covers the Config::load()? error path.
         // Uses execute_worker (which calls run_worker_inner with the real
         // build_provider_registry named function) to avoid a never-called closure
@@ -1738,6 +1799,9 @@ model = "claude-sonnet-4-6"
 
     #[tokio::test]
     async fn run_worker_inner_with_failing_provider_propagates_error() {
+        let _guard = crate::runstate::isolate_runs_dir_for_test(
+            "run_worker_inner_with_failing_provider_propagates_error",
+        );
         // Covers the `?` on `run_stage_loop` when run_stage_loop returns Err
         // because the provider always fails.
         let _config_guard = isolate_config_path("worker-failing-provider");
@@ -1803,6 +1867,9 @@ model = "fail-model"
 
     #[tokio::test]
     async fn run_worker_inner_title_enabled_but_no_title_provider_skips_title_print() {
+        let _guard = crate::runstate::isolate_runs_dir_for_test(
+            "run_worker_inner_title_enabled_but_no_title_provider_skips_title_print",
+        );
         // Covers the None branch of `if let Some(ref t) = meta.title` (line 571):
         // config.title.enabled = true, but config.title.provider is set to a name
         // that is NOT registered in the provider registry. generate_title returns
@@ -1880,6 +1947,9 @@ model = "claude-sonnet-4-6"
 
     #[tokio::test]
     async fn run_worker_inner_with_mock_provider_completes_full_round_trip() {
+        let _guard = crate::runstate::isolate_runs_dir_for_test(
+            "run_worker_inner_with_mock_provider_completes_full_round_trip",
+        );
         let _config_guard = isolate_config_path("worker-mock-provider");
         // A malformed key still exercises the `validate_keys()` warning
         // branch without being usable as a real credential -- and since the
@@ -1971,6 +2041,9 @@ bash = "ask"
 
     #[tokio::test]
     async fn execute_worker_with_yolo_false_and_empty_overrides() {
+        let _guard = crate::runstate::isolate_runs_dir_for_test(
+            "execute_worker_with_yolo_false_and_empty_overrides",
+        );
         // Redirect $HOME so Config::load() can't see a real config/API key —
         // otherwise this would make a real, billed inference call via
         // generate_title(). See CONFIG_PATH_ENV_LOCK/isolate_config_path above.
@@ -2071,6 +2144,9 @@ mode = "autonomous"
 
     #[tokio::test]
     async fn worker_callbacks_on_stage_error_graph_mode_with_full_state() {
+        let _guard = crate::runstate::isolate_runs_dir_for_test(
+            "worker_callbacks_on_stage_error_graph_mode_with_full_state",
+        );
         let run_id = "test-worker-stage-err-graph2";
         let dir = crate::runstate::run_dir(run_id);
         let _ = std::fs::create_dir_all(&dir);
@@ -2101,6 +2177,9 @@ mode = "autonomous"
 
     #[tokio::test]
     async fn worker_callbacks_on_provider_missing_empty_stages() {
+        let _guard = crate::runstate::isolate_runs_dir_for_test(
+            "worker_callbacks_on_provider_missing_empty_stages",
+        );
         let run_id = "test-worker-prov-miss-empty";
         let dir = crate::runstate::run_dir(run_id);
         let _ = std::fs::create_dir_all(&dir);
@@ -2127,6 +2206,9 @@ mode = "autonomous"
 
     #[tokio::test]
     async fn worker_callbacks_on_complete_logs_to_last_stage() {
+        let _guard = crate::runstate::isolate_runs_dir_for_test(
+            "worker_callbacks_on_complete_logs_to_last_stage",
+        );
         let run_id = "test-worker-complete-log";
         let dir = crate::runstate::run_dir(run_id);
         let _ = std::fs::create_dir_all(&dir);
@@ -2151,6 +2233,9 @@ mode = "autonomous"
 
     #[tokio::test]
     async fn worker_callbacks_on_stage_enter_out_of_bounds_stage_idx() {
+        let _guard = crate::runstate::isolate_runs_dir_for_test(
+            "worker_callbacks_on_stage_enter_out_of_bounds_stage_idx",
+        );
         let run_id = "test-worker-stage-enter-oob";
         let dir = crate::runstate::run_dir(run_id);
         let _ = std::fs::create_dir_all(&dir);
@@ -2181,6 +2266,9 @@ mode = "autonomous"
 
     #[tokio::test]
     async fn worker_callbacks_on_stage_error_linear_out_of_bounds() {
+        let _guard = crate::runstate::isolate_runs_dir_for_test(
+            "worker_callbacks_on_stage_error_linear_out_of_bounds",
+        );
         let run_id = "test-worker-stage-err-linear-oob";
         let dir = crate::runstate::run_dir(run_id);
         let _ = std::fs::create_dir_all(&dir);
@@ -2211,6 +2299,9 @@ mode = "autonomous"
 
     #[tokio::test]
     async fn worker_interaction_backend_ask_delegates_to_bg_review() {
+        let _guard = crate::runstate::isolate_runs_dir_for_test(
+            "worker_interaction_backend_ask_delegates_to_bg_review",
+        );
         let run_id = "test-worker-backend-ask";
         let dir = crate::runstate::run_dir(run_id);
         std::fs::create_dir_all(&dir).unwrap();
@@ -2238,6 +2329,9 @@ mode = "autonomous"
 
     #[test]
     fn worker_interaction_backend_log_writes_to_stage_log() {
+        let _guard = crate::runstate::isolate_runs_dir_for_test(
+            "worker_interaction_backend_log_writes_to_stage_log",
+        );
         let run_id = "test-worker-backend-log";
         let dir = crate::runstate::run_dir(run_id);
         std::fs::create_dir_all(&dir).unwrap();
@@ -2257,6 +2351,9 @@ mode = "autonomous"
 
     #[test]
     fn worker_interaction_backend_on_review_document_persists_artifact_and_output() {
+        let _guard = crate::runstate::isolate_runs_dir_for_test(
+            "worker_interaction_backend_on_review_document_persists_artifact_and_output",
+        );
         let run_id = "test-worker-backend-review-doc";
         let dir = crate::runstate::run_dir(run_id);
         std::fs::create_dir_all(&dir).unwrap();
@@ -2325,6 +2422,9 @@ mode = "autonomous"
 
     #[tokio::test]
     async fn dispatch_tool_calls_deny_policy_returns_denied_message() {
+        let _guard = crate::runstate::isolate_runs_dir_for_test(
+            "dispatch_tool_calls_deny_policy_returns_denied_message",
+        );
         let run_id = "test-dispatch-deny";
         let dir = crate::runstate::run_dir(run_id);
         std::fs::create_dir_all(&dir).unwrap();
@@ -2350,6 +2450,9 @@ mode = "autonomous"
 
     #[tokio::test]
     async fn dispatch_tool_calls_allow_builtin_executes_and_logs() {
+        let _guard = crate::runstate::isolate_runs_dir_for_test(
+            "dispatch_tool_calls_allow_builtin_executes_and_logs",
+        );
         let run_id = "test-dispatch-allow-builtin";
         let dir = crate::runstate::run_dir(run_id);
         std::fs::create_dir_all(&dir).unwrap();
@@ -2379,6 +2482,9 @@ mode = "autonomous"
 
     #[tokio::test]
     async fn dispatch_tool_calls_result_truncated_when_long() {
+        let _guard = crate::runstate::isolate_runs_dir_for_test(
+            "dispatch_tool_calls_result_truncated_when_long",
+        );
         let run_id = "test-dispatch-truncate";
         let dir = crate::runstate::run_dir(run_id);
         std::fs::create_dir_all(&dir).unwrap();
@@ -2425,6 +2531,9 @@ mode = "autonomous"
 
     #[tokio::test]
     async fn dispatch_tool_calls_session_allow_short_circuits_policy_resolution() {
+        let _guard = crate::runstate::isolate_runs_dir_for_test(
+            "dispatch_tool_calls_session_allow_short_circuits_policy_resolution",
+        );
         let run_id = "test-dispatch-session-allow";
         let dir = crate::runstate::run_dir(run_id);
         std::fs::create_dir_all(&dir).unwrap();
@@ -2456,6 +2565,9 @@ mode = "autonomous"
 
     #[tokio::test]
     async fn dispatch_tool_calls_ask_approved_executes_tool() {
+        let _guard = crate::runstate::isolate_runs_dir_for_test(
+            "dispatch_tool_calls_ask_approved_executes_tool",
+        );
         let run_id = "test-dispatch-ask-approved";
         let dir = crate::runstate::run_dir(run_id);
         std::fs::create_dir_all(&dir).unwrap();
@@ -2502,6 +2614,9 @@ mode = "autonomous"
 
     #[tokio::test]
     async fn dispatch_tool_calls_ask_approved_mcp_tool_returns_error_text() {
+        let _guard = crate::runstate::isolate_runs_dir_for_test(
+            "dispatch_tool_calls_ask_approved_mcp_tool_returns_error_text",
+        );
         // Not a builtin name and no MCP server registered -> the MCP
         // execute() path returns Err, exercising the `Err(e)` arm of the
         // Ask-branch's MCP dispatch (as opposed to the builtin-execution arm
@@ -2546,6 +2661,9 @@ mode = "autonomous"
 
     #[tokio::test]
     async fn dispatch_tool_calls_allow_mcp_tool_returns_error_text() {
+        let _guard = crate::runstate::isolate_runs_dir_for_test(
+            "dispatch_tool_calls_allow_mcp_tool_returns_error_text",
+        );
         // Same as above but via the Allow branch's MCP dispatch (lines
         // distinct from the Ask branch's identical match).
         let run_id = "test-dispatch-allow-mcp";
@@ -2568,6 +2686,9 @@ mode = "autonomous"
 
     #[tokio::test]
     async fn dispatch_tool_calls_ask_approved_long_result_is_truncated_in_log() {
+        let _guard = crate::runstate::isolate_runs_dir_for_test(
+            "dispatch_tool_calls_ask_approved_long_result_is_truncated_in_log",
+        );
         // The Ask branch's own truncation computation (distinct from the
         // Allow branch's, covered by `dispatch_tool_calls_result_truncated_when_long`)
         // had no test driving a long result through an Ask-approved call.
@@ -2632,6 +2753,9 @@ mode = "autonomous"
 
     #[tokio::test]
     async fn dispatch_tool_calls_ask_denied_returns_declined_message() {
+        let _guard = crate::runstate::isolate_runs_dir_for_test(
+            "dispatch_tool_calls_ask_denied_returns_declined_message",
+        );
         let run_id = "test-dispatch-ask-denied";
         let dir = crate::runstate::run_dir(run_id);
         std::fs::create_dir_all(&dir).unwrap();
@@ -2677,6 +2801,9 @@ mode = "autonomous"
 
     #[tokio::test]
     async fn dispatch_tool_calls_dynamic_interaction_short_circuits() {
+        let _guard = crate::runstate::isolate_runs_dir_for_test(
+            "dispatch_tool_calls_dynamic_interaction_short_circuits",
+        );
         let run_id = "test-dispatch-dynamic-interaction";
         let dir = crate::runstate::run_dir(run_id);
         std::fs::create_dir_all(&dir).unwrap();
@@ -2713,6 +2840,9 @@ mode = "autonomous"
 
     #[tokio::test]
     async fn dispatch_tool_calls_multiple_calls_preserve_order() {
+        let _guard = crate::runstate::isolate_runs_dir_for_test(
+            "dispatch_tool_calls_multiple_calls_preserve_order",
+        );
         let run_id = "test-dispatch-multi";
         let dir = crate::runstate::run_dir(run_id);
         std::fs::create_dir_all(&dir).unwrap();
@@ -2850,6 +2980,9 @@ for line in sys.stdin:
 
     #[tokio::test]
     async fn dispatch_tool_calls_allow_mcp_ok_success_returns_text() {
+        let _guard = crate::runstate::isolate_runs_dir_for_test(
+            "dispatch_tool_calls_allow_mcp_ok_success_returns_text",
+        );
         // Covers line 163: `Ok(r) if r.success => r.text`
         let run_id = "test-dispatch-allow-mcp-ok-success";
         let dir = crate::runstate::run_dir(run_id);
@@ -2873,6 +3006,9 @@ for line in sys.stdin:
 
     #[tokio::test]
     async fn dispatch_tool_calls_allow_mcp_ok_error_result_returns_error_prefix() {
+        let _guard = crate::runstate::isolate_runs_dir_for_test(
+            "dispatch_tool_calls_allow_mcp_ok_error_result_returns_error_prefix",
+        );
         // Covers line 164: `Ok(r) => format!("[error] {}", r.text)` (isError: true)
         let run_id = "test-dispatch-allow-mcp-ok-error-result";
         let dir = crate::runstate::run_dir(run_id);
@@ -2899,6 +3035,9 @@ for line in sys.stdin:
 
     #[tokio::test]
     async fn dispatch_tool_calls_ask_approved_mcp_ok_success_returns_text() {
+        let _guard = crate::runstate::isolate_runs_dir_for_test(
+            "dispatch_tool_calls_ask_approved_mcp_ok_success_returns_text",
+        );
         // Covers line 132: `Ok(r) if r.success => r.text` in the Ask branch
         let run_id = "test-dispatch-ask-mcp-ok-success";
         let dir = crate::runstate::run_dir(run_id);
@@ -2938,6 +3077,9 @@ for line in sys.stdin:
 
     #[tokio::test]
     async fn dispatch_tool_calls_ask_approved_mcp_ok_error_result_returns_error_prefix() {
+        let _guard = crate::runstate::isolate_runs_dir_for_test(
+            "dispatch_tool_calls_ask_approved_mcp_ok_error_result_returns_error_prefix",
+        );
         // Covers line 133: `Ok(r) => format!("[error] {}", r.text)` in the Ask branch
         let run_id = "test-dispatch-ask-mcp-ok-error-result";
         let dir = crate::runstate::run_dir(run_id);

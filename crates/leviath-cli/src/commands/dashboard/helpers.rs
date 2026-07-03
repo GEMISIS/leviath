@@ -604,6 +604,9 @@ mod tests {
 
     #[test]
     fn test_kill_write_cancelled_updates_existing_meta() {
+        let _guard = crate::runstate::isolate_runs_dir_for_test(
+            "test_kill_write_cancelled_updates_existing_meta",
+        );
         let run_id = "test-kill-write-cancelled";
         let meta = runstate::RunMeta::new(
             run_id.to_string(),

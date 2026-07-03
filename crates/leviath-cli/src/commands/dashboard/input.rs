@@ -1227,6 +1227,9 @@ mod tests {
 
     #[test]
     fn cancel_from_list_waiting_agent_clears_interaction() {
+        let _guard = crate::runstate::isolate_runs_dir_for_test(
+            "cancel_from_list_waiting_agent_clears_interaction",
+        );
         let run_id = "test-cancel-list-waiting-clears";
         std::fs::create_dir_all(crate::runstate::run_dir(run_id)).unwrap();
         let req = crate::interaction::InteractionRequest::free_text("q1", "?", "main", true);
@@ -1399,6 +1402,9 @@ mod tests {
 
     #[test]
     fn kill_from_detail_waiting_agent_clears_interaction() {
+        let _guard = crate::runstate::isolate_runs_dir_for_test(
+            "kill_from_detail_waiting_agent_clears_interaction",
+        );
         let run_id = "test-kill-waiting-clears";
         std::fs::create_dir_all(crate::runstate::run_dir(run_id)).unwrap();
         let req = crate::interaction::InteractionRequest::free_text("q1", "?", "main", true);
@@ -2114,6 +2120,9 @@ mod tests {
 
     #[test]
     fn yank_with_real_content_reports_success_or_clipboard_unavailable() {
+        let _guard = crate::runstate::isolate_runs_dir_for_test(
+            "yank_with_real_content_reports_success_or_clipboard_unavailable",
+        );
         let run_id = "test-yank-real-content";
         crate::runstate::append_stage_output(run_id, 0, "some real output");
 
@@ -2191,6 +2200,8 @@ mod tests {
 
     #[test]
     fn input_mode_multiple_choice_enter_submits() {
+        let _guard =
+            crate::runstate::isolate_runs_dir_for_test("input_mode_multiple_choice_enter_submits");
         let run_id = format!("test-mc-enter-{}", std::process::id());
         let mut dash = make_test_dashboard();
         let mut agent = make_test_agent(&run_id, AgentDisplayStatus::Waiting);
@@ -2656,6 +2667,9 @@ mod tests {
 
     #[test]
     fn yank_clipboard_unavailable_shows_error_toast() {
+        let _guard = crate::runstate::isolate_runs_dir_for_test(
+            "yank_clipboard_unavailable_shows_error_toast",
+        );
         use crate::runstate;
         let run_id = "test-yank-clipboard-unavailable-x7z9";
         let stage_path = runstate::stage_dir(run_id, 0);

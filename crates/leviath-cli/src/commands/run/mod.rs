@@ -639,6 +639,9 @@ prompt = "Do the thing"
     #[cfg(unix)]
     #[tokio::test]
     async fn execute_background_happy_path_spawns_single_worker() {
+        let _guard = crate::runstate::isolate_runs_dir_for_test(
+            "execute_background_happy_path_spawns_single_worker",
+        );
         let agent_name = "test-execute-bg-happy-single";
         let _cleanup = RunPrefixCleanup(agent_name);
         let temp_dir = std::env::temp_dir().join(agent_name);
@@ -673,6 +676,9 @@ prompt = "Do the thing"
     #[cfg(unix)]
     #[tokio::test]
     async fn execute_background_happy_path_spawns_multiple_workers() {
+        let _guard = crate::runstate::isolate_runs_dir_for_test(
+            "execute_background_happy_path_spawns_multiple_workers",
+        );
         let agent_name = "test-execute-bg-happy-multi";
         let _cleanup = RunPrefixCleanup(agent_name);
         let temp_dir = std::env::temp_dir().join(agent_name);
@@ -706,6 +712,9 @@ prompt = "Do the thing"
 
     #[tokio::test]
     async fn execute_worker_thin_wrapper_delegates_to_worker_module() {
+        let _guard = crate::runstate::isolate_runs_dir_for_test(
+            "execute_worker_thin_wrapper_delegates_to_worker_module",
+        );
         // `execute_worker` (the public re-export) is a one-line delegation to
         // `worker::execute_worker` -- exercised end-to-end (not mocked) by
         // `worker.rs`'s own test suite. This just proves the delegation

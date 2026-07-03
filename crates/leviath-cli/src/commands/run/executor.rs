@@ -1582,6 +1582,9 @@ mod tests {
 
     #[tokio::test]
     async fn interactive_points_stage_ipc_write_failure_propagates_error() {
+        let _guard = crate::runstate::isolate_runs_dir_for_test(
+            "interactive_points_stage_ipc_write_failure_propagates_error",
+        );
         // InteractivePoints with a non-empty points slice and a run_context whose
         // run_dir doesn't exist → write_request fails inside request_interaction_async
         // → Err propagates via the ? at the InteractivePoints match arm.
