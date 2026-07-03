@@ -546,6 +546,40 @@ mod tests {
 
     use crate::test_support::with_tracing;
 
+    /// Shared `assert!`-with-dynamic-message helper for the many tests that
+    /// assert a condition on `io.outputs`/`io.errors` while formatting the
+    /// full `Vec<String>` into the panic message for diagnostics if the
+    /// assertion ever fails. The panic-message formatting is only evaluated
+    /// on failure, which otherwise leaves it permanently uncovered by
+    /// `cargo llvm-cov`. Extracted once here (rather than per call site) and
+    /// exercised below via `#[should_panic]`.
+    fn assert_contains_debug(cond: bool, prefix: &str, value: &[String]) {
+        assert!(cond, "{}: {:?}", prefix, value);
+    }
+
+    #[test]
+    #[should_panic(expected = "Expected max turns message in outputs: [\"nope\"]")]
+    fn assert_contains_debug_panics_when_false() {
+        assert_contains_debug(
+            false,
+            "Expected max turns message in outputs",
+            &["nope".to_string()],
+        );
+    }
+
+    /// Same purpose as [`assert_contains_debug`] above, but for the tests
+    /// that format a single joined `String` (rather than a `Vec<String>`)
+    /// into the panic message.
+    fn assert_contains_display(cond: bool, prefix: &str, value: &str) {
+        assert!(cond, "{}: {}", prefix, value);
+    }
+
+    #[test]
+    #[should_panic(expected = "expected stage output to be recorded, got: nope")]
+    fn assert_contains_display_panics_when_false() {
+        assert_contains_display(false, "expected stage output to be recorded, got", "nope");
+    }
+
     /// A mock provider that returns canned responses for testing.
     struct MockProvider {
         response_content: String,
@@ -760,10 +794,10 @@ mod tests {
         .await
         .unwrap();
 
-        assert!(
+        assert_contains_debug(
             io.outputs.iter().any(|o| o.contains("[Max turns reached]")),
-            "Expected max turns message in outputs: {:?}",
-            io.outputs
+            "Expected max turns message in outputs",
+            &io.outputs,
         );
     }
 
@@ -788,10 +822,10 @@ mod tests {
         .await
         .unwrap();
 
-        assert!(
+        assert_contains_debug(
             io.outputs.iter().any(|o| o.contains("[Session ended]")),
-            "Expected session ended message in outputs: {:?}",
-            io.outputs
+            "Expected session ended message in outputs",
+            &io.outputs,
         );
     }
 
@@ -817,10 +851,10 @@ mod tests {
         .await
         .unwrap();
 
-        assert!(
+        assert_contains_debug(
             io.outputs.iter().any(|o| o.contains("[Session ended]")),
-            "Expected session ended in outputs: {:?}",
-            io.outputs
+            "Expected session ended in outputs",
+            &io.outputs,
         );
     }
 
@@ -856,12 +890,12 @@ mod tests {
         .await
         .unwrap();
 
-        assert!(
+        assert_contains_debug(
             io.outputs
                 .iter()
                 .any(|o| o.contains("Assistant: fallback content")),
-            "Expected fallback response in outputs: {:?}",
-            io.outputs
+            "Expected fallback response in outputs",
+            &io.outputs,
         );
     }
 
@@ -922,8 +956,11 @@ mod tests {
         assert_eq!(meta.prompt_tokens, 10);
         assert_eq!(meta.completion_tokens, 5);
         let output = crate::runstate::tail_stage_output(&run_id, meta.stage_index, 65536);
-        #[rustfmt::skip]
-        assert!(output.contains("Agent reply with tools"), "expected stage output to be recorded, got: {}", output);
+        assert_contains_display(
+            output.contains("Agent reply with tools"),
+            "expected stage output to be recorded, got",
+            &output,
+        );
 
         let _ = std::fs::remove_dir_all(runstate::run_dir(&run_id));
     }
@@ -1041,10 +1078,10 @@ mod tests {
 
         // The streaming path outputs the response content via io
         let all_output: String = io.outputs.join("");
-        assert!(
+        assert_contains_debug(
             all_output.contains("Test response content"),
-            "Expected assistant output in: {:?}",
-            io.outputs
+            "Expected assistant output in",
+            &io.outputs,
         );
     }
 
@@ -1070,10 +1107,7 @@ mod tests {
         .unwrap();
 
         // Token records should have been reported
-        assert!(
-            !io.token_records.is_empty(),
-            "Expected token records to be reported"
-        );
+        assert!(!io.token_records.is_empty());
     }
 
     #[tokio::test]
@@ -1098,10 +1132,10 @@ mod tests {
         .unwrap();
 
         let all_output: String = io.outputs.join("");
-        assert!(
+        assert_contains_debug(
             all_output.contains("Autonomous result"),
-            "Expected response content in outputs: {:?}",
-            io.outputs
+            "Expected response content in outputs",
+            &io.outputs,
         );
     }
 
@@ -1154,10 +1188,10 @@ mod tests {
         .await
         .unwrap();
 
-        assert!(
+        assert_contains_debug(
             io.errors.iter().any(|e| e.contains("Inference error")),
-            "Expected inference error in errors: {:?}",
-            io.errors
+            "Expected inference error in errors",
+            &io.errors,
         );
     }
 
@@ -1186,10 +1220,10 @@ mod tests {
         .unwrap();
 
         let all_output: String = io.outputs.join("");
-        assert!(
+        assert_contains_debug(
             all_output.contains("Points result"),
-            "Expected autonomous output: {:?}",
-            io.outputs
+            "Expected autonomous output",
+            &io.outputs,
         );
     }
 
@@ -1223,10 +1257,10 @@ mod tests {
 
         // Should have gotten output from the tool-path
         let all_output: String = io.outputs.join("");
-        assert!(
+        assert_contains_debug(
             all_output.contains("Tool response"),
-            "Expected tool response in outputs: {:?}",
-            io.outputs
+            "Expected tool response in outputs",
+            &io.outputs,
         );
     }
 
@@ -1251,10 +1285,10 @@ mod tests {
         .await
         .unwrap();
 
-        assert!(
+        assert_contains_debug(
             io.outputs.iter().any(|o| o.contains("[Session ended]")),
-            "Expected session ended message: {:?}",
-            io.outputs
+            "Expected session ended message",
+            &io.outputs,
         );
     }
 
@@ -1305,10 +1339,10 @@ mod tests {
         .unwrap();
 
         // Should have multiple outputs (at least 2: response + session ended)
-        assert!(
+        assert_contains_debug(
             io.outputs.len() >= 2,
-            "Expected at least 2 outputs: {:?}",
-            io.outputs
+            "Expected at least 2 outputs",
+            &io.outputs,
         );
     }
 
@@ -1606,8 +1640,11 @@ mod tests {
             .map(|e| e.content.as_str())
             .collect::<Vec<_>>()
             .join("\n");
-        #[rustfmt::skip]
-        assert!(all_content.contains("please add error handling"), "expected the followup elaboration in context, got: {}", all_content);
+        assert_contains_display(
+            all_content.contains("please add error handling"),
+            "expected the followup elaboration in context, got",
+            &all_content,
+        );
         assert!(all_content.contains("Revise"));
         assert!(all_content.contains("Approve"));
 
@@ -1789,8 +1826,11 @@ mod tests {
             .map(|e| e.content.as_str())
             .collect::<Vec<_>>()
             .join("\n");
-        #[rustfmt::skip]
-        assert!(all_content.contains("please add error handling"), "expected the followup elaboration in context, got: {}", all_content);
+        assert_contains_display(
+            all_content.contains("please add error handling"),
+            "expected the followup elaboration in context, got",
+            &all_content,
+        );
         assert!(all_content.contains("Revise"));
         assert!(all_content.contains("Approve"));
     }
@@ -2136,10 +2176,10 @@ mod tests {
         .unwrap();
 
         let all_output = io.outputs.join("");
-        assert!(
+        assert_contains_debug(
             all_output.contains("Tool result response"),
-            "Expected tool response in: {:?}",
-            io.outputs
+            "Expected tool response in",
+            &io.outputs,
         );
     }
 
@@ -2212,10 +2252,7 @@ mod tests {
         )
         .await;
 
-        assert!(
-            result.is_ok(),
-            "expected Ok from foreground interactive stage"
-        );
+        assert!(result.is_ok());
     }
 
     #[tokio::test]
@@ -2271,10 +2308,10 @@ mod tests {
         .await
         .unwrap();
 
-        assert!(
+        assert_contains_debug(
             io.outputs.iter().any(|o| o.contains("[Max turns reached]")),
-            "Expected max turns message: {:?}",
-            io.outputs
+            "Expected max turns message",
+            &io.outputs,
         );
     }
 
@@ -2327,7 +2364,7 @@ mod tests {
         )
         .await;
 
-        assert!(result.is_err(), "Expected error but got Ok");
+        assert!(result.is_err());
     }
 
     // ─── Coverage: both-fail inference (lines 128:42, 128:84) ───────────────
@@ -2422,7 +2459,7 @@ mod tests {
         )
         .await;
 
-        assert!(result.is_err(), "Expected error but got Ok");
+        assert!(result.is_err());
     }
 
     // ─── Coverage: request_interaction_async error (lines 168:80) ────────────
@@ -2490,7 +2527,7 @@ mod tests {
         let _ = std::fs::set_permissions(&dir, perms2);
         let _ = std::fs::remove_dir_all(&dir);
 
-        assert!(result.is_err(), "Expected error from read-only run dir");
+        assert!(result.is_err());
     }
 
     #[cfg(unix)]
@@ -2549,7 +2586,7 @@ mod tests {
         let _ = std::fs::set_permissions(&dir, perms2);
         let _ = std::fs::remove_dir_all(&dir);
 
-        assert!(result.is_err(), "Expected error from read-only run dir");
+        assert!(result.is_err());
     }
 
     // ─── Coverage: interactive_points None run_context (lines 374:21, 388:17) ─
@@ -2872,10 +2909,7 @@ mod tests {
         .await;
 
         // Err is silently dropped by `if let Ok(resp)` so function returns Ok
-        assert!(
-            result.is_ok(),
-            "Expected Ok since final-segment Err is silently dropped"
-        );
+        assert!(result.is_ok());
     }
 
     // ─── Coverage: spawn_interaction_responder exhaustion (lines 1382:25, 1384:17, 1386:9) ─
@@ -2949,10 +2983,7 @@ mod tests {
         // The responder should have broken out of its loop when p2 arrived
         let responder_result =
             tokio::time::timeout(std::time::Duration::from_secs(5), responder).await;
-        assert!(
-            responder_result.is_ok(),
-            "Responder should have exited (else {{ break }}) before timeout"
-        );
+        assert!(responder_result.is_ok());
 
         let _ = std::fs::remove_dir_all(runstate::run_dir(&run_id));
     }
@@ -3093,10 +3124,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
 
         // The error from write_request (read-only dir) propagates via `?` at line 474
-        assert!(
-            result.is_err(),
-            "Expected Err from followup write_request failure"
-        );
+        assert!(result.is_err());
     }
 
     // ─── Coverage: empty inference content with run context (lines 374:21, 513:13) ─
@@ -3162,10 +3190,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(runstate::run_dir(&run_id));
 
         // When content is empty, io.on_output was NOT called
-        assert!(
-            io.outputs.is_empty(),
-            "expected no output with empty content"
-        );
+        assert!(io.outputs.is_empty());
     }
 
     // ─── Coverage: first request_interaction_async fails (line 421:96) ─────────
@@ -3238,10 +3263,7 @@ mod tests {
         });
         let _ = std::fs::remove_dir_all(&dir);
 
-        assert!(
-            result.is_err(),
-            "Expected Err from write_request failure on read-only dir"
-        );
+        assert!(result.is_err());
     }
 
     // ─── Coverage: followup non-empty text + no ContextWindow (line 485:17) ────

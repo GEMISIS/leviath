@@ -268,6 +268,25 @@ mod tests {
         }
     }
 
+    /// Shared `assert!`-with-dynamic-message helper: several `launch_editor`
+    /// success tests assert `result.is_ok()` while formatting the actual
+    /// result into the panic message for diagnostics if the assertion ever
+    /// fails. The panic-message formatting is only evaluated on failure,
+    /// which otherwise leaves it permanently uncovered by `cargo llvm-cov`.
+    /// Extracted once here (rather than per call site) and exercised below
+    /// via `#[should_panic]`.
+    #[cfg(unix)]
+    fn assert_launch_ok(result: &anyhow::Result<()>) {
+        assert!(result.is_ok(), "expected Ok, got {:?}", result);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[should_panic(expected = "expected Ok, got Err(boom)")]
+    fn assert_launch_ok_panics_when_err() {
+        assert_launch_ok(&Err(anyhow::anyhow!("boom")));
+    }
+
     #[test]
     fn resolve_task_with_literal_string() {
         let result = resolve_task(&Some("do something".to_string()), "test", None);
@@ -350,16 +369,12 @@ mod tests {
         let config = Config::default();
         let registry = build_provider_registry(&config);
         // Should always have ollama and claude-code registered
-        assert!(registry.has("ollama"), "ollama should be registered");
-        #[rustfmt::skip]
-        assert!(registry.has("claude-code"), "claude-code should be registered");
+        assert!(registry.has("ollama"));
+        assert!(registry.has("claude-code"));
         // Should NOT have anthropic, openai, google without keys
-        #[rustfmt::skip]
-        assert!(!registry.has("anthropic"), "anthropic should not be registered without key");
-        #[rustfmt::skip]
-        assert!(!registry.has("openai"), "openai should not be registered without key");
-        #[rustfmt::skip]
-        assert!(!registry.has("google"), "google should not be registered without key");
+        assert!(!registry.has("anthropic"));
+        assert!(!registry.has("openai"));
+        assert!(!registry.has("google"));
     }
 
     #[test]
@@ -372,7 +387,7 @@ mod tests {
             ..Config::default()
         };
         let registry = build_provider_registry(&config);
-        assert!(registry.has("anthropic"), "anthropic should be registered");
+        assert!(registry.has("anthropic"));
     }
 
     #[test]
@@ -385,7 +400,7 @@ mod tests {
             ..Config::default()
         };
         let registry = build_provider_registry(&config);
-        assert!(registry.has("openai"), "openai should be registered");
+        assert!(registry.has("openai"));
     }
 
     #[test]
@@ -398,7 +413,7 @@ mod tests {
             ..Config::default()
         };
         let registry = build_provider_registry(&config);
-        assert!(registry.has("google"), "google should be registered");
+        assert!(registry.has("google"));
     }
 
     #[test]
@@ -408,8 +423,7 @@ mod tests {
             ..Config::default()
         };
         let registry = build_provider_registry(&config);
-        #[rustfmt::skip]
-        assert!(registry.has("openrouter"), "openrouter should be registered");
+        assert!(registry.has("openrouter"));
     }
 
     #[test]
@@ -419,7 +433,7 @@ mod tests {
             ..Config::default()
         };
         let registry = build_provider_registry(&config);
-        assert!(registry.has("ollama"), "ollama should be registered");
+        assert!(registry.has("ollama"));
     }
 
     // ─── build_provider_registry with all keys ──────────────────────────
@@ -665,7 +679,7 @@ mod tests {
         std::fs::write(&file, "content").unwrap();
 
         let result = launch_editor(&file);
-        assert!(result.is_ok(), "expected Ok, got {:?}", result);
+        assert_launch_ok(&result);
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -687,7 +701,7 @@ mod tests {
         std::fs::write(&file, "content").unwrap();
 
         let result = launch_editor(&file);
-        assert!(result.is_ok(), "expected Ok, got {:?}", result);
+        assert_launch_ok(&result);
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -710,7 +724,7 @@ mod tests {
         // A non-zero-but-present exit code is treated as the user having
         // closed the editor -- not an error.
         let result = launch_editor(&file);
-        assert!(result.is_ok(), "expected Ok, got {:?}", result);
+        assert_launch_ok(&result);
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -735,7 +749,7 @@ mod tests {
         std::fs::write(&file, "content").unwrap();
 
         let result = launch_editor(&file);
-        assert!(result.is_ok(), "expected Ok, got {:?}", result);
+        assert_launch_ok(&result);
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -760,7 +774,7 @@ mod tests {
         std::fs::write(&file, "content").unwrap();
 
         let result = launch_editor(&file);
-        assert!(result.is_ok(), "expected Ok, got {:?}", result);
+        assert_launch_ok(&result);
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -837,7 +851,7 @@ mod tests {
         std::fs::write(&file, "content").unwrap();
 
         let result = launch_editor(&file);
-        assert!(result.is_ok(), "expected Ok, got {:?}", result);
+        assert_launch_ok(&result);
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1014,7 +1028,7 @@ mod tests {
     #[test]
     fn build_task_template_with_empty_description_skips_desc_line() {
         let t = build_task_template("agent", Some(""));
-        assert!(!t.contains("# \n"), "empty desc should not add a line");
+        assert!(!t.contains("# \n"));
         assert!(t.contains("# Task for agent: agent\n"));
     }
 

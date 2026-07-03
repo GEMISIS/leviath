@@ -508,6 +508,40 @@ mod tests {
 
     use crate::test_support::with_tracing;
 
+    /// Shared `assert!`-with-dynamic-message helper: several `apply_compact_transform`
+    /// tests assert a condition on `all_content` while formatting `all_content`
+    /// itself into the panic message for diagnostics if the assertion ever
+    /// fails. The panic-message formatting is only evaluated on failure, which
+    /// otherwise leaves it permanently uncovered by `cargo llvm-cov`. Extracted
+    /// once here (rather than per call site) and exercised below via
+    /// `#[should_panic]`.
+    fn assert_contains_display(cond: bool, prefix: &str, value: &str) {
+        assert!(cond, "{}: {}", prefix, value);
+    }
+
+    #[test]
+    #[should_panic(expected = "Expected summary in conversation: nope")]
+    fn assert_contains_display_panics_when_false() {
+        assert_contains_display(false, "Expected summary in conversation", "nope");
+    }
+
+    /// Same purpose as [`assert_contains_display`] above, but for the one
+    /// `prompt_llm_transition` fallback test whose message doesn't use a
+    /// `<prefix>: <value>` shape (`"Expected b or c, got {}"`).
+    fn assert_edge_is_b_or_c(target: &str) {
+        assert!(
+            target == "b" || target == "c",
+            "Expected b or c, got {}",
+            target
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "Expected b or c, got d")]
+    fn assert_edge_is_b_or_c_panics_when_neither() {
+        assert_edge_is_b_or_c("d");
+    }
+
     /// Helper to create a minimal blueprint for testing.
     fn make_blueprint(stages: Vec<Stage>) -> Blueprint {
         let layout = ContextLayout::new(
@@ -993,7 +1027,7 @@ mod tests {
 
         let window = engine.world().get::<ContextWindow>(entity).unwrap();
         let conv = window.get_region("conversation").unwrap();
-        assert!(conv.content.is_empty(), "conversation should be cleared");
+        assert!(conv.content.is_empty());
     }
 
     // ─── is_graph_mode additional ───────────────────────────────────────────
@@ -1480,8 +1514,7 @@ mod tests {
         )
         .await;
 
-        #[rustfmt::skip]
-        assert!(result.is_none(), "allow_complete stage must be able to terminate via DONE instead of being forced down its only edge");
+        assert!(result.is_none());
     }
 
     #[tokio::test]
@@ -1551,10 +1584,7 @@ mod tests {
         let result =
             prompt_llm_transition(stage_ref, &edges, &mut engine, entity, "mock", "test").await;
 
-        assert!(
-            result.is_none(),
-            "custom-prompt stage with allow_complete must still honor DONE"
-        );
+        assert!(result.is_none());
     }
 
     #[tokio::test]
@@ -1849,15 +1879,14 @@ mod tests {
 
         let window = engine.world().get::<ContextWindow>(entity).unwrap();
         let conv = window.get_region("conversation").unwrap();
-        #[rustfmt::skip]
-        assert!(conv.content.iter().any(|e| e.content.contains("concise summary of the conversation")), "summary should have been written into the conversation region");
-        assert!(
-            !conv
-                .content
-                .iter()
-                .any(|e| e.content.contains("raw conversation content")),
-            "original content should have been cleared before the summary was added"
-        );
+        assert!(conv
+            .content
+            .iter()
+            .any(|e| e.content.contains("concise summary of the conversation")));
+        assert!(!conv
+            .content
+            .iter()
+            .any(|e| e.content.contains("raw conversation content")));
     }
 
     // ─── apply_compact_transform: provider infer() errors ────────────────────
@@ -1964,7 +1993,7 @@ mod tests {
         let result =
             prompt_llm_transition(stage, &edges, &mut engine, entity, "mock", "test").await;
 
-        assert!(result.is_some(), "Expected a transition edge");
+        assert!(result.is_some());
         assert_eq!(result.unwrap().target, "b");
     }
 
@@ -2180,7 +2209,7 @@ mod tests {
             prompt_llm_transition(stage, &edges, &mut engine, entity, "failing", "test-model")
                 .await;
 
-        assert!(result.is_none(), "provider infer() error should yield None");
+        assert!(result.is_none());
     }
 
     // ─── prompt_llm_transition: empty edges slice ────────────────────────────
@@ -2199,7 +2228,7 @@ mod tests {
         let result =
             prompt_llm_transition(stage, &edges, &mut engine, entity, "mock", "test-model").await;
 
-        assert!(result.is_none(), "empty edges should fall back to None");
+        assert!(result.is_none());
     }
 
     #[tokio::test]
@@ -2304,10 +2333,10 @@ mod tests {
         let window = engine.world().get::<ContextWindow>(entity).unwrap();
         let conv = window.get_region("conversation").unwrap();
         let all_content: String = conv.content.iter().map(|e| e.content.as_str()).collect();
-        assert!(
+        assert_contains_display(
             all_content.contains("Summary of context"),
-            "Expected summary in conversation: {}",
-            all_content
+            "Expected summary in conversation",
+            &all_content,
         );
     }
 
@@ -2344,10 +2373,10 @@ mod tests {
         let window = engine.world().get::<ContextWindow>(entity).unwrap();
         let conv = window.get_region("conversation").unwrap();
         let all_content: String = conv.content.iter().map(|e| e.content.as_str()).collect();
-        assert!(
+        assert_contains_display(
             all_content.contains("Compact summary"),
-            "Expected compact summary: {}",
-            all_content
+            "Expected compact summary",
+            &all_content,
         );
     }
 
@@ -2386,10 +2415,10 @@ mod tests {
         let window = engine.world().get::<ContextWindow>(entity).unwrap();
         let conv = window.get_region("conversation").unwrap();
         let all_content: String = conv.content.iter().map(|e| e.content.as_str()).collect();
-        assert!(
+        assert_contains_display(
             all_content.contains("Compacted context"),
-            "Expected compacted content: {}",
-            all_content
+            "Expected compacted content",
+            &all_content,
         );
     }
 
@@ -2425,10 +2454,7 @@ mod tests {
         // Content should be unchanged
         let window = engine.world().get::<ContextWindow>(entity).unwrap();
         let conv = window.get_region("conversation").unwrap();
-        assert!(
-            conv.content.iter().any(|e| e.content == "original content"),
-            "Content should be preserved on direct first-visit"
-        );
+        assert!(conv.content.iter().any(|e| e.content == "original content"));
     }
 
     #[tokio::test]
@@ -2467,10 +2493,10 @@ mod tests {
         let window = engine.world().get::<ContextWindow>(entity).unwrap();
         let conv = window.get_region("conversation").unwrap();
         let all_content: String = conv.content.iter().map(|e| e.content.as_str()).collect();
-        assert!(
+        assert_contains_display(
             all_content.contains("Custom compact result"),
-            "Expected custom compact result: {}",
-            all_content
+            "Expected custom compact result",
+            &all_content,
         );
     }
 
@@ -2510,12 +2536,10 @@ mod tests {
 
         let window = engine.world().get::<ContextWindow>(entity).unwrap();
         let conv = window.get_region("conversation").unwrap();
-        assert!(
-            conv.content
-                .iter()
-                .any(|e| e.content == "preserved content"),
-            "Content should be preserved"
-        );
+        assert!(conv
+            .content
+            .iter()
+            .any(|e| e.content == "preserved content"));
     }
 
     // ─── resolve_transition: multiple LlmChoice edges, provider returns no match
@@ -2574,14 +2598,10 @@ mod tests {
         })
         .await;
 
-        assert!(result.is_some(), "Expected a fallback edge");
+        assert!(result.is_some());
         let (edge, _) = result.unwrap();
         // Must be one of the valid targets
-        assert!(
-            edge.target == "b" || edge.target == "c",
-            "Expected b or c, got {}",
-            edge.target
-        );
+        assert_edge_is_b_or_c(&edge.target);
     }
 
     // ─── line-89: Error result but no Error edge → if-let None branch ────────
