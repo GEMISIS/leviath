@@ -622,28 +622,47 @@ mod tests {
 
         // Second call: tokens unchanged (prev = 5000, current = 5000), no event.
         poll_once(&state, &mut poll, &client, &[meta]);
-        // Drain any events: we expect none for this run. Use a direct loop with
-        // an explicit else clause so LLVM covers the "event present" path too.
-        // We send a Tokens event first to ensure the loop body executes at least
-        // once, exercising both the matching and non-matching branches.
+
+        // Inject events to exercise all branches of the drain loop below:
+        // 1. A non-ContextUpdate (Tokens) so the outer `if let ContextUpdate` fails
+        //    → covers the implicit else-path of the if-let (line 648 col 13).
+        // 2. A ContextUpdate for a different run → outer matches, inner eid!=run_id.
+        // 3. A ContextUpdate for our run → outer matches, inner eid==run_id.
+        // We count only #3 to verify poll_once emitted 0 for run_id (total = 1).
         let _ = state.event_tx.send(ServerEvent::Tokens {
-            agent_id: "other".to_string(),
-            run_id: "other-run".to_string(),
-            prompt_tokens: 1,
-            completion_tokens: 1,
+            agent_id: "noise-agent".to_string(),
+            run_id: "noise-run".to_string(),
+            prompt_tokens: 0,
+            completion_tokens: 0,
         });
-        let mut got_context_update = false;
+        let _ = state.event_tx.send(ServerEvent::ContextUpdate {
+            agent_id: "other-agent".to_string(),
+            run_id: "other-run-ctx".to_string(),
+            total_tokens: 100,
+            max_tokens: 200000,
+        });
+        let _ = state.event_tx.send(ServerEvent::ContextUpdate {
+            agent_id: "our-agent".to_string(),
+            run_id: run_id.clone(),
+            total_tokens: 9999,
+            max_tokens: 200000,
+        });
+        let mut ctx_updates_for_run = 0u32;
         while let Ok(ev) = rx.try_recv() {
-            if matches!(&ev, ServerEvent::ContextUpdate { run_id: eid, .. } if eid == &run_id) {
-                got_context_update = true;
+            if let ServerEvent::ContextUpdate { run_id: eid, .. } = &ev {
+                if eid == &run_id {
+                    ctx_updates_for_run += 1;
+                }
             }
         }
+        // poll_once emitted 0 ContextUpdates for run_id (unchanged tokens);
+        // we manually injected exactly 1. Total must be exactly 1.
+        assert_eq!(
+            ctx_updates_for_run, 1,
+            "expected exactly 1 manually-injected ContextUpdate (poll_once must not emit any)"
+        );
 
         let _ = std::fs::remove_dir_all(crate::runstate::run_dir(&run_id));
-        assert!(
-            !got_context_update,
-            "poll_once should not emit ContextUpdate when token count is unchanged"
-        );
     }
 
     #[test]
@@ -709,15 +728,13 @@ mod tests {
         let (tx, rx) = tokio::sync::oneshot::channel();
 
         tokio::spawn(async move {
-            if let Ok((mut socket, _)) = listener.accept().await {
-                let mut buf = vec![0u8; 8192];
-                let n = socket.read(&mut buf).await.unwrap_or(0);
-                buf.truncate(n);
-                let resp = b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
-                let _ = socket.write_all(resp).await;
-                let _ = socket.shutdown().await;
-                let _ = tx.send(buf);
-            }
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut buf = vec![0u8; 8192];
+            let n = socket.read(&mut buf).await.unwrap_or(0);
+            buf.truncate(n);
+            let resp = b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+            let _ = socket.write_all(resp).await;
+            let _ = tx.send(buf);
         });
 
         (format!("http://{}", addr), rx)
@@ -977,13 +994,17 @@ mod tests {
 
         // Transition to Cancelled status: this is not Complete or Error, so the
         // outer `if !was_terminal && (Complete || Error)` condition is false.
-        // But this exercises the Cancelled arm of the was_terminal matches! so
-        // the second poll_once sees was_terminal = true.
+        // After this call last_status["run-cancelled-status"] = ("Cancelled", ...).
         meta.status = RunStatus::Cancelled;
-        meta.touch();
+        meta.iteration = 2;
         poll_once(&state, &mut poll, &client, std::slice::from_ref(&meta));
 
-        // Now last_status has "Cancelled"; a second call should see was_terminal=true.
+        // Now last_status has "Cancelled". Bump iteration so the key is different
+        // (forcing the change-detection block to run) and call poll_once again.
+        // This exercises the Cancelled arm of was_terminal at line 102 — the
+        // PREVIOUS status ("Cancelled") is read and matched against "Complete" |
+        // "Error" | "Cancelled", returning true.
+        meta.iteration = 3;
         poll_once(&state, &mut poll, &client, std::slice::from_ref(&meta));
         // No assertion needed — the point is to exercise the Cancelled arm.
     }

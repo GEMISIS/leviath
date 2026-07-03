@@ -75,6 +75,26 @@ impl SpawnAgentIo for RealSpawnAgentIo {
     }
 }
 
+/// Configures the command to run in its own process group on Unix non-test builds.
+///
+/// `setsid()` only ever executes inside the forked child immediately before `exec`,
+/// so it can never be observed by the parent test process's coverage instrumentation.
+/// Placing the cfg boundary here (at the function level) rather than inside
+/// `spawn_agent_with` keeps LLVM from generating unreachable coverage regions.
+#[cfg(all(unix, not(test)))]
+fn set_process_group(cmd: &mut std::process::Command) {
+    use std::os::unix::process::CommandExt;
+    unsafe {
+        cmd.pre_exec(|| {
+            libc::setsid();
+            Ok(())
+        });
+    }
+}
+
+#[cfg(not(all(unix, not(test))))]
+fn set_process_group(_cmd: &mut std::process::Command) {}
+
 pub(super) async fn spawn_agent(
     State(state): State<AppState>,
     Json(body): Json<SpawnAgentReq>,
@@ -200,18 +220,9 @@ async fn spawn_agent_with(
 
     // `setsid()` only ever runs inside the forked child right before `exec`,
     // so it can never be observed by the parent test process's coverage
-    // instrumentation. Excluded from test builds so no zero-count closure
-    // regions appear in LLVM coverage output.
-    #[cfg(all(unix, not(test)))]
-    {
-        use std::os::unix::process::CommandExt;
-        unsafe {
-            cmd.pre_exec(|| {
-                libc::setsid();
-                Ok(())
-            });
-        }
-    }
+    // instrumentation. Delegated to an out-of-line function so the cfg boundary
+    // is at the function level rather than a block, keeping LLVM gap-free.
+    set_process_group(&mut cmd);
 
     io.spawn(cmd).map_err(|e| {
         (
@@ -952,6 +963,14 @@ prompt = "Plan the work"
         meta.status = RunStatus::Complete;
         create_run(&meta).unwrap();
 
+        // Create a second run with Running status so the filtered list is
+        // non-empty — this makes the map/any closure in the assertion actually
+        // execute, covering the closure body in LLVM's instrumentation.
+        let run_id2 = unique_run_id("list-filter-excl-running");
+        let mut meta2 = make_run(&run_id2);
+        meta2.status = RunStatus::Running;
+        create_run(&meta2).unwrap();
+
         let app = Router::new()
             .route("/api/agents", get(list_agents))
             .with_state(test_state());
@@ -965,14 +984,15 @@ prompt = "Plan the work"
             .await
             .unwrap();
         let runs: Vec<RunMeta> = serde_json::from_slice(&body).unwrap();
-        // None of the returned runs should be the complete one we created.
-        let run_ids: Vec<&str> = runs.iter().map(|r| r.run_id.as_str()).collect();
-        assert!(
-            !run_ids.contains(&run_id.as_str()),
-            "complete run should not appear in 'running' filter"
-        );
+        // The complete run should not appear in the 'running' filter.
+        let found = runs.iter().any(|r| r.run_id == run_id);
+        assert!(!found, "complete run should not appear in 'running' filter");
+        // The running run should appear.
+        let found2 = runs.iter().any(|r| r.run_id == run_id2);
+        assert!(found2, "running run should appear in 'running' filter");
 
         let _ = std::fs::remove_dir_all(runstate::run_dir(&run_id));
+        let _ = std::fs::remove_dir_all(runstate::run_dir(&run_id2));
     }
 
     #[tokio::test]

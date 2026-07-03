@@ -27,6 +27,17 @@ use crate::config::Config;
 
 // ─── Entrypoint ──────────────────────────────────────────────────────────────
 
+/// Aborts a spawned task when dropped — including when dropped mid-flight as
+/// part of an outer future's cancellation (e.g. `JoinHandle::abort()` on the
+/// task that owns this guard), not just on normal scope exit.
+struct AbortOnDrop<T>(tokio::task::JoinHandle<T>);
+
+impl<T> Drop for AbortOnDrop<T> {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
 pub async fn execute(args: ServeArgs) -> anyhow::Result<()> {
     execute_with_shutdown(args, std::future::pending()).await
 }
@@ -49,9 +60,14 @@ async fn execute_with_shutdown(
         event_tx: event_tx.clone(),
     };
 
-    // Background polling loop
+    // Background polling loop. Held behind an abort-on-drop guard so the
+    // task is torn down whenever this function returns *or* is cancelled —
+    // e.g. when a test aborts the outer `execute()`/`execute_with_shutdown()`
+    // task. Without this, aborting only the outer task left the inner
+    // `polling_loop` (an unconditional `loop { ... sleep(200ms) ... }`)
+    // running detached until the whole runtime was torn down.
     let poll_state = state.clone();
-    tokio::spawn(polling::polling_loop(poll_state));
+    let _poll_guard = AbortOnDrop(tokio::spawn(polling::polling_loop(poll_state)));
 
     let cors = if args.cors == "*" {
         CorsLayer::new()
