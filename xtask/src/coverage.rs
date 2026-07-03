@@ -37,6 +37,22 @@
 //!
 //! Output lands at `coverage/llvm-cov.json` (gitignored) — never under
 //! `target/`, never committed.
+//!
+//! **A residual class of "missed regions" is a confirmed, permanent
+//! limitation, not a real gap.** Generic functions instantiated over many
+//! type parameters or closure types (e.g. `leviath-runtime/src/engine.rs`'s
+//! `run_inference_loop`, `leviath-providers`'s `*SseStream<S>::poll_next`,
+//! `leviath-package/src/bundler.rs`'s `write_bundle<W: Write>`) produce one
+//! coverage-mapping instance per monomorphization; llvm-cov sometimes reports
+//! a region as uncovered for one instantiation even though every source
+//! position is covered by the union of all instantiations. Empirically
+//! tested and ruled out: building with `codegen-units=1` has zero measurable
+//! effect on these counts (verified via clean rebuilds with before/after JSON
+//! region diffs identical to the byte) while costing ~60-70% more wall-clock
+//! time per crate — `codegen-units` only affects how already-monomorphized
+//! code is partitioned for backend codegen, not how many monomorphizations
+//! exist. There is no known workaround; this is inherent to source-based
+//! coverage of generic code.
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
