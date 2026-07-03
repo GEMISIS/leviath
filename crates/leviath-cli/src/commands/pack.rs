@@ -306,6 +306,7 @@ mod tests {
         assert_eq!(count_files(&file), 0);
     }
 
+    #[cfg(unix)]
     #[test]
     fn count_files_unreadable_dir_returns_zero() {
         use std::os::unix::fs::PermissionsExt;
@@ -316,6 +317,7 @@ mod tests {
         assert_eq!(result, 0);
     }
 
+    #[cfg(unix)]
     #[test]
     fn count_files_skips_non_file_non_dir_entries() {
         // A broken symlink is neither is_file() nor is_dir(), so count_files
@@ -575,6 +577,7 @@ mod tests {
         execute(args).await.unwrap_err();
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn execute_unreadable_manifest_errors() {
         // Manifest exists but is chmod 000 — covers map_err on lines 28-29.
@@ -601,6 +604,7 @@ mod tests {
         assert!(e.to_string().contains("Failed to read manifest"));
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn execute_bundle_error_propagated() {
         // An unreadable file in the project causes bundler.bundle to fail —

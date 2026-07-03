@@ -195,6 +195,13 @@ fn open_controlling_tty() -> std::io::Result<std::fs::File> {
 /// `std::io::stdout()` bypasses cargo test's per-test output capture (unlike
 /// `print!`/`println!`) just as much as a raw `/dev/tty` write does, so both
 /// destinations must be injectable, not just the TTY one.
+///
+/// Only called for real from `osc52_yank_raw`'s `#[cfg(unix)]` branch, but
+/// exercised directly by cross-platform tests below -- `cfg(any(unix, test))`
+/// (rather than plain `cfg(unix)`) keeps it compiled for non-unix test
+/// builds too, avoiding an unused-function warning (hard error under this
+/// workspace's `-D warnings`) on the plain non-unix lib build.
+#[cfg(any(unix, test))]
 fn osc52_write_via<T: std::io::Write>(
     text: &str,
     open_tty: fn() -> std::io::Result<std::fs::File>,

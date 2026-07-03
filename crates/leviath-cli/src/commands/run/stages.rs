@@ -2420,6 +2420,7 @@ mod tests {
 
     // ─── Coverage: request_interaction_async error (lines 168:80) ────────────
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn interactive_stage_tools_request_interaction_async_error() {
         let _guard = crate::runstate::isolate_runs_dir_for_test(
@@ -2485,6 +2486,7 @@ mod tests {
         assert!(result.is_err(), "Expected error from read-only run dir");
     }
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn interactive_stage_no_tools_request_interaction_async_error() {
         let _guard = crate::runstate::isolate_runs_dir_for_test(
@@ -2979,6 +2981,7 @@ mod tests {
 
     // ─── Coverage: request_interaction_async error in interactive_points (line 474:97) ─
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn interactive_points_followup_request_interaction_async_error() {
         let _guard = crate::runstate::isolate_runs_dir_for_test(
@@ -3160,6 +3163,7 @@ mod tests {
 
     // ─── Coverage: first request_interaction_async fails (line 421:96) ─────────
 
+    #[cfg(unix)]
     #[tokio::test]
     async fn interactive_points_first_request_interaction_async_error() {
         let _guard = crate::runstate::isolate_runs_dir_for_test(
