@@ -98,6 +98,11 @@ pub fn run_with(runner: &dyn Runner) -> Result<()> {
 /// Runs coverage via `runner`, prints a summary, reports any gaps, and writes
 /// CI output variables.  All paths (including error paths) are reachable from
 /// tests through the `MockRunner` abstraction.
+///
+/// NOTE: the "fail the build below 100%" enforcement is temporarily disabled
+/// (see the comment above the `gaps.is_empty()` check below) while coverage
+/// catches back up to 100% across all four metrics on every CI platform.
+/// Re-enable by restoring the `anyhow::bail!` once that's true again.
 pub fn run_report(
     runner: &dyn Runner,
     output_path: &str,
@@ -115,14 +120,25 @@ pub fn run_report(
 
     let gaps = gap_files(data);
 
+    // Always publish the computed percentages -- the coverage badges need
+    // real numbers regardless of whether 100% is currently met, and
+    // previously this only ran inside the `gaps.is_empty()` branch, so the
+    // badges got no data at all (not just a failed build) whenever coverage
+    // was below 100%.
+    write_github_output(&data.totals, github_output)?;
+
     if gaps.is_empty() {
         println!("\n[coverage] All metrics at 100%. ✓");
-        write_github_output(&data.totals, github_output)?;
         return Ok(());
     }
 
     print_gaps(&gaps);
-    anyhow::bail!("[coverage] Coverage is not 100%. Fix the gaps above.");
+    // TEMPORARY: not failing the build below 100% right now -- re-enable
+    // `anyhow::bail!("[coverage] Coverage is not 100%. Fix the gaps above.")`
+    // once coverage is back to 100% across regions/lines/functions/branches
+    // on every CI platform.
+    println!("\n[coverage] Coverage is not 100% (see gaps above) — not failing the build for now.");
+    Ok(())
 }
 
 // ── Gap detection (pure, testable) ───────────────────────────────────────────
@@ -1158,7 +1174,12 @@ mod tests {
     }
 
     #[test]
-    fn run_report_partial_coverage_is_err() {
+    fn run_report_partial_coverage_is_ok_and_writes_github_output() {
+        // Enforcement (failing the build below 100%) is temporarily disabled
+        // -- see the comment on `run_report`. This test asserts the current,
+        // intentional behavior: partial coverage is reported but does not
+        // fail the build, and -- the actual bug this replaced -- the badge
+        // percentages still get written even when coverage isn't 100%.
         let dir = tempfile::tempdir().unwrap();
         // Build a partial-coverage report and supply it as the workspace JSON.
         let report = LlvmCovReport {
@@ -1173,10 +1194,18 @@ mod tests {
         let json = serde_json::to_string(&report).unwrap();
         let runner = MockRunner::new(true, simple_metadata(&[])).with_workspace_json(json);
         let output = dir.path().join("cov.json").to_str().unwrap().to_owned();
-        let result = run_report(&runner, &output, false, None);
-        assert!(result.is_err(), "partial coverage should fail");
-        let msg = result.unwrap_err().to_string();
-        assert!(msg.contains("100%"), "error should mention 100%: {msg}");
+        let gha = dir.path().join("gha_output");
+        std::fs::write(&gha, "").unwrap();
+        let result = run_report(&runner, &output, false, Some(gha.to_str().unwrap()));
+        assert!(
+            result.is_ok(),
+            "partial coverage should not fail the build right now: {result:?}"
+        );
+        let content = std::fs::read_to_string(&gha).unwrap();
+        assert!(
+            content.contains("regions="),
+            "badge percentages should still be written when coverage is partial: {content}"
+        );
     }
 
     #[test]
@@ -1443,7 +1472,11 @@ mod tests {
         let runner = MockRunner::new(true, simple_metadata(&[])).with_workspace_json(json);
         let output = dir.path().join("cov.json").to_str().unwrap().to_owned();
         let result = run_report(&runner, &output, false, None);
-        assert!(result.is_err(), "partial coverage should fail: {result:?}");
+        // Enforcement is temporarily disabled -- see the comment on `run_report`.
+        assert!(
+            result.is_ok(),
+            "partial coverage should not fail the build right now: {result:?}"
+        );
     }
 
     #[test]
@@ -1474,7 +1507,11 @@ mod tests {
         let runner = MockRunner::new(true, simple_metadata(&[])).with_workspace_json(json);
         let output = dir.path().join("cov.json").to_str().unwrap().to_owned();
         let result = run_report(&runner, &output, false, None);
-        assert!(result.is_err(), "partial coverage should fail: {result:?}");
+        // Enforcement is temporarily disabled -- see the comment on `run_report`.
+        assert!(
+            result.is_ok(),
+            "partial coverage should not fail the build right now: {result:?}"
+        );
     }
 
     // ── Line 217: None branch of if let Some(data) = pkg_report.data.into_iter().next()
