@@ -914,16 +914,13 @@ mod tests {
 
         // First non-system message has cache_breakpoint: true
         let first_msg = &messages[0];
-        #[rustfmt::skip]
-        assert!(first_msg.get("content").unwrap().is_array(), "Cache breakpoint message should use content blocks array");
+        assert!(first_msg.get("content").unwrap().is_array());
         let content_block = &first_msg["content"][0];
-        #[rustfmt::skip]
-        assert_eq!(content_block["cache_control"]["type"], "ephemeral", "Cache breakpoint should have cache_control");
+        assert_eq!(content_block["cache_control"]["type"], "ephemeral");
 
         // Second non-system message has no cache_breakpoint
         let second_msg = &messages[1];
-        #[rustfmt::skip]
-        assert!(second_msg.get("content").unwrap().is_string(), "Non-breakpoint message should use simple string content");
+        assert!(second_msg.get("content").unwrap().is_string());
     }
 
     #[test]
@@ -969,7 +966,7 @@ mod tests {
                     .is_some()
             })
             .count();
-        assert_eq!(bp_count, 4, "Should cap at 4 cache breakpoints");
+        assert_eq!(bp_count, 4);
     }
 
     #[test]
@@ -1013,7 +1010,7 @@ mod tests {
     fn test_count_tokens_basic() {
         let provider = AnthropicProvider::new("test-key".to_string());
         let tokens = provider.count_tokens("Hello, world!", "claude-sonnet-4-6");
-        assert!(tokens > 0, "Should produce at least one token");
+        assert!(tokens > 0);
         // ~3.5 chars per token → 13 chars ≈ 3-4 tokens
         assert!(tokens < 10);
     }
@@ -1415,7 +1412,7 @@ mod tests {
         assert_eq!(chunk.tool_calls[0].id, Some("toolu_1".to_string()));
         assert_eq!(chunk.tool_calls[0].name, Some("search".to_string()));
         assert_eq!(chunk.tool_calls[0].index, 0);
-        assert_eq!(tool_index, 1, "tool_index should increment");
+        assert_eq!(tool_index, 1);
     }
 
     #[test]
@@ -1898,6 +1895,16 @@ mod tests {
         assert!(msg.contains("boom"));
     }
 
+    fn assert_contains_500(msg: &str) {
+        assert!(msg.contains("500"), "expected 500 in: {msg}");
+    }
+
+    #[test]
+    #[should_panic(expected = "expected 500 in: not the status you're looking for")]
+    fn assert_contains_500_panics_when_missing() {
+        assert_contains_500("not the status you're looking for");
+    }
+
     #[tokio::test]
     async fn infer_non_success_status_body_read_error_falls_back_to_unknown_error() {
         let url = spawn_mock_server_truncated_error_body(500, "Internal Server Error").await;
@@ -1907,7 +1914,7 @@ mod tests {
             .await
             .unwrap_err()
             .to_string();
-        assert!(msg.contains("500"), "expected 500 in: {msg}");
+        assert_contains_500(&msg);
     }
 
     #[tokio::test]
@@ -1949,10 +1956,7 @@ mod tests {
         let provider = provider_with_url(url);
         let result = provider.infer_stream(simple_request()).await;
         assert!(result.is_err());
-        assert!(
-            result.err().unwrap().to_string().contains("503"),
-            "expected 503 in error"
-        );
+        assert!(result.err().unwrap().to_string().contains("503"));
     }
 
     #[tokio::test]

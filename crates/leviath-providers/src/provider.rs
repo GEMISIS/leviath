@@ -801,12 +801,22 @@ mod tests {
         assert!(msg.contains("boom"));
     }
 
+    fn assert_contains_500(msg: &str) {
+        assert!(msg.contains("500"), "expected 500 in: {msg}");
+    }
+
+    #[test]
+    #[should_panic(expected = "expected 500 in: not the status you're looking for")]
+    fn assert_contains_500_panics_when_missing() {
+        assert_contains_500("not the status you're looking for");
+    }
+
     #[tokio::test]
     async fn check_http_response_non_success_body_read_error_falls_back_to_error_string() {
         let response = spawn_truncated_error_response(500, "Internal Server Error").await;
         let err = check_http_response(response, None).await.unwrap_err();
         let msg = err.to_string();
-        assert!(msg.contains("500"), "expected 500 in: {msg}");
+        assert_contains_500(&msg);
     }
 
     #[tokio::test]
