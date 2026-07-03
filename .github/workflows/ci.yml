@@ -79,47 +79,28 @@ jobs:
       # 100%-coverage enforcement is also temporarily disabled in
       # xtask/src/coverage.rs (run_report no longer fails the build below
       # 100%) while coverage catches back up across all three remaining
-      # metrics on every platform. This step still computes and reports
-      # regions/lines/functions percentages for the badges below. Re-enable
-      # enforcement by restoring the `anyhow::bail!` noted in that file's
-      # comments once coverage is back to 100% everywhere.
+      # metrics on every platform. This step still computes and reports all
+      # three (regions/lines/functions) so that re-enabling enforcement
+      # later, and re-publishing the other two as badges, is a config-only
+      # change -- only the lines badge is published for now (see the step
+      # below) since three separate coverage numbers read as confusing to
+      # newcomers; regions/functions stay computed but unpublished.
+      # Re-enable enforcement by restoring the `anyhow::bail!` noted in that
+      # file's comments once coverage is back to 100% everywhere.
       - name: Compute coverage (regions / lines / functions)
         id: cov
         run: cargo xtask coverage
-      # Update the three coverage badges — only from ubuntu on push to main.
-      - name: Update regions badge
-        if: matrix.os == 'ubuntu-latest' && github.ref == 'refs/heads/main' && github.event_name == 'push'
-        uses: schneegans/dynamic-badges-action@v1.7.0
-        with:
-          auth: ${{ secrets.GIST_TOKEN }}
-          gistID: ${{ vars.COVERAGE_GIST_ID }}
-          filename: leviath-coverage-regions.json
-          label: regions
-          message: ${{ steps.cov.outputs.regions }}%
-          valColorRange: ${{ steps.cov.outputs.regions }}
-          minColorRange: 50
-          maxColorRange: 100
-      - name: Update lines badge
+      # Publish the single line-coverage badge — only from ubuntu on push to
+      # main (all three OSes compute coverage; only one need publish it).
+      - name: Update coverage badge
         if: matrix.os == 'ubuntu-latest' && github.ref == 'refs/heads/main' && github.event_name == 'push'
         uses: schneegans/dynamic-badges-action@v1.7.0
         with:
           auth: ${{ secrets.GIST_TOKEN }}
           gistID: ${{ vars.COVERAGE_GIST_ID }}
           filename: leviath-coverage-lines.json
-          label: lines
+          label: coverage
           message: ${{ steps.cov.outputs.lines }}%
           valColorRange: ${{ steps.cov.outputs.lines }}
-          minColorRange: 50
-          maxColorRange: 100
-      - name: Update functions badge
-        if: matrix.os == 'ubuntu-latest' && github.ref == 'refs/heads/main' && github.event_name == 'push'
-        uses: schneegans/dynamic-badges-action@v1.7.0
-        with:
-          auth: ${{ secrets.GIST_TOKEN }}
-          gistID: ${{ vars.COVERAGE_GIST_ID }}
-          filename: leviath-coverage-functions.json
-          label: functions
-          message: ${{ steps.cov.outputs.functions }}%
-          valColorRange: ${{ steps.cov.outputs.functions }}
           minColorRange: 50
           maxColorRange: 100
