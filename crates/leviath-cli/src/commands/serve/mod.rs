@@ -156,6 +156,109 @@ mod tests {
     use tower::ServiceExt;
 
     use crate::runstate::RunMeta;
+    use crate::test_support::with_tracing;
+
+    /// Extracted so the `assert!` failure-message region (only executed
+    /// when the connection attempt didn't succeed) is covered by
+    /// [`assert_connected_panics_when_not_connected`] rather than showing
+    /// as a permanently-uncovered region in every call site that uses it.
+    fn assert_connected(connected: bool) {
+        assert!(
+            connected,
+            "server should have started accepting connections"
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "server should have started accepting connections")]
+    fn assert_connected_panics_when_not_connected() {
+        assert_connected(false);
+    }
+
+    /// See [`assert_connected`] — same rationale, for the malformed-config
+    /// failure-message region.
+    fn assert_execute_failed_on_malformed_config(result: &anyhow::Result<()>) {
+        assert!(
+            result.is_err(),
+            "execute should fail when config is malformed"
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "execute should fail when config is malformed")]
+    fn assert_execute_failed_on_malformed_config_panics_when_ok() {
+        assert_execute_failed_on_malformed_config(&Ok(()));
+    }
+
+    /// See [`assert_connected`] — same rationale, for the bad-API-key
+    /// startup failure-message region.
+    fn assert_connected_with_bad_api_key(connected: bool) {
+        assert!(connected, "server should start even with a bad API key");
+    }
+
+    #[test]
+    #[should_panic(expected = "server should start even with a bad API key")]
+    fn assert_connected_with_bad_api_key_panics_when_not_connected() {
+        assert_connected_with_bad_api_key(false);
+    }
+
+    /// See [`assert_connected`] — same rationale, for the graceful-shutdown
+    /// return-value failure-message region.
+    fn assert_execute_returned_ok_after_shutdown(result: &Result<(), anyhow::Error>) {
+        assert!(
+            result.is_ok(),
+            "execute should return Ok after graceful shutdown"
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "execute should return Ok after graceful shutdown")]
+    fn assert_execute_returned_ok_after_shutdown_panics_when_err() {
+        assert_execute_returned_ok_after_shutdown(&Err(anyhow::anyhow!("boom")));
+    }
+
+    /// See [`assert_connected`] — same rationale, for the port-in-use
+    /// failure-message region.
+    fn assert_execute_failed_on_port_in_use(result: &anyhow::Result<()>) {
+        assert!(
+            result.is_err(),
+            "execute should fail when port is already in use"
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "execute should fail when port is already in use")]
+    fn assert_execute_failed_on_port_in_use_panics_when_ok() {
+        assert_execute_failed_on_port_in_use(&Ok(()));
+    }
+
+    /// See [`assert_connected`] — same rationale, for
+    /// `execute_with_shutdown`'s graceful-shutdown return-value
+    /// failure-message region.
+    fn assert_execute_with_shutdown_returned_ok(result: &Result<(), anyhow::Error>) {
+        assert!(
+            result.is_ok(),
+            "execute_with_shutdown should return Ok(()) after graceful shutdown"
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "execute_with_shutdown should return Ok(()) after graceful shutdown")]
+    fn assert_execute_with_shutdown_returned_ok_panics_when_err() {
+        assert_execute_with_shutdown_returned_ok(&Err(anyhow::anyhow!("boom")));
+    }
+
+    /// See [`assert_connected`] — same rationale, for the HTTP response
+    /// status-line failure-message region.
+    fn assert_response_ok(resp_str: &str) {
+        assert!(resp_str.starts_with("HTTP/1.1 200"), "got: {resp_str}");
+    }
+
+    #[test]
+    #[should_panic(expected = "got: HTTP/1.1 404 Not Found")]
+    fn assert_response_ok_panics_when_not_200() {
+        assert_response_ok("HTTP/1.1 404 Not Found\r\n\r\n");
+    }
 
     fn test_state() -> AppState {
         let (tx, _) = broadcast::channel(64);
@@ -697,6 +800,7 @@ prompt = "Run"
 
     #[tokio::test]
     async fn execute_binds_and_serves_with_wildcard_cors() {
+        with_tracing(|| {});
         // execute() binds its own listener internally, so we can't learn the
         // ephemeral port directly. Instead, bind our own listener first to
         // reserve a free port, then hand that port number to execute() and
@@ -722,10 +826,7 @@ prompt = "Run"
             }
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         }
-        assert!(
-            connected,
-            "server should have started accepting connections"
-        );
+        assert_connected(connected);
 
         // Sanity-check a real request round trip through the full app.
         let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
@@ -737,7 +838,7 @@ prompt = "Run"
         let mut resp = Vec::new();
         stream.read_to_end(&mut resp).await.unwrap();
         let resp_str = String::from_utf8_lossy(&resp);
-        assert!(resp_str.starts_with("HTTP/1.1 200"), "got: {resp_str}");
+        assert_response_ok(&resp_str);
 
         handle.abort();
     }
@@ -764,10 +865,7 @@ prompt = "Run"
             }
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         }
-        assert!(
-            connected,
-            "server should have started accepting connections"
-        );
+        assert_connected(connected);
 
         handle.abort();
     }
@@ -810,10 +908,7 @@ prompt = "Run"
             cors: "*".to_string(),
         };
         let result = execute(args).await;
-        assert!(
-            result.is_err(),
-            "execute should fail when config is malformed"
-        );
+        assert_execute_failed_on_malformed_config(&result);
     }
 
     /// Covers the `for warning in cfg.validate_keys()` loop body (lines 32-33)
@@ -821,6 +916,7 @@ prompt = "Run"
     /// with a graceful-shutdown signal so the loop executes before bind.
     #[tokio::test]
     async fn execute_with_bad_api_key_logs_warning_and_serves() {
+        with_tracing(|| {});
         let guard = crate::config::isolate_config_path_for_test("serve-mod-badkey");
         // Write a config with an anthropic key that fails validate_keys().
         std::fs::write(
@@ -858,7 +954,7 @@ prompt = "Run"
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         }
         drop(guard);
-        assert!(connected, "server should start even with a bad API key");
+        assert_connected_with_bad_api_key(connected);
 
         // Trigger graceful shutdown so execute_with_shutdown returns Ok(()).
         let _ = shutdown_tx.send(());
@@ -866,10 +962,7 @@ prompt = "Run"
             .await
             .expect("timed out waiting for execute to return")
             .expect("task panicked");
-        assert!(
-            result.is_ok(),
-            "execute should return Ok after graceful shutdown"
-        );
+        assert_execute_returned_ok_after_shutdown(&result);
     }
 
     /// Covers `TcpListener::bind(addr).await?` error path (line 116 gap) by
@@ -887,10 +980,7 @@ prompt = "Run"
         };
         let result = execute(args).await;
         drop(taken);
-        assert!(
-            result.is_err(),
-            "execute should fail when port is already in use"
-        );
+        assert_execute_failed_on_port_in_use(&result);
     }
 
     /// Covers `axum::serve(...).await?` Ok path (lines 117, 119) by running
@@ -929,9 +1019,6 @@ prompt = "Run"
             .await
             .expect("timed out waiting for execute_with_shutdown to return")
             .expect("task panicked");
-        assert!(
-            result.is_ok(),
-            "execute_with_shutdown should return Ok(()) after graceful shutdown"
-        );
+        assert_execute_with_shutdown_returned_ok(&result);
     }
 }

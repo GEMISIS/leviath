@@ -291,12 +291,22 @@ prompt = "Plan the work"
             .await
             .unwrap();
         let blueprints: Vec<serde_json::Value> = serde_json::from_slice(&body).unwrap();
+        assert_test_bp_listed(&blueprints);
+    }
+
+    fn assert_test_bp_listed(blueprints: &[serde_json::Value]) {
         assert!(
             blueprints
                 .iter()
                 .any(|b| b["name"].as_str() == Some("test-bp")),
             "test-bp should be listed"
         );
+    }
+
+    #[test]
+    #[should_panic(expected = "test-bp should be listed")]
+    fn assert_test_bp_listed_panics_when_missing() {
+        assert_test_bp_listed(&[]);
     }
 
     // ─── get_blueprint ────────────────────────────────────────────────────────
@@ -650,7 +660,17 @@ prompt = "Run"
             .unwrap();
         let resp = app.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), axum::http::StatusCode::NO_CONTENT);
+        assert_dir_removed(&dir);
+    }
+
+    fn assert_dir_removed(dir: &std::path::Path) {
         assert!(!dir.exists(), "directory should be removed");
+    }
+
+    #[test]
+    #[should_panic(expected = "directory should be removed")]
+    fn assert_dir_removed_panics_when_still_present() {
+        assert_dir_removed(std::path::Path::new("."));
     }
 
     #[tokio::test]
@@ -847,7 +867,17 @@ prompt = "Do work"
 
         let blueprints = discover_blueprints(&config);
         let found = blueprints.iter().find(|b| b.name == "discovered");
-        assert!(found.is_some(), "should discover agent in custom path");
+        assert_discovered_in_custom_path(found.is_some());
+    }
+
+    fn assert_discovered_in_custom_path(found: bool) {
+        assert!(found, "should discover agent in custom path");
+    }
+
+    #[test]
+    #[should_panic(expected = "should discover agent in custom path")]
+    fn assert_discovered_in_custom_path_panics_when_not_found() {
+        assert_discovered_in_custom_path(false);
     }
 
     #[test]
@@ -894,9 +924,16 @@ prompt = "Run"
 
         let blueprints = discover_blueprints(&config);
         let found = blueprints.iter().find(|b| b.name == "direct");
-        assert!(
-            found.is_some(),
-            "should discover agent.leviath directly in scan dir"
-        );
+        assert_discovered_directly_in_scan_dir(found.is_some());
+    }
+
+    fn assert_discovered_directly_in_scan_dir(found: bool) {
+        assert!(found, "should discover agent.leviath directly in scan dir");
+    }
+
+    #[test]
+    #[should_panic(expected = "should discover agent.leviath directly in scan dir")]
+    fn assert_discovered_directly_in_scan_dir_panics_when_not_found() {
+        assert_discovered_directly_in_scan_dir(false);
     }
 }

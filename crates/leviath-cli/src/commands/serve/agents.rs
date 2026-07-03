@@ -411,6 +411,7 @@ mod tests {
 
     use crate::config::Config;
     use crate::runstate::{create_run, RunMeta, RunStatus};
+    use crate::test_support::with_tracing;
 
     fn test_state() -> AppState {
         let (tx, _) = broadcast::channel(64);
@@ -500,6 +501,13 @@ prompt = "Plan the work"
         assert_eq!(resp.status(), axum::http::StatusCode::NOT_FOUND);
     }
 
+    fn assert_open_log_files_fails(result: &std::io::Result<(std::fs::File, std::fs::File)>) {
+        assert!(
+            result.is_err(),
+            "opening a log file under a missing directory should fail"
+        );
+    }
+
     /// Exercises the `?` error path in `RealSpawnAgentIo::open_log_files`
     /// (line 61) by passing a path whose parent directory does not exist so
     /// `OpenOptions::open` returns an I/O error.
@@ -508,14 +516,35 @@ prompt = "Plan the work"
         let io = RealSpawnAgentIo;
         let bad_path = std::path::Path::new("/nonexistent-dir-abc123/output.log");
         let result = io.open_log_files(bad_path);
+        assert_open_log_files_fails(&result);
+    }
+
+    #[test]
+    #[should_panic(expected = "opening a log file under a missing directory should fail")]
+    fn assert_open_log_files_fails_panics_when_ok() {
+        let io = RealSpawnAgentIo;
+        let tmp = tempfile::tempdir().unwrap();
+        let good_path = tmp.path().join("output.log");
+        let result = io.open_log_files(&good_path);
+        assert_open_log_files_fails(&result);
+    }
+
+    fn assert_broadcast_agent_spawned(spawned_events: &[String], run_id: &str) {
         assert!(
-            result.is_err(),
-            "opening a log file under a missing directory should fail"
+            spawned_events.iter().any(|ev_rid| ev_rid == run_id),
+            "should broadcast AgentSpawned event"
         );
+    }
+
+    #[test]
+    #[should_panic(expected = "should broadcast AgentSpawned event")]
+    fn assert_broadcast_agent_spawned_panics_when_missing() {
+        assert_broadcast_agent_spawned(&[], "some-run-id");
     }
 
     #[tokio::test]
     async fn spawn_agent_valid_blueprint_creates_run_and_returns_ok() {
+        with_tracing(|| {});
         let _guard = crate::runstate::isolate_runs_dir_for_test(
             "spawn_agent_valid_blueprint_creates_run_and_returns_ok",
         );
@@ -574,10 +603,7 @@ prompt = "Plan the work"
                 spawned_events.push(ev_rid);
             }
         }
-        assert!(
-            spawned_events.contains(&run_id),
-            "should broadcast AgentSpawned event"
-        );
+        assert_broadcast_agent_spawned(&spawned_events, &run_id);
 
         // Give the (doomed) child process a moment to exit on its own so we
         // don't leave a zombie process behind, then clean up run state.
@@ -971,10 +997,20 @@ prompt = "Plan the work"
         let runs: Vec<RunMeta> = serde_json::from_slice(&body).unwrap();
         // The run we created has Running status
         let found = runs.iter().any(|r| r.run_id == run_id);
-        assert!(found, "should find the running run");
+        assert_found_running_run(found);
 
         // Cleanup
         let _ = std::fs::remove_dir_all(runstate::run_dir(&run_id));
+    }
+
+    fn assert_found_running_run(found: bool) {
+        assert!(found, "should find the running run");
+    }
+
+    #[test]
+    #[should_panic(expected = "should find the running run")]
+    fn assert_found_running_run_panics_when_not_found() {
+        assert_found_running_run(false);
     }
 
     #[tokio::test]
@@ -1010,13 +1046,33 @@ prompt = "Plan the work"
         let runs: Vec<RunMeta> = serde_json::from_slice(&body).unwrap();
         // The complete run should not appear in the 'running' filter.
         let found = runs.iter().any(|r| r.run_id == run_id);
-        assert!(!found, "complete run should not appear in 'running' filter");
+        assert_complete_run_excluded(found);
         // The running run should appear.
         let found2 = runs.iter().any(|r| r.run_id == run_id2);
-        assert!(found2, "running run should appear in 'running' filter");
+        assert_running_run_included(found2);
 
         let _ = std::fs::remove_dir_all(runstate::run_dir(&run_id));
         let _ = std::fs::remove_dir_all(runstate::run_dir(&run_id2));
+    }
+
+    fn assert_complete_run_excluded(found: bool) {
+        assert!(!found, "complete run should not appear in 'running' filter");
+    }
+
+    #[test]
+    #[should_panic(expected = "complete run should not appear in 'running' filter")]
+    fn assert_complete_run_excluded_panics_when_found() {
+        assert_complete_run_excluded(true);
+    }
+
+    fn assert_running_run_included(found2: bool) {
+        assert!(found2, "running run should appear in 'running' filter");
+    }
+
+    #[test]
+    #[should_panic(expected = "running run should appear in 'running' filter")]
+    fn assert_running_run_included_panics_when_not_found() {
+        assert_running_run_included(false);
     }
 
     #[tokio::test]
@@ -1041,9 +1097,19 @@ prompt = "Plan the work"
             .unwrap();
         let runs: Vec<RunMeta> = serde_json::from_slice(&body).unwrap();
         let found = runs.iter().any(|r| r.run_id == run_id);
-        assert!(found, "error run should appear in 'running,error' filter");
+        assert_error_run_included(found);
 
         let _ = std::fs::remove_dir_all(runstate::run_dir(&run_id));
+    }
+
+    fn assert_error_run_included(found: bool) {
+        assert!(found, "error run should appear in 'running,error' filter");
+    }
+
+    #[test]
+    #[should_panic(expected = "error run should appear in 'running,error' filter")]
+    fn assert_error_run_included_panics_when_not_found() {
+        assert_error_run_included(false);
     }
 
     // ─── get_agent ────────────────────────────────────────────────────────────
@@ -1116,11 +1182,20 @@ prompt = "Plan the work"
             .await
             .unwrap();
         let children: Vec<RunMeta> = serde_json::from_slice(&body).unwrap();
-        #[rustfmt::skip]
-        assert!(children.iter().any(|c| c.run_id == child_id), "child run should appear");
+        assert_child_run_appears(children.iter().any(|c| c.run_id == child_id));
 
         let _ = std::fs::remove_dir_all(runstate::run_dir(&parent_id));
         let _ = std::fs::remove_dir_all(runstate::run_dir(&child_id));
+    }
+
+    fn assert_child_run_appears(found: bool) {
+        assert!(found, "child run should appear");
+    }
+
+    #[test]
+    #[should_panic(expected = "child run should appear")]
+    fn assert_child_run_appears_panics_when_not_found() {
+        assert_child_run_appears(false);
     }
 
     #[tokio::test]
@@ -1144,12 +1219,22 @@ prompt = "Plan the work"
             .await
             .unwrap();
         let children: Vec<RunMeta> = serde_json::from_slice(&body).unwrap();
+        assert_no_self_in_children(&children);
+
+        let _ = std::fs::remove_dir_all(runstate::run_dir(&run_id));
+    }
+
+    fn assert_no_self_in_children(children: &[RunMeta]) {
         assert!(
             children.is_empty(),
             "run itself should not appear in its own children list"
         );
+    }
 
-        let _ = std::fs::remove_dir_all(runstate::run_dir(&run_id));
+    #[test]
+    #[should_panic(expected = "run itself should not appear in its own children list")]
+    fn assert_no_self_in_children_panics_when_nonempty() {
+        assert_no_self_in_children(&[make_run("bogus-child")]);
     }
 
     // ─── agent_context ────────────────────────────────────────────────────────

@@ -289,6 +289,10 @@ mod tests {
         assert_eq!(last_pending.len(), 1);
     }
 
+    fn assert_terminal(s: &str, is_terminal: bool, expected: bool) {
+        assert_eq!(is_terminal, expected, "{} terminal mismatch", s);
+    }
+
     #[test]
     fn terminal_status_detection() {
         let cases: &[(&str, bool)] = &[
@@ -301,8 +305,14 @@ mod tests {
         ];
         for (s, expected) in cases {
             let is_terminal = matches!(*s, "Complete" | "Error" | "Cancelled");
-            assert_eq!(is_terminal, *expected, "{} terminal mismatch", s);
+            assert_terminal(s, is_terminal, *expected);
         }
+    }
+
+    #[test]
+    #[should_panic(expected = "bogus terminal mismatch")]
+    fn terminal_status_detection_panics_on_mismatch() {
+        assert_terminal("bogus", true, false);
     }
 
     #[test]
@@ -337,8 +347,18 @@ mod tests {
             let was_terminal = poll.last_status.get("run-1").is_some_and(|(s, _, _, _)| {
                 matches!(s.as_str(), "Complete" | "Error" | "Cancelled")
             });
-            assert!(was_terminal, "{} should be terminal", status);
+            assert_is_terminal(was_terminal, status);
         }
+    }
+
+    fn assert_is_terminal(was_terminal: bool, status: &str) {
+        assert!(was_terminal, "{} should be terminal", status);
+    }
+
+    #[test]
+    #[should_panic(expected = "bogus should be terminal")]
+    fn poll_state_was_terminal_logic_panics_when_not_terminal() {
+        assert_is_terminal(false, "bogus");
     }
 
     #[test]
@@ -390,14 +410,38 @@ mod tests {
         // First time seeing pending → should emit event (has_pending && !had_pending)
         let has_pending = true;
         let had_pending = poll.last_pending.get("run-1").copied().unwrap_or(false);
-        #[rustfmt::skip]
-        assert!(has_pending && !had_pending, "should trigger on first pending");
+        assert_triggers_on_first_pending(has_pending, had_pending);
         poll.last_pending.insert("run-1".to_string(), has_pending);
 
         // Second time → had_pending is now true, should NOT emit again
         let had_pending = poll.last_pending.get("run-1").copied().unwrap_or(false);
-        #[rustfmt::skip]
-        assert!(!has_pending || had_pending, "should not trigger when already pending");
+        assert_no_trigger_when_already_pending(has_pending, had_pending);
+    }
+
+    fn assert_triggers_on_first_pending(has_pending: bool, had_pending: bool) {
+        assert!(
+            has_pending && !had_pending,
+            "should trigger on first pending"
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "should trigger on first pending")]
+    fn poll_state_pending_transition_panics_when_no_trigger() {
+        assert_triggers_on_first_pending(false, false);
+    }
+
+    fn assert_no_trigger_when_already_pending(has_pending: bool, had_pending: bool) {
+        assert!(
+            !has_pending || had_pending,
+            "should not trigger when already pending"
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "should not trigger when already pending")]
+    fn poll_state_pending_transition_panics_when_unexpected_trigger() {
+        assert_no_trigger_when_already_pending(true, false);
     }
 
     #[test]
@@ -470,8 +514,20 @@ mod tests {
                 got_status = true;
             }
         }
-        #[rustfmt::skip]
-        assert!(got_status, "poll_once should have emitted AgentStatus event");
+        assert_got_agent_status(got_status);
+    }
+
+    fn assert_got_agent_status(got_status: bool) {
+        assert!(
+            got_status,
+            "poll_once should have emitted AgentStatus event"
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "poll_once should have emitted AgentStatus event")]
+    fn polling_loop_runs_and_sends_events_panics_when_missing() {
+        assert_got_agent_status(false);
     }
 
     #[test]
@@ -515,8 +571,20 @@ mod tests {
                 got_completed = true;
             }
         }
-        #[rustfmt::skip]
-        assert!(got_completed, "poll_once should have emitted AgentCompleted event");
+        assert_got_agent_completed(got_completed);
+    }
+
+    fn assert_got_agent_completed(got_completed: bool) {
+        assert!(
+            got_completed,
+            "poll_once should have emitted AgentCompleted event"
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "poll_once should have emitted AgentCompleted event")]
+    fn polling_loop_emits_completion_event_panics_when_missing() {
+        assert_got_agent_completed(false);
     }
 
     #[test]
@@ -571,8 +639,20 @@ mod tests {
             }
         }
         let _ = std::fs::remove_dir_all(crate::runstate::run_dir(&run_id));
-        #[rustfmt::skip]
-        assert!(got_context, "poll_once should have emitted ContextUpdate event");
+        assert_got_context_update(got_context);
+    }
+
+    fn assert_got_context_update(got_context: bool) {
+        assert!(
+            got_context,
+            "poll_once should have emitted ContextUpdate event"
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "poll_once should have emitted ContextUpdate event")]
+    fn polling_loop_emits_context_update_panics_when_missing() {
+        assert_got_context_update(false);
     }
 
     /// Covers the `if prev != Some(ctx.total_tokens)` ELSE path: when the
@@ -662,12 +742,22 @@ mod tests {
         }
         // poll_once emitted 0 ContextUpdates for run_id (unchanged tokens);
         // we manually injected exactly 1. Total must be exactly 1.
+        assert_ctx_updates_for_run(ctx_updates_for_run);
+
+        let _ = std::fs::remove_dir_all(crate::runstate::run_dir(&run_id));
+    }
+
+    fn assert_ctx_updates_for_run(ctx_updates_for_run: u32) {
         assert_eq!(
             ctx_updates_for_run, 1,
             "expected exactly 1 manually-injected ContextUpdate (poll_once must not emit any)"
         );
+    }
 
-        let _ = std::fs::remove_dir_all(crate::runstate::run_dir(&run_id));
+    #[test]
+    #[should_panic(expected = "expected exactly 1 manually-injected ContextUpdate")]
+    fn poll_once_no_context_update_panics_on_unexpected_count() {
+        assert_ctx_updates_for_run(0);
     }
 
     #[test]
@@ -717,8 +807,20 @@ mod tests {
             }
         }
         let _ = std::fs::remove_dir_all(crate::runstate::run_dir(&run_id));
-        #[rustfmt::skip]
-        assert!(got_interaction, "poll_once should have emitted InteractionNeeded event");
+        assert_got_interaction_needed(got_interaction);
+    }
+
+    fn assert_got_interaction_needed(got_interaction: bool) {
+        assert!(
+            got_interaction,
+            "poll_once should have emitted InteractionNeeded event"
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "poll_once should have emitted InteractionNeeded event")]
+    fn polling_loop_emits_interaction_needed_panics_when_missing() {
+        assert_got_interaction_needed(false);
     }
 
     // ─── callback webhook (poll_once's tokio::spawn branch) ────────────────
@@ -850,6 +952,7 @@ mod tests {
     /// so coverage is attributed synchronously rather than depending on timing.
     #[tokio::test]
     async fn fire_webhook_logs_on_connection_failure() {
+        crate::test_support::with_tracing(|| {});
         // Use a port with no listener so the HTTP POST fails immediately.
         let client = reqwest::Client::new();
         let payload = serde_json::json!({"event": "agent_completed"});
@@ -966,10 +1069,20 @@ mod tests {
                 got_completed = true;
             }
         }
+        assert_got_completed_on_error(got_completed);
+    }
+
+    fn assert_got_completed_on_error(got_completed: bool) {
         assert!(
             got_completed,
             "poll_once should emit AgentCompleted on Error"
         );
+    }
+
+    #[test]
+    #[should_panic(expected = "poll_once should emit AgentCompleted on Error")]
+    fn poll_once_error_status_panics_when_completion_missing() {
+        assert_got_completed_on_error(false);
     }
 
     /// Covers the "Cancelled" match arm in the production `matches!` at line 102.
@@ -1125,8 +1238,20 @@ mod tests {
         }
 
         handle.abort();
-        #[rustfmt::skip]
-        assert!(saw_status, "polling_loop_with should have broadcast an AgentStatus event for the injected run");
+        assert_saw_status(saw_status);
+    }
+
+    fn assert_saw_status(saw_status: bool) {
+        assert!(
+            saw_status,
+            "polling_loop_with should have broadcast an AgentStatus event for the injected run"
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "polling_loop_with should have broadcast an AgentStatus event")]
+    fn polling_loop_wrapper_panics_when_status_missing() {
+        assert_saw_status(false);
     }
 
     #[tokio::test]
@@ -1141,8 +1266,20 @@ mod tests {
         let (state, _rx) = make_test_state();
         let handle = tokio::spawn(polling_loop(state));
         tokio::time::sleep(std::time::Duration::from_millis(350)).await;
-        #[rustfmt::skip]
-        assert!(!handle.is_finished(), "polling_loop should still be looping, not have exited");
+        assert_still_looping(handle.is_finished());
         handle.abort();
+    }
+
+    fn assert_still_looping(is_finished: bool) {
+        assert!(
+            !is_finished,
+            "polling_loop should still be looping, not have exited"
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "polling_loop should still be looping, not have exited")]
+    fn polling_loop_real_wrapper_panics_when_finished_early() {
+        assert_still_looping(true);
     }
 }

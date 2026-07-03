@@ -90,6 +90,7 @@ mod tests {
     use tokio::net::TcpStream;
 
     use crate::config::Config;
+    use crate::test_support::with_tracing;
 
     /// Minimal hand-rolled WebSocket client used to drive `handle_ws` end to
     /// end over a real TCP loopback connection. No `tokio-tungstenite` or
@@ -98,6 +99,29 @@ mod tests {
     /// frames with axum's server-side WebSocket implementation.
     struct WsTestClient {
         stream: TcpStream,
+    }
+
+    /// `stream.read()` returning `0` mid-handshake means the peer closed the
+    /// connection before sending a complete response.
+    fn assert_handshake_byte_read(n: usize) {
+        assert_ne!(n, 0, "connection closed before handshake completed");
+    }
+
+    #[test]
+    #[should_panic(expected = "connection closed before handshake completed")]
+    fn assert_handshake_byte_read_panics_on_zero() {
+        assert_handshake_byte_read(0);
+    }
+
+    fn assert_handshake_101(response: &str) {
+        #[rustfmt::skip]
+        assert!(response.starts_with("HTTP/1.1 101"), "expected 101 Switching Protocols, got: {response}");
+    }
+
+    #[test]
+    #[should_panic(expected = "expected 101 Switching Protocols, got: HTTP/1.1 404 Not Found")]
+    fn assert_handshake_101_panics_on_non_101() {
+        assert_handshake_101("HTTP/1.1 404 Not Found");
     }
 
     impl WsTestClient {
@@ -119,15 +143,14 @@ mod tests {
             let mut byte = [0u8; 1];
             loop {
                 let n = stream.read(&mut byte).await.unwrap();
-                assert_ne!(n, 0, "connection closed before handshake completed");
+                assert_handshake_byte_read(n);
                 buf.push(byte[0]);
                 if buf.ends_with(b"\r\n\r\n") {
                     break;
                 }
             }
             let response = String::from_utf8_lossy(&buf);
-            #[rustfmt::skip]
-            assert!(response.starts_with("HTTP/1.1 101"), "expected 101 Switching Protocols, got: {response}");
+            assert_handshake_101(&response);
 
             Self { stream }
         }
@@ -238,6 +261,16 @@ mod tests {
         addr
     }
 
+    fn assert_text_frame(opcode: u8) {
+        assert_eq!(opcode, 0x1, "expected a text frame");
+    }
+
+    #[test]
+    #[should_panic(expected = "expected a text frame")]
+    fn assert_text_frame_panics_on_non_text_opcode() {
+        assert_text_frame(0x2);
+    }
+
     #[tokio::test]
     async fn ws_global_relays_broadcast_event_to_client() {
         let state = test_state();
@@ -259,7 +292,7 @@ mod tests {
             tokio::time::timeout(std::time::Duration::from_secs(5), client.recv_frame())
                 .await
                 .expect("timed out waiting for event frame");
-        assert_eq!(opcode, 0x1, "expected a text frame");
+        assert_text_frame(opcode);
         let text = String::from_utf8(payload).unwrap();
         assert!(text.contains("\"type\":\"log\""));
         assert!(text.contains("\"run_id\":\"run-1\""));
@@ -431,6 +464,16 @@ mod tests {
         client.send_close().await;
     }
 
+    fn assert_clean_eof_after_close(eof: Option<u8>) {
+        assert_eq!(eof, None, "expected clean EOF after server processed close");
+    }
+
+    #[test]
+    #[should_panic(expected = "expected clean EOF after server processed close")]
+    fn assert_clean_eof_after_close_panics_on_some() {
+        assert_clean_eof_after_close(Some(0x42));
+    }
+
     #[tokio::test]
     async fn ws_global_closes_on_client_close_frame() {
         let state = test_state();
@@ -447,11 +490,15 @@ mod tests {
         let eof = tokio::time::timeout(std::time::Duration::from_secs(5), client.recv_eof())
             .await
             .expect("timed out waiting for server to close the connection");
-        assert_eq!(eof, None, "expected clean EOF after server processed close");
+        assert_clean_eof_after_close(eof);
     }
 
     #[tokio::test]
     async fn ws_global_lagged_receiver_does_not_crash_connection() {
+        // Install the shared `AlwaysOnSubscriber` (see `crate::test_support`)
+        // so the `warn!(...)` call in handle_ws's `Lagged` arm below actually
+        // evaluates its message-format region instead of short-circuiting.
+        with_tracing(|| {});
         // Use a tiny broadcast buffer so that flooding it triggers a `Lagged`
         // error on the server-side subscriber, exercising that branch of
         // `handle_ws` without needing to fabricate the error directly.
@@ -567,6 +614,16 @@ mod tests {
     ///    its Sender clone); and
     /// 4. dropping the test-side sender — making the channel Closed so
     ///    rx.recv() returns Err(Closed) and handle_ws breaks.
+    fn assert_closed_after_channel_closed(eof: Option<u8>) {
+        assert_eq!(eof, None, "server should close after channel Closed");
+    }
+
+    #[test]
+    #[should_panic(expected = "server should close after channel Closed")]
+    fn assert_closed_after_channel_closed_panics_on_some() {
+        assert_closed_after_channel_closed(Some(0x1));
+    }
+
     #[tokio::test]
     async fn handle_ws_breaks_on_closed_channel_via_server_shutdown() {
         let (tx, _) = broadcast::channel::<ServerEvent>(16);
@@ -594,7 +651,7 @@ mod tests {
         let eof = tokio::time::timeout(std::time::Duration::from_secs(5), client.recv_eof())
             .await
             .expect("timed out waiting for server to close after channel closed");
-        assert_eq!(eof, None, "server should close after channel Closed");
+        assert_closed_after_channel_closed(eof);
     }
 
     /// Exercises the graceful-shutdown path of `axum::serve` so the
@@ -614,6 +671,26 @@ mod tests {
             .await
             .expect("timed out waiting for server to shut down")
             .unwrap();
+    }
+
+    fn assert_text_opcode(opcode: u8) {
+        assert_eq!(opcode, 0x1, "expected text opcode");
+    }
+
+    #[test]
+    #[should_panic(expected = "expected text opcode")]
+    fn assert_text_opcode_panics_on_non_text() {
+        assert_text_opcode(0x2);
+    }
+
+    fn assert_empty_payload(payload: &[u8]) {
+        assert!(payload.is_empty(), "expected empty payload");
+    }
+
+    #[test]
+    #[should_panic(expected = "expected empty payload")]
+    fn assert_empty_payload_panics_on_nonempty() {
+        assert_empty_payload(&[1, 2, 3]);
     }
 
     /// Exercises `recv_frame`'s `if len > 0` false branch by having a raw TCP
@@ -639,8 +716,18 @@ mod tests {
             tokio::time::timeout(std::time::Duration::from_secs(5), client.recv_frame())
                 .await
                 .expect("timed out waiting for zero-length frame");
-        assert_eq!(opcode, 0x1, "expected text opcode");
-        assert!(payload.is_empty(), "expected empty payload");
+        assert_text_opcode(opcode);
+        assert_empty_payload(&payload);
+    }
+
+    fn assert_none_on_clean_eof(result: Option<u8>) {
+        assert_eq!(result, None, "expected None on clean EOF");
+    }
+
+    #[test]
+    #[should_panic(expected = "expected None on clean EOF")]
+    fn assert_none_on_clean_eof_panics_on_some() {
+        assert_none_on_clean_eof(Some(0x1));
     }
 
     /// Exercises `recv_eof`'s `Ok(0) => None` branch by closing the server
@@ -665,7 +752,17 @@ mod tests {
         let result = tokio::time::timeout(std::time::Duration::from_secs(5), client.recv_eof())
             .await
             .expect("timed out");
-        assert_eq!(result, None, "expected None on clean EOF");
+        assert_none_on_clean_eof(result);
+    }
+
+    fn assert_some_byte_arrived(result: Option<u8>) {
+        assert_eq!(result, Some(0x42), "expected the sent byte");
+    }
+
+    #[test]
+    #[should_panic(expected = "expected the sent byte")]
+    fn assert_some_byte_arrived_panics_on_mismatch() {
+        assert_some_byte_arrived(Some(0x99));
     }
 
     /// Exercises `recv_eof`'s `Ok(_) => Some(byte[0])` branch by having the
@@ -687,7 +784,7 @@ mod tests {
         let result = tokio::time::timeout(std::time::Duration::from_secs(5), client.recv_eof())
             .await
             .expect("timed out");
-        assert_eq!(result, Some(0x42), "expected the sent byte");
+        assert_some_byte_arrived(result);
     }
 
     /// Single shared copy of the `run_id`-extraction match every test below
@@ -838,6 +935,16 @@ mod tests {
         assert!(tx.send(ev).is_ok());
     }
 
+    fn assert_none_on_connection_reset(result: Option<u8>) {
+        assert_eq!(result, None, "expected None on connection reset");
+    }
+
+    #[test]
+    #[should_panic(expected = "expected None on connection reset")]
+    fn assert_none_on_connection_reset_panics_on_some() {
+        assert_none_on_connection_reset(Some(0x1));
+    }
+
     /// Exercises `recv_eof`'s `Err(_) => None` branch by having the server
     /// abort the connection with SO_LINGER=0, which causes the client to
     /// receive a TCP RST rather than a clean FIN, so `read()` returns an IO
@@ -870,6 +977,6 @@ mod tests {
         let result = tokio::time::timeout(std::time::Duration::from_secs(2), client.recv_eof())
             .await
             .expect("timed out waiting for recv_eof on RST");
-        assert_eq!(result, None, "expected None on connection reset");
+        assert_none_on_connection_reset(result);
     }
 }

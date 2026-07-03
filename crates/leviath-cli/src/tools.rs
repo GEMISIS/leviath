@@ -730,8 +730,9 @@ for line in sys.stdin:
 
     #[tokio::test]
     async fn build_connects_mcp_server_and_registers_its_tools() {
+        with_tracing(|| {});
         let config = config_with_mcp_server("python3", vec!["-c", STUB_INIT_AND_LIST]);
-        let registry = with_tracing(|| ToolRegistry::build(std::env::temp_dir(), &config)).await;
+        let registry = ToolRegistry::build(std::env::temp_dir(), &config).await;
 
         assert_eq!(registry.mcp_tool_defs.len(), 1);
         assert_eq!(registry.mcp_tool_defs[0].name, "echo");
@@ -744,8 +745,9 @@ for line in sys.stdin:
         // A nonexistent command fails to spawn, exercising the `Err(e)` arm
         // ("Failed to connect MCP server -- skipping") instead of the
         // success arm above.
+        with_tracing(|| {});
         let config = config_with_mcp_server("definitely-not-a-real-binary-xyz", vec![]);
-        let registry = with_tracing(|| ToolRegistry::build(std::env::temp_dir(), &config)).await;
+        let registry = ToolRegistry::build(std::env::temp_dir(), &config).await;
 
         assert!(registry.mcp_tool_defs.is_empty());
     }
@@ -798,6 +800,7 @@ for line in sys.stdin:
 #[cfg(test)]
 mod subagent_tests {
     use super::*;
+    use crate::test_support::with_tracing;
     use leviath_core::blueprint::ModelConfig;
     use leviath_core::{ContextLayout, RegionDefinition, RegionKind, Stage};
     use leviath_runtime::ProviderRegistry;
@@ -925,6 +928,7 @@ mod subagent_tests {
 
     #[tokio::test]
     async fn spawn_agent_success_with_seed_context_registers_child() {
+        with_tracing(|| {});
         let (exec, root_entity, engine) = make_executor_with_root();
         let out = exec
             .execute(

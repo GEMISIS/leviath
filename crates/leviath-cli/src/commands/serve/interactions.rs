@@ -133,6 +133,16 @@ mod tests {
         format!("test-int-{}-{}-{}", prefix, std::process::id(), nanos)
     }
 
+    fn assert_response_was_written(response: &Option<interaction::InteractionResponse>) {
+        assert!(response.is_some(), "response should have been written");
+    }
+
+    #[test]
+    #[should_panic(expected = "response should have been written")]
+    fn assert_response_was_written_panics_when_missing() {
+        assert_response_was_written(&None);
+    }
+
     fn make_run(id: &str) -> RunMeta {
         RunMeta::new(
             id.to_string(),
@@ -415,7 +425,7 @@ mod tests {
 
         // Verify a response was written
         let response = interaction::take_response(&run_id);
-        assert!(response.is_some(), "response should have been written");
+        assert_response_was_written(&response);
         assert_eq!(response.unwrap().value.as_deref(), Some("do the thing"));
 
         let _ = std::fs::remove_dir_all(runstate::run_dir(&run_id));
