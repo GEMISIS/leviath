@@ -314,8 +314,10 @@ impl Dashboard {
     }
 
     fn handle_yank(&mut self) {
-        use super::helpers::yank_to_clipboard;
+        self.handle_yank_with_fn(super::helpers::yank_to_clipboard);
+    }
 
+    fn handle_yank_with_fn(&mut self, yank_fn: fn(&str) -> bool) {
         if let Some(agent) = self.selected_agent() {
             if agent.is_run_state {
                 let (content, label) = match self.stage_content_mode {
@@ -342,7 +344,7 @@ impl Dashboard {
                         remaining_ticks: 25,
                         level: ToastLevel::Warning,
                     });
-                } else if yank_to_clipboard(&content) {
+                } else if yank_fn(&content) {
                     self.toasts.push(Toast {
                         message: format!("{} yanked to clipboard", label),
                         remaining_ticks: 25,
@@ -773,6 +775,32 @@ mod tests {
         KeyEvent::new(code, KeyModifiers::empty())
     }
 
+    // ── Status assertion helpers (both branches covered by #[should_panic] companions) ──
+
+    fn assert_cancelled(status: &AgentDisplayStatus) {
+        if !matches!(status, AgentDisplayStatus::Cancelled) {
+            panic!("expected Cancelled, got {:?}", status);
+        }
+    }
+
+    fn assert_complete(status: &AgentDisplayStatus) {
+        if !matches!(status, AgentDisplayStatus::Complete) {
+            panic!("expected Complete, got {:?}", status);
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "expected Cancelled")]
+    fn assert_cancelled_helper_panics_on_wrong_status() {
+        assert_cancelled(&AgentDisplayStatus::Active);
+    }
+
+    #[test]
+    #[should_panic(expected = "expected Complete")]
+    fn assert_complete_helper_panics_on_wrong_status() {
+        assert_complete(&AgentDisplayStatus::Active);
+    }
+
     #[test]
     fn key_esc_quits_from_main_list() {
         let mut dash = make_test_dashboard();
@@ -1183,10 +1211,7 @@ mod tests {
         dash.update_display_indices();
         dash.handle_key(key(KeyCode::Char('c')));
         // Agent should be cancelled (is_run_state = true, pid = 0)
-        assert!(matches!(
-            dash.agents[0].status,
-            AgentDisplayStatus::Cancelled
-        ));
+        assert_cancelled(&dash.agents[0].status);
     }
 
     #[test]
@@ -1197,10 +1222,7 @@ mod tests {
         dash.update_display_indices();
         dash.handle_key(key(KeyCode::Char('c')));
         // Should remain Complete
-        assert!(matches!(
-            dash.agents[0].status,
-            AgentDisplayStatus::Complete
-        ));
+        assert_complete(&dash.agents[0].status);
     }
 
     #[test]
@@ -1217,10 +1239,7 @@ mod tests {
         dash.update_display_indices();
         dash.handle_key(key(KeyCode::Char('c')));
 
-        assert!(matches!(
-            dash.agents[0].status,
-            AgentDisplayStatus::Cancelled
-        ));
+        assert_cancelled(&dash.agents[0].status);
         assert!(crate::interaction::read_request(run_id).is_none());
 
         let _ = std::fs::remove_dir_all(crate::runstate::run_dir(run_id));
@@ -1236,10 +1255,7 @@ mod tests {
         dash.agents.push(agent);
         dash.update_display_indices();
         dash.handle_key(key(KeyCode::Char('c')));
-        assert!(matches!(
-            dash.agents[0].status,
-            AgentDisplayStatus::Cancelled
-        ));
+        assert_cancelled(&dash.agents[0].status);
     }
 
     // ─── handle_kill_from_list ─────────────────────────────────────────────
@@ -1251,10 +1267,7 @@ mod tests {
             .push(make_test_agent("run-1", AgentDisplayStatus::Active));
         dash.update_display_indices();
         dash.handle_key(key(KeyCode::Char('k')));
-        assert!(matches!(
-            dash.agents[0].status,
-            AgentDisplayStatus::Cancelled
-        ));
+        assert_cancelled(&dash.agents[0].status);
     }
 
     #[test]
@@ -1265,10 +1278,7 @@ mod tests {
         dash.agents.push(agent);
         dash.update_display_indices();
         dash.handle_key(key(KeyCode::Char('k')));
-        assert!(matches!(
-            dash.agents[0].status,
-            AgentDisplayStatus::Cancelled
-        ));
+        assert_cancelled(&dash.agents[0].status);
         assert!(dash.agents[0].waiting_prompt.is_none());
     }
 
@@ -1279,10 +1289,7 @@ mod tests {
             .push(make_test_agent("run-1", AgentDisplayStatus::Complete));
         dash.update_display_indices();
         dash.handle_key(key(KeyCode::Char('k')));
-        assert!(matches!(
-            dash.agents[0].status,
-            AgentDisplayStatus::Complete
-        ));
+        assert_complete(&dash.agents[0].status);
     }
 
     #[test]
@@ -1295,10 +1302,7 @@ mod tests {
         dash.agents.push(agent);
         dash.update_display_indices();
         dash.handle_key(key(KeyCode::Char('k')));
-        assert!(matches!(
-            dash.agents[0].status,
-            AgentDisplayStatus::Cancelled
-        ));
+        assert_cancelled(&dash.agents[0].status);
     }
 
     #[test]
@@ -1362,10 +1366,7 @@ mod tests {
         dash.update_display_indices();
         dash.detail_view = true;
         dash.handle_key(key(KeyCode::Char('k')));
-        assert!(matches!(
-            dash.agents[0].status,
-            AgentDisplayStatus::Cancelled
-        ));
+        assert_cancelled(&dash.agents[0].status);
     }
 
     #[test]
@@ -1377,10 +1378,7 @@ mod tests {
         dash.detail_view = true;
         dash.handle_key(key(KeyCode::Char('k')));
         // Should remain complete
-        assert!(matches!(
-            dash.agents[0].status,
-            AgentDisplayStatus::Complete
-        ));
+        assert_complete(&dash.agents[0].status);
     }
 
     #[test]
@@ -1396,10 +1394,7 @@ mod tests {
         dash.update_display_indices();
         dash.detail_view = true;
         dash.handle_key(key(KeyCode::Char('k')));
-        assert!(matches!(
-            dash.agents[0].status,
-            AgentDisplayStatus::Cancelled
-        ));
+        assert_cancelled(&dash.agents[0].status);
     }
 
     #[test]
@@ -1418,10 +1413,7 @@ mod tests {
         dash.detail_view = true;
         dash.handle_key(key(KeyCode::Char('k')));
 
-        assert!(matches!(
-            dash.agents[0].status,
-            AgentDisplayStatus::Cancelled
-        ));
+        assert_cancelled(&dash.agents[0].status);
         assert!(crate::interaction::read_request(run_id).is_none());
 
         let _ = std::fs::remove_dir_all(crate::runstate::run_dir(run_id));
@@ -2287,5 +2279,407 @@ mod tests {
             dash.agents[0].last_answered_request_id.as_deref(),
             Some("req-42")
         );
+    }
+
+    // ─── detail view: Left/Right stage navigation ─────────────────────────
+
+    #[test]
+    fn detail_view_left_when_selected_stage_greater_than_zero() {
+        // Exercises lines 164-171: the body of `if self.selected_stage > 0`
+        // for the Left key in handle_detail_view_key.
+        let mut dash = make_test_dashboard();
+        let mut agent = make_test_agent("run-1", AgentDisplayStatus::Active);
+        agent.num_stages = 3;
+        dash.agents.push(agent);
+        dash.update_display_indices();
+        dash.detail_view = true;
+        dash.selected_stage = 2;
+        dash.detail_scroll = 5;
+        dash.review_scroll = 3;
+        // search_mode must be FALSE so search mode doesn't intercept the Left key.
+        // The handler still clears search_query and search_match_idx.
+        dash.search_mode = false;
+        dash.search_query = "foo".to_string();
+        dash.search_match_idx = 4;
+
+        dash.handle_key(key(KeyCode::Left));
+
+        assert_eq!(dash.selected_stage, 1);
+        assert_eq!(dash.detail_scroll, 0);
+        assert_eq!(dash.review_scroll, 0);
+        assert!(!dash.search_mode);
+        assert!(dash.search_query.is_empty());
+        assert_eq!(dash.search_match_idx, 0);
+    }
+
+    #[test]
+    fn detail_view_left_when_selected_stage_is_zero_no_op() {
+        // Exercises the false branch of `if self.selected_stage > 0` (line 164).
+        let mut dash = make_test_dashboard();
+        dash.agents
+            .push(make_test_agent("run-1", AgentDisplayStatus::Active));
+        dash.update_display_indices();
+        dash.detail_view = true;
+        dash.selected_stage = 0;
+
+        dash.handle_key(key(KeyCode::Left));
+
+        assert_eq!(dash.selected_stage, 0);
+    }
+
+    #[test]
+    fn detail_view_right_advances_stage_when_below_max() {
+        // Exercises lines 178-185: the body of `if self.selected_stage < max_stage`
+        // for the Right key in handle_detail_view_key.
+        let mut dash = make_test_dashboard();
+        let mut agent = make_test_agent("run-1", AgentDisplayStatus::Active);
+        agent.num_stages = 3; // max_stage = 2
+        dash.agents.push(agent);
+        dash.update_display_indices();
+        dash.detail_view = true;
+        dash.selected_stage = 0;
+        dash.detail_scroll = 5;
+        dash.review_scroll = 3;
+        // search_mode must be FALSE so search mode doesn't intercept the Right key.
+        dash.search_mode = false;
+        dash.search_query = "bar".to_string();
+        dash.search_match_idx = 7;
+
+        dash.handle_key(key(KeyCode::Right));
+
+        assert_eq!(dash.selected_stage, 1);
+        assert_eq!(dash.detail_scroll, 0);
+        assert_eq!(dash.review_scroll, 0);
+        assert!(!dash.search_mode);
+        assert!(dash.search_query.is_empty());
+        assert_eq!(dash.search_match_idx, 0);
+    }
+
+    #[test]
+    fn detail_view_right_at_max_stage_no_op() {
+        // Exercises the false branch of `if self.selected_stage < max_stage`.
+        let mut dash = make_test_dashboard();
+        let mut agent = make_test_agent("run-1", AgentDisplayStatus::Active);
+        agent.num_stages = 2; // max_stage = 1
+        dash.agents.push(agent);
+        dash.update_display_indices();
+        dash.detail_view = true;
+        dash.selected_stage = 1; // already at max
+
+        dash.handle_key(key(KeyCode::Right));
+
+        assert_eq!(dash.selected_stage, 1);
+    }
+
+    // ─── detail view: number key stage jump ──────────────────────────────
+
+    #[test]
+    fn detail_view_number_key_jumps_to_valid_stage() {
+        // Exercises lines 194-201: the body of `if idx <= max_stage` in the
+        // Char('1'..='9') arm of handle_detail_view_key.
+        let mut dash = make_test_dashboard();
+        let mut agent = make_test_agent("run-1", AgentDisplayStatus::Active);
+        agent.num_stages = 3; // max_stage=2; '3' => idx=2 which is <= 2
+        dash.agents.push(agent);
+        dash.update_display_indices();
+        dash.detail_view = true;
+        dash.selected_stage = 0;
+        dash.detail_scroll = 10;
+        dash.review_scroll = 5;
+        // search_mode must be FALSE — in search mode, Char('3') is treated as a
+        // search character rather than a stage-jump key.
+        dash.search_mode = false;
+        dash.search_query = "xyz".to_string();
+        dash.search_match_idx = 3;
+
+        dash.handle_key(key(KeyCode::Char('3')));
+
+        assert_eq!(dash.selected_stage, 2);
+        assert_eq!(dash.detail_scroll, 0);
+        assert_eq!(dash.review_scroll, 0);
+        assert!(!dash.search_mode);
+        assert!(dash.search_query.is_empty());
+        assert_eq!(dash.search_match_idx, 0);
+    }
+
+    #[test]
+    fn detail_view_number_key_out_of_range_no_op() {
+        // Exercises the false branch of `if idx <= max_stage`: pressing '9'
+        // when there are only 2 stages (max_stage=1) leaves selected_stage unchanged.
+        let mut dash = make_test_dashboard();
+        let mut agent = make_test_agent("run-1", AgentDisplayStatus::Active);
+        agent.num_stages = 2; // max_stage=1; '9' => idx=8 which is > 1
+        dash.agents.push(agent);
+        dash.update_display_indices();
+        dash.detail_view = true;
+        dash.selected_stage = 0;
+
+        dash.handle_key(key(KeyCode::Char('9')));
+
+        assert_eq!(dash.selected_stage, 0);
+    }
+
+    // ─── detail view: 'N' search when query is empty (no-op) ──────────────
+
+    #[test]
+    fn detail_view_shift_n_no_query_no_op() {
+        // Exercises the false branch of `if !self.search_query.is_empty()` in
+        // the Char('N') arm (line 301), ensuring search_match_idx stays at 0.
+        let mut dash = make_test_dashboard();
+        dash.agents
+            .push(make_test_agent("run-1", AgentDisplayStatus::Active));
+        dash.update_display_indices();
+        dash.detail_view = true;
+        dash.search_query.clear();
+        dash.search_match_idx = 0;
+        dash.handle_key(key(KeyCode::Char('N')));
+        assert_eq!(dash.search_match_idx, 0);
+    }
+
+    // ─── handle_yank: no agent, is_run_state=false ────────────────────────
+
+    #[test]
+    fn yank_no_agent_is_noop() {
+        // Exercises the `else` branch of `if let Some(agent) = self.selected_agent()`
+        // (line 359) in handle_yank: no agent means nothing happens.
+        let mut dash = make_test_dashboard();
+        dash.detail_view = true;
+        // No agents at all
+        dash.handle_key(key(KeyCode::Char('y')));
+        assert!(dash.toasts.is_empty());
+    }
+
+    #[test]
+    fn yank_non_run_state_agent_is_noop() {
+        // Exercises the `else` branch of `if agent.is_run_state` (line 358)
+        // in handle_yank: non-run-state agents skip yank entirely.
+        let mut dash = make_test_dashboard();
+        let mut agent = make_test_agent("run-1", AgentDisplayStatus::Active);
+        agent.is_run_state = false;
+        dash.agents.push(agent);
+        dash.update_display_indices();
+        dash.detail_view = true;
+
+        dash.handle_key(key(KeyCode::Char('y')));
+
+        // No toast generated — yank does nothing for non-run-state agents.
+        assert!(dash.toasts.is_empty());
+    }
+
+    // ─── process_events: agent not found for various event types ──────────
+
+    #[test]
+    fn process_events_stage_changed_unknown_agent_logs_but_no_update() {
+        // Exercises the `else` path of `if let Some(agent) = ... .find(...)` (line 656)
+        // in StageChanged: logs the message but no agent is updated.
+        let mut dash = make_test_dashboard();
+        dash.agents
+            .push(make_test_agent("run-1", AgentDisplayStatus::Active));
+        dash.update_display_indices();
+        let tx = dash.event_tx.clone();
+        tx.send(AgentEvent::StageChanged {
+            agent_id: "nonexistent".to_string(),
+            stage: "code".to_string(),
+        })
+        .unwrap();
+        dash.process_events();
+        // Existing agent is untouched
+        assert_eq!(dash.agents[0].stage, "main");
+    }
+
+    #[test]
+    fn process_events_status_changed_unknown_agent_no_update() {
+        // Exercises the `else` path of `if let Some(agent) = ... .find(...)` (line 662)
+        // in StatusChanged: event for unknown agent id is silently ignored.
+        let mut dash = make_test_dashboard();
+        dash.agents
+            .push(make_test_agent("run-1", AgentDisplayStatus::Active));
+        dash.update_display_indices();
+        let tx = dash.event_tx.clone();
+        tx.send(AgentEvent::StatusChanged {
+            agent_id: "nonexistent".to_string(),
+            status: AgentDisplayStatus::Complete,
+        })
+        .unwrap();
+        dash.process_events();
+        // Existing agent remains Active
+        assert!(matches!(dash.agents[0].status, AgentDisplayStatus::Active));
+    }
+
+    #[test]
+    fn process_events_needs_input_unknown_agent_logs_but_no_update() {
+        // Exercises the `else` path of `if let Some(agent) = ... .find(...)` (line 668)
+        // in NeedsInput: logs the message but the unknown agent is not updated.
+        let mut dash = make_test_dashboard();
+        dash.agents
+            .push(make_test_agent("run-1", AgentDisplayStatus::Active));
+        dash.update_display_indices();
+        let tx = dash.event_tx.clone();
+        tx.send(AgentEvent::NeedsInput {
+            agent_id: "nonexistent".to_string(),
+            prompt: "?".to_string(),
+        })
+        .unwrap();
+        dash.process_events();
+        // Existing agent still Active, no waiting_prompt set
+        assert!(matches!(dash.agents[0].status, AgentDisplayStatus::Active));
+        assert!(dash.agents[0].waiting_prompt.is_none());
+    }
+
+    #[test]
+    fn process_events_inference_complete_unknown_agent_logs_but_no_update() {
+        // Exercises the `else` path of `if let Some(_agent) = ... .find(...)` (line 691)
+        // in InferenceComplete: iteration is NOT incremented for unknown agents.
+        let mut dash = make_test_dashboard();
+        dash.agents
+            .push(make_test_agent("run-1", AgentDisplayStatus::Active));
+        dash.update_display_indices();
+        let tx = dash.event_tx.clone();
+        tx.send(AgentEvent::InferenceComplete {
+            agent_id: "nonexistent".to_string(),
+            content: "done".to_string(),
+            tokens_used: 10,
+            tokens_prompt: 5,
+        })
+        .unwrap();
+        dash.process_events();
+        assert_eq!(dash.agents[0].iteration, 0);
+    }
+
+    #[test]
+    fn process_events_error_unknown_agent_logs_but_no_update() {
+        // Exercises the `else` path of `if let Some(agent) = ... .find(...)` (line 703)
+        // in Error: the existing agent's status is unaffected.
+        let mut dash = make_test_dashboard();
+        dash.agents
+            .push(make_test_agent("run-1", AgentDisplayStatus::Active));
+        dash.update_display_indices();
+        let tx = dash.event_tx.clone();
+        tx.send(AgentEvent::Error {
+            agent_id: "nonexistent".to_string(),
+            error: "boom".to_string(),
+        })
+        .unwrap();
+        dash.process_events();
+        assert!(matches!(dash.agents[0].status, AgentDisplayStatus::Active));
+    }
+
+    // ─── main list: Down key — three agents to confirm can-move path ──────
+
+    #[test]
+    fn main_list_down_advances_through_multiple_agents() {
+        // Exercises lines 421-424: the body of the Down key's inner if-block
+        // in handle_main_list_key when selected < display_indices.len() - 1.
+        let mut dash = make_test_dashboard();
+        dash.agents
+            .push(make_test_agent("run-1", AgentDisplayStatus::Active));
+        dash.agents
+            .push(make_test_agent("run-2", AgentDisplayStatus::Active));
+        dash.agents
+            .push(make_test_agent("run-3", AgentDisplayStatus::Active));
+        dash.update_display_indices();
+        assert_eq!(dash.selected, 0);
+
+        dash.handle_key(key(KeyCode::Down));
+        assert_eq!(dash.selected, 1);
+
+        dash.handle_key(key(KeyCode::Down));
+        assert_eq!(dash.selected, 2);
+
+        // At bottom — cannot go further
+        dash.handle_key(key(KeyCode::Down));
+        assert_eq!(dash.selected, 2);
+    }
+
+    // ─── handle_cancel_from_list: pending_request cleared for run-state ───
+
+    #[test]
+    fn cancel_from_list_run_state_agent_clears_pending_request() {
+        // Exercises line 493: `a.pending_request = None;` in handle_cancel_from_list.
+        let mut dash = make_test_dashboard();
+        let mut agent = make_test_agent("run-1", AgentDisplayStatus::Active);
+        agent.is_run_state = true;
+        agent.pending_request = Some(crate::interaction::InteractionRequest::free_text(
+            "r1", "?", "main", true,
+        ));
+        dash.agents.push(agent);
+        dash.update_display_indices();
+
+        dash.handle_key(key(KeyCode::Char('c')));
+
+        assert!(dash.agents[0].pending_request.is_none());
+        assert_cancelled(&dash.agents[0].status);
+    }
+
+    // ─── handle_kill_from_list: pending_request cleared ───────────────────
+
+    #[test]
+    fn kill_from_list_run_state_agent_clears_pending_request() {
+        // Exercises line 531: `a.pending_request = None;` in handle_kill_from_list.
+        let mut dash = make_test_dashboard();
+        let mut agent = make_test_agent("run-1", AgentDisplayStatus::Active);
+        agent.is_run_state = true;
+        agent.pending_request = Some(crate::interaction::InteractionRequest::free_text(
+            "r1", "?", "main", true,
+        ));
+        dash.agents.push(agent);
+        dash.update_display_indices();
+
+        dash.handle_key(key(KeyCode::Char('k')));
+
+        assert!(dash.agents[0].pending_request.is_none());
+        assert_cancelled(&dash.agents[0].status);
+    }
+
+    // ─── handle_kill_from_detail: pending_request cleared ─────────────────
+
+    #[test]
+    fn kill_from_detail_run_state_agent_clears_pending_request() {
+        // Exercises line 392: `a.pending_request = None;` in handle_kill_from_detail.
+        let mut dash = make_test_dashboard();
+        let mut agent = make_test_agent("run-1", AgentDisplayStatus::Active);
+        agent.is_run_state = true;
+        agent.pending_request = Some(crate::interaction::InteractionRequest::free_text(
+            "r1", "?", "main", true,
+        ));
+        dash.agents.push(agent);
+        dash.update_display_indices();
+        dash.detail_view = true;
+
+        dash.handle_key(key(KeyCode::Char('k')));
+
+        assert!(dash.agents[0].pending_request.is_none());
+        assert_cancelled(&dash.agents[0].status);
+    }
+
+    // ─── handle_yank_with_fn: clipboard-unavailable branch ───────────────────
+
+    #[test]
+    fn yank_clipboard_unavailable_shows_error_toast() {
+        use crate::runstate;
+        let run_id = "test-yank-clipboard-unavailable-x7z9";
+        let stage_path = runstate::stage_dir(run_id, 0);
+        std::fs::create_dir_all(&stage_path).ok();
+        std::fs::write(stage_path.join("context.json"), r#"{"test":true}"#).ok();
+
+        let mut dash = make_test_dashboard();
+        let agent = make_test_agent(run_id, AgentDisplayStatus::Active);
+        dash.agents.push(agent);
+        dash.update_display_indices();
+        dash.detail_view = true;
+        dash.stage_content_mode = StageContentMode::Context;
+        dash.selected_stage = 0;
+
+        dash.handle_yank_with_fn(|_| false);
+
+        assert!(
+            dash.toasts
+                .iter()
+                .any(|t| t.message.contains("Clipboard unavailable")),
+            "expected Clipboard unavailable toast, got: {:?}",
+            dash.toasts.iter().map(|t| &t.message).collect::<Vec<_>>()
+        );
+
+        let _ = std::fs::remove_dir_all(runstate::run_dir(run_id));
     }
 }

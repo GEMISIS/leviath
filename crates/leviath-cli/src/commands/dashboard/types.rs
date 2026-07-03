@@ -24,7 +24,7 @@ pub(super) enum StageContentMode {
 }
 
 /// Display status for agents in the dashboard.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum AgentDisplayStatus {
     Active,
     Waiting,

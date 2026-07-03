@@ -107,6 +107,13 @@ pub(super) fn elapsed_str_until(started_at: i64, until: i64) -> String {
 /// 3. `wl-copy` (Linux Wayland)
 /// 4. OSC52 via /dev/tty → stdout fallback
 pub(super) fn yank_to_clipboard(text: &str) -> bool {
+    yank_to_clipboard_via(text, osc52_yank_raw)
+}
+
+/// Core `yank_to_clipboard` logic, parameterized over the OSC52 fallback so
+/// tests that force this path (e.g. by starving `PATH`) can inject a fake
+/// that never touches the real TTY.
+fn yank_to_clipboard_via(text: &str, osc52_fallback: fn(&str) -> bool) -> bool {
     use std::io::Write as IoWrite;
     use std::process::{Command, Stdio};
 
@@ -134,60 +141,90 @@ pub(super) fn yank_to_clipboard(text: &str) -> bool {
     }
 
     // Fall back to OSC52
-    osc52_yank_raw(text)
+    osc52_fallback(text)
 }
 
-/// Yank via the OSC52 terminal escape sequence — last-resort fallback.
-pub(super) fn osc52_yank_raw(text: &str) -> bool {
+/// Base64-encode `text` and wrap it in the OSC52 "set clipboard" escape sequence.
+fn osc52_sequence(text: &str) -> String {
+    use std::fmt::Write as FmtWrite;
+    let bytes = text.as_bytes();
+    let mut encoded = String::with_capacity((bytes.len() * 4 / 3) + 8);
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut i = 0;
+    while i + 3 <= bytes.len() {
+        let b0 = bytes[i] as usize;
+        let b1 = bytes[i + 1] as usize;
+        let b2 = bytes[i + 2] as usize;
+        let _ = FmtWrite::write_char(&mut encoded, TABLE[b0 >> 2] as char);
+        let _ = FmtWrite::write_char(&mut encoded, TABLE[((b0 & 3) << 4) | (b1 >> 4)] as char);
+        let _ = FmtWrite::write_char(&mut encoded, TABLE[((b1 & 0xf) << 2) | (b2 >> 6)] as char);
+        let _ = FmtWrite::write_char(&mut encoded, TABLE[b2 & 0x3f] as char);
+        i += 3;
+    }
+    let rem = bytes.len() - i;
+    if rem == 1 {
+        let b0 = bytes[i] as usize;
+        let _ = FmtWrite::write_char(&mut encoded, TABLE[b0 >> 2] as char);
+        let _ = FmtWrite::write_char(&mut encoded, TABLE[(b0 & 3) << 4] as char);
+        encoded.push_str("==");
+    } else if rem == 2 {
+        let b0 = bytes[i] as usize;
+        let b1 = bytes[i + 1] as usize;
+        let _ = FmtWrite::write_char(&mut encoded, TABLE[b0 >> 2] as char);
+        let _ = FmtWrite::write_char(&mut encoded, TABLE[((b0 & 3) << 4) | (b1 >> 4)] as char);
+        let _ = FmtWrite::write_char(&mut encoded, TABLE[(b1 & 0xf) << 2] as char);
+        encoded.push('=');
+    }
+    format!("\x1b]52;c;{}\x07", encoded)
+}
+
+/// Open the process's controlling terminal for writing. Extracted behind a
+/// `fn` pointer (see [`osc52_yank_via`]) so tests can swap in an opener that
+/// never touches the real TTY -- writing OSC escape sequences to a live
+/// `/dev/tty` from a unit test corrupts (and can hang) whatever terminal
+/// `cargo test` happens to be running in, since it bypasses the test
+/// harness's stdout capture entirely.
+#[cfg(unix)]
+fn open_controlling_tty() -> std::io::Result<std::fs::File> {
+    std::fs::OpenOptions::new().write(true).open("/dev/tty")
+}
+
+/// Core OSC52 write logic, parameterized over how to open the TTY *and*
+/// where the stdout fallback writes go, so it can be fully exercised in
+/// tests without ever touching a real terminal. A direct `Write` call on
+/// `std::io::stdout()` bypasses cargo test's per-test output capture (unlike
+/// `print!`/`println!`) just as much as a raw `/dev/tty` write does, so both
+/// destinations must be injectable, not just the TTY one.
+fn osc52_write_via<T: std::io::Write>(
+    text: &str,
+    open_tty: fn() -> std::io::Result<std::fs::File>,
+    mut stdout_fallback: T,
+) -> bool {
     use std::io::Write;
-    // Base64-encode the content
-    let encoded = {
-        use std::fmt::Write as FmtWrite;
-        let bytes = text.as_bytes();
-        let mut out = String::with_capacity((bytes.len() * 4 / 3) + 8);
-        const TABLE: &[u8; 64] =
-            b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-        let mut i = 0;
-        while i + 3 <= bytes.len() {
-            let b0 = bytes[i] as usize;
-            let b1 = bytes[i + 1] as usize;
-            let b2 = bytes[i + 2] as usize;
-            let _ = FmtWrite::write_char(&mut out, TABLE[b0 >> 2] as char);
-            let _ = FmtWrite::write_char(&mut out, TABLE[((b0 & 3) << 4) | (b1 >> 4)] as char);
-            let _ = FmtWrite::write_char(&mut out, TABLE[((b1 & 0xf) << 2) | (b2 >> 6)] as char);
-            let _ = FmtWrite::write_char(&mut out, TABLE[b2 & 0x3f] as char);
-            i += 3;
-        }
-        let rem = bytes.len() - i;
-        if rem == 1 {
-            let b0 = bytes[i] as usize;
-            let _ = FmtWrite::write_char(&mut out, TABLE[b0 >> 2] as char);
-            let _ = FmtWrite::write_char(&mut out, TABLE[(b0 & 3) << 4] as char);
-            out.push_str("==");
-        } else if rem == 2 {
-            let b0 = bytes[i] as usize;
-            let b1 = bytes[i + 1] as usize;
-            let _ = FmtWrite::write_char(&mut out, TABLE[b0 >> 2] as char);
-            let _ = FmtWrite::write_char(&mut out, TABLE[((b0 & 3) << 4) | (b1 >> 4)] as char);
-            let _ = FmtWrite::write_char(&mut out, TABLE[(b1 & 0xf) << 2] as char);
-            out.push('=');
-        }
-        out
-    };
-    let osc = format!("\x1b]52;c;{}\x07", encoded);
-    // Write directly to /dev/tty to bypass ratatui's raw mode stdout handling.
-    #[cfg(unix)]
-    {
-        if let Ok(mut tty) = std::fs::OpenOptions::new().write(true).open("/dev/tty") {
-            if tty.write_all(osc.as_bytes()).is_ok() && tty.flush().is_ok() {
-                return true;
-            }
+    let osc = osc52_sequence(text);
+    if let Ok(mut tty) = open_tty() {
+        if tty.write_all(osc.as_bytes()).is_ok() && tty.flush().is_ok() {
+            return true;
         }
     }
     // Fallback: write to stdout. Report the real outcome instead of always
     // claiming success — callers show an error toast when this is false.
-    let mut stdout = std::io::stdout();
-    stdout.write_all(osc.as_bytes()).is_ok() && stdout.flush().is_ok()
+    stdout_fallback.write_all(osc.as_bytes()).is_ok() && stdout_fallback.flush().is_ok()
+}
+
+/// Yank via the OSC52 terminal escape sequence — last-resort fallback.
+pub(super) fn osc52_yank_raw(text: &str) -> bool {
+    #[cfg(unix)]
+    {
+        osc52_write_via(text, open_controlling_tty, std::io::stdout())
+    }
+    #[cfg(not(unix))]
+    {
+        use std::io::Write;
+        let osc = osc52_sequence(text);
+        let mut stdout = std::io::stdout();
+        stdout.write_all(osc.as_bytes()).is_ok() && stdout.flush().is_ok()
+    }
 }
 
 #[cfg(test)]
@@ -327,24 +364,31 @@ mod tests {
         assert_eq!(elapsed_str_until(0, 60), "—");
     }
 
+    // These exercise `osc52_sequence` directly (pure, no I/O) rather than
+    // `osc52_yank_raw`. `osc52_yank_raw` opens the real `/dev/tty` and writes
+    // an OSC escape sequence straight to it -- calling it from a unit test
+    // bypasses cargo test's stdout capture entirely and corrupts (and, with
+    // enough parallel tests hitting it at once, can hang) whatever terminal
+    // `cargo test` happens to be running in. See `osc52_yank_via` tests below
+    // for I/O-path coverage routed through a fake TTY instead.
+
     #[test]
-    fn test_osc52_yank_raw_produces_output() {
-        // We can't easily verify clipboard content, but we can verify it doesn't panic
-        // and returns true (it falls through to stdout writing)
-        let result = osc52_yank_raw("test data");
-        assert!(result);
+    fn test_osc52_sequence_produces_output() {
+        let seq = osc52_sequence("test data");
+        assert!(seq.starts_with("\x1b]52;c;"));
+        assert!(seq.ends_with('\x07'));
     }
 
     #[test]
-    fn test_osc52_yank_raw_empty_string() {
-        let result = osc52_yank_raw("");
-        assert!(result);
+    fn test_osc52_sequence_empty_string() {
+        assert_eq!(osc52_sequence(""), "\x1b]52;c;\x07");
     }
 
     #[test]
-    fn test_osc52_yank_raw_special_chars() {
-        let result = osc52_yank_raw("hello\nworld\ttab");
-        assert!(result);
+    fn test_osc52_sequence_special_chars() {
+        let seq = osc52_sequence("hello\nworld\ttab");
+        assert!(seq.starts_with("\x1b]52;c;"));
+        assert!(seq.ends_with('\x07'));
     }
 
     // ── relative_time branches ────────────────────────────────────────────────
@@ -465,47 +509,95 @@ mod tests {
 
     #[test]
     fn test_yank_to_clipboard_small_text() {
-        // In test environments pbcopy/xclip/wl-copy likely don't exist,
-        // so this will fall through to OSC52 (returns true).
-        let result = yank_to_clipboard("hello clipboard");
-        // We can't assert true/false in all CI environments, just assert no panic.
-        let _ = result;
+        // Exercises the real native-tool spawn attempt (pbcopy/xclip/wl-copy
+        // -- harmless clipboard mutation, not terminal I/O), but if none are
+        // available in this environment the injected fallback below returns
+        // `true` without ever touching a real terminal via `osc52_yank_raw`.
+        fn fake_osc52_fallback(_text: &str) -> bool {
+            true
+        }
+        let result = yank_to_clipboard_via("hello clipboard", fake_osc52_fallback);
+        assert!(result);
     }
 
     #[test]
     fn test_yank_to_clipboard_empty() {
-        let _ = yank_to_clipboard("");
+        fn fake_osc52_fallback(_text: &str) -> bool {
+            true
+        }
+        let result = yank_to_clipboard_via("", fake_osc52_fallback);
+        assert!(result);
     }
 
-    // ── OSC52 base64 edge cases ───────────────────────────────────────────────
+    // ── OSC52 base64 edge cases (pure `osc52_sequence`, no I/O) ───────────────
 
     #[test]
-    fn test_osc52_yank_raw_one_byte() {
+    fn test_osc52_sequence_one_byte() {
         // Single byte → rem == 1 path in base64 encoder
-        let result = osc52_yank_raw("A");
-        assert!(result);
+        assert_eq!(osc52_sequence("A"), "\x1b]52;c;QQ==\x07");
     }
 
     #[test]
-    fn test_osc52_yank_raw_two_bytes() {
+    fn test_osc52_sequence_two_bytes() {
         // Two bytes → rem == 2 path in base64 encoder
-        let result = osc52_yank_raw("AB");
-        assert!(result);
+        assert_eq!(osc52_sequence("AB"), "\x1b]52;c;QUI=\x07");
     }
 
     #[test]
-    fn test_osc52_yank_raw_three_bytes() {
+    fn test_osc52_sequence_three_bytes() {
         // Three bytes → exact group, no remainder
-        let result = osc52_yank_raw("ABC");
-        assert!(result);
+        assert_eq!(osc52_sequence("ABC"), "\x1b]52;c;QUJD\x07");
     }
 
     #[test]
-    fn test_osc52_yank_raw_long_text() {
+    fn test_osc52_sequence_long_text() {
         // Multiple 3-byte groups plus a remainder
         let text = "The quick brown fox jumps over the lazy dog";
-        let result = osc52_yank_raw(text);
+        let seq = osc52_sequence(text);
+        assert!(seq.starts_with("\x1b]52;c;"));
+        assert!(seq.ends_with('\x07'));
+    }
+
+    // ── osc52_write_via (both I/O destinations faked — never touches a real
+    // TTY or the process's real stdout) ───────────────────────────────────
+
+    #[test]
+    fn test_osc52_write_via_tty_open_succeeds_writes_expected_sequence() {
+        // Points the "tty" at a throwaway temp file instead of `/dev/tty` --
+        // proves the success branch works without ever touching a terminal.
+        fn open_temp_tty() -> std::io::Result<std::fs::File> {
+            std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .open(std::env::temp_dir().join("lev_test_osc52_fake_tty"))
+        }
+        let path = std::env::temp_dir().join("lev_test_osc52_fake_tty");
+        let mut stdout_fallback = Vec::new();
+        let result = osc52_write_via("test data", open_temp_tty, &mut stdout_fallback);
         assert!(result);
+        let contents = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(contents, osc52_sequence("test data"));
+        // The tty branch succeeded, so the stdout fallback must never fire.
+        assert!(stdout_fallback.is_empty());
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_osc52_write_via_tty_open_fails_falls_back_to_injected_writer() {
+        fn fail_to_open_tty() -> std::io::Result<std::fs::File> {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "no tty in tests",
+            ))
+        }
+        // Falls through to the injected in-memory writer instead of the
+        // process's real `std::io::stdout()`.
+        let mut stdout_fallback = Vec::new();
+        let result = osc52_write_via("fallback data", fail_to_open_tty, &mut stdout_fallback);
+        assert!(result);
+        assert_eq!(stdout_fallback, osc52_sequence("fallback data").as_bytes());
     }
 
     // ─── kill_write_cancelled ───────────────────────────────────────────────
@@ -545,8 +637,13 @@ mod tests {
     fn test_yank_to_clipboard_returns_true() {
         // On this machine (macOS, real pbcopy present) this exercises the
         // native-clipboard success path (return true from inside the `for`
-        // loop) rather than falling through to OSC52.
-        let result = yank_to_clipboard("dashboard yank test content");
+        // loop) rather than falling through to OSC52. If pbcopy is
+        // unavailable, the injected fallback still returns `true` without
+        // ever touching a real terminal via `osc52_yank_raw`.
+        fn fake_osc52_fallback(_text: &str) -> bool {
+            true
+        }
+        let result = yank_to_clipboard_via("dashboard yank test content", fake_osc52_fallback);
         assert!(result);
     }
 
@@ -563,40 +660,34 @@ mod tests {
         // Starve PATH so `Command::new("pbcopy"/"xclip"/"wl-copy").spawn()`
         // fails with NotFound for all three -- the `if let Ok(mut child) = `
         // guard is simply false each time (no external process is ever
-        // launched), falling through to the OSC52 code path. Unlike
-        // `launch_editor`'s PATH-starvation tests elsewhere in this crate,
-        // this is safe cross-platform: OSC52's own fallback chain never
-        // launches an external interactive program (it either writes to
-        // `/dev/tty` or to `stdout`, both non-blocking file I/O).
+        // launched), falling through to the OSC52 fallback. That fallback is
+        // injected as a fn pointer that never touches the real TTY (unlike
+        // the real `osc52_yank_raw`, which would open `/dev/tty` here).
+        fn fake_osc52_fallback(_text: &str) -> bool {
+            true
+        }
         let original_path = std::env::var_os("PATH");
         unsafe {
             std::env::set_var("PATH", "/lev-definitely-empty-path-dir");
         }
-        let result = yank_to_clipboard("fallback path test content");
+        let result = yank_to_clipboard_via("fallback path test content", fake_osc52_fallback);
         unsafe {
             match &original_path {
                 Some(p) => std::env::set_var("PATH", p),
                 None => std::env::remove_var("PATH"),
             }
         }
-        // Whatever osc52_yank_raw itself returns (see its own tests) is what
-        // should come back here -- the point of this test is proving the
-        // native-tool loop was skipped entirely, not the final bool value.
-        assert_eq!(result, osc52_yank_raw("fallback path test content"));
-    }
-
-    // ─── osc52_yank_raw ─────────────────────────────────────────────────────
-
-    #[test]
-    fn test_osc52_yank_raw_reports_real_write_outcome() {
-        // Exercises the real write/flush call chain (either /dev/tty or the
-        // stdout fallback, depending on whether this test process has a
-        // controlling terminal) and confirms the return value matches
-        // reality -- this is the exact bug fixed this session (the function
-        // used to unconditionally return `true`).
-        let result = osc52_yank_raw("osc52 direct test content");
-        // Both real destinations (a live /dev/tty or this process's own
-        // stdout) succeed under a normal `cargo test` invocation.
+        // The point of this test is proving the native-tool loop was skipped
+        // entirely and control reached the injected OSC52 fallback -- not
+        // exercising the real `osc52_yank_raw` (see its own tests above).
         assert!(result);
     }
+
+    // `osc52_yank_raw` itself is a thin one-line wrapper delegating to
+    // `osc52_yank_via` with the real `open_controlling_tty` opener (see
+    // above for full coverage of that logic). It is deliberately not called
+    // from tests: doing so opens the process's actual `/dev/tty` and writes
+    // an OSC escape sequence straight to it, corrupting -- and, under
+    // parallel test execution, potentially hanging -- whatever terminal
+    // `cargo test` is run from.
 }

@@ -495,8 +495,11 @@ impl Dashboard {
 
     /// Kill + delete all on-disk state for the selected agent.
     pub(super) fn delete_selected_agent(&mut self) {
-        let (id, _pid, is_run_state) = match self.selected_agent() {
-            Some(a) => (a.id.clone(), a.pid, a.is_run_state),
+        let (raw_idx, id, _pid, is_run_state) = match self.selected_agent_raw_idx() {
+            Some(i) => {
+                let a = &self.agents[i];
+                (i, a.id.clone(), a.pid, a.is_run_state)
+            }
             None => return,
         };
         if !is_run_state {
@@ -517,15 +520,13 @@ impl Dashboard {
         } else {
             self.add_log(format!("Deleted run {}", id));
         }
-        // Remove saved context state if present
-        if let Some(home) = dirs::home_dir() {
-            let state_dir = home.join(".leviath").join("state").join(&id);
-            let _ = std::fs::remove_dir_all(state_dir);
-        }
-        // Remove agent from self.agents using the raw index
-        if let Some(raw_idx) = self.selected_agent_raw_idx() {
-            self.agents.remove(raw_idx);
-        }
+        // Remove saved context state if present — dirs::home_dir() is always
+        // Some on supported platforms; use map() to avoid a dead None branch.
+        let _ = dirs::home_dir()
+            .map(|home| std::fs::remove_dir_all(home.join(".leviath").join("state").join(&id)));
+        // Remove agent from self.agents using the raw index (always valid because
+        // selected_agent_raw_idx() succeeded above and agents hasn't changed).
+        self.agents.remove(raw_idx);
         self.update_display_indices();
     }
 
@@ -767,10 +768,17 @@ mod tests {
         dash.agents
             .push(make_test_agent("run-1", AgentDisplayStatus::Active));
         dash.update_display_indices();
-        if let Some(agent) = dash.selected_agent_mut() {
-            agent.tokens_in = 999;
-        }
+        // Use the mutable reference directly; the None path is tested separately.
+        dash.selected_agent_mut().unwrap().tokens_in = 999;
         assert_eq!(dash.agents[0].tokens_in, 999);
+    }
+
+    #[test]
+    fn selected_agent_mut_empty_returns_none() {
+        // Exercises the `?` (None) return branch of selected_agent_mut when
+        // display_indices is empty.
+        let mut dash = make_test_dashboard();
+        assert!(dash.selected_agent_mut().is_none());
     }
 
     #[test]
@@ -793,6 +801,22 @@ mod tests {
         dash.tick_toasts();
         assert_eq!(dash.toasts.len(), 1);
         assert_eq!(dash.toasts[0].remaining_ticks, 1);
+        dash.tick_toasts();
+        assert!(dash.toasts.is_empty());
+    }
+
+    #[test]
+    fn tick_toasts_already_at_zero_is_removed_immediately() {
+        // A toast that starts with remaining_ticks=0 is already expired.
+        // tick_toasts sees `0 > 0` = false, skips the decrement (exercises
+        // the implicit else path of the if block at the closing `}`), then
+        // evaluates `0 > 0` = false so retain_mut removes the toast.
+        let mut dash = make_test_dashboard();
+        dash.toasts.push(Toast {
+            message: "expired".to_string(),
+            remaining_ticks: 0,
+            level: ToastLevel::Info,
+        });
         dash.tick_toasts();
         assert!(dash.toasts.is_empty());
     }
@@ -1411,6 +1435,31 @@ mod tests {
         assert_eq!(dash.agents[0].depth, 2);
     }
 
+    #[test]
+    fn sync_agent_state_from_world_no_agent_state_component_leaves_agent_unchanged() {
+        // Exercise the `None` branch of `if let Some(state) = engine.world().get::<AgentState>()`.
+        // The entity exists in the world but has no AgentState component attached — the
+        // if-let falls through without modifying the DashboardAgent.
+        let mut dash = make_test_dashboard();
+        let mut engine = AgentEngine::new();
+
+        // Spawn an entity with NO AgentState component (just a ContextWindow)
+        let entity = engine.world_mut().spawn(ContextWindow::new(50000)).id();
+
+        let mut agent = make_test_agent("no-state-agent", AgentDisplayStatus::Active);
+        agent.is_run_state = false;
+        agent.entity = entity;
+        agent.iteration = 42; // sentinel — must stay unchanged
+        dash.agents.push(agent);
+        dash.update_display_indices();
+
+        dash.sync_agent_state_from_world(&engine);
+
+        // AgentState is absent, so nothing should have changed
+        assert_eq!(dash.agents[0].iteration, 42);
+        assert!(matches!(dash.agents[0].status, AgentDisplayStatus::Active));
+    }
+
     // ─── build_tree_order with deeper nesting ─────────────────────────────
 
     #[test]
@@ -1709,6 +1758,28 @@ mod tests {
         assert!(dash.selected_stage_can_respond());
     }
 
+    #[test]
+    fn selected_stage_can_respond_waiting_prompt_only_no_pending_request() {
+        // `waiting_prompt` is Some but `pending_request` is None: the
+        // `if let Some(req) = &agent.pending_request` branch falls to its
+        // `else` arm (line 568), using `agent.stage_index` as the fallback.
+        let mut dash = make_test_dashboard();
+        let mut agent = make_test_agent("run-1", AgentDisplayStatus::Waiting);
+        agent.waiting_prompt = Some("prompt text".to_string());
+        agent.pending_request = None; // no structured request — legacy path
+        agent.stage_index = 0;
+        dash.agents.push(agent);
+        dash.update_display_indices();
+
+        // selected_stage matches stage_index → can respond
+        dash.selected_stage = 0;
+        assert!(dash.selected_stage_can_respond());
+
+        // Wrong stage selected → cannot respond
+        dash.selected_stage = 1;
+        assert!(!dash.selected_stage_can_respond());
+    }
+
     // ─── delete_selected_agent: run state agent removal ──────────────────
 
     #[test]
@@ -1730,8 +1801,8 @@ mod tests {
 
         // Agent should have been removed from the list
         assert!(
-            dash.agents.is_empty() || dash.agents[0].id != tmp_id,
-            "agent should have been removed"
+            dash.agents.is_empty(),
+            "agent should have been removed from agents vec"
         );
     }
 
@@ -1903,10 +1974,11 @@ mod tests {
         dash.sync_from_run_state();
 
         let agent = dash.agents.iter().find(|a| a.id == run_id).unwrap();
-        match &agent.status {
-            AgentDisplayStatus::Error(msg) => assert_eq!(msg, "boom"),
-            other => panic!("expected Error status, got {:?}", other),
-        }
+        assert!(
+            matches!(&agent.status, AgentDisplayStatus::Error(msg) if msg == "boom"),
+            "expected Error(\"boom\") status, got {:?}",
+            agent.status
+        );
 
         cleanup_run(run_id);
     }
@@ -2336,6 +2408,58 @@ mod tests {
         let agent = dash.agents.iter().find(|a| a.id == run_id).unwrap();
         assert_eq!(agent.workdir, "/second/workdir");
         assert!(!dash.display_indices.is_empty());
+
+        cleanup_run(run_id);
+    }
+
+    #[test]
+    fn sync_from_run_state_existing_agent_enters_complete_interactive_no_needs_input_toast() {
+        // Exercise the branch where:
+        //   agent.waiting_prompt.is_none()          -> true  (agent was Active, no prompt yet)
+        //   && waiting_prompt.is_some()              -> true  (a pending request is present)
+        //   && matches!(run.status, WaitingInput)    -> FALSE (status is CompleteInteractive)
+        //
+        // The full condition is false, so no "needs input" toast is emitted
+        // (CompleteInteractive input is optional, unlike WaitingInput).
+        let run_id = "test-sync-ci-no-toast";
+        cleanup_run(run_id);
+        let meta = make_run_meta(run_id, RunStatus::Running);
+        runstate::create_run(&meta).unwrap();
+
+        let mut dash = make_test_dashboard();
+        dash.sync_from_run_state(); // first sync: agent is Active, waiting_prompt=None
+
+        // Transition to CompleteInteractive and write a pending request
+        let meta2 = make_run_meta(run_id, RunStatus::CompleteInteractive);
+        runstate::write_meta(&meta2).unwrap();
+        let req = crate::interaction::InteractionRequest::free_text(
+            "req-ci",
+            "Any final feedback?",
+            "review",
+            false,
+        );
+        crate::interaction::write_request(run_id, &req).unwrap();
+
+        dash.toasts.clear(); // clear any earlier toasts
+        dash.sync_from_run_state();
+
+        let agent = dash.agents.iter().find(|a| a.id == run_id).unwrap();
+        assert!(matches!(
+            agent.status,
+            AgentDisplayStatus::CompleteInteractive
+        ));
+        // waiting_prompt is populated (the request exists)
+        assert!(agent.waiting_prompt.is_some());
+        // But no "needs input" toast because CompleteInteractive input is optional
+        let needs_input_toast = dash.toasts.iter().find(|t| {
+            let has_id = t.message.contains(run_id);
+            let has_tag = t.message.contains("needs input");
+            has_id && has_tag
+        });
+        assert!(
+            needs_input_toast.is_none(),
+            "should not toast 'needs input' for CompleteInteractive"
+        );
 
         cleanup_run(run_id);
     }
