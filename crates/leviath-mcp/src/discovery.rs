@@ -123,42 +123,7 @@ impl Default for ToolDiscovery {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// Minimal `tracing::Subscriber` that reports every callsite as enabled.
-    /// Without a registered subscriber, `tracing::info!`'s multi-line field
-    /// arguments (e.g. `discover_from_client`'s `tool_count = tools.len()`
-    /// line) show as 0-hit in coverage even though the call demonstrably
-    /// executes -- the macro short-circuits field evaluation before ever
-    /// checking for a subscriber.
-    struct AlwaysOnSubscriber;
-    impl tracing::Subscriber for AlwaysOnSubscriber {
-        fn enabled(&self, _metadata: &tracing::Metadata<'_>) -> bool {
-            true
-        }
-        fn new_span(&self, _span: &tracing::span::Attributes<'_>) -> tracing::span::Id {
-            tracing::span::Id::from_u64(1)
-        }
-        fn record(&self, _span: &tracing::span::Id, _values: &tracing::span::Record<'_>) {}
-        fn record_follows_from(&self, _span: &tracing::span::Id, _follows: &tracing::span::Id) {}
-        fn event(&self, _event: &tracing::Event<'_>) {}
-        fn enter(&self, _span: &tracing::span::Id) {}
-        fn exit(&self, _span: &tracing::span::Id) {}
-    }
-
-    fn always_on_tracing_guard() -> tracing::subscriber::DefaultGuard {
-        tracing::subscriber::set_default(AlwaysOnSubscriber)
-    }
-
-    #[test]
-    fn always_on_subscriber_span_methods_are_all_no_ops() {
-        let _guard = always_on_tracing_guard();
-        let span = tracing::info_span!("test-span", field = 1);
-        span.record("field", 2);
-        span.follows_from(&span);
-        span.in_scope(|| {
-            tracing::info!("inside span");
-        });
-    }
+    use crate::test_support::always_on_tracing_guard;
 
     // --- ToolMetadata serde ---
 

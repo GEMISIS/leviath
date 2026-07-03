@@ -10,6 +10,9 @@ pub mod client;
 pub mod discovery;
 pub mod execution;
 
+#[cfg(test)]
+mod test_support;
+
 pub use client::{MCPClient, ServerCapabilities, ToolResult, ToolResultContent, ToolsCapability};
 pub use discovery::{MCPServerConfig, ToolDiscovery, ToolMetadata};
 pub use execution::{ExecutionResult, ToolExecutor};
