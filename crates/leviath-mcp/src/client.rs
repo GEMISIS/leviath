@@ -1025,10 +1025,7 @@ for line in sys.stdin:
         // propagation path in connect() after send_notification.
         let mut client = spawn_stub_client(STUB_INIT_THEN_CLOSE_STDIN).await;
         let result = client.connect().await;
-        assert!(
-            result.is_err(),
-            "Expected error when notification write fails after initialize"
-        );
+        assert!(result.is_err());
     }
 
     #[tokio::test]
@@ -1163,9 +1160,8 @@ for line in sys.stdin:
         let mut client = spawn_stub_client(STUB_ERROR_SERVER).await;
         // initialize sends a request and the error server will return an error response
         let err = client.connect().await;
-        assert!(err.is_err(), "Expected error from error server");
-        #[rustfmt::skip]
-        assert!(err.unwrap_err().to_string().contains("server error"), "Expected server error message");
+        assert!(err.is_err());
+        assert!(err.unwrap_err().to_string().contains("server error"));
     }
 
     #[tokio::test]
@@ -1180,7 +1176,7 @@ sys.stdout.close()
 "#;
         let mut client = spawn_stub_client(script).await;
         let err = client.connect().await;
-        assert!(err.is_err(), "Expected error when server closes connection");
+        assert!(err.is_err());
     }
 
     #[tokio::test]
@@ -1194,9 +1190,8 @@ for line in sys.stdin:
 "#;
         let mut client = spawn_stub_client(script).await;
         let err = client.connect().await;
-        assert!(err.is_err(), "Expected error for malformed JSON");
-        #[rustfmt::skip]
-        assert!(err.unwrap_err().to_string().contains("parse"), "Expected parse error");
+        assert!(err.is_err());
+        assert!(err.unwrap_err().to_string().contains("parse"));
     }
 
     #[tokio::test]
@@ -1209,7 +1204,7 @@ for line in sys.stdin:
         .await;
         assert!(result.is_err());
         let err_msg = result.err().unwrap().to_string();
-        assert!(err_msg.contains("Failed to spawn"), "err: {}", err_msg);
+        assert!(err_msg.contains("Failed to spawn"));
     }
 
     #[tokio::test]
@@ -1274,8 +1269,7 @@ for line in sys.stdin:
             .list_tools()
             .await
             .expect("list_tools should succeed");
-        #[rustfmt::skip]
-        assert!(tools.is_empty(), "Expected empty list when tools key absent");
+        assert!(tools.is_empty());
     }
 
     #[tokio::test]
