@@ -970,6 +970,14 @@ mod tests {
 
     #[tokio::test]
     async fn list_with_openrouter_filter() {
+        // execute() -> list_with_registry() calls the real Config::load(),
+        // which reads the process-global LEVIATH_CONFIG_PATH. Without
+        // isolating it here, a concurrently-running test that points that
+        // var at a temporarily-invalid-TOML fake config (e.g.
+        // list_with_registry_propagates_config_load_error) can make this
+        // test observe that torn state and fail nondeterministically --
+        // exactly what happened on CI.
+        let _guard = crate::config::isolate_config_path_for_test("models-list-openrouter-filter");
         let args = ModelsArgs {
             command: ModelsCommand::List(ListArgs {
                 provider: Some("openrouter".to_string()),
@@ -982,6 +990,9 @@ mod tests {
 
     #[tokio::test]
     async fn list_with_openai_filter() {
+        // See the comment on list_with_openrouter_filter -- same real
+        // Config::load() race.
+        let _guard = crate::config::isolate_config_path_for_test("models-list-openai-filter");
         let args = ModelsArgs {
             command: ModelsCommand::List(ListArgs {
                 provider: Some("openai".to_string()),
@@ -994,6 +1005,9 @@ mod tests {
 
     #[tokio::test]
     async fn show_builtin_anthropic_opus() {
+        // See the comment on list_with_openrouter_filter -- same real
+        // Config::load() race.
+        let _guard = crate::config::isolate_config_path_for_test("models-show-anthropic-opus");
         let args = ModelsArgs {
             command: ModelsCommand::Show(ShowArgs {
                 model: "claude-opus-4-6".to_string(),
@@ -1007,6 +1021,9 @@ mod tests {
 
     #[tokio::test]
     async fn show_builtin_openai_model() {
+        // See the comment on list_with_openrouter_filter -- same real
+        // Config::load() race.
+        let _guard = crate::config::isolate_config_path_for_test("models-show-openai-model");
         let args = ModelsArgs {
             command: ModelsCommand::Show(ShowArgs {
                 model: "gpt-5.5".to_string(),
@@ -1020,6 +1037,9 @@ mod tests {
 
     #[tokio::test]
     async fn show_builtin_deepseek_r1() {
+        // See the comment on list_with_openrouter_filter -- same real
+        // Config::load() race.
+        let _guard = crate::config::isolate_config_path_for_test("models-show-deepseek-r1");
         let args = ModelsArgs {
             command: ModelsCommand::Show(ShowArgs {
                 model: "deepseek/deepseek-r1".to_string(),
