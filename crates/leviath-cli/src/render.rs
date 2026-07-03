@@ -519,7 +519,7 @@ mod tests {
             .iter()
             .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
             .collect();
-        assert!(all.contains("Hello, world!"), "got: {}", all);
+        assert!(all.contains("Hello, world!"));
     }
 
     #[test]
@@ -530,8 +530,8 @@ mod tests {
             .iter()
             .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
             .collect::<String>();
-        assert!(all.contains("My Heading"), "got: {}", all);
-        assert!(all.contains("Some paragraph"), "got: {}", all);
+        assert!(all.contains("My Heading"));
+        assert!(all.contains("Some paragraph"));
     }
 
     #[test]
@@ -543,10 +543,10 @@ mod tests {
             .iter()
             .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
             .collect::<String>();
-        assert!(all.contains("fn main() {}"), "got: {}", all);
+        assert!(all.contains("fn main() {}"));
         // Should have a border glyph
         let has_border = all.contains('╭') || all.contains('│');
-        assert!(has_border, "no border found in: {}", all);
+        assert!(has_border);
     }
 
     #[test]
@@ -558,9 +558,9 @@ mod tests {
             .iter()
             .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
             .collect::<String>();
-        assert!(all.contains("mermaid"), "got: {}", all);
+        assert!(all.contains("mermaid"));
         let has_hint = all.contains("mmdc") || all.contains("Install");
-        assert!(has_hint, "expected mermaid hint in: {}", all);
+        assert!(has_hint);
     }
 
     #[test]
@@ -572,8 +572,8 @@ mod tests {
             .iter()
             .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
             .collect::<String>();
-        assert!(all.contains("item one"), "got: {}", all);
-        assert!(all.contains("item two"), "got: {}", all);
+        assert!(all.contains("item one"));
+        assert!(all.contains("item two"));
     }
 
     // ─── Empty input ───────────────────────────────────────────────────────
@@ -582,10 +582,7 @@ mod tests {
     fn empty_input_returns_empty() {
         let text = markdown_to_text("", 80);
         // Empty input produces zero lines (no content to render).
-        assert!(
-            text.lines.iter().all(|l| l.spans.is_empty()),
-            "expected all lines to have empty spans"
-        );
+        assert!(text.lines.iter().all(|l| l.spans.is_empty()));
     }
 
     // ─── Inline styles ────────────────────────────────────────────────────
@@ -598,7 +595,7 @@ mod tests {
             .iter()
             .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
             .collect::<String>();
-        assert!(all.contains("bold text"), "got: {}", all);
+        assert!(all.contains("bold text"));
     }
 
     #[test]
@@ -609,7 +606,7 @@ mod tests {
             .iter()
             .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
             .collect::<String>();
-        assert!(all.contains("italic text"), "got: {}", all);
+        assert!(all.contains("italic text"));
     }
 
     #[test]
@@ -620,7 +617,7 @@ mod tests {
             .iter()
             .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
             .collect::<String>();
-        assert!(all.contains("deleted"), "got: {}", all);
+        assert!(all.contains("deleted"));
     }
 
     #[test]
@@ -631,7 +628,7 @@ mod tests {
             .iter()
             .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
             .collect::<String>();
-        assert!(all.contains("println!()"), "got: {}", all);
+        assert!(all.contains("println!()"));
     }
 
     // ─── Headings ──────────────────────────────────────────────────────────
@@ -644,7 +641,7 @@ mod tests {
             .iter()
             .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
             .collect::<String>();
-        assert!(all.contains("Second Level"), "got: {}", all);
+        assert!(all.contains("Second Level"));
     }
 
     #[test]
@@ -655,7 +652,7 @@ mod tests {
             .iter()
             .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
             .collect::<String>();
-        assert!(all.contains("Third Level"), "got: {}", all);
+        assert!(all.contains("Third Level"));
     }
 
     #[test]
@@ -667,8 +664,7 @@ mod tests {
             .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
             .collect::<String>();
         // H1 should produce a horizontal rule line underneath
-        #[rustfmt::skip]
-        assert!(all.contains("\u{2500}"), "H1 should have underline rule, got: {}", all);
+        assert!(all.contains("\u{2500}"));
     }
 
     // ─── Horizontal rule ───────────────────────────────────────────────────
@@ -681,10 +677,9 @@ mod tests {
             .iter()
             .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
             .collect::<String>();
-        assert!(all.contains("above"), "got: {}", all);
-        assert!(all.contains("below"), "got: {}", all);
-        #[rustfmt::skip]
-        assert!(all.contains("\u{2500}"), "Expected horizontal rule char, got: {}", all);
+        assert!(all.contains("above"));
+        assert!(all.contains("below"));
+        assert!(all.contains("\u{2500}"));
     }
 
     // ─── Blockquote ────────────────────────────────────────────────────────
@@ -697,7 +692,7 @@ mod tests {
             .iter()
             .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
             .collect::<String>();
-        assert!(all.contains("quoted text"), "got: {}", all);
+        assert!(all.contains("quoted text"));
     }
 
     // ─── Ordered list ──────────────────────────────────────────────────────
@@ -711,9 +706,9 @@ mod tests {
             .iter()
             .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
             .collect::<String>();
-        assert!(all.contains("first"), "got: {}", all);
-        assert!(all.contains("second"), "got: {}", all);
-        assert!(all.contains("third"), "got: {}", all);
+        assert!(all.contains("first"));
+        assert!(all.contains("second"));
+        assert!(all.contains("third"));
     }
 
     // ─── Code block without language ───────────────────────────────────────
@@ -727,9 +722,9 @@ mod tests {
             .iter()
             .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
             .collect::<String>();
-        assert!(all.contains("plain code"), "got: {}", all);
+        assert!(all.contains("plain code"));
         // Should show "code" as the default language label
-        assert!(all.contains("code"), "got: {}", all);
+        assert!(all.contains("code"));
     }
 
     // ─── Link rendering ───────────────────────────────────────────────────
@@ -743,7 +738,7 @@ mod tests {
             .iter()
             .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
             .collect::<String>();
-        assert!(all.contains("click here"), "got: {}", all);
+        assert!(all.contains("click here"));
     }
 
     // ─── Narrow width ──────────────────────────────────────────────────────
@@ -802,9 +797,9 @@ mod tests {
             .iter()
             .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
             .collect();
-        assert!(all.contains("Four"), "got: {}", all);
-        assert!(all.contains("Five"), "got: {}", all);
-        assert!(all.contains("Six"), "got: {}", all);
+        assert!(all.contains("Four"));
+        assert!(all.contains("Five"));
+        assert!(all.contains("Six"));
     }
 
     // ─── Nested inline styles inherit from parent ──────────────────────────
@@ -843,8 +838,8 @@ mod tests {
             .iter()
             .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
             .collect();
-        assert!(all.contains("line one"), "got: {}", all);
-        assert!(all.contains("line two"), "got: {}", all);
+        assert!(all.contains("line one"));
+        assert!(all.contains("line two"));
     }
 
     // ─── Nested / multi-item lists flush pending content between items ─────
@@ -858,11 +853,10 @@ mod tests {
             .iter()
             .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
             .collect();
-        assert!(all.contains("alpha"), "got: {}", all);
-        assert!(all.contains("beta"), "got: {}", all);
-        assert!(all.contains("gamma"), "got: {}", all);
-        #[rustfmt::skip]
-        assert!(all.contains("\u{25cf}"), "expected bullet glyph, got: {}", all);
+        assert!(all.contains("alpha"));
+        assert!(all.contains("beta"));
+        assert!(all.contains("gamma"));
+        assert!(all.contains("\u{25cf}"));
     }
 
     #[test]
@@ -874,8 +868,8 @@ mod tests {
             .iter()
             .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
             .collect();
-        assert!(all.contains("top"), "got: {}", all);
-        assert!(all.contains("nested"), "got: {}", all);
+        assert!(all.contains("top"));
+        assert!(all.contains("nested"));
     }
 
     // ─── Indented (non-fenced) code block ───────────────────────────────────
@@ -889,7 +883,7 @@ mod tests {
             .iter()
             .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
             .collect();
-        assert!(all.contains("indented code line"), "got: {}", all);
+        assert!(all.contains("indented code line"));
     }
 
     // ─── Multi-line text event (embedded newline split) ────────────────────
@@ -905,8 +899,8 @@ mod tests {
             .iter()
             .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
             .collect();
-        assert!(all.contains("first line"), "got: {}", all);
-        assert!(all.contains("second line"), "got: {}", all);
+        assert!(all.contains("first line"));
+        assert!(all.contains("second line"));
     }
 
     #[test]
@@ -918,8 +912,8 @@ mod tests {
             .iter()
             .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
             .collect();
-        assert!(all.contains("first"), "got: {}", all);
-        assert!(all.contains("second"), "got: {}", all);
+        assert!(all.contains("first"));
+        assert!(all.contains("second"));
     }
 
     // ─── Rule with pending inline content before it ────────────────────────
@@ -936,8 +930,8 @@ mod tests {
             .iter()
             .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
             .collect();
-        assert!(all.contains("above text"), "got: {}", all);
-        assert!(all.contains("below text"), "got: {}", all);
+        assert!(all.contains("above text"));
+        assert!(all.contains("below text"));
     }
 
     // ─── Table events fall through the catch-all arm ───────────────────────
@@ -954,7 +948,7 @@ mod tests {
         // Table structural events are ignored (catch-all arm), but the text
         // content inside cells still comes through as Text events.
         let has_cell_text = all.contains('1') || all.contains('A');
-        assert!(has_cell_text, "expected cell text in: {}", all);
+        assert!(has_cell_text);
     }
 
     // ─── Renderer state-machine edge cases ──────────────────────────────────
@@ -978,8 +972,8 @@ mod tests {
             .iter()
             .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
             .collect();
-        assert!(all.contains("nested heading in item"), "got: {}", all);
-        assert!(all.contains("item2"), "got: {}", all);
+        assert!(all.contains("nested heading in item"));
+        assert!(all.contains("item2"));
     }
 
     #[test]
@@ -992,7 +986,7 @@ mod tests {
             .iter()
             .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
             .collect();
-        assert!(all.contains("code"), "got: {}", all);
+        assert!(all.contains("code"));
     }
 
     #[test]
@@ -1019,7 +1013,7 @@ mod tests {
             .iter()
             .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
             .collect();
-        assert!(all.contains('│'), "got: {}", all);
+        assert!(all.contains('│'));
     }
 
     #[test]
@@ -1037,8 +1031,7 @@ mod tests {
                     && s.style.add_modifier.contains(Modifier::BOLD)
             })
         });
-        #[rustfmt::skip]
-        assert!(has_strikethrough_bold, "expected a span with both CROSSED_OUT and BOLD modifiers for 'bold inside'");
+        assert!(has_strikethrough_bold);
     }
 
     // `push_line`'s own `if !self.current_spans.is_empty() { self.flush_line() }`
@@ -1063,18 +1056,14 @@ mod tests {
         r.handle_text_content("first\nsecond\nthird");
         // The first line is flushed for each embedded newline; at least 2 lines
         // should have been emitted.
-        assert!(
-            r.lines.len() >= 2,
-            "expected split lines, got {:?}",
-            r.lines
-        );
+        assert!(r.lines.len() >= 2);
         let all: String = r
             .lines
             .iter()
             .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
             .collect();
-        assert!(all.contains("first"), "got: {}", all);
-        assert!(all.contains("second"), "got: {}", all);
+        assert!(all.contains("first"));
+        assert!(all.contains("second"));
     }
 
     #[test]
@@ -1085,11 +1074,7 @@ mod tests {
         // "hello" lands in current_spans (pending); lines get the flush for the
         // empty-first-part boundary, which produces an empty line.
         let pending: String = r.current_spans.iter().map(|s| s.content.as_ref()).collect();
-        assert!(
-            pending.contains("hello"),
-            "pending spans: {:?}",
-            r.current_spans
-        );
+        assert!(pending.contains("hello"));
     }
 
     #[test]
@@ -1106,6 +1091,6 @@ mod tests {
                 .map(|s| s.content.as_ref())
                 .collect::<String>()
                 .as_str();
-        assert!(all.contains("no newline here"), "got: {}", all);
+        assert!(all.contains("no newline here"));
     }
 }

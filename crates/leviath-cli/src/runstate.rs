@@ -571,6 +571,21 @@ pub fn tail_stage_log(run_id: &str, stage_idx: usize, max_bytes: u64) -> String 
 #[cfg(test)]
 pub(crate) static RUNS_DIR_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+/// Restores an env var to a previously-captured value: `Some` re-sets it,
+/// `None` removes it. Shared by [`RunsDirTestGuard::drop`] and the handful
+/// of tests in `mod tests` that temporarily override `LEVIATH_RUNS_DIR`/
+/// `LEVIATH_DASHBOARD_LOG_PATH` to exercise the real (env-reading) fallback
+/// path directly, so both the "was set" and "was unset" arms are exercised
+/// through one shared, directly-tested implementation instead of leaving
+/// either arm's coverage dependent on incidental test-scheduling timing.
+#[cfg(test)]
+pub(crate) fn restore_env_var(key: &str, prev: Option<impl Into<std::ffi::OsString>>) {
+    match prev {
+        Some(v) => unsafe { std::env::set_var(key, v.into()) },
+        None => unsafe { std::env::remove_var(key) },
+    }
+}
+
 /// RAII guard that restores `LEVIATH_RUNS_DIR` and
 /// `LEVIATH_DASHBOARD_LOG_PATH` to their original values, removes the
 /// isolated temp directory, and releases [`RUNS_DIR_ENV_LOCK`], on drop.
@@ -585,16 +600,11 @@ pub(crate) struct RunsDirTestGuard {
 #[cfg(test)]
 impl Drop for RunsDirTestGuard {
     fn drop(&mut self) {
-        unsafe {
-            match self.original_runs_dir.take() {
-                Some(v) => std::env::set_var("LEVIATH_RUNS_DIR", v),
-                None => std::env::remove_var("LEVIATH_RUNS_DIR"),
-            }
-            match self.original_dashboard_log_path.take() {
-                Some(v) => std::env::set_var("LEVIATH_DASHBOARD_LOG_PATH", v),
-                None => std::env::remove_var("LEVIATH_DASHBOARD_LOG_PATH"),
-            }
-        }
+        restore_env_var("LEVIATH_RUNS_DIR", self.original_runs_dir.take());
+        restore_env_var(
+            "LEVIATH_DASHBOARD_LOG_PATH",
+            self.original_dashboard_log_path.take(),
+        );
         let _ = std::fs::remove_dir_all(&self.base_dir);
     }
 }
@@ -959,11 +969,7 @@ mod tests {
         // ID, silently collapsing N runs into a single on-disk entry.
         let ids: std::collections::HashSet<String> =
             (0..100).map(|_| new_run_id("same-agent")).collect();
-        assert_eq!(
-            ids.len(),
-            100,
-            "expected 100 unique run IDs, got collisions"
-        );
+        assert_eq!(ids.len(), 100);
     }
 
     // ─── write_meta / read_meta roundtrip ───────────────────────────────────
@@ -1106,7 +1112,36 @@ mod tests {
         assert!(dashboard_log_path().exists());
     }
 
+    #[test]
+    fn append_dashboard_log_open_failure_is_silently_ignored() {
+        // Covers the `if let Ok(mut file) = ... .open(&path)` pattern *not*
+        // matching: pre-create the resolved log path as a directory, so
+        // opening it for append fails with `IsADirectory` -- the function
+        // must swallow this silently (best-effort logging) rather than
+        // panic.
+        let _guard = isolate_runs_dir_for_test("append-dashboard-log-open-failure");
+        let path = dashboard_log_path();
+        std::fs::create_dir_all(&path).unwrap();
+        append_dashboard_log("this should not panic");
+        assert!(path.is_dir());
+    }
+
     // ─── dashboard_log_path ────────────────────────────────────────────────
+
+    // `restore_env_var` (used below) is defined alongside `RunsDirTestGuard`
+    // in the parent module, since `RunsDirTestGuard::drop` shares it too --
+    // see its doc comment for why both the `Some` and `None` arms are
+    // exercised directly by the test below rather than by the "real" call
+    // sites, whose `prev` depends on incidental test-scheduling timing.
+
+    #[test]
+    fn restore_env_var_handles_both_some_and_none() {
+        let key = "LEVIATH_COVERAGE_RESTORE_ENV_VAR_TEST";
+        restore_env_var(key, Some("value".to_string()));
+        assert_eq!(std::env::var(key).as_deref(), Ok("value"));
+        restore_env_var(key, None::<String>);
+        assert!(std::env::var(key).is_err());
+    }
 
     #[test]
     fn dashboard_log_path_structure() {
@@ -1123,9 +1158,7 @@ mod tests {
         let path = dashboard_log_path();
         assert!(path.to_str().unwrap().contains(".leviath"));
         assert!(path.to_str().unwrap().ends_with("dashboard.log"));
-        if let Some(v) = prev {
-            unsafe { std::env::set_var("LEVIATH_DASHBOARD_LOG_PATH", v) }
-        }
+        restore_env_var("LEVIATH_DASHBOARD_LOG_PATH", prev);
     }
 
     // ─── runs_dir / run_dir ────────────────────────────────────────────────
@@ -1140,9 +1173,7 @@ mod tests {
         let path = runs_dir();
         assert!(path.to_str().unwrap().contains(".leviath"));
         assert!(path.to_str().unwrap().ends_with("runs"));
-        if let Some(v) = prev {
-            unsafe { std::env::set_var("LEVIATH_RUNS_DIR", v) }
-        }
+        restore_env_var("LEVIATH_RUNS_DIR", prev);
     }
 
     #[test]
@@ -1416,6 +1447,24 @@ mod tests {
         assert!(result.is_empty());
     }
 
+    #[test]
+    #[cfg(unix)]
+    fn list_runs_in_dir_unreadable_dir_returns_empty() {
+        // Covers the `if let Ok(entries) = std::fs::read_dir(&dir)` pattern
+        // *not* matching: `dir.exists()` is true (so the earlier early-return
+        // is skipped) but the directory itself denies read+execute, so
+        // `read_dir` fails and the whole block is silently skipped rather
+        // than panicking or propagating an error.
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let unreadable = dir.path().join("unreadable-runs");
+        std::fs::create_dir(&unreadable).unwrap();
+        std::fs::set_permissions(&unreadable, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let result = list_runs_in_dir(unreadable.clone());
+        std::fs::set_permissions(&unreadable, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(result.is_empty());
+    }
+
     // ─── runs_dir / list_runs edge cases ────────────────────────────────────
 
     #[test]
@@ -1426,10 +1475,7 @@ mod tests {
         unsafe { std::env::set_var("LEVIATH_RUNS_DIR", tmpdir.path()) };
         let dir = runs_dir();
         assert_eq!(dir, tmpdir.path());
-        match prev {
-            Some(v) => unsafe { std::env::set_var("LEVIATH_RUNS_DIR", v) },
-            None => unsafe { std::env::remove_var("LEVIATH_RUNS_DIR") },
-        }
+        restore_env_var("LEVIATH_RUNS_DIR", prev);
     }
 
     #[test]
@@ -1442,9 +1488,7 @@ mod tests {
         assert!(dir.ends_with(".leviath/runs"));
         #[cfg(windows)]
         assert!(dir.ends_with(".leviath\\runs"));
-        if let Some(v) = prev {
-            unsafe { std::env::set_var("LEVIATH_RUNS_DIR", v) }
-        }
+        restore_env_var("LEVIATH_RUNS_DIR", prev);
     }
 
     #[test]
@@ -1566,6 +1610,25 @@ mod tests {
     }
 
     #[test]
+    fn write_context_snapshot_to_fails_when_rename_target_is_a_dir() {
+        // Covers the `std::fs::rename(&tmp, &path)?` `Err` arm: the tmp file
+        // write succeeds (its directory is writable), but the final rename
+        // fails because `context.json` already exists as a *directory* --
+        // `rename(2)` on POSIX refuses to replace a directory with a
+        // regular file, unlike a plain overwrite of an existing file.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("context.json")).unwrap();
+        let snap = ContextSnapshot {
+            stage_name: "s".into(),
+            total_tokens: 1,
+            max_tokens: 100,
+            regions: vec![],
+        };
+        let result = write_context_snapshot_to(dir.path(), &snap);
+        assert!(result.is_err());
+    }
+
+    #[test]
     fn create_run_in_hermetic() {
         let tmpdir = tempfile::tempdir().unwrap();
         let run_dir = tmpdir.path().join("cov-run");
@@ -1645,6 +1708,26 @@ mod tests {
     }
 
     #[test]
+    fn write_meta_to_fails_when_rename_target_is_a_dir() {
+        // See `write_context_snapshot_to_fails_when_rename_target_is_a_dir`:
+        // same `std::fs::rename(&tmp_path, &final_path)?` `Err` arm, forced
+        // by pre-creating `meta.json` as a directory.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("meta.json")).unwrap();
+        let meta = RunMeta::new(
+            "cov-rename-fail".into(),
+            "a".into(),
+            "/".into(),
+            "t".into(),
+            None,
+            "/tmp".into(),
+            1,
+        );
+        let result = write_meta_to(dir.path(), &meta);
+        assert!(result.is_err());
+    }
+
+    #[test]
     fn read_meta_from_fails_on_missing_file() {
         let tmpdir = tempfile::tempdir().unwrap();
         let result = read_meta_from(tmpdir.path());
@@ -1667,6 +1750,18 @@ mod tests {
         let stages = vec![StageRecord::new("s".into(), 0)];
         let bad = std::path::Path::new("/nonexistent-cov-stages-xyzzy");
         let result = write_stages_index_to(bad, &stages);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn write_stages_index_to_fails_when_rename_target_is_a_dir() {
+        // See `write_context_snapshot_to_fails_when_rename_target_is_a_dir`:
+        // same `std::fs::rename(&tmp, &path)?` `Err` arm, forced by
+        // pre-creating `stages.json` as a directory.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("stages.json")).unwrap();
+        let stages = vec![StageRecord::new("s".into(), 0)];
+        let result = write_stages_index_to(dir.path(), &stages);
         assert!(result.is_err());
     }
 

@@ -1054,10 +1054,7 @@ mod subagent_tests {
         let child_entity = *exec.agent_entities.read().unwrap().get(&child_id).unwrap();
         let eng = engine.read().await;
         let window = eng.world().get::<ContextWindow>(child_entity).unwrap();
-        assert!(
-            window.get_region("conversation").is_some(),
-            "fallback should have added a conversation region"
-        );
+        assert!(window.get_region("conversation").is_some());
     }
 
     #[tokio::test]
@@ -1227,7 +1224,7 @@ mod subagent_tests {
                     5,
                 )
                 .await;
-            assert!(out.contains(expect_substr), "got: {}", out);
+            assert!(out.contains(expect_substr));
         }
     }
 
@@ -1952,11 +1949,7 @@ mod policy_tests {
 
         // Should include known built-in tools
         let names: Vec<&str> = all_defs.iter().map(|t| t.name.as_str()).collect();
-        assert!(
-            names.contains(&"read_file"),
-            "Expected read_file in tool defs: {:?}",
-            names
-        );
+        assert!(names.contains(&"read_file"));
     }
 
     #[tokio::test]
@@ -1967,10 +1960,7 @@ mod policy_tests {
 
         // builtin_names should come from builtins.names()
         let names_from_builtins: HashSet<String> = registry.builtins.names().into_iter().collect();
-        assert_eq!(
-            registry.builtin_names, names_from_builtins,
-            "builtin_names should match builtins.names()"
-        );
+        assert_eq!(registry.builtin_names, names_from_builtins);
     }
 
     // ─── resolve_policy full precedence chain ─────────────────────────────
@@ -2192,11 +2182,7 @@ mod policy_tests {
         let all_defs = registry.all_tool_defs();
         let names: Vec<&str> = all_defs.iter().map(|t| t.name.as_str()).collect();
         // Should include subagent tools
-        assert!(
-            names.contains(&"spawn_agent"),
-            "Expected spawn_agent in tool defs: {:?}",
-            names
-        );
+        assert!(names.contains(&"spawn_agent"));
     }
 
     // ─── default_tool_policy for all known builtin tools ──────────────────
@@ -2295,12 +2281,7 @@ mod policy_tests {
             "send_to_agent",
             "kill_agent",
         ] {
-            assert!(
-                names.contains(expected),
-                "Expected '{}' in tool defs, found: {:?}",
-                expected,
-                names
-            );
+            assert!(names.contains(expected));
         }
     }
 
@@ -2314,18 +2295,11 @@ mod policy_tests {
 
         // These should be in builtin_names
         for name in &["read_file", "list_dir"] {
-            assert!(
-                registry.builtin_names.contains(*name),
-                "Expected '{}' in builtin_names",
-                name
-            );
+            assert!(registry.builtin_names.contains(*name));
         }
 
         // Subagent tools should NOT be in builtin_names
-        assert!(
-            !registry.builtin_names.contains("spawn_agent"),
-            "spawn_agent should not be in builtin_names"
-        );
+        assert!(!registry.builtin_names.contains("spawn_agent"));
     }
 
     // ─── ToolRegistry.all_tool_defs does not duplicate ────────────────────
@@ -2701,8 +2675,7 @@ mod policy_tests {
             exec.execute("spawn_agent", &args, "caller-agent", caller_entity, 0, 3)
         })
         .await;
-        #[rustfmt::skip]
-        assert!(result.contains("Spawned sub-agent"), "Expected spawn success, got: {}", result);
+        assert!(result.contains("Spawned sub-agent"));
         assert!(result.contains("spawn-bp"));
     }
 
@@ -2741,8 +2714,7 @@ mod policy_tests {
                 3,
             )
             .await;
-        #[rustfmt::skip]
-        assert!(result.contains("Spawned sub-agent"), "Expected spawn success, got: {}", result);
+        assert!(result.contains("Spawned sub-agent"));
     }
 
     // ─── exec_check with a real spawned agent ─────────────────────────────
@@ -2785,11 +2757,7 @@ mod policy_tests {
                 3,
             )
             .await;
-        assert!(
-            result.contains("Status:"),
-            "Expected status output, got: {}",
-            result
-        );
+        assert!(result.contains("Status:"));
     }
 
     /// Spawn an agent, register it, set its AgentState.status, and return
@@ -2935,7 +2903,7 @@ mod policy_tests {
                 3,
             )
             .await;
-        assert!(result.contains("no state"), "got: {}", result);
+        assert!(result.contains("no state"));
     }
 
     // ─── exec_wait: completes, errors, cancelled ────────────────────────────
@@ -2986,7 +2954,7 @@ mod policy_tests {
                 3,
             )
             .await;
-        assert!(result.contains("completed"), "got: {}", result);
+        assert!(result.contains("completed"));
     }
 
     #[tokio::test]
@@ -3036,8 +3004,8 @@ mod policy_tests {
                 3,
             )
             .await;
-        assert!(result.contains("failed"), "got: {}", result);
-        assert!(result.contains("oops"), "got: {}", result);
+        assert!(result.contains("failed"));
+        assert!(result.contains("oops"));
     }
 
     #[tokio::test]
@@ -3085,7 +3053,7 @@ mod policy_tests {
                 3,
             )
             .await;
-        assert!(result.contains("cancelled"), "got: {}", result);
+        assert!(result.contains("cancelled"));
     }
 
     #[tokio::test]
@@ -3109,7 +3077,7 @@ mod policy_tests {
                 3,
             )
             .await;
-        assert!(result.contains("no longer exists"), "got: {}", result);
+        assert!(result.contains("no longer exists"));
     }
 
     // ─── exec_send success path ────────────────────────────────────────────
@@ -3133,11 +3101,7 @@ mod policy_tests {
                 3,
             )
             .await;
-        assert!(
-            result.contains("Message sent"),
-            "Expected message sent, got: {}",
-            result
-        );
+        assert!(result.contains("Message sent"));
     }
 
     #[tokio::test]
@@ -3161,11 +3125,7 @@ mod policy_tests {
                 3,
             )
             .await;
-        assert!(
-            result.contains("Message sent"),
-            "Expected message sent, got: {}",
-            result
-        );
+        assert!(result.contains("Message sent"));
     }
 
     // ─── exec_kill success path ────────────────────────────────────────────
@@ -3205,14 +3165,9 @@ mod policy_tests {
                 3,
             )
             .await;
-        #[rustfmt::skip]
-        assert!(result.contains("Killed agent"), "Expected kill confirmation, got: {}", result);
+        assert!(result.contains("Killed agent"));
         // Single agent killed (no descendants)
-        assert!(
-            result.contains(&agent_id),
-            "Result should include agent ID: {}",
-            result
-        );
+        assert!(result.contains(&agent_id));
     }
 
     // ─── exec_spawn second spawn (SubAgentChildren already present) ───────
@@ -3249,7 +3204,7 @@ mod policy_tests {
                 3,
             )
             .await;
-        assert!(r1.contains("Spawned"), "First spawn failed: {}", r1);
+        assert!(r1.contains("Spawned"));
 
         // Second spawn — exercises the `SubAgentChildren already exists` branch
         let r2 = exec
@@ -3262,6 +3217,6 @@ mod policy_tests {
                 3,
             )
             .await;
-        assert!(r2.contains("Spawned"), "Second spawn failed: {}", r2);
+        assert!(r2.contains("Spawned"));
     }
 }

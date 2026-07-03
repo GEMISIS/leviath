@@ -1313,7 +1313,7 @@ max_tokens = 5000
         };
         let result = run_test_case(&blueprint, &registry, &tc).await;
         let err = result.unwrap_err().to_string();
-        assert!(err.contains("Inference failed"), "got: {}", err);
+        assert!(err.contains("Inference failed"));
     }
 
     /// Covers the `ok_or(anyhow!("Blueprint has no stages"))` path.
@@ -1336,7 +1336,7 @@ max_tokens = 5000
         };
         let result = run_test_case(&blueprint, &registry, &tc).await;
         let err = result.unwrap_err().to_string();
-        assert!(err.contains("Blueprint has no stages"), "got: {}", err);
+        assert!(err.contains("Blueprint has no stages"));
     }
 
     /// Covers the `if window.get_region("tool_results").is_none()` false branch:
@@ -1798,12 +1798,21 @@ model = { provider = "anthropic", model = "claude-sonnet-4-6" }
     //
     // `execute()`'s non-dry-run path still calls the real `Config::load()`
     // (no path-injection seam for that without touching config.rs, out of
-    // scope here), but its *return value* is now irrelevant to these tests:
-    // `execute_with_registry` takes the registry-building step as a
-    // parameter, so we can hand it a registry built entirely from an
-    // in-memory `MockProvider` and completely ignore whatever the developer's
-    // real config file happens to contain. No network calls, no real API
-    // keys read.
+    // scope here). `execute_with_registry` takes the registry-building step
+    // as a parameter, so we can hand it a registry built entirely from an
+    // in-memory `MockProvider` and don't care what the config *contains* --
+    // no network calls, no real API keys read. But `Config::load()?` still
+    // propagates a hard error via `?` if it fails, which is *not* irrelevant:
+    // every test below that reaches this line uses
+    // `isolate_config_path_for_test` to point `LEVIATH_CONFIG_PATH` at a
+    // guaranteed-absent path, so `Config::load()` deterministically falls
+    // back to defaults instead of racing some *other*, concurrently-running
+    // test's temporarily-malformed config file at the same process-global
+    // env var (see `models.rs`'s own `isolate_config_path_for_test` users
+    // for the other side of that race -- without this, this whole group was
+    // observed to fail intermittently, with a config-parse error instead of
+    // the expected test-run outcome, when run alongside `commands::models`'s
+    // test suite).
 
     fn mock_registry_builder(
         content: &'static str,
@@ -1840,7 +1849,9 @@ model = { provider = "anthropic", model = "claude-sonnet-4-6" }
 
     #[tokio::test]
     async fn execute_with_registry_non_dry_run_all_pass() {
-        let _guard = always_on_tracing_guard();
+        let _tracing_guard = always_on_tracing_guard();
+        let _config_guard =
+            crate::config::isolate_config_path_for_test("test-rs-non-dry-run-all-pass");
         let dir = tempfile::tempdir().unwrap();
         let project = dir.path();
         write_project_with_test_file(
@@ -1887,6 +1898,9 @@ expect_contains = "world"
 
     #[tokio::test]
     async fn execute_with_registry_non_dry_run_failure_bails_with_count() {
+        let _config_guard = crate::config::isolate_config_path_for_test(
+            "test-rs-non-dry-run-failure-bails-with-count",
+        );
         let dir = tempfile::tempdir().unwrap();
         let project = dir.path();
         write_project_with_test_file(
@@ -1907,11 +1921,13 @@ expect_contains = "world"
 
         let result = execute_with_registry(args, mock_registry_builder("goodbye", vec![])).await;
         let err = result.unwrap_err().to_string();
-        assert!(err.contains("1 test(s) failed"), "got: {}", err);
+        assert!(err.contains("1 test(s) failed"));
     }
 
     #[tokio::test]
     async fn execute_with_registry_non_dry_run_applies_filter() {
+        let _config_guard =
+            crate::config::isolate_config_path_for_test("test-rs-non-dry-run-applies-filter");
         let dir = tempfile::tempdir().unwrap();
         let project = dir.path();
         write_project_with_test_file(
@@ -1945,6 +1961,8 @@ expect_contains = "unmatchable content"
 
     #[tokio::test]
     async fn execute_with_registry_non_dry_run_tool_call_assertion() {
+        let _config_guard =
+            crate::config::isolate_config_path_for_test("test-rs-non-dry-run-tool-call-assertion");
         let dir = tempfile::tempdir().unwrap();
         let project = dir.path();
         write_project_with_test_file(
@@ -1974,6 +1992,9 @@ expect_tool_call = "bash"
 
     #[tokio::test]
     async fn execute_with_registry_non_dry_run_provider_error_counts_as_failure() {
+        let _config_guard = crate::config::isolate_config_path_for_test(
+            "test-rs-non-dry-run-provider-error-counts-as-failure",
+        );
         let dir = tempfile::tempdir().unwrap();
         let project = dir.path();
         write_project_with_test_file(
@@ -2010,11 +2031,14 @@ model = { provider = "nonexistent-provider", model = "x" }
 
         let result = execute_with_registry(args, mock_registry_builder("irrelevant", vec![])).await;
         let err = result.unwrap_err().to_string();
-        assert!(err.contains("1 test(s) failed"), "got: {}", err);
+        assert!(err.contains("1 test(s) failed"));
     }
 
     #[tokio::test]
     async fn execute_with_registry_non_dry_run_toml_malformed_errors() {
+        let _config_guard = crate::config::isolate_config_path_for_test(
+            "test-rs-non-dry-run-toml-malformed-errors",
+        );
         let dir = tempfile::tempdir().unwrap();
         let project = dir.path();
         write_project_with_test_file(project, "not valid {{{ toml");
@@ -2034,6 +2058,8 @@ model = { provider = "nonexistent-provider", model = "x" }
 
     #[tokio::test]
     async fn execute_with_registry_rhai_script_passes() {
+        let _config_guard =
+            crate::config::isolate_config_path_for_test("test-rs-rhai-script-passes");
         let dir = tempfile::tempdir().unwrap();
         let project = dir.path();
         let manifest = r#"
@@ -2062,6 +2088,8 @@ model = { provider = "anthropic", model = "claude-sonnet-4-6" }
 
     #[tokio::test]
     async fn execute_with_registry_rhai_script_returns_false_fails() {
+        let _config_guard =
+            crate::config::isolate_config_path_for_test("test-rs-rhai-script-returns-false-fails");
         let dir = tempfile::tempdir().unwrap();
         let project = dir.path();
         let manifest = r#"
@@ -2086,11 +2114,13 @@ model = { provider = "anthropic", model = "claude-sonnet-4-6" }
 
         let result = execute_with_registry(args, mock_registry_builder("unused", vec![])).await;
         let err = result.unwrap_err().to_string();
-        assert!(err.contains("1 test(s) failed"), "got: {}", err);
+        assert!(err.contains("1 test(s) failed"));
     }
 
     #[tokio::test]
     async fn execute_with_registry_rhai_script_error_fails() {
+        let _config_guard =
+            crate::config::isolate_config_path_for_test("test-rs-rhai-script-error-fails");
         let dir = tempfile::tempdir().unwrap();
         let project = dir.path();
         let manifest = r#"
@@ -2119,6 +2149,9 @@ model = { provider = "anthropic", model = "claude-sonnet-4-6" }
 
     #[tokio::test]
     async fn execute_with_registry_rhai_script_non_bool_return_passes() {
+        let _config_guard = crate::config::isolate_config_path_for_test(
+            "test-rs-rhai-script-non-bool-return-passes",
+        );
         let dir = tempfile::tempdir().unwrap();
         let project = dir.path();
         let manifest = r#"
@@ -2149,6 +2182,8 @@ model = { provider = "anthropic", model = "claude-sonnet-4-6" }
 
     #[tokio::test]
     async fn execute_with_registry_rhai_script_filter_excludes_all() {
+        let _config_guard =
+            crate::config::isolate_config_path_for_test("test-rs-rhai-script-filter-excludes-all");
         let dir = tempfile::tempdir().unwrap();
         let project = dir.path();
         let manifest = r#"

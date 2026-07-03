@@ -814,7 +814,7 @@ google_api_key = "AIza-existing"
             .arg(path)
             .status()
             .expect("chflags should be available on macOS");
-        assert!(status.success(), "chflags uchg failed");
+        assert!(status.success());
     }
 
     #[cfg(target_os = "macos")]

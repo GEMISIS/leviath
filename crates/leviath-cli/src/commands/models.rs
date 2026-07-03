@@ -665,14 +665,10 @@ mod tests {
     #[test]
     fn builtin_entries_have_valid_capabilities() {
         for entry in builtin_table() {
-            #[rustfmt::skip]
-            assert!(entry.caps.max_context_tokens > 0, "model {} has zero context tokens", entry.model_id);
-            #[rustfmt::skip]
-            assert!(entry.caps.max_output_tokens > 0, "model {} has zero output tokens", entry.model_id);
-            #[rustfmt::skip]
-            assert!(entry.caps.supports_streaming, "model {} doesn't support streaming", entry.model_id);
-            #[rustfmt::skip]
-            assert!(entry.caps.supports_system_prompt, "model {} doesn't support system prompt", entry.model_id);
+            assert!(entry.caps.max_context_tokens > 0);
+            assert!(entry.caps.max_output_tokens > 0);
+            assert!(entry.caps.supports_streaming);
+            assert!(entry.caps.supports_system_prompt);
         }
     }
 
@@ -681,8 +677,7 @@ mod tests {
         let table = builtin_table();
         let ids: Vec<&str> = table.iter().map(|e| e.model_id).collect();
         let unique: std::collections::HashSet<&str> = ids.iter().copied().collect();
-        #[rustfmt::skip]
-        assert_eq!(ids.len(), unique.len(), "duplicate model IDs in builtin table");
+        assert_eq!(ids.len(), unique.len());
     }
 
     #[test]
@@ -690,8 +685,7 @@ mod tests {
         let table = builtin_table();
         for entry in &table {
             if entry.model_id.contains("deepseek-r1") {
-                #[rustfmt::skip]
-                assert!(!entry.caps.supports_tools, "DeepSeek R1 model {} should not support tools", entry.model_id);
+                assert!(!entry.caps.supports_tools);
             }
         }
     }
@@ -733,8 +727,7 @@ mod tests {
         let table = builtin_table();
         for entry in &table {
             if entry.model_id == "claude-opus-4-8" || entry.model_id == "claude-opus-4-7" {
-                #[rustfmt::skip]
-                assert!(!entry.caps.supports_temperature, "{} should not support temperature", entry.model_id);
+                assert!(!entry.caps.supports_temperature);
             }
         }
     }
@@ -753,8 +746,7 @@ mod tests {
     fn builtin_table_has_display_names() {
         let table = builtin_table();
         for entry in &table {
-            #[rustfmt::skip]
-            assert!(!entry.display_name.is_empty(), "model {} has empty display name", entry.model_id);
+            assert!(!entry.display_name.is_empty());
         }
     }
 
@@ -762,8 +754,7 @@ mod tests {
     fn builtin_table_context_larger_than_output() {
         let table = builtin_table();
         for entry in &table {
-            #[rustfmt::skip]
-            assert!(entry.caps.max_context_tokens >= entry.caps.max_output_tokens, "model {} has output > context", entry.model_id);
+            assert!(entry.caps.max_context_tokens >= entry.caps.max_output_tokens);
         }
     }
 
@@ -783,8 +774,7 @@ mod tests {
         let table = builtin_table();
         for entry in &table {
             if entry.provider == "openai" {
-                #[rustfmt::skip]
-                assert!(entry.caps.supports_temperature, "OpenAI model {} should support temperature", entry.model_id);
+                assert!(entry.caps.supports_temperature);
             }
         }
     }
@@ -796,8 +786,7 @@ mod tests {
             .iter()
             .filter(|e| e.model_id.contains("gemini") && e.model_id.contains("flash"))
             .collect();
-        #[rustfmt::skip]
-        assert!(!flash.is_empty(), "Expected at least one Gemini Flash model");
+        assert!(!flash.is_empty());
     }
 
     #[test]
@@ -805,8 +794,7 @@ mod tests {
         let table = builtin_table();
         for entry in &table {
             if entry.model_id.contains("deepseek-r1") {
-                #[rustfmt::skip]
-                assert!(!entry.caps.supports_temperature, "DeepSeek R1 {} should not support temperature", entry.model_id);
+                assert!(!entry.caps.supports_temperature);
             }
         }
     }
@@ -818,7 +806,7 @@ mod tests {
             .iter()
             .filter(|e| e.model_id.contains("qwen"))
             .collect();
-        assert!(!qwen.is_empty(), "Expected Qwen models in table");
+        assert!(!qwen.is_empty());
     }
 
     #[test]
@@ -828,15 +816,14 @@ mod tests {
             .iter()
             .filter(|e| e.model_id.contains("mistral"))
             .collect();
-        assert!(!mistral.is_empty(), "Expected Mistral models in table");
+        assert!(!mistral.is_empty());
     }
 
     #[test]
     fn builtin_table_all_entries_have_provider() {
         let table = builtin_table();
         for entry in &table {
-            #[rustfmt::skip]
-            assert!(!entry.provider.is_empty(), "model {} has empty provider", entry.model_id);
+            assert!(!entry.provider.is_empty());
         }
     }
 
@@ -844,8 +831,7 @@ mod tests {
     fn builtin_table_all_entries_have_model_id() {
         let table = builtin_table();
         for entry in &table {
-            #[rustfmt::skip]
-            assert!(!entry.model_id.is_empty(), "entry has empty model_id for provider {}", entry.provider);
+            assert!(!entry.model_id.is_empty());
         }
     }
 
@@ -1297,6 +1283,29 @@ mod tests {
         let args = ListArgs {
             remote: true,
             provider: Some("mock".to_string()),
+        };
+        let new_model = ModelInfo {
+            id: "mock-brand-new-model".to_string(),
+            display_name: Some("Mock Brand New Model".to_string()),
+            provider: "mock".to_string(),
+            capabilities: ModelCapabilities::default(),
+        };
+        let result = list_with_registry(args, mock_registry("mock", vec![new_model], false)).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn list_remote_without_provider_filter_queries_all_providers() {
+        // No `--provider` filter set: every provider in the registry should
+        // be queried for remote models (the `if let Some(ref filter) = ...`
+        // pattern-doesn't-match arm, never exercised by the other
+        // `list_remote_*` tests below, which all pass a provider filter).
+        let _guard = crate::config::isolate_config_path_for_test(
+            "models-list_remote_without_provider_filter_queries_all_providers",
+        );
+        let args = ListArgs {
+            remote: true,
+            provider: None,
         };
         let new_model = ModelInfo {
             id: "mock-brand-new-model".to_string(),
