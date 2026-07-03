@@ -159,6 +159,74 @@ scratch      = {{ kind = "clearable",      max_tokens = 5000 }}
 mod tests {
     use super::*;
 
+    /// Minimal no-op `Subscriber` that reports every callsite as enabled.
+    ///
+    /// Without an active subscriber, `tracing::warn!`/`info!`/`debug!` calls
+    /// short-circuit their field-argument evaluation before ever reaching it
+    /// (no subscriber means the "is this level enabled" check fails first) --
+    /// so a multi-line `tracing::warn!(...)` call's field-list lines show as
+    /// uncovered by `cargo llvm-cov` even when the surrounding branch
+    /// genuinely executes and is asserted on. `tracing_subscriber::fmt()`'s
+    /// default builder was tried first and did *not* fix this (its default
+    /// filtering still suppressed these callsites); this bare `Subscriber`
+    /// impl is the proven-working pattern (see `leviath-runtime/src/systems.rs`).
+    struct AlwaysOnSubscriber;
+
+    impl tracing::Subscriber for AlwaysOnSubscriber {
+        fn enabled(&self, _metadata: &tracing::Metadata<'_>) -> bool {
+            true
+        }
+        fn register_callsite(
+            &self,
+            _metadata: &'static tracing::Metadata<'static>,
+        ) -> tracing::subscriber::Interest {
+            tracing::subscriber::Interest::always()
+        }
+        fn new_span(&self, _span: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+            tracing::span::Id::from_u64(1)
+        }
+        fn record(&self, _span: &tracing::span::Id, _values: &tracing::span::Record<'_>) {}
+        fn record_follows_from(&self, _span: &tracing::span::Id, _follows: &tracing::span::Id) {}
+        fn event(&self, _event: &tracing::Event<'_>) {}
+        fn enter(&self, _span: &tracing::span::Id) {}
+        fn exit(&self, _span: &tracing::span::Id) {}
+        fn max_level_hint(&self) -> Option<tracing::metadata::LevelFilter> {
+            Some(tracing::metadata::LevelFilter::TRACE)
+        }
+    }
+
+    fn with_tracing<T>(f: impl FnOnce() -> T) -> T {
+        static INSTALLED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+        INSTALLED.get_or_init(|| {
+            // set_global_default registers AlwaysOnSubscriber in LOCKED_DISPATCHERS
+            // (the global dispatcher registry). rebuild_interest_cache then re-evaluates
+            // every callsite against the global subscriber, setting interest to "always".
+            // Without this, tracing macro inner blocks are unreachable in tests because
+            // with_default (thread-local) is NOT consulted during callsite registration,
+            // leaving every callsite cached as interest=never (no global dispatcher).
+            let _ = tracing::subscriber::set_global_default(AlwaysOnSubscriber);
+            tracing::callsite::rebuild_interest_cache();
+        });
+        f()
+    }
+
+    #[test]
+    fn always_on_subscriber_span_methods_are_all_no_ops() {
+        // This file only ever uses `tracing::info!` event macros (no field
+        // list, no `tracing::span!`), so the span-related trait methods above
+        // are otherwise dead code from `with_tracing`'s callers. Exercise
+        // them directly via a real span so they're not left uncovered
+        // themselves.
+        with_tracing(|| {
+            let span = tracing::info_span!("test-span", field = tracing::field::Empty);
+            span.record("field", 1);
+            let other = tracing::info_span!("other-span");
+            span.follows_from(&other);
+            let _enter = span.enter();
+            tracing::info!(parent: &span, "inside span");
+        });
+    }
+
     #[test]
     fn default_template_is_valid_toml() {
         let manifest = create_manifest("test-agent", "software-engineer");
@@ -275,7 +343,7 @@ mod tests {
             template: "coder".to_string(),
         };
 
-        execute(args).await.unwrap();
+        with_tracing(|| execute(args)).await.unwrap();
 
         assert!(blueprint_path.join("agent.leviath").exists());
         assert!(blueprint_path.join(".gitignore").exists());
@@ -294,7 +362,7 @@ mod tests {
             template: "software-engineer".to_string(),
         };
 
-        execute(args).await.unwrap();
+        with_tracing(|| execute(args)).await.unwrap();
 
         let manifest = fs::read_to_string(blueprint_path.join("agent.leviath")).unwrap();
         let parsed: toml::Value = toml::from_str(&manifest).unwrap();
@@ -315,7 +383,7 @@ mod tests {
             template: "coder".to_string(),
         };
 
-        let err = execute(args).await.unwrap_err();
+        let err = with_tracing(|| execute(args)).await.unwrap_err();
         assert!(err.to_string().contains("already exists"));
     }
 }

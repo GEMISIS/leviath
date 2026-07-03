@@ -160,6 +160,74 @@ fn parse_agent_name(content: &str) -> Option<String> {
 mod tests {
     use super::*;
 
+    /// Minimal no-op `Subscriber` that reports every callsite as enabled.
+    ///
+    /// Without an active subscriber, `tracing::warn!`/`info!`/`debug!` calls
+    /// short-circuit their field-argument evaluation before ever reaching it
+    /// (no subscriber means the "is this level enabled" check fails first) --
+    /// so a multi-line `tracing::warn!(...)` call's field-list lines show as
+    /// uncovered by `cargo llvm-cov` even when the surrounding branch
+    /// genuinely executes and is asserted on. `tracing_subscriber::fmt()`'s
+    /// default builder was tried first and did *not* fix this (its default
+    /// filtering still suppressed these callsites); this bare `Subscriber`
+    /// impl is the proven-working pattern (see `leviath-runtime/src/systems.rs`).
+    struct AlwaysOnSubscriber;
+
+    impl tracing::Subscriber for AlwaysOnSubscriber {
+        fn enabled(&self, _metadata: &tracing::Metadata<'_>) -> bool {
+            true
+        }
+        fn register_callsite(
+            &self,
+            _metadata: &'static tracing::Metadata<'static>,
+        ) -> tracing::subscriber::Interest {
+            tracing::subscriber::Interest::always()
+        }
+        fn new_span(&self, _span: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+            tracing::span::Id::from_u64(1)
+        }
+        fn record(&self, _span: &tracing::span::Id, _values: &tracing::span::Record<'_>) {}
+        fn record_follows_from(&self, _span: &tracing::span::Id, _follows: &tracing::span::Id) {}
+        fn event(&self, _event: &tracing::Event<'_>) {}
+        fn enter(&self, _span: &tracing::span::Id) {}
+        fn exit(&self, _span: &tracing::span::Id) {}
+        fn max_level_hint(&self) -> Option<tracing::metadata::LevelFilter> {
+            Some(tracing::metadata::LevelFilter::TRACE)
+        }
+    }
+
+    fn with_tracing<T>(f: impl FnOnce() -> T) -> T {
+        static INSTALLED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+        INSTALLED.get_or_init(|| {
+            // set_global_default registers AlwaysOnSubscriber in LOCKED_DISPATCHERS
+            // (the global dispatcher registry). rebuild_interest_cache then re-evaluates
+            // every callsite against the global subscriber, setting interest to "always".
+            // Without this, tracing macro inner blocks are unreachable in tests because
+            // with_default (thread-local) is NOT consulted during callsite registration,
+            // leaving every callsite cached as interest=never (no global dispatcher).
+            let _ = tracing::subscriber::set_global_default(AlwaysOnSubscriber);
+            tracing::callsite::rebuild_interest_cache();
+        });
+        f()
+    }
+
+    #[test]
+    fn always_on_subscriber_span_methods_are_all_no_ops() {
+        // This file only ever uses `tracing::info!` event macros (no field
+        // list, no `tracing::span!`), so the span-related trait methods above
+        // are otherwise dead code from `with_tracing`'s callers. Exercise
+        // them directly via a real span so they're not left uncovered
+        // themselves.
+        with_tracing(|| {
+            let span = tracing::info_span!("test-span", field = tracing::field::Empty);
+            span.record("field", 1);
+            let other = tracing::info_span!("other-span");
+            span.follows_from(&other);
+            let _enter = span.enter();
+            tracing::info!(parent: &span, "inside span");
+        });
+    }
+
     // ─── agents_dir_from_home ─────────────────────────────────────────────
 
     #[test]
@@ -320,81 +388,90 @@ description = "test"
     #[test]
     fn execute_with_directory_package_installs() {
         let rt = tokio::runtime::Runtime::new().unwrap();
-        rt.block_on(async {
-            let src = tempfile::tempdir().unwrap();
-            std::fs::write(
-                src.path().join("agent.leviath"),
-                "[agent]\nname = \"dir-pkg\"\n",
-            )
-            .unwrap();
-            let agents_dir = tempfile::tempdir().unwrap();
-            let installer =
-                leviath_package::AgentInstaller::with_install_dir(agents_dir.path().to_path_buf());
-            let args = AddArgs {
-                package: src.path().to_str().unwrap().to_string(),
-                registry: None,
-            };
-
-            execute_with(&args, &installer, agents_dir.path())
-                .await
+        with_tracing(|| {
+            rt.block_on(async {
+                let src = tempfile::tempdir().unwrap();
+                std::fs::write(
+                    src.path().join("agent.leviath"),
+                    "[agent]\nname = \"dir-pkg\"\n",
+                )
                 .unwrap();
+                let agents_dir = tempfile::tempdir().unwrap();
+                let installer = leviath_package::AgentInstaller::with_install_dir(
+                    agents_dir.path().to_path_buf(),
+                );
+                let args = AddArgs {
+                    package: src.path().to_str().unwrap().to_string(),
+                    registry: None,
+                };
 
-            assert!(agents_dir.path().join("dir-pkg").exists());
+                execute_with(&args, &installer, agents_dir.path())
+                    .await
+                    .unwrap();
+
+                assert!(agents_dir.path().join("dir-pkg").exists());
+            })
         });
     }
 
     #[test]
     fn execute_with_missing_bundle_file_errors() {
         let rt = tokio::runtime::Runtime::new().unwrap();
-        rt.block_on(async {
-            let agents_dir = tempfile::tempdir().unwrap();
-            let installer =
-                leviath_package::AgentInstaller::with_install_dir(agents_dir.path().to_path_buf());
-            let args = AddArgs {
-                package: "nonexistent.leviath-bundle".to_string(),
-                registry: None,
-            };
+        with_tracing(|| {
+            rt.block_on(async {
+                let agents_dir = tempfile::tempdir().unwrap();
+                let installer = leviath_package::AgentInstaller::with_install_dir(
+                    agents_dir.path().to_path_buf(),
+                );
+                let args = AddArgs {
+                    package: "nonexistent.leviath-bundle".to_string(),
+                    registry: None,
+                };
 
-            let err = execute_with(&args, &installer, agents_dir.path())
-                .await
-                .unwrap_err();
-            assert!(err.to_string().contains("Package file not found"));
+                let err = execute_with(&args, &installer, agents_dir.path())
+                    .await
+                    .unwrap_err();
+                assert!(err.to_string().contains("Package file not found"));
+            })
         });
     }
 
     #[test]
     fn execute_with_bundle_file_installs() {
         let rt = tokio::runtime::Runtime::new().unwrap();
-        rt.block_on(async {
-            let project_dir = tempfile::tempdir().unwrap();
-            std::fs::write(
-                project_dir.path().join("agent.leviath"),
-                "[agent]\nname = \"bundled-pkg\"\nversion = \"1.0.0\"\ndescription = \"d\"\n",
-            )
-            .unwrap();
-            let bundle_bytes = leviath_package::AgentBundler::new()
-                .bundle(project_dir.path())
+        with_tracing(|| {
+            rt.block_on(async {
+                let project_dir = tempfile::tempdir().unwrap();
+                std::fs::write(
+                    project_dir.path().join("agent.leviath"),
+                    "[agent]\nname = \"bundled-pkg\"\nversion = \"1.0.0\"\ndescription = \"d\"\n",
+                )
                 .unwrap();
-            let bundle_dir = tempfile::tempdir().unwrap();
-            // AgentInstaller::install() derives the agent name from the
-            // bundle *filename* (not the manifest content), so name it
-            // to match what we assert on below.
-            let bundle_path = bundle_dir.path().join("bundled-pkg.leviath-bundle");
-            std::fs::write(&bundle_path, bundle_bytes).unwrap();
+                let bundle_bytes = leviath_package::AgentBundler::new()
+                    .bundle(project_dir.path())
+                    .unwrap();
+                let bundle_dir = tempfile::tempdir().unwrap();
+                // AgentInstaller::install() derives the agent name from the
+                // bundle *filename* (not the manifest content), so name it
+                // to match what we assert on below.
+                let bundle_path = bundle_dir.path().join("bundled-pkg.leviath-bundle");
+                std::fs::write(&bundle_path, bundle_bytes).unwrap();
 
-            let agents_dir = tempfile::tempdir().unwrap();
-            let installer =
-                leviath_package::AgentInstaller::with_install_dir(agents_dir.path().to_path_buf());
-            let args = AddArgs {
-                package: bundle_path.to_str().unwrap().to_string(),
-                registry: None,
-            };
+                let agents_dir = tempfile::tempdir().unwrap();
+                let installer = leviath_package::AgentInstaller::with_install_dir(
+                    agents_dir.path().to_path_buf(),
+                );
+                let args = AddArgs {
+                    package: bundle_path.to_str().unwrap().to_string(),
+                    registry: None,
+                };
 
-            execute_with(&args, &installer, agents_dir.path())
-                .await
-                .unwrap();
+                execute_with(&args, &installer, agents_dir.path())
+                    .await
+                    .unwrap();
 
-            assert!(agents_dir.path().join("bundled-pkg").exists());
+                assert!(agents_dir.path().join("bundled-pkg").exists());
+            })
         });
     }
 
@@ -442,35 +519,39 @@ description = "test"
     #[test]
     fn execute_with_registry_package_installs() {
         let rt = tokio::runtime::Runtime::new().unwrap();
-        rt.block_on(async {
-            let project_dir = tempfile::tempdir().unwrap();
-            std::fs::write(
-                project_dir.path().join("agent.leviath"),
-                "[agent]\nname = \"reg-pkg\"\nversion = \"1.0.0\"\ndescription = \"d\"\n",
-            )
-            .unwrap();
-            let bundle_bytes = leviath_package::AgentBundler::new()
-                .bundle(project_dir.path())
+        with_tracing(|| {
+            rt.block_on(async {
+                let project_dir = tempfile::tempdir().unwrap();
+                std::fs::write(
+                    project_dir.path().join("agent.leviath"),
+                    "[agent]\nname = \"reg-pkg\"\nversion = \"1.0.0\"\ndescription = \"d\"\n",
+                )
                 .unwrap();
+                let bundle_bytes = leviath_package::AgentBundler::new()
+                    .bundle(project_dir.path())
+                    .unwrap();
 
-            let info_json =
-                br#"{"name":"reg-pkg","version":"1.0.0","description":"A registry package"}"#;
-            let url =
-                spawn_mock_registry(info_json, Box::leak(bundle_bytes.into_boxed_slice())).await;
+                let info_json =
+                    br#"{"name":"reg-pkg","version":"1.0.0","description":"A registry package"}"#;
+                let url =
+                    spawn_mock_registry(info_json, Box::leak(bundle_bytes.into_boxed_slice()))
+                        .await;
 
-            let agents_dir = tempfile::tempdir().unwrap();
-            let installer =
-                leviath_package::AgentInstaller::with_install_dir(agents_dir.path().to_path_buf());
-            let args = AddArgs {
-                package: "reg-pkg".to_string(),
-                registry: Some(url),
-            };
+                let agents_dir = tempfile::tempdir().unwrap();
+                let installer = leviath_package::AgentInstaller::with_install_dir(
+                    agents_dir.path().to_path_buf(),
+                );
+                let args = AddArgs {
+                    package: "reg-pkg".to_string(),
+                    registry: Some(url),
+                };
 
-            execute_with(&args, &installer, agents_dir.path())
-                .await
-                .unwrap();
+                execute_with(&args, &installer, agents_dir.path())
+                    .await
+                    .unwrap();
 
-            assert!(agents_dir.path().join("reg-pkg").exists());
+                assert!(agents_dir.path().join("reg-pkg").exists());
+            })
         });
     }
 
@@ -558,13 +639,15 @@ name = "second"
         // not found" check before any real file under ~/.leviath/agents is
         // ever touched.
         let rt = tokio::runtime::Runtime::new().unwrap();
-        rt.block_on(async {
-            let args = AddArgs {
-                package: "definitely-not-a-real-bundle-xyz.leviath-bundle".to_string(),
-                registry: None,
-            };
-            let err = execute(args).await.unwrap_err();
-            assert!(err.to_string().contains("Package file not found"));
+        with_tracing(|| {
+            rt.block_on(async {
+                let args = AddArgs {
+                    package: "definitely-not-a-real-bundle-xyz.leviath-bundle".to_string(),
+                    registry: None,
+                };
+                let err = execute(args).await.unwrap_err();
+                assert!(err.to_string().contains("Package file not found"));
+            })
         });
     }
 
