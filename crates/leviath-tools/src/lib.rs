@@ -649,17 +649,31 @@ mod tests {
         }
     }
 
+    fn assert_has_description(name: &str, description: &str) {
+        assert!(
+            !description.is_empty(),
+            "tool {} has empty description",
+            name
+        );
+    }
+
+    fn assert_has_object_params(name: &str, params: &serde_json::Value) {
+        assert!(params.is_object(), "tool {} has non-object params", name);
+    }
+
     #[test]
     fn tool_defs_have_descriptions() {
         let dir = std::env::temp_dir();
         let tools = make_tools(&dir);
         for def in tools.tool_defs() {
-            assert!(
-                !def.description.is_empty(),
-                "tool {} has empty description",
-                def.name
-            );
+            assert_has_description(&def.name, &def.description);
         }
+    }
+
+    #[test]
+    #[should_panic(expected = "tool bogus has empty description")]
+    fn tool_defs_have_descriptions_panics_on_empty_description() {
+        assert_has_description("bogus", "");
     }
 
     #[test]
@@ -667,12 +681,14 @@ mod tests {
         let dir = std::env::temp_dir();
         let tools = make_tools(&dir);
         for def in tools.tool_defs() {
-            assert!(
-                def.parameters.is_object(),
-                "tool {} has non-object params",
-                def.name
-            );
+            assert_has_object_params(&def.name, &def.parameters);
         }
+    }
+
+    #[test]
+    #[should_panic(expected = "tool bogus has non-object params")]
+    fn tool_defs_have_parameters_panics_on_non_object_params() {
+        assert_has_object_params("bogus", &serde_json::Value::Null);
     }
 
     // ── names() ───────────────────────────────────────────────────────────
