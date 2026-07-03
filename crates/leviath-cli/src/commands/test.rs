@@ -430,42 +430,7 @@ fn truncate_str(s: &str, max: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// Without a registered `tracing::Subscriber`, `tracing::info!`'s
-    /// multi-line field-argument lines show as uncovered even though the
-    /// call itself demonstrably executes -- the macro short-circuits field
-    /// evaluation when no subscriber is listening.
-    struct AlwaysOnSubscriber;
-    impl tracing::Subscriber for AlwaysOnSubscriber {
-        fn enabled(&self, _metadata: &tracing::Metadata<'_>) -> bool {
-            true
-        }
-        fn new_span(&self, _span: &tracing::span::Attributes<'_>) -> tracing::span::Id {
-            tracing::span::Id::from_u64(1)
-        }
-        fn record(&self, _span: &tracing::span::Id, _values: &tracing::span::Record<'_>) {}
-        fn record_follows_from(&self, _span: &tracing::span::Id, _follows: &tracing::span::Id) {}
-        fn event(&self, _event: &tracing::Event<'_>) {}
-        fn enter(&self, _span: &tracing::span::Id) {}
-        fn exit(&self, _span: &tracing::span::Id) {}
-    }
-    fn always_on_tracing_guard() -> tracing::subscriber::DefaultGuard {
-        tracing::subscriber::set_default(AlwaysOnSubscriber)
-    }
-
-    #[test]
-    fn always_on_subscriber_span_methods_are_all_no_ops() {
-        // This file only ever uses `tracing::info!` event macros, never
-        // `tracing::span!` -- so `Subscriber::{new_span,record,
-        // record_follows_from,enter,exit}` are otherwise never invoked.
-        let _guard = always_on_tracing_guard();
-        let span_a = tracing::info_span!("a", value = tracing::field::Empty);
-        span_a.record("value", 1);
-        let span_b = tracing::info_span!("b");
-        span_b.follows_from(&span_a);
-        let _enter_a = span_a.enter();
-        let _enter_b = span_b.enter();
-    }
+    use crate::test_support::with_tracing;
 
     // ─── validate_test_case ────────────────────────────────────────────────
 
@@ -1849,7 +1814,6 @@ model = { provider = "anthropic", model = "claude-sonnet-4-6" }
 
     #[tokio::test]
     async fn execute_with_registry_non_dry_run_all_pass() {
-        let _tracing_guard = always_on_tracing_guard();
         let _config_guard =
             crate::config::isolate_config_path_for_test("test-rs-non-dry-run-all-pass");
         let dir = tempfile::tempdir().unwrap();
@@ -1870,8 +1834,10 @@ expect_contains = "world"
             dry_run: false,
         };
 
-        let result =
-            execute_with_registry(args, mock_registry_builder("Hello, world!", vec![])).await;
+        let result = with_tracing(|| {
+            execute_with_registry(args, mock_registry_builder("Hello, world!", vec![]))
+        })
+        .await;
         assert!(result.is_ok());
     }
 

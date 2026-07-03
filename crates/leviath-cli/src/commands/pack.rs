@@ -145,81 +145,21 @@ fn count_files(dir: &Path) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::with_tracing;
 
     // ─── tracing subscriber ────────────────────────────────────────────────
     //
     // Without a registered subscriber, `tracing::info!`'s macro expansion
     // short-circuits field evaluation before the "is level enabled" check
     // runs, so field-expression lines show as uncovered even though the
-    // surrounding branch executes.  This minimal subscriber reports every
-    // callsite as enabled, forcing real evaluation of all macro arms.
-    //
-    // The macro checks two things before evaluating field expressions:
-    //  1. `LevelFilter::current()` — a global `MAX_LEVEL` atomic, initialised
-    //     to `OFF`; only raised to `TRACE` when a subscriber is registered.
-    //  2. `callsite.interest()` — cached per callsite; stays `never` until a
-    //     subscriber claims the callsite.
-    //
-    // Both are global state, so we install AlwaysOn as the *global* default
-    // exactly once via `install_tracing_once()`.  Using a global (rather than
-    // a thread-local) guarantees that both `MAX_LEVEL` and callsite interest
-    // are updated regardless of which test thread runs first or how the
-    // Tokio runtime schedules async tasks.
-
-    struct AlwaysOn;
-    impl tracing::Subscriber for AlwaysOn {
-        fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
-            true
-        }
-        fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
-            tracing::span::Id::from_u64(1)
-        }
-        fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
-        fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
-        fn event(&self, _: &tracing::Event<'_>) {}
-        fn enter(&self, _: &tracing::span::Id) {}
-        fn exit(&self, _: &tracing::span::Id) {}
-    }
-
-    /// Register `AlwaysOn` as the process-wide tracing subscriber at most once,
-    /// then rebuild the callsite interest cache so that `MAX_LEVEL` is raised
-    /// to `TRACE` and every callsite's cached interest reflects the subscriber.
-    ///
-    /// Background: `set_global_default` sets `GLOBAL_DISPATCH` but does *not*
-    /// call `register_dispatch`, so it does not update `MAX_LEVEL` (which
-    /// starts at `OFF`) or the per-callsite interest cache.  The tracing macro
-    /// guards field-expression evaluation behind both:
-    ///
-    ///   `Level::INFO <= LevelFilter::current()` — reads `MAX_LEVEL`
-    ///   `!callsite.interest().is_never()`        — reads per-callsite cache
-    ///
-    /// Calling `rebuild_interest_cache()` after `set_global_default` fixes both:
-    /// it iterates all registered callsites (and the `DISPATCHERS::JustOne`
-    /// rebuilder delegates to `get_default`, which now returns our global
-    /// AlwaysOn), sets each callsite's interest to `always`, and updates
-    /// `MAX_LEVEL` to `TRACE` via `LevelFilter::set_max`.  Any callsite first
-    /// encountered *after* this call also registers against the global default
-    /// and therefore also gets `interest = always`.
-    fn install_tracing_once() {
-        static INSTALLED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
-        INSTALLED.get_or_init(|| {
-            // Ignore the error: another module may have installed a global
-            // subscriber first; subsequent calls simply fail silently.
-            let _ = tracing::subscriber::set_global_default(AlwaysOn);
-            // Raise MAX_LEVEL to TRACE and mark all registered callsites as
-            // enabled now that the global subscriber is in place.
-            tracing::callsite::rebuild_interest_cache();
-        });
-    }
-
-    // ─── AlwaysOn method coverage ─────────────────────────────────────────
-    //
-    // Exercise every method on AlwaysOn so those lines appear covered.
-    // Mirrors the pattern in leviath-package/src/bundler.rs.
+    // surrounding branch executes. Each test below calls `with_tracing(|| {})`
+    // once as a bare statement (rather than wrapping the whole test body) to
+    // install the shared `AlwaysOnSubscriber` (see `crate::test_support`) as
+    // the process-wide default before the rest of the test runs.
 
     #[test]
     fn diagnose_tracing_setup() {
-        install_tracing_once();
+        with_tracing(|| {});
         tracing::callsite::rebuild_interest_cache();
         let lvl = tracing::level_filters::LevelFilter::current();
         println!("LevelFilter::current() = {:?}", lvl);
@@ -227,28 +167,6 @@ mod tests {
         println!("dispatcher has_been_set = {}", set);
         tracing::info!("test event");
         println!("info! executed successfully");
-    }
-
-    #[test]
-    fn always_on_subscriber_all_methods_execute() {
-        use tracing::Subscriber;
-        // Install AlwaysOn as the global subscriber so that info_span! below
-        // uses it (through get_global), without incrementing SCOPED_COUNT and
-        // risking a race where another thread's callsite registration falls
-        // through to NoSubscriber and caches interest = never.
-        install_tracing_once();
-        let sub = AlwaysOn;
-        let span_id = tracing::span::Id::from_u64(1);
-        // Directly call the three methods not triggered by event!/info_span!.
-        sub.enter(&span_id);
-        sub.exit(&span_id);
-        sub.record_follows_from(&span_id, &span_id);
-        // new_span + record + enter/exit via the span API.
-        // Using the global subscriber (installed above) rather than with_default
-        // avoids bumping SCOPED_COUNT and creating the race described above.
-        let s = tracing::info_span!("test-span", field = tracing::field::Empty);
-        s.record("field", 1_u64);
-        s.in_scope(|| {});
     }
 
     // ─── format_size ───────────────────────────────────────────────────────
@@ -493,7 +411,7 @@ mod tests {
 
     #[tokio::test]
     async fn execute_packs_project_to_explicit_output() {
-        install_tracing_once();
+        with_tracing(|| {});
         let project = make_project_dir(false, false);
         let output_dir = tempfile::tempdir().unwrap();
         let output_path = output_dir.path().join("out.leviath-bundle");
@@ -508,7 +426,7 @@ mod tests {
 
     #[tokio::test]
     async fn execute_with_scripts_and_tests_dirs() {
-        install_tracing_once();
+        with_tracing(|| {});
         let project = make_project_dir(true, true);
         let output_dir = tempfile::tempdir().unwrap();
         let output_path = output_dir.path().join("out.leviath-bundle");
@@ -522,7 +440,7 @@ mod tests {
 
     #[tokio::test]
     async fn execute_missing_manifest_errors() {
-        install_tracing_once();
+        with_tracing(|| {});
         let project = tempfile::tempdir().unwrap();
         let output_dir = tempfile::tempdir().unwrap();
         let output_path = output_dir.path().join("out.leviath-bundle");
@@ -536,7 +454,7 @@ mod tests {
 
     #[tokio::test]
     async fn execute_unwritable_output_path_errors() {
-        install_tracing_once();
+        with_tracing(|| {});
         let project = make_project_dir(false, false);
         let output_path = project
             .path()
@@ -553,7 +471,7 @@ mod tests {
     #[tokio::test]
     async fn execute_with_path_none_falls_back_to_dot() {
         // args.path = None triggers the unwrap_or_else closure on line 21.
-        install_tracing_once();
+        with_tracing(|| {});
         let args = PackArgs {
             path: None,
             output: None,
@@ -565,7 +483,7 @@ mod tests {
     #[tokio::test]
     async fn execute_invalid_manifest_toml_errors() {
         // Manifest exists but is invalid TOML — covers parse_manifest_public ? on line 30.
-        install_tracing_once();
+        with_tracing(|| {});
         let project = tempfile::tempdir().unwrap();
         std::fs::write(project.path().join("agent.leviath"), "not valid toml ][").unwrap();
         let output_dir = tempfile::tempdir().unwrap();
@@ -583,7 +501,7 @@ mod tests {
         // Manifest exists but is chmod 000 — covers map_err on lines 28-29.
         // This test assumes it is not running as root (chmod 000 blocks reads).
         use std::os::unix::fs::PermissionsExt;
-        install_tracing_once();
+        with_tracing(|| {});
         let project = tempfile::tempdir().unwrap();
         let manifest = project.path().join("agent.leviath");
         std::fs::write(
@@ -611,7 +529,7 @@ mod tests {
         // covers the ? on bundler.bundle(project_dir)? on line 42.
         // This test assumes it is not running as root (chmod 000 blocks reads).
         use std::os::unix::fs::PermissionsExt;
-        install_tracing_once();
+        with_tracing(|| {});
         let project = make_project_dir(false, false);
         let secret = project.path().join("secret.txt");
         std::fs::write(&secret, "secret data").unwrap();

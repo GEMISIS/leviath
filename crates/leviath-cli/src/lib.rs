@@ -5,4 +5,6 @@ pub mod config;
 pub mod interaction;
 pub mod render;
 pub mod runstate;
+#[cfg(test)]
+mod test_support;
 pub mod tools;

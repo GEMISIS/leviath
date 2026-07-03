@@ -676,69 +676,9 @@ fn parse_policy_str(s: &str) -> ToolPolicy {
 #[cfg(test)]
 mod mcp_registry_tests {
     use super::*;
+    use crate::test_support::with_tracing;
     use leviath_mcp::MCPServerConfig;
     use std::collections::HashMap as Map;
-
-    /// Minimal no-op `Subscriber` that reports every callsite as enabled.
-    ///
-    /// Without an active subscriber, `tracing::warn!`/`info!`/`debug!` calls
-    /// short-circuit their field-argument evaluation before ever reaching it
-    /// (no subscriber means the "is this level enabled" check fails first) --
-    /// so a multi-line `tracing::info!(...)`/`tracing::warn!(...)` call's
-    /// field-list lines show as uncovered by `cargo llvm-cov` even when the
-    /// surrounding branch genuinely executes and is asserted on. See
-    /// `leviath-cli/src/config.rs`'s `AlwaysOnSubscriber` for the
-    /// canonical/proven-working copy of this pattern.
-    struct AlwaysOnSubscriber;
-
-    impl tracing::Subscriber for AlwaysOnSubscriber {
-        fn enabled(&self, _metadata: &tracing::Metadata<'_>) -> bool {
-            true
-        }
-        fn register_callsite(
-            &self,
-            _metadata: &'static tracing::Metadata<'static>,
-        ) -> tracing::subscriber::Interest {
-            tracing::subscriber::Interest::always()
-        }
-        fn new_span(&self, _span: &tracing::span::Attributes<'_>) -> tracing::span::Id {
-            tracing::span::Id::from_u64(1)
-        }
-        fn record(&self, _span: &tracing::span::Id, _values: &tracing::span::Record<'_>) {}
-        fn record_follows_from(&self, _span: &tracing::span::Id, _follows: &tracing::span::Id) {}
-        fn event(&self, _event: &tracing::Event<'_>) {}
-        fn enter(&self, _span: &tracing::span::Id) {}
-        fn exit(&self, _span: &tracing::span::Id) {}
-        fn max_level_hint(&self) -> Option<tracing::metadata::LevelFilter> {
-            Some(tracing::metadata::LevelFilter::TRACE)
-        }
-    }
-
-    fn with_tracing<T>(f: impl FnOnce() -> T) -> T {
-        static INSTALLED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
-        INSTALLED.get_or_init(|| {
-            let _ = tracing::subscriber::set_global_default(AlwaysOnSubscriber);
-            tracing::callsite::rebuild_interest_cache();
-        });
-        f()
-    }
-
-    #[test]
-    fn always_on_subscriber_span_methods_are_all_no_ops() {
-        // This module only ever uses `tracing::info!`/`tracing::warn!` event
-        // macros, never `tracing::span!`, so the span-related trait methods
-        // above are otherwise dead code from `with_tracing`'s callers.
-        // Exercise them directly via a real span so they're not left
-        // uncovered themselves.
-        with_tracing(|| {
-            let span = tracing::info_span!("test-span", field = tracing::field::Empty);
-            span.record("field", 1);
-            let other = tracing::info_span!("other-span");
-            span.follows_from(&other);
-            let _enter = span.enter();
-            tracing::info!(parent: &span, "inside span");
-        });
-    }
 
     // A minimal MCP server speaking just enough JSON-RPC over stdio to
     // satisfy `initialize` / `notifications/initialized` / `tools/list`,
@@ -1654,64 +1594,7 @@ mod subagent_tests {
 #[cfg(test)]
 mod policy_tests {
     use super::*;
-
-    /// Minimal no-op `Subscriber` that reports every callsite as enabled.
-    ///
-    /// Without an active subscriber, `tracing::info!`'s field-argument lines
-    /// (e.g. `SubAgentExecutor::exec_spawn`'s "Spawned sub-agent" log) show
-    /// as uncovered by `cargo llvm-cov` even though the surrounding branch
-    /// genuinely executes. See `leviath-cli/src/config.rs`'s
-    /// `AlwaysOnSubscriber` for the canonical/proven-working copy of this
-    /// pattern.
-    struct AlwaysOnSubscriber;
-
-    impl tracing::Subscriber for AlwaysOnSubscriber {
-        fn enabled(&self, _metadata: &tracing::Metadata<'_>) -> bool {
-            true
-        }
-        fn register_callsite(
-            &self,
-            _metadata: &'static tracing::Metadata<'static>,
-        ) -> tracing::subscriber::Interest {
-            tracing::subscriber::Interest::always()
-        }
-        fn new_span(&self, _span: &tracing::span::Attributes<'_>) -> tracing::span::Id {
-            tracing::span::Id::from_u64(1)
-        }
-        fn record(&self, _span: &tracing::span::Id, _values: &tracing::span::Record<'_>) {}
-        fn record_follows_from(&self, _span: &tracing::span::Id, _follows: &tracing::span::Id) {}
-        fn event(&self, _event: &tracing::Event<'_>) {}
-        fn enter(&self, _span: &tracing::span::Id) {}
-        fn exit(&self, _span: &tracing::span::Id) {}
-        fn max_level_hint(&self) -> Option<tracing::metadata::LevelFilter> {
-            Some(tracing::metadata::LevelFilter::TRACE)
-        }
-    }
-
-    fn with_tracing<T>(f: impl FnOnce() -> T) -> T {
-        static INSTALLED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
-        INSTALLED.get_or_init(|| {
-            let _ = tracing::subscriber::set_global_default(AlwaysOnSubscriber);
-            tracing::callsite::rebuild_interest_cache();
-        });
-        f()
-    }
-
-    #[test]
-    fn always_on_subscriber_span_methods_are_all_no_ops() {
-        // This module only ever uses `tracing::info!` event macros, never
-        // `tracing::span!`, so the span-related trait methods above are
-        // otherwise dead code from `with_tracing`'s callers. Exercise them
-        // directly via a real span so they're not left uncovered themselves.
-        with_tracing(|| {
-            let span = tracing::info_span!("test-span", field = tracing::field::Empty);
-            span.record("field", 1);
-            let other = tracing::info_span!("other-span");
-            span.follows_from(&other);
-            let _enter = span.enter();
-            tracing::info!(parent: &span, "inside span");
-        });
-    }
+    use crate::test_support::with_tracing;
 
     #[test]
     fn test_default_policy_read_file() {
