@@ -76,17 +76,17 @@ jobs:
       # Branch coverage is not collected -- `cargo llvm-cov --branch`
       # reliably crashes with SIGSEGV on an open, unresolved upstream LLVM
       # bug (see the doc comment at the top of xtask/src/coverage.rs).
-      # 100%-coverage enforcement is also temporarily disabled in
-      # xtask/src/coverage.rs (run_report no longer fails the build below
-      # 100%) while coverage catches back up across all three remaining
-      # metrics on every platform. This step still computes and reports all
-      # three (regions/lines/functions) so that re-enabling enforcement
-      # later, and re-publishing the other two as badges, is a config-only
+      # Coverage enforcement IS active: this step fails the build if missed
+      # regions/lines/functions exceed the locked-in ceiling in
+      # xtask/src/coverage.rs (MAX_MISSED_REGIONS/LINES/FUNCTIONS) -- see
+      # that file's doc comments for why literal 100% isn't the target
+      # (individually investigated, confirmed-permanent tooling limitations)
+      # and how the ceiling should be lowered as real gaps get closed. This
+      # step computes and reports all three metrics (regions/lines/functions)
+      # so re-publishing the other two as badges later is a config-only
       # change -- only the lines badge is published for now (see the step
       # below) since three separate coverage numbers read as confusing to
       # newcomers; regions/functions stay computed but unpublished.
-      # Re-enable enforcement by restoring the `anyhow::bail!` noted in that
-      # file's comments once coverage is back to 100% everywhere.
       - name: Compute coverage (regions / lines / functions)
         id: cov
         run: cargo xtask coverage
