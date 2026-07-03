@@ -468,6 +468,41 @@ impl Provider for OpenRouterProvider {
 mod tests {
     use super::*;
 
+    /// No-op `tracing::Subscriber` that reports every callsite enabled.
+    /// Without a registered subscriber during tests, `tracing::debug!`/`warn!`
+    /// short-circuit field-expression evaluation before the enclosing
+    /// branch's field-list lines ever execute, even though the branch itself
+    /// demonstrably runs -- this makes those lines genuinely exercised
+    /// instead of an unexplained coverage gap.
+    struct AlwaysOnSubscriber;
+    impl tracing::Subscriber for AlwaysOnSubscriber {
+        fn enabled(&self, _metadata: &tracing::Metadata<'_>) -> bool {
+            true
+        }
+        fn new_span(&self, _span: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+            tracing::span::Id::from_u64(1)
+        }
+        fn record(&self, _span: &tracing::span::Id, _values: &tracing::span::Record<'_>) {}
+        fn record_follows_from(&self, _span: &tracing::span::Id, _follows: &tracing::span::Id) {}
+        fn event(&self, _event: &tracing::Event<'_>) {}
+        fn enter(&self, _span: &tracing::span::Id) {}
+        fn exit(&self, _span: &tracing::span::Id) {}
+    }
+
+    #[test]
+    fn always_on_subscriber_span_methods_are_all_no_ops() {
+        use tracing::Subscriber;
+        let sub = AlwaysOnSubscriber;
+        let span = tracing::span::Id::from_u64(1);
+        let _guard = tracing::subscriber::set_default(AlwaysOnSubscriber);
+        let s = tracing::info_span!("test-span", field = tracing::field::Empty);
+        s.record("field", 1);
+        s.in_scope(|| {});
+        sub.enter(&span);
+        sub.exit(&span);
+        sub.record_follows_from(&span, &span);
+    }
+
     #[test]
     fn test_provider_creation() {
         let provider = OpenRouterProvider::new("test-key".to_string());
@@ -870,6 +905,9 @@ mod tests {
 
     #[tokio::test]
     async fn infer_success_parses_response() {
+        // Registers a real Subscriber so the tracing::debug! call's field
+        // arguments at the top of infer() are actually exercised.
+        let _guard = tracing::subscriber::set_default(AlwaysOnSubscriber);
         let body = br#"{"choices":[{"message":{"content":"hi there"},"finish_reason":"stop"}],"usage":{"prompt_tokens":3,"completion_tokens":2}}"#;
         let url = spawn_mock_server(200, "OK", body).await;
         let provider = provider_with_url(url);
@@ -964,6 +1002,9 @@ mod tests {
 
     #[tokio::test]
     async fn infer_stream_success_yields_chunks() {
+        // Registers a real Subscriber so the tracing::debug! call's field
+        // arguments at the top of infer_stream() are actually exercised.
+        let _guard = tracing::subscriber::set_default(AlwaysOnSubscriber);
         let sse_body =
             b"data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\ndata: [DONE]\n\n";
         let url = spawn_mock_server(200, "OK", sse_body).await;
