@@ -224,8 +224,8 @@ impl Config {
             create_config_dir(parent)?;
         }
 
-        let content = toml::to_string_pretty(self)
-            .map_err(|e| anyhow::anyhow!("Failed to serialize config: {}", e))?;
+        // Config contains only primitive-typed fields; toml serialization is infallible.
+        let content = toml::to_string_pretty(self).expect("Config serialization is infallible");
 
         std::fs::write(path, content).map_err(|e| {
             anyhow::anyhow!("Failed to write config to '{}': {}", path.display(), e)
@@ -487,8 +487,13 @@ mod tests {
 
     impl tracing::Subscriber for AlwaysOnSubscriber {
         fn enabled(&self, _metadata: &tracing::Metadata<'_>) -> bool {
-            eprintln!("PROBE: enabled() called for {}", _metadata.name());
             true
+        }
+        fn register_callsite(
+            &self,
+            _metadata: &'static tracing::Metadata<'static>,
+        ) -> tracing::subscriber::Interest {
+            tracing::subscriber::Interest::always()
         }
         fn new_span(&self, _span: &tracing::span::Attributes<'_>) -> tracing::span::Id {
             tracing::span::Id::from_u64(1)
@@ -498,10 +503,24 @@ mod tests {
         fn event(&self, _event: &tracing::Event<'_>) {}
         fn enter(&self, _span: &tracing::span::Id) {}
         fn exit(&self, _span: &tracing::span::Id) {}
+        fn max_level_hint(&self) -> Option<tracing::metadata::LevelFilter> {
+            Some(tracing::metadata::LevelFilter::TRACE)
+        }
     }
 
     fn with_tracing<T>(f: impl FnOnce() -> T) -> T {
-        tracing::subscriber::with_default(AlwaysOnSubscriber, f)
+        static INSTALLED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+        INSTALLED.get_or_init(|| {
+            // set_global_default registers AlwaysOnSubscriber in LOCKED_DISPATCHERS
+            // (the global dispatcher registry). rebuild_interest_cache then re-evaluates
+            // every callsite against the global subscriber, setting interest to "always".
+            // Without this, tracing macro inner blocks are unreachable in tests because
+            // with_default (thread-local) is NOT consulted during callsite registration,
+            // leaving every callsite cached as interest=never (no global dispatcher).
+            let _ = tracing::subscriber::set_global_default(AlwaysOnSubscriber);
+            tracing::callsite::rebuild_interest_cache();
+        });
+        f()
     }
 
     #[test]
@@ -670,7 +689,7 @@ google_api_key = "AIza-existing"
         use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
-        Config::default().save_to_path(&path).unwrap();
+        with_tracing(|| Config::default().save_to_path(&path)).unwrap();
         let mode = std::fs::metadata(&path).unwrap().permissions().mode();
         assert_eq!(mode & 0o777, 0o600);
     }

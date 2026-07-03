@@ -1222,7 +1222,9 @@ mod tests {
             _request: leviath_providers::InferenceRequest,
         ) -> Result<leviath_providers::InferenceResponse, leviath_providers::ProviderError>
         {
-            unreachable!("models command never calls infer()")
+            Err(leviath_providers::ProviderError::Other(
+                "MockProvider does not support infer".to_string(),
+            ))
         }
 
         fn count_tokens(&self, text: &str, _model: &str) -> usize {
@@ -1474,9 +1476,6 @@ mod tests {
 
     #[tokio::test]
     async fn mock_provider_trivial_trait_methods() {
-        // Covers the `Provider` trait methods that `list`/`show` never call
-        // through this file's code paths (only `list_models()` is exercised
-        // above); `infer()` is intentionally left unreachable (see its body).
         use leviath_providers::Provider;
         let provider = MockProvider {
             models: vec![],
@@ -1486,5 +1485,53 @@ mod tests {
         assert_eq!(provider.max_context_tokens("mock-model"), 100_000);
         assert_eq!(provider.name(), "mock");
         let _ = provider.capabilities("mock-model");
+    }
+
+    #[tokio::test]
+    async fn mock_provider_infer_returns_err() {
+        use leviath_providers::Provider;
+        let provider = MockProvider {
+            models: vec![],
+            fail: false,
+        };
+        let request = leviath_providers::InferenceRequest {
+            messages: vec![],
+            model: "mock".to_string(),
+            max_tokens: 100,
+            temperature: 0.0,
+            tools: vec![],
+            extra: serde_json::Value::Null,
+        };
+        let result = provider.infer(request).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn list_with_registry_propagates_config_load_error() {
+        let guard = crate::config::isolate_config_path_for_test(
+            "models-list_with_registry_propagates_config_load_error",
+        );
+        std::fs::write(guard.fake_dir.join("config.toml"), "not valid toml [[[").unwrap();
+        let args = ListArgs {
+            remote: false,
+            provider: None,
+        };
+        let result = list_with_registry(args, mock_registry("mock", vec![], false)).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn show_with_registry_propagates_config_load_error() {
+        let guard = crate::config::isolate_config_path_for_test(
+            "models-show_with_registry_propagates_config_load_error",
+        );
+        std::fs::write(guard.fake_dir.join("config.toml"), "not valid toml [[[").unwrap();
+        let args = ShowArgs {
+            model: "any-model".to_string(),
+            remote: false,
+            provider: None,
+        };
+        let result = show_with_registry(args, mock_registry("mock", vec![], false)).await;
+        assert!(result.is_err());
     }
 }

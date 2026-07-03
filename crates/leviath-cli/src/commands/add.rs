@@ -14,12 +14,14 @@ pub struct AddArgs {
     pub registry: Option<String>,
 }
 
+fn agents_dir_from_home(home: Option<std::path::PathBuf>) -> anyhow::Result<std::path::PathBuf> {
+    let home = home.ok_or_else(|| anyhow::anyhow!("Could not determine home directory"))?;
+    Ok(home.join(".leviath").join("agents"))
+}
+
 pub async fn execute(args: AddArgs) -> anyhow::Result<()> {
     let installer = leviath_package::AgentInstaller::new();
-    let agents_dir = dirs::home_dir()
-        .ok_or(anyhow::anyhow!("Could not determine home directory"))?
-        .join(".leviath")
-        .join("agents");
+    let agents_dir = agents_dir_from_home(dirs::home_dir())?;
     execute_with(&args, &installer, &agents_dir).await
 }
 
@@ -157,6 +159,23 @@ fn parse_agent_name(content: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ─── agents_dir_from_home ─────────────────────────────────────────────
+
+    #[test]
+    fn agents_dir_from_home_some_returns_path() {
+        let home = std::path::PathBuf::from("/home/testuser");
+        let dir = agents_dir_from_home(Some(home)).unwrap();
+        assert_eq!(dir, std::path::Path::new("/home/testuser/.leviath/agents"));
+    }
+
+    #[test]
+    fn agents_dir_from_home_none_returns_error() {
+        let err = agents_dir_from_home(None).unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("Could not determine home directory"));
+    }
 
     // ─── parse_agent_name ──────────────────────────────────────────────────
 
@@ -393,29 +412,28 @@ description = "test"
 
         tokio::spawn(async move {
             // First request: GET .../packages/<name> (get_info)
-            if let Ok((mut socket, _)) = listener.accept().await {
-                let mut buf = [0u8; 8192];
-                let _ = socket.read(&mut buf).await;
-                let resp = format!(
-                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                    get_info_body.len()
-                );
-                let _ = socket.write_all(resp.as_bytes()).await;
-                let _ = socket.write_all(get_info_body).await;
-                let _ = socket.shutdown().await;
-            }
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut buf = [0u8; 8192];
+            let _ = socket.read(&mut buf).await;
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                get_info_body.len()
+            );
+            let _ = socket.write_all(resp.as_bytes()).await;
+            let _ = socket.write_all(get_info_body).await;
+            let _ = socket.shutdown().await;
+
             // Second request: GET .../download (download)
-            if let Ok((mut socket, _)) = listener.accept().await {
-                let mut buf = [0u8; 8192];
-                let _ = socket.read(&mut buf).await;
-                let resp = format!(
-                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                    download_body.len()
-                );
-                let _ = socket.write_all(resp.as_bytes()).await;
-                let _ = socket.write_all(download_body).await;
-                let _ = socket.shutdown().await;
-            }
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut buf = [0u8; 8192];
+            let _ = socket.read(&mut buf).await;
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                download_body.len()
+            );
+            let _ = socket.write_all(resp.as_bytes()).await;
+            let _ = socket.write_all(download_body).await;
+            let _ = socket.shutdown().await;
         });
 
         format!("http://{}", addr)

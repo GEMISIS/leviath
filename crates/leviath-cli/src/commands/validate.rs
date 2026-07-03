@@ -775,13 +775,30 @@ max_iterations = 5
         path
     }
 
+    /// Extract the inner `anyhow::Error` from a `ManifestCheckError::Io`,
+    /// panicking with a diagnostic message for any other variant.
+    fn unwrap_io_err(err: ManifestCheckError) -> anyhow::Error {
+        let ManifestCheckError::Io(e) = err else {
+            panic!("expected ManifestCheckError::Io, got {err:?}");
+        };
+        e
+    }
+
+    #[test]
+    #[should_panic(expected = "expected ManifestCheckError::Io")]
+    fn unwrap_io_err_panics_on_parse_variant() {
+        let dir = tempfile::tempdir().unwrap();
+        write_manifest(dir.path(), "not valid toml [[[");
+        let err = check_manifest(dir.path()).unwrap_err();
+        // err is ManifestCheckError::Parse — this should panic
+        unwrap_io_err(err);
+    }
+
     #[test]
     fn check_manifest_missing_directory_manifest_is_io_error() {
         let dir = tempfile::tempdir().unwrap();
         let err = check_manifest(dir.path()).unwrap_err();
-        let ManifestCheckError::Io(e) = err else {
-            panic!("expected ManifestCheckError::Io, got {err:?}");
-        };
+        let e = unwrap_io_err(err);
         assert!(e.to_string().contains("No agent.leviath found"));
     }
 
@@ -793,7 +810,7 @@ max_iterations = 5
         // "join agent.leviath" branch, which also won't exist.
         let missing = dir.path().join("nonexistent-subdir");
         let err = check_manifest(&missing).unwrap_err();
-        assert!(matches!(err, ManifestCheckError::Io(_)));
+        unwrap_io_err(err);
     }
 
     // Distinct from the two "file doesn't exist" IO-error cases above: this
@@ -815,9 +832,7 @@ max_iterations = 5
         std::fs::set_permissions(&manifest_path, std::fs::Permissions::from_mode(0o644)).unwrap();
 
         let err = result.unwrap_err();
-        let ManifestCheckError::Io(e) = err else {
-            panic!("expected ManifestCheckError::Io, got {err:?}");
-        };
+        let e = unwrap_io_err(err);
         assert!(e.to_string().contains("Failed to read"));
     }
 

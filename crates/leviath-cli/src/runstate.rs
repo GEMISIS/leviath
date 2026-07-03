@@ -162,7 +162,11 @@ pub struct ContextSnapshot {
 
 /// Atomically write a context snapshot for the run.
 pub fn write_context_snapshot(run_id: &str, snap: &ContextSnapshot) -> anyhow::Result<()> {
-    let path = run_dir(run_id).join("context.json");
+    write_context_snapshot_to(&run_dir(run_id), snap)
+}
+
+fn write_context_snapshot_to(dir: &std::path::Path, snap: &ContextSnapshot) -> anyhow::Result<()> {
+    let path = dir.join("context.json");
     let tmp = path.with_extension("json.tmp");
     let json = serde_json::to_string_pretty(snap)?;
     std::fs::write(&tmp, &json)?;
@@ -255,36 +259,44 @@ pub fn new_run_id(agent_name: &str) -> String {
 
 /// Create the run directory and write initial metadata.
 pub fn create_run(meta: &RunMeta) -> anyhow::Result<()> {
-    let dir = run_dir(&meta.run_id);
-    std::fs::create_dir_all(&dir)?;
+    create_run_in(&run_dir(&meta.run_id), meta)
+}
+
+fn create_run_in(dir: &std::path::Path, meta: &RunMeta) -> anyhow::Result<()> {
+    std::fs::create_dir_all(dir)?;
 
     // Set restrictive permissions on the run directory (Unix only)
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         let perms = std::fs::Permissions::from_mode(0o700);
-        let _ = std::fs::set_permissions(&dir, perms);
+        let _ = std::fs::set_permissions(dir, perms);
     }
 
-    write_meta(meta)
+    write_meta_to(dir, meta)
 }
 
 /// Atomically write run metadata (write to tmp, then rename).
 pub fn write_meta(meta: &RunMeta) -> anyhow::Result<()> {
-    let dir = run_dir(&meta.run_id);
+    write_meta_to(&run_dir(&meta.run_id), meta)
+}
+
+fn write_meta_to(dir: &std::path::Path, meta: &RunMeta) -> anyhow::Result<()> {
     let tmp_path = dir.join("meta.json.tmp");
     let final_path = dir.join("meta.json");
-
     let json = serde_json::to_string_pretty(meta)?;
     std::fs::write(&tmp_path, &json)?;
     std::fs::rename(&tmp_path, &final_path)?;
-
     Ok(())
 }
 
 /// Read run metadata for a given run ID.
 pub fn read_meta(run_id: &str) -> anyhow::Result<RunMeta> {
-    let path = run_dir(run_id).join("meta.json");
+    read_meta_from(&run_dir(run_id))
+}
+
+fn read_meta_from(dir: &std::path::Path) -> anyhow::Result<RunMeta> {
+    let path = dir.join("meta.json");
     let json = std::fs::read_to_string(&path)?;
     Ok(serde_json::from_str(&json)?)
 }
@@ -300,9 +312,11 @@ fn list_runs_in_dir(dir: PathBuf) -> Vec<RunMeta> {
 
     if let Ok(entries) = std::fs::read_dir(&dir) {
         for entry in entries.filter_map(|e| e.ok()) {
-            let run_id = entry.file_name().to_string_lossy().to_string();
-            if let Ok(meta) = read_meta(&run_id) {
-                runs.push(meta);
+            let meta_path = entry.path().join("meta.json");
+            if let Ok(json) = std::fs::read_to_string(&meta_path) {
+                if let Ok(meta) = serde_json::from_str::<RunMeta>(&json) {
+                    runs.push(meta);
+                }
             }
         }
     }
@@ -424,7 +438,11 @@ pub fn stage_dir(run_id: &str, stage_idx: usize) -> PathBuf {
 
 /// Atomically write the stages index for a run.
 pub fn write_stages_index(run_id: &str, stages: &[StageRecord]) -> anyhow::Result<()> {
-    let path = run_dir(run_id).join("stages.json");
+    write_stages_index_to(&run_dir(run_id), stages)
+}
+
+fn write_stages_index_to(dir: &std::path::Path, stages: &[StageRecord]) -> anyhow::Result<()> {
+    let path = dir.join("stages.json");
     let tmp = path.with_extension("json.tmp");
     let json = serde_json::to_string_pretty(stages)?;
     std::fs::write(&tmp, &json)?;
@@ -483,12 +501,7 @@ pub fn write_stage_context(
     snap: &ContextSnapshot,
 ) -> anyhow::Result<()> {
     ensure_stage_dir(run_id, stage_idx);
-    let path = stage_dir(run_id, stage_idx).join("context.json");
-    let tmp = path.with_extension("json.tmp");
-    let json = serde_json::to_string_pretty(snap)?;
-    std::fs::write(&tmp, &json)?;
-    std::fs::rename(&tmp, &path)?;
-    Ok(())
+    write_context_snapshot_to(&stage_dir(run_id, stage_idx), snap)
 }
 
 /// Read the context snapshot for a specific stage, if present.
@@ -511,6 +524,11 @@ pub fn tail_stage_log(run_id: &str, stage_idx: usize, max_bytes: u64) -> String 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    /// Serialises tests that mutate `LEVIATH_RUNS_DIR` so they don't interfere
+    /// with each other when `cargo test` runs them concurrently.
+    static RUNS_DIR_ENV_LOCK: Mutex<()> = Mutex::new(());
 
     // ─── RunStatus ──────────────────────────────────────────────────────────
 
@@ -991,7 +1009,10 @@ mod tests {
     #[test]
     fn runs_dir_from_falls_back_to_home_when_none() {
         let path = runs_dir_from(None);
-        assert!(path.ends_with(".leviath/runs") || path.ends_with(".leviath\\runs"));
+        #[cfg(unix)]
+        assert!(path.ends_with(".leviath/runs"));
+        #[cfg(windows)]
+        assert!(path.ends_with(".leviath\\runs"));
     }
 
     #[test]
@@ -1211,16 +1232,31 @@ mod tests {
     // ─── runs_dir / list_runs edge cases ────────────────────────────────────
 
     #[test]
-    fn runs_dir_respects_leviath_runs_dir_env_override() {
-        // This test process/suite already relies on LEVIATH_RUNS_DIR being
-        // set for determinism (see other tests using run_dir/create_run
-        // without touching the real ~/.leviath/runs) — assert the override
-        // actually takes effect rather than assuming it silently.
-        let existing = std::env::var("LEVIATH_RUNS_DIR").ok();
+    fn runs_dir_with_override_set_returns_override() {
+        let _lock = RUNS_DIR_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let tmpdir = tempfile::tempdir().unwrap();
+        let prev = std::env::var("LEVIATH_RUNS_DIR").ok();
+        unsafe { std::env::set_var("LEVIATH_RUNS_DIR", tmpdir.path()) };
         let dir = runs_dir();
-        match existing {
-            Some(v) => assert_eq!(dir, PathBuf::from(v)),
-            None => assert!(dir.ends_with(".leviath/runs") || dir.ends_with(".leviath\\runs")),
+        assert_eq!(dir, tmpdir.path());
+        match prev {
+            Some(v) => unsafe { std::env::set_var("LEVIATH_RUNS_DIR", v) },
+            None => unsafe { std::env::remove_var("LEVIATH_RUNS_DIR") },
+        }
+    }
+
+    #[test]
+    fn runs_dir_without_override_falls_back_to_home() {
+        let _lock = RUNS_DIR_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let prev = std::env::var("LEVIATH_RUNS_DIR").ok();
+        unsafe { std::env::remove_var("LEVIATH_RUNS_DIR") };
+        let dir = runs_dir();
+        #[cfg(unix)]
+        assert!(dir.ends_with(".leviath/runs"));
+        #[cfg(windows)]
+        assert!(dir.ends_with(".leviath\\runs"));
+        if let Some(v) = prev {
+            unsafe { std::env::set_var("LEVIATH_RUNS_DIR", v) }
         }
     }
 
@@ -1314,5 +1350,160 @@ mod tests {
 
         // Restore permissions so the tempdir can clean itself up on drop.
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+    }
+
+    // ─── hermetic write/read coverage tests (use _to/_from/_in helpers) ───────
+
+    #[test]
+    fn write_context_snapshot_to_hermetic() {
+        let dir = tempfile::tempdir().unwrap();
+        let snap = ContextSnapshot {
+            stage_name: "cov-stage".into(),
+            total_tokens: 42,
+            max_tokens: 8192,
+            regions: vec![],
+        };
+        write_context_snapshot_to(dir.path(), &snap).unwrap();
+        let json = std::fs::read_to_string(dir.path().join("context.json")).unwrap();
+        let back: ContextSnapshot = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.total_tokens, 42);
+    }
+
+    #[test]
+    fn write_context_snapshot_to_fails_without_dir() {
+        let snap = ContextSnapshot {
+            stage_name: "s".into(),
+            total_tokens: 1,
+            max_tokens: 100,
+            regions: vec![],
+        };
+        let nonexistent = std::path::Path::new("/nonexistent-cov-dir-xyzzy-abc");
+        let result = write_context_snapshot_to(nonexistent, &snap);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn create_run_in_hermetic() {
+        let tmpdir = tempfile::tempdir().unwrap();
+        let run_dir = tmpdir.path().join("cov-run");
+        let meta = RunMeta::new(
+            "cov-run".into(),
+            "cov-agent".into(),
+            "/agents/cov".into(),
+            "cov task".into(),
+            None,
+            "/tmp".into(),
+            1,
+        );
+        create_run_in(&run_dir, &meta).unwrap();
+        let back = read_meta_from(&run_dir).unwrap();
+        assert_eq!(back.run_id, "cov-run");
+    }
+
+    #[test]
+    fn create_run_in_fails_on_bad_parent() {
+        let bad = std::path::Path::new("/nonexistent-cov-parent-xyzzy/run");
+        let meta = RunMeta::new(
+            "run".into(),
+            "a".into(),
+            "/".into(),
+            "t".into(),
+            None,
+            "/tmp".into(),
+            1,
+        );
+        let result = create_run_in(bad, &meta);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn write_meta_to_hermetic() {
+        let tmpdir = tempfile::tempdir().unwrap();
+        let meta = RunMeta::new(
+            "cov-write-meta".into(),
+            "a".into(),
+            "/".into(),
+            "t".into(),
+            None,
+            "/tmp".into(),
+            1,
+        );
+        write_meta_to(tmpdir.path(), &meta).unwrap();
+        let back = read_meta_from(tmpdir.path()).unwrap();
+        assert_eq!(back.run_id, "cov-write-meta");
+    }
+
+    #[test]
+    fn write_meta_to_fails_without_dir() {
+        let meta = RunMeta::new(
+            "cov-no-dir".into(),
+            "a".into(),
+            "/".into(),
+            "t".into(),
+            None,
+            "/tmp".into(),
+            1,
+        );
+        let bad = std::path::Path::new("/nonexistent-cov-write-meta-xyzzy");
+        let result = write_meta_to(bad, &meta);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn read_meta_from_fails_on_missing_file() {
+        let tmpdir = tempfile::tempdir().unwrap();
+        let result = read_meta_from(tmpdir.path());
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn write_stages_index_to_hermetic() {
+        let tmpdir = tempfile::tempdir().unwrap();
+        let stages = vec![StageRecord::new("cov-stage".into(), 0)];
+        write_stages_index_to(tmpdir.path(), &stages).unwrap();
+        let json = std::fs::read_to_string(tmpdir.path().join("stages.json")).unwrap();
+        let back: Vec<StageRecord> = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.len(), 1);
+        assert_eq!(back[0].name, "cov-stage");
+    }
+
+    #[test]
+    fn write_stages_index_to_fails_without_dir() {
+        let stages = vec![StageRecord::new("s".into(), 0)];
+        let bad = std::path::Path::new("/nonexistent-cov-stages-xyzzy");
+        let result = write_stages_index_to(bad, &stages);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn list_runs_in_dir_includes_valid_run() {
+        let tmpdir = tempfile::tempdir().unwrap();
+        let run_id = "cov-listed-run";
+        let run_subdir = tmpdir.path().join(run_id);
+        std::fs::create_dir_all(&run_subdir).unwrap();
+        let meta = RunMeta::new(
+            run_id.into(),
+            "list-agent".into(),
+            "/agents/list".into(),
+            "list task".into(),
+            None,
+            "/tmp".into(),
+            1,
+        );
+        let json = serde_json::to_string_pretty(&meta).unwrap();
+        std::fs::write(run_subdir.join("meta.json"), &json).unwrap();
+
+        // list_runs_in_dir now reads meta.json directly from the dir, no env var needed
+        let runs = list_runs_in_dir(tmpdir.path().to_path_buf());
+        assert!(runs.iter().any(|r| r.run_id == run_id));
+    }
+
+    #[test]
+    fn append_dashboard_log_writes_message() {
+        // Exercises the create_dir_all branch and writeln! branch via a unique marker.
+        let unique = format!("cov-dashboard-log-{}", std::process::id());
+        append_dashboard_log(&unique);
+        let content = std::fs::read_to_string(dashboard_log_path()).unwrap_or_default();
+        assert!(content.contains(&unique));
     }
 }

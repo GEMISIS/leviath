@@ -545,8 +545,8 @@ mod tests {
             .collect::<String>();
         assert!(all.contains("fn main() {}"), "got: {}", all);
         // Should have a border glyph
-        #[rustfmt::skip]
-        assert!(all.contains("╭") || all.contains("│"), "no border found in: {}", all);
+        let has_border = all.contains('╭') || all.contains('│');
+        assert!(has_border, "no border found in: {}", all);
     }
 
     #[test]
@@ -559,8 +559,8 @@ mod tests {
             .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
             .collect::<String>();
         assert!(all.contains("mermaid"), "got: {}", all);
-        #[rustfmt::skip]
-        assert!(all.contains("mmdc") || all.contains("Install"), "got: {}", all);
+        let has_hint = all.contains("mmdc") || all.contains("Install");
+        assert!(has_hint, "expected mermaid hint in: {}", all);
     }
 
     #[test]
@@ -581,13 +581,11 @@ mod tests {
     #[test]
     fn empty_input_returns_empty() {
         let text = markdown_to_text("", 80);
-        // Empty input should produce no lines or only empty lines
-        let all: String = text
-            .lines
-            .iter()
-            .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
-            .collect::<String>();
-        assert!(all.is_empty() || all.trim().is_empty(), "got: {:?}", all);
+        // Empty input produces zero lines (no content to render).
+        assert!(
+            text.lines.iter().all(|l| l.spans.is_empty()),
+            "expected all lines to have empty spans"
+        );
     }
 
     // ─── Inline styles ────────────────────────────────────────────────────
@@ -790,8 +788,7 @@ mod tests {
         let md = "First paragraph.\n\nSecond paragraph.";
         let text = markdown_to_text(md, 80);
         // Should have more than 2 lines (paragraphs + blank separators)
-        #[rustfmt::skip]
-        assert!(text.lines.len() >= 3, "Expected at least 3 lines, got {}", text.lines.len());
+        assert!(text.lines.len() >= 3);
     }
 
     // ─── Additional heading levels (H4/H5/H6) ───────────────────────────────
@@ -956,7 +953,8 @@ mod tests {
             .collect();
         // Table structural events are ignored (catch-all arm), but the text
         // content inside cells still comes through as Text events.
-        assert!(all.contains('1') || all.contains('A'), "got: {}", all);
+        let has_cell_text = all.contains('1') || all.contains('A');
+        assert!(has_cell_text, "expected cell text in: {}", all);
     }
 
     // ─── Renderer state-machine edge cases ──────────────────────────────────
@@ -1048,31 +1046,66 @@ mod tests {
     // called in this file: every call site (heading/paragraph/blockquote/list/
     // rule end handlers) already flushes `current_spans` explicitly, via its
     // own separate check, before ever calling `push_line`/`blank_line`.
-    // Confirmed by enumerating parser events for nested lists, adjacent
-    // headings, lists followed by headings/rules, and ordered lists during
-    // this pass -- no input leaves `current_spans` non-empty at a
-    // `push_line`/`blank_line` call site. This guard exists defensively, to
-    // protect a future call site that doesn't flush first, not because any
-    // current path exercises it.
 
     // `Event::Start(Tag::Item)`'s `None => "● ".to_string()` arm (list_stack
     // empty) is not covered and is not reachable: `Tag::Item` is only ever
     // emitted by `pulldown_cmark` as a child of `Tag::List`, which always
-    // pushes onto `list_stack` first. Confirmed by direct inspection of
-    // actual parser event streams for numerous inputs during this pass --
-    // no input triggers `Start(Item)` without a preceding `Start(List)`.
-    //
-    // The `t.contains('\n')` branch in `Event::Text` handling (splitting a
-    // single non-code-block text run on embedded newlines) is also not
-    // reachable with this file's actual `Options` (`ENABLE_STRIKETHROUGH |
-    // ENABLE_TABLES`): every multi-line text run pulldown_cmark emits for
-    // paragraphs/emphasis/table cells is split into separate `Text` events
-    // joined by `SoftBreak`, never a single `Text` event containing a literal
-    // `\n`. The only real event with an embedded `\n` in `Text`'s payload is
-    // fenced-code-block content, which takes the *other* branch of this same
-    // `if` (`self.in_code_block`) before ever reaching this one. Confirmed by
-    // directly enumerating parser events for ~20 candidate inputs (code
-    // blocks, tables with escaped pipes/newlines, link titles, raw HTML,
-    // nested emphasis) during this pass -- none produced a non-code Text
-    // event with an embedded newline.
+    // pushes onto `list_stack` first.
+
+    // ─── handle_text_content: embedded newline split (direct call) ────────────
+
+    #[test]
+    fn handle_text_content_with_embedded_newline_splits_lines() {
+        // pulldown_cmark never produces a non-code Text event with `\n`, so
+        // the newline-split path in handle_text_content is exercised here by
+        // calling the method directly.
+        let mut r = Renderer::new(80);
+        r.handle_text_content("first\nsecond\nthird");
+        // The first line is flushed for each embedded newline; at least 2 lines
+        // should have been emitted.
+        assert!(
+            r.lines.len() >= 2,
+            "expected split lines, got {:?}",
+            r.lines
+        );
+        let all: String = r
+            .lines
+            .iter()
+            .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
+            .collect();
+        assert!(all.contains("first"), "got: {}", all);
+        assert!(all.contains("second"), "got: {}", all);
+    }
+
+    #[test]
+    fn handle_text_content_with_leading_newline_skips_empty_first_part() {
+        // The empty part before the leading '\n' must not emit an empty span.
+        let mut r = Renderer::new(80);
+        r.handle_text_content("\nhello");
+        // "hello" lands in current_spans (pending); lines get the flush for the
+        // empty-first-part boundary, which produces an empty line.
+        let pending: String = r.current_spans.iter().map(|s| s.content.as_ref()).collect();
+        assert!(
+            pending.contains("hello"),
+            "pending spans: {:?}",
+            r.current_spans
+        );
+    }
+
+    #[test]
+    fn handle_text_content_without_newline_emits_directly() {
+        let mut r = Renderer::new(80);
+        r.handle_text_content("no newline here");
+        let all: String = r
+            .lines
+            .iter()
+            .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
+            .collect::<String>()
+            + r.current_spans
+                .iter()
+                .map(|s| s.content.as_ref())
+                .collect::<String>()
+                .as_str();
+        assert!(all.contains("no newline here"), "got: {}", all);
+    }
 }
