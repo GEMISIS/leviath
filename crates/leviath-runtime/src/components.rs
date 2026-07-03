@@ -576,6 +576,71 @@ mod tests {
     use super::*;
     use leviath_core::{Region, RegionKind};
 
+    /// Minimal no-op `Subscriber` that reports every callsite as enabled.
+    ///
+    /// Without an active subscriber, `tracing::warn!`/`debug!` calls
+    /// short-circuit their field-argument evaluation before ever reaching it
+    /// (no subscriber means the "is this level enabled" check fails first) --
+    /// so a multi-line `tracing::warn!`/`debug!` call's field-list lines show
+    /// as uncovered by `cargo llvm-cov` even when the surrounding branch
+    /// genuinely executes and is asserted on. This bare `Subscriber` impl is
+    /// the proven-working pattern (see `leviath-cli/src/config.rs`).
+    struct AlwaysOnSubscriber;
+
+    impl tracing::Subscriber for AlwaysOnSubscriber {
+        fn enabled(&self, _metadata: &tracing::Metadata<'_>) -> bool {
+            true
+        }
+        fn register_callsite(
+            &self,
+            _metadata: &'static tracing::Metadata<'static>,
+        ) -> tracing::subscriber::Interest {
+            tracing::subscriber::Interest::always()
+        }
+        fn new_span(&self, _span: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+            tracing::span::Id::from_u64(1)
+        }
+        fn record(&self, _span: &tracing::span::Id, _values: &tracing::span::Record<'_>) {}
+        fn record_follows_from(&self, _span: &tracing::span::Id, _follows: &tracing::span::Id) {}
+        fn event(&self, _event: &tracing::Event<'_>) {}
+        fn enter(&self, _span: &tracing::span::Id) {}
+        fn exit(&self, _span: &tracing::span::Id) {}
+        fn max_level_hint(&self) -> Option<tracing::metadata::LevelFilter> {
+            Some(tracing::metadata::LevelFilter::TRACE)
+        }
+    }
+
+    fn with_tracing<T>(f: impl FnOnce() -> T) -> T {
+        static INSTALLED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+        INSTALLED.get_or_init(|| {
+            // set_global_default registers AlwaysOnSubscriber in LOCKED_DISPATCHERS
+            // (the global dispatcher registry). rebuild_interest_cache then re-evaluates
+            // every callsite against the global subscriber, setting interest to "always".
+            // Without this, tracing macro inner blocks are unreachable in tests because
+            // with_default (thread-local) is NOT consulted during callsite registration,
+            // leaving every callsite cached as interest=never (no global dispatcher).
+            let _ = tracing::subscriber::set_global_default(AlwaysOnSubscriber);
+            tracing::callsite::rebuild_interest_cache();
+        });
+        f()
+    }
+
+    #[test]
+    fn always_on_subscriber_span_methods_are_all_no_ops() {
+        // This file only ever uses `tracing::warn!`/`debug!` event macros,
+        // never `tracing::span!`, so the span-related trait methods above are
+        // otherwise dead code from `with_tracing`'s callers. Exercise them
+        // directly via a real span so they're not left uncovered themselves.
+        with_tracing(|| {
+            let span = tracing::info_span!("test-span", field = tracing::field::Empty);
+            span.record("field", 1);
+            let other = tracing::info_span!("other-span");
+            span.follows_from(&other);
+            let _enter = span.enter();
+            tracing::info!(parent: &span, "inside span");
+        });
+    }
+
     #[test]
     fn test_context_window_creation() {
         let window = ContextWindow::new(10000);
@@ -616,7 +681,7 @@ mod tests {
         assert_eq!(window.current_tokens, 2000);
 
         // Evict should clear the entire Clearable region
-        let result = window.try_evict(1000).unwrap();
+        let result = with_tracing(|| window.try_evict(1000)).unwrap();
         assert_eq!(result.tokens_freed, 2000);
         assert!(result.needs_compaction.is_empty());
         assert_eq!(window.current_tokens, 0);
@@ -636,7 +701,7 @@ mod tests {
         assert_eq!(window.current_tokens, 3000);
 
         // Evict should remove oldest first
-        let result = window.try_evict(500).unwrap();
+        let result = with_tracing(|| window.try_evict(500)).unwrap();
         assert!(result.tokens_freed >= 1000); // Should free at least one entry
         assert!(result.needs_compaction.is_empty());
 
@@ -1305,7 +1370,7 @@ mod tests {
             .unwrap();
         window.add_region(pinned);
 
-        let result = window.try_evict(500).unwrap();
+        let result = with_tracing(|| window.try_evict(500)).unwrap();
         assert_eq!(result.tokens_freed, 0);
         assert!(result.needs_compaction.is_empty());
     }

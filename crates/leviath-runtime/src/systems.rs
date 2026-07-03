@@ -429,7 +429,7 @@ mod tests {
 
         let mut schedule = Schedule::default();
         schedule.add_systems(pool_management_system);
-        schedule.run(&mut world);
+        with_tracing(|| schedule.run(&mut world));
 
         #[rustfmt::skip]
         assert!(world.get_entity(entity).is_err(), "Completed agent should be despawned");
@@ -449,7 +449,7 @@ mod tests {
 
         let mut schedule = Schedule::default();
         schedule.add_systems(pool_management_system);
-        schedule.run(&mut world);
+        with_tracing(|| schedule.run(&mut world));
 
         #[rustfmt::skip]
         assert!(world.get_entity(entity).is_err(), "Error agent should be despawned");
@@ -464,7 +464,7 @@ mod tests {
 
         let mut schedule = Schedule::default();
         schedule.add_systems(pool_management_system);
-        schedule.run(&mut world);
+        with_tracing(|| schedule.run(&mut world));
 
         #[rustfmt::skip]
         assert!(world.get_entity(entity).is_err(), "Cancelled agent should be despawned");

@@ -1136,7 +1136,7 @@ mod tests {
             ))
             .id();
 
-        let result = engine.cancel_agent("cancel-me");
+        let result = with_tracing(|| engine.cancel_agent("cancel-me"));
         assert!(result.is_ok());
 
         // Verify status changed
@@ -1615,19 +1615,18 @@ mod tests {
             user_prompt_template: None,
         };
 
-        let result = engine
-            .run_inference_loop_filtered(
-                entity,
-                "mock",
-                "test-model",
-                Vec::new(),
-                5,
-                None,
-                None,
-                Some(&cc),
-                &mut |_tool_calls| async { vec![("call_1".to_string(), "ok".to_string())] },
-            )
-            .await;
+        let result = with_tracing_async(engine.run_inference_loop_filtered(
+            entity,
+            "mock",
+            "test-model",
+            Vec::new(),
+            5,
+            None,
+            None,
+            Some(&cc),
+            &mut |_tool_calls| async { vec![("call_1".to_string(), "ok".to_string())] },
+        ))
+        .await;
         result.unwrap();
     }
 
@@ -2277,7 +2276,7 @@ mod tests {
             user_prompt_template: None,
         };
 
-        let result = engine.compact_region(entity, "conversation", &cc).await;
+        let result = with_tracing_async(engine.compact_region(entity, "conversation", &cc)).await;
         assert!(result.is_ok());
 
         // After compaction, conversation should be cleared
