@@ -155,6 +155,41 @@ impl Default for ToolExecutor {
 mod tests {
     use super::*;
 
+    /// Minimal `tracing::Subscriber` that reports every callsite as enabled.
+    /// Without a registered subscriber, `tracing::info!`'s field arguments
+    /// (e.g. `tool = %tool_name`) show as 0-hit in coverage even though the
+    /// call demonstrably executes -- the macro short-circuits field
+    /// evaluation before ever checking for a subscriber.
+    struct AlwaysOnSubscriber;
+    impl tracing::Subscriber for AlwaysOnSubscriber {
+        fn enabled(&self, _metadata: &tracing::Metadata<'_>) -> bool {
+            true
+        }
+        fn new_span(&self, _span: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+            tracing::span::Id::from_u64(1)
+        }
+        fn record(&self, _span: &tracing::span::Id, _values: &tracing::span::Record<'_>) {}
+        fn record_follows_from(&self, _span: &tracing::span::Id, _follows: &tracing::span::Id) {}
+        fn event(&self, _event: &tracing::Event<'_>) {}
+        fn enter(&self, _span: &tracing::span::Id) {}
+        fn exit(&self, _span: &tracing::span::Id) {}
+    }
+
+    fn always_on_tracing_guard() -> tracing::subscriber::DefaultGuard {
+        tracing::subscriber::set_default(AlwaysOnSubscriber)
+    }
+
+    #[test]
+    fn always_on_subscriber_span_methods_are_all_no_ops() {
+        let _guard = always_on_tracing_guard();
+        let span = tracing::info_span!("test-span", field = 1);
+        span.record("field", 2);
+        span.follows_from(&span);
+        span.in_scope(|| {
+            tracing::info!("inside span");
+        });
+    }
+
     #[tokio::test]
     async fn test_execute_filtered_rejects_disallowed_tool() {
         let mut executor = ToolExecutor::new();
@@ -302,6 +337,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_execute_filtered_allowed_tool_but_no_server() {
+        let _guard = always_on_tracing_guard();
         let mut executor = ToolExecutor::new();
         let allowed = vec!["read_file".to_string()];
 
@@ -317,6 +353,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_execute_no_server_errors() {
+        let _guard = always_on_tracing_guard();
         let mut executor = ToolExecutor::new();
         let result = executor
             .execute("nonexistent_tool", serde_json::json!({}))
@@ -328,6 +365,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_execute_on_unknown_server() {
+        let _guard = always_on_tracing_guard();
         let mut executor = ToolExecutor::new();
         let result = executor
             .execute_on("unknown_server", "tool", serde_json::json!({}))
@@ -340,6 +378,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_shutdown_all_empty() {
+        let _guard = always_on_tracing_guard();
         let mut executor = ToolExecutor::new();
         let result = executor.shutdown_all().await;
         assert!(result.is_ok());
@@ -407,6 +446,7 @@ for line in sys.stdin:
 
     #[tokio::test]
     async fn execute_finds_owning_server_and_calls_tool() {
+        let _guard = always_on_tracing_guard();
         let mut executor = ToolExecutor::new();
         let client = spawn_ready_client().await;
         executor.add_client("server1".to_string(), client);
@@ -421,6 +461,7 @@ for line in sys.stdin:
 
     #[tokio::test]
     async fn execute_on_specific_server_calls_tool() {
+        let _guard = always_on_tracing_guard();
         let mut executor = ToolExecutor::new();
         let client = spawn_ready_client().await;
         executor.add_client("server1".to_string(), client);
@@ -435,6 +476,7 @@ for line in sys.stdin:
 
     #[tokio::test]
     async fn execute_filtered_allowed_tool_with_server_succeeds() {
+        let _guard = always_on_tracing_guard();
         let mut executor = ToolExecutor::new();
         let client = spawn_ready_client().await;
         executor.add_client("server1".to_string(), client);
@@ -449,6 +491,7 @@ for line in sys.stdin:
 
     #[tokio::test]
     async fn shutdown_all_with_live_client_succeeds_and_clears() {
+        let _guard = always_on_tracing_guard();
         let mut executor = ToolExecutor::new();
         let client = spawn_ready_client().await;
         executor.add_client("server1".to_string(), client);
@@ -523,6 +566,7 @@ for line in sys.stdin:
 
     #[tokio::test]
     async fn execute_on_propagates_call_tool_error() {
+        let _guard = always_on_tracing_guard();
         let mut client = MCPClient::spawn("python3", &["-c", STUB_CALL_ERROR], &HashMap::new())
             .await
             .expect("spawn");
