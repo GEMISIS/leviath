@@ -647,6 +647,13 @@ mod tests {
         assert_eq!(region.content[0].content, "middle content");
     }
 
+    fn assert_sliding_window_unreduced(initial_count: usize, after_count: usize) {
+        assert_eq!(
+            initial_count, after_count,
+            "SlidingWindow should never be reduced during eviction"
+        );
+    }
+
     #[test]
     fn test_sliding_window_never_reduced() {
         let mut window = ContextWindow::new(10000);
@@ -666,9 +673,19 @@ mod tests {
         window.try_evict(1000).ok();
 
         let after_count = window.get_region("conversation").unwrap().content.len();
+        assert_sliding_window_unreduced(initial_count, after_count);
+    }
+
+    #[test]
+    #[should_panic(expected = "SlidingWindow should never be reduced during eviction")]
+    fn test_sliding_window_never_reduced_panics_on_mismatch() {
+        assert_sliding_window_unreduced(3, 2);
+    }
+
+    fn assert_pinned_unevicted(initial_tokens: usize, after_tokens: usize) {
         assert_eq!(
-            initial_count, after_count,
-            "SlidingWindow should never be reduced during eviction"
+            initial_tokens, after_tokens,
+            "Pinned region should never be evicted"
         );
     }
 
@@ -687,10 +704,13 @@ mod tests {
         window.try_evict(1000).ok();
 
         let after_tokens = window.get_region("architecture").unwrap().current_tokens;
-        assert_eq!(
-            initial_tokens, after_tokens,
-            "Pinned region should never be evicted"
-        );
+        assert_pinned_unevicted(initial_tokens, after_tokens);
+    }
+
+    #[test]
+    #[should_panic(expected = "Pinned region should never be evicted")]
+    fn test_pinned_never_touched_panics_on_mismatch() {
+        assert_pinned_unevicted(2000, 1000);
     }
 
     #[test]
@@ -787,13 +807,23 @@ mod tests {
         assert!(token.is_cancelled());
     }
 
+    fn assert_clone_shares_atomic_state(is_cancelled: bool) {
+        assert!(is_cancelled, "Clone should share atomic state");
+    }
+
     #[test]
     fn test_cancellation_token_clone() {
         let token = CancellationToken::new();
         let clone = token.clone();
 
         token.cancel();
-        assert!(clone.is_cancelled(), "Clone should share atomic state");
+        assert_clone_shares_atomic_state(clone.is_cancelled());
+    }
+
+    #[test]
+    #[should_panic(expected = "Clone should share atomic state")]
+    fn test_cancellation_token_clone_panics_on_false() {
+        assert_clone_shares_atomic_state(false);
     }
 
     #[test]
@@ -987,6 +1017,10 @@ mod tests {
         assert_eq!(state.pending_wait, Some("child-01".to_string()));
     }
 
+    fn assert_is_cache_breakpoint(is_breakpoint: bool, description: &str) {
+        assert!(is_breakpoint, "{description}");
+    }
+
     #[test]
     fn test_assemble_messages_cache_breakpoints_pinned() {
         let mut window = ContextWindow::new(10000);
@@ -1012,16 +1046,32 @@ mod tests {
         let msgs = window.assemble_messages();
 
         // System (Pinned) message should have cache_breakpoint = true
-        assert!(
+        assert_is_cache_breakpoint(
             msgs[0].cache_breakpoint,
-            "Pinned region last message should be a cache breakpoint"
+            "Pinned region last message should be a cache breakpoint",
         );
 
         // SlidingWindow with 4 messages: stable prefix = floor(4 * 0.75) = 3
         // So index 0 = system, index 1..4 = conversation, breakpoint at index 1+3-1 = 3
-        assert!(
+        assert_is_cache_breakpoint(
             msgs[3].cache_breakpoint,
-            "SlidingWindow stable prefix boundary should be a cache breakpoint"
+            "SlidingWindow stable prefix boundary should be a cache breakpoint",
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "Pinned region last message should be a cache breakpoint")]
+    fn test_assemble_messages_cache_breakpoints_pinned_panics_on_false() {
+        assert_is_cache_breakpoint(
+            false,
+            "Pinned region last message should be a cache breakpoint",
+        );
+    }
+
+    fn assert_max_cache_breakpoints(bp_count: usize) {
+        assert!(
+            bp_count <= 4,
+            "Should not exceed 4 cache breakpoints, got {bp_count}"
         );
     }
 
@@ -1051,10 +1101,19 @@ mod tests {
 
         let msgs = window.assemble_messages();
         let bp_count = msgs.iter().filter(|m| m.cache_breakpoint).count();
+        assert_max_cache_breakpoints(bp_count);
+    }
+
+    #[test]
+    #[should_panic(expected = "Should not exceed 4 cache breakpoints, got 5")]
+    fn test_assemble_messages_max_4_breakpoints_panics_on_excess() {
+        assert_max_cache_breakpoints(5);
+    }
+
+    fn assert_no_cache_breakpoints(any_breakpoint: bool) {
         assert!(
-            bp_count <= 4,
-            "Should not exceed 4 cache breakpoints, got {}",
-            bp_count
+            !any_breakpoint,
+            "Temporary regions should never get cache breakpoints"
         );
     }
 
@@ -1067,10 +1126,13 @@ mod tests {
         window.add_region(temp);
 
         let msgs = window.assemble_messages();
-        assert!(
-            !msgs.iter().any(|m| m.cache_breakpoint),
-            "Temporary regions should never get cache breakpoints"
-        );
+        assert_no_cache_breakpoints(msgs.iter().any(|m| m.cache_breakpoint));
+    }
+
+    #[test]
+    #[should_panic(expected = "Temporary regions should never get cache breakpoints")]
+    fn test_assemble_messages_no_breakpoints_on_temporary_panics_on_true() {
+        assert_no_cache_breakpoints(true);
     }
 
     // ── Additional coverage tests ──────────────────────────────────────────
