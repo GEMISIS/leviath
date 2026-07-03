@@ -278,6 +278,20 @@ async fn run_crossterm_events_loop<B: ratatui::backend::Backend>(
 /// [`CrosstermEventSource`] for real keyboard input. Separated from
 /// [`execute`] so the non-TTY logic (tick-rate setup, event source
 /// construction, and the loop invocation itself) can be exercised in tests
+///
+/// Deliberately not called from any test (see [`execute_core`] and
+/// [`run_dashboard_loop`] for the fully-covered, injectable logic this
+/// delegates to). A `#[cfg(test)]`-guarded "is a real TTY attached?" check
+/// was tried here and removed: it checked `is_terminal(&stdout())`, but
+/// crossterm's raw-mode/alternate-screen calls act on the process's
+/// controlling terminal (`/dev/tty`), not specifically fd 1 -- the two can
+/// disagree depending on how the test binary is invoked. When they disagree
+/// in the "looks safe but isn't" direction, calling this for real enables
+/// actual raw mode and the actual alternate screen, then blocks forever
+/// polling actual keyboard input (nothing ever sets `should_quit`), leaving
+/// the invoking terminal hijacked full-screen until it's killed and reset.
+/// That happened twice against a real editor terminal. Not worth a few
+/// lines of coverage on a thin pass-through.
 pub async fn execute(_args: DashboardArgs) -> anyhow::Result<()> {
     let config = Config::load()?;
     let (mut dashboard, engine) = init_dashboard(&config).await;
@@ -1013,25 +1027,15 @@ mod tests {
         assert!(result.is_err());
     }
 
-    #[tokio::test]
-    async fn execute_errors_without_tty() {
-        // Calls the real `execute()`, which constructs CrosstermSetup::new()
-        // (Viewport::Fullscreen) and CrosstermEventSource::new(). In a
-        // non-TTY environment this fails at setup.enable() or
-        // setup.create_terminal(), which is what this test exercises.
-        //
-        // With a real TTY attached, `enable()` instead *succeeds* — enabling
-        // real raw mode and the real alternate screen — and the loop then
-        // blocks forever polling real keyboard input that an automated test
-        // run never supplies. `dashboard.should_quit` never gets set, so the
-        // test hangs indefinitely with the terminal left in raw/alt-screen
-        // mode. Skip entirely whenever a real TTY is attached; the "fails
-        // fast without a TTY" path is only meaningful in that environment
-        // anyway (e.g. CI).
-        if std::io::IsTerminal::is_terminal(&std::io::stdout()) {
-            return;
-        }
-        let result = execute(DashboardArgs {}).await;
-        let _ = result; // Err on CI (no TTY) — the only case this test runs in.
-    }
+    // `execute()` itself (the real, non-test entry point) is deliberately
+    // not called from any test -- see the doc comment on `execute` for why:
+    // in short, an `is_terminal()`-based "skip if this looks like a real
+    // TTY" guard was tried and removed after it twice failed to prevent
+    // `execute()` from enabling real raw mode / the real alternate screen
+    // and then hanging full-screen, waiting on keyboard input that no
+    // automated test run supplies. `execute_core` and `run_dashboard_loop`
+    // (exercised extensively above via `TestBackend` and injected
+    // `TerminalSetup`/`EventSource` implementations) cover all of its
+    // actual logic; `execute` itself is just a thin wire-up of real
+    // components with nothing left to unit test safely.
 }
