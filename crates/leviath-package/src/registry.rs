@@ -300,6 +300,16 @@ mod tests {
 
     // ─── PackageRegistry HTTP error paths ──────────────────────────────
 
+    fn assert_err_contains(err: &str, needle: &str, label: &str) {
+        assert!(err.contains(needle), "Expected {label} error, got: {}", err);
+    }
+
+    #[test]
+    #[should_panic(expected = "Expected widget error, got: unrelated failure")]
+    fn assert_err_contains_panics_when_missing() {
+        assert_err_contains("unrelated failure", "needle", "widget");
+    }
+
     #[tokio::test]
     async fn search_connection_refused_returns_error() {
         // Use a port that's unlikely to be listening
@@ -307,8 +317,7 @@ mod tests {
         let result = registry.search("test-query").await;
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
-        #[rustfmt::skip]
-        assert!(err.contains("Failed to search"), "Expected search error, got: {}", err);
+        assert_err_contains(&err, "Failed to search", "search");
     }
 
     #[tokio::test]
@@ -317,8 +326,7 @@ mod tests {
         let result = registry.download("my-package", "1.0.0").await;
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
-        #[rustfmt::skip]
-        assert!(err.contains("Failed to download"), "Expected download error, got: {}", err);
+        assert_err_contains(&err, "Failed to download", "download");
     }
 
     #[tokio::test]
@@ -327,8 +335,7 @@ mod tests {
         let result = registry.get_info("my-package").await;
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
-        #[rustfmt::skip]
-        assert!(err.contains("Failed to get package info"), "Expected get_info error, got: {}", err);
+        assert_err_contains(&err, "Failed to get package info", "get_info");
     }
 
     #[tokio::test]
@@ -338,8 +345,7 @@ mod tests {
         let result = registry.publish(bundle, "my-token").await;
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
-        #[rustfmt::skip]
-        assert!(err.contains("Failed to publish"), "Expected publish error, got: {}", err);
+        assert_err_contains(&err, "Failed to publish", "publish");
     }
 
     // ─── Minimal raw-TCP mock HTTP server (no new dependency needed) ───────
