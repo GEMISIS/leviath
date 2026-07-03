@@ -178,7 +178,15 @@ mod tests {
         }
         fn record(&self, _span: &tracing::span::Id, _values: &tracing::span::Record<'_>) {}
         fn record_follows_from(&self, _span: &tracing::span::Id, _follows: &tracing::span::Id) {}
-        fn event(&self, _event: &tracing::Event<'_>) {}
+        fn event(&self, event: &tracing::Event<'_>) {
+            // `register_callsite` always returns `Interest::always()`, so
+            // tracing's dispatch macros cache every callsite as
+            // "always enabled" and never call `enabled` again afterward.
+            // Call it directly here (with real metadata from a live event)
+            // so this trait-impl boilerplate method isn't itself left
+            // uncovered.
+            assert!(self.enabled(event.metadata()));
+        }
         fn enter(&self, _span: &tracing::span::Id) {}
         fn exit(&self, _span: &tracing::span::Id) {}
         fn max_level_hint(&self) -> Option<tracing::metadata::LevelFilter> {

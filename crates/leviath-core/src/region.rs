@@ -428,6 +428,28 @@ mod tests {
     }
 
     #[test]
+    fn test_region_kind_equality() {
+        assert_eq!(RegionKind::Clearable, RegionKind::Clearable);
+        assert_eq!(
+            RegionKind::Compacting {
+                threshold_tokens: 500
+            },
+            RegionKind::Compacting {
+                threshold_tokens: 500
+            }
+        );
+        assert_eq!(
+            RegionKind::CompactHistory {
+                source_region: "conv".to_string()
+            },
+            RegionKind::CompactHistory {
+                source_region: "conv".to_string()
+            }
+        );
+        assert_ne!(RegionKind::Pinned, RegionKind::Temporary);
+    }
+
+    #[test]
     fn test_sliding_window_enforces_max_items() {
         let mut region = Region::new(
             "conv".to_string(),
@@ -689,10 +711,7 @@ mod tests {
     fn test_validate_json_invalid() {
         let schema = RegionSchema::new(ContentFormat::Json);
         let err = schema.validate("not json").unwrap_err();
-        assert!(
-            err.to_string().starts_with("Region validation failed:"),
-            "unexpected: {err}"
-        );
+        assert!(err.to_string().starts_with("Region validation failed:"));
     }
 
     #[test]
@@ -715,11 +734,7 @@ mod tests {
             "pie",
             "flowchart",
         ] {
-            assert!(
-                schema.validate(&format!("{} content", kind)).is_ok(),
-                "{} should be recognized as valid mermaid",
-                kind
-            );
+            assert!(schema.validate(&format!("{} content", kind)).is_ok());
         }
     }
 
@@ -727,10 +742,7 @@ mod tests {
     fn test_validate_mermaid_invalid() {
         let schema = RegionSchema::new(ContentFormat::Mermaid);
         let err = schema.validate("just some text").unwrap_err();
-        assert!(
-            err.to_string().starts_with("Region validation failed:"),
-            "unexpected: {err}"
-        );
+        assert!(err.to_string().starts_with("Region validation failed:"));
     }
 
     #[test]
@@ -747,10 +759,7 @@ mod tests {
             language: "rust".to_string(),
         });
         let err = schema.validate("   ").unwrap_err();
-        assert!(
-            err.to_string().starts_with("Region validation failed:"),
-            "unexpected: {err}"
-        );
+        assert!(err.to_string().starts_with("Region validation failed:"));
     }
 
     #[test]
@@ -763,10 +772,7 @@ mod tests {
     fn test_validate_markdown_empty_is_error() {
         let schema = RegionSchema::new(ContentFormat::Markdown);
         let err = schema.validate("").unwrap_err();
-        assert!(
-            err.to_string().starts_with("Region validation failed:"),
-            "unexpected: {err}"
-        );
+        assert!(err.to_string().starts_with("Region validation failed:"));
     }
 
     #[test]

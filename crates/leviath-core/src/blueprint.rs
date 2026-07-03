@@ -1246,15 +1246,55 @@ mod tests {
     }
 
     #[test]
+    fn test_stage_mode_equality() {
+        assert_eq!(StageMode::Autonomous, StageMode::Autonomous);
+        assert_eq!(StageMode::Interactive, StageMode::Interactive);
+        assert_ne!(StageMode::Autonomous, StageMode::Interactive);
+    }
+
+    #[test]
+    fn test_interaction_style_equality() {
+        assert_eq!(InteractionStyle::FreeText, InteractionStyle::FreeText);
+        assert_ne!(InteractionStyle::FreeText, InteractionStyle::MultipleChoice);
+    }
+
+    #[test]
+    fn test_transition_condition_custom_equality() {
+        let a = TransitionCondition::Custom("x".to_string());
+        let b = TransitionCondition::Custom("x".to_string());
+        assert_eq!(a, b);
+        assert_ne!(TransitionCondition::Always, TransitionCondition::Error);
+    }
+
+    #[test]
+    fn test_edge_transform_compact_and_custom_equality() {
+        let a = EdgeTransform::Compact {
+            prompt: Some("p".to_string()),
+        };
+        let b = EdgeTransform::Compact {
+            prompt: Some("p".to_string()),
+        };
+        assert_eq!(a, b);
+
+        let c1 = EdgeTransform::Custom {
+            carry: vec!["a".to_string()],
+            compact: vec!["b".to_string()],
+            clear: vec!["c".to_string()],
+            compact_prompt: Some("p".to_string()),
+        };
+        let c2 = c1.clone();
+        assert_eq!(c1, c2);
+
+        assert_ne!(EdgeTransform::Direct, EdgeTransform::Clear);
+    }
+
+    #[test]
     fn test_stage_accepts_messages_default_true() {
         let stage = Stage::new(
             "test".to_string(),
             ModelConfig::new("anthropic".to_string(), "claude-sonnet-4-6".to_string()),
         );
-        assert!(
-            stage.accepts_messages,
-            "accepts_messages should default to true"
-        );
+        assert!(stage.accepts_messages);
     }
 
     #[test]
@@ -1268,10 +1308,7 @@ mod tests {
 
         let json = serde_json::to_string(&stage).expect("should serialize");
         let deserialized: Stage = serde_json::from_str(&json).expect("should deserialize");
-        assert!(
-            !deserialized.accepts_messages,
-            "accepts_messages should be false after roundtrip"
-        );
+        assert!(!deserialized.accepts_messages);
     }
 
     #[test]
@@ -1287,10 +1324,7 @@ mod tests {
             "requires_children": false
         }"#;
         let stage: Stage = serde_json::from_str(json).expect("should parse");
-        assert!(
-            stage.accepts_messages,
-            "accepts_messages should default to true when not specified"
-        );
+        assert!(stage.accepts_messages);
     }
 
     #[test]
