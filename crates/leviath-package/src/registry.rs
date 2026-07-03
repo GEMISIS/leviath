@@ -141,6 +141,7 @@ impl PackageRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::with_tracing;
 
     #[test]
     fn package_info_serde_roundtrip() {
@@ -407,45 +408,9 @@ mod tests {
         format!("http://{}", addr)
     }
 
-    /// llvm-cov reports `tracing::info!(...)` call sites' field-expression
-    /// sub-regions as uncovered when no `tracing::Subscriber` is registered
-    /// during tests -- the macro short-circuits field evaluation before the
-    /// "is this level enabled" check even runs, even though the surrounding
-    /// branch genuinely executes. Setting this as the default subscriber for
-    /// a test's duration makes those field expressions actually evaluate.
-    struct AlwaysOnSubscriber;
-    impl tracing::Subscriber for AlwaysOnSubscriber {
-        fn enabled(&self, _metadata: &tracing::Metadata<'_>) -> bool {
-            true
-        }
-        fn new_span(&self, _span: &tracing::span::Attributes<'_>) -> tracing::span::Id {
-            tracing::span::Id::from_u64(1)
-        }
-        fn record(&self, _span: &tracing::span::Id, _values: &tracing::span::Record<'_>) {}
-        fn record_follows_from(&self, _span: &tracing::span::Id, _follows: &tracing::span::Id) {}
-        fn event(&self, _event: &tracing::Event<'_>) {}
-        fn enter(&self, _span: &tracing::span::Id) {}
-        fn exit(&self, _span: &tracing::span::Id) {}
-    }
-
-    fn always_on_tracing_guard() -> tracing::subscriber::DefaultGuard {
-        tracing::subscriber::set_default(AlwaysOnSubscriber)
-    }
-
-    #[test]
-    fn always_on_subscriber_span_methods_are_all_no_ops() {
-        let _guard = always_on_tracing_guard();
-        let span = tracing::info_span!("test-span", field = 1);
-        span.record("field", 2);
-        span.follows_from(&span);
-        span.in_scope(|| {
-            tracing::info!("inside span");
-        });
-    }
-
     #[tokio::test]
     async fn search_success_returns_packages() {
-        let _guard = always_on_tracing_guard();
+        with_tracing(|| {});
         let body = br#"[{"name":"pkg-a","version":"1.0.0","description":"desc"}]"#;
         let url = spawn_mock_server(200, "OK", body).await;
         let registry = PackageRegistry::new(url);
@@ -472,7 +437,7 @@ mod tests {
 
     #[tokio::test]
     async fn download_success_returns_bytes() {
-        let _guard = always_on_tracing_guard();
+        with_tracing(|| {});
         let url = spawn_mock_server(200, "OK", b"binary bundle content").await;
         let registry = PackageRegistry::new(url);
         let bytes = registry.download("pkg-a", "1.0.0").await.unwrap();
@@ -501,7 +466,7 @@ mod tests {
 
     #[tokio::test]
     async fn get_info_success_returns_info() {
-        let _guard = always_on_tracing_guard();
+        with_tracing(|| {});
         let body = br#"{"name":"pkg-a","version":"1.0.0","description":"desc"}"#;
         let url = spawn_mock_server(200, "OK", body).await;
         let registry = PackageRegistry::new(url);
@@ -528,7 +493,7 @@ mod tests {
 
     #[tokio::test]
     async fn publish_success_returns_ok() {
-        let _guard = always_on_tracing_guard();
+        with_tracing(|| {});
         let url = spawn_mock_server(200, "OK", b"").await;
         let registry = PackageRegistry::new(url);
         let result = registry.publish(b"bundle bytes", "token").await;

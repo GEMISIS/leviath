@@ -9,6 +9,8 @@ pub mod bundler;
 pub mod installer;
 pub mod manifest;
 pub mod registry;
+#[cfg(test)]
+mod test_support;
 
 pub use bundler::AgentBundler;
 pub use installer::{AgentInstaller, InstalledAgent};

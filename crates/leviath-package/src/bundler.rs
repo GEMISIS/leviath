@@ -177,46 +177,7 @@ impl Default for AgentBundler {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// Without a registered `tracing::Subscriber`, `tracing::info!`'s macro
-    /// expansion short-circuits field-expression evaluation before the
-    /// call's "is this level enabled" check even runs -- so a multi-line
-    /// `tracing::info!` call's field-list lines show as uncovered even
-    /// though the surrounding branch demonstrably executes. This bare
-    /// subscriber reports every callsite enabled, forcing real evaluation.
-    struct AlwaysOnSubscriber;
-    impl tracing::Subscriber for AlwaysOnSubscriber {
-        fn enabled(&self, _metadata: &tracing::Metadata<'_>) -> bool {
-            true
-        }
-        fn new_span(&self, _span: &tracing::span::Attributes<'_>) -> tracing::span::Id {
-            tracing::span::Id::from_u64(1)
-        }
-        fn record(&self, _span: &tracing::span::Id, _values: &tracing::span::Record<'_>) {}
-        fn record_follows_from(&self, _span: &tracing::span::Id, _follows: &tracing::span::Id) {}
-        fn event(&self, _event: &tracing::Event<'_>) {}
-        fn enter(&self, _span: &tracing::span::Id) {}
-        fn exit(&self, _span: &tracing::span::Id) {}
-    }
-
-    fn with_tracing<T>(f: impl FnOnce() -> T) -> T {
-        tracing::subscriber::with_default(AlwaysOnSubscriber, f)
-    }
-
-    #[test]
-    fn always_on_subscriber_span_methods_are_all_no_ops() {
-        use tracing::Subscriber;
-        let sub = AlwaysOnSubscriber;
-        let span = tracing::span::Id::from_u64(1);
-        with_tracing(|| {
-            let s = tracing::info_span!("test-span", field = tracing::field::Empty);
-            s.record("field", 1);
-            s.in_scope(|| {});
-        });
-        sub.enter(&span);
-        sub.exit(&span);
-        sub.record_follows_from(&span, &span);
-    }
+    use crate::test_support::with_tracing;
 
     #[test]
     fn test_should_exclude_env_files() {

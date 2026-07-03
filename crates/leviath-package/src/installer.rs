@@ -238,43 +238,9 @@ impl Default for AgentInstaller {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::with_tracing;
     use flate2::write::GzEncoder;
     use flate2::Compression;
-
-    /// Minimal `tracing::Subscriber` that reports every callsite/level as
-    /// enabled. Without a registered subscriber, `tracing::info!`'s
-    /// multi-line field-expression arguments show as uncovered in llvm-cov
-    /// even though the call itself demonstrably executes -- the macro
-    /// short-circuits field evaluation before ever reaching them.
-    struct AlwaysOnSubscriber;
-    impl tracing::Subscriber for AlwaysOnSubscriber {
-        fn enabled(&self, _metadata: &tracing::Metadata<'_>) -> bool {
-            true
-        }
-        fn new_span(&self, _span: &tracing::span::Attributes<'_>) -> tracing::span::Id {
-            tracing::span::Id::from_u64(1)
-        }
-        fn record(&self, _span: &tracing::span::Id, _values: &tracing::span::Record<'_>) {}
-        fn record_follows_from(&self, _span: &tracing::span::Id, _follows: &tracing::span::Id) {}
-        fn event(&self, _event: &tracing::Event<'_>) {}
-        fn enter(&self, _span: &tracing::span::Id) {}
-        fn exit(&self, _span: &tracing::span::Id) {}
-    }
-
-    fn with_tracing<T>(f: impl FnOnce() -> T) -> T {
-        tracing::subscriber::with_default(AlwaysOnSubscriber, f)
-    }
-
-    #[test]
-    fn always_on_subscriber_span_methods_are_all_no_ops() {
-        tracing::subscriber::with_default(AlwaysOnSubscriber, || {
-            let span = tracing::info_span!("test-span", val = tracing::field::Empty);
-            span.record("val", 2);
-            let other = tracing::info_span!("other-span");
-            span.follows_from(&other);
-            let _entered = span.enter();
-        });
-    }
 
     /// Create a minimal tar.gz bundle with an agent.leviath manifest.
     fn make_bundle(name: &str, version: &str, description: &str) -> Vec<u8> {
