@@ -22,7 +22,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: nightly-2026-01-15
+          toolchain: stable
           components: rustfmt,clippy
       - uses: Swatinem/rust-cache@v2
       - name: Build
@@ -37,7 +37,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: nightly-2026-01-15
+          toolchain: stable
           components: clippy
       - uses: Swatinem/rust-cache@v2
       - name: Clippy
@@ -50,7 +50,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: nightly-2026-01-15
+          toolchain: stable
           components: rustfmt
       - name: Check formatting
         run: cargo fmt --all -- --check
@@ -66,23 +66,27 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: nightly-2026-01-15
-          components: llvm-tools-preview,rustfmt,clippy
+          toolchain: stable
+          components: llvm-tools,rustfmt,clippy
       - uses: Swatinem/rust-cache@v2
       - name: Install cargo-llvm-cov
         run: cargo install cargo-llvm-cov --locked
       - name: Check coverage suppression markers
         run: cargo xtask check-exclusions
-      # 100%-coverage enforcement is temporarily disabled in xtask/src/coverage.rs
-      # (run_report no longer fails the build below 100%) while coverage catches
-      # back up across all four metrics on every platform. This step still
-      # computes and reports regions/lines/functions/branches percentages for
-      # the badges below. Re-enable enforcement by restoring the `anyhow::bail!`
-      # noted in that file's comments once coverage is back to 100% everywhere.
-      - name: Compute coverage (regions / lines / functions / branches)
+      # Branch coverage is not collected -- `cargo llvm-cov --branch`
+      # reliably crashes with SIGSEGV on an open, unresolved upstream LLVM
+      # bug (see the doc comment at the top of xtask/src/coverage.rs).
+      # 100%-coverage enforcement is also temporarily disabled in
+      # xtask/src/coverage.rs (run_report no longer fails the build below
+      # 100%) while coverage catches back up across all three remaining
+      # metrics on every platform. This step still computes and reports
+      # regions/lines/functions percentages for the badges below. Re-enable
+      # enforcement by restoring the `anyhow::bail!` noted in that file's
+      # comments once coverage is back to 100% everywhere.
+      - name: Compute coverage (regions / lines / functions)
         id: cov
         run: cargo xtask coverage
-      # Update the four coverage badges — only from ubuntu on push to main.
+      # Update the three coverage badges — only from ubuntu on push to main.
       - name: Update regions badge
         if: matrix.os == 'ubuntu-latest' && github.ref == 'refs/heads/main' && github.event_name == 'push'
         uses: schneegans/dynamic-badges-action@v1.7.0
@@ -117,17 +121,5 @@ jobs:
           label: functions
           message: ${{ steps.cov.outputs.functions }}%
           valColorRange: ${{ steps.cov.outputs.functions }}
-          minColorRange: 50
-          maxColorRange: 100
-      - name: Update branches badge
-        if: matrix.os == 'ubuntu-latest' && github.ref == 'refs/heads/main' && github.event_name == 'push'
-        uses: schneegans/dynamic-badges-action@v1.7.0
-        with:
-          auth: ${{ secrets.GIST_TOKEN }}
-          gistID: ${{ vars.COVERAGE_GIST_ID }}
-          filename: leviath-coverage-branches.json
-          label: branches
-          message: ${{ steps.cov.outputs.branches }}%
-          valColorRange: ${{ steps.cov.outputs.branches }}
           minColorRange: 50
           maxColorRange: 100

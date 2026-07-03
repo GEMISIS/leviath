@@ -8,7 +8,6 @@
     <img src="https://img.shields.io/endpoint?url=https://gist.githubusercontent.com/GEMISIS/b35e030175e78fad8e3562e58be21c60/raw/leviath-coverage-regions.json" alt="Region coverage">
     <img src="https://img.shields.io/endpoint?url=https://gist.githubusercontent.com/GEMISIS/b35e030175e78fad8e3562e58be21c60/raw/leviath-coverage-lines.json" alt="Line coverage">
     <img src="https://img.shields.io/endpoint?url=https://gist.githubusercontent.com/GEMISIS/b35e030175e78fad8e3562e58be21c60/raw/leviath-coverage-functions.json" alt="Function coverage">
-    <img src="https://img.shields.io/endpoint?url=https://gist.githubusercontent.com/GEMISIS/b35e030175e78fad8e3562e58be21c60/raw/leviath-coverage-branches.json" alt="Branch coverage">
     <a href="https://github.com/GEMISIS/leviath/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License: MIT"></a>
     <a href="https://leviath.dev"><img src="https://img.shields.io/badge/docs-leviath.dev-8b5cf6" alt="Docs"></a>
   </p>
@@ -251,18 +250,19 @@ cargo test --workspace
 cargo clippy --workspace
 ```
 
-The `git config` line is a one-time step per clone. It points git at the `.githooks/` directory where the pre-commit hook lives. The hook enforces formatting, clippy (warnings-as-errors), and all tests passing. CI additionally enforces 100% coverage (regions/lines/functions/branches) via `cargo xtask coverage`.
+The `git config` line is a one-time step per clone. It points git at the `.githooks/` directory where the pre-commit hook lives. The hook enforces formatting, clippy (warnings-as-errors), and all tests passing. CI additionally reports region/line/function coverage (branch coverage is not collected — see below) via `cargo xtask coverage`.
 
 ### Running coverage locally
 
-Use **`cargo xtask coverage`** — it runs `cargo-llvm-cov` per-package with a clean `llvm-cov-target/` between each crate, which avoids an upstream LLVM aggregation crash that raw `cargo llvm-cov --workspace` can trigger on macOS (it OOMs the machine trying to merge branch data for all crates and ~3000 tests in one process). Output is written to the gitignored `coverage/` folder.
+Use **`cargo xtask coverage`** — it runs `cargo-llvm-cov` across the whole workspace and reports region/line/function percentages. Output is written to the gitignored `coverage/` folder.
 
 ```bash
-cargo xtask coverage              # full workspace, per-package fallback, safe on macOS
+cargo xtask coverage                     # full workspace
 cargo llvm-cov --package <crate> --lib   # coverage for a single crate
+cargo llvm-cov --package <crate> --lib --html --open   # browsable per-crate report
 ```
 
-**Do not run `cargo llvm-cov --workspace` directly** — see `xtask/src/coverage.rs` for details on why.
+Branch coverage isn't collected: `cargo llvm-cov --branch` reliably crashes with SIGSEGV inside LLVM's own coverage-mapping code, an [open, unresolved upstream bug](https://github.com/llvm/llvm-project/issues/119558) — see the doc comment at the top of `xtask/src/coverage.rs` for the full investigation.
 
 ## License
 
