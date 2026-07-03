@@ -960,7 +960,7 @@ mod tests {
         };
 
         let result = execute(args).await;
-        assert!(result.is_ok(), "expected Ok, got {:?}", result);
+        assert!(result.is_ok());
 
         // Config::load() re-reads via the same (isolated) LEVIATH_CONFIG_PATH,
         // proving execute() actually wrote through Config::config_path().
@@ -987,6 +987,6 @@ mod tests {
             default_model: None,
         };
         let result = execute(args).await;
-        assert!(result.is_ok(), "expected Ok in test mode, got {:?}", result);
+        assert!(result.is_ok());
     }
 }

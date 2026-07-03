@@ -915,6 +915,26 @@ mod tests {
     }
 
     #[test]
+    fn test_write_request_rename_fails_when_target_is_a_directory() {
+        let _guard = crate::runstate::isolate_runs_dir_for_test(
+            "test_write_request_rename_fails_when_target_is_a_directory",
+        );
+        let run_id = "test-write-request-target-is-dir";
+        let dir = crate::runstate::run_dir(run_id);
+        std::fs::create_dir_all(&dir).unwrap();
+        // Pre-create the target path as a directory: the tmp-file write
+        // succeeds, but `fs::rename` onto an existing directory fails,
+        // exercising `write_request`'s rename `?`.
+        std::fs::create_dir_all(pending_path(run_id)).unwrap();
+
+        let req = InteractionRequest::free_text("rw1", "What now?", "plan", true);
+        let result = write_request(run_id, &req);
+        assert!(result.is_err());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn test_write_and_read_response() {
         let _guard = crate::runstate::isolate_runs_dir_for_test("test_write_and_read_response");
         let run_id = "test-interaction-rw-resp";
@@ -934,6 +954,26 @@ mod tests {
         assert!(take_response(run_id).is_none());
 
         let _ = std::fs::remove_dir_all(crate::runstate::run_dir(run_id));
+    }
+
+    #[test]
+    fn test_write_response_rename_fails_when_target_is_a_directory() {
+        let _guard = crate::runstate::isolate_runs_dir_for_test(
+            "test_write_response_rename_fails_when_target_is_a_directory",
+        );
+        let run_id = "test-write-response-target-is-dir";
+        let dir = crate::runstate::run_dir(run_id);
+        std::fs::create_dir_all(&dir).unwrap();
+        // Pre-create the target path as a directory: the tmp-file write
+        // succeeds, but `fs::rename` onto an existing directory fails,
+        // exercising `write_response`'s rename `?`.
+        std::fs::create_dir_all(response_path(run_id)).unwrap();
+
+        let resp = InteractionResponse::text("rw2", "my answer");
+        let result = write_response(run_id, &resp);
+        assert!(result.is_err());
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -1491,10 +1531,7 @@ mod tests {
             "stage_name": "stage"
         }"#;
         let req: InteractionRequest = serde_json::from_str(json).unwrap();
-        assert!(
-            req.required,
-            "required should default to true via default_true()"
-        );
+        assert!(req.required);
     }
 
     // ─── request_interaction (synchronous) ───────────────────────────────
@@ -1646,6 +1683,61 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    #[test]
+    fn test_request_interaction_sync_write_request_fails_when_run_dir_missing() {
+        let _guard = crate::runstate::isolate_runs_dir_for_test(
+            "test_request_interaction_sync_write_request_fails_when_run_dir_missing",
+        );
+        let run_id = "test-sync-request-no-dir";
+        // Deliberately skip creating the run directory, so `write_request`'s
+        // tmp-file write fails immediately, exercising this function's own
+        // `write_request(...)?` propagation.
+        let mut meta = crate::runstate::RunMeta::new(
+            run_id.to_string(),
+            "agent".to_string(),
+            "/tmp/agent.toml".to_string(),
+            "task".to_string(),
+            None,
+            "/tmp".to_string(),
+            1,
+        );
+
+        let req = InteractionRequest::free_text("no-dir-req", "What?", "plan", true);
+        let result = request_interaction(run_id, &mut meta, req, Some(Duration::from_secs(5)));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_request_interaction_sync_write_meta_fails_when_target_is_a_directory() {
+        let _guard = crate::runstate::isolate_runs_dir_for_test(
+            "test_request_interaction_sync_write_meta_fails_when_target_is_a_directory",
+        );
+        let run_id = "test-sync-request-meta-target-is-dir";
+        let dir = crate::runstate::run_dir(run_id);
+        std::fs::create_dir_all(&dir).unwrap();
+        // Pre-create meta.json as a directory: write_request succeeds (it
+        // touches a different filename), but the subsequent `write_meta`'s
+        // rename onto "meta.json" fails, exercising this function's own
+        // `write_meta(...)?` propagation.
+        std::fs::create_dir_all(dir.join("meta.json")).unwrap();
+
+        let mut meta = crate::runstate::RunMeta::new(
+            run_id.to_string(),
+            "agent".to_string(),
+            "/tmp/agent.toml".to_string(),
+            "task".to_string(),
+            None,
+            "/tmp".to_string(),
+            1,
+        );
+
+        let req = InteractionRequest::free_text("meta-fail-req", "What?", "plan", true);
+        let result = request_interaction(run_id, &mut meta, req, Some(Duration::from_secs(5)));
+        assert!(result.is_err());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     // ─── request_interaction_async ────────────────────────────────────────
 
     #[tokio::test]
@@ -1744,6 +1836,38 @@ mod tests {
         let result =
             request_interaction_async(run_id, &mut meta, req, Some(Duration::from_secs(5))).await;
         assert!(result.is_ok());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn test_request_interaction_async_write_meta_fails_when_target_is_a_directory() {
+        let _guard = crate::runstate::isolate_runs_dir_for_test(
+            "test_request_interaction_async_write_meta_fails_when_target_is_a_directory",
+        );
+        let run_id = "test-async-request-meta-target-is-dir";
+        let dir = crate::runstate::run_dir(run_id);
+        std::fs::create_dir_all(&dir).unwrap();
+        // Pre-create meta.json as a directory: write_request succeeds (it
+        // touches a different filename), but the subsequent `write_meta`'s
+        // rename onto "meta.json" fails, exercising this function's own
+        // `write_meta(...)?` propagation.
+        std::fs::create_dir_all(dir.join("meta.json")).unwrap();
+
+        let mut meta = crate::runstate::RunMeta::new(
+            run_id.to_string(),
+            "agent".to_string(),
+            "/tmp/agent.toml".to_string(),
+            "task".to_string(),
+            None,
+            "/tmp".to_string(),
+            1,
+        );
+
+        let req = InteractionRequest::free_text("async-meta-fail-req", "What?", "plan", true);
+        let result =
+            request_interaction_async(run_id, &mut meta, req, Some(Duration::from_secs(5))).await;
+        assert!(result.is_err());
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -2218,12 +2342,7 @@ mod tests {
             let req = InteractionRequest::confirm("cf1", "Sure?", "plan");
             let mut reader = reader_from(input);
             let resp = request_interaction_from_reader(&req, &mut reader);
-            assert_eq!(
-                resp.approved,
-                Some(true),
-                "input {:?} should approve",
-                input
-            );
+            assert_eq!(resp.approved, Some(true));
         }
     }
 
@@ -2233,7 +2352,7 @@ mod tests {
             let req = InteractionRequest::confirm("cf2", "Sure?", "plan");
             let mut reader = reader_from(input);
             let resp = request_interaction_from_reader(&req, &mut reader);
-            assert_eq!(resp.approved, Some(false), "input {:?} should deny", input);
+            assert_eq!(resp.approved, Some(false));
         }
     }
 

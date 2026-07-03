@@ -316,17 +316,28 @@ mod tests {
         assert!(manifest.contains("special-name-123"));
     }
 
+    fn assert_has_context(template: &str, parsed: &toml::Value) {
+        assert!(
+            parsed.get("context").is_some(),
+            "template '{}' missing [context]",
+            template
+        );
+    }
+
     #[test]
     fn all_templates_have_context_regions() {
         for template in &["software-engineer", "coder", "researcher"] {
             let manifest = create_manifest("test", template);
             let parsed: toml::Value = toml::from_str(&manifest).unwrap();
-            assert!(
-                parsed.get("context").is_some(),
-                "template '{}' missing [context]",
-                template
-            );
+            assert_has_context(template, &parsed);
         }
+    }
+
+    #[test]
+    #[should_panic(expected = "template 'bogus' missing [context]")]
+    fn all_templates_have_context_regions_panics_when_missing() {
+        let parsed: toml::Value = toml::from_str("").unwrap();
+        assert_has_context("bogus", &parsed);
     }
 
     // ─── execute ─────────────────────────────────────────────────────────
@@ -385,5 +396,25 @@ mod tests {
 
         let err = with_tracing(|| execute(args)).await.unwrap_err();
         assert!(err.to_string().contains("already exists"));
+    }
+
+    #[tokio::test]
+    async fn execute_create_dir_all_fails_when_ancestor_is_a_file() {
+        // `blueprint_dir.exists()` (the early bail check) returns `false` for
+        // this path -- `Path::exists()` can't stat through a non-directory
+        // path component -- so execution reaches `fs::create_dir_all(...)?`,
+        // which then genuinely fails (ancestor isn't a directory).
+        let dir = tempfile::tempdir().unwrap();
+        let blocking_file = dir.path().join("not-a-directory");
+        fs::write(&blocking_file, "x").unwrap();
+        let blueprint_path = blocking_file.join("nested-blueprint");
+
+        let args = CreateArgs {
+            name: blueprint_path.to_str().unwrap().to_string(),
+            template: "coder".to_string(),
+        };
+
+        let result = with_tracing(|| execute(args)).await;
+        assert!(result.is_err());
     }
 }

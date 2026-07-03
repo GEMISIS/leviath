@@ -320,6 +320,75 @@ description = "test"
         assert!(dst_path.is_dir());
     }
 
+    #[test]
+    fn copy_dir_recursive_nonexistent_src_errors() {
+        let dst_dir = tempfile::tempdir().unwrap();
+        let dst_path = dst_dir.path().join("dst");
+        let missing_src = dst_dir.path().join("does-not-exist");
+
+        let result = copy_dir_recursive(&missing_src, &dst_path);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn copy_dir_recursive_dst_parent_is_file_errors() {
+        let tmp = tempfile::tempdir().unwrap();
+        let file_path = tmp.path().join("not-a-dir");
+        std::fs::write(&file_path, "x").unwrap();
+        let src = tempfile::tempdir().unwrap();
+        let dst = file_path.join("child");
+
+        let result = copy_dir_recursive(src.path(), &dst);
+        assert!(result.is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn copy_dir_recursive_unreadable_file_errors() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let src_dir = tempfile::tempdir().unwrap();
+        let file_path = src_dir.path().join("secret.txt");
+        std::fs::write(&file_path, "top secret").unwrap();
+        std::fs::set_permissions(&file_path, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+        let dst_dir = tempfile::tempdir().unwrap();
+        let dst_path = dst_dir.path().join("copy");
+
+        let result = copy_dir_recursive(src_dir.path(), &dst_path);
+
+        // Restore permissions so the tempdir can clean itself up on drop.
+        std::fs::set_permissions(&file_path, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        assert!(result.is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn copy_dir_recursive_unreadable_subdir_errors() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let src_dir = tempfile::tempdir().unwrap();
+        let sub = src_dir.path().join("sub");
+        std::fs::create_dir_all(&sub).unwrap();
+        std::fs::write(sub.join("file.txt"), "data").unwrap();
+        std::fs::set_permissions(&sub, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+        let dst_dir = tempfile::tempdir().unwrap();
+        let dst_path = dst_dir.path().join("copy");
+
+        // Exercises the recursive-call error-propagation branch: the
+        // subdirectory itself is unreadable, so the nested
+        // `copy_dir_recursive` call's own `read_dir` fails and that `Err`
+        // bubbles up through the parent's `copy_dir_recursive(...)?`.
+        let result = copy_dir_recursive(src_dir.path(), &dst_path);
+
+        // Restore permissions so the tempdir can clean itself up on drop.
+        std::fs::set_permissions(&sub, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        assert!(result.is_err());
+    }
+
     // ─── install_from_dir ──────────────────────────────────────────────────
 
     #[test]
@@ -383,6 +452,71 @@ description = "test"
         assert!(existing.join("agent.leviath").exists());
     }
 
+    #[test]
+    fn install_from_dir_invalid_utf8_manifest_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("agent.leviath"), [0xFF, 0xFE, 0xFA]).unwrap();
+        let agents_dir = tempfile::tempdir().unwrap();
+
+        let result = install_from_dir(dir.path(), agents_dir.path());
+        assert!(result.is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn install_from_dir_remove_dir_all_permission_denied_errors() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let src = tempfile::tempdir().unwrap();
+        std::fs::write(
+            src.path().join("agent.leviath"),
+            "[agent]\nname = \"locked-agent\"\n",
+        )
+        .unwrap();
+
+        let agents_dir = tempfile::tempdir().unwrap();
+        let existing = agents_dir.path().join("locked-agent");
+        std::fs::create_dir_all(&existing).unwrap();
+        std::fs::write(existing.join("stale.txt"), "old").unwrap();
+
+        // Removing write permission on agents_dir prevents unlinking the
+        // "locked-agent" entry inside it, forcing `remove_dir_all` to fail.
+        std::fs::set_permissions(agents_dir.path(), std::fs::Permissions::from_mode(0o555))
+            .unwrap();
+
+        let result = install_from_dir(src.path(), agents_dir.path());
+
+        // Restore permissions so the tempdir can clean itself up on drop.
+        std::fs::set_permissions(agents_dir.path(), std::fs::Permissions::from_mode(0o755))
+            .unwrap();
+
+        assert!(result.is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn install_from_dir_copy_failure_propagates() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let src = tempfile::tempdir().unwrap();
+        std::fs::write(
+            src.path().join("agent.leviath"),
+            "[agent]\nname = \"broken-copy-agent\"\n",
+        )
+        .unwrap();
+        let secret = src.path().join("secret.txt");
+        std::fs::write(&secret, "top secret").unwrap();
+        std::fs::set_permissions(&secret, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+        let agents_dir = tempfile::tempdir().unwrap();
+        let result = install_from_dir(src.path(), agents_dir.path());
+
+        // Restore permissions so the tempdir can clean itself up on drop.
+        std::fs::set_permissions(&secret, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        assert!(result.is_err());
+    }
+
     // ─── execute_with: directory + bundle-file paths ───────────────────────
 
     #[test]
@@ -410,6 +544,29 @@ description = "test"
                     .unwrap();
 
                 assert!(agents_dir.path().join("dir-pkg").exists());
+            })
+        });
+    }
+
+    #[test]
+    fn execute_with_directory_without_manifest_errors() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        with_tracing(|| {
+            rt.block_on(async {
+                let src = tempfile::tempdir().unwrap(); // no agent.leviath inside
+                let agents_dir = tempfile::tempdir().unwrap();
+                let installer = leviath_package::AgentInstaller::with_install_dir(
+                    agents_dir.path().to_path_buf(),
+                );
+                let args = AddArgs {
+                    package: src.path().to_str().unwrap().to_string(),
+                    registry: None,
+                };
+
+                let err = execute_with(&args, &installer, agents_dir.path())
+                    .await
+                    .unwrap_err();
+                assert!(err.to_string().contains("agent.leviath"));
             })
         });
     }
@@ -475,6 +632,32 @@ description = "test"
         });
     }
 
+    #[test]
+    fn execute_with_corrupt_bundle_file_errors() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        with_tracing(|| {
+            rt.block_on(async {
+                let bundle_dir = tempfile::tempdir().unwrap();
+                let bundle_path = bundle_dir.path().join("broken.leviath-bundle");
+                std::fs::write(&bundle_path, b"not a valid gzip archive").unwrap();
+
+                let agents_dir = tempfile::tempdir().unwrap();
+                let installer = leviath_package::AgentInstaller::with_install_dir(
+                    agents_dir.path().to_path_buf(),
+                );
+                let args = AddArgs {
+                    package: bundle_path.to_str().unwrap().to_string(),
+                    registry: None,
+                };
+
+                let err = execute_with(&args, &installer, agents_dir.path())
+                    .await
+                    .unwrap_err();
+                assert!(err.to_string().contains("Failed to extract package"));
+            })
+        });
+    }
+
     // ─── execute_with: registry path (raw-TCP mock server) ─────────────────
 
     async fn spawn_mock_registry(
@@ -521,6 +704,13 @@ description = "test"
         let rt = tokio::runtime::Runtime::new().unwrap();
         with_tracing(|| {
             rt.block_on(async {
+                // Isolates `Config::load()` (called unconditionally at the
+                // top of the registry branch) from a real `~/.leviath/config.toml`
+                // *and* from other tests elsewhere in the crate that use this
+                // same `LEVIATH_CONFIG_PATH` seam to point it at a
+                // deliberately-malformed file -- without this, this test can
+                // flakily observe that other test's mid-flight override.
+                let _guard = crate::config::isolate_config_path_for_test("add-registry-installs");
                 let project_dir = tempfile::tempdir().unwrap();
                 std::fs::write(
                     project_dir.path().join("agent.leviath"),
@@ -551,6 +741,156 @@ description = "test"
                     .unwrap();
 
                 assert!(agents_dir.path().join("reg-pkg").exists());
+            })
+        });
+    }
+
+    async fn spawn_mock_registry_download_error(get_info_body: &'static [u8]) -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        tokio::spawn(async move {
+            // First request: get_info -- succeeds.
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut buf = [0u8; 8192];
+            let _ = socket.read(&mut buf).await;
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                get_info_body.len()
+            );
+            let _ = socket.write_all(resp.as_bytes()).await;
+            let _ = socket.write_all(get_info_body).await;
+            let _ = socket.shutdown().await;
+
+            // Second request: download -- fails with a non-success status.
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut buf = [0u8; 8192];
+            let _ = socket.read(&mut buf).await;
+            let resp =
+                "HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+            let _ = socket.write_all(resp.as_bytes()).await;
+            let _ = socket.shutdown().await;
+        });
+
+        format!("http://{}", addr)
+    }
+
+    #[test]
+    fn execute_with_registry_config_load_error_propagates() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        with_tracing(|| {
+            rt.block_on(async {
+                let guard =
+                    crate::config::isolate_config_path_for_test("add-registry-config-error");
+                std::fs::write(guard.fake_dir.join("config.toml"), "not valid toml [[[").unwrap();
+
+                let agents_dir = tempfile::tempdir().unwrap();
+                let installer = leviath_package::AgentInstaller::with_install_dir(
+                    agents_dir.path().to_path_buf(),
+                );
+                let args = AddArgs {
+                    package: "some-registry-package".to_string(),
+                    registry: None,
+                };
+
+                let result = execute_with(&args, &installer, agents_dir.path()).await;
+                assert!(result.is_err());
+            })
+        });
+    }
+
+    #[test]
+    fn execute_with_registry_get_info_connection_refused_errors() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        with_tracing(|| {
+            rt.block_on(async {
+                // See `execute_with_registry_package_installs` for why this
+                // guard is needed even though this test never writes a
+                // config file of its own.
+                let _guard =
+                    crate::config::isolate_config_path_for_test("add-registry-get-info-refused");
+                // Fixed, never-bound high port (same pattern used in
+                // leviath-package's own connection-refused tests) --
+                // deterministic, unlike bind-then-drop which races against
+                // other parallel tests' ephemeral-port allocations.
+                let agents_dir = tempfile::tempdir().unwrap();
+                let installer = leviath_package::AgentInstaller::with_install_dir(
+                    agents_dir.path().to_path_buf(),
+                );
+                let args = AddArgs {
+                    package: "some-registry-package".to_string(),
+                    registry: Some("http://127.0.0.1:19999".to_string()),
+                };
+
+                let err = execute_with(&args, &installer, agents_dir.path())
+                    .await
+                    .unwrap_err();
+                assert!(err.to_string().contains("Failed to get package info"));
+            })
+        });
+    }
+
+    #[test]
+    fn execute_with_registry_download_failure_errors() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        with_tracing(|| {
+            rt.block_on(async {
+                // See `execute_with_registry_package_installs` for why this
+                // guard is needed even though this test never writes a
+                // config file of its own.
+                let _guard =
+                    crate::config::isolate_config_path_for_test("add-registry-download-failure");
+                let info_json =
+                    br#"{"name":"reg-pkg-dl-fail","version":"1.0.0","description":"d"}"#;
+                let url = spawn_mock_registry_download_error(info_json).await;
+
+                let agents_dir = tempfile::tempdir().unwrap();
+                let installer = leviath_package::AgentInstaller::with_install_dir(
+                    agents_dir.path().to_path_buf(),
+                );
+                let args = AddArgs {
+                    package: "reg-pkg-dl-fail".to_string(),
+                    registry: Some(url),
+                };
+
+                let err = execute_with(&args, &installer, agents_dir.path())
+                    .await
+                    .unwrap_err();
+                assert!(err.to_string().contains("Package download failed"));
+            })
+        });
+    }
+
+    #[test]
+    fn execute_with_registry_install_from_bytes_invalid_data_errors() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        with_tracing(|| {
+            rt.block_on(async {
+                // See `execute_with_registry_package_installs` for why this
+                // guard is needed even though this test never writes a
+                // config file of its own.
+                let _guard =
+                    crate::config::isolate_config_path_for_test("add-registry-invalid-data");
+                let info_json =
+                    br#"{"name":"reg-pkg-bad-data","version":"1.0.0","description":"d"}"#;
+                let url = spawn_mock_registry(info_json, b"not a valid gzip archive").await;
+
+                let agents_dir = tempfile::tempdir().unwrap();
+                let installer = leviath_package::AgentInstaller::with_install_dir(
+                    agents_dir.path().to_path_buf(),
+                );
+                let args = AddArgs {
+                    package: "reg-pkg-bad-data".to_string(),
+                    registry: Some(url),
+                };
+
+                let err = execute_with(&args, &installer, agents_dir.path())
+                    .await
+                    .unwrap_err();
+                assert!(err.to_string().contains("Failed to extract package"));
             })
         });
     }
