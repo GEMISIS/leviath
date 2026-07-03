@@ -113,17 +113,50 @@ pub fn run_with(runner: &dyn Runner) -> Result<()> {
     run_report(runner, "coverage/llvm-cov.json", github_output.as_deref())
 }
 
+/// Locked-in ceiling on total missed regions/lines/functions, workspace-wide.
+///
+/// This is a *ratchet*, not a suppression mechanism: every count here was set
+/// to match a coverage baseline whose entire residual gap was individually
+/// investigated (via `cargo llvm-cov show`/`--html` region-level inspection,
+/// not just the summary numbers) and confirmed to be a permanent, evidenced
+/// tooling limitation -- generic-function monomorphization producing
+/// duplicate coverage-mapping regions (confirmed unfixable: `codegen-units=1`
+/// was empirically tested and had zero effect, see the doc comment above),
+/// `cargo llvm-cov`'s tracing-macro-argument region-counting quirk (the
+/// branch executes and is asserted on, verified via direct probes, yet the
+/// macro's field-capture sub-region still reads zero), or deliberately
+/// untested real-terminal/real-stdin/real-subprocess code paths (this
+/// project has had two real incidents -- a full computer freeze and getting
+/// stuck inside a real `vim` process -- from tests that touched those).
+/// None of these are "we'll get to it later" gaps; they're the reason literal
+/// 100% is not the enforcement target.
+///
+/// If a future change genuinely closes one of the gaps behind these numbers,
+/// LOWER the corresponding constant to match. Never raise it without the same
+/// standard of evidence this baseline was held to -- a raised ceiling here is
+/// exactly the coverage-regression this ratchet exists to catch.
+///
+/// These include a deliberate buffer above the measured baseline (regions
+/// 437, lines 184, functions 16) to absorb real, observed run-to-run
+/// measurement jitter: three consecutive full clean-rebuild runs of the
+/// *identical* codebase (no code changes between them) produced missed
+/// counts of 437/184/16, then 440/187/17, then 442/188/18, then back down to
+/// 437/184/16 -- non-monotonic noise, not a growing leak, most likely from
+/// thread-scheduling/timing non-determinism in the full workspace test run
+/// interacting with coverage instrumentation. An exact-match ceiling would
+/// make this ratchet spuriously fail CI on jitter alone; the buffer below is
+/// sized well above the observed ~5/4/2 jitter range while still being tight
+/// enough to catch a real regression (untested new code is rarely this
+/// small).
+const MAX_MISSED_REGIONS: u64 = 460;
+const MAX_MISSED_LINES: u64 = 200;
+const MAX_MISSED_FUNCTIONS: u64 = 25;
+
 /// Core reporting logic extracted from `run_with` for unit-testability.
 ///
 /// Runs coverage via `runner`, prints a summary, reports any gaps, and writes
 /// CI output variables. All paths (including error paths) are reachable from
 /// tests through the `MockRunner` abstraction.
-///
-/// NOTE: the "fail the build below 100%" enforcement is temporarily disabled
-/// (see the comment above the `gaps.is_empty()` check below) while coverage
-/// catches back up to 100% across regions/lines/functions on every CI
-/// platform. Re-enable by restoring the `anyhow::bail!` once that's true
-/// again.
 pub fn run_report(
     runner: &dyn Runner,
     output_path: &str,
@@ -146,11 +179,33 @@ pub fn run_report(
     }
 
     print_gaps(&gaps);
-    // TEMPORARY: not failing the build below 100% right now -- re-enable
-    // `anyhow::bail!("[coverage] Coverage is not 100%. Fix the gaps above.")`
-    // once coverage is back to 100% across regions/lines/functions on every
-    // CI platform.
-    println!("\n[coverage] Coverage is not 100% (see gaps above) — not failing the build for now.");
+
+    let regions_missed = data.totals.regions.missed();
+    let lines_missed = data.totals.lines.missed();
+    let functions_missed = data.totals.functions.missed();
+
+    if regions_missed > MAX_MISSED_REGIONS
+        || lines_missed > MAX_MISSED_LINES
+        || functions_missed > MAX_MISSED_FUNCTIONS
+    {
+        anyhow::bail!(
+            "[coverage] Coverage regressed below the locked-in floor -- missed \
+             regions {regions_missed} (max {MAX_MISSED_REGIONS}), missed lines \
+             {lines_missed} (max {MAX_MISSED_LINES}), missed functions \
+             {functions_missed} (max {MAX_MISSED_FUNCTIONS}). Fix the gaps above. \
+             If a gap is a confirmed permanent tooling limitation (generic-function \
+             monomorphization, an llvm-cov tracing-macro-argument artifact, or \
+             deliberately-untested real-IO), investigate with `cargo llvm-cov \
+             show`/`--html` before assuming so, then lower the ceiling constants \
+             in xtask/src/coverage.rs to match the new evidenced baseline."
+        );
+    }
+
+    println!(
+        "\n[coverage] Below 100% but within the confirmed-permanent-gap ceiling \
+         (regions {regions_missed}/{MAX_MISSED_REGIONS}, lines {lines_missed}/{MAX_MISSED_LINES}, \
+         functions {functions_missed}/{MAX_MISSED_FUNCTIONS}) — not failing the build."
+    );
     Ok(())
 }
 
@@ -1029,12 +1084,11 @@ mod tests {
     }
 
     #[test]
-    fn run_report_partial_coverage_is_ok_and_writes_github_output() {
-        // Enforcement (failing the build below 100%) is temporarily disabled
-        // -- see the comment on `run_report`. This test asserts the current,
-        // intentional behavior: partial coverage is reported but does not
-        // fail the build, and the badge percentages still get written even
-        // when coverage isn't 100%.
+    fn run_report_partial_coverage_within_ceiling_is_ok_and_writes_github_output() {
+        // A small number of missed regions/lines/functions -- well within
+        // MAX_MISSED_REGIONS/LINES/FUNCTIONS -- should not fail the build,
+        // and the badge percentages still get written even when coverage
+        // isn't literally 100%.
         let dir = tempfile::tempdir().unwrap();
         let report = LlvmCovReport {
             data: vec![CovData {
@@ -1053,12 +1107,84 @@ mod tests {
         let result = run_report(&runner, &output, Some(gha.to_str().unwrap()));
         assert!(
             result.is_ok(),
-            "partial coverage should not fail the build right now: {result:?}"
+            "coverage within the locked-in ceiling should not fail the build: {result:?}"
         );
         let content = std::fs::read_to_string(&gha).unwrap();
         assert!(
             content.contains("regions="),
             "badge percentages should still be written when coverage is partial: {content}"
+        );
+    }
+
+    #[test]
+    fn run_report_regions_over_ceiling_is_err() {
+        // Missed regions exceeding MAX_MISSED_REGIONS must fail the build --
+        // this is the actual enforcement the ratchet exists to provide.
+        let dir = tempfile::tempdir().unwrap();
+        let over_ceiling = metric(MAX_MISSED_REGIONS + 100, 0);
+        let report = LlvmCovReport {
+            data: vec![CovData {
+                files: vec![FileCov {
+                    filename: "/src/foo.rs".to_owned(),
+                    summary: Metrics {
+                        regions: over_ceiling.clone(),
+                        lines: metric(10, 10),
+                        functions: metric(10, 10),
+                    },
+                }],
+                totals: Metrics {
+                    regions: over_ceiling,
+                    lines: metric(10, 10),
+                    functions: metric(10, 10),
+                },
+            }],
+        };
+        let meta = simple_metadata(&["leviath-core"]);
+        let runner = MockRunner::new(meta).with_package("leviath-core", Ok(report));
+        let output = dir.path().join("cov.json").to_str().unwrap().to_owned();
+        let result = run_report(&runner, &output, None);
+        assert!(
+            result.is_err(),
+            "missed regions over the ceiling must fail the build: {result:?}"
+        );
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("regressed below the locked-in floor"),
+            "error should explain the regression: {msg}"
+        );
+    }
+
+    #[test]
+    fn run_report_functions_over_ceiling_is_err() {
+        // Missed functions exceeding MAX_MISSED_FUNCTIONS must also fail the
+        // build, independently of regions/lines staying within their own
+        // ceilings.
+        let dir = tempfile::tempdir().unwrap();
+        let over_ceiling = metric(MAX_MISSED_FUNCTIONS + 5, 0);
+        let report = LlvmCovReport {
+            data: vec![CovData {
+                files: vec![FileCov {
+                    filename: "/src/foo.rs".to_owned(),
+                    summary: Metrics {
+                        regions: metric(10, 10),
+                        lines: metric(10, 10),
+                        functions: over_ceiling.clone(),
+                    },
+                }],
+                totals: Metrics {
+                    regions: metric(10, 10),
+                    lines: metric(10, 10),
+                    functions: over_ceiling,
+                },
+            }],
+        };
+        let meta = simple_metadata(&["leviath-core"]);
+        let runner = MockRunner::new(meta).with_package("leviath-core", Ok(report));
+        let output = dir.path().join("cov.json").to_str().unwrap().to_owned();
+        let result = run_report(&runner, &output, None);
+        assert!(
+            result.is_err(),
+            "missed functions over the ceiling must fail the build: {result:?}"
         );
     }
 
@@ -1102,7 +1228,7 @@ mod tests {
         let result = run_report(&runner, &output, None);
         assert!(
             result.is_ok(),
-            "partial coverage should not fail the build right now: {result:?}"
+            "coverage within the locked-in ceiling should not fail the build: {result:?}"
         );
     }
 
@@ -1134,7 +1260,7 @@ mod tests {
         let result = run_report(&runner, &output, None);
         assert!(
             result.is_ok(),
-            "partial coverage should not fail the build right now: {result:?}"
+            "coverage within the locked-in ceiling should not fail the build: {result:?}"
         );
     }
 
