@@ -158,6 +158,27 @@ mod tests {
     use crate::runstate::RunMeta;
     use crate::test_support::with_tracing;
 
+    /// Serializes the tests below that probe a free port, drop the probe
+    /// listener, then hand that bare port *number* to `execute`/
+    /// `execute_with_shutdown` (which does its own internal
+    /// `TcpListener::bind`) -- a real TOCTOU race: another test doing the
+    /// exact same probe-drop-rebind dance concurrently can have the OS
+    /// ephemeral-port allocator hand it the just-freed port before this
+    /// test's real bind happens, causing a spurious "address already in
+    /// use" failure. Confirmed to reproduce on a real CI runner (not just
+    /// locally) once real test-execution overhead widened the race window.
+    /// Other files with similar `TcpListener::bind("127.0.0.1:0")` probes
+    /// (`add.rs`, `serve/websocket.rs`, `serve/polling.rs`) bind once and
+    /// reuse that exact listener instead of dropping and re-binding by
+    /// number, so they don't share this specific race and don't need this
+    /// lock.
+    ///
+    /// A `tokio::sync::Mutex`, not `std::sync::Mutex`: every test below holds
+    /// this guard across `.await` points (the whole point is serializing the
+    /// probe-drop-rebind window against concurrent `.await`ing tests), and
+    /// `std::sync::Mutex` guards aren't safe to hold across `.await`.
+    static SERVE_PORT_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
     /// Extracted so the `assert!` failure-message region (only executed
     /// when the connection attempt didn't succeed) is covered by
     /// [`assert_connected_panics_when_not_connected`] rather than showing
@@ -800,6 +821,7 @@ prompt = "Run"
 
     #[tokio::test]
     async fn execute_binds_and_serves_with_wildcard_cors() {
+        let _port_lock = SERVE_PORT_LOCK.lock().await;
         with_tracing(|| {});
         // execute() binds its own listener internally, so we can't learn the
         // ephemeral port directly. Instead, bind our own listener first to
@@ -845,6 +867,7 @@ prompt = "Run"
 
     #[tokio::test]
     async fn execute_with_specific_cors_origin_serves() {
+        let _port_lock = SERVE_PORT_LOCK.lock().await;
         let probe = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = probe.local_addr().unwrap().port();
         drop(probe);
@@ -916,6 +939,7 @@ prompt = "Run"
     /// with a graceful-shutdown signal so the loop executes before bind.
     #[tokio::test]
     async fn execute_with_bad_api_key_logs_warning_and_serves() {
+        let _port_lock = SERVE_PORT_LOCK.lock().await;
         with_tracing(|| {});
         let guard = crate::config::isolate_config_path_for_test("serve-mod-badkey");
         // Write a config with an anthropic key that fails validate_keys().
@@ -987,6 +1011,7 @@ prompt = "Run"
     /// `execute_with_shutdown` and sending a graceful-shutdown signal.
     #[tokio::test]
     async fn execute_with_shutdown_signal_returns_ok() {
+        let _port_lock = SERVE_PORT_LOCK.lock().await;
         let probe = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = probe.local_addr().unwrap().port();
         drop(probe);
