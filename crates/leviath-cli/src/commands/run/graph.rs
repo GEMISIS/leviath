@@ -269,7 +269,20 @@ pub async fn prompt_llm_transition(
     let response = provider.infer(request).await.ok()?;
     let choice = response.content.trim().to_string();
 
-    // Add the LLM's response to context
+    // Add the LLM's response to context.
+    //
+    // CONFIRMED-PERMANENT COVERAGE GAP: the `None` arm here (closing `}`) is
+    // provably unreachable, not merely untested. `window()?` at line 251
+    // above already short-circuited the whole function with `None` unless a
+    // `ContextWindow` was present on `entity` at that point, and nothing
+    // between there and here can remove it: `Provider::infer` (the only
+    // `.await` in between) takes `&self` and a plain `InferenceRequest` --
+    // it has no access to `engine`/`World` and so cannot delete the
+    // component out from under us during the await. A restructuring
+    // experiment (adding an explicit `else` arm, mirroring the fix applied
+    // to the sibling `EdgeTransform::Clear`/`Custom` blocks in
+    // `apply_edge_transform` above) does not apply here since there is no
+    // reachable `None` case to give the `else` arm real behavior for.
     if let Some(mut window) = engine.world_mut().get_mut::<ContextWindow>(entity) {
         let tokens = choice.len() / 4 + 1;
         let _ = window.add_to_region(
@@ -349,6 +362,8 @@ pub async fn apply_edge_transform(
                     }
                 }
                 window.current_tokens = window.calculate_tokens();
+            } else {
+                // No ContextWindow on this entity; nothing to clear.
             }
         }
         EdgeTransform::Compact { prompt } => {
@@ -384,6 +399,8 @@ pub async fn apply_edge_transform(
                     }
                 }
                 window.current_tokens = window.calculate_tokens();
+            } else {
+                // No ContextWindow on this entity; nothing to clear.
             }
 
             // Compact specified regions
@@ -917,10 +934,11 @@ mod tests {
         let bp = make_blueprint(vec![make_stage("a"), make_stage("b")]);
         let (mut engine, entity) = make_engine_and_entity(&bp);
 
-        // Add some content to conversation
-        if let Some(mut window) = engine.world_mut().get_mut::<ContextWindow>(entity) {
-            let _ = window.add_to_region("conversation", "test content".to_string(), 5);
-        }
+        // Add some content to conversation. `make_engine_and_entity` routes
+        // through `AgentPool::spawn_agent`, which always inserts a
+        // `ContextWindow`, so this is unconditionally `Some` here.
+        let mut window = engine.world_mut().get_mut::<ContextWindow>(entity).unwrap();
+        let _ = window.add_to_region("conversation", "test content".to_string(), 5);
 
         let edge = TransitionEdge {
             target: "b".to_string(),
@@ -952,11 +970,10 @@ mod tests {
         let bp = make_blueprint(vec![make_stage("a"), make_stage("b")]);
         let (mut engine, entity) = make_engine_and_entity(&bp);
 
-        // Add content to both regions
-        if let Some(mut window) = engine.world_mut().get_mut::<ContextWindow>(entity) {
-            let _ = window.add_to_region("system", "system content".to_string(), 5);
-            let _ = window.add_to_region("conversation", "conv content".to_string(), 5);
-        }
+        // Add content to both regions. Always `Some` (see note above).
+        let mut window = engine.world_mut().get_mut::<ContextWindow>(entity).unwrap();
+        let _ = window.add_to_region("system", "system content".to_string(), 5);
+        let _ = window.add_to_region("conversation", "conv content".to_string(), 5);
 
         let edge = TransitionEdge {
             target: "b".to_string(),
@@ -1024,9 +1041,8 @@ mod tests {
         let (mut engine, entity) = make_engine_and_entity(&bp);
 
         // Add content to conversation
-        if let Some(mut window) = engine.world_mut().get_mut::<ContextWindow>(entity) {
-            let _ = window.add_to_region("conversation", "conv content".to_string(), 5);
-        }
+        let mut window = engine.world_mut().get_mut::<ContextWindow>(entity).unwrap();
+        let _ = window.add_to_region("conversation", "conv content".to_string(), 5);
 
         let edge = TransitionEdge {
             target: "b".to_string(),
@@ -1336,9 +1352,8 @@ mod tests {
         let bp = make_blueprint(vec![make_stage("a"), make_stage("b")]);
         let (mut engine, entity) = make_engine_and_entity(&bp);
 
-        if let Some(mut window) = engine.world_mut().get_mut::<ContextWindow>(entity) {
-            let _ = window.add_to_region("conversation", "some content".to_string(), 5);
-        }
+        let mut window = engine.world_mut().get_mut::<ContextWindow>(entity).unwrap();
+        let _ = window.add_to_region("conversation", "some content".to_string(), 5);
 
         let edge = TransitionEdge {
             target: "b".to_string(),
@@ -1900,9 +1915,8 @@ mod tests {
         let (mut engine, entity) =
             make_engine_with_mock_provider(&bp, "concise summary of the conversation");
 
-        if let Some(mut window) = engine.world_mut().get_mut::<ContextWindow>(entity) {
-            let _ = window.add_to_region("conversation", "raw conversation content".to_string(), 5);
-        }
+        let mut window = engine.world_mut().get_mut::<ContextWindow>(entity).unwrap();
+        let _ = window.add_to_region("conversation", "raw conversation content".to_string(), 5);
 
         apply_compact_transform(&mut engine, entity, "mock", "test-model", "Summarize", None).await;
 
@@ -1926,9 +1940,8 @@ mod tests {
         let (mut engine, entity) =
             make_engine_with_provider(&bp, "failing", Arc::new(FailingProvider));
 
-        if let Some(mut window) = engine.world_mut().get_mut::<ContextWindow>(entity) {
-            let _ = window.add_to_region("conversation", "raw conversation content".to_string(), 5);
-        }
+        let mut window = engine.world_mut().get_mut::<ContextWindow>(entity).unwrap();
+        let _ = window.add_to_region("conversation", "raw conversation content".to_string(), 5);
 
         // Should log a warning and return, not panic; original content is
         // left untouched since the Err arm never reaches the clear/summarize step.
@@ -1961,9 +1974,8 @@ mod tests {
         let bp = make_blueprint(vec![make_stage("a"), make_stage("b")]);
         let (mut engine, entity) = make_engine_and_entity(&bp);
 
-        if let Some(mut window) = engine.world_mut().get_mut::<ContextWindow>(entity) {
-            let _ = window.add_to_region("conversation", "conv content".to_string(), 5);
-        }
+        let mut window = engine.world_mut().get_mut::<ContextWindow>(entity).unwrap();
+        let _ = window.add_to_region("conversation", "conv content".to_string(), 5);
 
         let edge = TransitionEdge {
             target: "b".to_string(),
@@ -2340,13 +2352,12 @@ mod tests {
         let (mut engine, entity) = make_engine_with_mock_provider(&bp, "Summary of context");
 
         // Add content to the conversation region so compact has something to work with
-        if let Some(mut window) = engine.world_mut().get_mut::<ContextWindow>(entity) {
-            let _ = window.add_to_region(
-                "conversation",
-                "User: hello\nAssistant: world".to_string(),
-                10,
-            );
-        }
+        let mut window = engine.world_mut().get_mut::<ContextWindow>(entity).unwrap();
+        let _ = window.add_to_region(
+            "conversation",
+            "User: hello\nAssistant: world".to_string(),
+            10,
+        );
 
         apply_compact_transform(
             &mut engine,
@@ -2375,10 +2386,8 @@ mod tests {
         let (mut engine, entity) = make_engine_with_mock_provider(&bp, "Compact summary");
 
         // Add content to conversation
-        if let Some(mut window) = engine.world_mut().get_mut::<ContextWindow>(entity) {
-            let _ =
-                window.add_to_region("conversation", "Some conversation history".to_string(), 5);
-        }
+        let mut window = engine.world_mut().get_mut::<ContextWindow>(entity).unwrap();
+        let _ = window.add_to_region("conversation", "Some conversation history".to_string(), 5);
 
         let config = leviath_core::lifecycle::CompactionConfig {
             provider: "mock".to_string(),
@@ -2417,9 +2426,8 @@ mod tests {
         let (mut engine, entity) = make_engine_with_mock_provider(&bp, "Compacted context");
 
         // Add conversation content
-        if let Some(mut window) = engine.world_mut().get_mut::<ContextWindow>(entity) {
-            let _ = window.add_to_region("conversation", "existing conversation".to_string(), 5);
-        }
+        let mut window = engine.world_mut().get_mut::<ContextWindow>(entity).unwrap();
+        let _ = window.add_to_region("conversation", "existing conversation".to_string(), 5);
 
         let edge = TransitionEdge {
             target: "b".to_string(),
@@ -2457,9 +2465,8 @@ mod tests {
         let bp = make_blueprint(vec![make_stage("a"), make_stage("b")]);
         let (mut engine, entity) = make_engine_with_mock_provider(&bp, "Response");
 
-        if let Some(mut window) = engine.world_mut().get_mut::<ContextWindow>(entity) {
-            let _ = window.add_to_region("conversation", "original content".to_string(), 5);
-        }
+        let mut window = engine.world_mut().get_mut::<ContextWindow>(entity).unwrap();
+        let _ = window.add_to_region("conversation", "original content".to_string(), 5);
 
         let edge = TransitionEdge {
             target: "b".to_string(),
@@ -2491,9 +2498,8 @@ mod tests {
         let bp = make_blueprint(vec![make_stage("a"), make_stage("b")]);
         let (mut engine, entity) = make_engine_with_mock_provider(&bp, "Custom compact result");
 
-        if let Some(mut window) = engine.world_mut().get_mut::<ContextWindow>(entity) {
-            let _ = window.add_to_region("conversation", "conv content to compact".to_string(), 5);
-        }
+        let mut window = engine.world_mut().get_mut::<ContextWindow>(entity).unwrap();
+        let _ = window.add_to_region("conversation", "conv content to compact".to_string(), 5);
 
         let edge = TransitionEdge {
             target: "b".to_string(),
@@ -2535,9 +2541,8 @@ mod tests {
         let bp = make_blueprint(vec![make_stage("a"), make_stage("b")]);
         let (mut engine, entity) = make_engine_and_entity(&bp);
 
-        if let Some(mut window) = engine.world_mut().get_mut::<ContextWindow>(entity) {
-            let _ = window.add_to_region("conversation", "preserved content".to_string(), 5);
-        }
+        let mut window = engine.world_mut().get_mut::<ContextWindow>(entity).unwrap();
+        let _ = window.add_to_region("conversation", "preserved content".to_string(), 5);
 
         let edge = TransitionEdge {
             target: "b".to_string(),
@@ -2723,14 +2728,17 @@ mod tests {
     // ─── line-325: Clear transform on entity without ContextWindow ────────────
 
     fn make_engine_and_entity_no_window(
-        blueprint: &Blueprint,
+        _blueprint: &Blueprint,
     ) -> (AgentEngine, bevy_ecs::prelude::Entity) {
         let registry = ProviderRegistry::new();
         let mut engine = AgentEngine::with_providers(registry);
-        let mut pool = AgentPool::new(blueprint.clone());
-        let agent_id = pool.spawn_agent(engine.world_mut());
-        let entity = pool.get_agent(&agent_id).unwrap();
-        // Deliberately skip initialize_context_window so the entity has no ContextWindow.
+        // NOTE: `AgentPool::spawn_agent` unconditionally inserts a
+        // `ContextWindow` component itself (see `leviath_runtime::pool`), so
+        // routing through the pool -- even while skipping
+        // `initialize_context_window` -- can never produce a `None` from
+        // `get_mut::<ContextWindow>`. To genuinely exercise that branch we
+        // spawn a bare entity with no components at all, bypassing the pool.
+        let entity = engine.world_mut().spawn_empty().id();
         (engine, entity)
     }
 

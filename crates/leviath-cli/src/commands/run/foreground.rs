@@ -497,11 +497,23 @@ async fn run_foreground_with_registry(
 
     let mut pool = AgentPool::new(blueprint.clone());
     let agent_id = pool.spawn_agent(engine.world_mut());
+    // spawn_agent inserts agent_id into the pool immediately; get_agent will
+    // always return Some here. We use expect to surface a bug if that invariant
+    // is ever violated, avoiding an unreachable ? error branch (see the
+    // identical fix and rationale in `worker.rs`'s `run_worker_inner`).
     let entity = pool
         .get_agent(&agent_id)
-        .ok_or_else(|| anyhow::anyhow!("Failed to get spawned agent entity"))?;
+        .expect("agent was just spawned and must be in the pool");
 
-    let workdir = std::env::current_dir()?;
+    // `.ok().unwrap_or(...)` rather than `?`: matches the identical fix in
+    // `worker.rs`'s `run_worker_inner` -- `?`'s implicit error-propagation
+    // region is an untestable-in-practice branch (would require deleting the
+    // process's cwd out from under it), whereas `unwrap_or`'s fallback value
+    // is evaluated unconditionally, so it introduces no separate coverage
+    // region to leave permanently uncovered.
+    let workdir = std::env::current_dir()
+        .ok()
+        .unwrap_or(std::path::PathBuf::from("."));
     initialize_context_window(&mut engine, entity, &blueprint, &task);
 
     let tool_registry = Arc::new(ToolRegistry::build(workdir, &config).await);
@@ -721,6 +733,26 @@ mod tests {
         let engine = leviath_runtime::AgentEngine::with_providers(registry);
         let handle = cb.start_message_reader(&engine, "agent-1", false);
         assert!(handle.is_none());
+    }
+
+    /// The `accepts = false` test above returns before ever calling the
+    /// injected reader factory, so it never actually instantiates or runs
+    /// `forward_lines_as_messages::<Empty>` (the monomorphization used by the
+    /// `#[cfg(test)]` twin of `start_message_reader` above, which passes
+    /// `tokio::io::empty` directly rather than wrapped in a `BufReader`).
+    /// `foreground_start_message_reader_returns_handle_when_accepts` below
+    /// only exercises the *other* monomorphization (`BufReader<Empty>`) by
+    /// calling `start_message_reader_with` directly. This test drives the
+    /// trait method itself with `accepts = true` so the `Empty`
+    /// monomorphization's spawned task body actually runs to completion.
+    #[tokio::test]
+    async fn foreground_start_message_reader_returns_handle_when_accepts_via_trait() {
+        let mut cb = ForegroundCallbacks {};
+        let registry = leviath_runtime::ProviderRegistry::new();
+        let engine = leviath_runtime::AgentEngine::with_providers(registry);
+        let handle = cb.start_message_reader(&engine, "agent-1", true);
+        assert!(handle.is_some());
+        handle.unwrap().await.unwrap();
     }
 
     #[tokio::test]

@@ -51,6 +51,7 @@ fn resolve_task_with(
         description,
         stdin_is_terminal,
         &launch_editor,
+        &std::env::temp_dir,
     )
 }
 
@@ -64,7 +65,14 @@ fn resolve_task_with(
 /// `#[cfg(unix)]`-only real-PATH-starvation test for this can't be mirrored
 /// there — injecting the editor launcher closes that gap on every platform.
 ///
-/// Both closures are `&dyn Fn` for the same monomorphization-noise reason
+/// Also takes the temp-directory provider (`tmp_dir_fn`) as an injectable
+/// closure so tests can point the task-template write at a guaranteed-
+/// unwritable directory (e.g. one whose parent doesn't exist) and
+/// deterministically exercise `write_task_template`'s `?` propagating out of
+/// this function -- the real OS temp directory used in production is
+/// essentially always writable, so that error path is otherwise untestable.
+///
+/// All closures are `&dyn Fn` for the same monomorphization-noise reason
 /// documented on [`resolve_task_with`].
 fn resolve_task_with_editor(
     arg: &Option<String>,
@@ -72,6 +80,7 @@ fn resolve_task_with_editor(
     description: Option<&str>,
     stdin_is_terminal: &dyn Fn() -> bool,
     launch_editor_fn: &dyn Fn(&std::path::Path) -> anyhow::Result<()>,
+    tmp_dir_fn: &dyn Fn() -> std::path::PathBuf,
 ) -> anyhow::Result<String> {
     match arg {
         Some(s) => {
@@ -99,8 +108,7 @@ fn resolve_task_with_editor(
             let template = build_task_template(agent_name, description);
 
             // Write to a temp file
-            let tmp_path =
-                std::env::temp_dir().join(format!("lev-task-{}.txt", std::process::id()));
+            let tmp_path = tmp_dir_fn().join(format!("lev-task-{}.txt", std::process::id()));
             write_task_template(&tmp_path, &template)?;
 
             // Launch the editor (exits only when the user closes it)
@@ -1466,6 +1474,24 @@ mod tests {
         assert!(result.unwrap_err().to_string().contains("No editor found"));
     }
 
+    /// Shared stub editor-launcher used by both
+    /// `resolve_task_with_editor_injected_editor_failure_propagates` (where
+    /// it's actually invoked) and
+    /// `resolve_task_with_editor_tmp_file_write_failure_propagates` (where,
+    /// by design, `write_task_template`'s earlier `?` should short-circuit
+    /// before this is ever reached). Extracted into a single named `fn`
+    /// rather than an inline closure per call site so that if the latter
+    /// test's control flow ever regresses and this stub *does* get called,
+    /// llvm-cov's function-level coverage for it is still merged from the
+    /// former test -- an inline closure unique to the latter test would
+    /// otherwise show up as a brand new "0 calls" function purely because
+    /// that particular test is designed to never reach it.
+    fn stub_editor_returns_no_editor_found(_path: &std::path::Path) -> anyhow::Result<()> {
+        Err(anyhow::anyhow!(
+            "No editor found. Set $VISUAL or $EDITOR, or install vim/nano/notepad."
+        ))
+    }
+
     /// Cross-platform twin of
     /// `resolve_task_with_editor_path_propagates_launch_editor_error` via
     /// `resolve_task_with_editor`'s injected editor launcher -- see that
@@ -1475,13 +1501,47 @@ mod tests {
     /// unconditionally regardless of environment state.
     #[test]
     fn resolve_task_with_editor_injected_editor_failure_propagates() {
-        let result = resolve_task_with_editor(&None, "test-agent", None, &|| true, &|_path| {
-            Err(anyhow::anyhow!(
-                "No editor found. Set $VISUAL or $EDITOR, or install vim/nano/notepad."
-            ))
-        });
+        let result = resolve_task_with_editor(
+            &None,
+            "test-agent",
+            None,
+            &|| true,
+            &stub_editor_returns_no_editor_found,
+            &std::env::temp_dir,
+        );
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("No editor found"));
+    }
+
+    /// Exercises `write_task_template(&tmp_path, &template)?`'s error path at
+    /// its actual call site inside `resolve_task_with_editor` (as opposed to
+    /// `write_task_template_error_on_bad_path` below, which calls
+    /// `write_task_template` directly). The real OS temp directory used in
+    /// production is essentially always writable, so this is only reachable
+    /// at all via the injected `tmp_dir_fn` -- pointed here at a directory
+    /// whose parent doesn't exist, so the write fails deterministically on
+    /// both Unix (ENOENT) and Windows (ERROR_PATH_NOT_FOUND) before the
+    /// editor launcher is ever reached (if it *were* reached, the assertion
+    /// below on the error message would fail, since
+    /// `stub_editor_returns_no_editor_found`'s error text differs).
+    #[test]
+    fn resolve_task_with_editor_tmp_file_write_failure_propagates() {
+        let bad_tmp_dir = std::env::temp_dir()
+            .join("lev-definitely-nonexistent-parent-dir-for-task-template-xyz")
+            .join("nested");
+        let result = resolve_task_with_editor(
+            &None,
+            "test-agent",
+            None,
+            &|| true,
+            &stub_editor_returns_no_editor_found,
+            &move || bad_tmp_dir.clone(),
+        );
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Failed to create task temp file"));
     }
 
     // ─── resolve_task_with: editor path (stdin is a TTY) — Windows twins ──
