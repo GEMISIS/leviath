@@ -249,13 +249,12 @@ graph TD
 ```bash
 git clone https://github.com/GEMISIS/leviath.git
 cd leviath
-git config core.hooksPath .githooks
 cargo build
 cargo test --workspace
 cargo clippy --workspace
 ```
 
-The `git config` line is a one-time step per clone. It points git at the `.githooks/` directory where the pre-commit hook lives. The hook enforces formatting, clippy (warnings-as-errors), and all tests passing. CI additionally reports region/line/function coverage (branch coverage is not collected — see below) via `cargo xtask coverage`.
+No manual setup step needed for the pre-commit hook — `cargo test`/`cargo build` above pulls in `xtask`'s dev-dependencies, which includes [`cargo-husky`](https://github.com/rhysd/cargo-husky), and it installs the hook script from `.cargo-husky/hooks/pre-commit` into `.git/hooks/pre-commit` automatically the first time you build or test the workspace. The hook enforces formatting, clippy (warnings-as-errors), all tests passing, the coverage-suppression-marker lint (`cargo xtask check-exclusions`), and that the coverage ceiling in `xtask/src/coverage.rs` wasn't silently raised (`cargo xtask check-ceiling`) before every commit — it does *not* run the full `cargo xtask coverage` check (too slow for a local commit gate, several minutes); that runs in CI on every push instead, enforcing that same ceiling for real. If the hook script itself is ever updated (e.g. a new commit changes `.cargo-husky/hooks/pre-commit`), `cargo-husky` only reinstalls it on a *fresh* compile of the `cargo-husky` crate, not on ordinary incremental builds — run `cargo clean -p cargo-husky && cargo test -p xtask` to force it to pick up the change.
 
 ### Running coverage locally
 

@@ -15,3 +15,10 @@ serde_json = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3"
+# Auto-installs the pre-commit hook (from .cargo-husky/hooks/) into
+# .git/hooks/ the first time this crate is built or tested -- since xtask is
+# a workspace member, that happens for free the first time anyone runs
+# `cargo build`/`cargo test`/`cargo clippy` at the workspace level, so the
+# hook is a mandatory part of getting the project working locally rather
+# than a manual, easy-to-forget `git config core.hooksPath` step.
+cargo-husky = { version = "1", default-features = false, features = ["user-hooks"] }

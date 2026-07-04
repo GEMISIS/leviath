@@ -9,7 +9,7 @@
 //! -----------------
 //! * `crates/**/*.rs`       — all Rust source files (not `target/`, not `xtask/`)
 //! * `.github/workflows/`  — CI YAML files
-//! * `.githooks/`           — commit hooks
+//! * `.cargo-husky/hooks/`  — commit hooks (auto-installed by `cargo-husky`)
 //! * `.cargo/config.toml`  — cargo configuration
 
 use anyhow::Result;
@@ -160,7 +160,7 @@ pub fn scan_workspace_from(root: &Path) -> Result<Vec<Violation>> {
         ".github/workflows/alpha.yml",
         ".github/workflows/beta.yml",
         ".github/workflows/prod.yml",
-        ".githooks/pre-commit",
+        ".cargo-husky/hooks/pre-commit",
         ".cargo/config.toml",
     ] {
         let p = root.join(rel);
@@ -600,7 +600,7 @@ mod tests {
 
     #[test]
     fn scan_workspace_from_skips_nonexistent_config_files() {
-        // A root with no .github/, .githooks/, or .cargo/ should not error.
+        // A root with no .github/, .cargo-husky/, or .cargo/ should not error.
         let root = TempDir::new().unwrap();
         let result = scan_workspace_from(root.path());
         assert!(result.is_ok());

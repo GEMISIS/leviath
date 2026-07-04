@@ -74,6 +74,26 @@ jobs:
       - name: Check formatting
         run: cargo fmt --all -- --check
 
+  check-ceiling:
+    name: Coverage ceiling not raised
+    runs-on: ubuntu-latest
+    steps:
+      # fetch-depth: 2 so HEAD~1 (this push's parent commit) is available to
+      # diff against -- a lightweight, fast check that doesn't need the full
+      # cargo-llvm-cov toolchain, so it's a separate job from `coverage`
+      # rather than a step tacked onto it.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Check coverage ceiling wasn't silently raised
+        env:
+          CEILING_BASELINE_REF: HEAD~1
+        run: cargo run -p xtask -- check-ceiling
+
   coverage:
     name: Coverage (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
