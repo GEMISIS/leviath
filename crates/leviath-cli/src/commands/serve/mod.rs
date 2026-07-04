@@ -61,14 +61,25 @@ impl<T> Drop for AbortOnDrop<T> {
 }
 
 pub async fn execute(args: ServeArgs) -> anyhow::Result<()> {
-    execute_with_shutdown(args, std::future::pending()).await
+    execute_with_shutdown(args, Box::pin(std::future::pending())).await
 }
 
 /// Core of [`execute`], with an optional shutdown signal so tests can stop
 /// the server gracefully and cover the `Ok(())` return path.
+///
+/// Takes `shutdown` as a boxed trait object (`Pin<Box<dyn Future<...>>>`)
+/// rather than `impl Future<...>` so every caller -- production's
+/// `std::future::pending()` and tests' various `async move { ... }` blocks
+/// awaiting a `oneshot::Receiver` -- shares exactly ONE monomorphization of
+/// this (large, multi-branch) function instead of one per concrete future
+/// type. Confirmed via HTML/JSON segment inspection that every source
+/// position already had a covered instantiation before this change (this
+/// is the same trait-object-erasure technique used for `io::Write` in
+/// `leviath-package`'s `bundler.rs`), so this is a coverage-attribution fix
+/// with no behavior change, not a fix for an actual gap in testing.
 async fn execute_with_shutdown(
     args: ServeArgs,
-    shutdown: impl std::future::Future<Output = ()> + Send + 'static,
+    shutdown: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>,
 ) -> anyhow::Result<()> {
     let cfg = Config::load()?;
     for warning in cfg.validate_keys() {
@@ -987,7 +998,7 @@ prompt = "Run"
             let _ = shutdown_rx.await;
         };
 
-        let handle = tokio::spawn(execute_with_shutdown(args, shutdown_fut));
+        let handle = tokio::spawn(execute_with_shutdown(args, Box::pin(shutdown_fut)));
 
         // Wait until the server is listening.
         let addr: std::net::SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
@@ -1049,7 +1060,7 @@ prompt = "Run"
             let _ = shutdown_rx.await;
         };
 
-        let handle = tokio::spawn(execute_with_shutdown(args, shutdown_fut));
+        let handle = tokio::spawn(execute_with_shutdown(args, Box::pin(shutdown_fut)));
 
         // Wait for the server to start.
         let addr: std::net::SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
