@@ -409,40 +409,45 @@ impl Provider for OllamaProvider {
 }
 
 // NDJSON stream parser for Ollama's streaming API.
-pin_project_lite::pin_project! {
-    struct OllamaNdjsonStream<S> {
-        #[pin]
-        inner: S,
-        buffer: String,
-    }
+//
+// The inner byte stream is boxed as a trait object rather than kept generic.
+// In production this is always `reqwest`'s `bytes_stream()`; tests inject
+// dozens of distinct mock stream types via `new`'s generic parameter, and a
+// generic `impl<S> Stream` causes `cargo llvm-cov` to instrument each
+// monomorphized `poll_next` separately, leaving some artificially "uncovered"
+// even though the shared logic is fully exercised. Boxing collapses all of
+// that into a single concrete `poll_next` implementation.
+struct OllamaNdjsonStream {
+    inner: Pin<Box<dyn Stream<Item = std::result::Result<bytes::Bytes, reqwest::Error>> + Send>>,
+    buffer: String,
 }
 
-impl<S> OllamaNdjsonStream<S> {
-    fn new(inner: S) -> Self {
+impl OllamaNdjsonStream {
+    fn new<S>(inner: S) -> Self
+    where
+        S: Stream<Item = std::result::Result<bytes::Bytes, reqwest::Error>> + Send + 'static,
+    {
         Self {
-            inner,
+            inner: Box::pin(inner),
             buffer: String::new(),
         }
     }
 }
 
-impl<S> Stream for OllamaNdjsonStream<S>
-where
-    S: Stream<Item = std::result::Result<bytes::Bytes, reqwest::Error>>,
-{
+impl Stream for OllamaNdjsonStream {
     type Item = Result<StreamChunk>;
 
     fn poll_next(
         self: Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<Option<Self::Item>> {
-        let mut this = self.project();
+        let this = self.get_mut();
 
         loop {
             // Try to parse a complete JSON line
             if let Some(newline_pos) = this.buffer.find('\n') {
                 let line = this.buffer[..newline_pos].to_string();
-                *this.buffer = this.buffer[newline_pos + 1..].to_string();
+                this.buffer = this.buffer[newline_pos + 1..].to_string();
 
                 let line = line.trim();
                 if line.is_empty() {

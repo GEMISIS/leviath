@@ -506,40 +506,45 @@ impl Provider for AnthropicProvider {
 }
 
 // SSE stream parser for Anthropic's streaming API.
-pin_project_lite::pin_project! {
-    struct AnthropicSseStream<S> {
-        #[pin]
-        inner: S,
-        buffer: String,
-        current_tool_index: usize,
-    }
+//
+// The inner byte stream is boxed as a trait object rather than kept generic.
+// In production this is always `reqwest`'s `bytes_stream()`; tests inject
+// dozens of distinct mock stream types via `new`'s generic parameter, and a
+// generic `impl<S> Stream` causes `cargo llvm-cov` to instrument each
+// monomorphized `poll_next` separately, leaving some artificially "uncovered"
+// even though the shared logic is fully exercised. Boxing collapses all of
+// that into a single concrete `poll_next` implementation.
+struct AnthropicSseStream {
+    inner: Pin<Box<dyn Stream<Item = std::result::Result<bytes::Bytes, reqwest::Error>> + Send>>,
+    buffer: String,
+    current_tool_index: usize,
 }
 
-impl<S> AnthropicSseStream<S> {
-    fn new(inner: S) -> Self {
+impl AnthropicSseStream {
+    fn new<S>(inner: S) -> Self
+    where
+        S: Stream<Item = std::result::Result<bytes::Bytes, reqwest::Error>> + Send + 'static,
+    {
         Self {
-            inner,
+            inner: Box::pin(inner),
             buffer: String::new(),
             current_tool_index: 0,
         }
     }
 }
 
-impl<S> Stream for AnthropicSseStream<S>
-where
-    S: Stream<Item = std::result::Result<bytes::Bytes, reqwest::Error>>,
-{
+impl Stream for AnthropicSseStream {
     type Item = Result<StreamChunk>;
 
     fn poll_next(
         self: Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<Option<Self::Item>> {
-        let mut this = self.project();
+        let this = self.get_mut();
 
         loop {
             // Check if we have complete SSE events in the buffer
-            if let Some(chunk) = parse_sse_event(this.buffer, this.current_tool_index) {
+            if let Some(chunk) = parse_sse_event(&mut this.buffer, &mut this.current_tool_index) {
                 return std::task::Poll::Ready(Some(Ok(chunk)));
             }
 
@@ -557,7 +562,9 @@ where
                 }
                 std::task::Poll::Ready(None) => {
                     // Stream ended — try to parse any remaining data
-                    if let Some(chunk) = parse_sse_event(this.buffer, this.current_tool_index) {
+                    if let Some(chunk) =
+                        parse_sse_event(&mut this.buffer, &mut this.current_tool_index)
+                    {
                         return std::task::Poll::Ready(Some(Ok(chunk)));
                     }
                     return std::task::Poll::Ready(None);
