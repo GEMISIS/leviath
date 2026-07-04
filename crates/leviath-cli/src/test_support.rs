@@ -75,9 +75,37 @@ pub(crate) fn with_tracing<T>(f: impl FnOnce() -> T) -> T {
     f()
 }
 
+/// A value that always fails to serialize, for forcing `?`-propagated
+/// `serde_json::to_string`/`to_string_pretty` error arms in tests.
+///
+/// Every "write JSON to disk" helper across this crate serializes a
+/// trivially-serializable struct (`String`/`usize`/enums/`HashMap`s), so
+/// `serde_json::to_string_pretty(...)?` can never actually fail in
+/// practice -- there is no real input that trips it. Rather than leave
+/// those `?` error arms permanently uncovered (or fake up something more
+/// exotic), this wraps an arbitrary payload behind a `Serialize` impl that
+/// deterministically returns `Err`, so tests can drive the real error path
+/// through the real (non-generic-only-for-tests) code, honestly.
+pub(crate) struct PoisonSerialize;
+
+impl serde::Serialize for PoisonSerialize {
+    fn serialize<S>(&self, _serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        Err(serde::ser::Error::custom("PoisonSerialize always fails"))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn poison_serialize_always_errs() {
+        let err = serde_json::to_string(&PoisonSerialize).unwrap_err();
+        assert!(err.to_string().contains("PoisonSerialize always fails"));
+    }
 
     /// Exercises the no-op span-related trait methods (`new_span`, `record`,
     /// `record_follows_from`, `enter`, `exit`) that aren't reachable via

@@ -360,26 +360,34 @@ fn check_permissions() {
 fn check_permissions_at(path: &std::path::Path) {
     use std::os::unix::fs::PermissionsExt;
 
-    if !path.exists() {
-        return;
-    }
+    // A single `metadata()` call serves both as the "does this exist"
+    // check and the source of the mode bits below -- previously this was
+    // `path.exists()` (itself just `fs::metadata(path).is_ok()`) followed
+    // by a *second*, redundant `fs::metadata(path)` call. That redundancy
+    // left a permanently-uncovered branch: the only way the second call
+    // could fail differently from the first is a TOCTOU race (the file
+    // vanishing in the gap between the two calls), which isn't something
+    // any test can trigger deterministically. Calling `metadata()` exactly
+    // once removes that race window (and the unreachable branch) entirely.
+    let metadata = match std::fs::metadata(path) {
+        Ok(metadata) => metadata,
+        Err(_) => return,
+    };
 
-    if let Ok(metadata) = std::fs::metadata(path) {
-        let mode = metadata.permissions().mode();
-        if mode & 0o077 != 0 {
-            let span = tracing::warn_span!(
-                "permissive_config_perms",
-                path = tracing::field::Empty,
-                mode = tracing::field::Empty
-            );
-            let _enter = span.enter();
-            span.record("path", tracing::field::display(path.display()));
-            span.record("mode", format!("{:o}", mode));
-            log_permissive_perms_warning();
-            let perms = std::fs::Permissions::from_mode(0o600);
-            if let Err(e) = std::fs::set_permissions(path, perms) {
-                log_fix_config_file_permissions_failed(&e);
-            }
+    let mode = metadata.permissions().mode();
+    if mode & 0o077 != 0 {
+        let span = tracing::warn_span!(
+            "permissive_config_perms",
+            path = tracing::field::Empty,
+            mode = tracing::field::Empty
+        );
+        let _enter = span.enter();
+        span.record("path", tracing::field::display(path.display()));
+        span.record("mode", format!("{:o}", mode));
+        log_permissive_perms_warning();
+        let perms = std::fs::Permissions::from_mode(0o600);
+        if let Err(e) = std::fs::set_permissions(path, perms) {
+            log_fix_config_file_permissions_failed(&e);
         }
     }
 }

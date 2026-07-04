@@ -221,6 +221,7 @@ pub fn scan_file(path: &Path, is_rs: bool, violations: &mut Vec<Violation>) {
 
     if is_rs {
         scan_cfg_not_test_escape_hatches(path, &content, violations);
+        scan_coverage_confirmed_artifact_markers(path, &content, violations);
     }
 }
 
@@ -406,6 +407,98 @@ fn preceded_by_coverage_excluded_marker(lines: &[&str], attr_idx: usize) -> bool
             return false;
         }
     }
+}
+
+// ── `COVERAGE-CONFIRMED-ARTIFACT` marker audit ──────────────────────────────
+//
+// A narrower, DIFFERENT category from the `#[cfg(not(test))]` escape hatch
+// above: code that IS fully exercised by real, passing tests (every logical
+// branch demonstrably runs -- confirmed by direct JSON/HTML segment
+// inspection showing every source position has at least one covered
+// instantiation) but which `cargo-llvm-cov`'s region-counting mechanism
+// still undercounts anyway, most often because of generic-function
+// monomorphization: a shared generic helper called with several concrete
+// type arguments gets one region-coverage row per source position in the
+// summary table, but that table's cross-instantiation merge does not
+// consistently mark the position covered even when at least one
+// instantiation's copy of it genuinely executed.
+//
+// Using `#[cfg(not(test))]` isolation for this would be dishonest -- it
+// would hide genuinely-tested code from measurement instead of correctly
+// counting it as covered -- so it gets its own marker instead, deliberately
+// with NO twin requirement (there is no swapped-out real/fake pair here,
+// just one real function). Every function tagged with this marker must
+// still have a non-empty, reviewable justification, exactly like
+// `COVERAGE-EXCLUDED` above, and the marker must actually be attached (via
+// an immediately-following doc-comment/attribute block) to a real `fn` --
+// not left floating as an unattached comment.
+
+/// Doc-comment marker required on any function claimed to be a confirmed
+/// `cargo-llvm-cov` region-counting artifact (tested for real, undercounted
+/// anyway) rather than a genuine coverage gap.
+const COVERAGE_CONFIRMED_ARTIFACT_MARKER: &str = "COVERAGE-CONFIRMED-ARTIFACT:";
+
+/// Scan a single file's already-read `content` for `COVERAGE-CONFIRMED-ARTIFACT`
+/// marker violations: an empty reason, or a marker not attached to a `fn`.
+fn scan_coverage_confirmed_artifact_markers(
+    path: &Path,
+    content: &str,
+    violations: &mut Vec<Violation>,
+) {
+    let lines: Vec<&str> = content.lines().collect();
+
+    for (idx, line) in lines.iter().enumerate() {
+        let trimmed = line.trim();
+        if !trimmed.starts_with("///") {
+            continue;
+        }
+        let Some(pos) = trimmed.find(COVERAGE_CONFIRMED_ARTIFACT_MARKER) else {
+            continue;
+        };
+
+        let reason = trimmed[pos + COVERAGE_CONFIRMED_ARTIFACT_MARKER.len()..].trim();
+        if reason.is_empty() {
+            violations.push(Violation {
+                file: path.to_owned(),
+                line_num: idx + 1,
+                line: (*line).to_owned(),
+                pattern: "COVERAGE-CONFIRMED-ARTIFACT missing reason",
+                reason: "COVERAGE-CONFIRMED-ARTIFACT marker has no non-empty reason after \
+                          the colon"
+                    .to_owned(),
+            });
+            continue;
+        }
+
+        if fn_name_after_doc_or_attr_block(&lines, idx + 1).is_none() {
+            violations.push(Violation {
+                file: path.to_owned(),
+                line_num: idx + 1,
+                line: (*line).to_owned(),
+                pattern: "COVERAGE-CONFIRMED-ARTIFACT not attached to a fn",
+                reason: "COVERAGE-CONFIRMED-ARTIFACT marker must be immediately followed \
+                          (skipping further doc lines/attributes) by a `fn` declaration"
+                    .to_owned(),
+            });
+        }
+    }
+}
+
+/// Starting at `start_idx`, skip blank lines, further `///` doc-comment
+/// lines, and `#[...]` attribute lines, then try to read a function name off
+/// the first substantive line found. Returns `None` if that line isn't a
+/// `fn` declaration.
+fn fn_name_after_doc_or_attr_block(lines: &[&str], start_idx: usize) -> Option<String> {
+    let mut i = start_idx;
+    while i < lines.len() {
+        let trimmed = lines[i].trim();
+        if trimmed.is_empty() || trimmed.starts_with("///") || trimmed.starts_with("#[") {
+            i += 1;
+            continue;
+        }
+        return extract_fn_name(trimmed);
+    }
+    None
 }
 
 // ── Tests ────────────────────────────────────────────────────────────────────
@@ -1011,6 +1104,82 @@ mod tests {
     fn cfg_not_test_missing_both_marker_and_twin_reports_two_violations() {
         let v = scan_content("#[cfg(not(test))]\nfn real_thing() {}\n", true);
         assert_eq!(v.len(), 2, "expected both violations: {v:?}");
+    }
+
+    // ── `COVERAGE-CONFIRMED-ARTIFACT` marker audit ────────────────────────────
+
+    #[test]
+    fn coverage_confirmed_artifact_with_reason_and_fn_is_clean() {
+        let v = scan_content(
+            "/// COVERAGE-CONFIRMED-ARTIFACT: generic monomorphization undercounts \
+             this despite every instantiation being covered (confirmed via HTML).\n\
+             fn generic_helper() {}\n",
+            true,
+        );
+        assert!(v.is_empty(), "expected no violations: {v:?}");
+    }
+
+    #[test]
+    fn coverage_confirmed_artifact_missing_reason_is_violation() {
+        let v = scan_content(
+            "/// COVERAGE-CONFIRMED-ARTIFACT:\nfn generic_helper() {}\n",
+            true,
+        );
+        assert!(
+            v.iter().any(|v| v
+                .pattern
+                .contains("COVERAGE-CONFIRMED-ARTIFACT missing reason")),
+            "expected a missing-reason violation: {v:?}"
+        );
+    }
+
+    #[test]
+    fn coverage_confirmed_artifact_not_attached_to_fn_is_violation() {
+        let v = scan_content(
+            "/// COVERAGE-CONFIRMED-ARTIFACT: some reason\nstruct NotAFunction;\n",
+            true,
+        );
+        assert!(
+            v.iter().any(|v| v
+                .pattern
+                .contains("COVERAGE-CONFIRMED-ARTIFACT not attached to a fn")),
+            "expected a not-attached-to-fn violation: {v:?}"
+        );
+    }
+
+    #[test]
+    fn coverage_confirmed_artifact_as_last_line_of_file_is_violation() {
+        let v = scan_content("/// COVERAGE-CONFIRMED-ARTIFACT: some reason", true);
+        assert!(
+            v.iter().any(|v| v
+                .pattern
+                .contains("COVERAGE-CONFIRMED-ARTIFACT not attached to a fn")),
+            "expected a not-attached-to-fn violation: {v:?}"
+        );
+    }
+
+    #[test]
+    fn coverage_confirmed_artifact_skips_further_doc_lines_and_attributes() {
+        let v = scan_content(
+            "/// COVERAGE-CONFIRMED-ARTIFACT: some reason, explained further\n\
+             /// across multiple doc-comment lines before the attribute.\n\
+             #[allow(dead_code)]\n\
+             fn generic_helper() {}\n",
+            true,
+        );
+        assert!(v.is_empty(), "expected no violations: {v:?}");
+    }
+
+    #[test]
+    fn coverage_confirmed_artifact_in_plain_comment_is_ignored() {
+        // A plain `//` comment doesn't count as the doc-comment marker even
+        // if it contains the right literal text -- mirrors how the
+        // COVERAGE-EXCLUDED marker is scoped to `///` lines only.
+        let v = scan_content(
+            "// COVERAGE-CONFIRMED-ARTIFACT: some reason\nfn generic_helper() {}\n",
+            true,
+        );
+        assert!(v.is_empty(), "expected no violations: {v:?}");
     }
 
     #[test]
