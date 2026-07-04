@@ -278,6 +278,26 @@ impl Config {
     }
 }
 
+/// Resolve the user's home directory for every OTHER `~/.leviath/...`-relative
+/// path this crate uses (agent installs, run state, dashboard log, etc. --
+/// anything that isn't `Config::config_path()`, which already has its own
+/// narrower `LEVIATH_CONFIG_PATH` override just above).
+///
+/// `LEVIATH_HOME` overrides this when set, so tests (including ones that
+/// spawn the real `lev` binary as a child process, not just in-process unit
+/// tests) can redirect every home-relative path at once. This exists because
+/// `dirs::home_dir()` cannot be redirected via `$HOME`/`%USERPROFILE%` env
+/// vars on macOS (`NSHomeDirectory()`) or Windows (`SHGetKnownFolderPath`) --
+/// confirmed via real Windows CI failures in `cli_dispatch.rs`'s `add`/
+/// `remove` integration tests even after overriding `HOME`+`USERPROFILE` for
+/// the spawned child process.
+pub fn leviath_home_dir() -> Option<PathBuf> {
+    if let Ok(override_home) = std::env::var("LEVIATH_HOME") {
+        return Some(PathBuf::from(override_home));
+    }
+    dirs::home_dir()
+}
+
 /// COVERAGE-EXCLUDED: llvm-cov's tracing-macro message-literal region is
 /// permanently uncovered regardless of restructuring (event!/pre-formatted
 /// let/inline(never)/crate-version were all tried and ruled out this
@@ -557,6 +577,48 @@ pub(crate) fn isolate_config_path_for_test(unique: &str) -> ConfigPathTestGuard 
 mod tests {
     use super::*;
     use crate::test_support::with_tracing;
+
+    // ─── leviath_home_dir ────────────────────────────────────────────────────
+
+    #[test]
+    fn leviath_home_dir_uses_override_when_set() {
+        let _lock = CONFIG_PATH_ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let original = std::env::var_os("LEVIATH_HOME");
+        unsafe {
+            std::env::set_var("LEVIATH_HOME", "/tmp/leviath-home-override-test");
+        }
+        let result = leviath_home_dir();
+        unsafe {
+            match &original {
+                Some(v) => std::env::set_var("LEVIATH_HOME", v),
+                None => std::env::remove_var("LEVIATH_HOME"),
+            }
+        }
+        assert_eq!(
+            result,
+            Some(std::path::PathBuf::from("/tmp/leviath-home-override-test"))
+        );
+    }
+
+    #[test]
+    fn leviath_home_dir_falls_back_to_dirs_home_dir_when_unset() {
+        let _lock = CONFIG_PATH_ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let original = std::env::var_os("LEVIATH_HOME");
+        unsafe {
+            std::env::remove_var("LEVIATH_HOME");
+        }
+        let result = leviath_home_dir();
+        unsafe {
+            if let Some(v) = &original {
+                std::env::set_var("LEVIATH_HOME", v);
+            }
+        }
+        assert_eq!(result, dirs::home_dir());
+    }
 
     // ─── load_from_path / save_to_path (path-parameterized for testability) ─
 

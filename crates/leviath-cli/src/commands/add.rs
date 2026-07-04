@@ -21,7 +21,7 @@ fn agents_dir_from_home(home: Option<std::path::PathBuf>) -> anyhow::Result<std:
 
 pub async fn execute(args: AddArgs) -> anyhow::Result<()> {
     let installer = leviath_package::AgentInstaller::new();
-    let agents_dir = agents_dir_from_home(dirs::home_dir())?;
+    let agents_dir = agents_dir_from_home(crate::config::leviath_home_dir())?;
     execute_with(&args, &installer, &agents_dir).await
 }
 

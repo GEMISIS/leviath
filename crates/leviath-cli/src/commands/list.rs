@@ -172,7 +172,7 @@ fn get_agents_dir_from_home(home: Option<PathBuf>) -> anyhow::Result<PathBuf> {
 }
 
 fn get_agents_dir() -> anyhow::Result<PathBuf> {
-    get_agents_dir_from_home(dirs::home_dir())
+    get_agents_dir_from_home(crate::config::leviath_home_dir())
 }
 
 #[cfg(test)]
