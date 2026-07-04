@@ -43,8 +43,8 @@ pub async fn run_interactive_stage<F, Fut>(
     executor: &mut F,
 ) -> anyhow::Result<()>
 where
-    F: FnMut(Vec<leviath_providers::ToolCall>) -> Fut,
-    Fut: std::future::Future<Output = Vec<(String, String)>>,
+    F: FnMut(Vec<leviath_providers::ToolCall>) -> Fut + Send,
+    Fut: std::future::Future<Output = Vec<(String, String)>> + Send,
 {
     use crate::interaction::{
         make_interaction_id, request_interaction_async, response_as_text, InteractionRequest,
@@ -217,8 +217,8 @@ pub async fn run_autonomous_stage<F, Fut>(
     executor: &mut F,
 ) -> anyhow::Result<()>
 where
-    F: FnMut(Vec<leviath_providers::ToolCall>) -> Fut,
-    Fut: std::future::Future<Output = Vec<(String, String)>>,
+    F: FnMut(Vec<leviath_providers::ToolCall>) -> Fut + Send,
+    Fut: std::future::Future<Output = Vec<(String, String)>> + Send,
 {
     let response = engine
         .run_inference_loop_filtered(
@@ -272,8 +272,8 @@ pub async fn run_interactive_points_stage<F, Fut>(
     executor: &mut F,
 ) -> anyhow::Result<()>
 where
-    F: FnMut(Vec<leviath_providers::ToolCall>) -> Fut,
-    Fut: std::future::Future<Output = Vec<(String, String)>>,
+    F: FnMut(Vec<leviath_providers::ToolCall>) -> Fut + Send,
+    Fut: std::future::Future<Output = Vec<(String, String)>> + Send,
 {
     run_interactive_points_stage_with(
         engine,
@@ -316,8 +316,8 @@ async fn run_interactive_points_stage_with<F, Fut>(
           + Sync),
 ) -> anyhow::Result<()>
 where
-    F: FnMut(Vec<leviath_providers::ToolCall>) -> Fut,
-    Fut: std::future::Future<Output = Vec<(String, String)>>,
+    F: FnMut(Vec<leviath_providers::ToolCall>) -> Fut + Send,
+    Fut: std::future::Future<Output = Vec<(String, String)>> + Send,
 {
     use crate::interaction::{
         make_interaction_id, request_interaction_async, response_as_choice, response_as_text,

@@ -80,6 +80,17 @@ pub struct AgentEngine {
     message_rx: mpsc::UnboundedReceiver<AgentMessage>,
 }
 
+/// Boxed future returned by a type-erased tool executor. See
+/// [`AgentEngine::run_inference_loop_filtered`] for why the executor
+/// closure is boxed instead of staying generic.
+type ToolResultsFuture<'a> =
+    std::pin::Pin<Box<dyn std::future::Future<Output = Vec<(String, String)>> + Send + 'a>>;
+
+/// Type-erased tool executor: takes a batch of tool calls, returns a boxed
+/// future resolving to `(tool_call_id, result)` pairs.
+type ToolExecutorDyn<'a> =
+    dyn FnMut(Vec<leviath_providers::ToolCall>) -> ToolResultsFuture<'a> + Send + 'a;
+
 impl AgentEngine {
     /// Create a new agent engine.
     pub fn new() -> Self {
@@ -406,10 +417,10 @@ impl AgentEngine {
         mut tool_executor: F,
     ) -> std::result::Result<InferenceResponse, ProviderError>
     where
-        F: FnMut(Vec<leviath_providers::ToolCall>) -> Fut,
+        F: FnMut(Vec<leviath_providers::ToolCall>) -> Fut + Send,
         Fut: std::future::Future<
-            Output = Vec<(String, String)>, // Vec<(tool_call_id, result)>
-        >,
+                Output = Vec<(String, String)>, // Vec<(tool_call_id, result)>
+            > + Send,
     {
         self.run_inference_loop_filtered(
             entity,
@@ -431,8 +442,25 @@ impl AgentEngine {
     /// `tool_result_routing`: if Some, routes tool results to configured regions.
     /// `compaction_config`: if Some, automatically runs eviction + compaction after
     /// each iteration when the context window is filling up.
+    ///
+    /// This is a thin, generic wrapper: it boxes `tool_executor` into a
+    /// trait-object closure and immediately delegates to
+    /// [`Self::run_inference_loop_filtered_dyn`], which contains the entire
+    /// actual loop body as a *single, non-generic* function.
+    ///
+    /// This split exists purely for coverage measurement, not behavior.
+    /// `cargo-llvm-cov` instruments each monomorphization of a generic
+    /// function separately; this function used to contain the whole loop
+    /// body directly, and with ~15-20 call sites (each passing a distinct
+    /// closure type) that meant ~15-20 separate coverage-mapping instances
+    /// of the same branches. Even though every branch was covered by the
+    /// union of all tests, llvm-cov would occasionally report a region as
+    /// uncovered for one instantiation, undercounting real coverage. Moving
+    /// the logic into one non-generic method compiles it (and instruments
+    /// it) exactly once, regardless of how many distinct closure types call
+    /// through this wrapper.
     #[allow(clippy::too_many_arguments)]
-    pub async fn run_inference_loop_filtered<F, Fut>(
+    pub async fn run_inference_loop_filtered<'p, F, Fut>(
         &mut self,
         entity: Entity,
         provider_name: &str,
@@ -442,14 +470,49 @@ impl AgentEngine {
         tool_filter: Option<&[String]>,
         tool_result_routing: Option<&ToolResultRoutingConfig>,
         compaction_config: Option<&leviath_core::CompactionConfig>,
-        tool_executor: &mut F,
+        tool_executor: &'p mut F,
     ) -> std::result::Result<InferenceResponse, ProviderError>
     where
-        F: FnMut(Vec<leviath_providers::ToolCall>) -> Fut,
+        F: FnMut(Vec<leviath_providers::ToolCall>) -> Fut + Send,
         Fut: std::future::Future<
-            Output = Vec<(String, String)>, // Vec<(tool_call_id, result)>
-        >,
+                Output = Vec<(String, String)>, // Vec<(tool_call_id, result)>
+            > + Send
+            + 'p,
     {
+        let mut boxed_executor =
+            move |tool_calls: Vec<leviath_providers::ToolCall>| -> ToolResultsFuture<'p> {
+                Box::pin(tool_executor(tool_calls))
+            };
+
+        self.run_inference_loop_filtered_dyn(
+            entity,
+            provider_name,
+            model,
+            tools,
+            max_iterations,
+            tool_filter,
+            tool_result_routing,
+            compaction_config,
+            &mut boxed_executor,
+        )
+        .await
+    }
+
+    /// Non-generic core of [`Self::run_inference_loop_filtered`]. See that
+    /// method's doc comment for why this split exists.
+    #[allow(clippy::too_many_arguments)]
+    async fn run_inference_loop_filtered_dyn<'e>(
+        &mut self,
+        entity: Entity,
+        provider_name: &str,
+        model: &str,
+        tools: Vec<Tool>,
+        max_iterations: usize,
+        tool_filter: Option<&[String]>,
+        tool_result_routing: Option<&ToolResultRoutingConfig>,
+        compaction_config: Option<&leviath_core::CompactionConfig>,
+        tool_executor: &mut ToolExecutorDyn<'e>,
+    ) -> std::result::Result<InferenceResponse, ProviderError> {
         let mut last_response = None;
 
         for iteration in 0..max_iterations {
@@ -909,13 +972,12 @@ mod tests {
 
         // Message should still be in inbox
         let inbox = engine.world().get::<MessageInbox>(entity).unwrap();
-        #[rustfmt::skip]
-        assert_eq!(inbox.messages.len(), 1, "message should stay in inbox when accepts_messages=false");
+        assert_eq!(inbox.messages.len(), 1);
 
         // Context should be empty
         let window = engine.world().get::<ContextWindow>(entity).unwrap();
         let conv = window.get_region("conversation").unwrap();
-        assert!(conv.content.is_empty(), "no messages should be in context");
+        assert!(conv.content.is_empty());
     }
 
     #[test]
@@ -961,8 +1023,7 @@ mod tests {
         let window = engine.world().get::<ContextWindow>(entity).unwrap();
         let conv = window.get_region("conversation").unwrap();
         assert_eq!(conv.content.len(), 1);
-        #[rustfmt::skip]
-        assert!(conv.content[0].content.starts_with("User: "), "message should be formatted as 'User: ...' not '[Message]: ...'");
+        assert!(conv.content[0].content.starts_with("User: "));
         assert!(conv.content[0].content.contains("focus on error handling"));
 
         // Inbox should be drained
@@ -1333,7 +1394,7 @@ mod tests {
 
         let result = engine.evict_and_compact(entity, &cc).await;
         assert!(result.is_ok());
-        assert!(result.unwrap() > 0, "expected tokens to be freed");
+        assert!(result.unwrap() > 0);
     }
 
     #[tokio::test]
@@ -1420,11 +1481,7 @@ mod tests {
         let result = engine.evict_and_compact(entity, &cc).await;
         assert!(result.is_err());
         let err_msg = result.unwrap_err().to_string();
-        assert!(
-            err_msg.to_lowercase().contains("pinned"),
-            "expected a pinned-regions-over-budget error, got: {}",
-            err_msg
-        );
+        assert!(err_msg.to_lowercase().contains("pinned"));
     }
 
     #[tokio::test]
@@ -2239,13 +2296,11 @@ mod tests {
         // After compaction, conversation should be cleared
         let w = engine.world().get::<ContextWindow>(entity).unwrap();
         let conv = w.get_region("conversation").unwrap();
-        #[rustfmt::skip]
-        assert!(conv.content.is_empty(), "conversation should be cleared after compaction");
+        assert!(conv.content.is_empty());
 
         // History should have the summary
         let hist = w.get_region("conversation_history").unwrap();
-        #[rustfmt::skip]
-        assert!(!hist.content.is_empty(), "history should contain the summary");
+        assert!(!hist.content.is_empty());
     }
 
     #[tokio::test]
@@ -2420,8 +2475,7 @@ mod tests {
         // Tool results should be in scratch (not tool_results) because persist=false
         let w = engine.world().get::<ContextWindow>(entity).unwrap();
         let scratch = w.get_region("scratch").unwrap();
-        #[rustfmt::skip]
-        assert!(!scratch.content.is_empty(), "scratch should have tool results when persist=false");
+        assert!(!scratch.content.is_empty());
     }
 
     #[tokio::test]
@@ -2517,8 +2571,7 @@ mod tests {
         // ("tool_results") target region even though persist=false.
         let w = engine.world().get::<ContextWindow>(entity).unwrap();
         let tool_results = w.get_region("tool_results").unwrap();
-        #[rustfmt::skip]
-        assert!(!tool_results.content.is_empty(), "tool_results should have results when scratch is absent");
+        assert!(!tool_results.content.is_empty());
     }
 
     #[tokio::test]
@@ -2616,10 +2669,7 @@ mod tests {
         // bash tool results should go to bash_output (override)
         let w = engine.world().get::<ContextWindow>(entity).unwrap();
         let bash_output = w.get_region("bash_output").unwrap();
-        assert!(
-            !bash_output.content.is_empty(),
-            "bash tool results should route to override region"
-        );
+        assert!(!bash_output.content.is_empty());
     }
 
     #[test]
