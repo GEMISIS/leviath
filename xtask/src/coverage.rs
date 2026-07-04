@@ -137,20 +137,38 @@ pub fn run_with(runner: &dyn Runner) -> Result<()> {
 /// exactly the coverage-regression this ratchet exists to catch.
 ///
 /// These include a deliberate buffer above the measured baseline (regions
-/// 437, lines 184, functions 16) to absorb real, observed run-to-run
-/// measurement jitter: three consecutive full clean-rebuild runs of the
-/// *identical* codebase (no code changes between them) produced missed
-/// counts of 437/184/16, then 440/187/17, then 442/188/18, then back down to
-/// 437/184/16 -- non-monotonic noise, not a growing leak, most likely from
-/// thread-scheduling/timing non-determinism in the full workspace test run
-/// interacting with coverage instrumentation. An exact-match ceiling would
-/// make this ratchet spuriously fail CI on jitter alone; the buffer below is
-/// sized well above the observed ~5/4/2 jitter range while still being tight
-/// enough to catch a real regression (untested new code is rarely this
-/// small).
-const MAX_MISSED_REGIONS: u64 = 460;
-const MAX_MISSED_LINES: u64 = 200;
-const MAX_MISSED_FUNCTIONS: u64 = 25;
+/// 437, lines 184, functions 16, on macOS) to absorb real, observed
+/// run-to-run measurement jitter: three consecutive full clean-rebuild runs
+/// of the *identical* codebase (no code changes between them) produced
+/// missed counts of 437/184/16, then 440/187/17, then 442/188/18, then back
+/// down to 437/184/16 -- non-monotonic noise, not a growing leak, most
+/// likely from thread-scheduling/timing non-determinism in the full
+/// workspace test run interacting with coverage instrumentation.
+///
+/// **The ceiling is set from real Windows CI data, not the macOS baseline
+/// above, because Windows measures meaningfully worse: 627/356/36** (a real
+/// GitHub Actions `windows-latest` run: <https://github.com/GEMISIS/leviath/actions/runs/28687995678>,
+/// job `Coverage (windows-latest)`). This isn't jitter -- it's `#[cfg(unix)]`
+/// -gated tests (permission bits, symlinks, process signals, TTY handling)
+/// compiling out entirely on Windows, leaving both the real Unix code path
+/// and its `#[cfg(not(unix))]` twin under-exercised there in ways this
+/// project hasn't had the Windows-side investigation time to close yet. The
+/// same compiled ceiling constants apply to every platform in the CI matrix
+/// (there's one binary, one set of constants), so the ceiling must
+/// accommodate the worst platform, not the best one -- "green locally on
+/// macOS" was explicitly flagged as insufficient evidence for this exact
+/// reason before this enforcement was turned on. An exact-match ceiling
+/// would make this ratchet spuriously fail CI on jitter alone, so these are
+/// set with a buffer above the real 627/356/36 Windows measurement -- large
+/// enough to comfortably absorb jitter on top of an already-worse baseline,
+/// while still tight enough to catch a real regression (untested new code
+/// large enough to move these numbers by dozens of regions is not subtle).
+/// TODO: investigate and close the real Windows-specific gap (likely
+/// `#[cfg(not(unix))]` twins of the permission/symlink/signal/TTY tests that
+/// only run on Unix), then lower these back toward the macOS baseline.
+const MAX_MISSED_REGIONS: u64 = 660;
+const MAX_MISSED_LINES: u64 = 380;
+const MAX_MISSED_FUNCTIONS: u64 = 46;
 
 /// Core reporting logic extracted from `run_with` for unit-testability.
 ///
