@@ -404,14 +404,15 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let args = args_for(dir.path(), "manifest-write-fails");
 
-        let result = execute_with(args, &|path, _contents| {
-            if path.file_name().and_then(|n| n.to_str()) == Some("agent.leviath") {
-                Err(std::io::Error::other(
-                    "injected agent.leviath write failure",
-                ))
-            } else {
-                Ok(())
-            }
+        // `agent.leviath` is unconditionally the *first* write `execute_with`
+        // attempts, so failing on every call (rather than branching on the
+        // path) is sufficient here and avoids an else-arm that could never
+        // actually run: the `?` on this first failure returns before any
+        // other path is ever passed to this closure.
+        let result = execute_with(args, &|_path, _contents| {
+            Err(std::io::Error::other(
+                "injected agent.leviath write failure",
+            ))
         });
 
         let err = result.unwrap_err();
