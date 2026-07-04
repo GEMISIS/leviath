@@ -139,14 +139,15 @@ pub fn run_with(runner: &dyn Runner) -> Result<()> {
 /// added for real fault-injection testing, `#[cfg(not(test))]`/`#[cfg(test)]`
 /// twins for genuinely-untestable real-IO, and `COVERAGE-CONFIRMED-ARTIFACT`
 /// markers for the residual, individually-investigated monomorphization
-/// artifacts that couldn't be collapsed further) -- two real CI runs on the
-/// identical commit measured 18/3/0 (macOS) and 33/11/3 (ubuntu) missed
-/// regions/lines/functions. This ceiling is set with real headroom above the
-/// worse of those (ubuntu's 33/11/3) to comfortably absorb further jitter
-/// (including on `windows-latest`, historically the worst-measuring
-/// platform) while still being roughly 85% smaller than this project's prior
-/// ceiling (660/380/46) -- large enough to not be spuriously flaky, small
-/// enough that a real, untested new feature would still trip it.
+/// artifacts that couldn't be collapsed further) -- three real CI runs on the
+/// identical commit measured 18/3/0 (macOS), 33/11/3 (ubuntu), and 117/61/11
+/// (windows -- confirming this platform's historical pattern of measuring
+/// meaningfully worse, same as this project's prior ceiling's own evidence).
+/// This ceiling is set with real headroom above the worst of those
+/// (windows's 117/61/11) to comfortably absorb further jitter while still
+/// being roughly 70% smaller than this project's prior ceiling (660/380/46)
+/// -- large enough to not be spuriously flaky, small enough that a real,
+/// untested new feature would still trip it.
 ///
 /// If future evidence shows this ceiling is still too tight (spurious CI
 /// failures with no corresponding code change) or too loose (a real
@@ -154,9 +155,9 @@ pub fn run_with(runner: &dyn Runner) -> Result<()> {
 /// measurements the same way this one was set and adjust -- never raise it
 /// on a hunch, and never lower it below what real, repeated CI evidence
 /// supports.
-const MAX_MISSED_REGIONS: u64 = 100;
-const MAX_MISSED_LINES: u64 = 40;
-const MAX_MISSED_FUNCTIONS: u64 = 10;
+const MAX_MISSED_REGIONS: u64 = 200;
+const MAX_MISSED_LINES: u64 = 90;
+const MAX_MISSED_FUNCTIONS: u64 = 20;
 
 /// Core reporting logic extracted from `run_with` for unit-testability.
 ///
