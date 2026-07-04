@@ -424,6 +424,18 @@ description = "test"
         assert!(result.is_err());
     }
 
+    #[test]
+    fn unwrap_dir_entry_propagates_a_real_err_argument() {
+        // `unwrap_dir_entry`'s own `Ok(entry?)` `?` still has a real error
+        // arm distinct from the `FORCE_DIR_ENTRY_ERROR`-triggered early
+        // `bail!` above it (that toggle short-circuits *before* this line
+        // is ever reached) -- `DirEntry` isn't constructible directly, but
+        // its `Result` wrapper doesn't need a real one to test the `Err`
+        // case: pass a synthetic `io::Error` straight in.
+        let result = unwrap_dir_entry(Err(std::io::Error::other("synthetic entry error")));
+        assert!(result.is_err());
+    }
+
     // ─── install_from_dir ──────────────────────────────────────────────────
 
     #[test]
