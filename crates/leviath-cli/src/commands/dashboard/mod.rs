@@ -933,6 +933,41 @@ mod tests {
         assert!(result.is_none());
     }
 
+    // ─── CrosstermEventSource::poll_event: `?`-propagation branches ─────────
+    //
+    // Both `poll_event` tests above only ever exercise the `Ok` side of each
+    // `?` (`(self.poll_fn)(timeout)?` and `(self.read_fn)()?`). Inject fake
+    // fn pointers that return `Err` to exercise the error-propagation branch
+    // of each `?` individually -- neither touches a real terminal.
+
+    fn mock_poll_err(_: Duration) -> std::io::Result<bool> {
+        Err(std::io::Error::other("simulated poll failure"))
+    }
+
+    fn mock_read_err() -> std::io::Result<Event> {
+        Err(std::io::Error::other("simulated read failure"))
+    }
+
+    #[test]
+    fn crossterm_event_source_poll_fn_error_propagates() {
+        let mut src = CrosstermEventSource {
+            poll_fn: mock_poll_err,
+            read_fn: mock_read_esc,
+        };
+        let result = src.poll_event(Duration::from_millis(0));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn crossterm_event_source_read_fn_error_propagates() {
+        let mut src = CrosstermEventSource {
+            poll_fn: mock_poll_true,
+            read_fn: mock_read_err,
+        };
+        let result = src.poll_event(Duration::from_millis(0));
+        assert!(result.is_err());
+    }
+
     // ─── CrosstermEventSource::new / CrosstermSetup::new constructors ───────
     //
     // Both constructors only ever *store* fn pointers (crossterm's real
@@ -975,6 +1010,30 @@ mod tests {
         };
         assert!(setup.enable().is_ok());
         setup.disable();
+    }
+
+    #[test]
+    fn crossterm_setup_enable_enter_alt_error_propagates_after_enable_raw_succeeds() {
+        // `execute_core_enable_error_propagates` (below) sets BOTH `enable_raw`
+        // and `enter_alt` to a failing fn, so `enable_raw`'s own `?` returns
+        // first and `enter_alt` is never even called -- that test can't reach
+        // `enter_alt`'s `?`-propagation branch in `CrosstermSetup::enable`.
+        // Here `enable_raw` succeeds so control reaches `(self.enter_alt)()?`,
+        // which then fails, exercising that second `?`'s error path.
+        fn ok() -> std::io::Result<()> {
+            Ok(())
+        }
+        fn fail() -> std::io::Result<()> {
+            Err(std::io::Error::other("simulated enter_alt failure"))
+        }
+        let mut setup = CrosstermSetup {
+            enable_raw: ok,
+            disable_raw: ok,
+            enter_alt: fail,
+            leave_alt: ok,
+            viewport: Viewport::Fixed(ratatui::layout::Rect::new(0, 0, 80, 24)),
+        };
+        assert!(setup.enable().is_err());
     }
 
     // ─── FailingDrawBackend: non-draw trait methods ──────────────────────────
@@ -1127,4 +1186,14 @@ mod tests {
     // `foreground.rs`, whose test twins still delegate into their tested
     // generic cores -- `execute` IS the top of this call graph, so there's
     // no "tested core with a fake factory" left to delegate to).
+    //
+    // The `#[cfg(test)]` stub itself (the bare `Ok(())` body above) is safe
+    // to call directly, though -- it touches no I/O at all -- so the test
+    // below closes out that stub's own coverage rather than leaving it as an
+    // uncalled function.
+    #[tokio::test]
+    async fn execute_test_stub_returns_ok() {
+        let result = execute(DashboardArgs {}).await;
+        assert!(result.is_ok());
+    }
 }

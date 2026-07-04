@@ -2089,6 +2089,50 @@ mod tests {
     }
 
     #[test]
+    fn sync_from_run_state_new_agent_complete_interactive_after_initial_sync_no_needs_input_toast()
+    {
+        // Sibling of the `..._toasts_after_initial_sync_waiting` test above,
+        // but for a brand-new agent that's already `CompleteInteractive`
+        // (rather than `WaitingInput`) with a pending request. Exercises the
+        // `false` arm of `matches!(run.status, RunStatus::WaitingInput)` in
+        // the "new agent" branch of `sync_from_run_state` -- every other
+        // test reaching that `if self.initial_sync_done { ... }` block does
+        // so with `run.status == WaitingInput`, so that `matches!`'s `false`
+        // arm (CompleteInteractive input is optional, no "needs input"
+        // toast) was never taken there.
+        let _guard = crate::runstate::isolate_runs_dir_for_test(
+            "sync_from_run_state_new_agent_complete_interactive_after_initial_sync_no_needs_input_toast",
+        );
+        let run_id = "test-sync-new-ci-after-initial-no-toast";
+        cleanup_run(run_id);
+
+        let mut dash = make_test_dashboard();
+        dash.initial_sync_done = true; // simulate: not the app's first sync
+
+        let meta = make_run_meta(run_id, RunStatus::CompleteInteractive);
+        runstate::create_run(&meta).unwrap();
+        let req = crate::interaction::InteractionRequest::free_text(
+            "req1",
+            "Any final feedback?",
+            "review",
+            false,
+        );
+        crate::interaction::write_request(run_id, &req).unwrap();
+
+        dash.sync_from_run_state();
+
+        assert!(!dash
+            .toasts
+            .iter()
+            .any(|t| t.message.contains("needs input")));
+        // The separate "completed" toast branch still fires for a brand-new
+        // Complete/CompleteInteractive agent.
+        assert!(dash.toasts.iter().any(|t| t.message.contains("completed")));
+
+        cleanup_run(run_id);
+    }
+
+    #[test]
     fn sync_from_run_state_new_agent_toasts_after_initial_sync_complete() {
         let _guard = crate::runstate::isolate_runs_dir_for_test(
             "sync_from_run_state_new_agent_toasts_after_initial_sync_complete",

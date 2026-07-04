@@ -355,6 +355,70 @@ mod tests {
         terminal.draw(|f| dash.draw(f)).unwrap();
     }
 
+    #[test]
+    fn draw_detail_view_graph_agent_uses_taller_stage_tabs_area() {
+        // `tabs_h` is `7` when `agent.graph_info.is_some()` and `3` otherwise
+        // -- every other detail-view test above leaves `graph_info: None`, so
+        // the `7` branch was never exercised. Build a minimal
+        // `GraphTransitionInfo` (same shape used by `render/stages.rs`'s own
+        // graph tests) purely to flip `is_graph_view` to `true`; the graph
+        // rendering itself is already exhaustively covered there.
+        use crate::commands::dashboard::graph::GraphTransitionInfo;
+        use std::collections::HashMap;
+
+        let backend = TestBackend::new(120, 40);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut dash = make_test_dashboard();
+        let mut agent = make_test_agent("run-graph-tabs", AgentDisplayStatus::Active);
+        agent.graph_info = Some(GraphTransitionInfo {
+            edges: HashMap::new(),
+            entry_stage: "main".to_string(),
+            stage_names: vec!["main".to_string()],
+        });
+        dash.agents.push(agent);
+        dash.update_display_indices();
+        dash.detail_view = true;
+
+        terminal.draw(|f| dash.draw(f)).unwrap();
+    }
+
+    #[test]
+    fn draw_detail_view_input_mode_waiting_wrong_stage_no_prompt_pane() {
+        // `prompt_height`'s condition is
+        // `has_prompt || (input_mode && is_waiting && selected_stage_can_respond()) || (input_mode && accepts_messages)`.
+        // Every other test either has `has_prompt == true` (short-circuiting
+        // before the middle term's own `selected_stage_can_respond()` call
+        // ever runs) or isn't in `input_mode` at all. Force `has_prompt` to
+        // `false` via a wrong `selected_stage` while `input_mode` and
+        // `is_waiting` are both `true`, and `accepts_messages` is `false`
+        // (status is `Waiting`, not `Active`) so no term short-circuits away
+        // the middle term's own `selected_stage_can_respond()` re-check.
+        let backend = TestBackend::new(120, 40);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut dash = make_test_dashboard();
+        let mut agent = make_test_agent("run-wrong-stage-input", AgentDisplayStatus::Waiting);
+        agent.waiting_prompt = Some("Pick one".to_string());
+        agent.pending_request = Some(crate::interaction::InteractionRequest::multiple_choice(
+            "mc-wrong-stage",
+            "Pick one",
+            vec!["A".to_string(), "B".to_string()],
+            "main",
+        ));
+        agent.num_stages = 2;
+        agent.stage_index = 0;
+        agent.stages = vec![
+            crate::runstate::StageRecord::new("main".to_string(), 0),
+            crate::runstate::StageRecord::new("code".to_string(), 1),
+        ];
+        dash.agents.push(agent);
+        dash.update_display_indices();
+        dash.detail_view = true;
+        dash.input_mode = true;
+        dash.selected_stage = 1; // wrong stage: selected_stage_can_respond() -> false
+
+        terminal.draw(|f| dash.draw(f)).unwrap();
+    }
+
     // ─── Regression: mid-run message input pane must actually render ──────
     //
     // Pressing 'i' (formerly 'm') on an Active agent that accepts mid-run
