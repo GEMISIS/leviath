@@ -1881,13 +1881,15 @@ mod tests {
         // returns even earlier (no provider at all).
         apply_compact_transform(&mut engine, entity, "mock", "test-model", "Summarize", None).await;
 
-        // The mock's canned response was never written anywhere.
+        // The mock's canned response was never written anywhere -- in fact
+        // the region's content stays fully empty, since the early return
+        // happens before any write. Asserting emptiness directly (rather
+        // than searching for the canned text via `.iter().any(...)`) is both
+        // a more precise match for the doc comment above and avoids a
+        // never-invoked search closure (there's nothing to search).
         let window = engine.world().get::<ContextWindow>(entity).unwrap();
         let conv = window.get_region("conversation").unwrap();
-        assert!(!conv
-            .content
-            .iter()
-            .any(|e| e.content.contains("should never be used as a summary")));
+        assert!(conv.content.is_empty());
     }
 
     // ─── apply_compact_transform: success path ───────────────────────────────

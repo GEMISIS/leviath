@@ -848,15 +848,28 @@ mod tests {
         backend.on_review_document("call-1", "Title", "# Markdown body");
     }
 
-    // `ask()`'s real body (`request_interaction_stdin`) is deliberately not
-    // called from any test -- see the doc comment on the `ask` impl above.
-    // The `spawn_blocking` + timeout wrapper this test used to have doesn't
-    // bound anything real: on a live TTY the underlying blocking stdin read
-    // never reaches EOF, tokio's blocking pool tracks it regardless of
-    // whether the `JoinHandle` is awaited/timed-out/aborted, and this test's
-    // runtime teardown hung waiting for it. `request_interaction_from_reader`
-    // (interaction.rs) has full in-memory-reader coverage of the actual
-    // logic `ask()` delegates to.
+    // `ask()`'s real (`#[cfg(not(test))]`) body (`request_interaction_stdin`)
+    // is deliberately not called from any test -- see the doc comment on
+    // that impl above. The `spawn_blocking` + timeout wrapper this test used
+    // to have doesn't bound anything real: on a live TTY the underlying
+    // blocking stdin read never reaches EOF, tokio's blocking pool tracks it
+    // regardless of whether the `JoinHandle` is awaited/timed-out/aborted,
+    // and this test's runtime teardown hung waiting for it.
+    // `request_interaction_from_reader` (interaction.rs) has full
+    // in-memory-reader coverage of the actual logic `ask()` delegates to.
+    //
+    // The `#[cfg(test)]` twin below it, however, is plain in-memory code (no
+    // I/O) -- it's safe to call directly, so we do, purely for coverage.
+    #[tokio::test]
+    async fn foreground_interaction_backend_ask_returns_canned_decline() {
+        use crate::commands::run::dynamic_interaction::InteractionBackend;
+        let backend = ForegroundInteractionBackend;
+        let req = InteractionRequest::confirm("ask-cov", "Proceed?", "stage");
+        let resp = backend.ask(req).await;
+        assert_eq!(resp.request_id, "ask-cov");
+        assert_eq!(resp.approved, Some(false));
+        assert_eq!(resp.scope, Some(crate::interaction::ApprovalScope::Once));
+    }
 
     // ─── dispatch_tool_calls_foreground ─────────────────────────────────────
 
@@ -1398,6 +1411,56 @@ model = "mock-model"
 
     // ─── run_foreground_with_registry: error and edge-case branches ──────────
 
+    /// Shared placeholder `build_registry` for the error-path tests below,
+    /// each of which returns before `run_foreground_with_registry` ever
+    /// calls it -- a single named `fn` (rather than a separate closure
+    /// literal per call site) means these 5 call sites share one
+    /// monomorphization of `run_foreground_with_registry` instead of 5,
+    /// so `run_foreground_with_registry_reaches_registry_build_when_provider_missing`
+    /// below (which *does* call it) covers all of them.
+    fn empty_registry(_c: &Config) -> leviath_runtime::ProviderRegistry {
+        leviath_runtime::ProviderRegistry::new()
+    }
+
+    /// Actually invokes `empty_registry` (unlike the error-path tests above
+    /// that share it but bail out before reaching it): a valid manifest,
+    /// task and config get all the way to `build_registry(&config)`, then
+    /// the stage's provider ("nonexistent") isn't registered in the empty
+    /// registry, so `ForegroundCallbacks::on_provider_missing` (always
+    /// aborts) short-circuits the run with `Ok(())` -- no mock provider or
+    /// real inference needed.
+    #[tokio::test]
+    async fn run_foreground_with_registry_reaches_registry_build_when_provider_missing() {
+        let _config_guard =
+            crate::config::isolate_config_path_for_test("fg-registry-build-provider-missing");
+
+        let temp_dir = std::env::temp_dir().join("lev-test-fg-registry-build-provider-missing");
+        let _ = std::fs::create_dir_all(&temp_dir);
+        std::fs::write(
+            temp_dir.join("agent.leviath"),
+            "[agent]\nname = \"x\"\nversion = \"1.0.0\"\ndescription = \"x\"\n",
+        )
+        .unwrap();
+
+        let args = RunArgs {
+            path: Some(temp_dir.to_string_lossy().to_string()),
+            task: Some("test task".to_string()),
+            model: None,
+            foreground: true,
+            yolo: false,
+            allow: vec![],
+            ask: vec![],
+            deny: vec![],
+            max_depth: None,
+            count: 1,
+        };
+
+        let result = with_tracing(|| run_foreground_with_registry(args, empty_registry)).await;
+        assert!(result.is_ok());
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
     /// Covers the `args.path = None` → `unwrap_or_else(|| ".".to_string())`
     /// branch (line 379).  The path resolves to "." which may or may not have
     /// a manifest; we only care that the closure fires and the function returns
@@ -1428,8 +1491,7 @@ model = "mock-model"
         };
 
         // find_manifest(".") will fail unless there's an agent.leviath in cwd
-        let result =
-            run_foreground_with_registry(args, |_c| leviath_runtime::ProviderRegistry::new()).await;
+        let result = run_foreground_with_registry(args, empty_registry).await;
         // Accept either Ok or Err — we just need the unwrap_or_else to fire.
         let _ = result;
     }
@@ -1477,9 +1539,7 @@ model = "mock-model"
             std::fs::set_permissions(&manifest_path, std::fs::Permissions::from_mode(0o000))
                 .unwrap();
 
-            let result =
-                run_foreground_with_registry(args, |_c| leviath_runtime::ProviderRegistry::new())
-                    .await;
+            let result = run_foreground_with_registry(args, empty_registry).await;
             assert!(result.is_err());
             // Restore permissions so cleanup works
             std::fs::set_permissions(&manifest_path, std::fs::Permissions::from_mode(0o644))
@@ -1518,8 +1578,7 @@ model = "mock-model"
             count: 1,
         };
 
-        let result =
-            run_foreground_with_registry(args, |_c| leviath_runtime::ProviderRegistry::new()).await;
+        let result = run_foreground_with_registry(args, empty_registry).await;
         assert!(result.is_err());
 
         let _ = std::fs::remove_dir_all(&temp_dir);
@@ -1562,8 +1621,7 @@ model = "mock-model"
             count: 1,
         };
 
-        let result =
-            run_foreground_with_registry(args, |_c| leviath_runtime::ProviderRegistry::new()).await;
+        let result = run_foreground_with_registry(args, empty_registry).await;
         assert!(result.is_err());
         let err_msg = result.unwrap_err().to_string();
         assert_contains_display(err_msg.contains("is empty"), "unexpected error", &err_msg);
@@ -1609,10 +1667,7 @@ model = "mock-model"
         // Wrapped in `with_tracing` because this path reaches the
         // `tracing::info!` at the top of `run_foreground_with_registry`
         // (after manifest parsing, before `Config::load()` fails).
-        let result = with_tracing(|| {
-            run_foreground_with_registry(args, |_c| leviath_runtime::ProviderRegistry::new())
-        })
-        .await;
+        let result = with_tracing(|| run_foreground_with_registry(args, empty_registry)).await;
         assert!(result.is_err());
         let err_msg = result.unwrap_err().to_string();
         assert_contains_display(
