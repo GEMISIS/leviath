@@ -437,8 +437,10 @@ mod tests {
         let config = Config::default();
         let (dashboard, engine) = init_dashboard(&config).await;
 
-        #[rustfmt::skip]
-        assert!(dashboard.log.iter().any(|entry| entry.message.contains("Dashboard started")), "expected the startup message to be logged");
+        assert!(dashboard
+            .log
+            .iter()
+            .any(|entry| entry.message.contains("Dashboard started")));
 
         // The background loop is live: a CancelAgent command sent on
         // dashboard's own cmd_tx should be processed without panicking.
@@ -517,10 +519,7 @@ mod tests {
 
         // The loop should exit because the channel is closed
         let result = tokio::time::timeout(std::time::Duration::from_millis(500), handle).await;
-        assert!(
-            result.is_ok(),
-            "engine_background_loop should exit when channel is closed"
-        );
+        assert!(result.is_ok());
     }
 
     // ─── Dashboard basic integration ──────────────────────────────────────
@@ -840,7 +839,7 @@ mod tests {
         )
         .await;
 
-        assert!(result.is_err(), "expected draw error to propagate");
+        assert!(result.is_err());
     }
 
     #[tokio::test]
@@ -986,7 +985,7 @@ mod tests {
     #[test]
     fn crossterm_setup_new_constructs_without_touching_real_terminal() {
         let setup = CrosstermSetup::new();
-        assert!(matches!(setup.viewport, Viewport::Fullscreen));
+        assert_eq!(setup.viewport, Viewport::Fullscreen);
     }
 
     #[test]
