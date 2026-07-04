@@ -46,7 +46,7 @@ struct TestFile {
 }
 
 pub async fn execute(args: TestArgs) -> anyhow::Result<()> {
-    execute_with_registry(args, build_registry_from_config).await
+    execute_with_registry(args, Box::new(build_registry_from_config)).await
 }
 
 /// Builds the real provider registry from a loaded [`Config`] -- the
@@ -112,9 +112,21 @@ fn log_running_agent_tests(_path: &str) {}
 /// either skipping it (dry-run only) or making a real, billed network call
 /// through whatever the developer's real `~/.leviath/config.toml` happens to
 /// contain.
+///
+/// `build_registry` is a boxed trait object (`Box<dyn FnOnce(&Config) ->
+/// ProviderRegistry>`) rather than `impl FnOnce(&Config) -> ProviderRegistry`
+/// so every caller -- production's `build_registry_from_config` and every
+/// test's distinct `mock_registry_builder(...)` closure -- shares exactly
+/// ONE monomorphization of this (large, many-branch) function instead of
+/// one per closure type. This was a confirmed generic-monomorphization
+/// coverage-attribution artifact: every source position had a covered
+/// instantiation (confirmed via HTML/JSON segment inspection showing no
+/// red/uncovered regions anywhere in this function), but the summary table
+/// still reported 32 regions / 21 lines missed -- the largest such residual
+/// in this crate.
 async fn execute_with_registry(
     args: TestArgs,
-    build_registry: impl FnOnce(&Config) -> ProviderRegistry,
+    build_registry: Box<dyn FnOnce(&Config) -> ProviderRegistry>,
 ) -> anyhow::Result<()> {
     let path = args.path.unwrap_or_else(|| ".".to_string());
     log_running_agent_tests(&path);
@@ -1365,7 +1377,7 @@ max_tokens = 5000
             filter: None,
             dry_run: true,
         };
-        let result = execute_with_registry(args, build_registry_from_config).await;
+        let result = execute_with_registry(args, Box::new(build_registry_from_config)).await;
         // Restore permissions so tempdir cleanup succeeds.
         std::fs::set_permissions(&manifest_path, std::fs::Permissions::from_mode(0o644)).unwrap();
         assert!(result.is_err());
@@ -1402,7 +1414,7 @@ model = { provider = "anthropic", model = "claude-sonnet-4-6" }
             filter: None,
             dry_run: false, // triggers Config::load()
         };
-        let result = execute_with_registry(args, build_registry_from_config).await;
+        let result = execute_with_registry(args, Box::new(build_registry_from_config)).await;
         drop(guard);
         assert!(result.is_err());
     }
@@ -1421,7 +1433,9 @@ model = { provider = "anthropic", model = "claude-sonnet-4-6" }
             filter: None,
             dry_run: false,
         };
-        let result = execute_with_registry(args, mock_registry_builder("irrelevant", vec![])).await;
+        let result =
+            execute_with_registry(args, Box::new(mock_registry_builder("irrelevant", vec![])))
+                .await;
         assert!(result.is_err());
     }
 
@@ -1452,7 +1466,7 @@ model = { provider = "anthropic", model = "claude-sonnet-4-6" }
             filter: None,
             dry_run: true,
         };
-        let result = execute_with_registry(args, build_registry_from_config).await;
+        let result = execute_with_registry(args, Box::new(build_registry_from_config)).await;
         std::fs::set_permissions(&tests_dir, std::fs::Permissions::from_mode(0o755)).unwrap();
         assert!(result.is_err());
     }
@@ -1490,7 +1504,7 @@ model = { provider = "anthropic", model = "claude-sonnet-4-6" }
             filter: None,
             dry_run: true,
         };
-        let result = execute_with_registry(args, build_registry_from_config).await;
+        let result = execute_with_registry(args, Box::new(build_registry_from_config)).await;
         std::fs::set_permissions(&toml_path, std::fs::Permissions::from_mode(0o644)).unwrap();
         assert!(result.is_err());
     }
@@ -1524,7 +1538,7 @@ model = { provider = "anthropic", model = "claude-sonnet-4-6" }
             filter: None,
             dry_run: true,
         };
-        let result = execute_with_registry(args, build_registry_from_config).await;
+        let result = execute_with_registry(args, Box::new(build_registry_from_config)).await;
         std::fs::set_permissions(&rhai_path, std::fs::Permissions::from_mode(0o644)).unwrap();
         assert!(result.is_err());
     }
@@ -1849,7 +1863,10 @@ expect_contains = "world"
         };
 
         let result = with_tracing(|| {
-            execute_with_registry(args, mock_registry_builder("Hello, world!", vec![]))
+            execute_with_registry(
+                args,
+                Box::new(mock_registry_builder("Hello, world!", vec![])),
+            )
         })
         .await;
         assert!(result.is_ok());
@@ -1868,7 +1885,7 @@ expect_contains = "world"
             filter: None,
             dry_run: true,
         };
-        let result = execute_with_registry(args, build_registry_from_config).await;
+        let result = execute_with_registry(args, Box::new(build_registry_from_config)).await;
         assert!(result.is_err());
         assert!(result
             .unwrap_err()
@@ -1899,7 +1916,8 @@ expect_contains = "world"
             dry_run: false,
         };
 
-        let result = execute_with_registry(args, mock_registry_builder("goodbye", vec![])).await;
+        let result =
+            execute_with_registry(args, Box::new(mock_registry_builder("goodbye", vec![]))).await;
         let err = result.unwrap_err().to_string();
         assert!(err.contains("1 test(s) failed"));
     }
@@ -1934,8 +1952,11 @@ expect_contains = "unmatchable content"
         // "skip_me" would fail (its expectation never matches the mock
         // response), but the filter excludes it -- only "keep_me" runs, and
         // it passes, so the whole run succeeds.
-        let result =
-            execute_with_registry(args, mock_registry_builder("Hello, world!", vec![])).await;
+        let result = execute_with_registry(
+            args,
+            Box::new(mock_registry_builder("Hello, world!", vec![])),
+        )
+        .await;
         assert!(result.is_ok());
     }
 
@@ -1966,7 +1987,8 @@ expect_tool_call = "bash"
             name: "bash".to_string(),
             arguments: serde_json::json!({}),
         }];
-        let result = execute_with_registry(args, mock_registry_builder("", tool_calls)).await;
+        let result =
+            execute_with_registry(args, Box::new(mock_registry_builder("", tool_calls))).await;
         assert!(result.is_ok());
     }
 
@@ -2009,7 +2031,9 @@ model = { provider = "nonexistent-provider", model = "x" }
             dry_run: false,
         };
 
-        let result = execute_with_registry(args, mock_registry_builder("irrelevant", vec![])).await;
+        let result =
+            execute_with_registry(args, Box::new(mock_registry_builder("irrelevant", vec![])))
+                .await;
         let err = result.unwrap_err().to_string();
         assert!(err.contains("1 test(s) failed"));
     }
@@ -2029,7 +2053,9 @@ model = { provider = "nonexistent-provider", model = "x" }
             dry_run: false,
         };
 
-        let result = execute_with_registry(args, mock_registry_builder("irrelevant", vec![])).await;
+        let result =
+            execute_with_registry(args, Box::new(mock_registry_builder("irrelevant", vec![])))
+                .await;
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("Failed to parse"));
     }
@@ -2062,7 +2088,8 @@ model = { provider = "anthropic", model = "claude-sonnet-4-6" }
             dry_run: false,
         };
 
-        let result = execute_with_registry(args, mock_registry_builder("unused", vec![])).await;
+        let result =
+            execute_with_registry(args, Box::new(mock_registry_builder("unused", vec![]))).await;
         assert!(result.is_ok());
     }
 
@@ -2092,7 +2119,8 @@ model = { provider = "anthropic", model = "claude-sonnet-4-6" }
             dry_run: false,
         };
 
-        let result = execute_with_registry(args, mock_registry_builder("unused", vec![])).await;
+        let result =
+            execute_with_registry(args, Box::new(mock_registry_builder("unused", vec![]))).await;
         let err = result.unwrap_err().to_string();
         assert!(err.contains("1 test(s) failed"));
     }
@@ -2123,7 +2151,8 @@ model = { provider = "anthropic", model = "claude-sonnet-4-6" }
             dry_run: false,
         };
 
-        let result = execute_with_registry(args, mock_registry_builder("unused", vec![])).await;
+        let result =
+            execute_with_registry(args, Box::new(mock_registry_builder("unused", vec![]))).await;
         assert!(result.is_err());
     }
 
@@ -2156,7 +2185,8 @@ model = { provider = "anthropic", model = "claude-sonnet-4-6" }
             dry_run: false,
         };
 
-        let result = execute_with_registry(args, mock_registry_builder("unused", vec![])).await;
+        let result =
+            execute_with_registry(args, Box::new(mock_registry_builder("unused", vec![]))).await;
         assert!(result.is_ok());
     }
 
@@ -2188,7 +2218,8 @@ model = { provider = "anthropic", model = "claude-sonnet-4-6" }
 
         // Filter excludes the only script -- 0 total, reports "no test files
         // found" and succeeds (rather than failing on the script's `false`).
-        let result = execute_with_registry(args, mock_registry_builder("unused", vec![])).await;
+        let result =
+            execute_with_registry(args, Box::new(mock_registry_builder("unused", vec![]))).await;
         assert!(result.is_ok());
     }
 
@@ -2260,7 +2291,7 @@ model = { provider = "anthropic", model = "claude-sonnet-4-6" }
             filter: None,
             dry_run: true,
         };
-        let result = execute_with_registry(args, build_registry_from_config).await;
+        let result = execute_with_registry(args, Box::new(build_registry_from_config)).await;
         assert!(result.is_ok());
     }
 
