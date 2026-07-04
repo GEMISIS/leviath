@@ -63,10 +63,33 @@ fn scan_directory_for_agents(dir: &Path) -> Vec<(PathBuf, AgentInfo)> {
     agents
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Test-only toggle letting `execute_falls_back_to_default_cwd_via_forced_error`
+    /// force [`resolve_cwd`]'s `Err` arm deterministically on every platform,
+    /// as a companion to
+    /// `execute_falls_back_to_default_cwd_when_current_dir_is_gone`'s genuine
+    /// Unix-only filesystem reproduction (real `remove_dir_all` of the live
+    /// CWD is a sharing violation on Windows, not a success, so that same
+    /// trick isn't available there).
+    static FORCE_CWD_ERROR: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Real CWD lookup, with a test-only failure-injection toggle so its `Err`
+/// arm can be forced deterministically (see [`FORCE_CWD_ERROR`]) without
+/// changing what production actually calls.
+fn resolve_cwd() -> std::io::Result<PathBuf> {
+    #[cfg(test)]
+    if FORCE_CWD_ERROR.with(|f| f.get()) {
+        return Err(std::io::Error::other("forced CWD error for testing"));
+    }
+    std::env::current_dir()
+}
+
 pub async fn execute(_args: ListArgs) -> anyhow::Result<()> {
     let config = Config::load().unwrap_or_default();
     let agents_dir = get_agents_dir()?;
-    let cwd = std::env::current_dir().unwrap_or_default();
+    let cwd = resolve_cwd().unwrap_or_default();
     let exe_dir = std::env::current_exe()
         .ok()
         .and_then(|p| p.parent().map(|p| p.to_path_buf()));
@@ -500,16 +523,24 @@ system = { kind = "pinned", max_tokens = 1000 }
             .contains("Could not determine home directory"));
     }
 
+    // `execute`'s `std::env::current_dir().unwrap_or_default()` can only take
+    // its `Err` arm in a real (if rare) TOCTOU scenario: the process's CWD is
+    // removed out from under it. That's genuinely reproducible on Unix (not a
+    // fake): create a directory, `chdir` into it, then delete it --
+    // `current_dir()` then reliably returns an error. On Windows this same
+    // sequence isn't reproducible: NTFS/Win32 refuse to remove a directory
+    // that's a live process's current working directory (a sharing
+    // violation), so `remove_dir_all` itself fails there instead of
+    // succeeding -- confirmed via real Windows CI (this test previously
+    // `.unwrap()`ed that removal unconditionally and panicked on
+    // `windows-latest`, which also poisoned the shared `CWD_LOCK` and
+    // cascaded into unrelated `manifest.rs` test failures). Unix-only.
+    #[cfg(unix)]
     #[tokio::test]
     async fn execute_falls_back_to_default_cwd_when_current_dir_is_gone() {
-        // `execute`'s `std::env::current_dir().unwrap_or_default()` can only
-        // take its `Err` arm in a real (if rare) TOCTOU scenario: the
-        // process's CWD is removed out from under it. That's genuinely
-        // reproducible (not a fake): create a directory, `chdir` into it,
-        // then delete it -- `current_dir()` then reliably returns an error
-        // on Unix. `isolate_cwd_for_test` serializes against every other
-        // CWD-mutating test in the crate and restores CWD automatically on
-        // drop, so it's safe to hold across the `.await` below.
+        // `isolate_cwd_for_test` serializes against every other CWD-mutating
+        // test in the crate and restores CWD automatically on drop, so it's
+        // safe to hold across the `.await` below.
         let _guard = crate::config::isolate_cwd_for_test();
         let dir = std::env::temp_dir().join("lev-test-list-cwd-gone");
         let _ = std::fs::remove_dir_all(&dir);
@@ -521,6 +552,23 @@ system = { kind = "pinned", max_tokens = 1000 }
             filter: "all".to_string(),
         };
         let result = execute(args).await;
+
+        assert!(result.is_ok());
+    }
+
+    /// Cross-platform companion to the Unix-only real-filesystem test above:
+    /// forces [`resolve_cwd`]'s `Err` arm deterministically via
+    /// [`FORCE_CWD_ERROR`] so `execute`'s `unwrap_or_default()` fallback is
+    /// also exercised on Windows, where the real filesystem race isn't
+    /// reproducible.
+    #[tokio::test]
+    async fn execute_falls_back_to_default_cwd_via_forced_error() {
+        FORCE_CWD_ERROR.with(|f| f.set(true));
+        let args = ListArgs {
+            filter: "all".to_string(),
+        };
+        let result = execute(args).await;
+        FORCE_CWD_ERROR.with(|f| f.set(false));
 
         assert!(result.is_ok());
     }

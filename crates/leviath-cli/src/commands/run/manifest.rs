@@ -1223,7 +1223,9 @@ mode = "autonomous"
     #[test]
     fn find_manifest_with_invalid_path() {
         // See CWD_LOCK's doc comment -- branch 4 depends on CWD state.
-        let _guard = CWD_LOCK.lock().unwrap();
+        let _guard = CWD_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let result = find_manifest("/nonexistent/path/to/nothing");
         assert!(result.is_err());
     }
@@ -1258,7 +1260,9 @@ mode = "autonomous"
         // temporarily pointed at that other test's directory (which does
         // contain agent.leviath), observe branch 4 succeed, and fail this
         // assertion nondeterministically -- confirmed on CI.
-        let _guard = CWD_LOCK.lock().unwrap();
+        let _guard = CWD_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let dir = std::env::temp_dir().join("lev-test-dir-no-manifest-9z7q");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
@@ -1274,7 +1278,9 @@ mode = "autonomous"
     #[test]
     fn find_manifest_installed_agent_not_found_falls_through() {
         // See CWD_LOCK's doc comment -- branch 4 depends on CWD state.
-        let _guard = CWD_LOCK.lock().unwrap();
+        let _guard = CWD_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let result = find_manifest("lev-no-such-agent-xyzzy-9f3a");
         assert!(result.is_err());
     }
@@ -1290,7 +1296,9 @@ mode = "autonomous"
         std::fs::write(&manifest, "[agent]\nname = \"cwd-test\"").unwrap();
 
         // Serialize all CWD-mutating tests so they don't interfere.
-        let _guard = CWD_LOCK.lock().unwrap();
+        let _guard = CWD_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let original_cwd = std::env::current_dir().unwrap();
         std::env::set_current_dir(&dir).unwrap();
 
