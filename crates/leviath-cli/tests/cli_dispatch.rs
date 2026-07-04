@@ -39,9 +39,17 @@ fn workspace_root() -> PathBuf {
 /// mirroring the isolation helpers used by in-process tests
 /// (`isolate_config_path_for_test` / `isolate_runs_dir_for_test`) but via
 /// `Command::env` so it can't race other tests over process-global env vars.
+///
+/// Sets BOTH `HOME` and `USERPROFILE`: the `dirs` crate's `home_dir()`
+/// resolves the home directory differently per platform -- `$HOME` on
+/// Unix, `%USERPROFILE%` on Windows -- so overriding only `HOME` silently
+/// leaves Windows pointed at the real user's home directory (confirmed via
+/// real Windows CI: `add`/`remove` tests installed into the real profile
+/// instead of the isolated tmpdir, since only `HOME` was set).
 fn lev_command(tmp_home: &std::path::Path) -> Command {
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_lev"));
     cmd.env("HOME", tmp_home)
+        .env("USERPROFILE", tmp_home)
         .env("LEVIATH_CONFIG_PATH", tmp_home.join("config.toml"))
         .env("LEVIATH_SKIP_DOTENV", "1")
         .env("LEVIATH_RUNS_DIR", tmp_home.join("runs"))
