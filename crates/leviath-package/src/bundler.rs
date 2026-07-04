@@ -43,8 +43,13 @@ impl AgentBundler {
     }
 
     /// Bundle an agent from a project directory into an in-memory tar.gz archive.
-    pub fn bundle<P: AsRef<Path>>(&self, project_path: P) -> anyhow::Result<Vec<u8>> {
-        let project_path = project_path.as_ref();
+    ///
+    /// Takes `project_path: &Path` (not `impl AsRef<Path>`) so every caller --
+    /// production code and the various `&Path`/`&PathBuf`/`&&PathBuf` shapes
+    /// tests pass -- shares exactly ONE monomorphization; `&PathBuf` and
+    /// `&&PathBuf` coerce to `&Path` automatically via deref coercion at the
+    /// call site, so no caller needs to change beyond that.
+    pub fn bundle(&self, project_path: &Path) -> anyhow::Result<Vec<u8>> {
         tracing::info!(path = %project_path.display(), "Bundling agent");
 
         if !project_path.is_dir() {
@@ -60,41 +65,50 @@ impl AgentBundler {
             anyhow::bail!("No agent.leviath found in '{}'", project_path.display());
         }
 
-        let buf = self.write_bundle(project_path, Vec::new())?;
+        let mut buf = Vec::new();
+        self.write_bundle(project_path, &mut buf)?;
 
         tracing::info!(size_bytes = buf.len(), "Bundle created");
 
         Ok(buf)
     }
 
-    /// Walk `project_path` and write a tar.gz archive to `sink`, returning it
-    /// once finalized. Generic over `W: Write` (rather than hardcoded to
-    /// `&mut Vec<u8>`) so tests can inject a sink that fails on write,
-    /// exercising the tar/gzip finalization error paths below without
-    /// needing an actually-broken filesystem.
-    fn write_bundle<W: Write>(&self, project_path: &Path, sink: W) -> anyhow::Result<W> {
-        let encoder = GzEncoder::new(sink, Compression::default());
-        let mut tar = tar::Builder::new(encoder);
+    /// Walk `project_path` and write a tar.gz archive to `sink`.
+    ///
+    /// Takes `sink` as `&mut dyn Write` (a trait object) rather than a
+    /// generic `W: Write` so that every caller -- the real `Vec<u8>`/file
+    /// sink as well as tests injecting sinks that fail on write to exercise
+    /// the tar/gzip finalization error paths below -- shares exactly ONE
+    /// monomorphization of this function (and, transitively, of
+    /// `add_directory_to_tar`) instead of one per concrete sink type.
+    fn write_bundle(&self, project_path: &Path, sink: &mut dyn Write) -> anyhow::Result<()> {
+        let mut encoder = GzEncoder::new(sink, Compression::default());
+        {
+            let mut tar = tar::Builder::new(&mut encoder as &mut dyn Write);
 
-        // Walk the project directory and add files
-        self.add_directory_to_tar(&mut tar, project_path, project_path)?;
+            // Walk the project directory and add files
+            self.add_directory_to_tar(&mut tar, project_path, project_path)?;
 
-        let encoder = tar
-            .into_inner()
-            .map_err(|e| anyhow::anyhow!("Failed to finalize tar archive: {}", e))?;
+            tar.into_inner()
+                .map_err(|e| anyhow::anyhow!("Failed to finalize tar archive: {}", e))?;
+        }
         encoder
             .finish()
-            .map_err(|e| anyhow::anyhow!("Failed to finalize gzip: {}", e))
+            .map_err(|e| anyhow::anyhow!("Failed to finalize gzip: {}", e))?;
+        Ok(())
     }
 
     /// Bundle an agent and write to a file.
-    pub fn bundle_to_file<P: AsRef<Path>>(
+    ///
+    /// Concrete `&Path` params for the same single-monomorphization reason
+    /// as `bundle` above.
+    pub fn bundle_to_file(
         &self,
-        project_path: P,
-        output_path: P,
+        project_path: &Path,
+        output_path: &Path,
     ) -> anyhow::Result<PathBuf> {
-        let data = self.bundle(&project_path)?;
-        let output = output_path.as_ref().to_path_buf();
+        let data = self.bundle(project_path)?;
+        let output = output_path.to_path_buf();
 
         fs::write(&output, &data).map_err(|e| {
             anyhow::anyhow!("Failed to write bundle to '{}': {}", output.display(), e)
@@ -124,9 +138,14 @@ impl AgentBundler {
     }
 
     /// Recursively add a directory's contents to the tar archive.
-    fn add_directory_to_tar<W: Write>(
+    ///
+    /// `tar` is `&mut tar::Builder<&mut dyn Write>` (matching `write_bundle`'s
+    /// trait-object sink) rather than `tar::Builder<W>` generic over `W:
+    /// Write`, for the same single-monomorphization reason described on
+    /// `write_bundle`.
+    fn add_directory_to_tar(
         &self,
-        tar: &mut tar::Builder<W>,
+        tar: &mut tar::Builder<&mut dyn Write>,
         dir: &Path,
         base: &Path,
     ) -> anyhow::Result<()> {
@@ -602,7 +621,8 @@ mod tests {
         let unrelated = tempfile::tempdir().unwrap();
 
         let bundler = AgentBundler::new();
-        let mut tar = tar::Builder::new(Vec::new());
+        let mut sink = Vec::new();
+        let mut tar = tar::Builder::new(&mut sink as &mut dyn Write);
         let result = bundler.add_directory_to_tar(&mut tar, project, unrelated.path());
 
         assert!(result.is_err());
@@ -640,7 +660,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
 
         let bundler = AgentBundler::new();
-        let result = bundler.write_bundle(dir.path(), AlwaysFailingWriter);
+        let mut sink = AlwaysFailingWriter;
+        let result = bundler.write_bundle(dir.path(), &mut sink);
 
         assert!(result.is_err());
         assert!(result
@@ -676,7 +697,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
 
         let bundler = AgentBundler::new();
-        let result = bundler.write_bundle(dir.path(), FailsAfterFirstWriteWriter::default());
+        let mut sink = FailsAfterFirstWriteWriter::default();
+        let result = bundler.write_bundle(dir.path(), &mut sink);
 
         assert!(result.is_err());
         assert!(result
