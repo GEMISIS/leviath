@@ -1140,6 +1140,24 @@ mod tests {
         assert!(path.is_dir());
     }
 
+    #[test]
+    fn append_dashboard_log_path_with_no_parent_skips_create_dir_all() {
+        // Every other test resolves `dashboard_log_path()` to a path with a
+        // real parent component, leaving the `if let Some(parent) = ...`
+        // pattern's `None` arm (root paths like "/" have no parent) never
+        // exercised. Locks `RUNS_DIR_ENV_LOCK` directly (not
+        // `isolate_runs_dir_for_test`, whose fixed `base_dir.join(...)`
+        // path always has a parent) so the override can point at "/".
+        let _lock = RUNS_DIR_ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let prev = std::env::var("LEVIATH_DASHBOARD_LOG_PATH").ok();
+        unsafe { std::env::set_var("LEVIATH_DASHBOARD_LOG_PATH", "/") };
+        assert!(dashboard_log_path().parent().is_none());
+        append_dashboard_log("this should not panic even with no parent");
+        restore_env_var("LEVIATH_DASHBOARD_LOG_PATH", prev);
+    }
+
     // ─── dashboard_log_path ────────────────────────────────────────────────
 
     // `restore_env_var` (used below) is defined alongside `RunsDirTestGuard`

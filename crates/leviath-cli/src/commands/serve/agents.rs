@@ -892,6 +892,26 @@ prompt = "Plan the work"
         );
     }
 
+    #[test]
+    fn cleanup_runs_with_prefix_only_removes_matching_entries() {
+        // Every existing test only ever calls this against either a
+        // nonexistent dir (the `else` branch above) or a dir containing
+        // exclusively matching-prefix entries -- leaving the loop's
+        // non-matching-entry skip arm (`if ... starts_with(...)` false)
+        // never independently exercised. A dir with both a matching and a
+        // non-matching entry closes that gap directly.
+        let dir = tempfile::tempdir().unwrap();
+        let matching = dir.path().join("agent-x-1234");
+        let other = dir.path().join("unrelated-dir");
+        std::fs::create_dir_all(&matching).unwrap();
+        std::fs::create_dir_all(&other).unwrap();
+
+        cleanup_runs_with_prefix_in_dir("agent-x", dir.path());
+
+        assert!(!matching.exists());
+        assert!(other.exists());
+    }
+
     async fn assert_spawn_agent_fails_on(fail_on: FailOn, expected_status: StatusCode) {
         // Spans this whole helper (not just the individual one-line test
         // wrappers that call it) since `spawn_agent_with`/`cleanup_runs_with_prefix`
