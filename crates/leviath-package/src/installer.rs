@@ -43,8 +43,7 @@ impl AgentInstaller {
     }
 
     /// Install an agent from a `.leviath-bundle` file.
-    pub fn install<P: AsRef<Path>>(&self, package_path: P) -> anyhow::Result<InstalledAgent> {
-        let package_path = package_path.as_ref();
+    pub fn install(&self, package_path: &Path) -> anyhow::Result<InstalledAgent> {
         tracing::info!(path = %package_path.display(), "Installing agent from package");
 
         let data = fs::read(package_path).map_err(|e| {
@@ -470,7 +469,7 @@ description = "{}"
         let installer = AgentInstaller::with_install_dir(dir.path().to_path_buf());
 
         let err = installer
-            .install(dir.path().join("does-not-exist.leviath-bundle"))
+            .install(&dir.path().join("does-not-exist.leviath-bundle"))
             .unwrap_err();
         assert!(err.to_string().contains("Failed to read package"));
     }

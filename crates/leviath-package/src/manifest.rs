@@ -30,7 +30,7 @@ pub struct PackageMetadata {
 
 impl PackageManifest {
     /// Load a manifest from a file.
-    pub fn load<P: AsRef<Path>>(path: P) -> anyhow::Result<Self> {
+    pub fn load(path: &Path) -> anyhow::Result<Self> {
         let content = std::fs::read_to_string(path)?;
         let manifest: Self = toml::from_str(&content)?;
         Ok(manifest)
@@ -236,7 +236,7 @@ mod tests {
 
     #[test]
     fn load_missing_file_returns_error() {
-        let result = PackageManifest::load("/nonexistent/path/leviath.toml");
+        let result = PackageManifest::load(Path::new("/nonexistent/path/leviath.toml"));
         assert!(result.is_err());
     }
 
