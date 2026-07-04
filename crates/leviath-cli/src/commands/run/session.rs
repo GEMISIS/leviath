@@ -147,11 +147,23 @@ fn launch_editor(path: &std::path::Path) -> anyhow::Result<()> {
         cmd.arg(path_str.as_ref());
 
         match cmd.status() {
-            Ok(status) => {
-                if status.success() || status.code().is_some() {
-                    // Exited (even non-zero means the user closed it — treat as OK)
-                    return Ok(());
-                }
+            // Exited (even non-zero means the user closed it — treat as OK).
+            // Written as a match guard (rather than a nested
+            // `if { return Ok(()); }` block) so the arm is a single
+            // expression: with the nested-block form, llvm-cov's coverage
+            // mapping attributes a region to the block's closing brace that
+            // represents "control fell through the if without returning" —
+            // which is unreachable given the block's only statement is an
+            // unconditional `return` — so that line reads as permanently
+            // uncovered no matter how thoroughly the success path is
+            // tested. A guard-arm has no such trailing block to fall
+            // through.
+            Ok(status) if status.success() || status.code().is_some() => {
+                return Ok(());
+            }
+            Ok(_) => {
+                // Terminated with neither a success status nor an exit code
+                // (e.g. killed by signal on Unix) — try the next candidate.
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 // Try next candidate
@@ -723,6 +735,42 @@ mod tests {
 
         // A non-zero-but-present exit code is treated as the user having
         // closed the editor -- not an error.
+        let result = launch_editor(&file);
+        assert_launch_ok(&result);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ─── launch_editor: terminated by signal (no exit code) tries next ───
+
+    #[cfg(unix)]
+    #[test]
+    fn launch_editor_signal_killed_falls_through_to_next() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        let _guard = EnvGuard;
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = std::env::temp_dir().join("lev-test-launch-editor-signal-killed");
+        let _ = std::fs::create_dir_all(&dir);
+
+        // A script that kills itself with SIGKILL: `Command::status()` then
+        // reports an `ExitStatus` with `success() == false` *and*
+        // `code() == None` (terminated by signal, not a normal exit) --
+        // the one outcome that falls into the `Ok(_) => {}` arm (neither
+        // the success guard nor an `Err(...)` variant), which should try
+        // the next candidate rather than returning.
+        let self_kill_script = dir.join("self-kill.sh");
+        std::fs::write(&self_kill_script, "#!/bin/sh\nkill -9 $$\n").unwrap();
+        std::fs::set_permissions(&self_kill_script, std::fs::Permissions::from_mode(0o700))
+            .unwrap();
+
+        unsafe {
+            std::env::set_var("VISUAL", &self_kill_script);
+            std::env::set_var("EDITOR", "/usr/bin/true");
+        }
+        let file = dir.join("edit.txt");
+        std::fs::write(&file, "content").unwrap();
+
         let result = launch_editor(&file);
         assert_launch_ok(&result);
 

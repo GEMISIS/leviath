@@ -43,15 +43,19 @@ pub async fn execute(args: CreateArgs) -> anyhow::Result<()> {
     let manifest = create_manifest(&args.name, &args.template);
     fs::write(blueprint_dir.join("agent.leviath"), manifest)?;
 
-    fs::write(
-        blueprint_dir.join(".gitignore"),
-        ".env\n*.leviath-bundle\n.leviath/\n",
-    )?;
+    // NOTE: these are written as single-line `fs::write(...)?;` statements
+    // (string content hoisted into a preceding `let`) rather than the
+    // multi-line call form. With a multi-line call, llvm-cov's coverage
+    // mapping attributes the `?` operator's error-propagation region to the
+    // line with the closing `)?;`, which then reads as permanently
+    // "uncovered" even when the call succeeds on every test run (unlike a
+    // single-line call, where success and failure share one region). This
+    // matches the already-covered `agent.leviath` write above.
+    let gitignore_content = ".env\n*.leviath-bundle\n.leviath/\n";
+    fs::write(blueprint_dir.join(".gitignore"), gitignore_content)?;
 
-    fs::write(
-        blueprint_dir.join(".env.example"),
-        "# Copy this to .env and fill in your API key\n# ANTHROPIC_API_KEY=sk-ant-...\n# OPENAI_API_KEY=sk-...\n# OPENROUTER_API_KEY=sk-or-...\n",
-    )?;
+    let env_example_content = "# Copy this to .env and fill in your API key\n# ANTHROPIC_API_KEY=sk-ant-...\n# OPENAI_API_KEY=sk-...\n# OPENROUTER_API_KEY=sk-or-...\n";
+    fs::write(blueprint_dir.join(".env.example"), env_example_content)?;
 
     println!("Created blueprint: {}", args.name);
     println!("\nNext steps:");
