@@ -110,10 +110,12 @@ impl EventSource for CrosstermEventSource {
 /// `enable_raw_mode`/`disable_raw_mode` have no such test-only twin) to
 /// exercise `CrosstermSetup::enable`/`disable`'s wiring without ever
 /// touching the real alternate screen.
+/// COVERAGE-EXCLUDED: mutates the real terminal's alternate screen buffer via crossterm; there is no way to assert on that side effect from a test without actually swapping the test runner's own screen.
 #[cfg(not(test))]
 fn enter_alt_screen() -> std::io::Result<()> {
     stdout().execute(EnterAlternateScreen).map(|_| ())
 }
+/// COVERAGE-EXCLUDED: mutates the real terminal's alternate screen buffer via crossterm; there is no way to assert on that side effect from a test without actually swapping the test runner's own screen.
 #[cfg(not(test))]
 fn leave_alt_screen() -> std::io::Result<()> {
     stdout().execute(LeaveAlternateScreen).map(|_| ())
