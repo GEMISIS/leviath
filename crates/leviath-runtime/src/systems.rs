@@ -380,8 +380,7 @@ mod tests {
         schedule.add_systems(pool_management_system);
         with_tracing(|| schedule.run(&mut world));
 
-        #[rustfmt::skip]
-        assert!(world.get_entity(entity).is_err(), "Completed agent should be despawned");
+        assert!(world.get_entity(entity).is_err());
     }
 
     #[test]
@@ -400,8 +399,7 @@ mod tests {
         schedule.add_systems(pool_management_system);
         with_tracing(|| schedule.run(&mut world));
 
-        #[rustfmt::skip]
-        assert!(world.get_entity(entity).is_err(), "Error agent should be despawned");
+        assert!(world.get_entity(entity).is_err());
     }
 
     #[test]
@@ -415,8 +413,7 @@ mod tests {
         schedule.add_systems(pool_management_system);
         with_tracing(|| schedule.run(&mut world));
 
-        #[rustfmt::skip]
-        assert!(world.get_entity(entity).is_err(), "Cancelled agent should be despawned");
+        assert!(world.get_entity(entity).is_err());
     }
 
     #[test]
@@ -430,8 +427,7 @@ mod tests {
         schedule.add_systems(pool_management_system);
         schedule.run(&mut world);
 
-        #[rustfmt::skip]
-        assert!(world.get_entity(entity).is_ok(), "Active agent should remain");
+        assert!(world.get_entity(entity).is_ok());
     }
 
     #[test]
@@ -445,8 +441,7 @@ mod tests {
         schedule.add_systems(pool_management_system);
         schedule.run(&mut world);
 
-        #[rustfmt::skip]
-        assert!(world.get_entity(entity).is_ok(), "Waiting agent should remain");
+        assert!(world.get_entity(entity).is_ok());
     }
 
     #[test]
@@ -460,7 +455,7 @@ mod tests {
         schedule.add_systems(pool_management_system);
         schedule.run(&mut world);
 
-        assert!(world.get_entity(entity).is_ok(), "Idle agent should remain");
+        assert!(world.get_entity(entity).is_ok());
     }
 
     // ── inference_system ───────────────────────────────────────────────────
@@ -510,7 +505,7 @@ mod tests {
         schedule.run(&mut world);
 
         let state = world.get::<AgentState>(entity).unwrap();
-        assert_eq!(state.iteration, 0, "Idle agent should not be iterated");
+        assert_eq!(state.iteration, 0);
     }
 
     #[test]
@@ -608,8 +603,7 @@ mod tests {
 
         // Should have NeedsCompaction component
         let compaction = world.get::<NeedsCompaction>(entity);
-        #[rustfmt::skip]
-        assert!(compaction.is_some(), "Should add NeedsCompaction when compacting regions need it");
+        assert!(compaction.is_some());
         assert!(compaction.unwrap().regions.contains(&"impl".to_string()));
     }
 
@@ -655,7 +649,7 @@ mod tests {
         schedule.run(&mut world);
 
         let window = world.get::<ContextWindow>(entity).unwrap();
-        assert_eq!(window.current_tokens, 500, "Should not evict below 95%");
+        assert_eq!(window.current_tokens, 500);
     }
 
     #[test]
@@ -684,8 +678,7 @@ mod tests {
         with_tracing(|| schedule.run(&mut world));
 
         let compaction = world.get::<NeedsCompaction>(entity);
-        #[rustfmt::skip]
-        assert!(compaction.is_some(), "eviction_system should add NeedsCompaction when compacting regions need it");
+        assert!(compaction.is_some());
         assert!(compaction.unwrap().regions.contains(&"impl".to_string()));
     }
 
@@ -932,10 +925,8 @@ mod tests {
         with_tracing(|| schedule.run(&mut world));
 
         let parent_state = world.get::<AgentState>(parent_entity).unwrap();
-        #[rustfmt::skip]
-        assert!(parent_state.pending_wait.is_none(), "pending_wait should be cleared");
-        #[rustfmt::skip]
-        assert!(parent_state.spawned_children_ids.is_empty(), "child should be removed from spawned list");
+        assert!(parent_state.pending_wait.is_none());
+        assert!(parent_state.spawned_children_ids.is_empty());
 
         let parent_window = world.get::<ContextWindow>(parent_entity).unwrap();
         let conv = parent_window.get_region("conversation").unwrap();
@@ -943,8 +934,7 @@ mod tests {
             .content
             .iter()
             .any(|e| e.content.contains("completed successfully"));
-        #[rustfmt::skip]
-        assert!(has_completion_msg, "Completion message should be injected");
+        assert!(has_completion_msg);
     }
 
     #[test]
@@ -1082,7 +1072,7 @@ mod tests {
         schedule.run(&mut world);
 
         let inbox = world.get::<MessageInbox>(entity).unwrap();
-        assert!(inbox.messages.is_empty(), "Inbox should be drained");
+        assert!(inbox.messages.is_empty());
 
         let window = world.get::<ContextWindow>(entity).unwrap();
         let conv = window.get_region("conversation").unwrap();
@@ -1122,7 +1112,7 @@ mod tests {
         with_tracing(|| schedule.run(&mut world));
 
         let inbox = world.get::<MessageInbox>(entity).unwrap();
-        assert!(inbox.messages.is_empty(), "Inbox should still be drained");
+        assert!(inbox.messages.is_empty());
     }
 
     #[test]
