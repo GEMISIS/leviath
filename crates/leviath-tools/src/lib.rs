@@ -505,17 +505,26 @@ impl BuiltinTools {
 
         #[cfg(not(windows))]
         {
-            Self::detect_shell_impl(std::env::var("SHELL").ok(), |s| {
+            Self::detect_shell_impl(std::env::var("SHELL").ok(), &|s| {
                 std::path::Path::new(s).exists()
             })
         }
     }
 
-    /// Core shell-detection logic with injectable env and filesystem checks for testing.
+    /// Core shell-detection logic with injectable env and filesystem checks
+    /// for testing.
+    ///
+    /// `shell_exists` is a trait object (`&dyn Fn(&str) -> bool`) rather
+    /// than `impl Fn(&str) -> bool` so every caller -- production's real
+    /// `Path::exists` closure and each test's distinct closure -- shares
+    /// exactly ONE monomorphization of this function instead of one per
+    /// closure type (this function was a confirmed generic-monomorphization
+    /// coverage-attribution artifact: every source position had a covered
+    /// instantiation, but the summary table still reported some as missed).
     #[cfg(not(windows))]
     fn detect_shell_impl(
         env_shell: Option<String>,
-        shell_exists: impl Fn(&str) -> bool,
+        shell_exists: &dyn Fn(&str) -> bool,
     ) -> (&'static str, &'static str) {
         if let Some(shell) = env_shell {
             if shell.ends_with("/zsh") || shell.ends_with("/bash") || shell.ends_with("/sh") {
@@ -1327,7 +1336,7 @@ mod tests {
     #[test]
     fn detect_shell_impl_returns_zsh_from_env() {
         let (shell, flag) =
-            BuiltinTools::detect_shell_impl(Some("/usr/local/bin/zsh".to_string()), |_| false);
+            BuiltinTools::detect_shell_impl(Some("/usr/local/bin/zsh".to_string()), &|_| false);
         assert_eq!(shell, "/usr/local/bin/zsh");
         assert_eq!(flag, "-c");
     }
@@ -1336,7 +1345,7 @@ mod tests {
     #[test]
     fn detect_shell_impl_returns_bash_from_env() {
         let (shell, flag) =
-            BuiltinTools::detect_shell_impl(Some("/usr/local/bin/bash".to_string()), |_| false);
+            BuiltinTools::detect_shell_impl(Some("/usr/local/bin/bash".to_string()), &|_| false);
         assert_eq!(shell, "/usr/local/bin/bash");
         assert_eq!(flag, "-c");
     }
@@ -1345,7 +1354,7 @@ mod tests {
     #[test]
     fn detect_shell_impl_returns_sh_from_env() {
         let (shell, flag) =
-            BuiltinTools::detect_shell_impl(Some("/usr/bin/sh".to_string()), |_| false);
+            BuiltinTools::detect_shell_impl(Some("/usr/bin/sh".to_string()), &|_| false);
         assert_eq!(shell, "/usr/bin/sh");
         assert_eq!(flag, "-c");
     }
@@ -1355,7 +1364,7 @@ mod tests {
     fn detect_shell_impl_falls_through_when_env_unrecognized() {
         // /opt/fish doesn't end with /zsh, /bash, or /sh → falls to candidate loop
         let (shell, flag) =
-            BuiltinTools::detect_shell_impl(Some("/opt/fish".to_string()), |s| s == "/bin/bash");
+            BuiltinTools::detect_shell_impl(Some("/opt/fish".to_string()), &|s| s == "/bin/bash");
         assert_eq!(shell, "/bin/bash");
         assert_eq!(flag, "-c");
     }
@@ -1364,7 +1373,7 @@ mod tests {
     #[test]
     fn detect_shell_impl_skips_missing_candidates_and_finds_zsh() {
         // bash paths return false; /bin/zsh exists — covers shell_exists false branch
-        let (shell, flag) = BuiltinTools::detect_shell_impl(None, |s| s == "/bin/zsh");
+        let (shell, flag) = BuiltinTools::detect_shell_impl(None, &|s| s == "/bin/zsh");
         assert_eq!(shell, "/bin/zsh");
         assert_eq!(flag, "-c");
     }
@@ -1372,7 +1381,7 @@ mod tests {
     #[cfg(not(windows))]
     #[test]
     fn detect_shell_impl_returns_last_resort_when_nothing_exists() {
-        let (shell, flag) = BuiltinTools::detect_shell_impl(None, |_| false);
+        let (shell, flag) = BuiltinTools::detect_shell_impl(None, &|_| false);
         assert_eq!(shell, "sh");
         assert_eq!(flag, "-c");
     }
