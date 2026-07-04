@@ -261,14 +261,15 @@ fn print_gaps(gaps: &[&FileCov]) {
 // ── Internal orchestration ───────────────────────────────────────────────────
 
 pub fn run_coverage(runner: &dyn Runner, output_path: &str) -> Result<CovData> {
-    let packages = workspace_packages(runner)?;
+    let meta = runner.cargo_metadata()?;
+    let packages = parse_workspace_packages(&meta);
     println!(
         "[coverage] Per-package run for {} crates: {}",
         packages.len(),
         packages.join(", ")
     );
 
-    // Place per-package JSON files next to the aggregated output file so they
+    // Place per-target JSON files next to the aggregated output file so they
     // always land in a writable directory (avoids relative-path issues in tests).
     let out_dir = std::path::Path::new(output_path)
         .parent()
@@ -279,23 +280,47 @@ pub fn run_coverage(runner: &dyn Runner, output_path: &str) -> Result<CovData> {
 
     for pkg in &packages {
         println!("[coverage]   → {pkg}");
-        // Clean slate between packages: belt-and-suspenders against any
-        // cross-package contamination of the profraw/profdata llvm-cov
-        // accumulates under here.
-        runner.remove_dir("target/llvm-cov-target");
 
-        let pkg_output = out_dir
-            .join(format!("llvm-cov-{pkg}.json"))
-            .to_string_lossy()
-            .into_owned();
-
-        let pkg_report = run_single_package(runner, pkg, &pkg_output)
-            .with_context(|| format!("coverage failed for {pkg}"))?;
-
-        if let Some(data) = pkg_report.data.into_iter().next() {
-            all_files.extend(data.files);
-            totals.add(&data.totals);
+        // Scope to --lib, then to each integration-test binary, SEPARATELY,
+        // rather than one bare `cargo llvm-cov --package X` call that lets
+        // llvm-cov merge every test binary's profraw data internally. That
+        // internal multi-binary merge is subject to the same
+        // `getInstantiationGroups` merge-inaccuracy bug documented above for
+        // cross-package `--workspace` runs -- confirmed empirically:
+        // leviath-cli's commands/add.rs read 6 missed regions when merged
+        // across all 3 of its test binaries (lib + 2 integration tests) in
+        // one invocation, but only 2 missed when measured via `--lib` alone.
+        // See `merge_target_reports` for how the separately-scoped results
+        // are safely recombined.
+        let mut scopes: Vec<Vec<&str>> = vec![vec!["--lib"]];
+        for test_name in package_test_targets(&meta, pkg) {
+            scopes.push(vec!["--test", test_name]);
         }
+
+        let mut target_reports: Vec<CovData> = Vec::new();
+        for scope in &scopes {
+            // Clean slate between every scoped run: belt-and-suspenders
+            // against cross-run contamination of the profraw/profdata
+            // llvm-cov accumulates under here.
+            runner.remove_dir("target/llvm-cov-target");
+
+            let scope_tag = scope.join("-").replace(['-', ' '], "_");
+            let target_output = out_dir
+                .join(format!("llvm-cov-{pkg}-{scope_tag}.json"))
+                .to_string_lossy()
+                .into_owned();
+
+            let report = run_single_target(runner, pkg, scope, &target_output)
+                .with_context(|| format!("coverage failed for {pkg} ({})", scope.join(" ")))?;
+
+            if let Some(data) = report.data.into_iter().next() {
+                target_reports.push(data);
+            }
+        }
+
+        let pkg_data = merge_target_reports(target_reports);
+        totals.add(&pkg_data.totals);
+        all_files.extend(pkg_data.files);
     }
 
     totals.recompute_percents();
@@ -318,22 +343,60 @@ pub fn run_coverage(runner: &dyn Runner, output_path: &str) -> Result<CovData> {
     Ok(aggregated)
 }
 
-fn run_single_package(runner: &dyn Runner, pkg: &str, output_path: &str) -> Result<LlvmCovReport> {
-    let args = [
-        "llvm-cov",
-        "--all-features",
-        "--package",
-        pkg,
-        "--json",
-        "--output-path",
-        output_path,
-    ];
-
-    if !runner.cargo(&args)? {
-        anyhow::bail!("cargo llvm-cov exited non-zero for package {pkg}");
+/// Merge multiple coverage reports for the SAME package (one per test
+/// target: `--lib`, plus one per integration-test binary) into a single,
+/// more accurate report for that package.
+///
+/// For each file, per metric, take the higher `covered` count across all
+/// target-scoped runs rather than summing. Summing would double-count
+/// regions the compiled library shares across binaries (an integration test
+/// links the same library code the `--lib` unit tests do); `max` is a
+/// mathematically safe lower-bound approximation of the true union of
+/// coverage across all test binaries -- it can never report less coverage
+/// than any single scoped run actually observed, and can never fabricate
+/// coverage no run actually exercised.
+fn merge_target_reports(reports: Vec<CovData>) -> CovData {
+    let mut by_file: std::collections::HashMap<String, FileCov> = std::collections::HashMap::new();
+    for report in reports {
+        for file in report.files {
+            by_file
+                .entry(file.filename.clone())
+                .and_modify(|existing| existing.summary.merge_max(&file.summary))
+                .or_insert(file);
+        }
     }
 
-    parse_json(output_path).with_context(|| format!("parsing coverage JSON for {pkg}"))
+    let mut files: Vec<FileCov> = by_file.into_values().collect();
+    files.sort_by(|a, b| a.filename.cmp(&b.filename));
+
+    let mut totals = Metrics::default();
+    for file in &files {
+        totals.add(&file.summary);
+    }
+    totals.recompute_percents();
+
+    CovData { files, totals }
+}
+
+fn run_single_target(
+    runner: &dyn Runner,
+    pkg: &str,
+    scope: &[&str],
+    output_path: &str,
+) -> Result<LlvmCovReport> {
+    let mut args = vec!["llvm-cov", "--all-features", "--package", pkg];
+    args.extend_from_slice(scope);
+    args.extend_from_slice(&["--json", "--output-path", output_path]);
+
+    if !runner.cargo(&args)? {
+        anyhow::bail!(
+            "cargo llvm-cov exited non-zero for package {pkg} ({})",
+            scope.join(" ")
+        );
+    }
+
+    parse_json(output_path)
+        .with_context(|| format!("parsing coverage JSON for {pkg} ({})", scope.join(" ")))
 }
 
 /// Parse workspace package names from `cargo metadata` JSON.
@@ -357,9 +420,30 @@ pub fn parse_workspace_packages(meta: &serde_json::Value) -> Vec<String> {
         .collect()
 }
 
-fn workspace_packages(runner: &dyn Runner) -> Result<Vec<String>> {
-    let meta = runner.cargo_metadata()?;
-    Ok(parse_workspace_packages(&meta))
+/// Return the names of a package's integration-test binaries (files under
+/// `tests/`) from `cargo metadata` JSON — NOT its `#[cfg(test)] mod tests`
+/// unit tests (which compile into the `--lib` target itself) and NOT its
+/// `[[bin]]` targets.
+pub fn package_test_targets<'a>(meta: &'a serde_json::Value, pkg: &str) -> Vec<&'a str> {
+    meta["packages"]
+        .as_array()
+        .map(|arr| arr.as_slice())
+        .unwrap_or(&[])
+        .iter()
+        .find(|p| p["name"].as_str() == Some(pkg))
+        .and_then(|p| p["targets"].as_array())
+        .map(|targets| {
+            targets
+                .iter()
+                .filter(|t| {
+                    t["kind"]
+                        .as_array()
+                        .is_some_and(|kinds| kinds.iter().any(|k| k.as_str() == Some("test")))
+                })
+                .filter_map(|t| t["name"].as_str())
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 // ── Formatting helpers ───────────────────────────────────────────────────────
@@ -474,6 +558,16 @@ impl Metrics {
         self.lines.recompute_percent();
         self.functions.recompute_percent();
     }
+
+    /// Merge another observation of the *same* underlying compiled code
+    /// (e.g. the same package's `--lib` run vs. one of its `--test <name>`
+    /// runs) by taking the higher `covered` count per metric — see
+    /// `merge_target_reports`'s doc comment for why `max`, not `add`.
+    pub fn merge_max(&mut self, other: &Metrics) {
+        self.regions.merge_max(&other.regions);
+        self.lines.merge_max(&other.lines);
+        self.functions.merge_max(&other.functions);
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -498,6 +592,16 @@ impl Metric {
         } else {
             (self.covered as f64 / self.count as f64) * 100.0
         };
+    }
+
+    /// Merge another observation of the same underlying regions/lines/
+    /// functions by taking the higher `covered` value. `count` is taken as
+    /// the max too (defensive — it should already match across runs of the
+    /// same compiled code, but doesn't hurt to guard against it not).
+    pub fn merge_max(&mut self, other: &Metric) {
+        self.count = self.count.max(other.count);
+        self.covered = self.covered.max(other.covered);
+        self.recompute_percent();
     }
 }
 
@@ -850,6 +954,184 @@ mod tests {
         });
         let pkgs = parse_workspace_packages(&meta);
         assert_eq!(pkgs, vec!["leviath-core"]);
+    }
+
+    // ── package_test_targets ─────────────────────────────────────────────────
+
+    fn metadata_with_targets(pkg: &str, targets: serde_json::Value) -> serde_json::Value {
+        serde_json::json!({
+            "workspace_members": [format!("path+file:///ws/{pkg}#0.1.0")],
+            "packages": [
+                {"id": format!("path+file:///ws/{pkg}#0.1.0"), "name": pkg, "targets": targets}
+            ]
+        })
+    }
+
+    #[test]
+    fn package_test_targets_finds_integration_tests() {
+        let meta = metadata_with_targets(
+            "leviath-cli",
+            serde_json::json!([
+                {"kind": ["lib"], "name": "leviath_cli"},
+                {"kind": ["bin"], "name": "lev"},
+                {"kind": ["test"], "name": "cli_dispatch"},
+                {"kind": ["test"], "name": "manifest_integration"},
+            ]),
+        );
+        let mut targets = package_test_targets(&meta, "leviath-cli");
+        targets.sort_unstable();
+        assert_eq!(targets, vec!["cli_dispatch", "manifest_integration"]);
+    }
+
+    #[test]
+    fn package_test_targets_excludes_lib_and_bin() {
+        let meta = metadata_with_targets(
+            "leviath-core",
+            serde_json::json!([
+                {"kind": ["lib"], "name": "leviath_core"},
+                {"kind": ["bin"], "name": "some-bin"},
+            ]),
+        );
+        assert!(package_test_targets(&meta, "leviath-core").is_empty());
+    }
+
+    #[test]
+    fn package_test_targets_unknown_package_returns_empty() {
+        let meta = metadata_with_targets("leviath-core", serde_json::json!([]));
+        assert!(package_test_targets(&meta, "does-not-exist").is_empty());
+    }
+
+    #[test]
+    fn package_test_targets_missing_targets_field_returns_empty() {
+        // `simple_metadata`-style packages have no "targets" key at all.
+        let meta = simple_metadata(&["leviath-core"]);
+        assert!(package_test_targets(&meta, "leviath-core").is_empty());
+    }
+
+    #[test]
+    fn package_test_targets_empty_packages_array_returns_empty() {
+        let meta = serde_json::json!({"workspace_members": [], "packages": []});
+        assert!(package_test_targets(&meta, "anything").is_empty());
+    }
+
+    // ── Metric/Metrics::merge_max ────────────────────────────────────────────
+
+    #[test]
+    fn metric_merge_max_takes_higher_covered() {
+        let mut a = metric(10, 4);
+        a.merge_max(&metric(10, 7));
+        assert_eq!(a.covered, 7);
+        assert_eq!(a.count, 10);
+        assert!((a.percent - 70.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn metric_merge_max_keeps_higher_when_self_already_larger() {
+        let mut a = metric(10, 9);
+        a.merge_max(&metric(10, 3));
+        assert_eq!(a.covered, 9);
+    }
+
+    #[test]
+    fn metric_merge_max_takes_higher_count() {
+        // Simulates merging a --lib report (whose count includes the file's
+        // own #[cfg(test)] mod tests) with a --test report (which doesn't).
+        let mut a = metric(8, 8);
+        a.merge_max(&metric(10, 6));
+        assert_eq!(a.count, 10);
+        assert_eq!(a.covered, 8);
+    }
+
+    #[test]
+    fn metrics_merge_max_all_fields() {
+        let mut a = Metrics {
+            regions: metric(10, 4),
+            lines: metric(10, 5),
+            functions: metric(2, 1),
+        };
+        a.merge_max(&Metrics {
+            regions: metric(10, 8),
+            lines: metric(10, 2),
+            functions: metric(2, 2),
+        });
+        assert_eq!(a.regions.covered, 8);
+        assert_eq!(a.lines.covered, 5);
+        assert_eq!(a.functions.covered, 2);
+    }
+
+    // ── merge_target_reports ─────────────────────────────────────────────────
+
+    #[test]
+    fn merge_target_reports_empty_is_empty() {
+        let merged = merge_target_reports(vec![]);
+        assert!(merged.files.is_empty());
+        assert!(merged.totals.is_100_percent());
+    }
+
+    #[test]
+    fn merge_target_reports_single_report_passes_through() {
+        let report = CovData {
+            files: vec![FileCov {
+                filename: "/src/a.rs".to_owned(),
+                summary: partial_metrics(10, 8),
+            }],
+            totals: partial_metrics(10, 8),
+        };
+        let merged = merge_target_reports(vec![report]);
+        assert_eq!(merged.files.len(), 1);
+        assert_eq!(merged.totals.regions.covered, 8);
+        assert_eq!(merged.totals.regions.count, 10);
+    }
+
+    #[test]
+    fn merge_target_reports_combines_overlapping_file_with_max_covered() {
+        // Simulates --lib (covered=2) and --test cli_dispatch (covered=5) both
+        // reporting on the same shared library file -- the merged result must
+        // take the higher observed coverage, not sum (which would double-count).
+        let lib_report = CovData {
+            files: vec![FileCov {
+                filename: "/src/commands/add.rs".to_owned(),
+                summary: partial_metrics(10, 2),
+            }],
+            totals: partial_metrics(10, 2),
+        };
+        let test_report = CovData {
+            files: vec![FileCov {
+                filename: "/src/commands/add.rs".to_owned(),
+                summary: partial_metrics(10, 5),
+            }],
+            totals: partial_metrics(10, 5),
+        };
+        let merged = merge_target_reports(vec![lib_report, test_report]);
+        assert_eq!(
+            merged.files.len(),
+            1,
+            "same filename must merge into one entry"
+        );
+        assert_eq!(merged.files[0].summary.regions.covered, 5);
+        assert_eq!(merged.totals.regions.covered, 5);
+    }
+
+    #[test]
+    fn merge_target_reports_disjoint_files_are_both_kept() {
+        let lib_report = CovData {
+            files: vec![FileCov {
+                filename: "/src/a.rs".to_owned(),
+                summary: full_metrics(5),
+            }],
+            totals: full_metrics(5),
+        };
+        let test_report = CovData {
+            files: vec![FileCov {
+                filename: "/src/b.rs".to_owned(),
+                summary: full_metrics(3),
+            }],
+            totals: full_metrics(3),
+        };
+        let merged = merge_target_reports(vec![lib_report, test_report]);
+        assert_eq!(merged.files.len(), 2);
+        assert_eq!(merged.totals.regions.count, 8);
+        assert_eq!(merged.totals.regions.covered, 8);
     }
 
     // ── gap_files ────────────────────────────────────────────────────────────
@@ -1316,6 +1598,29 @@ mod tests {
     }
 
     #[test]
+    fn run_coverage_scopes_lib_and_each_integration_test_target() {
+        // A package with an integration test target must be run per-scope
+        // (--lib, then --test <name>) rather than one bare `--package` call,
+        // exercising the same orchestration path used to fix the real
+        // leviath-cli multi-test-binary merge inaccuracy.
+        let meta = metadata_with_targets(
+            "leviath-cli",
+            serde_json::json!([
+                {"kind": ["lib"], "name": "leviath_cli"},
+                {"kind": ["test"], "name": "cli_dispatch"},
+            ]),
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let runner = MockRunner::new(meta);
+        let output_path = dir.path().join("cov.json").to_str().unwrap().to_owned();
+        let result = run_coverage(&runner, &output_path);
+        assert!(
+            result.is_ok(),
+            "multi-scope per-package run should succeed: {result:?}"
+        );
+    }
+
+    #[test]
     fn run_coverage_package_failure_is_err() {
         let dir = tempfile::tempdir().unwrap();
         let meta = simple_metadata(&["leviath-core"]);
@@ -1411,14 +1716,14 @@ mod tests {
     }
 
     #[test]
-    fn run_single_package_cargo_err_propagates() {
+    fn run_single_target_cargo_err_propagates() {
         let dir = tempfile::tempdir().unwrap();
         let runner = MockRunner::new(simple_metadata(&[])).with_fail_cargo_err();
         let output_path = dir.path().join("cov.json").to_str().unwrap().to_owned();
-        let result = run_single_package(&runner, "some-pkg", &output_path);
+        let result = run_single_target(&runner, "some-pkg", &["--lib"], &output_path);
         assert!(
             result.is_err(),
-            "cargo Err should propagate from run_single_package: {result:?}"
+            "cargo Err should propagate from run_single_target: {result:?}"
         );
     }
 
