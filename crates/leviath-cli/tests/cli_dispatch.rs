@@ -4,12 +4,17 @@
 //! config, or making a billed inference call.
 //!
 //! Only genuinely safe, side-effect-free, non-interactive subcommands are
-//! invoked here: `--version`, `list`, `models list`, and `validate <fixture>`.
+//! invoked here: `--version`, `list`, `models list`, `validate <fixture>`,
+//! `create <name>`, `setup --non-interactive`, `add <local-dir>`,
+//! `remove <name>`, `test <path> --dry-run`, and `pack <local-dir>`.
 //!
 //! This deliberately never spawns `dash`/`dashboard`, `run` (foreground),
 //! `serve`, or `__run-worker` — those touch real terminal/TTY/stdin/
 //! subprocess state and are intentionally left untested via real process
-//! spawns elsewhere in this codebase for safety reasons.
+//! spawns elsewhere in this codebase for safety reasons. It also never
+//! spawns `setup` without `--non-interactive` (blocks on real stdin), nor
+//! `add`/`test` in a way that would hit a package registry or a real
+//! provider API (both would require network access / billed calls).
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -121,4 +126,179 @@ fn validate_subcommand_dispatches_and_exits_zero_for_valid_manifest() {
         stdout.contains("valid"),
         "unexpected validate output: {stdout}"
     );
+}
+
+// ─── create ────────────────────────────────────────────────────────────
+//
+// `lev create <name>` only does local filesystem writes (creates a
+// directory + a few files under the current directory) -- no network, no
+// interactivity. Safe to spawn for real with `current_dir` pinned to the
+// isolated tmpdir (see `lev_command`).
+
+#[test]
+fn create_subcommand_dispatches_and_exits_zero() {
+    let tmp = tempfile::tempdir().unwrap();
+    let output = lev_command(tmp.path())
+        .args(["create", "my-new-agent"])
+        .output()
+        .expect("failed to spawn lev binary");
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(tmp.path().join("my-new-agent/agent.leviath").exists());
+}
+
+// ─── setup --non-interactive ────────────────────────────────────────────
+//
+// `lev setup --non-interactive` never touches stdin -- it only applies the
+// given flag values and saves to `Config::config_path()`, which is
+// redirected to the isolated `LEVIATH_CONFIG_PATH` by `lev_command`. The
+// plain interactive path (real stdin prompts) is deliberately never
+// exercised here.
+
+#[test]
+fn setup_non_interactive_subcommand_dispatches_and_exits_zero() {
+    let tmp = tempfile::tempdir().unwrap();
+    let output = lev_command(tmp.path())
+        .args([
+            "setup",
+            "--non-interactive",
+            "--anthropic-key",
+            "sk-ant-fake-test-key",
+        ])
+        .output()
+        .expect("failed to spawn lev binary");
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let saved = std::fs::read_to_string(tmp.path().join("config.toml")).unwrap();
+    assert!(saved.contains("sk-ant-fake-test-key"));
+}
+
+// ─── add (local directory) ──────────────────────────────────────────────
+//
+// `lev add <local-dir>` copies a plain agent directory into
+// `<HOME>/.leviath/agents/<name>` -- no network call. `HOME` is redirected
+// to the isolated tmpdir by `lev_command`, so this never touches the real
+// `~/.leviath`. Only the local-path variant is exercised; a bare package
+// name would fall through to the registry-installation branch, which makes
+// a real network call and is deliberately never spawned here.
+
+#[test]
+fn add_subcommand_installs_from_local_directory_and_exits_zero() {
+    let tmp = tempfile::tempdir().unwrap();
+    let coder_agent = workspace_root().join("agents").join("coder");
+    assert!(
+        coder_agent.exists(),
+        "fixture agent missing: {coder_agent:?}"
+    );
+
+    let output = lev_command(tmp.path())
+        .args(["add", coder_agent.to_str().unwrap()])
+        .output()
+        .expect("failed to spawn lev binary");
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(tmp
+        .path()
+        .join(".leviath")
+        .join("agents")
+        .join("coder")
+        .join("agent.leviath")
+        .exists());
+}
+
+// ─── remove ──────────────────────────────────────────────────────────────
+//
+// `remove_agent` has no interactive confirmation prompt (see
+// `commands/remove.rs`) -- it just verifies the agent is installed and
+// deletes its directory. Installs a fixture agent first (via `add`) into
+// the isolated `HOME`, then removes it with the same isolated environment.
+
+#[test]
+fn remove_subcommand_removes_installed_agent_and_exits_zero() {
+    let tmp = tempfile::tempdir().unwrap();
+    let coder_agent = workspace_root().join("agents").join("coder");
+
+    let add_output = lev_command(tmp.path())
+        .args(["add", coder_agent.to_str().unwrap()])
+        .output()
+        .expect("failed to spawn lev binary");
+    assert!(
+        add_output.status.success(),
+        "add stderr: {}",
+        String::from_utf8_lossy(&add_output.stderr)
+    );
+    let installed_dir = tmp.path().join(".leviath").join("agents").join("coder");
+    assert!(installed_dir.exists());
+
+    let remove_output = lev_command(tmp.path())
+        .args(["remove", "coder"])
+        .output()
+        .expect("failed to spawn lev binary");
+    assert!(
+        remove_output.status.success(),
+        "remove stderr: {}",
+        String::from_utf8_lossy(&remove_output.stderr)
+    );
+    assert!(!installed_dir.exists());
+}
+
+// ─── test (dry-run / no-tests-dir) ──────────────────────────────────────
+//
+// The `agents/coder` fixture has no `tests/` directory, so `execute()`
+// returns early (prints "No tests directory found") before ever calling
+// `Config::load()` or building a provider registry -- no network calls are
+// possible on this path regardless of `--dry-run`. Pass `--dry-run` anyway
+// for defense in depth in case the fixture ever grows a `tests/` dir.
+
+#[test]
+fn test_subcommand_dry_run_dispatches_and_exits_zero() {
+    let tmp = tempfile::tempdir().unwrap();
+    let coder_agent = workspace_root().join("agents").join("coder");
+
+    let output = lev_command(tmp.path())
+        .args(["test", coder_agent.to_str().unwrap(), "--dry-run"])
+        .output()
+        .expect("failed to spawn lev binary");
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+// ─── pack ────────────────────────────────────────────────────────────────
+//
+// `lev pack <local-dir>` bundles a local agent directory into a
+// `.leviath-bundle` archive on disk -- no network, no interactivity.
+
+#[test]
+fn pack_subcommand_dispatches_and_exits_zero() {
+    let tmp = tempfile::tempdir().unwrap();
+    let coder_agent = workspace_root().join("agents").join("coder");
+    let output_bundle = tmp.path().join("out.leviath-bundle");
+
+    let output = lev_command(tmp.path())
+        .args([
+            "pack",
+            coder_agent.to_str().unwrap(),
+            "--output",
+            output_bundle.to_str().unwrap(),
+        ])
+        .output()
+        .expect("failed to spawn lev binary");
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output_bundle.exists());
 }
