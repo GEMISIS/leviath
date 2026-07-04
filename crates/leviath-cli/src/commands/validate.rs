@@ -7,7 +7,7 @@ use std::path::PathBuf;
 pub struct ValidateArgs {
     /// Path to the agent directory or agent.leviath file
     #[arg(default_value = ".")]
-    path: String,
+    pub(crate) path: String,
 }
 
 /// Resolve, read, parse, and validate the manifest at `path`. Distinguishes

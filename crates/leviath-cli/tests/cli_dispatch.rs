@@ -100,6 +100,25 @@ fn list_subcommand_dispatches_and_exits_zero() {
 }
 
 #[test]
+fn verbose_flag_selects_debug_log_level_and_still_dispatches() {
+    // Drives `main`'s `let level = if cli.verbose { "debug" } else { "info" };`
+    // `true` arm for real -- every other test here omits `--verbose`, so
+    // that arm was otherwise never exercised. `list` is a safe, ordinary
+    // subcommand to pair it with.
+    let tmp = tempfile::tempdir().unwrap();
+    let output = lev_command(tmp.path())
+        .arg("--verbose")
+        .arg("list")
+        .output()
+        .expect("failed to spawn lev binary");
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
 fn models_list_subcommand_dispatches_and_exits_zero() {
     let tmp = tempfile::tempdir().unwrap();
     let output = lev_command(tmp.path())
