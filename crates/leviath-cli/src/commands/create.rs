@@ -51,6 +51,29 @@ pub async fn execute(args: CreateArgs) -> anyhow::Result<()> {
     // "uncovered" even when the call succeeds on every test run (unlike a
     // single-line call, where success and failure share one region). This
     // matches the already-covered `agent.leviath` write above.
+    //
+    // CONFIRMED-PERMANENT COVERAGE GAP: all 3 `fs::write(...)?` calls in
+    // this function (`agent.leviath` above, `.gitignore`/`.env.example`
+    // below) have an error arm that's real but not independently
+    // forceable by any test-safe trick available here. `blueprint_dir` is
+    // guaranteed to exist and be a freshly-created, normally-permissioned
+    // directory at this point (`create_dir_all` just succeeded, and
+    // nothing between there and here can revoke write access to it), so
+    // the *only* lever that could make a subsequent `fs::write` into it
+    // fail is deliberately restricting permissions -- and unlike
+    // `config.rs`'s single-file chmod tests, there's no way to
+    // pre-restrict *this* directory's permissions without either (a)
+    // making `blueprint_dir.exists()` true before `execute()` runs (which
+    // trips the early bail-out above instead of reaching these writes), or
+    // (b) mutating the process-global umask so `create_dir_all` creates
+    // the directory with zero permissions. (b) was evaluated and rejected:
+    // `cargo test`'s default thread-based parallelism means umask isn't
+    // scopable to one test the way an env var or CWD lock is -- ANY other
+    // test creating a file or directory on another thread during the
+    // (however brief) window our test holds a restrictive umask would
+    // silently get the same zero-permission treatment, a real and
+    // non-deterministic source of CI flakiness for unrelated tests. No
+    // other test in this suite touches umask for exactly this reason.
     let gitignore_content = ".env\n*.leviath-bundle\n.leviath/\n";
     fs::write(blueprint_dir.join(".gitignore"), gitignore_content)?;
 

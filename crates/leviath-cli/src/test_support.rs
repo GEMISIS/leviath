@@ -111,6 +111,16 @@ mod tests {
     /// `record_follows_from`, `enter`, `exit`) that aren't reachable via
     /// plain `tracing::info!`/`warn!` event macros used elsewhere in this
     /// crate.
+    ///
+    /// COVERAGE-CONFIRMED-ARTIFACT: the `tracing::info!(parent: &span, "inside
+    /// span")` call below genuinely executes (confirmed via HTML: the line
+    /// shows a nonzero hit count) and is what exercises `AlwaysOnSubscriber::event`
+    /// with a real, live event -- but llvm-cov's tracing-macro message-literal
+    /// region-counting quirk (the same one documented on `config.rs`'s
+    /// `log_permissive_perms_warning`) still reports that literal's region as
+    /// a miss. Since this is already test code, no `#[cfg(not(test))]` twin
+    /// applies here (there's nothing to isolate it from -- the whole point of
+    /// this test is exercising the macro under a real subscriber).
     #[test]
     fn always_on_subscriber_span_methods_are_all_no_ops() {
         with_tracing(|| {

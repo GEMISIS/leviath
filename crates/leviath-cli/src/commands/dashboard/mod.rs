@@ -197,6 +197,23 @@ impl TerminalSetup for CrosstermSetup {
 /// Terminal-independent core: runs the dashboard event loop after terminal
 /// setup. Extracted from [`execute`] so it can be driven in tests via
 /// [`TerminalSetup`] + [`EventSource`] without a real TTY.
+///
+/// COVERAGE-CONFIRMED-ARTIFACT: generic over both `S: TerminalSetup` and
+/// `E: EventSource`, giving this function (and the `run_dashboard_loop`
+/// call inside it) one monomorphization per test-double combination (e.g.
+/// `FailingEventSource`/`ScriptedEventSource`) plus production's real
+/// `CrosstermSetup`/`CrosstermEventSource`. Every source position has at
+/// least one covered instantiation (confirmed via direct HTML/JSON segment
+/// inspection: the file's HTML coverage report shows no red/uncovered
+/// regions anywhere in this function), but `cargo-llvm-cov`'s per-file
+/// region-coverage summary table still reports some shared positions as
+/// missed. `TerminalSetup` has an associated type (`type B: Backend`)
+/// tying the terminal's concrete backend to the setup implementation, so
+/// (unlike `leviath-package`'s `bundler.rs`, which collapsed a plain
+/// `W: Write` generic into `&mut dyn Write`) it cannot be turned into a
+/// trait object without a larger redesign of how the terminal/backend pair
+/// is threaded through the dashboard -- not attempted here since these are
+/// measurement artifacts, not untested branches.
 async fn execute_core<S: TerminalSetup, E: EventSource>(
     dashboard: &mut Dashboard,
     engine: &Arc<Mutex<AgentEngine>>,
@@ -221,6 +238,12 @@ async fn execute_core<S: TerminalSetup, E: EventSource>(
 /// untouched on error -- restoring those is `execute`'s responsibility, not
 /// this loop's, and this refactor preserves that pre-existing behavior
 /// rather than changing it as a side effect of a coverage pass).
+///
+/// COVERAGE-CONFIRMED-ARTIFACT: see [`execute_core`]'s doc comment -- this
+/// function is generic over `B: Backend` (production's real terminal
+/// backend vs. tests' `ratatui::backend::TestBackend`) and `impl
+/// EventSource`, for the same reason and with the same confirmed-covered-
+/// but-undercounted outcome.
 async fn run_dashboard_loop<B: ratatui::backend::Backend>(
     dashboard: &mut Dashboard,
     engine: &Arc<Mutex<AgentEngine>>,
