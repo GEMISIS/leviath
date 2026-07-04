@@ -32,5 +32,7 @@ tarpaulin-report.json
 *.profraw
 *.profdata
 
-# Coverage reports (cargo xtask coverage / cargo llvm-cov output)
-/coverage/
+# Coverage reports (cargo xtask coverage / cargo llvm-cov output). Not
+# rooted: `cargo test -p xtask` runs with the xtask/ crate dir as cwd, so
+# run_with's tests produce xtask/coverage/ there, not just <repo-root>/coverage/.
+coverage/

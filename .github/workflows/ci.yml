@@ -101,17 +101,28 @@ jobs:
       # that file's doc comments for why literal 100% isn't the target
       # (individually investigated, confirmed-permanent tooling limitations)
       # and how the ceiling should be lowered as real gaps get closed. This
-      # step computes and reports all three metrics (regions/lines/functions)
-      # so re-publishing the other two as badges later is a config-only
-      # change -- only the lines badge is published for now (see the step
-      # below) since three separate coverage numbers read as confusing to
-      # newcomers; regions/functions stay computed but unpublished.
+      # step computes and reports all three metrics (regions/lines/functions).
+      # It also writes a browsable HTML report to coverage/html/ (see the doc
+      # comment on generate_html_report in xtask/src/coverage.rs) -- uploaded
+      # as a build artifact below so it's viewable without needing to run
+      # coverage locally.
       - name: Compute coverage (regions / lines / functions)
         id: cov
         run: cargo xtask coverage
-      # Publish the single line-coverage badge — only from ubuntu on push to
-      # main (all three OSes compute coverage; only one need publish it).
-      - name: Update coverage badge
+      - name: Upload HTML coverage report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-html-${{ matrix.os }}
+          path: coverage/html/
+          retention-days: 14
+      # Publish all three coverage-percentage gists — only from ubuntu on
+      # push to main (all three OSes compute coverage; only one need
+      # publish). Only the lines gist is actually rendered as a README badge
+      # today (three separate numbers read as confusing to newcomers there),
+      # but regions/functions are published too so they're a click away in
+      # the gist for anyone who wants the full picture.
+      - name: Update lines coverage badge
         if: matrix.os == 'ubuntu-latest' && github.ref == 'refs/heads/main' && github.event_name == 'push'
         uses: schneegans/dynamic-badges-action@v1.7.0
         with:
@@ -121,5 +132,29 @@ jobs:
           label: coverage
           message: ${{ steps.cov.outputs.lines }}%
           valColorRange: ${{ steps.cov.outputs.lines }}
+          minColorRange: 50
+          maxColorRange: 100
+      - name: Update regions coverage badge
+        if: matrix.os == 'ubuntu-latest' && github.ref == 'refs/heads/main' && github.event_name == 'push'
+        uses: schneegans/dynamic-badges-action@v1.7.0
+        with:
+          auth: ${{ secrets.GIST_TOKEN }}
+          gistID: ${{ vars.COVERAGE_GIST_ID }}
+          filename: leviath-coverage-regions.json
+          label: regions
+          message: ${{ steps.cov.outputs.regions }}%
+          valColorRange: ${{ steps.cov.outputs.regions }}
+          minColorRange: 50
+          maxColorRange: 100
+      - name: Update functions coverage badge
+        if: matrix.os == 'ubuntu-latest' && github.ref == 'refs/heads/main' && github.event_name == 'push'
+        uses: schneegans/dynamic-badges-action@v1.7.0
+        with:
+          auth: ${{ secrets.GIST_TOKEN }}
+          gistID: ${{ vars.COVERAGE_GIST_ID }}
+          filename: leviath-coverage-functions.json
+          label: functions
+          message: ${{ steps.cov.outputs.functions }}%
+          valColorRange: ${{ steps.cov.outputs.functions }}
           minColorRange: 50
           maxColorRange: 100

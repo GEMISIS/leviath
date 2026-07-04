@@ -36,7 +36,11 @@
 //! cross-package contamination), and aggregate the JSON results ourselves.
 //!
 //! Output lands at `coverage/llvm-cov.json` (gitignored) — never under
-//! `target/`, never committed.
+//! `target/`, never committed. A browsable HTML report (source-highlighted,
+//! click-through per file) also lands at `coverage/html/index.html` on every
+//! run, for visual inspection -- see [`generate_html_report`]'s doc comment
+//! for why its numbers aren't the authoritative ones `run_report`'s ceiling
+//! check uses.
 //!
 //! **A residual class of "missed regions" is a confirmed, permanent
 //! limitation, not a real gap.** Generic functions instantiated over many
@@ -110,7 +114,46 @@ pub fn run_with(runner: &dyn Runner) -> Result<()> {
     let github_output = std::env::var("GITHUB_OUTPUT").ok();
     std::fs::create_dir_all("coverage")
         .expect("failed to create coverage/ directory — check filesystem permissions");
-    run_report(runner, "coverage/llvm-cov.json", github_output.as_deref())
+    let report_result = run_report(runner, "coverage/llvm-cov.json", github_output.as_deref());
+    // Always attempt the HTML report, even if the ceiling check above failed
+    // -- browsing exactly which lines are (un)covered is often the fastest
+    // way to understand *why* a coverage regression happened. A failure
+    // generating it (e.g. a real cargo/IO problem) is still surfaced, but
+    // the original report_result -- the authoritative pass/fail signal --
+    // is what's returned once both have run.
+    generate_html_report(runner)?;
+    report_result
+}
+
+/// Generate a browsable HTML coverage report for the whole workspace via
+/// `cargo llvm-cov --html`, for visual inspection only.
+///
+/// This is NOT used for the authoritative missed-region/line/function counts
+/// that `run_report`'s ceiling check enforces -- those come from
+/// `run_coverage`'s per-package, per-target-scoped runs (see this file's top
+/// doc comment for why a single `--workspace` invocation's counts can read
+/// inflated relative to that). A human browsing source-highlighted HTML
+/// tolerates that occasional inaccuracy (a handful of lines that are
+/// actually covered by another test target showing red) far better than an
+/// automated ceiling check would, and running one combined `--workspace`
+/// pass here (rather than replicating `run_coverage`'s per-package/per-scope
+/// splitting a second time) keeps this a single, simple, cheap-to-reason-about
+/// addition instead of doubling that function's complexity for a
+/// browsing-only convenience feature.
+fn generate_html_report(runner: &dyn Runner) -> Result<()> {
+    println!("[coverage] Generating HTML report…");
+    if !runner.cargo(&[
+        "llvm-cov",
+        "--all-features",
+        "--workspace",
+        "--html",
+        "--output-dir",
+        "coverage/html",
+    ])? {
+        anyhow::bail!("cargo llvm-cov exited non-zero while generating the HTML report");
+    }
+    println!("[coverage] HTML report: coverage/html/index.html");
+    Ok(())
 }
 
 /// Locked-in ceiling on total missed regions/lines/functions, workspace-wide.
@@ -618,6 +661,8 @@ mod tests {
         fail_write_json: bool,
         /// If true, cargo() immediately returns Err (simulates a spawn/IO failure).
         fail_cargo_err: bool,
+        /// If true, an `--html` cargo invocation (generate_html_report) returns Ok(false).
+        fail_html: bool,
     }
 
     impl MockRunner {
@@ -628,6 +673,7 @@ mod tests {
                 fail_metadata: false,
                 fail_write_json: false,
                 fail_cargo_err: false,
+                fail_html: false,
             }
         }
 
@@ -650,6 +696,11 @@ mod tests {
             self.fail_cargo_err = true;
             self
         }
+
+        fn with_fail_html(mut self) -> Self {
+            self.fail_html = true;
+            self
+        }
     }
 
     impl Runner for MockRunner {
@@ -663,7 +714,10 @@ mod tests {
                 .and_then(|w| w.get(1).copied());
 
             let Some(pkg_idx) = args.iter().position(|a| *a == "--package") else {
-                // Any non-package cargo invocation (e.g. plain `cargo help`) — no-op success.
+                if self.fail_html && args.contains(&"--html") {
+                    return Ok(false);
+                }
+                // Any other non-package cargo invocation (e.g. plain `cargo help`) — no-op success.
                 return Ok(true);
             };
             let pkg = args[pkg_idx + 1];
@@ -1572,6 +1626,55 @@ mod tests {
         assert!(
             msg.contains("GITHUB_OUTPUT"),
             "error should mention GITHUB_OUTPUT: {msg}"
+        );
+    }
+
+    // ── generate_html_report ─────────────────────────────────────────────────
+
+    #[test]
+    fn generate_html_report_success_is_ok() {
+        let runner = MockRunner::new(simple_metadata(&["leviath-core"]));
+        let result = generate_html_report(&runner);
+        assert!(result.is_ok(), "html generation should succeed: {result:?}");
+    }
+
+    #[test]
+    fn generate_html_report_cargo_exit_failure_is_err() {
+        let runner = MockRunner::new(simple_metadata(&["leviath-core"])).with_fail_html();
+        let result = generate_html_report(&runner);
+        assert!(
+            result.is_err(),
+            "a non-zero cargo llvm-cov --html exit should be an error: {result:?}"
+        );
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("HTML report"),
+            "error should mention the HTML report: {msg}"
+        );
+    }
+
+    #[test]
+    fn generate_html_report_cargo_spawn_failure_is_err() {
+        let runner = MockRunner::new(simple_metadata(&["leviath-core"])).with_fail_cargo_err();
+        let result = generate_html_report(&runner);
+        assert!(
+            result.is_err(),
+            "a cargo spawn failure should propagate as an error: {result:?}"
+        );
+    }
+
+    // ── run_with ──────────────────────────────────────────────────────────────
+
+    #[test]
+    fn run_with_html_generation_failure_is_err_even_when_coverage_passes() {
+        // 100% coverage (report check would be Ok), but HTML generation
+        // itself fails -- the overall result must still surface that error,
+        // not silently swallow it just because the ceiling check passed.
+        let runner = MockRunner::new(simple_metadata(&["leviath-core"])).with_fail_html();
+        let result = run_with(&runner);
+        assert!(
+            result.is_err(),
+            "an HTML generation failure must fail run_with even when coverage itself passed: {result:?}"
         );
     }
 
