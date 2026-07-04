@@ -892,36 +892,57 @@ mod tests {
     //
     // ClaudeCodeProvider shells out to a real subprocess, so exercising
     // infer()/infer_stream() means substituting a fake "claude" binary — a
-    // small shell script that ignores its args and prints canned output —
-    // via the existing `with_binary_path` test seam.
+    // small script that ignores its args and prints canned output — via the
+    // existing `with_binary_path` test seam.
     //
-    // This whole approach (a `#!/bin/sh` shebang script, `chmod +x`'d and
-    // spawned directly) is Unix-only: Windows' `CreateProcess` doesn't
-    // understand shebangs and can't execute a `.sh` file as a native binary
-    // at all -- every test using this failed on Windows CI with "%1 is not
-    // a valid Win32 application" (os error 193). `write_stub_script` itself
-    // and every test that calls it are therefore `#[cfg(unix)]`; the two
-    // spawn-failure tests below (which point at a nonexistent path rather
-    // than a real script) remain cross-platform since a missing file fails
-    // to spawn identically on every OS.
-    #[cfg(unix)]
-    fn write_stub_script(tag: &str, body: &str) -> std::path::PathBuf {
-        use std::io::Write;
-        let path = std::env::temp_dir().join(format!(
-            "lev-claude-stub-{}-{}.sh",
-            tag,
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        let mut f = std::fs::File::create(&path).unwrap();
-        writeln!(f, "#!/bin/sh").unwrap();
-        f.write_all(body.as_bytes()).unwrap();
-        drop(f);
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
-        path
+    // A `#!/bin/sh` shebang script (`chmod +x`'d and spawned directly) is
+    // Unix-only: Windows' `CreateProcess` doesn't understand shebangs and
+    // can't execute a `.sh` file as a native binary at all -- every test
+    // using one failed on Windows CI with "%1 is not a valid Win32
+    // application" (os error 193). `.bat` files, on the other hand, Windows
+    // *can* launch directly via `Command::new(path)`.
+    //
+    // `write_stub_script` therefore takes a body for each syntax (`sh_body`
+    // for Unix, `bat_body` for Windows) and internally writes whichever one
+    // applies to the target platform -- so each of the 10 tests below is a
+    // single, platform-agnostic test function (not duplicated per OS), just
+    // parameterized on two small strings that express the same canned
+    // behavior in each shell's syntax.
+    fn write_stub_script(tag: &str, sh_body: &str, bat_body: &str) -> std::path::PathBuf {
+        #[cfg(unix)]
+        {
+            let _ = bat_body;
+            use std::io::Write;
+            let path = std::env::temp_dir().join(format!(
+                "lev-claude-stub-{}-{}.sh",
+                tag,
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+            let mut f = std::fs::File::create(&path).unwrap();
+            writeln!(f, "#!/bin/sh").unwrap();
+            f.write_all(sh_body.as_bytes()).unwrap();
+            drop(f);
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+            path
+        }
+        #[cfg(windows)]
+        {
+            let _ = sh_body;
+            let path = std::env::temp_dir().join(format!(
+                "lev-claude-stub-{}-{}.bat",
+                tag,
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+            std::fs::write(&path, format!("@echo off\r\n{}\r\n", bat_body)).unwrap();
+            path
+        }
     }
 
     fn make_request() -> InferenceRequest {
@@ -939,12 +960,12 @@ mod tests {
         }
     }
 
-    #[cfg(unix)]
     #[tokio::test]
     async fn infer_success_parses_response() {
         let script = write_stub_script(
             "infer-ok",
             "echo '{\"result\": \"hello from stub\", \"usage\": {\"input_tokens\": 3, \"output_tokens\": 2}}'\n",
+            "echo {\"result\": \"hello from stub\", \"usage\": {\"input_tokens\": 3, \"output_tokens\": 2}}",
         );
         let provider = ClaudeCodeProvider::with_binary_path(script.to_str().unwrap().to_string());
         let resp = provider.infer(make_request()).await.unwrap();
@@ -952,14 +973,19 @@ mod tests {
         let _ = std::fs::remove_file(&script);
     }
 
-    #[cfg(unix)]
     #[tokio::test]
     async fn infer_with_timeout_fires_on_slow_process() {
         // A stub that outlives a short injected timeout, exercising the
         // real `tokio::time::timeout` branch in `infer_with_timeout` --
         // `infer()` itself hardcodes a real 5-minute timeout, far too long
-        // to wait for in a test.
-        let script = write_stub_script("infer-slow", "sleep 5\necho '{\"result\": \"late\"}'\n");
+        // to wait for in a test. Windows has no `sleep`; `ping -n 6
+        // 127.0.0.1` is the standard batch-file substitute (loopback ping,
+        // no network access implied) for an ~5s delay.
+        let script = write_stub_script(
+            "infer-slow",
+            "sleep 5\necho '{\"result\": \"late\"}'\n",
+            "ping -n 6 127.0.0.1 >nul\r\necho {\"result\": \"late\"}",
+        );
         let provider = ClaudeCodeProvider::with_binary_path(script.to_str().unwrap().to_string());
         let err = provider
             .infer_with_timeout(make_request(), std::time::Duration::from_millis(100))
@@ -969,12 +995,12 @@ mod tests {
         let _ = std::fs::remove_file(&script);
     }
 
-    #[cfg(unix)]
     #[tokio::test]
     async fn infer_is_error_response_returns_api_error() {
         let script = write_stub_script(
             "infer-err",
             "echo '{\"is_error\": true, \"result\": \"bad request\"}'\n",
+            "echo {\"is_error\": true, \"result\": \"bad request\"}",
         );
         let provider = ClaudeCodeProvider::with_binary_path(script.to_str().unwrap().to_string());
         let err = provider.infer(make_request()).await.unwrap_err();
@@ -982,10 +1008,13 @@ mod tests {
         let _ = std::fs::remove_file(&script);
     }
 
-    #[cfg(unix)]
     #[tokio::test]
     async fn infer_nonzero_exit_returns_request_failed() {
-        let script = write_stub_script("infer-fail", "echo 'boom' >&2\nexit 1\n");
+        let script = write_stub_script(
+            "infer-fail",
+            "echo 'boom' >&2\nexit 1\n",
+            "echo boom 1>&2\r\nexit /b 1",
+        );
         let provider = ClaudeCodeProvider::with_binary_path(script.to_str().unwrap().to_string());
         let err = provider.infer(make_request()).await.unwrap_err();
         assert!(err.to_string().contains("boom"));
@@ -1001,10 +1030,13 @@ mod tests {
         assert!(err.to_string().contains("Is Claude Code installed?"));
     }
 
-    #[cfg(unix)]
     #[tokio::test]
     async fn infer_with_system_prompt_and_tools_still_succeeds() {
-        let script = write_stub_script("infer-tools", "echo '{\"result\": \"ok\"}'\n");
+        let script = write_stub_script(
+            "infer-tools",
+            "echo '{\"result\": \"ok\"}'\n",
+            "echo {\"result\": \"ok\"}",
+        );
         let provider = ClaudeCodeProvider::with_binary_path(script.to_str().unwrap().to_string());
         let mut req = make_request();
         req.messages.insert(
@@ -1025,13 +1057,14 @@ mod tests {
         let _ = std::fs::remove_file(&script);
     }
 
-    #[cfg(unix)]
     #[tokio::test]
     async fn infer_stream_yields_chunks_from_ndjson() {
         let script = write_stub_script(
             "stream-ok",
             "echo '{\"type\": \"assistant\", \"content\": \"Hello\"}'\n\
              echo '{\"type\": \"assistant\", \"content\": \" world\"}'\n",
+            "echo {\"type\": \"assistant\", \"content\": \"Hello\"}\r\n\
+             echo {\"type\": \"assistant\", \"content\": \" world\"}",
         );
         let provider = ClaudeCodeProvider::with_binary_path(script.to_str().unwrap().to_string());
         let mut stream = provider.infer_stream(make_request()).await.unwrap();
@@ -1044,12 +1077,12 @@ mod tests {
         let _ = std::fs::remove_file(&script);
     }
 
-    #[cfg(unix)]
     #[tokio::test]
     async fn infer_stream_with_system_prompt_and_tools_still_succeeds() {
         let script = write_stub_script(
             "stream-tools",
             "echo '{\"type\": \"assistant\", \"content\": \"ok\"}'\n",
+            "echo {\"type\": \"assistant\", \"content\": \"ok\"}",
         );
         let provider = ClaudeCodeProvider::with_binary_path(script.to_str().unwrap().to_string());
         let mut req = make_request();
@@ -1073,12 +1106,12 @@ mod tests {
         let _ = std::fs::remove_file(&script);
     }
 
-    #[cfg(unix)]
     #[tokio::test]
     async fn infer_stream_content_block_delta_variant() {
         let script = write_stub_script(
             "stream-cbd",
             "echo '{\"type\": \"content_block_delta\", \"delta\": {\"text\": \"partial\"}}'\n",
+            "echo {\"type\": \"content_block_delta\", \"delta\": {\"text\": \"partial\"}}",
         );
         let provider = ClaudeCodeProvider::with_binary_path(script.to_str().unwrap().to_string());
         let mut stream = provider.infer_stream(make_request()).await.unwrap();
@@ -1088,7 +1121,6 @@ mod tests {
         let _ = std::fs::remove_file(&script);
     }
 
-    #[cfg(unix)]
     #[tokio::test]
     async fn infer_stream_skips_blank_and_unparseable_lines() {
         let script = write_stub_script(
@@ -1096,6 +1128,9 @@ mod tests {
             "echo ''\n\
              echo 'not json'\n\
              echo '{\"type\": \"assistant\", \"content\": \"real\"}'\n",
+            "echo.\r\n\
+             echo not json\r\n\
+             echo {\"type\": \"assistant\", \"content\": \"real\"}",
         );
         let provider = ClaudeCodeProvider::with_binary_path(script.to_str().unwrap().to_string());
         let mut stream = provider.infer_stream(make_request()).await.unwrap();
@@ -1114,7 +1149,6 @@ mod tests {
         assert!(err.to_string().contains("Is Claude Code installed?"));
     }
 
-    #[cfg(unix)]
     #[tokio::test]
     async fn infer_stream_invalid_utf8_output_yields_read_error() {
         // tokio's `Lines::poll_next_line` requires valid UTF-8 (like
@@ -1129,7 +1163,17 @@ mod tests {
         // invalid bytes and the stream produced no output at all instead of
         // a read error. `\NNN` octal escapes are POSIX-standard printf and
         // portable across dash/bash/zsh alike. 0377=0xff, 0376=0xfe.
-        let script = write_stub_script("stream-badutf8", "printf '\\377\\376\\n'\n");
+        //
+        // Batch has no `printf`; the Windows body shells out to PowerShell
+        // (always present on `windows-latest`) to write the exact same two
+        // raw bytes directly to the stdout stream handle, bypassing any text
+        // encoding that would otherwise "fix up" the invalid sequence.
+        let script = write_stub_script(
+            "stream-badutf8",
+            "printf '\\377\\376\\n'\n",
+            "powershell -NoProfile -Command \"$s=[Console]::OpenStandardOutput(); \
+             $b=[byte[]](0xFF,0xFE,0x0A); $s.Write($b,0,3); $s.Flush()\"",
+        );
         let provider = ClaudeCodeProvider::with_binary_path(script.to_str().unwrap().to_string());
         let mut stream = provider.infer_stream(make_request()).await.unwrap();
         use tokio_stream::StreamExt;

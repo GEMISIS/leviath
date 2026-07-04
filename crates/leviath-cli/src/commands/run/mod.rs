@@ -707,6 +707,97 @@ prompt = "Do the thing"
         let _ = std::fs::remove_dir_all(&temp_dir);
     }
 
+    // Windows twins of the two tests above: there's no `/usr/bin/true` on
+    // Windows, so a tiny no-op `.bat` file (which Windows' `CreateProcess`
+    // can launch directly, unlike a Unix shebang script) stands in as the
+    // harmless worker executable. These are also the only tests that
+    // exercise `cmd.spawn()`'s success path on Windows at all -- the
+    // production code's `#[cfg(unix)]` `pre_exec`/`setsid` block is simply
+    // absent from the Windows build, so reaching a successful `spawn()` here
+    // is sufficient to cover the entire non-Unix code path (there's no
+    // separate Windows-specific branch to inject around; the "gap" was
+    // purely a lack of any Windows test reaching this call at all).
+    #[cfg(windows)]
+    fn write_harmless_bat(path: &std::path::Path) {
+        std::fs::write(path, "@echo off\r\nexit /b 0\r\n").unwrap();
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn execute_background_happy_path_spawns_single_worker() {
+        let _guard = crate::runstate::isolate_runs_dir_for_test(
+            "execute_background_happy_path_spawns_single_worker",
+        );
+        let agent_name = "test-execute-bg-happy-single-win";
+        let _cleanup = RunPrefixCleanup(agent_name);
+        let temp_dir = std::env::temp_dir().join(agent_name);
+        let _ = std::fs::create_dir_all(&temp_dir);
+        write_valid_manifest(&temp_dir, agent_name);
+
+        let args = RunArgs {
+            path: Some(temp_dir.to_string_lossy().to_string()),
+            task: Some("test task".to_string()),
+            model: Some("claude-sonnet-4-6".to_string()),
+            foreground: false,
+            yolo: true,
+            allow: vec!["read_file".to_string()],
+            ask: vec!["bash".to_string()],
+            deny: vec!["write_file".to_string()],
+            max_depth: Some(2),
+            count: 1,
+        };
+
+        let harmless_exe = temp_dir.join("harmless.bat");
+        write_harmless_bat(&harmless_exe);
+        super::execute_background(args, &harmless_exe)
+            .await
+            .expect("expected background execute to succeed");
+
+        let runs = runstate::list_runs();
+        let run_was_created = runs.iter().any(|m| m.agent_name == agent_name);
+        assert!(run_was_created);
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn execute_background_happy_path_spawns_multiple_workers() {
+        let _guard = crate::runstate::isolate_runs_dir_for_test(
+            "execute_background_happy_path_spawns_multiple_workers",
+        );
+        let agent_name = "test-execute-bg-happy-multi-win";
+        let _cleanup = RunPrefixCleanup(agent_name);
+        let temp_dir = std::env::temp_dir().join(agent_name);
+        let _ = std::fs::create_dir_all(&temp_dir);
+        write_valid_manifest(&temp_dir, agent_name);
+
+        let args = RunArgs {
+            path: Some(temp_dir.to_string_lossy().to_string()),
+            task: Some("test task".to_string()),
+            model: None,
+            foreground: false,
+            yolo: false,
+            allow: vec![],
+            ask: vec![],
+            deny: vec![],
+            max_depth: None,
+            count: 3,
+        };
+
+        let harmless_exe = temp_dir.join("harmless.bat");
+        write_harmless_bat(&harmless_exe);
+        super::execute_background(args, &harmless_exe)
+            .await
+            .expect("expected multi-count background execute to succeed");
+
+        let runs = runstate::list_runs();
+        let matching = runs.iter().filter(|m| m.agent_name == agent_name).count();
+        assert_eq!(matching, 3);
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
     #[tokio::test]
     async fn execute_worker_thin_wrapper_delegates_to_worker_module() {
         let _guard = crate::runstate::isolate_runs_dir_for_test(

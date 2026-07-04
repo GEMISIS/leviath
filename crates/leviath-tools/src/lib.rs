@@ -1271,6 +1271,19 @@ mod tests {
     #[cfg(not(windows))]
     static SHELL_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+    /// Windows' `detect_shell()` branch is a plain, unconditional constant
+    /// return (no env/filesystem dependence to inject) -- the
+    /// platform-agnostic `detect_shell_returns_valid_shell` test below
+    /// already exercises it on Windows CI, but this asserts the exact
+    /// documented return value directly.
+    #[cfg(windows)]
+    #[test]
+    fn detect_shell_returns_cmd_exe() {
+        let (shell, flag) = BuiltinTools::detect_shell();
+        assert_eq!(shell, "cmd.exe");
+        assert_eq!(flag, "/C");
+    }
+
     #[test]
     fn detect_shell_returns_valid_shell() {
         #[cfg(not(windows))]
