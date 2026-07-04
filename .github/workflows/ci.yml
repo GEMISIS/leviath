@@ -29,6 +29,25 @@ jobs:
         run: cargo build --all-targets
       - name: Test
         run: cargo test
+      # GitHub's native per-job `badge.svg?job=...` filter was observed to
+      # render a "passing" badge even for a job name that doesn't exist in
+      # this workflow at all -- it silently falls back to some other status
+      # rather than erroring, so it can't be trusted to reflect this specific
+      # job's real per-OS result. Publish it ourselves instead, via the same
+      # self-published-gist mechanism already proven for the coverage badge
+      # below: `job.status` reflects the real accumulated pass/fail state of
+      # this job's steps so far, checked with `if: always()` so it runs
+      # (and reports failure) even when the Test step above failed.
+      - name: Publish test status badge
+        if: always() && github.ref == 'refs/heads/main' && github.event_name == 'push'
+        uses: schneegans/dynamic-badges-action@v1.7.0
+        with:
+          auth: ${{ secrets.GIST_TOKEN }}
+          gistID: ${{ vars.COVERAGE_GIST_ID }}
+          filename: leviath-test-${{ matrix.os }}.json
+          label: ${{ matrix.os }}
+          message: ${{ job.status == 'success' && 'passing' || 'failing' }}
+          color: ${{ job.status == 'success' && 'brightgreen' || 'red' }}
 
   clippy:
     name: Clippy
