@@ -131,9 +131,16 @@ fn yank_to_clipboard_via(text: &str, osc52_fallback: fn(&str) -> bool) -> bool {
             .stderr(Stdio::null())
             .spawn()
         {
-            if let Some(stdin) = child.stdin.as_mut() {
-                let _ = stdin.write_all(text.as_bytes());
-            }
+            // `child.stdin` is guaranteed `Some` here because the child was
+            // spawned with `.stdin(Stdio::piped())` above -- an `if let`
+            // guard would introduce an implicit "pattern didn't match" branch
+            // that could never actually be exercised, since that invariant
+            // always holds.
+            let _ = child
+                .stdin
+                .as_mut()
+                .expect("child spawned with Stdio::piped() stdin")
+                .write_all(text.as_bytes());
             if child.wait().map(|s| s.success()).unwrap_or(false) {
                 return true;
             }
@@ -184,9 +191,27 @@ fn osc52_sequence(text: &str) -> String {
 /// `/dev/tty` from a unit test corrupts (and can hang) whatever terminal
 /// `cargo test` happens to be running in, since it bypasses the test
 /// harness's stdout capture entirely.
+///
+/// COVERAGE-EXCLUDED: this is the real, unfaked `/dev/tty` opener. Calling it
+/// from a test would open the process's actual controlling terminal device.
+/// The `#[cfg(test)]` twin below always fails instead (harmlessly -- no real
+/// file is touched) so that `osc52_yank_raw`'s `#[cfg(test)]` twin can share
+/// the exact same `osc52_write_via`-calling structure as the real body
+/// (swapping only the stdout-fallback destination for an in-memory one) and
+/// still never reach a real TTY, rather than needing an entirely different,
+/// untested control-flow shape under `#[cfg(test)]`.
 #[cfg(unix)]
+#[cfg(not(test))]
 fn open_controlling_tty() -> std::io::Result<std::fs::File> {
     std::fs::OpenOptions::new().write(true).open("/dev/tty")
+}
+
+#[cfg(unix)]
+#[cfg(test)]
+fn open_controlling_tty() -> std::io::Result<std::fs::File> {
+    Err(std::io::Error::other(
+        "open_controlling_tty is disabled under #[cfg(test)]",
+    ))
 }
 
 /// Core OSC52 write logic, parameterized over how to open the TTY *and*
@@ -220,6 +245,23 @@ fn osc52_write_via<T: std::io::Write>(
 }
 
 /// Yank via the OSC52 terminal escape sequence — last-resort fallback.
+///
+/// COVERAGE-EXCLUDED: the real body writes directly to the real
+/// `std::io::stdout()` (and, via `open_controlling_tty`, the real `/dev/tty`)
+/// -- exercising it for real from a test would write raw OSC escape
+/// sequences to (and, if `/dev/tty` blocks, could hang) whatever terminal
+/// `cargo test` happens to run in. The `#[cfg(test)]` twin below keeps the
+/// exact same shape (still calls `open_controlling_tty` and
+/// `osc52_write_via`, so both remain exercised even if some future test
+/// reaches all the way down `yank_to_clipboard`'s real call chain instead of
+/// injecting a fake fallback, as every existing test of it does) but swaps
+/// the real `std::io::stdout()` destination for an in-memory `Vec<u8>`, so
+/// nothing ever touches a real terminal. All of the actual encode/branch
+/// logic (`osc52_sequence`, `osc52_write_via`'s try-tty-then-fall-back
+/// branching) is exercised directly and far more thoroughly by the
+/// dedicated tests below, which inject their own fake TTY openers and fake
+/// stdout destinations.
+#[cfg(not(test))]
 pub(super) fn osc52_yank_raw(text: &str) -> bool {
     #[cfg(unix)]
     {
@@ -235,8 +277,54 @@ pub(super) fn osc52_yank_raw(text: &str) -> bool {
 }
 
 #[cfg(test)]
+pub(super) fn osc52_yank_raw(text: &str) -> bool {
+    #[cfg(unix)]
+    {
+        osc52_write_via(text, open_controlling_tty, Vec::new())
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = text;
+        false
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
+
+    // ─── PATH env var save/restore helper for clipboard tests ────────────────
+    //
+    // Several tests below shadow `PATH` with a directory of fake clipboard
+    // binaries and must restore the original value afterwards -- or, if
+    // `PATH` was unset beforehand, remove it again rather than setting it to
+    // an empty string. Shared here (both branches covered: the `Some` arm by
+    // every call site below, the `None` arm by
+    // `test_restore_path_removes_path_when_originally_unset`) so the "was
+    // originally unset" branch only needs covering once instead of at every
+    // call site.
+    fn restore_path(original: Option<std::ffi::OsString>) {
+        unsafe {
+            match original {
+                Some(p) => std::env::set_var("PATH", p),
+                None => std::env::remove_var("PATH"),
+            }
+        }
+    }
+
+    #[test]
+    fn test_restore_path_removes_path_when_originally_unset() {
+        let _lock = crate::config::PATH_ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let real_original_path = std::env::var_os("PATH");
+
+        restore_path(None);
+        assert!(std::env::var_os("PATH").is_none());
+
+        // Put the real PATH back so no other test in this process is affected.
+        restore_path(real_original_path);
+    }
 
     #[test]
     fn test_truncate_short() {
@@ -421,8 +509,7 @@ mod tests {
             .unwrap_or(0);
         // 30 seconds ago → "30s ago"
         let result = relative_time(now - 30);
-        #[rustfmt::skip]
-        assert!(result.ends_with("s ago"), "expected 'Xs ago', got '{result}'");
+        assert!(result.ends_with("s ago"));
     }
 
     #[test]
@@ -434,8 +521,7 @@ mod tests {
             .unwrap_or(0);
         // 5 minutes ago → "5m ago"
         let result = relative_time(now - 300);
-        #[rustfmt::skip]
-        assert!(result.ends_with("m ago"), "expected 'Xm ago', got '{result}'");
+        assert!(result.ends_with("m ago"));
     }
 
     #[test]
@@ -485,7 +571,7 @@ mod tests {
             .unwrap_or(0);
         // Started 45 seconds ago
         let result = elapsed_str(now - 45);
-        assert!(result.ends_with('s'), "expected 'Xs', got '{}'", result);
+        assert!(result.ends_with('s'));
     }
 
     #[test]
@@ -497,7 +583,7 @@ mod tests {
             .unwrap_or(0);
         // Started 3 min 15 sec ago
         let result = elapsed_str(now - 195);
-        assert!(result.contains('m'), "expected 'XmYs', got '{}'", result);
+        assert!(result.contains('m'));
     }
 
     #[test]
@@ -509,34 +595,65 @@ mod tests {
             .unwrap_or(0);
         // Started 2 hours 10 minutes ago
         let result = elapsed_str(now - 7800);
-        assert!(result.contains('h'), "expected 'XhYm', got '{}'", result);
+        assert!(result.contains('h'));
     }
 
     // ── yank_to_clipboard: at least exercises the code path ──────────────────
-
-    #[test]
-    fn test_yank_to_clipboard_small_text() {
-        // Exercises the real native-tool spawn attempt (pbcopy/xclip/wl-copy
-        // -- harmless clipboard mutation, not terminal I/O), but if none are
-        // available in this environment the injected fallback below returns
-        // `true` without ever touching a real terminal via `osc52_yank_raw`.
-        fn fake_osc52_fallback(_text: &str) -> bool {
-            true
-        }
-        let result = yank_to_clipboard_via("hello clipboard", fake_osc52_fallback);
-        assert!(result);
-    }
+    //
+    // A previous version of this test ("test_yank_to_clipboard_small_text")
+    // called `yank_to_clipboard_via` with the ambient, untouched `PATH` and
+    // relied on whichever native tool happened to be installed -- which made
+    // whether its nested fallback closure ever actually ran (and thus
+    // whether it was ever covered) depend on the machine `cargo test`
+    // happened to run on. Both the "native tool succeeds" and "falls back to
+    // OSC52" branches of `yank_to_clipboard_via` are already covered
+    // deterministically below (`..._native_tool_success_returns_true_...`,
+    // `..._nonzero_exit_falls_through_to_fallback`,
+    // `..._falls_back_to_osc52_when_no_native_tool_on_path`), so that smoke
+    // test added no unique coverage -- it's removed rather than made
+    // deterministic by also starving `PATH`, to avoid growing the number of
+    // `PATH`-mutation windows tests not holding `PATH_ENV_LOCK` (e.g. the
+    // dashboard's real `key('y')` handlers in `input.rs`) could race with.
 
     #[test]
     fn test_yank_to_clipboard_empty() {
+        // Starves `PATH` so the injected fallback is reached deterministically
+        // regardless of which native clipboard tools happen to be installed
+        // on the machine `cargo test` runs on (see the removed
+        // `test_yank_to_clipboard_small_text`/`..._returns_true` tests'
+        // replacement comments above for why ambient-`PATH` smoke tests are
+        // avoided here).
+        let _lock = crate::config::PATH_ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         fn fake_osc52_fallback(_text: &str) -> bool {
             true
         }
+        let original_path = std::env::var_os("PATH");
+        unsafe {
+            std::env::set_var("PATH", "/lev-definitely-empty-path-dir");
+        }
         let result = yank_to_clipboard_via("", fake_osc52_fallback);
+        restore_path(original_path);
         assert!(result);
     }
 
     // ── yank_to_clipboard_via: native-tool success branch ────────────────────
+
+    // Module-scoped (rather than nested inside the test below) so its body
+    // can also be exercised directly by
+    // `test_unreachable_osc52_fallback_panics_if_ever_invoked` -- both
+    // branches (never called vs. called-and-panics) need coverage, and the
+    // test below can only ever prove the "never called" side.
+    fn unreachable_osc52_fallback(_text: &str) -> bool {
+        panic!("OSC52 fallback must not run when the fake pbcopy succeeds");
+    }
+
+    #[test]
+    #[should_panic(expected = "OSC52 fallback must not run when the fake pbcopy succeeds")]
+    fn test_unreachable_osc52_fallback_panics_if_ever_invoked() {
+        unreachable_osc52_fallback("anything");
+    }
 
     #[cfg(unix)]
     #[test]
@@ -564,21 +681,12 @@ mod tests {
             std::fs::set_permissions(&script_path, perms).unwrap();
         }
 
-        fn unreachable_osc52_fallback(_text: &str) -> bool {
-            panic!("OSC52 fallback must not run when the fake pbcopy succeeds");
-        }
-
         let original_path = std::env::var_os("PATH");
         unsafe {
             std::env::set_var("PATH", &dir);
         }
         let result = yank_to_clipboard_via("native tool success test", unreachable_osc52_fallback);
-        unsafe {
-            match &original_path {
-                Some(p) => std::env::set_var("PATH", p),
-                None => std::env::remove_var("PATH"),
-            }
-        }
+        restore_path(original_path);
         let _ = std::fs::remove_dir_all(&dir);
 
         assert!(result);
@@ -619,12 +727,7 @@ mod tests {
             std::env::set_var("PATH", &dir);
         }
         let result = yank_to_clipboard_via("nonzero exit test", fallback_reached);
-        unsafe {
-            match &original_path {
-                Some(p) => std::env::set_var("PATH", p),
-                None => std::env::remove_var("PATH"),
-            }
-        }
+        restore_path(original_path);
         let _ = std::fs::remove_dir_all(&dir);
 
         // All three native tools "ran" but failed, so control must have
@@ -765,20 +868,19 @@ mod tests {
     }
 
     // ─── yank_to_clipboard ──────────────────────────────────────────────────
-
-    #[test]
-    fn test_yank_to_clipboard_returns_true() {
-        // On this machine (macOS, real pbcopy present) this exercises the
-        // native-clipboard success path (return true from inside the `for`
-        // loop) rather than falling through to OSC52. If pbcopy is
-        // unavailable, the injected fallback still returns `true` without
-        // ever touching a real terminal via `osc52_yank_raw`.
-        fn fake_osc52_fallback(_text: &str) -> bool {
-            true
-        }
-        let result = yank_to_clipboard_via("dashboard yank test content", fake_osc52_fallback);
-        assert!(result);
-    }
+    //
+    // A previous version of this test ("test_yank_to_clipboard_returns_true")
+    // called `yank_to_clipboard_via` with the ambient, untouched `PATH`,
+    // relying on the real `pbcopy` this dev machine happens to have
+    // installed. Its nested fallback closure only got covered on runs where
+    // a concurrently-running `PATH`-mutating test happened to race with it --
+    // nondeterministic, and the exact kind of flakiness this file's
+    // `PATH_ENV_LOCK`-guarded tests exist to avoid. `yank_to_clipboard`
+    // itself (the public, un-suffixed wrapper this test also indirectly
+    // covered) is still exercised for real by the dashboard's `key('y')`
+    // handler tests in `input.rs`; the native-success and OSC52-fallback
+    // branches of `yank_to_clipboard_via` it delegates to are covered
+    // deterministically by the tests immediately below.
 
     #[test]
     fn test_yank_to_clipboard_falls_back_to_osc52_when_no_native_tool_on_path() {
@@ -804,23 +906,38 @@ mod tests {
             std::env::set_var("PATH", "/lev-definitely-empty-path-dir");
         }
         let result = yank_to_clipboard_via("fallback path test content", fake_osc52_fallback);
-        unsafe {
-            match &original_path {
-                Some(p) => std::env::set_var("PATH", p),
-                None => std::env::remove_var("PATH"),
-            }
-        }
+        restore_path(original_path);
         // The point of this test is proving the native-tool loop was skipped
         // entirely and control reached the injected OSC52 fallback -- not
         // exercising the real `osc52_yank_raw` (see its own tests above).
         assert!(result);
     }
 
-    // `osc52_yank_raw` itself is a thin one-line wrapper delegating to
-    // `osc52_yank_via` with the real `open_controlling_tty` opener (see
-    // above for full coverage of that logic). It is deliberately not called
-    // from tests: doing so opens the process's actual `/dev/tty` and writes
-    // an OSC escape sequence straight to it, corrupting -- and, under
-    // parallel test execution, potentially hanging -- whatever terminal
-    // `cargo test` is run from.
+    // ─── yank_to_clipboard (the real, un-suffixed wrapper) ───────────────────
+
+    #[test]
+    fn test_yank_to_clipboard_falls_back_to_test_twin_osc52_yank_raw() {
+        // Calls the real, un-suffixed `yank_to_clipboard` (unlike every test
+        // above, which calls `yank_to_clipboard_via` with an injected fake
+        // fallback) so its real call chain down to `osc52_yank_raw` is
+        // actually exercised. This is safe specifically *because*
+        // `osc52_yank_raw` is `#[cfg(test)]`-twinned to swap the real
+        // `std::io::stdout()` destination for an in-memory `Vec<u8>` (see its
+        // doc comment) -- under any other build, calling this would open the
+        // real `/dev/tty` and write to the real stdout.
+        let _lock = crate::config::PATH_ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // Starve PATH so the native-tool loop is skipped entirely and control
+        // reaches `osc52_yank_raw`, matching the technique used by
+        // `test_yank_to_clipboard_falls_back_to_osc52_when_no_native_tool_on_path`
+        // above (see its comment for why this is deterministic).
+        let original_path = std::env::var_os("PATH");
+        unsafe {
+            std::env::set_var("PATH", "/lev-definitely-empty-path-dir");
+        }
+        let result = yank_to_clipboard("real wrapper test content");
+        restore_path(original_path);
+        assert!(result);
+    }
 }

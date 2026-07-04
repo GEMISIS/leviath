@@ -206,11 +206,6 @@ impl Dashboard {
             .and_then(|&i| self.agents.get(i))
     }
 
-    pub(super) fn selected_agent_mut(&mut self) -> Option<&mut DashboardAgent> {
-        let idx = self.display_indices.get(self.selected).copied()?;
-        self.agents.get_mut(idx)
-    }
-
     pub(super) fn selected_agent_raw_idx(&self) -> Option<usize> {
         self.display_indices.get(self.selected).copied()
     }
@@ -763,25 +758,6 @@ mod tests {
     }
 
     #[test]
-    fn selected_agent_mut_works() {
-        let mut dash = make_test_dashboard();
-        dash.agents
-            .push(make_test_agent("run-1", AgentDisplayStatus::Active));
-        dash.update_display_indices();
-        // Use the mutable reference directly; the None path is tested separately.
-        dash.selected_agent_mut().unwrap().tokens_in = 999;
-        assert_eq!(dash.agents[0].tokens_in, 999);
-    }
-
-    #[test]
-    fn selected_agent_mut_empty_returns_none() {
-        // Exercises the `?` (None) return branch of selected_agent_mut when
-        // display_indices is empty.
-        let mut dash = make_test_dashboard();
-        assert!(dash.selected_agent_mut().is_none());
-    }
-
-    #[test]
     fn selected_agent_raw_idx() {
         let mut dash = make_test_dashboard();
         dash.agents
@@ -978,10 +954,7 @@ mod tests {
         })
         .unwrap();
         dash.process_events();
-        assert!(matches!(
-            dash.agents[0].status,
-            AgentDisplayStatus::Complete
-        ));
+        assert_eq!(dash.agents[0].status, AgentDisplayStatus::Complete);
     }
 
     #[test]
@@ -997,10 +970,10 @@ mod tests {
         })
         .unwrap();
         dash.process_events();
-        assert!(matches!(
+        assert_eq!(
             dash.agents[0].status,
-            AgentDisplayStatus::Error(_)
-        ));
+            AgentDisplayStatus::Error("something broke".to_string())
+        );
     }
 
     #[test]
@@ -1031,7 +1004,7 @@ mod tests {
         })
         .unwrap();
         dash.process_events();
-        assert!(matches!(dash.agents[0].status, AgentDisplayStatus::Waiting));
+        assert_eq!(dash.agents[0].status, AgentDisplayStatus::Waiting);
         assert_eq!(
             dash.agents[0].waiting_prompt.as_deref(),
             Some("What should I do?")
@@ -1087,10 +1060,7 @@ mod tests {
         })
         .unwrap();
         dash.process_events();
-        assert!(matches!(
-            dash.agents[0].status,
-            AgentDisplayStatus::Complete
-        ));
+        assert_eq!(dash.agents[0].status, AgentDisplayStatus::Complete);
     }
 
     #[test]
@@ -1283,7 +1253,7 @@ mod tests {
 
         assert_eq!(dash.agents[0].iteration, 5);
         assert_eq!(dash.agents[0].stage, "analyze");
-        assert!(matches!(dash.agents[0].status, AgentDisplayStatus::Active));
+        assert_eq!(dash.agents[0].status, AgentDisplayStatus::Active);
         assert!(dash.agents[0].accepts_messages);
     }
 
@@ -1347,22 +1317,16 @@ mod tests {
 
         dash.sync_agent_state_from_world(&engine);
 
-        // Verify each status was mapped correctly
-        assert!(matches!(dash.agents[0].status, AgentDisplayStatus::Active));
-        assert!(matches!(dash.agents[1].status, AgentDisplayStatus::Waiting));
-        assert!(matches!(
-            dash.agents[2].status,
-            AgentDisplayStatus::Complete
-        ));
-        assert!(matches!(
-            dash.agents[3].status,
-            AgentDisplayStatus::Cancelled
-        ));
-        assert!(matches!(dash.agents[4].status, AgentDisplayStatus::Idle));
-        assert!(matches!(
-            dash.agents[5].status,
-            AgentDisplayStatus::Error(_)
-        ));
+        // Verify each status was mapped correctly. `assert_eq!` against the
+        // exact expected `AgentDisplayStatus` (rather than
+        // `assert!(matches!(.., Variant))`, including for `Error(_)`, whose
+        // exact expected message is known from `statuses` above) exercises
+        // `AgentDisplayStatus`'s derived `PartialEq` directly instead of
+        // relying on `matches!`'s compiler-generated non-matching arm, which
+        // could never be covered here since every case is expected to match.
+        for (i, (_, expected_display)) in statuses.iter().enumerate() {
+            assert_eq!(&dash.agents[i].status, expected_display);
+        }
     }
 
     #[test]
@@ -1458,7 +1422,7 @@ mod tests {
 
         // AgentState is absent, so nothing should have changed
         assert_eq!(dash.agents[0].iteration, 42);
-        assert!(matches!(dash.agents[0].status, AgentDisplayStatus::Active));
+        assert_eq!(dash.agents[0].status, AgentDisplayStatus::Active);
     }
 
     // ─── build_tree_order with deeper nesting ─────────────────────────────
@@ -1687,7 +1651,7 @@ mod tests {
         let mut dash = make_test_dashboard();
         dash.push_toast("warning!", ToastLevel::Warning);
         assert_eq!(dash.toasts.len(), 1);
-        assert!(matches!(dash.toasts[0].level, ToastLevel::Warning));
+        assert_eq!(dash.toasts[0].level, ToastLevel::Warning);
     }
 
     #[test]
@@ -1695,7 +1659,7 @@ mod tests {
         let mut dash = make_test_dashboard();
         dash.push_toast("error!", ToastLevel::Error);
         assert_eq!(dash.toasts.len(), 1);
-        assert!(matches!(dash.toasts[0].level, ToastLevel::Error));
+        assert_eq!(dash.toasts[0].level, ToastLevel::Error);
     }
 
     // ─── tick_toasts: already at zero stays zero ──────────────────────────
@@ -1939,7 +1903,7 @@ mod tests {
         dash.sync_from_run_state();
 
         let agent = dash.agents.iter().find(|a| a.id == run_id).unwrap();
-        assert!(matches!(agent.status, AgentDisplayStatus::Active));
+        assert_eq!(agent.status, AgentDisplayStatus::Active);
         assert!(agent.is_run_state);
         assert!(dash.initial_sync_done);
         // No toasts on the very first sync (startup), even though this is a "new" agent.
@@ -1962,7 +1926,7 @@ mod tests {
         dash.sync_from_run_state();
 
         let agent = dash.agents.iter().find(|a| a.id == run_id).unwrap();
-        assert!(matches!(agent.status, AgentDisplayStatus::Active));
+        assert_eq!(agent.status, AgentDisplayStatus::Active);
 
         cleanup_run(run_id);
     }
@@ -2001,7 +1965,7 @@ mod tests {
         dash.sync_from_run_state();
 
         let agent = dash.agents.iter().find(|a| a.id == run_id).unwrap();
-        assert!(matches!(agent.status, AgentDisplayStatus::Cancelled));
+        assert_eq!(agent.status, AgentDisplayStatus::Cancelled);
 
         cleanup_run(run_id);
     }
@@ -2023,7 +1987,7 @@ mod tests {
         dash.sync_from_run_state();
 
         let agent = dash.agents.iter().find(|a| a.id == run_id).unwrap();
-        assert!(matches!(agent.status, AgentDisplayStatus::Waiting));
+        assert_eq!(agent.status, AgentDisplayStatus::Waiting);
         assert_eq!(agent.waiting_prompt.as_deref(), Some("What next?"));
         assert!(agent.pending_request.is_some());
         assert!(agent.active_until.is_some());
@@ -2052,10 +2016,7 @@ mod tests {
         dash.sync_from_run_state();
 
         let agent = dash.agents.iter().find(|a| a.id == run_id).unwrap();
-        assert!(matches!(
-            agent.status,
-            AgentDisplayStatus::CompleteInteractive
-        ));
+        assert_eq!(agent.status, AgentDisplayStatus::CompleteInteractive);
         assert!(agent.waiting_prompt.is_some());
         assert!(agent.active_until.is_some());
 
@@ -2172,7 +2133,10 @@ mod tests {
         dash.sync_from_run_state(); // second sync: transitions to Error
 
         let agent = dash.agents.iter().find(|a| a.id == run_id).unwrap();
-        assert!(matches!(agent.status, AgentDisplayStatus::Error(_)));
+        assert_eq!(
+            agent.status,
+            AgentDisplayStatus::Error("disk full".to_string())
+        );
         assert!(dash
             .toasts
             .iter()
@@ -2227,7 +2191,7 @@ mod tests {
         dash.sync_from_run_state();
 
         let agent = dash.agents.iter().find(|a| a.id == run_id).unwrap();
-        assert!(matches!(agent.status, AgentDisplayStatus::Complete));
+        assert_eq!(agent.status, AgentDisplayStatus::Complete);
         assert!(dash.toasts.iter().any(|t| t.message.contains("completed")));
 
         cleanup_run(run_id);
@@ -2275,17 +2239,19 @@ mod tests {
 
         let mut dash = make_test_dashboard();
         dash.sync_from_run_state(); // first sync: creates the agent, already Complete
-        assert!(matches!(
+        assert_eq!(
             dash.agents.iter().find(|a| a.id == run_id).unwrap().status,
             AgentDisplayStatus::Complete
-        ));
+        );
 
         let meta2 = make_run_meta(run_id, RunStatus::Error);
         runstate::write_meta(&meta2).unwrap();
         dash.sync_from_run_state(); // second sync: transitions Complete -> Error
 
         let agent = dash.agents.iter().find(|a| a.id == run_id).unwrap();
-        assert!(matches!(agent.status, AgentDisplayStatus::Error(_)));
+        // `meta2` above has no `.error` set, so the mapped message defaults
+        // to the empty string (`run.error.clone().unwrap_or_default()`).
+        assert_eq!(agent.status, AgentDisplayStatus::Error(String::new()));
         // No transition toast fires -- the block only runs when the agent
         // was previously Active/Waiting, which it wasn't here.
         // Seed an unrelated toast first so `.any()` below actually invokes
@@ -2360,7 +2326,7 @@ mod tests {
         dash.sync_from_run_state();
 
         let agent = dash.agents.iter().find(|a| a.id == run_id).unwrap();
-        assert!(matches!(agent.status, AgentDisplayStatus::Waiting));
+        assert_eq!(agent.status, AgentDisplayStatus::Waiting);
         assert_eq!(agent.active_until, Some(meta2.updated_at));
         assert_eq!(agent.waiting_prompt.as_deref(), Some("Q?"));
         assert!(dash
@@ -2541,7 +2507,7 @@ mod tests {
         dash.sync_from_run_state();
 
         let agent = dash.agents.iter().find(|a| a.id == run_id).unwrap();
-        assert!(matches!(agent.status, AgentDisplayStatus::Waiting));
+        assert_eq!(agent.status, AgentDisplayStatus::Waiting);
         assert!(agent.waiting_prompt.is_none());
 
         cleanup_run(run_id);
@@ -2608,12 +2574,20 @@ mod tests {
         dash.sync_from_run_state();
 
         let agent = dash.agents.iter().find(|a| a.id == run_id).unwrap();
-        assert!(matches!(
-            agent.status,
-            AgentDisplayStatus::CompleteInteractive
-        ));
+        assert_eq!(agent.status, AgentDisplayStatus::CompleteInteractive);
         // waiting_prompt is populated (the request exists)
         assert!(agent.waiting_prompt.is_some());
+        // Seed a toast that *does* contain `run_id` (but not "needs input")
+        // so the closure below's `has_id && has_tag` actually evaluates
+        // `has_tag` at least once -- the real "completed" toast pushed by
+        // `sync_from_run_state` uses `truncate(&agent.blueprint_name, 20)`,
+        // and `run_id` here is longer than 20 chars, so it never contains
+        // the full `run_id` substring on its own.
+        dash.toasts.push(Toast {
+            message: format!("{run_id}: unrelated toast"),
+            remaining_ticks: 1,
+            level: ToastLevel::Info,
+        });
         // But no "needs input" toast because CompleteInteractive input is optional
         let needs_input_toast = dash.toasts.iter().find(|t| {
             let has_id = t.message.contains(run_id);

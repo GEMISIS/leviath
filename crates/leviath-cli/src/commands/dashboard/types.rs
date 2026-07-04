@@ -186,7 +186,7 @@ pub(super) struct Toast {
     pub(super) level: ToastLevel,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 #[allow(dead_code)]
 pub(super) enum ToastLevel {
     Info,

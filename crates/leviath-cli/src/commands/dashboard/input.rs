@@ -387,11 +387,23 @@ impl Dashboard {
                         agent_id: agent_id.clone(),
                     });
                 }
-                if let Some(a) = self.selected_agent_mut() {
-                    a.status = AgentDisplayStatus::Cancelled;
-                    a.waiting_prompt = None;
-                    a.pending_request = None;
-                }
+                // The index came from `display_indices`/`agents` just above,
+                // via the `self.selected_agent()` lookup that got us into
+                // this branch, and nothing in between (the OS kill signal,
+                // `kill_write_cancelled`, `clear_interaction`, or the
+                // `cmd_tx.send`) mutates either collection or `self.selected`
+                // -- so it's always still valid. An `if let` guard here would
+                // add an "index went stale" branch that can never actually be
+                // exercised.
+                let idx = self
+                    .selected_agent_raw_idx()
+                    .expect("selected_agent() returned Some above");
+                let a = self.agents.get_mut(idx).expect(
+                    "index snapshotted from the still-unchanged display_indices/agents above",
+                );
+                a.status = AgentDisplayStatus::Cancelled;
+                a.waiting_prompt = None;
+                a.pending_request = None;
                 self.input_mode = false;
                 self.input_textarea = tui_textarea::TextArea::default();
                 self.add_log(format!("{}: Killed", agent_id));
@@ -488,11 +500,19 @@ impl Dashboard {
                     if matches!(agent.status, AgentDisplayStatus::Waiting) {
                         interaction::clear_interaction(&agent_id);
                     }
-                    if let Some(a) = self.selected_agent_mut() {
-                        a.status = AgentDisplayStatus::Cancelled;
-                        a.waiting_prompt = None;
-                        a.pending_request = None;
-                    }
+                    // See the comment in `handle_kill_from_detail` -- the
+                    // index is still valid because nothing since the
+                    // `self.selected_agent()` lookup above touches
+                    // `display_indices`/`agents`/`selected`.
+                    let idx = self
+                        .selected_agent_raw_idx()
+                        .expect("selected_agent() returned Some above");
+                    let a = self.agents.get_mut(idx).expect(
+                        "index snapshotted from the still-unchanged display_indices/agents above",
+                    );
+                    a.status = AgentDisplayStatus::Cancelled;
+                    a.waiting_prompt = None;
+                    a.pending_request = None;
                 } else {
                     let _ = self.cmd_tx.send(EngineCommand::CancelAgent {
                         agent_id: agent_id.clone(),
@@ -526,11 +546,19 @@ impl Dashboard {
                         agent_id: agent_id.clone(),
                     });
                 }
-                if let Some(a) = self.selected_agent_mut() {
-                    a.status = AgentDisplayStatus::Cancelled;
-                    a.waiting_prompt = None;
-                    a.pending_request = None;
-                }
+                // See the comment in `handle_kill_from_detail` -- the index
+                // is still valid because nothing since the
+                // `self.selected_agent()` lookup above touches
+                // `display_indices`/`agents`/`selected`.
+                let idx = self
+                    .selected_agent_raw_idx()
+                    .expect("selected_agent() returned Some above");
+                let a = self.agents.get_mut(idx).expect(
+                    "index snapshotted from the still-unchanged display_indices/agents above",
+                );
+                a.status = AgentDisplayStatus::Cancelled;
+                a.waiting_prompt = None;
+                a.pending_request = None;
                 self.add_log(format!("{}: Killed", agent_id));
             }
         }
@@ -616,16 +644,27 @@ impl Dashboard {
         self.choice_selected = 0;
 
         let answered_id = resp.request_id.clone();
-        if let Some(a) = self.selected_agent_mut() {
-            a.last_answered_request_id = if answered_id.is_empty() {
-                None
-            } else {
-                Some(answered_id)
-            };
-            a.waiting_prompt = None;
-            a.pending_request = None;
-            a.status = AgentDisplayStatus::Active;
-        }
+        // The index is still valid because nothing since the
+        // `self.selected_agent()` lookup at the top of this function (which
+        // is where `req`/`agent_id`/`is_run_state` came from) touches
+        // `display_indices`/`agents`/`selected` -- an `if let` guard here
+        // would add an "index went stale" branch that can never actually be
+        // exercised.
+        let idx = self
+            .selected_agent_raw_idx()
+            .expect("selected_agent() returned Some above");
+        let a = self
+            .agents
+            .get_mut(idx)
+            .expect("index snapshotted from the still-unchanged display_indices/agents above");
+        a.last_answered_request_id = if answered_id.is_empty() {
+            None
+        } else {
+            Some(answered_id)
+        };
+        a.waiting_prompt = None;
+        a.pending_request = None;
+        a.status = AgentDisplayStatus::Active;
 
         if is_run_state {
             match interaction::write_response(&agent_id, &resp) {
@@ -1665,7 +1704,7 @@ mod tests {
         assert!(!dash.input_mode);
         assert!(dash.agents[0].pending_request.is_none());
         assert!(dash.agents[0].waiting_prompt.is_none());
-        assert!(matches!(dash.agents[0].status, AgentDisplayStatus::Active));
+        assert_eq!(dash.agents[0].status, AgentDisplayStatus::Active);
     }
 
     // ─── submit_input for FreeText with /quit ─────────────────────────────
@@ -1691,7 +1730,7 @@ mod tests {
 
         assert!(!dash.input_mode);
         // Agent status should be Active (resumed)
-        assert!(matches!(dash.agents[0].status, AgentDisplayStatus::Active));
+        assert_eq!(dash.agents[0].status, AgentDisplayStatus::Active);
     }
 
     // ─── submit_input for MultipleChoice ──────────────────────────────────
@@ -1944,7 +1983,7 @@ mod tests {
         })
         .unwrap();
         dash.process_events();
-        assert!(matches!(dash.agents[0].status, AgentDisplayStatus::Waiting));
+        assert_eq!(dash.agents[0].status, AgentDisplayStatus::Waiting);
         assert_eq!(
             dash.agents[0].waiting_prompt.as_deref(),
             Some("Please provide input")
@@ -1967,7 +2006,7 @@ mod tests {
         .unwrap();
         dash.process_events();
         // The unrelated existing agent must be untouched.
-        assert!(matches!(dash.agents[0].status, AgentDisplayStatus::Active));
+        assert_eq!(dash.agents[0].status, AgentDisplayStatus::Active);
     }
 
     #[test]
@@ -1984,11 +2023,11 @@ mod tests {
         })
         .unwrap();
         dash.process_events();
-        // Should still be Error, not Complete
-        assert!(matches!(
+        // Should still be Error("failed"), not Complete.
+        assert_eq!(
             dash.agents[0].status,
-            AgentDisplayStatus::Error(_)
-        ));
+            AgentDisplayStatus::Error("failed".to_string())
+        );
     }
 
     #[test]
@@ -2003,10 +2042,7 @@ mod tests {
         })
         .unwrap();
         dash.process_events();
-        assert!(matches!(
-            dash.agents[0].status,
-            AgentDisplayStatus::Cancelled
-        ));
+        assert_eq!(dash.agents[0].status, AgentDisplayStatus::Cancelled);
     }
 
     // ─── handle_kill_from_detail for in-process agent ─────────────────────
@@ -2023,10 +2059,7 @@ mod tests {
 
         dash.handle_key(key(KeyCode::Char('k')));
 
-        assert!(matches!(
-            dash.agents[0].status,
-            AgentDisplayStatus::Cancelled
-        ));
+        assert_eq!(dash.agents[0].status, AgentDisplayStatus::Cancelled);
 
         // Should have sent CancelAgent command
         let cmd = cmd_rx.try_recv();
@@ -2064,10 +2097,7 @@ mod tests {
 
         dash.handle_key(key(KeyCode::Char('k')));
 
-        assert!(matches!(
-            dash.agents[0].status,
-            AgentDisplayStatus::Cancelled
-        ));
+        assert_eq!(dash.agents[0].status, AgentDisplayStatus::Cancelled);
 
         let cmd = cmd_rx.try_recv();
         assert!(cmd.is_ok());
@@ -2119,10 +2149,19 @@ mod tests {
     }
 
     #[test]
-    fn yank_with_real_content_reports_success_or_clipboard_unavailable() {
-        let _guard = crate::runstate::isolate_runs_dir_for_test(
-            "yank_with_real_content_reports_success_or_clipboard_unavailable",
-        );
+    fn yank_with_real_content_reports_success() {
+        // Uses `handle_yank_with_fn` with an injected always-succeeds
+        // fallback instead of `handle_key(KeyCode::Char('y'))` (which would
+        // dispatch to the real `handle_yank` -> `helpers::yank_to_clipboard`
+        // -> potentially the real `osc52_yank_raw`, which opens the actual
+        // `/dev/tty`). Whether that real path's native-tool-vs-OSC52 branch
+        // is taken depends on what clipboard tools happen to be installed on
+        // the machine `cargo test` runs on, which made the toast message
+        // (and therefore this assertion) inherently non-deterministic; the
+        // real dispatch path itself is exercised by `helpers.rs`'s own
+        // dedicated, deterministic tests instead.
+        let _guard =
+            crate::runstate::isolate_runs_dir_for_test("yank_with_real_content_reports_success");
         let run_id = "test-yank-real-content";
         crate::runstate::append_stage_output(run_id, 0, "some real output");
 
@@ -2133,12 +2172,12 @@ mod tests {
         dash.detail_view = true;
         dash.stage_content_mode = StageContentMode::Output;
 
-        dash.handle_key(key(KeyCode::Char('y')));
+        dash.handle_yank_with_fn(|_| true);
 
-        assert!(!dash.toasts.is_empty());
-        let msg = &dash.toasts[0].message;
-        #[rustfmt::skip]
-        assert!(msg.contains("yanked to clipboard") || msg.contains("Clipboard unavailable"), "unexpected toast message: {}", msg);
+        assert!(dash
+            .toasts
+            .iter()
+            .any(|t| t.message.contains("yanked to clipboard")));
 
         let _ = std::fs::remove_dir_all(crate::runstate::run_dir(run_id));
     }
@@ -2223,8 +2262,7 @@ mod tests {
 
         dash.handle_key(key(KeyCode::Enter));
         assert!(!dash.input_mode);
-        #[rustfmt::skip]
-        assert!(dash.log.iter().any(|e| e.message.contains("A")), "expected log entry containing 'A', got: {:?}", dash.log.iter().map(|e| &e.message).collect::<Vec<_>>());
+        assert!(dash.log.iter().any(|e| e.message.contains("A")));
 
         let _ = std::fs::remove_dir_all(crate::runstate::run_dir(&run_id));
     }
@@ -2261,10 +2299,7 @@ mod tests {
         dash.process_events();
 
         assert_eq!(dash.agents[0].stage, "code");
-        assert!(matches!(
-            dash.agents[0].status,
-            AgentDisplayStatus::Complete
-        ));
+        assert_eq!(dash.agents[0].status, AgentDisplayStatus::Complete);
         assert_eq!(dash.agents[1].iteration, 1);
     }
 
@@ -2514,7 +2549,7 @@ mod tests {
         .unwrap();
         dash.process_events();
         // Existing agent remains Active
-        assert!(matches!(dash.agents[0].status, AgentDisplayStatus::Active));
+        assert_eq!(dash.agents[0].status, AgentDisplayStatus::Active);
     }
 
     #[test]
@@ -2533,7 +2568,7 @@ mod tests {
         .unwrap();
         dash.process_events();
         // Existing agent still Active, no waiting_prompt set
-        assert!(matches!(dash.agents[0].status, AgentDisplayStatus::Active));
+        assert_eq!(dash.agents[0].status, AgentDisplayStatus::Active);
         assert!(dash.agents[0].waiting_prompt.is_none());
     }
 
@@ -2572,7 +2607,7 @@ mod tests {
         })
         .unwrap();
         dash.process_events();
-        assert!(matches!(dash.agents[0].status, AgentDisplayStatus::Active));
+        assert_eq!(dash.agents[0].status, AgentDisplayStatus::Active);
     }
 
     // ─── main list: Down key — three agents to confirm can-move path ──────

@@ -1175,20 +1175,12 @@ mod tests {
             .iter()
             .map(|c| c.symbol())
             .collect();
-        assert!(content.contains("output.log"), "got: {}", content);
+        assert!(content.contains("output.log"));
         assert!(!content.contains('~'));
 
         let _ = std::fs::remove_dir_all(&base);
-        unsafe {
-            match original_runs_dir {
-                Some(v) => std::env::set_var("LEVIATH_RUNS_DIR", v),
-                None => std::env::remove_var("LEVIATH_RUNS_DIR"),
-            }
-            match original_log_path {
-                Some(v) => std::env::set_var("LEVIATH_DASHBOARD_LOG_PATH", v),
-                None => std::env::remove_var("LEVIATH_DASHBOARD_LOG_PATH"),
-            }
-        }
+        runstate::restore_env_var("LEVIATH_RUNS_DIR", original_runs_dir);
+        runstate::restore_env_var("LEVIATH_DASHBOARD_LOG_PATH", original_log_path);
     }
 
     #[test]
@@ -1502,7 +1494,7 @@ mod tests {
         // Should show stage info
         assert!(!lines.is_empty());
         // The incoming edge from "plan" should be listed
-        assert!(text.contains("← plan") || text.contains("Incoming") || text.contains("plan"));
+        assert!(text.contains("← plan"));
     }
 
     #[test]
@@ -1533,7 +1525,7 @@ mod tests {
             .iter()
             .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
             .collect();
-        assert!(text.contains("terminal") || text.contains("Transitions"));
+        assert!(text.contains("terminal"));
     }
 
     #[test]
@@ -1563,7 +1555,7 @@ mod tests {
             .iter()
             .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
             .collect();
-        assert!(text.contains("linear") || text.contains("Transitions") || text.contains("Stage:"));
+        assert!(text.contains("linear"));
     }
 
     // ─── build_context_lines: multiple region kinds ───────────────────────
