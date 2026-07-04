@@ -448,9 +448,19 @@ fn log_running_agent_foreground() {
 #[cfg(test)]
 fn log_running_agent_foreground() {}
 
+/// `build_registry` is a plain function pointer (not `impl FnOnce`)
+/// deliberately: every test below passes a non-capturing closure, and a
+/// generic `impl FnOnce` parameter would make `run_foreground_with_registry`
+/// -- and therefore the `ForegroundCallbacks`/`exec`-closure instantiation of
+/// the shared `run_stage_loop` it drives -- monomorphize separately per
+/// test. A concrete `fn` pointer type lets every call site (production and
+/// test) share one instantiation, which is what fixed a real llvm-cov
+/// instantiation-merging undercount in `run_stage_loop`'s coverage (see
+/// `executor.rs`'s `run_stage_loop` doc comment, and the identical fix
+/// applied to `worker.rs`'s `run_worker_inner`).
 async fn run_foreground_with_registry(
     args: RunArgs,
-    build_registry: impl FnOnce(&Config) -> leviath_runtime::ProviderRegistry,
+    build_registry: fn(&Config) -> leviath_runtime::ProviderRegistry,
 ) -> anyhow::Result<()> {
     let path = args.path.unwrap_or_else(|| ".".to_string());
 

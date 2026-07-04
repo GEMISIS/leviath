@@ -935,6 +935,30 @@ mod tests {
     }
 
     #[test]
+    fn test_write_request_tmp_write_fails_when_target_is_a_directory() {
+        let _guard = crate::runstate::isolate_runs_dir_for_test(
+            "test_write_request_tmp_write_fails_when_target_is_a_directory",
+        );
+        let run_id = "test-write-request-tmp-is-dir";
+        let dir = crate::runstate::run_dir(run_id);
+        std::fs::create_dir_all(&dir).unwrap();
+        // Pre-create the *tmp* path (not the final path, covered by
+        // `test_write_request_rename_fails_when_target_is_a_directory` above)
+        // as a directory: `std::fs::write(&tmp, &json)` itself fails with
+        // EISDIR before `fs::rename` is ever reached, exercising
+        // `write_request`'s tmp-file-write `?` -- a distinct branch from the
+        // rename failure, since a well-formed JSON body is never itself
+        // capable of making `serde_json::to_string_pretty` fail.
+        std::fs::create_dir_all(pending_path(run_id).with_extension("json.tmp")).unwrap();
+
+        let req = InteractionRequest::free_text("rw1", "What now?", "plan", true);
+        let result = write_request(run_id, &req);
+        assert!(result.is_err());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn test_write_and_read_response() {
         let _guard = crate::runstate::isolate_runs_dir_for_test("test_write_and_read_response");
         let run_id = "test-interaction-rw-resp";
@@ -968,6 +992,25 @@ mod tests {
         // succeeds, but `fs::rename` onto an existing directory fails,
         // exercising `write_response`'s rename `?`.
         std::fs::create_dir_all(response_path(run_id)).unwrap();
+
+        let resp = InteractionResponse::text("rw2", "my answer");
+        let result = write_response(run_id, &resp);
+        assert!(result.is_err());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_write_response_tmp_write_fails_when_target_is_a_directory() {
+        let _guard = crate::runstate::isolate_runs_dir_for_test(
+            "test_write_response_tmp_write_fails_when_target_is_a_directory",
+        );
+        let run_id = "test-write-response-tmp-is-dir";
+        let dir = crate::runstate::run_dir(run_id);
+        std::fs::create_dir_all(&dir).unwrap();
+        // See `test_write_request_tmp_write_fails_when_target_is_a_directory`
+        // -- same distinction, for `write_response`'s own tmp-file write.
+        std::fs::create_dir_all(response_path(run_id).with_extension("json.tmp")).unwrap();
 
         let resp = InteractionResponse::text("rw2", "my answer");
         let result = write_response(run_id, &resp);

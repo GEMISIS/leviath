@@ -537,10 +537,20 @@ pub async fn execute_worker(args: WorkerArgs) -> anyhow::Result<()> {
 /// generation and the `exec` closure's real call site -- instead of either
 /// stopping at a missing-provider error or making a real, billed network
 /// call. Production always passes [`build_provider_registry`].
+///
+/// `build_registry` is a plain function pointer (not `impl FnOnce`)
+/// deliberately: every test below passes a non-capturing closure, and a
+/// generic `impl FnOnce` parameter would make `run_worker_inner` -- and
+/// therefore the `WorkerCallbacks`/`exec`-closure instantiation of the
+/// shared `run_stage_loop` it drives -- monomorphize separately per test.
+/// A concrete `fn` pointer type lets every call site (production and test)
+/// share one instantiation, which is what fixed a real llvm-cov
+/// instantiation-merging undercount in `run_stage_loop`'s coverage (see
+/// `executor.rs`'s `run_stage_loop` doc comment).
 async fn run_worker_inner(
     args: &WorkerArgs,
     meta: &mut RunMeta,
-    build_registry: impl FnOnce(&Config) -> leviath_runtime::ProviderRegistry,
+    build_registry: fn(&Config) -> leviath_runtime::ProviderRegistry,
 ) -> anyhow::Result<()> {
     let manifest_path = find_manifest(&args.path)?;
     println!("Loading agent from: {}", manifest_path.display());

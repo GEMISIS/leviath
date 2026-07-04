@@ -143,6 +143,27 @@ pub trait StageCallbacks: Send {
 
 /// The unified stage loop. Both foreground and worker modes call this with
 /// their respective `StageCallbacks` implementation.
+///
+/// Coverage note: this function is generic over both `CB: StageCallbacks`
+/// and the executor closure `F`/`Fut`, so every distinct (`CB`, `F`)
+/// combination a caller uses compiles as a separate monomorphized
+/// instantiation. `cargo-llvm-cov`'s own instantiation-group merging can
+/// under-report a handful of regions/lines for this function even when every
+/// branch is genuinely exercised by some instantiation (confirmed by
+/// inspecting the merged per-file segment data directly: it shows 100% real
+/// coverage even when the summary table's region/line counts show a small
+/// residual miss). `run_worker_inner` (worker.rs) and
+/// `run_foreground_with_registry` (foreground.rs) both take their
+/// provider-registry builder as a concrete `fn` pointer rather than `impl
+/// FnOnce` specifically to keep their own (and therefore this function's)
+/// instantiation count to the legitimate minimum -- one per production
+/// `StageCallbacks` impl, plus one per test double that genuinely needs
+/// distinct behavior (see this module's `MockCallbacks`/`ModelCapture`/
+/// `VisitCapture`). Making `StageCallbacks` object-safe (erasing `CB` too)
+/// would remove the rest, but `run_autonomous`'s own `<F, Fut>` generics
+/// make that a cascading refactor through every implementor and through
+/// `stages.rs`'s executor-closure plumbing -- out of scope for a
+/// coverage-only pass.
 #[allow(clippy::too_many_arguments)]
 pub async fn run_stage_loop<CB, F, Fut>(
     ctx: &mut StageContext<'_>,
