@@ -183,26 +183,37 @@ fn install_from_dir(src: &Path, agents_dir: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Test-only toggle letting a test force the `Err` arm of a
+    /// mid-iteration `ReadDir` entry deterministically (see
+    /// [`unwrap_dir_entry`]) -- the real failure mode (the directory handle
+    /// becoming invalid mid-iteration: deleted out from under the process,
+    /// an NFS ESTALE, or similar) is a genuine OS-level race that can't be
+    /// reproduced deterministically across Linux/macOS/Windows CI.
+    static FORCE_DIR_ENTRY_ERROR: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Unwrap one `ReadDir` iteration result, with a test-only failure-injection
+/// toggle (see [`FORCE_DIR_ENTRY_ERROR`]) so the `Err` arm -- `ReadDir::next()`
+/// failing after `read_dir` already succeeded in opening the directory --
+/// can be exercised deterministically without needing to actually race the
+/// filesystem.
+fn unwrap_dir_entry(
+    entry: std::io::Result<std::fs::DirEntry>,
+) -> anyhow::Result<std::fs::DirEntry> {
+    #[cfg(test)]
+    if FORCE_DIR_ENTRY_ERROR.with(|f| f.get()) {
+        anyhow::bail!("forced dir-entry error for testing");
+    }
+    Ok(entry?)
+}
+
 /// Recursively copy a directory tree.
 fn copy_dir_recursive(src: &Path, dst: &Path) -> anyhow::Result<()> {
     std::fs::create_dir_all(dst)?;
     for entry in std::fs::read_dir(src)? {
-        // CONFIRMED-PERMANENT COVERAGE GAP: this `?`'s `Err` arm requires
-        // `ReadDir::next()` itself to fail *after* `read_dir(src)` already
-        // succeeded in opening the directory -- e.g. the directory handle
-        // becoming invalid mid-iteration (deleted out from under the
-        // process, an NFS ESTALE, or similar). That's a genuine OS-level
-        // race, not a redundant recheck of something already validated
-        // (contrast `read_dir(src)?` itself and `src_path.is_dir()`/
-        // `std::fs::copy(...)` below, all of which ARE exercised via
-        // permission-based tests). Reliably forcing a mid-iteration
-        // `readdir()` failure would require deleting/corrupting the
-        // directory while iterating it, which is inherently racy and
-        // behaves differently across Linux/macOS/Windows (this suite runs
-        // real CI on all three) -- not something that can be made
-        // deterministic without the exact kind of unsafe, flaky trick this
-        // codebase avoids.
-        let entry = entry?;
+        let entry = unwrap_dir_entry(entry)?;
         let src_path = entry.path();
         let dst_path = dst.join(entry.file_name());
         if src_path.is_dir() {
@@ -391,6 +402,24 @@ description = "test"
 
         // Restore permissions so the tempdir can clean itself up on drop.
         std::fs::set_permissions(&sub, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn copy_dir_recursive_forced_mid_iteration_entry_error() {
+        // Deterministically exercises `unwrap_dir_entry`'s `Err` arm (a real
+        // `ReadDir::next()` failure mid-iteration) without racing the
+        // filesystem, via the FORCE_DIR_ENTRY_ERROR test toggle.
+        let src_dir = tempfile::tempdir().unwrap();
+        std::fs::write(src_dir.path().join("file.txt"), "data").unwrap();
+
+        let dst_dir = tempfile::tempdir().unwrap();
+        let dst_path = dst_dir.path().join("copy");
+
+        FORCE_DIR_ENTRY_ERROR.with(|f| f.set(true));
+        let result = copy_dir_recursive(src_dir.path(), &dst_path);
+        FORCE_DIR_ENTRY_ERROR.with(|f| f.set(false));
 
         assert!(result.is_err());
     }

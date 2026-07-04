@@ -269,28 +269,25 @@ pub async fn prompt_llm_transition(
     let response = provider.infer(request).await.ok()?;
     let choice = response.content.trim().to_string();
 
-    // Add the LLM's response to context.
-    //
-    // CONFIRMED-PERMANENT COVERAGE GAP: the `None` arm here (closing `}`) is
-    // provably unreachable, not merely untested. `window()?` at line 251
-    // above already short-circuited the whole function with `None` unless a
-    // `ContextWindow` was present on `entity` at that point, and nothing
-    // between there and here can remove it: `Provider::infer` (the only
-    // `.await` in between) takes `&self` and a plain `InferenceRequest` --
-    // it has no access to `engine`/`World` and so cannot delete the
-    // component out from under us during the await. A restructuring
-    // experiment (adding an explicit `else` arm, mirroring the fix applied
-    // to the sibling `EdgeTransform::Clear`/`Custom` blocks in
-    // `apply_edge_transform` above) does not apply here since there is no
-    // reachable `None` case to give the `else` arm real behavior for.
-    if let Some(mut window) = engine.world_mut().get_mut::<ContextWindow>(entity) {
-        let tokens = choice.len() / 4 + 1;
-        let _ = window.add_to_region(
-            "conversation",
-            format!("Assistant: Transitioning to: {}", choice),
-            tokens,
-        );
-    }
+    // Add the LLM's response to context. The `window()?` above already
+    // short-circuited the whole function with `None` unless a `ContextWindow`
+    // was present on `entity` at that point, and nothing between there and
+    // here can remove it: `Provider::infer` (the only `.await` in between)
+    // takes `&self` and a plain `InferenceRequest` -- it has no access to
+    // `engine`/`World` and so cannot delete the component out from under us
+    // during the await. So this is a real invariant, not a defensive
+    // recheck: `.expect()` documents it and avoids an unreachable `None`
+    // branch that could never be given real, testable behavior.
+    let mut window = engine
+        .world_mut()
+        .get_mut::<ContextWindow>(entity)
+        .expect("ContextWindow present: confirmed above and unremovable since");
+    let tokens = choice.len() / 4 + 1;
+    let _ = window.add_to_region(
+        "conversation",
+        format!("Assistant: Transitioning to: {}", choice),
+        tokens,
+    );
 
     // The stage explicitly allows ending here instead of transitioning —
     // honor an unambiguous "DONE" before attempting any edge-name match.
