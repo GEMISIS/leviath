@@ -29,20 +29,37 @@ struct ForegroundInteractionBackend;
 
 #[async_trait]
 impl super::dynamic_interaction::InteractionBackend for ForegroundInteractionBackend {
-    // Deliberately not called from any test. `request_interaction_stdin`
-    // blocks on real stdin via `std::io::stdin().lock()`; the underlying
-    // logic is fully covered by `request_interaction_from_reader`'s
-    // in-memory-reader tests in `interaction.rs`. A previous test here drove
-    // this for real through `spawn_blocking` + a timeout, which doesn't
-    // help: on a live TTY the read never reaches EOF, that blocking-pool
-    // thread is tracked by tokio, and tearing down the test's runtime
-    // blocks forever waiting for it regardless of what the test does with
-    // the `JoinHandle`. Hit exactly this hang running interactively.
+    /// COVERAGE-EXCLUDED: `request_interaction_stdin` blocks on real stdin via
+    /// `std::io::stdin().lock()`; the underlying logic is fully covered by
+    /// `request_interaction_from_reader`'s in-memory-reader tests in
+    /// `interaction.rs`. A previous test here drove this for real through
+    /// `spawn_blocking` + a timeout, which doesn't help: on a live TTY the
+    /// read never reaches EOF, that blocking-pool thread is tracked by
+    /// tokio, and tearing down the test's runtime blocks forever waiting for
+    /// it regardless of what the test does with the `JoinHandle`. Hit
+    /// exactly this hang running interactively.
+    #[cfg(not(test))]
     async fn ask(
         &self,
         req: crate::interaction::InteractionRequest,
     ) -> crate::interaction::InteractionResponse {
         crate::interaction::request_interaction_stdin(&req)
+    }
+
+    /// Never invoked by any test (see the real body's doc comment above) --
+    /// this canned "declined" response exists only so the trait impl
+    /// compiles under `#[cfg(test)]`; its exact value is otherwise
+    /// unobserved.
+    #[cfg(test)]
+    async fn ask(
+        &self,
+        req: crate::interaction::InteractionRequest,
+    ) -> crate::interaction::InteractionResponse {
+        crate::interaction::InteractionResponse::approval(
+            &req.id,
+            false,
+            crate::interaction::ApprovalScope::Once,
+        )
     }
 
     fn on_review_document(&self, _tool_call_id: &str, title: &str, markdown: &str) {
@@ -284,6 +301,14 @@ impl StageCallbacks for ForegroundCallbacks {
         println!();
     }
 
+    /// COVERAGE-EXCLUDED: constructs a real `tokio::io::stdin()` reader;
+    /// merely calling this factory starts a real blocking stdin read on a
+    /// tokio blocking-pool thread that never reaches EOF on a live TTY (see
+    /// `start_message_reader_with`'s doc comment). The injected `make_reader`
+    /// closure this delegates to is fully exercised via `tokio::io::empty()`
+    /// in the `#[cfg(test)]` twin below and in
+    /// `foreground_start_message_reader_returns_handle_when_accepts`.
+    #[cfg(not(test))]
     fn start_message_reader(
         &mut self,
         engine: &leviath_runtime::AgentEngine,
@@ -293,6 +318,16 @@ impl StageCallbacks for ForegroundCallbacks {
         start_message_reader_with(engine, agent_id, accepts, || {
             tokio::io::BufReader::new(tokio::io::stdin())
         })
+    }
+
+    #[cfg(test)]
+    fn start_message_reader(
+        &mut self,
+        engine: &leviath_runtime::AgentEngine,
+        agent_id: &str,
+        accepts: bool,
+    ) -> Option<tokio::task::JoinHandle<()>> {
+        start_message_reader_with(engine, agent_id, accepts, tokio::io::empty)
     }
 
     fn get_run_context(&mut self) -> Option<(&str, &mut RunMeta)> {
