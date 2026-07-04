@@ -30,6 +30,23 @@ fn log_creating_agent_blueprint() {
 fn log_creating_agent_blueprint() {}
 
 pub async fn execute(args: CreateArgs) -> anyhow::Result<()> {
+    execute_with(args, &|path, contents| fs::write(path, contents))
+}
+
+/// Core of `execute()`, parameterized over the file-write primitive so tests
+/// can force any individual write's error arm deterministically -- without
+/// the process-global umask mutation this file used to need (and reject, for
+/// good reason: `cargo test`'s default thread-based parallelism means a
+/// restrictive umask can't be scoped to one test the way an env var or CWD
+/// lock can, so ANY other test creating a file/directory on another thread
+/// during that window would silently get the same zero-permission
+/// treatment). Each real call site still goes through the exact same
+/// `std::fs::write` in production (`execute` above passes it directly, with
+/// zero indirection cost); only tests substitute a fake.
+fn execute_with(
+    args: CreateArgs,
+    write_file: &dyn Fn(&Path, &[u8]) -> std::io::Result<()>,
+) -> anyhow::Result<()> {
     log_creating_agent_blueprint();
 
     let blueprint_dir = Path::new(&args.name);
@@ -41,44 +58,19 @@ pub async fn execute(args: CreateArgs) -> anyhow::Result<()> {
     fs::create_dir_all(blueprint_dir)?;
 
     let manifest = create_manifest(&args.name, &args.template);
-    fs::write(blueprint_dir.join("agent.leviath"), manifest)?;
+    write_file(&blueprint_dir.join("agent.leviath"), manifest.as_bytes())?;
 
-    // NOTE: these are written as single-line `fs::write(...)?;` statements
-    // (string content hoisted into a preceding `let`) rather than the
-    // multi-line call form. With a multi-line call, llvm-cov's coverage
-    // mapping attributes the `?` operator's error-propagation region to the
-    // line with the closing `)?;`, which then reads as permanently
-    // "uncovered" even when the call succeeds on every test run (unlike a
-    // single-line call, where success and failure share one region). This
-    // matches the already-covered `agent.leviath` write above.
-    //
-    // CONFIRMED-PERMANENT COVERAGE GAP: all 3 `fs::write(...)?` calls in
-    // this function (`agent.leviath` above, `.gitignore`/`.env.example`
-    // below) have an error arm that's real but not independently
-    // forceable by any test-safe trick available here. `blueprint_dir` is
-    // guaranteed to exist and be a freshly-created, normally-permissioned
-    // directory at this point (`create_dir_all` just succeeded, and
-    // nothing between there and here can revoke write access to it), so
-    // the *only* lever that could make a subsequent `fs::write` into it
-    // fail is deliberately restricting permissions -- and unlike
-    // `config.rs`'s single-file chmod tests, there's no way to
-    // pre-restrict *this* directory's permissions without either (a)
-    // making `blueprint_dir.exists()` true before `execute()` runs (which
-    // trips the early bail-out above instead of reaching these writes), or
-    // (b) mutating the process-global umask so `create_dir_all` creates
-    // the directory with zero permissions. (b) was evaluated and rejected:
-    // `cargo test`'s default thread-based parallelism means umask isn't
-    // scopable to one test the way an env var or CWD lock is -- ANY other
-    // test creating a file or directory on another thread during the
-    // (however brief) window our test holds a restrictive umask would
-    // silently get the same zero-permission treatment, a real and
-    // non-deterministic source of CI flakiness for unrelated tests. No
-    // other test in this suite touches umask for exactly this reason.
     let gitignore_content = ".env\n*.leviath-bundle\n.leviath/\n";
-    fs::write(blueprint_dir.join(".gitignore"), gitignore_content)?;
+    write_file(
+        &blueprint_dir.join(".gitignore"),
+        gitignore_content.as_bytes(),
+    )?;
 
     let env_example_content = "# Copy this to .env and fill in your API key\n# ANTHROPIC_API_KEY=sk-ant-...\n# OPENAI_API_KEY=sk-...\n# OPENROUTER_API_KEY=sk-or-...\n";
-    fs::write(blueprint_dir.join(".env.example"), env_example_content)?;
+    write_file(
+        &blueprint_dir.join(".env.example"),
+        env_example_content.as_bytes(),
+    )?;
 
     println!("Created blueprint: {}", args.name);
     println!("\nNext steps:");
@@ -390,5 +382,89 @@ mod tests {
 
         let result = with_tracing(|| execute(args)).await;
         assert!(result.is_err());
+    }
+
+    // ─── execute_with: injected write-failure arms ─────────────────────────
+    //
+    // These exercise the 3 `write_file(...)?` error arms deterministically,
+    // without the process-global umask mutation `execute`'s own comment
+    // history rejected (see git blame) -- each test injects a plain local
+    // closure that fails for one specific target filename, leaving the
+    // others to succeed exactly as production would.
+
+    fn args_for(dir: &std::path::Path, name: &str) -> CreateArgs {
+        CreateArgs {
+            name: dir.join(name).to_str().unwrap().to_string(),
+            template: "coder".to_string(),
+        }
+    }
+
+    #[test]
+    fn execute_with_agent_manifest_write_failure_propagates() {
+        let dir = tempfile::tempdir().unwrap();
+        let args = args_for(dir.path(), "manifest-write-fails");
+
+        let result = execute_with(args, &|path, _contents| {
+            if path.file_name().and_then(|n| n.to_str()) == Some("agent.leviath") {
+                Err(std::io::Error::other(
+                    "injected agent.leviath write failure",
+                ))
+            } else {
+                Ok(())
+            }
+        });
+
+        let err = result.unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("injected agent.leviath write failure"));
+    }
+
+    #[test]
+    fn execute_with_gitignore_write_failure_propagates() {
+        let dir = tempfile::tempdir().unwrap();
+        let args = args_for(dir.path(), "gitignore-write-fails");
+
+        let result = execute_with(args, &|path, contents| {
+            if path.file_name().and_then(|n| n.to_str()) == Some(".gitignore") {
+                Err(std::io::Error::other("injected .gitignore write failure"))
+            } else {
+                fs::write(path, contents)
+            }
+        });
+
+        let err = result.unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("injected .gitignore write failure"));
+        // The manifest write before it genuinely happened.
+        assert!(dir
+            .path()
+            .join("gitignore-write-fails")
+            .join("agent.leviath")
+            .exists());
+    }
+
+    #[test]
+    fn execute_with_env_example_write_failure_propagates() {
+        let dir = tempfile::tempdir().unwrap();
+        let args = args_for(dir.path(), "env-example-write-fails");
+
+        let result = execute_with(args, &|path, contents| {
+            if path.file_name().and_then(|n| n.to_str()) == Some(".env.example") {
+                Err(std::io::Error::other("injected .env.example write failure"))
+            } else {
+                fs::write(path, contents)
+            }
+        });
+
+        let err = result.unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("injected .env.example write failure"));
+        // The two writes before it genuinely happened.
+        let created = dir.path().join("env-example-write-fails");
+        assert!(created.join("agent.leviath").exists());
+        assert!(created.join(".gitignore").exists());
     }
 }
