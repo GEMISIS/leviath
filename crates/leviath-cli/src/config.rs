@@ -580,6 +580,31 @@ mod tests {
 
     // ─── leviath_home_dir ────────────────────────────────────────────────────
 
+    /// Restores `LEVIATH_HOME` to its pre-test value (or removes it if it
+    /// wasn't set), shared by every `leviath_home_dir_*` test below.
+    ///
+    /// A single shared implementation -- rather than each test inlining its
+    /// own copy of this match -- matters for coverage, not just brevity:
+    /// `original` is `None` in every test that doesn't deliberately seed a
+    /// sentinel first (realistic dev/CI environments never have
+    /// `LEVIATH_HOME` set), so a test-private copy of this restore logic
+    /// would leave its own `Some(v) => set_var(...)` arm permanently
+    /// uncovered -- `cargo-llvm-cov` counts coverage per exact source
+    /// location, so one test hitting the `Some` arm of a *different*
+    /// test's textually-identical-looking copy doesn't cover this one.
+    /// Routing every test through one shared function means any test that
+    /// happens to pass `Some(..)` (see
+    /// `leviath_home_dir_restore_preserves_previously_set_home`) covers the
+    /// `Some` arm for all callers at once.
+    fn restore_leviath_home(original: Option<std::ffi::OsString>) {
+        unsafe {
+            match original {
+                Some(v) => std::env::set_var("LEVIATH_HOME", v),
+                None => std::env::remove_var("LEVIATH_HOME"),
+            }
+        }
+    }
+
     #[test]
     fn leviath_home_dir_uses_override_when_set() {
         let _lock = CONFIG_PATH_ENV_LOCK
@@ -590,12 +615,7 @@ mod tests {
             std::env::set_var("LEVIATH_HOME", "/tmp/leviath-home-override-test");
         }
         let result = leviath_home_dir();
-        unsafe {
-            match &original {
-                Some(v) => std::env::set_var("LEVIATH_HOME", v),
-                None => std::env::remove_var("LEVIATH_HOME"),
-            }
-        }
+        restore_leviath_home(original);
         assert_eq!(
             result,
             Some(std::path::PathBuf::from("/tmp/leviath-home-override-test"))
@@ -612,12 +632,43 @@ mod tests {
             std::env::remove_var("LEVIATH_HOME");
         }
         let result = leviath_home_dir();
-        unsafe {
-            if let Some(v) = &original {
-                std::env::set_var("LEVIATH_HOME", v);
-            }
-        }
+        restore_leviath_home(original);
         assert_eq!(result, dirs::home_dir());
+    }
+
+    /// Covers `restore_leviath_home`'s `Some(v) => set_var(...)` arm, which
+    /// the two tests above never reach (both start from a realistic unset
+    /// `LEVIATH_HOME`): seeds a sentinel *before* capturing `original`, so
+    /// the shared restore step has something real to put back.
+    #[test]
+    fn leviath_home_dir_restore_preserves_previously_set_home() {
+        let _lock = CONFIG_PATH_ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        unsafe {
+            std::env::set_var("LEVIATH_HOME", "/tmp/leviath-home-original-sentinel");
+        }
+        let original = std::env::var_os("LEVIATH_HOME");
+        unsafe {
+            std::env::set_var("LEVIATH_HOME", "/tmp/leviath-home-override-test-2");
+        }
+        let result = leviath_home_dir();
+        restore_leviath_home(original);
+        assert_eq!(
+            result,
+            Some(std::path::PathBuf::from(
+                "/tmp/leviath-home-override-test-2"
+            ))
+        );
+        assert_eq!(
+            std::env::var_os("LEVIATH_HOME"),
+            Some(std::ffi::OsString::from(
+                "/tmp/leviath-home-original-sentinel"
+            ))
+        );
+        unsafe {
+            std::env::remove_var("LEVIATH_HOME");
+        }
     }
 
     // ─── load_from_path / save_to_path (path-parameterized for testability) ─
