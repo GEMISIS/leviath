@@ -501,18 +501,19 @@ pub fn parse_manifest(content: &str) -> anyhow::Result<Blueprint> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
 
-    /// Serializes tests that mutate OR depend on the process's current
-    /// working directory. `set_current_dir` is process-global, so any test
-    /// whose assertion implicitly depends on CWD state (like `find_manifest`'s
-    /// "no agent.leviath in CWD" branch) must also hold this lock, not just
-    /// the tests that call `set_current_dir` themselves -- otherwise it can
-    /// observe a CWD another test temporarily pointed elsewhere and fail
-    /// nondeterministically. Confirmed exactly this: `find_manifest_dir_without_manifest_falls_through`
-    /// didn't hold this lock and intermittently failed on CI by observing
-    /// `find_manifest_cwd_agent_leviath_found`'s CWD mid-swap.
-    static CWD_LOCK: Mutex<()> = Mutex::new(());
+    // `set_current_dir` is process-global, so any test whose assertion
+    // implicitly depends on CWD state (like `find_manifest`'s "no
+    // agent.leviath in CWD" branch) must serialize against every other
+    // CWD-mutating test in the crate, not just the ones in this file --
+    // otherwise it can observe a CWD another test temporarily pointed
+    // elsewhere and fail nondeterministically. Confirmed exactly this:
+    // `find_manifest_dir_without_manifest_falls_through` didn't hold a lock
+    // and intermittently failed on CI by observing
+    // `find_manifest_cwd_agent_leviath_found`'s CWD mid-swap. Uses the
+    // crate-wide `crate::config::CWD_LOCK` (not a file-local one) so it
+    // actually serializes against CWD-mutating tests added to other files.
+    use crate::config::CWD_LOCK;
 
     // ─── test helpers ─────────────────────────────────────────────────────────
 

@@ -167,6 +167,15 @@ async fn execute_background(args: RunArgs, exe: &std::path::Path) -> anyhow::Res
     execute_background_with(args, exe, runstate::create_run).await
 }
 
+/// COVERAGE-CONFIRMED-ARTIFACT: this function is generic over `create_run`
+/// and has 2 monomorphizations -- production's `runstate::create_run` and
+/// `execute_background_create_run_fails_returns_error`'s always-failing
+/// test closure. Every source position in this function has at least one
+/// covered instantiation (confirmed via direct HTML/JSON segment
+/// inspection: the file's HTML coverage report shows no red/uncovered
+/// regions anywhere in this function), but `cargo-llvm-cov`'s per-file
+/// region-coverage summary table still reports one shared position as
+/// missed. This is a measurement artifact, not an untested branch.
 async fn execute_background_with(
     args: RunArgs,
     exe: &std::path::Path,

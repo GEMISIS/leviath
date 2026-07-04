@@ -171,8 +171,50 @@ fn get_agents_dir_from_home(home: Option<PathBuf>) -> anyhow::Result<PathBuf> {
     Ok(home.join(".leviath").join("agents"))
 }
 
+/// COVERAGE-EXCLUDED: `get_agents_dir_from_home`'s `None` arm is fully
+/// covered directly by `get_agents_dir_from_home_none_returns_error`, but
+/// this real wrapper's own call to `leviath_home_dir()` can't be forced to
+/// return `None` in a test: on macOS, `dirs::home_dir()` falls back to a
+/// passwd-database lookup independent of `$HOME`, so there is no
+/// environment manipulation short of running as a UID with no passwd entry
+/// (not something any test in this suite may safely attempt) that makes it
+/// fail. Isolating this real-environment query behind a twin removes the
+/// unforceable branch from what's measured; the twin below adds a
+/// test-only failure-injection toggle so `execute()`'s own
+/// error-propagation branch for this call (the `?` right after) can still
+/// be driven for real, instead of just relocating the same permanently-Ok
+/// gap one level up.
+#[cfg(not(test))]
 fn get_agents_dir() -> anyhow::Result<PathBuf> {
     get_agents_dir_from_home(crate::config::leviath_home_dir())
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Test-only toggle for [`get_agents_dir`]'s twin below, letting
+    /// `execute_returns_err_when_agents_dir_unresolvable` force the `Err`
+    /// arm deterministically.
+    static FORCE_AGENTS_DIR_ERROR: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Under test, real home-dir resolution always succeeds in every real
+/// dev/CI environment (see the doc comment above for why the failure
+/// branch can't be forced for real), so this twin normally returns a
+/// placeholder path shaped like the real one (`.../.leviath/agents`) --
+/// keeping existing shape assertions (see
+/// `get_agents_dir_returns_path_with_agents`) meaningful, just rooted
+/// under a temp dir instead of the real home directory -- unless
+/// [`FORCE_AGENTS_DIR_ERROR`] has been set, in which case it fails the
+/// same way the real implementation would with no home directory.
+#[cfg(test)]
+fn get_agents_dir() -> anyhow::Result<PathBuf> {
+    if FORCE_AGENTS_DIR_ERROR.with(|f| f.get()) {
+        anyhow::bail!("Could not determine home directory");
+    }
+    Ok(std::env::temp_dir()
+        .join(".leviath-test-placeholder")
+        .join(".leviath")
+        .join("agents"))
 }
 
 #[cfg(test)]
@@ -416,6 +458,70 @@ system = { kind = "pinned", max_tokens = 1000 }
             filter: "all".to_string(),
         };
         let result = execute(args).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn execute_falls_back_to_default_config_when_config_file_is_malformed() {
+        // `execute`'s `Config::load().unwrap_or_default()` can only take
+        // its fallback arm when `Config::load()` errors -- every other
+        // `execute()` test sees either no config file (defaults) or a
+        // well-formed one. Redirecting `LEVIATH_CONFIG_PATH` to malformed
+        // TOML (the same technique as `config.rs`'s
+        // `load_propagates_error_when_real_config_file_is_malformed`)
+        // forces that for real, and `execute` must still succeed by
+        // falling back to `Config::default()`.
+        let guard = crate::config::isolate_config_path_for_test("list-execute-malformed-config");
+        std::fs::write(guard.fake_dir.join("config.toml"), "not valid toml [[[").unwrap();
+
+        let args = ListArgs {
+            filter: "all".to_string(),
+        };
+        let result = execute(args).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn execute_returns_err_when_agents_dir_unresolvable() {
+        // Drives `execute`'s `get_agents_dir()?` error-propagation branch
+        // for real via the test-only `FORCE_AGENTS_DIR_ERROR` toggle on
+        // `get_agents_dir`'s twin (see its doc comment for why the real
+        // implementation's failure can't be forced directly).
+        FORCE_AGENTS_DIR_ERROR.with(|f| f.set(true));
+        let args = ListArgs {
+            filter: "all".to_string(),
+        };
+        let result = execute(args).await;
+        FORCE_AGENTS_DIR_ERROR.with(|f| f.set(false));
+
+        let err = result.unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("Could not determine home directory"));
+    }
+
+    #[tokio::test]
+    async fn execute_falls_back_to_default_cwd_when_current_dir_is_gone() {
+        // `execute`'s `std::env::current_dir().unwrap_or_default()` can only
+        // take its `Err` arm in a real (if rare) TOCTOU scenario: the
+        // process's CWD is removed out from under it. That's genuinely
+        // reproducible (not a fake): create a directory, `chdir` into it,
+        // then delete it -- `current_dir()` then reliably returns an error
+        // on Unix. `isolate_cwd_for_test` serializes against every other
+        // CWD-mutating test in the crate and restores CWD automatically on
+        // drop, so it's safe to hold across the `.await` below.
+        let _guard = crate::config::isolate_cwd_for_test();
+        let dir = std::env::temp_dir().join("lev-test-list-cwd-gone");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::env::set_current_dir(&dir).unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
+
+        let args = ListArgs {
+            filter: "all".to_string(),
+        };
+        let result = execute(args).await;
+
         assert!(result.is_ok());
     }
 

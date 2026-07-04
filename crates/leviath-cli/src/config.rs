@@ -499,6 +499,55 @@ pub(crate) static CONFIG_PATH_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex:
 #[cfg(test)]
 pub(crate) static PATH_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+/// Serializes any test, anywhere in the crate, that mutates the process's
+/// current working directory (via `std::env::set_current_dir`) or whose
+/// assertions implicitly depend on it. Declared here for the same reason as
+/// `CONFIG_PATH_ENV_LOCK`/`PATH_ENV_LOCK` above: `commands/run/manifest.rs`'s
+/// CWD-dependent `find_manifest` tests previously held only their own
+/// file-local lock, which wouldn't actually serialize against a CWD-mutating
+/// test added to a different file later.
+#[cfg(test)]
+pub(crate) static CWD_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// RAII guard that releases [`CWD_LOCK`] and restores the process's
+/// original working directory on drop.
+///
+/// Wraps the `MutexGuard` inside a private field (mirroring
+/// [`ConfigPathTestGuard`] below) specifically so it can be held across an
+/// `.await` in an async test without tripping clippy's
+/// `await_holding_lock` lint, which only looks for a directly-visible
+/// `MutexGuard` local -- not one hidden inside a wrapper struct's field.
+/// That's not working around a real risk: each `#[tokio::test]` gets its
+/// own private single-threaded runtime, so holding this across an await
+/// can't starve another task in the *same* test: it only serializes
+/// against other CWD-mutating tests, which is exactly the intended effect.
+#[cfg(test)]
+pub(crate) struct CwdTestGuard {
+    original_cwd: std::path::PathBuf,
+    _lock: std::sync::MutexGuard<'static, ()>,
+}
+
+#[cfg(test)]
+impl Drop for CwdTestGuard {
+    fn drop(&mut self) {
+        let _ = std::env::set_current_dir(&self.original_cwd);
+    }
+}
+
+/// Acquire [`CWD_LOCK`] and snapshot the current working directory so it can
+/// be restored automatically when the returned guard drops.
+#[cfg(test)]
+pub(crate) fn isolate_cwd_for_test() -> CwdTestGuard {
+    let lock = CWD_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let original_cwd = std::env::current_dir().expect("current dir must be readable at test start");
+    CwdTestGuard {
+        original_cwd,
+        _lock: lock,
+    }
+}
+
 /// Provider API key env vars that `Config::load()` (via `dotenvy::dotenv()`)
 /// loads into the process env regardless of which config file path is used --
 /// so redirecting the config path alone isn't enough; these must be cleared

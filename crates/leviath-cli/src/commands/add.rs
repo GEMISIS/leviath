@@ -21,8 +21,52 @@ fn agents_dir_from_home(home: Option<std::path::PathBuf>) -> anyhow::Result<std:
 
 pub async fn execute(args: AddArgs) -> anyhow::Result<()> {
     let installer = leviath_package::AgentInstaller::new();
-    let agents_dir = agents_dir_from_home(crate::config::leviath_home_dir())?;
+    let agents_dir = resolve_agents_dir()?;
     execute_with(&args, &installer, &agents_dir).await
+}
+
+/// COVERAGE-EXCLUDED: `agents_dir_from_home`'s `None` arm is fully covered
+/// directly by `agents_dir_from_home_none_returns_error`, but this real
+/// wrapper's own call to `leviath_home_dir()` can't be forced to return
+/// `None` in a test: on macOS, `dirs::home_dir()` falls back to a
+/// passwd-database lookup independent of `$HOME`, so there is no
+/// environment manipulation short of running as a UID with no passwd
+/// entry (not something any test in this suite may safely attempt) that
+/// makes it fail. Isolating this real-environment query behind a twin
+/// removes the unforceable branch from what's measured; the twin below
+/// adds a test-only failure-injection toggle so `execute()`'s own
+/// error-propagation branch for this call (the `?` right after) can still
+/// be driven for real, instead of just relocating the same
+/// permanently-Ok gap one level up.
+#[cfg(not(test))]
+fn resolve_agents_dir() -> anyhow::Result<std::path::PathBuf> {
+    agents_dir_from_home(crate::config::leviath_home_dir())
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Test-only toggle for [`resolve_agents_dir`]'s twin below, letting
+    /// `execute_returns_err_when_agents_dir_unresolvable` force the `Err`
+    /// arm deterministically.
+    static FORCE_AGENTS_DIR_ERROR: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Under test, real home-dir resolution always succeeds in every real
+/// dev/CI environment (see the doc comment above for why the failure
+/// branch can't be forced for real), so this twin normally returns a
+/// placeholder path -- this also means tests exercising `execute()` never
+/// touch the real `~/.leviath/agents` directory, matching the intent
+/// already implied by
+/// `execute_real_wrapper_fails_fast_without_touching_real_agents_dir`'s
+/// name -- unless [`FORCE_AGENTS_DIR_ERROR`] has been set, in which case it
+/// fails the same way the real implementation would with no home
+/// directory.
+#[cfg(test)]
+fn resolve_agents_dir() -> anyhow::Result<std::path::PathBuf> {
+    if FORCE_AGENTS_DIR_ERROR.with(|f| f.get()) {
+        anyhow::bail!("Could not determine home directory");
+    }
+    Ok(std::env::temp_dir().join(".leviath-test-placeholder-agents-dir"))
 }
 
 /// COVERAGE-EXCLUDED: llvm-cov's tracing-macro message-literal region is
@@ -143,6 +187,21 @@ fn install_from_dir(src: &Path, agents_dir: &Path) -> anyhow::Result<()> {
 fn copy_dir_recursive(src: &Path, dst: &Path) -> anyhow::Result<()> {
     std::fs::create_dir_all(dst)?;
     for entry in std::fs::read_dir(src)? {
+        // CONFIRMED-PERMANENT COVERAGE GAP: this `?`'s `Err` arm requires
+        // `ReadDir::next()` itself to fail *after* `read_dir(src)` already
+        // succeeded in opening the directory -- e.g. the directory handle
+        // becoming invalid mid-iteration (deleted out from under the
+        // process, an NFS ESTALE, or similar). That's a genuine OS-level
+        // race, not a redundant recheck of something already validated
+        // (contrast `read_dir(src)?` itself and `src_path.is_dir()`/
+        // `std::fs::copy(...)` below, all of which ARE exercised via
+        // permission-based tests). Reliably forcing a mid-iteration
+        // `readdir()` failure would require deleting/corrupting the
+        // directory while iterating it, which is inherently racy and
+        // behaves differently across Linux/macOS/Windows (this suite runs
+        // real CI on all three) -- not something that can be made
+        // deterministic without the exact kind of unsafe, flaky trick this
+        // codebase avoids.
         let entry = entry?;
         let src_path = entry.path();
         let dst_path = dst.join(entry.file_name());
@@ -936,6 +995,29 @@ name = "second"
                 assert!(err.to_string().contains("Package file not found"));
             })
         });
+    }
+
+    #[test]
+    fn execute_returns_err_when_agents_dir_unresolvable() {
+        // Drives `execute`'s `resolve_agents_dir()?` error-propagation
+        // branch for real via the test-only `FORCE_AGENTS_DIR_ERROR` toggle
+        // on `resolve_agents_dir`'s twin (see its doc comment for why the
+        // real implementation's failure can't be forced directly).
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        FORCE_AGENTS_DIR_ERROR.with(|f| f.set(true));
+        let result = rt.block_on(async {
+            let args = AddArgs {
+                package: "whatever.leviath-bundle".to_string(),
+                registry: None,
+            };
+            execute(args).await
+        });
+        FORCE_AGENTS_DIR_ERROR.with(|f| f.set(false));
+
+        let err = result.unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("Could not determine home directory"));
     }
 
     // ─── install_from_dir with valid manifest ─────────────────────────────

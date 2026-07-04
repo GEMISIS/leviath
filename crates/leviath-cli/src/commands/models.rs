@@ -383,35 +383,36 @@ async fn list_with_registry(
                 }
             }
 
-            // CONFIRMED-PERMANENT COVERAGE GAP: `registry.get(provider_name)`
-            // is structurally guaranteed `Some` here -- `provider_name` comes
-            // from `registry.provider_names()` just above, and both methods
-            // read the same underlying map (see
-            // `leviath-runtime/src/engine.rs`'s `ProviderRegistry`). There is
-            // no way to construct a registry where a name from
-            // `provider_names()` isn't `get()`-able, so this `if let`'s
-            // implicit "not found" path can't be exercised by a real test
-            // without breaking that invariant. Kept as defensive code
-            // against a future `ProviderRegistry` change rather than
-            // `.unwrap()`-ing.
-            if let Some(provider) = registry.get(provider_name) {
-                match provider.list_models().await {
-                    Ok(remote_models) => {
-                        for rm in remote_models {
-                            // Override builtin entry with the same ID, or append.
-                            if let Some(existing) = entries.iter_mut().find(|e| e.id == rm.id) {
-                                *existing = rm;
-                            } else {
-                                entries.push(rm);
-                            }
+            // `registry.get(provider_name)` is structurally guaranteed
+            // `Some` here -- `provider_name` comes from
+            // `registry.provider_names()` just above, and both methods read
+            // the same underlying map (see `leviath-runtime/src/engine.rs`'s
+            // `ProviderRegistry`). There is no way to construct a registry
+            // where a name from `provider_names()` isn't `get()`-able, so
+            // `.expect()` documents that invariant instead of leaving a
+            // defensive-but-unreachable `if let` branch permanently
+            // uncovered -- the same choice already made by
+            // `commands/serve/config.rs`'s `get_models` for this identical
+            // pattern.
+            let provider = registry
+                .get(provider_name)
+                .expect("provider_names returns registered names");
+            match provider.list_models().await {
+                Ok(remote_models) => {
+                    for rm in remote_models {
+                        // Override builtin entry with the same ID, or append.
+                        if let Some(existing) = entries.iter_mut().find(|e| e.id == rm.id) {
+                            *existing = rm;
+                        } else {
+                            entries.push(rm);
                         }
                     }
-                    Err(e) => {
-                        eprintln!(
-                            "Warning: could not fetch models from '{}': {}",
-                            provider_name, e
-                        );
-                    }
+                }
+                Err(e) => {
+                    eprintln!(
+                        "Warning: could not fetch models from '{}': {}",
+                        provider_name, e
+                    );
                 }
             }
         }
@@ -433,10 +434,16 @@ async fn list_with_registry(
     }
 
     if entries.is_empty() {
+        // `entries` starts from `builtin_table()`, which is a hardcoded,
+        // permanently non-empty static list (see `builtin_table_is_not_empty`)
+        // -- the only way to reach an empty `entries` here is the provider
+        // filter above removing every entry, which requires `args.provider`
+        // to be `Some`. So `args.provider.is_some()` is always true at this
+        // point; printing the hint unconditionally documents that invariant
+        // instead of leaving a defensive-but-unreachable `if` branch
+        // permanently uncovered.
         println!("No models found.");
-        if args.provider.is_some() {
-            println!("(try removing --provider or adding --remote)");
-        }
+        println!("(try removing --provider or adding --remote)");
         return Ok(());
     }
 

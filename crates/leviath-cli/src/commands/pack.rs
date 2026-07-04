@@ -170,18 +170,17 @@ mod tests {
     // once as a bare statement (rather than wrapping the whole test body) to
     // install the shared `AlwaysOnSubscriber` (see `crate::test_support`) as
     // the process-wide default before the rest of the test runs.
-
-    #[test]
-    fn diagnose_tracing_setup() {
-        with_tracing(|| {});
-        tracing::callsite::rebuild_interest_cache();
-        let lvl = tracing::level_filters::LevelFilter::current();
-        println!("LevelFilter::current() = {:?}", lvl);
-        let set = tracing::dispatcher::has_been_set();
-        println!("dispatcher has_been_set = {}", set);
-        tracing::info!("test event");
-        println!("info! executed successfully");
-    }
+    //
+    // (A `diagnose_tracing_setup` test used to live here, whose only
+    // purpose was printing dispatcher/level-filter diagnostics and firing
+    // one ad hoc `tracing::info!("test event")` with no assertions. Its
+    // `tracing::info!` message-literal region is the confirmed,
+    // permanently-uncovered llvm-cov macro-codegen artifact documented on
+    // `config.rs`'s `log_permissive_perms_warning` -- and since it asserted
+    // nothing, and the underlying "tracing works once `with_tracing` has
+    // installed the subscriber" behavior is already exercised by every
+    // other test below, removing it drops the artifact from what's
+    // measured without losing any real coverage.)
 
     // ─── format_size ───────────────────────────────────────────────────────
 
