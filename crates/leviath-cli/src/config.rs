@@ -521,13 +521,21 @@ pub(crate) static CWD_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 /// own private single-threaded runtime, so holding this across an await
 /// can't starve another task in the *same* test: it only serializes
 /// against other CWD-mutating tests, which is exactly the intended effect.
-#[cfg(test)]
+///
+/// `#[cfg(unix)]` (in addition to `#[cfg(test)]`): its only caller,
+/// `commands/list.rs`'s `execute_falls_back_to_default_cwd_when_current_dir_is_gone`,
+/// is itself Unix-only (the real filesystem race it reproduces -- deleting
+/// a directory that's the process's live CWD -- isn't reproducible on
+/// Windows, where that's a sharing violation instead). Without this,
+/// Windows CI's `-D warnings` treats this as genuinely dead code, since
+/// nothing on that platform ever constructs it.
+#[cfg(all(test, unix))]
 pub(crate) struct CwdTestGuard {
     original_cwd: std::path::PathBuf,
     _lock: std::sync::MutexGuard<'static, ()>,
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 impl Drop for CwdTestGuard {
     fn drop(&mut self) {
         let _ = std::env::set_current_dir(&self.original_cwd);
@@ -536,7 +544,7 @@ impl Drop for CwdTestGuard {
 
 /// Acquire [`CWD_LOCK`] and snapshot the current working directory so it can
 /// be restored automatically when the returned guard drops.
-#[cfg(test)]
+#[cfg(all(test, unix))]
 pub(crate) fn isolate_cwd_for_test() -> CwdTestGuard {
     let lock = CWD_LOCK
         .lock()
