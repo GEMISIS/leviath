@@ -113,62 +113,54 @@ pub fn run_with(runner: &dyn Runner) -> Result<()> {
     run_report(runner, "coverage/llvm-cov.json", github_output.as_deref())
 }
 
-/// Locked-in ceiling on total missed regions/lines/functions, workspace-wide.
+/// Per-file allowance for confirmed `cargo-llvm-cov` measurement artifacts --
+/// generic-function monomorphization producing duplicate coverage-mapping
+/// instances, or (for `main.rs` specifically) a tracing-macro message-literal
+/// region quirk in the one binary-entry-point file that structurally cannot
+/// use the `#[cfg(not(test))]`/`#[cfg(test)]` twin pattern (there is only one
+/// compiled `lev` binary; nothing to swap under `cfg(test)`). Every entry
+/// here corresponds to a function actually tagged `COVERAGE-CONFIRMED-ARTIFACT:`
+/// in that file -- see each function's own doc comment for the specific,
+/// individually-investigated justification (verified via `cargo llvm-cov
+/// --html` region-level inspection, not just summary numbers) -- and is
+/// mechanically checked by `xtask/src/check_exclusions.rs`'s
+/// `scan_coverage_confirmed_artifact_markers`, which requires a non-empty
+/// reason attached to a real `fn`.
 ///
-/// This is a *ratchet*, not a suppression mechanism: every count here was set
-/// to match a coverage baseline whose entire residual gap was individually
-/// investigated (via `cargo llvm-cov show`/`--html` region-level inspection,
-/// not just the summary numbers) and confirmed to be a permanent, evidenced
-/// tooling limitation -- generic-function monomorphization producing
-/// duplicate coverage-mapping regions (confirmed unfixable: `codegen-units=1`
-/// was empirically tested and had zero effect, see the doc comment above),
-/// `cargo llvm-cov`'s tracing-macro-argument region-counting quirk (the
-/// branch executes and is asserted on, verified via direct probes, yet the
-/// macro's field-capture sub-region still reads zero), or deliberately
-/// untested real-terminal/real-stdin/real-subprocess code paths (this
-/// project has had two real incidents -- a full computer freeze and getting
-/// stuck inside a real `vim` process -- from tests that touched those).
-/// None of these are "we'll get to it later" gaps; they're the reason literal
-/// 100% is not the enforcement target.
+/// This replaces a prior blanket, workspace-wide ceiling (660/380/46 missed
+/// regions/lines/functions) that could silently mask a gap ANYWHERE in the
+/// codebase. This allowance is deliberately narrow instead: a file not
+/// listed here must be at literal 100%, and a listed file must not exceed
+/// its own exact, evidenced value -- any regression, in this file or any
+/// other, fails the build immediately. Growing this list (or raising a
+/// value) requires the same standard of evidence as adding a new
+/// `COVERAGE-CONFIRMED-ARTIFACT` marker: individually investigate and
+/// confirm the gap is a measurement artifact, not untested logic, before
+/// touching this list.
 ///
-/// If a future change genuinely closes one of the gaps behind these numbers,
-/// LOWER the corresponding constant to match. Never raise it without the same
-/// standard of evidence this baseline was held to -- a raised ceiling here is
-/// exactly the coverage-regression this ratchet exists to catch.
-///
-/// These include a deliberate buffer above the measured baseline (regions
-/// 437, lines 184, functions 16, on macOS) to absorb real, observed
-/// run-to-run measurement jitter: three consecutive full clean-rebuild runs
-/// of the *identical* codebase (no code changes between them) produced
-/// missed counts of 437/184/16, then 440/187/17, then 442/188/18, then back
-/// down to 437/184/16 -- non-monotonic noise, not a growing leak, most
-/// likely from thread-scheduling/timing non-determinism in the full
-/// workspace test run interacting with coverage instrumentation.
-///
-/// **The ceiling is set from real Windows CI data, not the macOS baseline
-/// above, because Windows measures meaningfully worse: 627/356/36** (a real
-/// GitHub Actions `windows-latest` run: <https://github.com/GEMISIS/leviath/actions/runs/28687995678>,
-/// job `Coverage (windows-latest)`). This isn't jitter -- it's `#[cfg(unix)]`
-/// -gated tests (permission bits, symlinks, process signals, TTY handling)
-/// compiling out entirely on Windows, leaving both the real Unix code path
-/// and its `#[cfg(not(unix))]` twin under-exercised there in ways this
-/// project hasn't had the Windows-side investigation time to close yet. The
-/// same compiled ceiling constants apply to every platform in the CI matrix
-/// (there's one binary, one set of constants), so the ceiling must
-/// accommodate the worst platform, not the best one -- "green locally on
-/// macOS" was explicitly flagged as insufficient evidence for this exact
-/// reason before this enforcement was turned on. An exact-match ceiling
-/// would make this ratchet spuriously fail CI on jitter alone, so these are
-/// set with a buffer above the real 627/356/36 Windows measurement -- large
-/// enough to comfortably absorb jitter on top of an already-worse baseline,
-/// while still tight enough to catch a real regression (untested new code
-/// large enough to move these numbers by dozens of regions is not subtle).
-/// TODO: investigate and close the real Windows-specific gap (likely
-/// `#[cfg(not(unix))]` twins of the permission/symlink/signal/TTY tests that
-/// only run on Unix), then lower these back toward the macOS baseline.
-const MAX_MISSED_REGIONS: u64 = 660;
-const MAX_MISSED_LINES: u64 = 380;
-const MAX_MISSED_FUNCTIONS: u64 = 46;
+/// (filename suffix as reported by `cargo llvm-cov`, max missed regions, max
+/// missed lines, max missed functions)
+const CONFIRMED_ARTIFACT_ALLOWANCE: &[(&str, u64, u64, u64)] = &[
+    ("crates/leviath-cli/src/commands/dashboard/mod.rs", 3, 0, 0),
+    ("crates/leviath-cli/src/commands/run/executor.rs", 5, 1, 0),
+    ("crates/leviath-cli/src/commands/run/mod.rs", 1, 0, 0),
+    ("crates/leviath-cli/src/interaction.rs", 1, 0, 0),
+    ("crates/leviath-cli/src/main.rs", 1, 0, 0),
+    ("crates/leviath-cli/src/runstate.rs", 1, 0, 0),
+    ("crates/leviath-cli/src/test_support.rs", 1, 0, 0),
+];
+
+/// Look up a gap file's allowance, matching by filename suffix the same way
+/// [`print_gaps`] normalizes display names (`cargo llvm-cov` reports absolute
+/// paths that vary by machine/CI runner, so match on the `crates/...`
+/// suffix).
+fn confirmed_artifact_allowance(filename: &str) -> (u64, u64, u64) {
+    CONFIRMED_ARTIFACT_ALLOWANCE
+        .iter()
+        .find(|(suffix, ..)| filename.ends_with(suffix))
+        .map(|(_, regions, lines, functions)| (*regions, *lines, *functions))
+        .unwrap_or((0, 0, 0))
+}
 
 /// Core reporting logic extracted from `run_with` for unit-testability.
 ///
@@ -198,32 +190,31 @@ pub fn run_report(
 
     print_gaps(&gaps);
 
-    let regions_missed = data.totals.regions.missed();
-    let lines_missed = data.totals.lines.missed();
-    let functions_missed = data.totals.functions.missed();
+    let overflows = gaps_exceeding_allowance(&gaps);
 
-    if regions_missed > MAX_MISSED_REGIONS
-        || lines_missed > MAX_MISSED_LINES
-        || functions_missed > MAX_MISSED_FUNCTIONS
-    {
-        anyhow::bail!(
-            "[coverage] Coverage regressed below the locked-in floor -- missed \
-             regions {regions_missed} (max {MAX_MISSED_REGIONS}), missed lines \
-             {lines_missed} (max {MAX_MISSED_LINES}), missed functions \
-             {functions_missed} (max {MAX_MISSED_FUNCTIONS}). Fix the gaps above. \
-             If a gap is a confirmed permanent tooling limitation (generic-function \
-             monomorphization, an llvm-cov tracing-macro-argument artifact, or \
-             deliberately-untested real-IO), investigate with `cargo llvm-cov \
-             show`/`--html` before assuming so, then lower the ceiling constants \
-             in xtask/src/coverage.rs to match the new evidenced baseline."
+    if !overflows.is_empty() {
+        let mut msg = String::from(
+            "[coverage] Coverage gap(s) exceed their confirmed-artifact allowance -- this \
+             is a real regression, not a known tooling limitation:\n",
         );
+        for line in &overflows {
+            msg.push_str("  ");
+            msg.push_str(line);
+            msg.push('\n');
+        }
+        msg.push_str(
+            "Fix the gap(s) above with a real test. If a gap is genuinely a confirmed \
+             permanent tooling limitation (generic-function monomorphization, or an \
+             llvm-cov tracing-macro-argument artifact in code that structurally cannot \
+             use the #[cfg(not(test))] twin pattern), investigate with `cargo llvm-cov \
+             show`/`--html` before assuming so, mark the function `COVERAGE-CONFIRMED-ARTIFACT`, \
+             and add or adjust its entry in CONFIRMED_ARTIFACT_ALLOWANCE in \
+             xtask/src/coverage.rs to match the new evidenced value.",
+        );
+        anyhow::bail!(msg);
     }
 
-    println!(
-        "\n[coverage] Below 100% but within the confirmed-permanent-gap ceiling \
-         (regions {regions_missed}/{MAX_MISSED_REGIONS}, lines {lines_missed}/{MAX_MISSED_LINES}, \
-         functions {functions_missed}/{MAX_MISSED_FUNCTIONS}) — not failing the build."
-    );
+    println!("\n[coverage] All gaps are within their confirmed-artifact allowances. ✓");
     Ok(())
 }
 
@@ -235,6 +226,40 @@ pub fn gap_files(data: &CovData) -> Vec<&FileCov> {
         .iter()
         .filter(|f| !f.summary.is_100_percent())
         .collect()
+}
+
+/// Return a human-readable line per `(file, metric)` whose missed count
+/// exceeds that file's [`CONFIRMED_ARTIFACT_ALLOWANCE`] entry (or exceeds
+/// zero, for a file with no entry) -- an empty result means every gap in
+/// `gaps` is accounted for by an evidenced, marker-backed allowance.
+fn gaps_exceeding_allowance(gaps: &[&FileCov]) -> Vec<String> {
+    let mut overflows = Vec::new();
+    for gap in gaps {
+        let (max_regions, max_lines, max_functions) = confirmed_artifact_allowance(&gap.filename);
+        let regions_missed = gap.summary.regions.missed();
+        let lines_missed = gap.summary.lines.missed();
+        let functions_missed = gap.summary.functions.missed();
+
+        if regions_missed > max_regions {
+            overflows.push(format!(
+                "{}: regions missed {regions_missed} (allowance {max_regions})",
+                gap.filename
+            ));
+        }
+        if lines_missed > max_lines {
+            overflows.push(format!(
+                "{}: lines missed {lines_missed} (allowance {max_lines})",
+                gap.filename
+            ));
+        }
+        if functions_missed > max_functions {
+            overflows.push(format!(
+                "{}: functions missed {functions_missed} (allowance {max_functions})",
+                gap.filename
+            ));
+        }
+    }
+    overflows
 }
 
 fn print_gaps(gaps: &[&FileCov]) {
@@ -1384,19 +1409,24 @@ mod tests {
     }
 
     #[test]
-    fn run_report_partial_coverage_within_ceiling_is_ok_and_writes_github_output() {
-        // A small number of missed regions/lines/functions -- well within
-        // MAX_MISSED_REGIONS/LINES/FUNCTIONS -- should not fail the build,
-        // and the badge percentages still get written even when coverage
-        // isn't literally 100%.
+    fn run_report_gap_within_confirmed_artifact_allowance_is_ok_and_writes_github_output() {
+        // A gap file matching a CONFIRMED_ARTIFACT_ALLOWANCE entry, within
+        // its allowed missed-region count, must not fail the build, and the
+        // badge percentages still get written even when coverage isn't
+        // literally 100%.
         let dir = tempfile::tempdir().unwrap();
         let report = LlvmCovReport {
             data: vec![CovData {
                 files: vec![FileCov {
-                    filename: "/src/foo.rs".to_owned(),
-                    summary: partial_metrics(10, 8),
+                    filename: "/home/runner/work/leviath/leviath/crates/leviath-cli/src/main.rs"
+                        .to_owned(),
+                    summary: Metrics {
+                        regions: metric(10, 9), // 1 missed, matches main.rs's allowance
+                        lines: metric(10, 10),
+                        functions: metric(10, 10),
+                    },
                 }],
-                totals: partial_metrics(10, 8),
+                totals: partial_metrics(10, 9),
             }],
         };
         let meta = simple_metadata(&["leviath-core"]);
@@ -1407,7 +1437,7 @@ mod tests {
         let result = run_report(&runner, &output, Some(gha.to_str().unwrap()));
         assert!(
             result.is_ok(),
-            "coverage within the locked-in ceiling should not fail the build: {result:?}"
+            "a gap within its confirmed-artifact allowance should not fail the build: {result:?}"
         );
         let content = std::fs::read_to_string(&gha).unwrap();
         assert!(
@@ -1417,26 +1447,22 @@ mod tests {
     }
 
     #[test]
-    fn run_report_regions_over_ceiling_is_err() {
-        // Missed regions exceeding MAX_MISSED_REGIONS must fail the build --
-        // this is the actual enforcement the ratchet exists to provide.
+    fn run_report_gap_in_unlisted_file_is_err() {
+        // Literal 100% enforcement: a file with NO CONFIRMED_ARTIFACT_ALLOWANCE
+        // entry must be at exactly 100%; even a single missed region fails
+        // the build.
         let dir = tempfile::tempdir().unwrap();
-        let over_ceiling = metric(MAX_MISSED_REGIONS + 100, 0);
         let report = LlvmCovReport {
             data: vec![CovData {
                 files: vec![FileCov {
                     filename: "/src/foo.rs".to_owned(),
                     summary: Metrics {
-                        regions: over_ceiling.clone(),
+                        regions: metric(10, 9),
                         lines: metric(10, 10),
                         functions: metric(10, 10),
                     },
                 }],
-                totals: Metrics {
-                    regions: over_ceiling,
-                    lines: metric(10, 10),
-                    functions: metric(10, 10),
-                },
+                totals: partial_metrics(10, 9),
             }],
         };
         let meta = simple_metadata(&["leviath-core"]);
@@ -1445,22 +1471,55 @@ mod tests {
         let result = run_report(&runner, &output, None);
         assert!(
             result.is_err(),
-            "missed regions over the ceiling must fail the build: {result:?}"
+            "a gap in a file with no confirmed-artifact allowance must fail the build: {result:?}"
         );
         let msg = result.unwrap_err().to_string();
         assert!(
-            msg.contains("regressed below the locked-in floor"),
+            msg.contains("exceed their confirmed-artifact allowance"),
             "error should explain the regression: {msg}"
+        );
+        assert!(
+            msg.contains("/src/foo.rs"),
+            "error should name the offending file: {msg}"
         );
     }
 
     #[test]
-    fn run_report_functions_over_ceiling_is_err() {
-        // Missed functions exceeding MAX_MISSED_FUNCTIONS must also fail the
-        // build, independently of regions/lines staying within their own
-        // ceilings.
+    fn run_report_gap_exceeding_its_allowance_is_err() {
+        // A file THAT IS in CONFIRMED_ARTIFACT_ALLOWANCE, but whose missed
+        // count exceeds its documented value, must still fail the build --
+        // the allowance is an exact ceiling per file, not a blanket pass.
         let dir = tempfile::tempdir().unwrap();
-        let over_ceiling = metric(MAX_MISSED_FUNCTIONS + 5, 0);
+        let report = LlvmCovReport {
+            data: vec![CovData {
+                files: vec![FileCov {
+                    filename: "/home/runner/work/leviath/leviath/crates/leviath-cli/src/main.rs"
+                        .to_owned(),
+                    summary: Metrics {
+                        regions: metric(10, 5), // 5 missed, main.rs's allowance is only 1
+                        lines: metric(10, 10),
+                        functions: metric(10, 10),
+                    },
+                }],
+                totals: partial_metrics(10, 5),
+            }],
+        };
+        let meta = simple_metadata(&["leviath-core"]);
+        let runner = MockRunner::new(meta).with_package("leviath-core", Ok(report));
+        let output = dir.path().join("cov.json").to_str().unwrap().to_owned();
+        let result = run_report(&runner, &output, None);
+        assert!(
+            result.is_err(),
+            "a gap exceeding its own file's allowance must fail the build: {result:?}"
+        );
+    }
+
+    #[test]
+    fn run_report_functions_gap_in_unlisted_file_is_err() {
+        // Same as run_report_gap_in_unlisted_file_is_err, but for the
+        // functions metric specifically -- each metric is checked
+        // independently against the allowance.
+        let dir = tempfile::tempdir().unwrap();
         let report = LlvmCovReport {
             data: vec![CovData {
                 files: vec![FileCov {
@@ -1468,13 +1527,13 @@ mod tests {
                     summary: Metrics {
                         regions: metric(10, 10),
                         lines: metric(10, 10),
-                        functions: over_ceiling.clone(),
+                        functions: metric(10, 9),
                     },
                 }],
                 totals: Metrics {
                     regions: metric(10, 10),
                     lines: metric(10, 10),
-                    functions: over_ceiling,
+                    functions: metric(10, 9),
                 },
             }],
         };
@@ -1484,8 +1543,50 @@ mod tests {
         let result = run_report(&runner, &output, None);
         assert!(
             result.is_err(),
-            "missed functions over the ceiling must fail the build: {result:?}"
+            "missed functions in an unlisted file must fail the build: {result:?}"
         );
+    }
+
+    #[test]
+    fn confirmed_artifact_allowance_matches_listed_file() {
+        assert_eq!(
+            confirmed_artifact_allowance(
+                "/home/runner/work/leviath/leviath/crates/leviath-cli/src/main.rs"
+            ),
+            (1, 0, 0)
+        );
+    }
+
+    #[test]
+    fn confirmed_artifact_allowance_defaults_to_zero_for_unlisted_file() {
+        assert_eq!(confirmed_artifact_allowance("/src/foo.rs"), (0, 0, 0));
+    }
+
+    #[test]
+    fn gaps_exceeding_allowance_empty_when_all_gaps_within_allowance() {
+        let file = FileCov {
+            filename: "/home/runner/work/leviath/leviath/crates/leviath-cli/src/main.rs".to_owned(),
+            summary: Metrics {
+                regions: metric(10, 9),
+                lines: metric(10, 10),
+                functions: metric(10, 10),
+            },
+        };
+        assert!(gaps_exceeding_allowance(&[&file]).is_empty());
+    }
+
+    #[test]
+    fn gaps_exceeding_allowance_reports_every_offending_metric() {
+        let file = FileCov {
+            filename: "/src/foo.rs".to_owned(),
+            summary: Metrics {
+                regions: metric(10, 9),
+                lines: metric(10, 9),
+                functions: metric(10, 9),
+            },
+        };
+        let overflows = gaps_exceeding_allowance(&[&file]);
+        assert_eq!(overflows.len(), 3, "overflows: {overflows:?}");
     }
 
     #[test]
@@ -1503,10 +1604,12 @@ mod tests {
 
     #[test]
     fn run_report_partial_only_functions() {
-        // regions=100%, lines=100%, functions=partial.
+        // regions=100%, lines=100%, functions=partial, on a file with no
+        // CONFIRMED_ARTIFACT_ALLOWANCE entry.
         // In print_gaps, the `if !s.regions.is_fully_covered()` and
         // `if !s.lines.is_fully_covered()` conditions evaluate to FALSE,
-        // covering the "skip if 100%" path.
+        // covering the "skip if 100%" path -- and the missed function still
+        // fails the build under literal enforcement.
         let dir = tempfile::tempdir().unwrap();
         let mixed = Metrics {
             regions: metric(10, 10),
@@ -1527,17 +1630,19 @@ mod tests {
         let output = dir.path().join("cov.json").to_str().unwrap().to_owned();
         let result = run_report(&runner, &output, None);
         assert!(
-            result.is_ok(),
-            "coverage within the locked-in ceiling should not fail the build: {result:?}"
+            result.is_err(),
+            "a missed function in a file with no confirmed-artifact allowance must fail the build: {result:?}"
         );
     }
 
     #[test]
     fn run_report_partial_with_crates_filename() {
-        // regions=partial, lines=partial, functions=100%.
+        // regions=partial, lines=partial, functions=100%, on a file with no
+        // CONFIRMED_ARTIFACT_ALLOWANCE entry.
         // In print_gaps: split_once("/crates/") returns Some → covers the
         // Some arm of the match; `if !s.functions.is_fully_covered()` →
-        // false (skip branch).
+        // false (skip branch) -- and the missed regions/lines still fail
+        // the build under literal enforcement.
         let dir = tempfile::tempdir().unwrap();
         let mixed = Metrics {
             regions: metric(10, 9),
@@ -1559,8 +1664,8 @@ mod tests {
         let output = dir.path().join("cov.json").to_str().unwrap().to_owned();
         let result = run_report(&runner, &output, None);
         assert!(
-            result.is_ok(),
-            "coverage within the locked-in ceiling should not fail the build: {result:?}"
+            result.is_err(),
+            "missed regions/lines in a file with no confirmed-artifact allowance must fail the build: {result:?}"
         );
     }
 

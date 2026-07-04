@@ -144,8 +144,9 @@ pub trait StageCallbacks: Send {
 /// The unified stage loop. Both foreground and worker modes call this with
 /// their respective `StageCallbacks` implementation.
 ///
-/// Coverage note: this function is generic over both `CB: StageCallbacks`
-/// and the executor closure `F`/`Fut`, so every distinct (`CB`, `F`)
+/// COVERAGE-CONFIRMED-ARTIFACT: this function is generic over both
+/// `CB: StageCallbacks` and the executor closure `F`/`Fut`, so every distinct
+/// (`CB`, `F`)
 /// combination a caller uses compiles as a separate monomorphized
 /// instantiation. `cargo-llvm-cov`'s own instantiation-group merging can
 /// under-report a handful of regions/lines for this function even when every
