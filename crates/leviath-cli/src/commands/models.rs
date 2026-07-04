@@ -48,8 +48,8 @@ pub struct ShowArgs {
 
 pub async fn execute(args: ModelsArgs) -> anyhow::Result<()> {
     match args.command {
-        ModelsCommand::List(a) => list_with_registry(a, build_provider_registry).await,
-        ModelsCommand::Show(a) => show_with_registry(a, build_provider_registry).await,
+        ModelsCommand::List(a) => list_with_registry(a, &build_provider_registry).await,
+        ModelsCommand::Show(a) => show_with_registry(a, &build_provider_registry).await,
     }
 }
 
@@ -338,9 +338,23 @@ fn builtin_table() -> Vec<BuiltinEntry> {
 /// [`Provider`](leviath_providers::Provider) mock instead of hitting a real
 /// network endpoint (ollama) or spawning a real subprocess (claude-code) --
 /// both of which [`build_provider_registry`] always registers.
+///
+/// `build_registry` is a `&dyn Fn` trait object, not a generic
+/// `impl FnOnce`, deliberately: every test below passes a distinct closure
+/// type (each `mock_registry(...)` call site produces its own closure type,
+/// separate again from the production `build_provider_registry` function
+/// item type). A generic parameter would make `cargo-llvm-cov` instrument
+/// each call site's monomorphization of this function separately, and it
+/// has been observed to report the production instantiation as 0-hit even
+/// though it's genuinely exercised by `execute_list_command_runs_without_error`
+/// et al. -- the same instantiation-merging undercount documented for
+/// `run_stage_loop` (see `run/worker.rs`'s `run_worker_inner` and
+/// `run/session.rs`'s `resolve_task_with`, which use the same fix). A
+/// `&dyn Fn` trait object is one concrete type regardless of what closure is
+/// passed, so every call site shares a single instrumented instantiation.
 async fn list_with_registry(
     args: ListArgs,
-    build_registry: impl FnOnce(&Config) -> leviath_runtime::ProviderRegistry,
+    build_registry: &dyn Fn(&Config) -> leviath_runtime::ProviderRegistry,
 ) -> anyhow::Result<()> {
     let config = Config::load()?;
     for warning in config.validate_keys() {
@@ -369,6 +383,17 @@ async fn list_with_registry(
                 }
             }
 
+            // CONFIRMED-PERMANENT COVERAGE GAP: `registry.get(provider_name)`
+            // is structurally guaranteed `Some` here -- `provider_name` comes
+            // from `registry.provider_names()` just above, and both methods
+            // read the same underlying map (see
+            // `leviath-runtime/src/engine.rs`'s `ProviderRegistry`). There is
+            // no way to construct a registry where a name from
+            // `provider_names()` isn't `get()`-able, so this `if let`'s
+            // implicit "not found" path can't be exercised by a real test
+            // without breaking that invariant. Kept as defensive code
+            // against a future `ProviderRegistry` change rather than
+            // `.unwrap()`-ing.
             if let Some(provider) = registry.get(provider_name) {
                 match provider.list_models().await {
                     Ok(remote_models) => {
@@ -456,7 +481,7 @@ async fn list_with_registry(
 /// [`list_with_registry`] for why.
 async fn show_with_registry(
     args: ShowArgs,
-    build_registry: impl FnOnce(&Config) -> leviath_runtime::ProviderRegistry,
+    build_registry: &dyn Fn(&Config) -> leviath_runtime::ProviderRegistry,
 ) -> anyhow::Result<()> {
     let config = Config::load()?;
     for warning in config.validate_keys() {
@@ -1128,7 +1153,7 @@ mod tests {
             remote: false,
             provider: None,
         };
-        let result = list_with_registry(args, build_provider_registry).await;
+        let result = list_with_registry(args, &build_provider_registry).await;
         assert!(result.is_ok());
     }
 
@@ -1141,7 +1166,7 @@ mod tests {
             remote: false,
             provider: Some("anthropic".to_string()),
         };
-        let result = list_with_registry(args, build_provider_registry).await;
+        let result = list_with_registry(args, &build_provider_registry).await;
         assert!(result.is_ok());
     }
 
@@ -1155,7 +1180,7 @@ mod tests {
             provider: Some("no-such-provider".to_string()),
         };
         // Should print "No models found." and still succeed, not error.
-        let result = list_with_registry(args, build_provider_registry).await;
+        let result = list_with_registry(args, &build_provider_registry).await;
         assert!(result.is_ok());
     }
 
@@ -1170,7 +1195,7 @@ mod tests {
             remote: false,
             provider: None,
         };
-        let result = show_with_registry(args, build_provider_registry).await;
+        let result = show_with_registry(args, &build_provider_registry).await;
         assert!(result.is_ok());
     }
 
@@ -1185,7 +1210,7 @@ mod tests {
             provider: None,
         };
         // Falls through all lookup tiers; must not error even when not found.
-        let result = show_with_registry(args, build_provider_registry).await;
+        let result = show_with_registry(args, &build_provider_registry).await;
         assert!(result.is_ok());
     }
 
@@ -1201,7 +1226,7 @@ mod tests {
             remote: true,
             provider: None,
         };
-        let result = show_with_registry(args, build_provider_registry).await;
+        let result = show_with_registry(args, &build_provider_registry).await;
         assert!(result.is_ok());
     }
 
@@ -1264,12 +1289,21 @@ mod tests {
         provider_name: &'static str,
         models: Vec<ModelInfo>,
         fail: bool,
-    ) -> impl FnOnce(&Config) -> leviath_runtime::ProviderRegistry {
+    ) -> impl Fn(&Config) -> leviath_runtime::ProviderRegistry {
+        // `Fn` (not `FnOnce`) so the closure can be called through the
+        // `&dyn Fn` trait object `list_with_registry`/`show_with_registry`
+        // now take -- see the doc comment on `list_with_registry` for why.
+        // Only ever actually invoked once per test, but `Fn`'s "may be
+        // called more than once" contract means captured state can't be
+        // moved out on each call, hence the clone.
         move |_config: &Config| {
             let mut registry = leviath_runtime::ProviderRegistry::new();
             registry.register(
                 provider_name.to_string(),
-                std::sync::Arc::new(MockProvider { models, fail }),
+                std::sync::Arc::new(MockProvider {
+                    models: models.clone(),
+                    fail,
+                }),
             );
             registry
         }
@@ -1290,7 +1324,7 @@ mod tests {
             provider: "mock".to_string(),
             capabilities: ModelCapabilities::default(),
         };
-        let result = list_with_registry(args, mock_registry("mock", vec![new_model], false)).await;
+        let result = list_with_registry(args, &mock_registry("mock", vec![new_model], false)).await;
         assert!(result.is_ok());
     }
 
@@ -1313,7 +1347,7 @@ mod tests {
             provider: "mock".to_string(),
             capabilities: ModelCapabilities::default(),
         };
-        let result = list_with_registry(args, mock_registry("mock", vec![new_model], false)).await;
+        let result = list_with_registry(args, &mock_registry("mock", vec![new_model], false)).await;
         assert!(result.is_ok());
     }
 
@@ -1334,7 +1368,7 @@ mod tests {
             capabilities: ModelCapabilities::default(),
         };
         let result =
-            list_with_registry(args, mock_registry("mock", vec![overriding_model], false)).await;
+            list_with_registry(args, &mock_registry("mock", vec![overriding_model], false)).await;
         assert!(result.is_ok());
     }
 
@@ -1347,7 +1381,7 @@ mod tests {
             remote: true,
             provider: Some("mock".to_string()),
         };
-        let result = list_with_registry(args, mock_registry("mock", vec![], true)).await;
+        let result = list_with_registry(args, &mock_registry("mock", vec![], true)).await;
         assert!(result.is_ok());
     }
 
@@ -1363,7 +1397,7 @@ mod tests {
             remote: true,
             provider: Some("mock-other".to_string()),
         };
-        let result = list_with_registry(args, mock_registry("mock", vec![], false)).await;
+        let result = list_with_registry(args, &mock_registry("mock", vec![], false)).await;
         assert!(result.is_ok());
     }
 
@@ -1384,7 +1418,7 @@ mod tests {
             capabilities: ModelCapabilities::default(),
         };
         let result =
-            show_with_registry(args, mock_registry("mock", vec![remote_model], false)).await;
+            show_with_registry(args, &mock_registry("mock", vec![remote_model], false)).await;
         assert!(result.is_ok());
     }
 
@@ -1398,7 +1432,7 @@ mod tests {
             remote: true,
             provider: Some("mock".to_string()),
         };
-        let result = show_with_registry(args, mock_registry("mock", vec![], false)).await;
+        let result = show_with_registry(args, &mock_registry("mock", vec![], false)).await;
         assert!(result.is_ok());
     }
 
@@ -1412,7 +1446,7 @@ mod tests {
             remote: true,
             provider: Some("mock".to_string()),
         };
-        let result = show_with_registry(args, mock_registry("mock", vec![], true)).await;
+        let result = show_with_registry(args, &mock_registry("mock", vec![], true)).await;
         assert!(result.is_ok());
     }
 
@@ -1428,7 +1462,7 @@ mod tests {
             remote: true,
             provider: Some("nonexistent-provider".to_string()),
         };
-        let result = show_with_registry(args, mock_registry("mock", vec![], false)).await;
+        let result = show_with_registry(args, &mock_registry("mock", vec![], false)).await;
         assert!(result.is_ok());
     }
 
@@ -1467,7 +1501,7 @@ mod tests {
             remote: false,
             provider: None,
         };
-        let result = list_with_registry(args, mock_registry("mock", vec![], false)).await;
+        let result = list_with_registry(args, &mock_registry("mock", vec![], false)).await;
         assert!(result.is_ok());
     }
 
@@ -1499,7 +1533,7 @@ mod tests {
             remote: false,
             provider: None,
         };
-        let result = show_with_registry(args, mock_registry("mock", vec![], false)).await;
+        let result = show_with_registry(args, &mock_registry("mock", vec![], false)).await;
         assert!(result.is_ok());
     }
 
@@ -1545,7 +1579,131 @@ mod tests {
             remote: false,
             provider: None,
         };
-        let result = list_with_registry(args, mock_registry("mock", vec![], false)).await;
+        let result = list_with_registry(args, &mock_registry("mock", vec![], false)).await;
+        assert!(result.is_err());
+    }
+
+    // ─── CLI argument parsing (clap derive) ────────────────────────────────
+    //
+    // `ModelsArgs`/`ModelsCommand`/`ListArgs`/`ShowArgs` only ever get
+    // constructed as plain struct literals elsewhere in this file's tests,
+    // which never exercises clap's derive-generated `Args`/`FromArgMatches`
+    // parsing implementations (`augment_args`, `from_arg_matches`, etc.) --
+    // those are only reached in production via `main.rs`'s real
+    // `Cli::parse()`, which isn't part of this crate's `--lib` test target.
+    // Wrapping `ModelsArgs` in a minimal local `Parser` and driving it
+    // through `try_parse_from` exercises that derive machinery directly and
+    // doubles as a real regression test for the actual flag/positional
+    // contract (short flags, long flags, subcommand names).
+
+    use clap::Parser as _;
+
+    #[derive(clap::Parser)]
+    struct TestCli {
+        #[command(flatten)]
+        models: ModelsArgs,
+    }
+
+    /// Unwraps the `List` variant, panicking otherwise. A bare `match ... =>
+    /// panic!(...)` inline in each test would leave that panic arm a
+    /// permanent 0-hit region in a green suite (it only fires on failure) --
+    /// extracting it here lets a single `#[should_panic]` test exercise it
+    /// once, matching the pattern already used in `serve/blueprints.rs`.
+    fn expect_list(cmd: ModelsCommand) -> ListArgs {
+        match cmd {
+            ModelsCommand::List(args) => args,
+            ModelsCommand::Show(_) => panic!("expected List"),
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "expected List")]
+    fn expect_list_panics_on_show() {
+        expect_list(ModelsCommand::Show(ShowArgs {
+            model: "x".to_string(),
+            provider: None,
+            remote: false,
+        }));
+    }
+
+    /// Unwraps the `Show` variant, panicking otherwise. See [`expect_list`].
+    fn expect_show(cmd: ModelsCommand) -> ShowArgs {
+        match cmd {
+            ModelsCommand::Show(args) => args,
+            ModelsCommand::List(_) => panic!("expected Show"),
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "expected Show")]
+    fn expect_show_panics_on_list() {
+        expect_show(ModelsCommand::List(ListArgs {
+            provider: None,
+            remote: false,
+        }));
+    }
+
+    #[test]
+    fn parses_list_with_no_flags() {
+        let cli = TestCli::try_parse_from(["lev", "list"]).unwrap();
+        let args = expect_list(cli.models.command);
+        assert!(args.provider.is_none());
+        assert!(!args.remote);
+    }
+
+    #[test]
+    fn parses_list_with_long_flags() {
+        let cli = TestCli::try_parse_from(["lev", "list", "--provider", "anthropic", "--remote"])
+            .unwrap();
+        let args = expect_list(cli.models.command);
+        assert_eq!(args.provider.as_deref(), Some("anthropic"));
+        assert!(args.remote);
+    }
+
+    #[test]
+    fn parses_list_with_short_flags() {
+        let cli = TestCli::try_parse_from(["lev", "list", "-p", "openai", "-r"]).unwrap();
+        let args = expect_list(cli.models.command);
+        assert_eq!(args.provider.as_deref(), Some("openai"));
+        assert!(args.remote);
+    }
+
+    #[test]
+    fn parses_show_with_positional_model_and_long_flags() {
+        let cli = TestCli::try_parse_from([
+            "lev",
+            "show",
+            "claude-sonnet-4-6",
+            "--provider",
+            "anthropic",
+            "--remote",
+        ])
+        .unwrap();
+        let args = expect_show(cli.models.command);
+        assert_eq!(args.model, "claude-sonnet-4-6");
+        assert_eq!(args.provider.as_deref(), Some("anthropic"));
+        assert!(args.remote);
+    }
+
+    #[test]
+    fn parses_show_with_short_flags() {
+        let cli =
+            TestCli::try_parse_from(["lev", "show", "gpt-5.5", "-p", "openai", "-r"]).unwrap();
+        let args = expect_show(cli.models.command);
+        assert_eq!(args.model, "gpt-5.5");
+        assert_eq!(args.provider.as_deref(), Some("openai"));
+        assert!(args.remote);
+    }
+
+    #[test]
+    fn parses_show_missing_required_positional_errors() {
+        let result = TestCli::try_parse_from(["lev", "show"]);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn parses_unknown_subcommand_errors() {
+        let result = TestCli::try_parse_from(["lev", "not-a-subcommand"]);
         assert!(result.is_err());
     }
 
@@ -1560,7 +1718,7 @@ mod tests {
             remote: false,
             provider: None,
         };
-        let result = show_with_registry(args, mock_registry("mock", vec![], false)).await;
+        let result = show_with_registry(args, &mock_registry("mock", vec![], false)).await;
         assert!(result.is_err());
     }
 }
