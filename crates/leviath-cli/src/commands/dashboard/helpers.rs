@@ -284,8 +284,16 @@ pub(super) fn osc52_yank_raw(text: &str) -> bool {
     }
     #[cfg(not(unix))]
     {
-        let _ = text;
-        false
+        // Mirror the real (`#[cfg(not(test))]`) non-unix body above, but
+        // swap the real `std::io::stdout()` destination for an in-memory
+        // `Vec<u8>` -- same reasoning as the unix branch just above: this
+        // still exercises the real `osc52_sequence` encoding logic without
+        // ever touching real stdout, and (like a real write to a live
+        // terminal) succeeds.
+        use std::io::Write;
+        let osc = osc52_sequence(text);
+        let mut buf = Vec::new();
+        buf.write_all(osc.as_bytes()).is_ok() && buf.flush().is_ok()
     }
 }
 
