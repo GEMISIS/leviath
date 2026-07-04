@@ -574,6 +574,49 @@ mod tests {
     }
 
     #[test]
+    fn draw_agent_table_title_none_falls_back_to_task() {
+        // `title` is `None` before title generation completes (or when
+        // disabled) -- exercises the `.unwrap_or_else(|| truncate(&agent.task, 26))`
+        // fallback closure, which every other test in this file never
+        // reaches because `make_test_agent` always sets `title: Some(...)`.
+        let backend = TestBackend::new(120, 40);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut dash = make_test_dashboard();
+        let mut agent = make_test_agent("run-no-title", AgentDisplayStatus::Active);
+        agent.title = None;
+        agent.task = "fallback task text".to_string();
+        dash.agents.push(agent);
+        dash.update_display_indices();
+        terminal
+            .draw(|f| {
+                let area = f.area();
+                dash.draw_agent_table(f, area);
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn draw_agent_table_single_stage_omits_stage_counter() {
+        // `make_test_agent` defaults to `num_stages: 2`, always taking the
+        // `agent.num_stages > 1` branch (stage name + "i/n" counter). A
+        // single-stage agent takes the other arm (bare truncated stage
+        // name, no counter) -- never exercised elsewhere in this file.
+        let backend = TestBackend::new(120, 40);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut dash = make_test_dashboard();
+        let mut agent = make_test_agent("run-single-stage", AgentDisplayStatus::Active);
+        agent.num_stages = 1;
+        dash.agents.push(agent);
+        dash.update_display_indices();
+        terminal
+            .draw(|f| {
+                let area = f.area();
+                dash.draw_agent_table(f, area);
+            })
+            .unwrap();
+    }
+
+    #[test]
     fn draw_agent_table_non_run_state_zero_max_context() {
         let backend = TestBackend::new(120, 40);
         let mut terminal = Terminal::new(backend).unwrap();
