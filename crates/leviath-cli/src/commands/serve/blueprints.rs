@@ -656,24 +656,38 @@ prompt = "Run"
     /// permission) governs whether an entry can be unlinked from a
     /// directory, so making the directory `0o555` is what forces
     /// `remove_dir_all` to fail there. Windows has no equivalent
-    /// "directory write permission" concept via `std::fs::Permissions` --
-    /// instead, `remove_dir_all` on Windows fails to remove a directory
-    /// that contains a read-only file, so marking the file inside the
-    /// directory read-only (via the cross-platform `set_readonly`) is the
-    /// platform-appropriate fault-injection mechanism there.
+    /// "directory write permission" concept via `std::fs::Permissions`, and
+    /// -- contrary to what an earlier version of this test assumed --
+    /// marking a file inside the directory read-only does NOT make
+    /// `remove_dir_all` fail on Windows: it clears the read-only attribute
+    /// before deleting, the same way it silently succeeds through other
+    /// removable-but-`readonly` obstacles. A real sharing violation does
+    /// still block deletion, though: holding an exclusive (no-share) file
+    /// handle open on a file inside the directory for the duration of the
+    /// request -- the same technique
+    /// `session.rs`'s `resolve_task_unreadable_file_returns_error` Windows
+    /// twin uses -- reliably makes `remove_dir_all` fail there.
     #[cfg(windows)]
     #[tokio::test]
     async fn delete_blueprint_removal_failure_returns_500_windows() {
         use axum::routing::delete;
+        use std::fs::OpenOptions;
+        use std::os::windows::fs::OpenOptionsExt;
 
         let name = unique_bp_name("delete-fail-win");
         let dir = agents_dir().join(&name);
         std::fs::create_dir_all(&dir).unwrap();
         let manifest_path = dir.join("agent.leviath");
         std::fs::write(&manifest_path, test_manifest()).unwrap();
-        let mut perms = std::fs::metadata(&manifest_path).unwrap().permissions();
-        perms.set_readonly(true);
-        std::fs::set_permissions(&manifest_path, perms).unwrap();
+
+        // Hold an exclusive (no-share) handle open for the duration of the
+        // delete attempt below, so `remove_dir_all` hits a sharing
+        // violation trying to unlink `manifest_path`.
+        let _locked = OpenOptions::new()
+            .write(true)
+            .share_mode(0)
+            .open(&manifest_path)
+            .unwrap();
 
         let app = Router::new().route("/api/blueprints/{name}", delete(delete_blueprint));
         let req = Request::builder()
@@ -684,16 +698,7 @@ prompt = "Run"
         let resp = app.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), axum::http::StatusCode::INTERNAL_SERVER_ERROR);
 
-        // Restore perms so cleanup (and any subsequent test) can remove it.
-        // Test-only cleanup, not production/security-relevant code, so
-        // clippy's Unix-world-writable warning about `set_readonly(false)`
-        // doesn't apply here.
-        #[allow(clippy::permissions_set_readonly_false)]
-        {
-            let mut perms = std::fs::metadata(&manifest_path).unwrap().permissions();
-            perms.set_readonly(false);
-            let _ = std::fs::set_permissions(&manifest_path, perms);
-        }
+        drop(_locked);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
