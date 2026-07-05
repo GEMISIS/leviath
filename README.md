@@ -9,12 +9,12 @@
 
 | Linux | macOS | Windows | Coverage |
 | :-: | :-: | :-: | :-: |
-| [![Linux](https://img.shields.io/endpoint?url=https://gist.githubusercontent.com/GEMISIS/b35e030175e78fad8e3562e58be21c60/raw/leviath-test-ubuntu-latest.json)](https://github.com/GEMISIS/leviath/actions/workflows/ci.yml) | [![macOS](https://img.shields.io/endpoint?url=https://gist.githubusercontent.com/GEMISIS/b35e030175e78fad8e3562e58be21c60/raw/leviath-test-macos-latest.json)](https://github.com/GEMISIS/leviath/actions/workflows/ci.yml) | [![Windows](https://img.shields.io/endpoint?url=https://gist.githubusercontent.com/GEMISIS/b35e030175e78fad8e3562e58be21c60/raw/leviath-test-windows-latest.json)](https://github.com/GEMISIS/leviath/actions/workflows/ci.yml) | [![Coverage](https://img.shields.io/endpoint?url=https://gist.githubusercontent.com/GEMISIS/b35e030175e78fad8e3562e58be21c60/raw/leviath-coverage-lines.json)](https://github.com/GEMISIS/leviath/actions/workflows/ci.yml) |
+| [![Linux](https://img.shields.io/endpoint?url=https://gist.githubusercontent.com/GEMISIS/b35e030175e78fad8e3562e58be21c60/raw/leviath-test-ubuntu-latest.json)](https://github.com/Sun-Forge-AI/leviath/actions/workflows/ci.yml) | [![macOS](https://img.shields.io/endpoint?url=https://gist.githubusercontent.com/GEMISIS/b35e030175e78fad8e3562e58be21c60/raw/leviath-test-macos-latest.json)](https://github.com/Sun-Forge-AI/leviath/actions/workflows/ci.yml) | [![Windows](https://img.shields.io/endpoint?url=https://gist.githubusercontent.com/GEMISIS/b35e030175e78fad8e3562e58be21c60/raw/leviath-test-windows-latest.json)](https://github.com/Sun-Forge-AI/leviath/actions/workflows/ci.yml) | [![Coverage](https://img.shields.io/endpoint?url=https://gist.githubusercontent.com/GEMISIS/b35e030175e78fad8e3562e58be21c60/raw/leviath-coverage-lines.json)](https://github.com/Sun-Forge-AI/leviath/actions/workflows/ci.yml) |
 
 </div>
 
 <p align="center">
-  <a href="https://github.com/GEMISIS/leviath/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License: MIT"></a>
+  <a href="https://github.com/Sun-Forge-AI/leviath/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="License: MIT"></a>
   <a href="https://leviath.dev"><img src="https://img.shields.io/badge/docs-leviath.dev-8b5cf6" alt="Docs"></a>
 </p>
 
@@ -43,10 +43,10 @@ Pick a pre-built agent or create your own. Run it. Watch it actually remember wh
 brew install gemisis/tap/leviath
 
 # Linux
-curl -fsSL https://github.com/GEMISIS/leviath/releases/latest/download/leviath-linux-x64.tar.gz | tar xz -C /usr/local/bin
+curl -fsSL https://github.com/Sun-Forge-AI/leviath/releases/latest/download/leviath-linux-x64.tar.gz | tar xz -C /usr/local/bin
 
 # Windows — download from GitHub Releases
-# https://github.com/GEMISIS/leviath/releases
+# https://github.com/Sun-Forge-AI/leviath/releases
 
 # Build from source (any platform, requires Rust)
 cargo install --path crates/leviath-cli
@@ -247,7 +247,7 @@ graph TD
 ## Contributing
 
 ```bash
-git clone https://github.com/GEMISIS/leviath.git
+git clone https://github.com/Sun-Forge-AI/leviath.git
 cd leviath
 cargo build
 cargo test --workspace
@@ -277,6 +277,6 @@ Branch coverage isn't collected: `cargo llvm-cov --branch` reliably crashes with
 <p align="center">
   <a href="https://leviath.dev">Website</a> ·
   <a href="https://leviath.dev/docs">Docs</a> ·
-  <a href="https://github.com/GEMISIS/leviath">GitHub</a> ·
-  <a href="https://github.com/GEMISIS/leviath/issues">Issues</a>
+  <a href="https://github.com/Sun-Forge-AI/leviath">GitHub</a> ·
+  <a href="https://github.com/Sun-Forge-AI/leviath/issues">Issues</a>
 </p>
