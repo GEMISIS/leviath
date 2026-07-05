@@ -717,6 +717,7 @@ mod tests {
             waiting_secs: 0,
             graph_info: None,
             accepts_messages: true,
+            taint_summary: vec![],
         }
     }
 

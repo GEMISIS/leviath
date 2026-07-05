@@ -125,6 +125,9 @@ pub struct DashboardAgent {
     pub(super) graph_info: Option<GraphTransitionInfo>,
     /// Whether the current stage accepts mid-run user messages
     pub accepts_messages: bool,
+    /// Per-region taint levels (region_name, taint_level_string).
+    /// Empty when taint tracking is disabled or not yet populated.
+    pub taint_summary: Vec<(String, String)>,
 }
 
 /// Event from an agent back to the dashboard.
@@ -328,6 +331,7 @@ mod tests {
             waiting_secs: 0,
             graph_info: None,
             accepts_messages: true,
+            taint_summary: vec![],
         };
         let cloned = agent.clone();
         assert_eq!(cloned.id, "run-1");
