@@ -10,6 +10,10 @@ env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: "-D warnings"
 
+# Default to read-only; the release job elevates itself explicitly.
+permissions:
+  contents: read
+
 jobs:
   # Re-run all CI gates before building alpha
   gate:
@@ -117,21 +121,20 @@ jobs:
           # Write the commit SHA for downstream promotion
           echo "${{ steps.info.outputs.sha_full }}" > COMMIT_SHA
 
-      - name: Create/update alpha tag
+      # 'alpha' is a rolling channel release: delete the previous release
+      # AND its tag together before republishing. Deleting only the tag
+      # (the old approach) orphans the attached release as a draft, and
+      # the next publish then fails with tag_name already_exists.
+      - name: Reset alpha channel release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: |
-          SHA=$(git rev-parse HEAD)
-          # Delete existing tag ref if present, then recreate
-          gh api -X DELETE repos/${{ github.repository }}/git/refs/tags/alpha 2>/dev/null || true
-          gh api -X POST repos/${{ github.repository }}/git/refs \
-            -f ref="refs/tags/alpha" \
-            -f sha="$SHA"
+        run: gh release delete alpha --yes --cleanup-tag --repo ${{ github.repository }} || true
 
       - name: Publish alpha release
         uses: softprops/action-gh-release@v3
         with:
           tag_name: alpha
+          target_commitish: ${{ steps.info.outputs.sha_full }}
           name: "Alpha · ${{ steps.info.outputs.date }} · ${{ steps.info.outputs.sha_short }}"
           body: |
             **Nightly alpha build** from `main` at ${{ steps.info.outputs.sha_full }}
