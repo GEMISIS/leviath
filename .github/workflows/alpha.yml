@@ -24,7 +24,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
-      - uses: Swatinem/rust-cache@v3
+      - uses: Swatinem/rust-cache@v2
       - name: Build
         run: cargo build --all-targets
       - name: Test
@@ -61,7 +61,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
-      - uses: Swatinem/rust-cache@v3
+      - uses: Swatinem/rust-cache@v2
         with:
           key: release-${{ matrix.target }}
       - name: Build release binary
