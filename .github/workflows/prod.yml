@@ -81,10 +81,6 @@ jobs:
       - name: Approval received
         run: echo "Prod deployment approved for ${{ needs.check-beta.outputs.sha_short }}"
 
-  # Auto-cancel if not approved by 6pm PST (1am UTC Friday)
-  # GitHub environment protection rules handle the timeout —
-  # set "Required reviewers" and a wait timer on the 'production' environment.
-
   deploy:
     name: Deploy to Prod
     needs: [check-beta, approve]
@@ -121,40 +117,48 @@ jobs:
       - name: Publish prod release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: latest
+          tag_name: ${{ env.VERSION }}
           name: "Leviath ${{ env.VERSION }}"
           body: |
-            **Stable release** promoted from beta.
+            **Stable release** — ${{ env.VERSION }}
 
             Source commit: ${{ needs.check-beta.outputs.sha }}
-            Version: ${{ env.VERSION }}
 
             ### Install
 
-            **Homebrew** (coming soon):
+            **Homebrew (macOS):**
             ```bash
-            brew install gemisis/tap/leviath
+            brew tap sun-forge-ai/leviath https://github.com/Sun-Forge-AI/leviath-dist.git
+            brew install leviath
             ```
 
-            **Binary download:**
+            **Linux:**
             ```bash
-            # macOS (Apple Silicon)
-            curl -sL <release-url>/lev-darwin-arm64 -o lev && chmod +x lev && sudo mv lev /usr/local/bin/
+            curl -fsSL https://raw.githubusercontent.com/Sun-Forge-AI/leviath-dist/main/install.sh | bash
+            ```
 
-            # macOS (Intel)
-            curl -sL <release-url>/lev-darwin-x86_64 -o lev && chmod +x lev && sudo mv lev /usr/local/bin/
+            **Windows (Scoop):**
+            ```powershell
+            scoop bucket add leviath https://github.com/Sun-Forge-AI/leviath-dist.git
+            scoop install leviath
+            ```
 
-            # Linux (x86_64)
-            curl -sL <release-url>/lev-linux-x86_64 -o lev && chmod +x lev && sudo mv lev /usr/local/bin/
-
-            # Windows (x86_64) — download lev-windows-x86_64.exe and add to PATH
+            **Manual:**
+            ```bash
+            # Download the archive for your platform, then:
+            tar xzf leviath-*.tar.gz    # or unzip for Windows
+            sudo mv lev /usr/local/bin/
             ```
 
             **From source:**
             ```bash
-            cargo install --git https://github.com/GEMISIS/leviath.git --tag ${{ env.VERSION }} --bin lev
+            cargo install --git https://github.com/Sun-Forge-AI/leviath.git --tag ${{ env.VERSION }} --bin lev
             ```
           prerelease: false
           make_latest: true
           files: release/*
-          # TODO: Update homebrew stable tap once created
+
+      - name: Update latest tag
+        run: |
+          git tag -f latest ${{ needs.check-beta.outputs.sha }}
+          git push -f origin latest

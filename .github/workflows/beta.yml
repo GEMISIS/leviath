@@ -77,10 +77,22 @@ jobs:
             prod on Thursday if approved.
 
             ### Install
+
+            **Homebrew (macOS):**
             ```bash
-            chmod +x lev-*
-            sudo mv lev-* /usr/local/bin/lev
+            brew tap sun-forge-ai/leviath https://github.com/Sun-Forge-AI/leviath-dist.git
+            brew install leviath
+            ```
+
+            **Linux:**
+            ```bash
+            curl -fsSL https://raw.githubusercontent.com/Sun-Forge-AI/leviath-dist/main/install.sh | bash
+            ```
+
+            **Manual:**
+            ```bash
+            tar xzf leviath-*.tar.gz
+            sudo mv lev /usr/local/bin/
             ```
           prerelease: true
           files: release/*
-          # TODO: Update homebrew beta tap once created
