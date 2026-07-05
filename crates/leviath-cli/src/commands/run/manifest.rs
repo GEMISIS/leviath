@@ -483,6 +483,39 @@ pub fn parse_manifest(content: &str) -> anyhow::Result<Blueprint> {
         blueprint.compaction_config = Some(cc);
     }
 
+    // Parse security config: [security]
+    if let Some(security_table) = parsed.get("security").and_then(|v| v.as_table()) {
+        let mut sc = leviath_core::SecurityConfig::default();
+
+        if let Some(tt) = security_table
+            .get("taint_tracking")
+            .and_then(|v| v.as_bool())
+        {
+            sc.taint_tracking = tt;
+        }
+        if let Some(pm) = security_table.get("pointer_mode").and_then(|v| v.as_bool()) {
+            sc.pointer_mode = pm;
+        }
+        if let Some(fm_val) = security_table.get("filter_mode") {
+            if let Some(fm_str) = fm_val.as_str() {
+                sc.filter_mode = leviath_core::FilterMode::from_str_loose(fm_str);
+            } else if let Some(false) = fm_val.as_bool() {
+                sc.filter_mode = None;
+            }
+        }
+        if let Some(deg_arr) = security_table.get("degradation").and_then(|v| v.as_array()) {
+            let modes: Vec<leviath_core::InputMode> = deg_arr
+                .iter()
+                .filter_map(|v| v.as_str().and_then(leviath_core::InputMode::from_str_loose))
+                .collect();
+            if !modes.is_empty() {
+                sc.degradation = modes;
+            }
+        }
+
+        blueprint.security = Some(sc);
+    }
+
     // Parse agent-level tool permissions: [tool_permissions]
     if let Some(tp_table) = parsed.get("tool_permissions").and_then(|v| v.as_table()) {
         for (tool_name, policy_val) in tp_table {
@@ -1619,6 +1652,98 @@ provider = "anthropic"
         let cc = bp.compaction_config.as_ref().unwrap();
         assert_eq!(cc.provider, "anthropic");
         // model absent — stays at CompactionConfig default
+    }
+
+    // ─── Security config parsing ──────────────────────────────────────────
+
+    #[test]
+    fn parse_manifest_with_security_config() {
+        let toml = r#"
+[agent]
+name = "security-test"
+
+[security]
+taint_tracking = true
+pointer_mode = true
+filter_mode = "structured"
+degradation = ["pointer", "filter", "traditional"]
+"#;
+        let bp = parse_manifest(toml).unwrap();
+        let sc = bp.security.as_ref().unwrap();
+        assert!(sc.taint_tracking);
+        assert!(sc.pointer_mode);
+        assert_eq!(sc.filter_mode, Some(leviath_core::FilterMode::Structured));
+        assert_eq!(sc.degradation.len(), 3);
+        assert_eq!(sc.degradation[0], leviath_core::InputMode::Pointer);
+        assert_eq!(sc.degradation[1], leviath_core::InputMode::Filter);
+        assert_eq!(sc.degradation[2], leviath_core::InputMode::Traditional);
+    }
+
+    #[test]
+    fn parse_manifest_security_disabled() {
+        let toml = r#"
+[agent]
+name = "no-taint"
+
+[security]
+taint_tracking = false
+"#;
+        let bp = parse_manifest(toml).unwrap();
+        let sc = bp.security.as_ref().unwrap();
+        assert!(!sc.taint_tracking);
+    }
+
+    #[test]
+    fn parse_manifest_security_filter_mode_false() {
+        let toml = r#"
+[agent]
+name = "no-filter"
+
+[security]
+filter_mode = false
+"#;
+        let bp = parse_manifest(toml).unwrap();
+        let sc = bp.security.as_ref().unwrap();
+        assert!(sc.filter_mode.is_none());
+    }
+
+    #[test]
+    fn parse_manifest_no_security_section() {
+        let toml = r#"
+[agent]
+name = "no-security"
+"#;
+        let bp = parse_manifest(toml).unwrap();
+        assert!(bp.security.is_none());
+    }
+
+    #[test]
+    fn parse_manifest_security_freeform_filter() {
+        let toml = r#"
+[agent]
+name = "freeform-test"
+
+[security]
+filter_mode = "freeform"
+"#;
+        let bp = parse_manifest(toml).unwrap();
+        let sc = bp.security.as_ref().unwrap();
+        assert_eq!(sc.filter_mode, Some(leviath_core::FilterMode::Freeform));
+    }
+
+    #[test]
+    fn parse_manifest_security_partial_degradation() {
+        let toml = r#"
+[agent]
+name = "partial-deg"
+
+[security]
+degradation = ["traditional"]
+"#;
+        let bp = parse_manifest(toml).unwrap();
+        let sc = bp.security.as_ref().unwrap();
+        assert_eq!(sc.degradation.len(), 1);
+        assert_eq!(sc.degradation[0], leviath_core::InputMode::Traditional);
     }
 
     /// Agent-level tool_permissions with a non-string value — the inner

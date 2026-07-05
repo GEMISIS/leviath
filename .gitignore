@@ -36,3 +36,4 @@ tarpaulin-report.json
 # rooted: `cargo test -p xtask` runs with the xtask/ crate dir as cwd, so
 # run_with's tests produce xtask/coverage/ there, not just <repo-root>/coverage/.
 coverage/
+plans/
