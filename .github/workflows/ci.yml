@@ -131,7 +131,7 @@ jobs:
         run: cargo xtask coverage
       - name: Upload HTML coverage report
         if: always()
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v7
         with:
           name: coverage-html-${{ matrix.os }}
           path: coverage/html/
