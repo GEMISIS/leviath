@@ -42,16 +42,20 @@ jobs:
         include:
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
-            artifact: lev-linux-x86_64
+            artifact: leviath-linux-x64
+            ext: tar.gz
           - target: aarch64-apple-darwin
             os: macos-latest
-            artifact: lev-darwin-arm64
+            artifact: leviath-macos-arm64
+            ext: tar.gz
           - target: x86_64-apple-darwin
             os: macos-latest
-            artifact: lev-darwin-x86_64
+            artifact: leviath-macos-x64
+            ext: tar.gz
           - target: x86_64-pc-windows-msvc
             os: windows-latest
-            artifact: lev-windows-x86_64.exe
+            artifact: leviath-windows-x64
+            ext: zip
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
@@ -62,19 +66,23 @@ jobs:
           key: release-${{ matrix.target }}
       - name: Build release binary
         run: cargo build --release --bin lev --target ${{ matrix.target }}
-      - name: Rename binary
+      - name: Package archive
         shell: bash
         run: |
+          mkdir -p staging/
           if [ "${{ matrix.os }}" = "windows-latest" ]; then
-            cp target/${{ matrix.target }}/release/lev.exe ${{ matrix.artifact }}
+            cp target/${{ matrix.target }}/release/lev.exe staging/lev.exe
+            cd staging && 7z a -tzip ../${{ matrix.artifact }}.zip lev.exe
           else
-            cp target/${{ matrix.target }}/release/lev ${{ matrix.artifact }}
+            cp target/${{ matrix.target }}/release/lev staging/lev
+            chmod +x staging/lev
+            cd staging && tar czf ../${{ matrix.artifact }}.tar.gz lev
           fi
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.artifact }}
-          path: ${{ matrix.artifact }}
+          name: ${{ matrix.artifact }}.${{ matrix.ext }}
+          path: ${{ matrix.artifact }}.${{ matrix.ext }}
 
   release:
     name: Publish Alpha
@@ -103,10 +111,11 @@ jobs:
           for dir in artifacts/*/; do
             name=$(basename "$dir")
             cp "$dir/$name" "release/$name"
-            chmod +x "release/$name"
           done
+          # Generate checksums
+          cd release && sha256sum * > SHA256SUMS
           # Write the commit SHA for downstream promotion
-          echo "${{ steps.info.outputs.sha_full }}" > release/COMMIT_SHA
+          echo "${{ steps.info.outputs.sha_full }}" > COMMIT_SHA
 
       - name: Create/update alpha tag
         run: |
@@ -127,11 +136,23 @@ jobs:
             ⚠️ This is an alpha build. Use at your own risk.
 
             ### Install
+
+            **Homebrew (macOS):**
             ```bash
-            # Download for your platform, then:
-            chmod +x lev-*
-            sudo mv lev-* /usr/local/bin/lev
+            brew tap sun-forge-ai/leviath https://github.com/Sun-Forge-AI/leviath-dist.git
+            brew install leviath
+            ```
+
+            **Linux:**
+            ```bash
+            curl -fsSL https://raw.githubusercontent.com/Sun-Forge-AI/leviath-dist/main/install.sh | bash
+            ```
+
+            **Manual:**
+            ```bash
+            # Download the archive for your platform, then:
+            tar xzf leviath-*.tar.gz
+            sudo mv lev /usr/local/bin/
             ```
           prerelease: true
           files: release/*
-          # TODO: Update homebrew alpha tap once created
