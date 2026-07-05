@@ -56,6 +56,38 @@ impl ScriptEngine {
             .eval_with_scope(scope, script)
             .map_err(|e| Error::ExecutionFailed(e.to_string()))
     }
+
+    /// Evaluate a taint gate check script.
+    ///
+    /// The script should define a `check(context)` function that returns bool.
+    /// Context map contains: tool, target, taint_level.
+    pub fn check_gate_rule(
+        &self,
+        script: &str,
+        tool: &str,
+        target: Option<&str>,
+        taint_level: &str,
+    ) -> Result<bool> {
+        let mut context = rhai::Map::new();
+        context.insert("tool".into(), rhai::Dynamic::from(tool.to_string()));
+        context.insert(
+            "target".into(),
+            rhai::Dynamic::from(target.unwrap_or("").to_string()),
+        );
+        context.insert(
+            "taint_level".into(),
+            rhai::Dynamic::from(taint_level.to_string()),
+        );
+
+        let mut scope = Scope::new();
+        scope.push("context", context);
+
+        // The script should end with a call to check(context) or
+        // be a simple expression that uses the 'context' variable.
+        self.engine
+            .eval_with_scope::<bool>(&mut scope, script)
+            .map_err(|e| Error::ExecutionFailed(e.to_string()))
+    }
 }
 
 impl Default for ScriptEngine {
@@ -268,5 +300,66 @@ mod tests {
         let engine = ScriptEngine::default();
         let result = engine.validate("content.len() > 0", "hi");
         assert!(result.unwrap());
+    }
+
+    // ─── check_gate_rule ────────────────────────────────────────────────────
+
+    #[test]
+    fn test_gate_rule_allows_matching_tool() {
+        let engine = ScriptEngine::new();
+        let script = r#"
+            context["tool"] == "send_email"
+            && context["target"].ends_with("@mycompany.com")
+            && (context["taint_level"] == "public" || context["taint_level"] == "internal")
+        "#;
+        let result = engine
+            .check_gate_rule(
+                script,
+                "send_email",
+                Some("alice@mycompany.com"),
+                "internal",
+            )
+            .unwrap();
+        assert!(result);
+    }
+
+    #[test]
+    fn test_gate_rule_blocks_external_email() {
+        let engine = ScriptEngine::new();
+        let script = r#"
+            context["tool"] == "send_email"
+            && context["target"].ends_with("@mycompany.com")
+        "#;
+        let result = engine
+            .check_gate_rule(script, "send_email", Some("bob@external.com"), "internal")
+            .unwrap();
+        assert!(!result);
+    }
+
+    #[test]
+    fn test_gate_rule_blocks_wrong_tool() {
+        let engine = ScriptEngine::new();
+        let script = r#"context["tool"] == "send_email""#;
+        let result = engine
+            .check_gate_rule(script, "post_to_slack", None, "public")
+            .unwrap();
+        assert!(!result);
+    }
+
+    #[test]
+    fn test_gate_rule_no_target_uses_empty_string() {
+        let engine = ScriptEngine::new();
+        let script = r#"context["target"] == """#;
+        let result = engine
+            .check_gate_rule(script, "shell", None, "public")
+            .unwrap();
+        assert!(result);
+    }
+
+    #[test]
+    fn test_gate_rule_script_error() {
+        let engine = ScriptEngine::new();
+        let result = engine.check_gate_rule("invalid {{ syntax", "shell", None, "public");
+        assert!(result.is_err());
     }
 }
