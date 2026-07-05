@@ -15,6 +15,7 @@ pub mod cache;
 pub mod error;
 pub mod layout;
 pub mod lifecycle;
+pub mod policy;
 pub mod region;
 pub mod taint;
 
@@ -26,6 +27,7 @@ pub use cache::{CacheBreakpoint, CacheHint};
 pub use error::{Error, Result, ValidationError};
 pub use layout::{ContextLayout, RegionDefinition};
 pub use lifecycle::{CompactionConfig, CompactionStrategy, EvictionPolicy};
+pub use policy::{AllowlistRule, McpToolOverride, PolicyConfig, ScriptedRule};
 pub use region::{ContentFormat, Region, RegionEntry, RegionKind, RegionSchema};
 pub use taint::{
     FilterInput, FilterMode, FilterOperation, GateDecision, GateDecisionSource, GateEvent,

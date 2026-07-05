@@ -12,6 +12,10 @@ use std::collections::HashMap;
 
 use crate::components::ContextWindow;
 
+/// Type alias for a scripted rule checker function.
+/// Takes (tool_name, target, taint_level) and returns Some(script_name) if the rule allows.
+pub type ScriptRuleChecker = dyn Fn(&str, Option<&str>, TaintLevel) -> Option<String>;
+
 /// Taint gate — checks whether a tool invocation is allowed given the
 /// current taint state of the context window.
 #[derive(Debug, Clone)]
@@ -261,6 +265,75 @@ impl TaintGate {
                 tool_name: tool_name.to_string(),
             }
         }
+    }
+
+    /// Check the gate with allowlist and scripted rule support.
+    ///
+    /// This is the full gate check that runs:
+    /// 1. Basic taint vs clearance check
+    /// 2. If blocked, check static allowlist rules
+    /// 3. If still blocked, check scripted rules (if checker provided)
+    /// 4. Return final decision
+    pub fn check_with_policy(
+        &mut self,
+        agent_id: &str,
+        tool_name: &str,
+        window: &ContextWindow,
+        target: Option<&str>,
+        policy: &leviath_core::PolicyConfig,
+        script_checker: Option<&ScriptRuleChecker>,
+    ) -> GateDecision {
+        let decision = self.check_traditional(agent_id, tool_name, window);
+
+        if decision.is_allowed() {
+            return decision;
+        }
+
+        // Extract taint level from the blocked decision
+        let (taint, clearance) = if let GateDecision::Blocked {
+            taint_level,
+            clearance,
+            ..
+        } = &decision
+        {
+            (*taint_level, *clearance)
+        } else {
+            return decision;
+        };
+
+        // Check static allowlist rules
+        if let Some(rule_idx) = policy.check_allowlist(tool_name, target, taint) {
+            self.log_event(
+                agent_id,
+                tool_name,
+                InputMode::Traditional,
+                taint,
+                clearance,
+                true,
+                GateDecisionSource::AllowlistRule {
+                    rule_index: rule_idx,
+                },
+            );
+            return GateDecision::Allowed;
+        }
+
+        // Check scripted rules
+        if let Some(checker) = script_checker {
+            if let Some(script_name) = checker(tool_name, target, taint) {
+                self.log_event(
+                    agent_id,
+                    tool_name,
+                    InputMode::Traditional,
+                    taint,
+                    clearance,
+                    true,
+                    GateDecisionSource::ScriptedRule { script_name },
+                );
+                return GateDecision::Allowed;
+            }
+        }
+
+        decision
     }
 
     /// Record an allow decision from the user or allowlist.
@@ -1238,5 +1311,123 @@ mod tests {
             message: "sub-agent failed".into(),
         };
         assert!(err.to_string().contains("sub-agent failed"));
+    }
+
+    // ─── Policy-aware gate check ────────────────────────────────────────────
+
+    #[test]
+    fn gate_with_policy_allows_via_allowlist() {
+        let mut gate = TaintGate::new(SecurityConfig::default());
+        let window = make_window_with_taint(TaintLevel::Private);
+        let policy = leviath_core::PolicyConfig {
+            allowlist: vec![leviath_core::AllowlistRule {
+                tool: "shell".into(),
+                to: vec![],
+                channel: vec![],
+                max_sensitivity: TaintLevel::Private,
+            }],
+            mcp_overrides: Default::default(),
+        };
+
+        let decision = gate.check_with_policy("agent-1", "shell", &window, None, &policy, None);
+        assert!(decision.is_allowed());
+
+        // Should have logged an allowlist allow
+        let last = gate.audit_log().last().unwrap();
+        assert!(last.allowed);
+        assert!(matches!(
+            last.decision_source,
+            GateDecisionSource::AllowlistRule { .. }
+        ));
+    }
+
+    #[test]
+    fn gate_with_policy_allows_via_scripted_rule() {
+        let mut gate = TaintGate::new(SecurityConfig::default());
+        let window = make_window_with_taint(TaintLevel::Private);
+        let policy = leviath_core::PolicyConfig::default(); // empty allowlist
+
+        let checker = |tool: &str, _target: Option<&str>, _taint: TaintLevel| -> Option<String> {
+            if tool == "shell" {
+                Some("company_rule.rhai".to_string())
+            } else {
+                None
+            }
+        };
+
+        let decision =
+            gate.check_with_policy("agent-1", "shell", &window, None, &policy, Some(&checker));
+        assert!(decision.is_allowed());
+
+        let last = gate.audit_log().last().unwrap();
+        assert!(matches!(
+            last.decision_source,
+            GateDecisionSource::ScriptedRule { .. }
+        ));
+    }
+
+    #[test]
+    fn gate_with_policy_blocks_when_no_rule_matches() {
+        let mut gate = TaintGate::new(SecurityConfig::default());
+        let window = make_window_with_taint(TaintLevel::Private);
+        let policy = leviath_core::PolicyConfig::default();
+
+        let decision = gate.check_with_policy("agent-1", "shell", &window, None, &policy, None);
+        assert!(!decision.is_allowed());
+    }
+
+    #[test]
+    fn gate_with_policy_passes_through_when_already_allowed() {
+        let mut gate = TaintGate::new(SecurityConfig::default());
+        let window = make_window_with_taint(TaintLevel::Public);
+        let policy = leviath_core::PolicyConfig::default();
+
+        let decision = gate.check_with_policy("agent-1", "shell", &window, None, &policy, None);
+        assert!(decision.is_allowed());
+    }
+
+    #[test]
+    fn gate_with_policy_target_pattern_matching() {
+        let mut gate = TaintGate::new(SecurityConfig::default());
+        gate.set_tool_classification(
+            "send_email".to_string(),
+            ToolClassification::new(
+                TaintLevel::Public,
+                ToolDirection::Outbound,
+                TaintLevel::Public,
+            ),
+        );
+        let window = make_window_with_taint(TaintLevel::Private);
+        let policy = leviath_core::PolicyConfig {
+            allowlist: vec![leviath_core::AllowlistRule {
+                tool: "send_email".into(),
+                to: vec!["megan@*".into()],
+                channel: vec![],
+                max_sensitivity: TaintLevel::Private,
+            }],
+            mcp_overrides: Default::default(),
+        };
+
+        // Should match megan@ pattern
+        let decision = gate.check_with_policy(
+            "agent-1",
+            "send_email",
+            &window,
+            Some("megan@work.com"),
+            &policy,
+            None,
+        );
+        assert!(decision.is_allowed());
+
+        // Should not match bob@
+        let decision2 = gate.check_with_policy(
+            "agent-1",
+            "send_email",
+            &window,
+            Some("bob@work.com"),
+            &policy,
+            None,
+        );
+        assert!(!decision2.is_allowed());
     }
 }

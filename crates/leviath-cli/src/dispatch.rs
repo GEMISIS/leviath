@@ -69,6 +69,9 @@ pub enum Commands {
     /// Validate an agent blueprint
     Validate(commands::validate::ValidateArgs),
 
+    /// Manage taint tracking policy rules
+    Policy(commands::policy::PolicyArgs),
+
     /// Start the REST + WebSocket API server
     Serve(commands::serve::ServeArgs),
 
@@ -93,6 +96,7 @@ pub async fn dispatch(command: Commands) -> anyhow::Result<()> {
         Commands::Dashboard(args) => commands::dashboard::execute(args).await,
         Commands::Models(args) => commands::models::execute(args).await,
         Commands::Validate(args) => commands::validate::execute(args).await,
+        Commands::Policy(args) => commands::policy::execute(args).await,
         Commands::Serve(args) => dispatch_serve(args).await,
         Commands::RunWorker(args) => dispatch_run_worker(args).await,
     }
@@ -331,5 +335,27 @@ mod tests {
         };
         let result = dispatch(Commands::Validate(args)).await;
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn dispatch_policy_list_variant_is_routed() {
+        let args = commands::policy::PolicyArgs {
+            command: commands::policy::PolicyCommand::List(commands::policy::PolicyListArgs {}),
+        };
+        let result = dispatch(Commands::Policy(args)).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn dispatch_policy_test_variant_is_routed() {
+        let args = commands::policy::PolicyArgs {
+            command: commands::policy::PolicyCommand::Test(commands::policy::PolicyTestArgs {
+                tool: "shell".to_string(),
+                target: None,
+                taint: "public".to_string(),
+            }),
+        };
+        let result = dispatch(Commands::Policy(args)).await;
+        assert!(result.is_ok());
     }
 }
