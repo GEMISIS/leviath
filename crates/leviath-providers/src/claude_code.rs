@@ -297,6 +297,30 @@ impl Stream for ClaudeCodeStream {
     }
 }
 
+/// Run `op` (a spawn attempt), retrying briefly when it fails with
+/// `ETXTBSY`. On POSIX, `exec` fails with "Text file busy" while *any*
+/// process holds a write handle to the executable — including a write fd
+/// inherited by another process's in-flight fork/exec, or an installer
+/// rewriting the claude binary mid-spawn. The condition clears as soon as
+/// the writer closes, so a short bounded retry is the standard remedy
+/// (cargo does the same). On Windows the error kind never occurs, so this
+/// is a plain pass-through there.
+async fn retry_etxtbsy<T>(mut op: impl FnMut() -> std::io::Result<T>) -> std::io::Result<T> {
+    const MAX_RETRIES: u32 = 40;
+    let mut attempt = 0;
+    loop {
+        match op() {
+            Err(e)
+                if e.kind() == std::io::ErrorKind::ExecutableFileBusy && attempt < MAX_RETRIES =>
+            {
+                attempt += 1;
+                tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+            }
+            other => return other,
+        }
+    }
+}
+
 impl ClaudeCodeProvider {
     /// Core of [`Provider::infer`], with the process timeout injected so
     /// tests can exercise the timeout branch without a real 5-minute wait.
@@ -332,7 +356,7 @@ impl ClaudeCodeProvider {
         cmd.stdout(std::process::Stdio::piped());
         cmd.stderr(std::process::Stdio::piped());
 
-        let child = cmd.spawn().map_err(|e| {
+        let child = retry_etxtbsy(|| cmd.spawn()).await.map_err(|e| {
             ProviderError::RequestFailed(format!(
                 "Failed to spawn '{}': {}. Is Claude Code installed?",
                 self.binary_path, e
@@ -398,7 +422,7 @@ impl Provider for ClaudeCodeProvider {
         cmd.stdout(std::process::Stdio::piped());
         cmd.stderr(std::process::Stdio::piped());
 
-        let mut child = cmd.spawn().map_err(|e| {
+        let mut child = retry_etxtbsy(|| cmd.spawn()).await.map_err(|e| {
             ProviderError::RequestFailed(format!(
                 "Failed to spawn '{}': {}. Is Claude Code installed?",
                 self.binary_path, e
@@ -992,8 +1016,93 @@ mod tests {
             .infer_with_timeout(make_request(), std::time::Duration::from_millis(100))
             .await
             .unwrap_err();
-        assert!(err.to_string().contains("timed out"));
+        let msg = err.to_string();
+        assert!(msg.contains("timed out"), "unexpected error: {msg}");
         let _ = std::fs::remove_file(&script);
+    }
+
+    /// Holds the stub script open for writing so exec fails `ETXTBSY`,
+    /// then releases it mid-retry: `spawn_child` must ride out the busy
+    /// window and the inference must still succeed. Deterministic
+    /// re-creation of the race that made stub tests flake on Linux CI.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn spawn_child_retries_until_etxtbsy_writer_releases() {
+        let script = write_stub_script(
+            "etxtbsy-retry",
+            "echo '{\"result\": \"hello from stub\"}'\n",
+            "",
+        );
+        let holder = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&script)
+            .unwrap();
+        let release = tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+            drop(holder);
+        });
+        let provider = ClaudeCodeProvider::with_binary_path(script.to_str().unwrap().to_string());
+        let resp = provider.infer(make_request()).await.unwrap();
+        assert_eq!(resp.content, "hello from stub");
+        release.await.unwrap();
+        let _ = std::fs::remove_file(&script);
+    }
+
+    // The retry policy itself is unit-tested with injected errors rather
+    // than real busy executables: macOS does not enforce ETXTBSY at all,
+    // so a real-file simulation only exercises the branches on Linux.
+    // `start_paused` fast-forwards the backoff sleeps so these run
+    // instantly.
+
+    #[tokio::test(start_paused = true)]
+    async fn retry_etxtbsy_retries_then_succeeds() {
+        let mut calls = 0;
+        let result = retry_etxtbsy(|| {
+            calls += 1;
+            if calls < 3 {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::ExecutableFileBusy,
+                    "Text file busy",
+                ))
+            } else {
+                Ok(42)
+            }
+        })
+        .await;
+        assert_eq!(result.unwrap(), 42);
+        assert_eq!(calls, 3);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn retry_etxtbsy_gives_up_when_busy_never_clears() {
+        let mut calls = 0;
+        let result: std::io::Result<()> = retry_etxtbsy(|| {
+            calls += 1;
+            Err(std::io::Error::new(
+                std::io::ErrorKind::ExecutableFileBusy,
+                "Text file busy",
+            ))
+        })
+        .await;
+        let err = result.unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::ExecutableFileBusy);
+        // Initial attempt plus MAX_RETRIES retries.
+        assert_eq!(calls, 41);
+    }
+
+    #[tokio::test]
+    async fn retry_etxtbsy_other_errors_pass_through_immediately() {
+        let mut calls = 0;
+        let result: std::io::Result<()> = retry_etxtbsy(|| {
+            calls += 1;
+            Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "no such file",
+            ))
+        })
+        .await;
+        assert_eq!(result.unwrap_err().kind(), std::io::ErrorKind::NotFound);
+        assert_eq!(calls, 1);
     }
 
     #[tokio::test]
