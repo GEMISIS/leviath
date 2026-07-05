@@ -55,21 +55,21 @@ jobs:
           gh release download alpha --dir release/
           ls -la release/
 
-      - name: Create/update beta tag
+      # 'beta' is a rolling channel release: delete the previous release
+      # AND its tag together before republishing (deleting only the tag
+      # orphans the release as a draft and the next publish collides).
+      - name: Reset beta channel release
         if: steps.alpha.outputs.skip != 'true'
         env:
           GH_TOKEN: ${{ github.token }}
-        run: |
-          gh api -X DELETE repos/${{ github.repository }}/git/refs/tags/beta 2>/dev/null || true
-          gh api -X POST repos/${{ github.repository }}/git/refs \
-            -f ref="refs/tags/beta" \
-            -f sha="${{ steps.alpha.outputs.sha }}"
+        run: gh release delete beta --yes --cleanup-tag --repo ${{ github.repository }} || true
 
       - name: Publish beta release
         if: steps.alpha.outputs.skip != 'true'
         uses: softprops/action-gh-release@v3
         with:
           tag_name: beta
+          target_commitish: ${{ steps.alpha.outputs.sha }}
           name: "Beta · ${{ steps.alpha.outputs.date }} · ${{ steps.alpha.outputs.sha_short }}"
           body: |
             **Weekly beta build** promoted from alpha.

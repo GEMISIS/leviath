@@ -6,8 +6,9 @@ on:
     - cron: '0 16 * * 4'
   workflow_dispatch: # Manual trigger
 
+# Default to read-only; only the deploy job needs to write releases.
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   check-beta:
@@ -68,7 +69,9 @@ jobs:
         id: version
         if: steps.beta.outputs.skip != 'true'
         run: |
-          version=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')
+          # Read the version from the promoted commit, not the tip of main --
+          # main may have moved past the beta build since it was cut.
+          version=$(git show "${{ steps.beta.outputs.sha }}:Cargo.toml" | grep '^version' | head -1 | sed 's/.*"\(.*\)"/\1/')
           echo "version=$version" >> $GITHUB_OUTPUT
 
   approve:
@@ -85,6 +88,8 @@ jobs:
     name: Deploy to Prod
     needs: [check-beta, approve]
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v7
         with:
@@ -98,35 +103,24 @@ jobs:
           gh release download beta --dir release/
           ls -la release/
 
-      - name: Create version tag
+      - name: Determine version tag
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           VERSION="v${{ needs.check-beta.outputs.version }}"
-          SHA="${{ needs.check-beta.outputs.sha }}"
-          # If tag exists, append date
+          # If the tag was already released (version not bumped since the
+          # last prod deploy), disambiguate with the date rather than
+          # moving the existing tag.
           if gh api repos/${{ github.repository }}/git/refs/tags/$VERSION >/dev/null 2>&1; then
             VERSION="${VERSION}+$(date -u +%Y%m%d)"
           fi
-          gh api -X DELETE repos/${{ github.repository }}/git/refs/tags/$VERSION 2>/dev/null || true
-          gh api -X POST repos/${{ github.repository }}/git/refs \
-            -f ref="refs/tags/$VERSION" \
-            -f sha="$SHA"
           echo "VERSION=$VERSION" >> $GITHUB_ENV
-
-      - name: Create/update latest tag
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          gh api -X DELETE repos/${{ github.repository }}/git/refs/tags/latest 2>/dev/null || true
-          gh api -X POST repos/${{ github.repository }}/git/refs \
-            -f ref="refs/tags/latest" \
-            -f sha="${{ needs.check-beta.outputs.sha }}"
 
       - name: Publish prod release
         uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ env.VERSION }}
+          target_commitish: ${{ needs.check-beta.outputs.sha }}
           name: "Leviath ${{ env.VERSION }}"
           body: |
             **Stable release** — ${{ env.VERSION }}
@@ -165,6 +159,32 @@ jobs:
             ```
           prerelease: false
           make_latest: true
+          files: release/*
+
+      # The install script's stable channel resolves releases/tags/latest,
+      # so 'latest' must be a rolling channel release with the same assets
+      # (like 'alpha' and 'beta'), not just a git tag. Delete release+tag
+      # together before republishing to avoid orphaned-draft collisions.
+      - name: Update latest channel release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release delete latest --yes --cleanup-tag --repo ${{ github.repository }} || true
+
+      - name: Publish latest channel release
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: latest
+          target_commitish: ${{ needs.check-beta.outputs.sha }}
+          name: "Leviath ${{ env.VERSION }} (stable channel)"
+          body: |
+            Rolling **stable channel** release, currently ${{ env.VERSION }}.
+
+            Source commit: ${{ needs.check-beta.outputs.sha }}
+
+            This tag always points at the newest stable release; see the
+            ${{ env.VERSION }} release for details and install instructions.
+          prerelease: false
+          make_latest: false
           files: release/*
 
 

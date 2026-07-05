@@ -35,11 +35,14 @@ jobs:
             TARGET_TAG="${{ inputs.version }}"
             echo "Reverting to specified version: $TARGET_TAG"
           else
-            # Find the previous prod release (not alpha/beta/latest)
-            # List releases, skip current latest, find first non-prerelease
-            PREV_TAG=$(gh release list --limit 20 | grep -v "Pre-release" | grep -v "^Latest" | head -1 | awk '{print $1}' || echo "")
+            # Find the previous prod release: versioned (vX.Y.Z) stable
+            # releases only, skipping index 0 (the current one being
+            # reverted). Channel releases (alpha/beta/latest) and drafts
+            # are excluded.
+            PREV_TAG=$(gh api "repos/${{ github.repository }}/releases" \
+              --jq '[.[] | select((.draft or .prerelease) | not) | .tag_name | select(startswith("v"))][1] // empty')
             if [ -z "$PREV_TAG" ]; then
-              echo "ERROR: No previous release found to revert to."
+              echo "ERROR: No previous versioned release found to revert to."
               exit 1
             fi
             TARGET_TAG="$PREV_TAG"
@@ -69,15 +72,20 @@ jobs:
           }
           ls -la release/
 
-      - name: Update latest tag
-        run: |
-          git tag -f latest ${{ steps.target.outputs.sha }}
-          git push -f origin latest
+      # Rebuild the rolling 'latest' channel release from the target
+      # version's assets. Same delete-release-and-tag-together pattern as
+      # prod (a bare tag delete/force-push orphans the release as a draft,
+      # and direct git pushes are blocked by branch/tag protection).
+      - name: Reset latest channel release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release delete latest --yes --cleanup-tag --repo ${{ github.repository }} || true
 
       - name: Publish reverted release
         uses: softprops/action-gh-release@v3
         with:
           tag_name: latest
+          target_commitish: ${{ steps.target.outputs.sha }}
           name: "Leviath ${{ steps.target.outputs.tag }} (reverted)"
           body: |
             **⚠️ REVERTED** to ${{ steps.target.outputs.tag }}
