@@ -924,6 +924,7 @@ mod tests {
             let mut f = std::fs::File::create(&path).unwrap();
             writeln!(f, "#!/bin/sh").unwrap();
             f.write_all(sh_body.as_bytes()).unwrap();
+            f.sync_all().unwrap();
             drop(f);
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
