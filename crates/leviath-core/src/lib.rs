@@ -16,6 +16,7 @@ pub mod error;
 pub mod layout;
 pub mod lifecycle;
 pub mod region;
+pub mod taint;
 
 pub use blueprint::{
     Blueprint, ContextTransform, EdgeTransform, Stage, StageResult, ToolFilter, ToolResultRouting,
@@ -26,3 +27,8 @@ pub use error::{Error, Result, ValidationError};
 pub use layout::{ContextLayout, RegionDefinition};
 pub use lifecycle::{CompactionConfig, CompactionStrategy, EvictionPolicy};
 pub use region::{ContentFormat, Region, RegionEntry, RegionKind, RegionSchema};
+pub use taint::{
+    FilterInput, FilterMode, FilterOperation, GateDecision, GateDecisionSource, GateEvent,
+    InputMode, PointerRef, RegionTaint, SecurityConfig, TaintLevel, ToolClassification,
+    ToolDirection,
+};
