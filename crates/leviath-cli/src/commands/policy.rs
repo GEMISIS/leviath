@@ -83,8 +83,13 @@ fn rules_dir() -> std::path::PathBuf {
 }
 
 async fn execute_list() -> anyhow::Result<()> {
-    let config = load_policy()?;
+    execute_list_with(&load_policy()?, &rules_dir())
+}
 
+fn execute_list_with(
+    config: &leviath_core::PolicyConfig,
+    rules: &std::path::Path,
+) -> anyhow::Result<()> {
     println!("Taint Policy Rules");
     println!("==================");
     println!();
@@ -114,9 +119,8 @@ async fn execute_list() -> anyhow::Result<()> {
     println!();
 
     // List scripted rules
-    let rules = rules_dir();
     if rules.exists() {
-        let mut scripts: Vec<_> = std::fs::read_dir(&rules)?
+        let mut scripts: Vec<_> = std::fs::read_dir(rules)?
             .filter_map(|e| e.ok())
             .filter(|e| {
                 e.path()
@@ -165,6 +169,14 @@ async fn execute_list() -> anyhow::Result<()> {
 }
 
 async fn execute_add(args: PolicyAddArgs) -> anyhow::Result<()> {
+    execute_add_with(args, &policy_path(), &load_policy()?)
+}
+
+fn execute_add_with(
+    args: PolicyAddArgs,
+    path: &std::path::Path,
+    existing: &leviath_core::PolicyConfig,
+) -> anyhow::Result<()> {
     let sensitivity =
         leviath_core::TaintLevel::from_str_loose(&args.max_sensitivity).ok_or_else(|| {
             anyhow::anyhow!(
@@ -184,21 +196,18 @@ async fn execute_add(args: PolicyAddArgs) -> anyhow::Result<()> {
         max_sensitivity: sensitivity,
     };
 
-    // Load existing config or create new
-    let mut config = load_policy()?;
+    let mut config = existing.clone();
     config.allowlist.push(rule);
 
     // Ensure directory exists
-    let path = policy_path();
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
 
-    // Serialize and write. We build the TOML manually for the allowlist
-    // array-of-tables format, since the toml crate's serialize handles it.
+    // Serialize and write
     let toml_str =
         toml::to_string_pretty(&config).map_err(|e| anyhow::anyhow!("TOML error: {}", e))?;
-    std::fs::write(&path, toml_str)?;
+    std::fs::write(path, toml_str)?;
 
     println!("Added rule: {} [max: {}]", args.tool, args.max_sensitivity);
     if let Some(target) = &args.target {
@@ -489,5 +498,188 @@ mod tests {
         let path_str = path.to_str().unwrap();
         assert!(path_str.contains("leviath"));
         assert!(path_str.ends_with("rules"));
+    }
+
+    // ─── execute_list_with coverage ─────────────────────────────────────────
+
+    #[test]
+    fn list_with_allowlist_rules_to_targets() {
+        let config = leviath_core::PolicyConfig {
+            allowlist: vec![leviath_core::AllowlistRule {
+                tool: "send_email".into(),
+                to: vec!["alice@*".into(), "bob@*".into()],
+                channel: vec![],
+                max_sensitivity: leviath_core::TaintLevel::Private,
+            }],
+            mcp_overrides: Default::default(),
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let result = execute_list_with(&config, dir.path());
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn list_with_allowlist_rules_channel_targets() {
+        let config = leviath_core::PolicyConfig {
+            allowlist: vec![leviath_core::AllowlistRule {
+                tool: "post_to_slack".into(),
+                to: vec![],
+                channel: vec!["#general".into()],
+                max_sensitivity: leviath_core::TaintLevel::Internal,
+            }],
+            mcp_overrides: Default::default(),
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let result = execute_list_with(&config, dir.path());
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn list_with_allowlist_rules_any_target() {
+        let config = leviath_core::PolicyConfig {
+            allowlist: vec![leviath_core::AllowlistRule {
+                tool: "shell".into(),
+                to: vec![],
+                channel: vec![],
+                max_sensitivity: leviath_core::TaintLevel::Public,
+            }],
+            mcp_overrides: Default::default(),
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let result = execute_list_with(&config, dir.path());
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn list_with_scripted_rules() {
+        let dir = tempfile::tempdir().unwrap();
+        let rules = dir.path().join("rules");
+        std::fs::create_dir_all(&rules).unwrap();
+        std::fs::write(rules.join("company.rhai"), "// rule").unwrap();
+        std::fs::write(rules.join("other.rhai"), "// rule").unwrap();
+        std::fs::write(rules.join("not_a_rule.txt"), "ignored").unwrap();
+
+        let config = leviath_core::PolicyConfig::default();
+        let result = execute_list_with(&config, &rules);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn list_with_empty_scripted_rules_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let rules = dir.path().join("rules");
+        std::fs::create_dir_all(&rules).unwrap();
+
+        let config = leviath_core::PolicyConfig::default();
+        let result = execute_list_with(&config, &rules);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn list_with_mcp_overrides() {
+        let mut overrides = std::collections::HashMap::new();
+        overrides.insert(
+            "server.tool_a".to_string(),
+            leviath_core::McpToolOverride {
+                sensitivity: Some(leviath_core::TaintLevel::Private),
+                direction: Some("outbound".to_string()),
+                clearance: Some(leviath_core::TaintLevel::Internal),
+            },
+        );
+        let config = leviath_core::PolicyConfig {
+            allowlist: vec![],
+            mcp_overrides: overrides,
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let result = execute_list_with(&config, dir.path());
+        assert!(result.is_ok());
+    }
+
+    // ─── execute_add_with coverage ──────────────────────────────────────────
+
+    #[test]
+    fn add_with_target_writes_policy() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("policy.toml");
+        let config = leviath_core::PolicyConfig::default();
+        let args = PolicyAddArgs {
+            tool: "send_email".to_string(),
+            target: Some("test@example.com".to_string()),
+            max_sensitivity: "private".to_string(),
+        };
+        let result = execute_add_with(args, &path, &config);
+        assert!(result.is_ok());
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(content.contains("send_email"));
+    }
+
+    #[test]
+    fn add_without_target_writes_policy() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("policy.toml");
+        let config = leviath_core::PolicyConfig::default();
+        let args = PolicyAddArgs {
+            tool: "shell".to_string(),
+            target: None,
+            max_sensitivity: "internal".to_string(),
+        };
+        let result = execute_add_with(args, &path, &config);
+        assert!(result.is_ok());
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(content.contains("shell"));
+    }
+
+    #[test]
+    fn add_invalid_sensitivity_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("policy.toml");
+        let config = leviath_core::PolicyConfig::default();
+        let args = PolicyAddArgs {
+            tool: "shell".to_string(),
+            target: None,
+            max_sensitivity: "bogus".to_string(),
+        };
+        let result = execute_add_with(args, &path, &config);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn add_appends_to_existing_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("policy.toml");
+        let existing = leviath_core::PolicyConfig {
+            allowlist: vec![leviath_core::AllowlistRule {
+                tool: "existing".into(),
+                to: vec![],
+                channel: vec![],
+                max_sensitivity: leviath_core::TaintLevel::Public,
+            }],
+            mcp_overrides: Default::default(),
+        };
+        let args = PolicyAddArgs {
+            tool: "new_tool".to_string(),
+            target: None,
+            max_sensitivity: "private".to_string(),
+        };
+        let result = execute_add_with(args, &path, &existing);
+        assert!(result.is_ok());
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(content.contains("existing"));
+        assert!(content.contains("new_tool"));
+    }
+
+    #[test]
+    fn add_creates_parent_dirs() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sub").join("dir").join("policy.toml");
+        let config = leviath_core::PolicyConfig::default();
+        let args = PolicyAddArgs {
+            tool: "shell".to_string(),
+            target: None,
+            max_sensitivity: "public".to_string(),
+        };
+        let result = execute_add_with(args, &path, &config);
+        assert!(result.is_ok());
+        assert!(path.exists());
     }
 }
