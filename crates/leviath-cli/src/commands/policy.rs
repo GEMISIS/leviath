@@ -369,4 +369,125 @@ mod tests {
         let result = execute_add(args).await;
         assert!(result.is_err());
     }
+
+    #[tokio::test]
+    async fn execute_test_with_target() {
+        let args = PolicyTestArgs {
+            tool: "shell".to_string(),
+            target: Some("example.com".to_string()),
+            taint: "private".to_string(),
+        };
+        let result = execute_test(args).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn execute_test_outbound_with_internal_taint() {
+        let args = PolicyTestArgs {
+            tool: "shell".to_string(),
+            target: None,
+            taint: "internal".to_string(),
+        };
+        let result = execute_test(args).await;
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn policy_add_args_parse_sensitivity_public() {
+        let sensitivity = leviath_core::TaintLevel::from_str_loose("public");
+        assert!(sensitivity.is_some());
+        assert_eq!(sensitivity.unwrap(), leviath_core::TaintLevel::Public);
+    }
+
+    #[test]
+    fn policy_add_args_parse_sensitivity_internal() {
+        let sensitivity = leviath_core::TaintLevel::from_str_loose("internal");
+        assert!(sensitivity.is_some());
+        assert_eq!(sensitivity.unwrap(), leviath_core::TaintLevel::Internal);
+    }
+
+    #[test]
+    fn policy_add_args_build_rule_with_target() {
+        let args = PolicyAddArgs {
+            tool: "send_email".to_string(),
+            target: Some("alice@*".to_string()),
+            max_sensitivity: "private".to_string(),
+        };
+        let sensitivity = leviath_core::TaintLevel::from_str_loose(&args.max_sensitivity).unwrap();
+        let rule = leviath_core::AllowlistRule {
+            tool: args.tool.clone(),
+            to: args
+                .target
+                .as_ref()
+                .map(|t| vec![t.clone()])
+                .unwrap_or_default(),
+            channel: vec![],
+            max_sensitivity: sensitivity,
+        };
+        assert_eq!(rule.tool, "send_email");
+        assert_eq!(rule.to, vec!["alice@*".to_string()]);
+        assert_eq!(rule.max_sensitivity, leviath_core::TaintLevel::Private);
+    }
+
+    #[test]
+    fn policy_add_args_build_rule_without_target() {
+        let args = PolicyAddArgs {
+            tool: "shell".to_string(),
+            target: None,
+            max_sensitivity: "internal".to_string(),
+        };
+        let sensitivity = leviath_core::TaintLevel::from_str_loose(&args.max_sensitivity).unwrap();
+        let rule = leviath_core::AllowlistRule {
+            tool: args.tool.clone(),
+            to: args
+                .target
+                .as_ref()
+                .map(|t| vec![t.clone()])
+                .unwrap_or_default(),
+            channel: vec![],
+            max_sensitivity: sensitivity,
+        };
+        assert!(rule.to.is_empty());
+        assert_eq!(rule.max_sensitivity, leviath_core::TaintLevel::Internal);
+    }
+
+    #[test]
+    fn policy_test_classification_lookup() {
+        // Verify that builtin_tool_classification returns expected values
+        // for tools we use in execute_test
+        let shell_class = leviath_core::taint::builtin_tool_classification("shell");
+        assert!(shell_class.is_outbound());
+        assert_eq!(shell_class.clearance, leviath_core::TaintLevel::Public);
+
+        let read_class = leviath_core::taint::builtin_tool_classification("read_file");
+        assert!(!read_class.is_outbound());
+    }
+
+    #[test]
+    fn policy_test_clearance_check_scenarios() {
+        let class = leviath_core::taint::builtin_tool_classification("shell");
+
+        // Public taint within Public clearance
+        assert!(class.check_clearance(leviath_core::TaintLevel::Public));
+
+        // Internal taint exceeds Public clearance
+        assert!(!class.check_clearance(leviath_core::TaintLevel::Internal));
+
+        // Private taint exceeds Public clearance
+        assert!(!class.check_clearance(leviath_core::TaintLevel::Private));
+    }
+
+    #[test]
+    fn load_policy_returns_empty_mcp_overrides() {
+        let config = load_policy().unwrap();
+        assert!(config.mcp_overrides.is_empty());
+    }
+
+    #[test]
+    fn rules_dir_is_under_leviath_config() {
+        let path = rules_dir();
+        let path_str = path.to_str().unwrap();
+        assert!(path_str.contains("leviath"));
+        assert!(path_str.ends_with("rules"));
+    }
 }
