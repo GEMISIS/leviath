@@ -442,7 +442,8 @@ impl Dashboard {
                     },
                     waiting_secs: 0,
                     graph_info: load_graph_info(&run.agent_path),
-                    accepts_messages: true, // default; stage-level control via agent state
+                    accepts_messages: true,
+                    taint_summary: vec![], // default; stage-level control via agent state
                 });
             }
         }
@@ -670,6 +671,7 @@ mod tests {
             waiting_secs: 0,
             graph_info: None,
             accepts_messages: true,
+            taint_summary: vec![],
         }
     }
 

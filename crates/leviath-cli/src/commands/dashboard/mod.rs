@@ -599,6 +599,7 @@ mod tests {
             waiting_secs: 0,
             graph_info: None,
             accepts_messages: false,
+            taint_summary: vec![],
         };
         assert_eq!(agent.id, "run-test");
         assert_eq!(agent.blueprint_name, "tester");
