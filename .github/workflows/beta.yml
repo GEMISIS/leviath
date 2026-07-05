@@ -57,9 +57,13 @@ jobs:
 
       - name: Create/update beta tag
         if: steps.alpha.outputs.skip != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          git tag -f beta ${{ steps.alpha.outputs.sha }}
-          git push -f origin beta
+          gh api -X DELETE repos/${{ github.repository }}/git/refs/tags/beta 2>/dev/null || true
+          gh api -X POST repos/${{ github.repository }}/git/refs \
+            -f ref="refs/tags/beta" \
+            -f sha="${{ steps.alpha.outputs.sha }}"
 
       - name: Publish beta release
         if: steps.alpha.outputs.skip != 'true'

@@ -99,20 +99,29 @@ jobs:
           ls -la release/
 
       - name: Create version tag
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           VERSION="v${{ needs.check-beta.outputs.version }}"
+          SHA="${{ needs.check-beta.outputs.sha }}"
           # If tag exists, append date
-          if git rev-parse "$VERSION" >/dev/null 2>&1; then
+          if gh api repos/${{ github.repository }}/git/refs/tags/$VERSION >/dev/null 2>&1; then
             VERSION="${VERSION}+$(date -u +%Y%m%d)"
           fi
-          git tag -f "$VERSION" ${{ needs.check-beta.outputs.sha }}
-          git push -f origin "$VERSION"
+          gh api -X DELETE repos/${{ github.repository }}/git/refs/tags/$VERSION 2>/dev/null || true
+          gh api -X POST repos/${{ github.repository }}/git/refs \
+            -f ref="refs/tags/$VERSION" \
+            -f sha="$SHA"
           echo "VERSION=$VERSION" >> $GITHUB_ENV
 
       - name: Create/update latest tag
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          git tag -f latest ${{ needs.check-beta.outputs.sha }}
-          git push -f origin latest
+          gh api -X DELETE repos/${{ github.repository }}/git/refs/tags/latest 2>/dev/null || true
+          gh api -X POST repos/${{ github.repository }}/git/refs \
+            -f ref="refs/tags/latest" \
+            -f sha="${{ needs.check-beta.outputs.sha }}"
 
       - name: Publish prod release
         uses: softprops/action-gh-release@v3
@@ -158,7 +167,4 @@ jobs:
           make_latest: true
           files: release/*
 
-      - name: Update latest tag
-        run: |
-          git tag -f latest ${{ needs.check-beta.outputs.sha }}
-          git push -f origin latest
+

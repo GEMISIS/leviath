@@ -118,9 +118,15 @@ jobs:
           echo "${{ steps.info.outputs.sha_full }}" > COMMIT_SHA
 
       - name: Create/update alpha tag
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          git tag -f alpha
-          git push -f origin alpha
+          SHA=$(git rev-parse HEAD)
+          # Delete existing tag ref if present, then recreate
+          gh api -X DELETE repos/${{ github.repository }}/git/refs/tags/alpha 2>/dev/null || true
+          gh api -X POST repos/${{ github.repository }}/git/refs \
+            -f ref="refs/tags/alpha" \
+            -f sha="$SHA"
 
       - name: Publish alpha release
         uses: softprops/action-gh-release@v3
