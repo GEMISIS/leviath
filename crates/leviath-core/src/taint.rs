@@ -1198,4 +1198,20 @@ mod tests {
         assert_eq!(tc.direction, ToolDirection::Internal);
         assert_eq!(tc.clearance, TaintLevel::Public);
     }
+
+    #[test]
+    fn builtin_edit_file_classification() {
+        let tc = builtin_tool_classification("edit_file");
+        assert_eq!(tc.sensitivity, TaintLevel::Internal);
+        assert_eq!(tc.direction, ToolDirection::Internal);
+        assert_eq!(tc.clearance, TaintLevel::Public);
+    }
+
+    #[test]
+    fn builtin_list_dir_classification() {
+        let tc = builtin_tool_classification("list_dir");
+        assert_eq!(tc.sensitivity, TaintLevel::Internal);
+        assert_eq!(tc.direction, ToolDirection::Inbound);
+        assert_eq!(tc.clearance, TaintLevel::Public);
+    }
 }
