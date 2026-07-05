@@ -75,7 +75,7 @@ jobs:
           git push -f origin latest
 
       - name: Publish reverted release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           tag_name: latest
           name: "Leviath ${{ steps.target.outputs.tag }} (reverted)"

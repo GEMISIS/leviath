@@ -24,7 +24,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@v3
       - name: Build
         run: cargo build --all-targets
       - name: Test
@@ -61,7 +61,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@v3
         with:
           key: release-${{ matrix.target }}
       - name: Build release binary
@@ -79,7 +79,7 @@ jobs:
             cd staging && tar czf ../${{ matrix.artifact }}.tar.gz lev
           fi
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: ${{ matrix.artifact }}.${{ matrix.ext }}
           path: ${{ matrix.artifact }}.${{ matrix.ext }}
@@ -101,7 +101,7 @@ jobs:
           echo "sha_full=$(git rev-parse HEAD)" >> $GITHUB_OUTPUT
 
       - name: Download all artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v5
         with:
           path: artifacts/
 
@@ -123,7 +123,7 @@ jobs:
           git push -f origin alpha
 
       - name: Publish alpha release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           tag_name: alpha
           name: "Alpha · ${{ steps.info.outputs.date }} · ${{ steps.info.outputs.sha_short }}"
