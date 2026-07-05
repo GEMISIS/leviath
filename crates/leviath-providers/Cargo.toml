@@ -21,3 +21,7 @@ futures-core = { workspace = true }
 tokio-stream = { workspace = true }
 pin-project-lite = { workspace = true }
 bytes = "1"
+
+[dev-dependencies]
+# test-util enables tokio::time::pause so retry/backoff tests run instantly
+tokio = { workspace = true, features = ["test-util"] }
