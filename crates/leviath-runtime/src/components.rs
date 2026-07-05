@@ -438,6 +438,58 @@ impl ContextWindow {
             .collect::<Vec<_>>()
             .join("\n\n")
     }
+
+    /// Enable taint tracking on all regions in this context window.
+    pub fn enable_taint_tracking(&mut self) {
+        for region in &mut self.regions {
+            region.enable_taint_tracking();
+        }
+    }
+
+    /// Add tainted content to a specific region.
+    pub fn add_tainted_to_region(
+        &mut self,
+        region_name: &str,
+        content: String,
+        tokens: usize,
+        taint_level: leviath_core::TaintLevel,
+    ) -> leviath_core::Result<()> {
+        if let Some(region) = self.get_region_mut(region_name) {
+            region.add_tainted_entry(content, tokens, taint_level)?;
+            self.current_tokens = self.calculate_tokens();
+            Ok(())
+        } else {
+            Err(leviath_core::Error::RegionNotFound(region_name.to_string()))
+        }
+    }
+
+    /// Get the overall taint level (max across all regions).
+    /// Returns None if no region has taint tracking enabled.
+    pub fn overall_taint(&self) -> Option<leviath_core::TaintLevel> {
+        let mut max_taint = None;
+        for region in &self.regions {
+            if let Some(level) = region.taint_level() {
+                max_taint = Some(match max_taint {
+                    Some(current) => level.max(current),
+                    None => level,
+                });
+            }
+        }
+        max_taint
+    }
+
+    /// Get the taint level of a specific region.
+    pub fn region_taint(&self, region_name: &str) -> Option<leviath_core::TaintLevel> {
+        self.get_region(region_name).and_then(|r| r.taint_level())
+    }
+
+    /// Get a summary of taint levels across all regions (for dashboard/audit).
+    pub fn taint_summary(&self) -> Vec<(String, leviath_core::TaintLevel)> {
+        self.regions
+            .iter()
+            .filter_map(|r| r.taint_level().map(|t| (r.name.clone(), t)))
+            .collect()
+    }
 }
 
 /// Task assignment component.
@@ -1504,5 +1556,163 @@ mod tests {
         let messages = window.assemble_messages();
         // Should have at least the "User: hello" message
         assert!(messages.iter().any(|m| m.content.contains("hello")));
+    }
+
+    // ─── Context window taint tracking ──────────────────────────────────────
+
+    #[test]
+    fn test_enable_taint_tracking_on_context_window() {
+        let mut window = ContextWindow::new(10000);
+        window.add_region(Region::new(
+            "conv".to_string(),
+            RegionKind::SlidingWindow { max_items: 10 },
+            5000,
+        ));
+        window.add_region(Region::new(
+            "tools".to_string(),
+            RegionKind::Temporary,
+            3000,
+        ));
+
+        assert!(window.overall_taint().is_none());
+        window.enable_taint_tracking();
+        assert_eq!(
+            window.overall_taint(),
+            Some(leviath_core::TaintLevel::Public)
+        );
+    }
+
+    #[test]
+    fn test_add_tainted_to_region() {
+        let mut window = ContextWindow::new(10000);
+        let region =
+            Region::new("tools".to_string(), RegionKind::Temporary, 5000).with_taint_tracking();
+        window.add_region(region);
+
+        window
+            .add_tainted_to_region(
+                "tools",
+                "secret data".to_string(),
+                10,
+                leviath_core::TaintLevel::Private,
+            )
+            .unwrap();
+
+        assert_eq!(
+            window.region_taint("tools"),
+            Some(leviath_core::TaintLevel::Private)
+        );
+        assert_eq!(
+            window.overall_taint(),
+            Some(leviath_core::TaintLevel::Private)
+        );
+    }
+
+    #[test]
+    fn test_add_tainted_to_nonexistent_region() {
+        let mut window = ContextWindow::new(10000);
+        let result = window.add_tainted_to_region(
+            "nope",
+            "data".to_string(),
+            10,
+            leviath_core::TaintLevel::Public,
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_overall_taint_is_max_across_regions() {
+        let mut window = ContextWindow::new(10000);
+        let r1 = Region::new("a".to_string(), RegionKind::Temporary, 5000).with_taint_tracking();
+        let r2 = Region::new("b".to_string(), RegionKind::Temporary, 5000).with_taint_tracking();
+        window.add_region(r1);
+        window.add_region(r2);
+
+        window
+            .add_tainted_to_region("a", "x".to_string(), 5, leviath_core::TaintLevel::Internal)
+            .unwrap();
+        window
+            .add_tainted_to_region("b", "y".to_string(), 5, leviath_core::TaintLevel::Public)
+            .unwrap();
+
+        assert_eq!(
+            window.overall_taint(),
+            Some(leviath_core::TaintLevel::Internal)
+        );
+    }
+
+    #[test]
+    fn test_taint_summary() {
+        let mut window = ContextWindow::new(10000);
+        let r1 = Region::new("conv".to_string(), RegionKind::Temporary, 5000).with_taint_tracking();
+        let r2 =
+            Region::new("tools".to_string(), RegionKind::Temporary, 5000).with_taint_tracking();
+        window.add_region(r1);
+        window.add_region(r2);
+
+        window
+            .add_tainted_to_region(
+                "conv",
+                "x".to_string(),
+                5,
+                leviath_core::TaintLevel::Private,
+            )
+            .unwrap();
+
+        let summary = window.taint_summary();
+        assert_eq!(summary.len(), 2);
+        assert!(summary
+            .iter()
+            .any(|(name, level)| name == "conv" && *level == leviath_core::TaintLevel::Private));
+        assert!(summary
+            .iter()
+            .any(|(name, level)| name == "tools" && *level == leviath_core::TaintLevel::Public));
+    }
+
+    #[test]
+    fn test_region_taint_for_unknown_region() {
+        let window = ContextWindow::new(10000);
+        assert_eq!(window.region_taint("nope"), None);
+    }
+
+    #[test]
+    fn test_taint_recovery_through_eviction() {
+        with_tracing(|| {});
+        let mut window = ContextWindow::new(100);
+        let r = Region::new("temp".to_string(), RegionKind::Temporary, 100).with_taint_tracking();
+        window.add_region(r);
+
+        window
+            .add_tainted_to_region(
+                "temp",
+                "private".to_string(),
+                30,
+                leviath_core::TaintLevel::Private,
+            )
+            .unwrap();
+        window
+            .add_tainted_to_region(
+                "temp",
+                "public".to_string(),
+                30,
+                leviath_core::TaintLevel::Public,
+            )
+            .unwrap();
+
+        assert_eq!(
+            window.region_taint("temp"),
+            Some(leviath_core::TaintLevel::Private)
+        );
+
+        // Eviction should trigger and remove oldest (private) entry
+        window.current_tokens = 96; // Push over 0.95 threshold
+        let result = window.try_evict(10).unwrap();
+        assert!(result.tokens_freed > 0);
+
+        // After evicting the private entry, taint should recover
+        assert_eq!(
+            window.region_taint("temp"),
+            Some(leviath_core::TaintLevel::Public)
+        );
     }
 }

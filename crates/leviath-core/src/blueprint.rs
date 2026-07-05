@@ -50,6 +50,10 @@ pub struct Blueprint {
 
     /// Additional metadata
     pub metadata: HashMap<String, serde_json::Value>,
+
+    /// Security configuration for taint tracking.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub security: Option<crate::taint::SecurityConfig>,
 }
 
 impl Blueprint {
@@ -72,6 +76,7 @@ impl Blueprint {
             max_child_depth: None,
             entry_stage: None,
             metadata: HashMap::new(),
+            security: None,
         }
     }
 
