@@ -11,6 +11,7 @@ pub mod engine;
 pub mod pool;
 pub mod scheduler;
 pub mod systems;
+pub mod taint;
 // test_support.rs gates itself with an inner `#![cfg(test)]` attribute, so no
 // `#[cfg(test)]` is needed here (adding one would trigger clippy's
 // `duplicated_attributes` lint under `-D warnings`).
@@ -23,3 +24,4 @@ pub use components::{
 pub use engine::{AgentEngine, ProviderRegistry, ToolResultRoutingConfig};
 pub use pool::AgentPool;
 pub use scheduler::TaskScheduler;
+pub use taint::TaintGate;
