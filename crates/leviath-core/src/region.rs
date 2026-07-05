@@ -135,6 +135,10 @@ pub struct Region {
 
     /// Optional validation schema enforcing content format
     pub schema: Option<RegionSchema>,
+
+    /// Taint tracking state. Present when taint tracking is enabled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub taint: Option<crate::taint::RegionTaint>,
 }
 
 impl Region {
@@ -147,7 +151,66 @@ impl Region {
             max_tokens,
             current_tokens: 0,
             schema: None,
+            taint: None,
         }
+    }
+
+    /// Enable taint tracking for this region.
+    pub fn with_taint_tracking(mut self) -> Self {
+        self.taint = Some(crate::taint::RegionTaint::new());
+        self
+    }
+
+    /// Enable taint tracking on this region (mutable).
+    pub fn enable_taint_tracking(&mut self) {
+        if self.taint.is_none() {
+            self.taint = Some(crate::taint::RegionTaint::new());
+        }
+    }
+
+    /// Get the current taint level of this region, if taint tracking is enabled.
+    pub fn taint_level(&self) -> Option<crate::taint::TaintLevel> {
+        self.taint.as_ref().map(|t| t.level())
+    }
+
+    /// Add an entry with a taint level. Used when taint tracking is enabled.
+    pub fn add_tainted_entry(
+        &mut self,
+        content: String,
+        tokens: usize,
+        taint_level: crate::taint::TaintLevel,
+    ) -> crate::error::Result<()> {
+        // Validate against schema if present
+        if let Some(schema) = &self.schema {
+            schema.validate(&content)?;
+        }
+
+        // Check token budget
+        if self.current_tokens + tokens > self.max_tokens {
+            return Err(crate::error::Error::TokenBudgetExceeded {
+                used: self.current_tokens + tokens,
+                max: self.max_tokens,
+            });
+        }
+
+        // Add entry
+        self.content.push(RegionEntry {
+            content,
+            tokens,
+            timestamp: chrono::Utc::now().timestamp(),
+            metadata: None,
+        });
+        self.current_tokens += tokens;
+
+        // Update taint tracking
+        if let Some(taint) = &mut self.taint {
+            taint.add_entry(taint_level);
+        }
+
+        // Enforce SlidingWindow max_items limit
+        self.enforce_sliding_window();
+
+        Ok(())
     }
 
     /// Add a validation schema to this region.
@@ -182,6 +245,11 @@ impl Region {
             metadata: None,
         });
         self.current_tokens += tokens;
+
+        // Track taint as Public for untagged entries
+        if let Some(taint) = &mut self.taint {
+            taint.add_entry(crate::taint::TaintLevel::Public);
+        }
 
         // Enforce SlidingWindow max_items limit
         self.enforce_sliding_window();
@@ -218,6 +286,11 @@ impl Region {
         });
         self.current_tokens += tokens;
 
+        // Track taint as Public for untagged entries
+        if let Some(taint) = &mut self.taint {
+            taint.add_entry(crate::taint::TaintLevel::Public);
+        }
+
         // Enforce SlidingWindow max_items limit
         self.enforce_sliding_window();
 
@@ -231,6 +304,9 @@ impl Region {
             while self.content.len() > max {
                 self.current_tokens -= self.content[0].tokens;
                 self.content.remove(0);
+                if let Some(taint) = &mut self.taint {
+                    taint.remove_oldest();
+                }
             }
         }
     }
@@ -239,13 +315,20 @@ impl Region {
     pub fn clear(&mut self) {
         self.content.clear();
         self.current_tokens = 0;
+        if let Some(taint) = &mut self.taint {
+            taint.clear();
+        }
     }
 
     /// Remove the oldest entry (for Temporary regions).
     pub fn remove_oldest(&mut self) -> Option<RegionEntry> {
         if let Some(entry) = self.content.first() {
             self.current_tokens -= entry.tokens;
-            Some(self.content.remove(0))
+            let removed = self.content.remove(0);
+            if let Some(taint) = &mut self.taint {
+                taint.remove_oldest();
+            }
+            Some(removed)
         } else {
             None
         }
@@ -801,5 +884,157 @@ mod tests {
         let cloned = schema.clone();
         assert_eq!(cloned.custom_script.as_deref(), Some("s"));
         assert_eq!(cloned.format, ContentFormat::Text);
+    }
+
+    // ─── Region taint tracking ──────────────────────────────────────────────
+
+    #[test]
+    fn test_region_with_taint_tracking() {
+        let region =
+            Region::new("test".to_string(), RegionKind::Temporary, 1000).with_taint_tracking();
+        assert!(region.taint.is_some());
+        assert_eq!(region.taint_level(), Some(crate::taint::TaintLevel::Public));
+    }
+
+    #[test]
+    fn test_region_without_taint_tracking() {
+        let region = Region::new("test".to_string(), RegionKind::Temporary, 1000);
+        assert!(region.taint.is_none());
+        assert_eq!(region.taint_level(), None);
+    }
+
+    #[test]
+    fn test_enable_taint_tracking() {
+        let mut region = Region::new("test".to_string(), RegionKind::Temporary, 1000);
+        assert!(region.taint.is_none());
+        region.enable_taint_tracking();
+        assert!(region.taint.is_some());
+        // Calling again is a no-op
+        region.enable_taint_tracking();
+        assert!(region.taint.is_some());
+    }
+
+    #[test]
+    fn test_add_tainted_entry() {
+        let mut region =
+            Region::new("test".to_string(), RegionKind::Temporary, 1000).with_taint_tracking();
+        region
+            .add_tainted_entry(
+                "secret data".to_string(),
+                10,
+                crate::taint::TaintLevel::Private,
+            )
+            .unwrap();
+        assert_eq!(
+            region.taint_level(),
+            Some(crate::taint::TaintLevel::Private)
+        );
+        assert_eq!(region.entry_count(), 1);
+    }
+
+    #[test]
+    fn test_add_tainted_entry_validates_schema() {
+        let mut region = Region::new("test".to_string(), RegionKind::Temporary, 1000)
+            .with_taint_tracking()
+            .with_schema(RegionSchema::new(ContentFormat::Json));
+        let result = region.add_tainted_entry(
+            "not json".to_string(),
+            10,
+            crate::taint::TaintLevel::Internal,
+        );
+        assert!(result.is_err());
+        assert_eq!(region.entry_count(), 0);
+    }
+
+    #[test]
+    fn test_add_tainted_entry_checks_budget() {
+        let mut region =
+            Region::new("test".to_string(), RegionKind::Temporary, 10).with_taint_tracking();
+        let result = region.add_tainted_entry(
+            "too much".to_string(),
+            20,
+            crate::taint::TaintLevel::Internal,
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_add_entry_tracks_taint_as_public() {
+        let mut region =
+            Region::new("test".to_string(), RegionKind::Temporary, 1000).with_taint_tracking();
+        region.add_entry("public data".to_string(), 10).unwrap();
+        assert_eq!(region.taint_level(), Some(crate::taint::TaintLevel::Public));
+    }
+
+    #[test]
+    fn test_taint_recovery_on_remove_oldest() {
+        let mut region =
+            Region::new("test".to_string(), RegionKind::Temporary, 1000).with_taint_tracking();
+        region
+            .add_tainted_entry("private".to_string(), 10, crate::taint::TaintLevel::Private)
+            .unwrap();
+        region
+            .add_tainted_entry("public".to_string(), 10, crate::taint::TaintLevel::Public)
+            .unwrap();
+        assert_eq!(
+            region.taint_level(),
+            Some(crate::taint::TaintLevel::Private)
+        );
+
+        region.remove_oldest(); // removes private entry
+        assert_eq!(region.taint_level(), Some(crate::taint::TaintLevel::Public));
+    }
+
+    #[test]
+    fn test_taint_recovery_on_clear() {
+        let mut region =
+            Region::new("test".to_string(), RegionKind::Temporary, 1000).with_taint_tracking();
+        region
+            .add_tainted_entry("private".to_string(), 10, crate::taint::TaintLevel::Private)
+            .unwrap();
+        region.clear();
+        assert_eq!(region.taint_level(), Some(crate::taint::TaintLevel::Public));
+    }
+
+    #[test]
+    fn test_taint_recovery_on_sliding_window_eviction() {
+        let mut region = Region::new(
+            "conv".to_string(),
+            RegionKind::SlidingWindow { max_items: 2 },
+            50000,
+        )
+        .with_taint_tracking();
+
+        region
+            .add_tainted_entry("private".to_string(), 10, crate::taint::TaintLevel::Private)
+            .unwrap();
+        region
+            .add_tainted_entry("public1".to_string(), 10, crate::taint::TaintLevel::Public)
+            .unwrap();
+        assert_eq!(
+            region.taint_level(),
+            Some(crate::taint::TaintLevel::Private)
+        );
+
+        // Third entry evicts the private one
+        region
+            .add_tainted_entry("public2".to_string(), 10, crate::taint::TaintLevel::Public)
+            .unwrap();
+        assert_eq!(region.entry_count(), 2);
+        assert_eq!(region.taint_level(), Some(crate::taint::TaintLevel::Public));
+    }
+
+    #[test]
+    fn test_taint_field_not_serialized_when_none() {
+        let region = Region::new("test".to_string(), RegionKind::Temporary, 1000);
+        let json = serde_json::to_string(&region).unwrap();
+        assert!(!json.contains("taint"));
+    }
+
+    #[test]
+    fn test_taint_field_deserialized_as_none_when_missing() {
+        let json = r#"{"name":"test","kind":"Temporary","content":[],"max_tokens":1000,"current_tokens":0,"schema":null}"#;
+        let region: Region = serde_json::from_str(json).unwrap();
+        assert!(region.taint.is_none());
     }
 }
