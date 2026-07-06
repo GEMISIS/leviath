@@ -48,6 +48,10 @@ jobs:
             os: ubuntu-latest
             artifact: leviath-linux-x64
             ext: tar.gz
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+            artifact: leviath-linux-arm64
+            ext: tar.gz
           - target: aarch64-apple-darwin
             os: macos-latest
             artifact: leviath-macos-arm64
@@ -68,7 +72,19 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: release-${{ matrix.target }}
+      # aarch64-linux is cross-compiled from the x64 runner (hosted ARM
+      # runners aren't available for private repos on this plan). rustls
+      # keeps this simple: the only C to cross-compile is ring's, which
+      # just needs the gcc cross toolchain.
+      - name: Install aarch64 Linux cross toolchain
+        if: matrix.target == 'aarch64-unknown-linux-gnu'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
       - name: Build release binary
+        env:
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+          CC_aarch64_unknown_linux_gnu: aarch64-linux-gnu-gcc
         run: cargo build --release --bin lev --target ${{ matrix.target }}
       - name: Package archive
         shell: bash
