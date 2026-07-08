@@ -3407,6 +3407,19 @@ mod tests {
             "Expected temperature 0.3, got: {}",
             result.content
         );
+
+        // Cover the mock's trivial trait methods, which infer()-driven tests
+        // never reach on their own.
+        let probe = TempEchoProvider;
+        assert_eq!(
+            leviath_providers::Provider::count_tokens(&probe, "x", "m"),
+            4
+        );
+        assert_eq!(
+            leviath_providers::Provider::max_context_tokens(&probe, "m"),
+            100_000
+        );
+        assert_eq!(leviath_providers::Provider::name(&probe), "temp-echo");
     }
 
     #[tokio::test]
@@ -3461,6 +3474,17 @@ mod tests {
             "Expected default temperature 0.7, got: {}",
             result.content
         );
+
+        let probe = TempEchoProvider;
+        assert_eq!(
+            leviath_providers::Provider::count_tokens(&probe, "x", "m"),
+            4
+        );
+        assert_eq!(
+            leviath_providers::Provider::max_context_tokens(&probe, "m"),
+            100_000
+        );
+        assert_eq!(leviath_providers::Provider::name(&probe), "temp-echo");
     }
 
     #[tokio::test]
@@ -3560,5 +3584,16 @@ mod tests {
             "Expected max_output_tokens override (2048), got: {}",
             result.content
         );
+
+        let probe = MaxTokensEchoProvider;
+        assert_eq!(
+            leviath_providers::Provider::count_tokens(&probe, "x", "m"),
+            4
+        );
+        assert_eq!(
+            leviath_providers::Provider::max_context_tokens(&probe, "m"),
+            100_000
+        );
+        assert_eq!(leviath_providers::Provider::name(&probe), "max-echo");
     }
 }
