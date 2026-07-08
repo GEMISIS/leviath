@@ -10,6 +10,46 @@ use super::helpers::record_stage_output;
 use super::inference::stream_inference;
 use super::io::RunIO;
 
+/// Normalize a string for followup matching: collapse whitespace and
+/// normalize Unicode dashes (em dash `\u{2014}`, en dash `\u{2013}`,
+/// minus sign `\u{2212}`, horizontal bar `\u{2015}`) to ASCII hyphen-minus.
+fn normalize_for_followup(s: &str) -> String {
+    s.chars()
+        .map(|c| match c {
+            '\u{2014}' | '\u{2013}' | '\u{2212}' | '\u{2015}' => '-',
+            _ => c,
+        })
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Look up a followup prompt in the followups map, trying exact match first,
+/// then normalized comparison (whitespace + Unicode dash normalization).
+fn lookup_followup<'a>(
+    followups: &'a std::collections::HashMap<String, String>,
+    user_text: &str,
+) -> Option<&'a str> {
+    // Exact match first
+    if let Some(prompt) = followups.get(user_text) {
+        return Some(prompt.as_str());
+    }
+    // Normalized match
+    let normalized = normalize_for_followup(user_text);
+    for (key, prompt) in followups {
+        if normalize_for_followup(key) == normalized {
+            tracing::debug!(
+                user_text = %user_text,
+                key = %key,
+                "Followup matched via normalization (original text didn't match exactly)"
+            );
+            return Some(prompt.as_str());
+        }
+    }
+    None
+}
+
 /// COVERAGE-EXCLUDED: llvm-cov's tracing-macro message-literal region is
 /// permanently uncovered regardless of restructuring (event!/pre-formatted
 /// let/inline(never)/crate-version were all tried and ruled out this
@@ -471,7 +511,12 @@ where
             // actually describe what they want instead of letting the model
             // act on the bare option label alone, then loop back and re-ask
             // the same point so the user can review what changed.
-            let Some(followup_prompt) = point.followups.get(&user_text) else {
+            let Some(followup_prompt) = lookup_followup(&point.followups, &user_text) else {
+                tracing::debug!(
+                    user_text = %user_text,
+                    followup_keys = ?point.followups.keys().collect::<Vec<_>>(),
+                    "No followup match found for user selection"
+                );
                 break 'point;
             };
             if revision_round + 1 >= MAX_REVISION_ROUNDS || remaining_iterations == 0 {
@@ -3337,5 +3382,80 @@ mod tests {
         )
         .await
         .unwrap();
+    }
+
+    // ─── normalize_for_followup + lookup_followup tests ──────────────────
+
+    #[test]
+    fn normalize_for_followup_preserves_simple_text() {
+        assert_eq!(super::normalize_for_followup("Approve"), "Approve");
+    }
+
+    #[test]
+    fn normalize_for_followup_normalizes_em_dash() {
+        assert_eq!(
+            super::normalize_for_followup("Revise \u{2014} I'll describe changes"),
+            "Revise - I'll describe changes"
+        );
+    }
+
+    #[test]
+    fn normalize_for_followup_normalizes_en_dash() {
+        assert_eq!(
+            super::normalize_for_followup("Revise \u{2013} changes"),
+            "Revise - changes"
+        );
+    }
+
+    #[test]
+    fn normalize_for_followup_collapses_whitespace() {
+        assert_eq!(
+            super::normalize_for_followup("Revise  —  I'll   describe"),
+            "Revise - I'll describe"
+        );
+    }
+
+    #[test]
+    fn lookup_followup_exact_match() {
+        let mut followups = std::collections::HashMap::new();
+        followups.insert(
+            "Revise \u{2014} I'll describe changes".to_string(),
+            "What would you like to change?".to_string(),
+        );
+        let result = super::lookup_followup(&followups, "Revise \u{2014} I'll describe changes");
+        assert_eq!(result, Some("What would you like to change?"));
+    }
+
+    #[test]
+    fn lookup_followup_normalized_match_em_dash_vs_hyphen() {
+        let mut followups = std::collections::HashMap::new();
+        followups.insert(
+            "Revise \u{2014} I'll describe changes".to_string(),
+            "What would you like to change?".to_string(),
+        );
+        // User text uses ASCII hyphen instead of em dash
+        let result = super::lookup_followup(&followups, "Revise - I'll describe changes");
+        assert_eq!(result, Some("What would you like to change?"));
+    }
+
+    #[test]
+    fn lookup_followup_normalized_match_extra_whitespace() {
+        let mut followups = std::collections::HashMap::new();
+        followups.insert(
+            "Revise \u{2014} I'll describe changes".to_string(),
+            "What would you like to change?".to_string(),
+        );
+        // User text has extra whitespace and an en dash
+        let result =
+            super::lookup_followup(&followups, "Revise  \u{2013}  I'll  describe  changes");
+        assert_eq!(result, Some("What would you like to change?"));
+    }
+
+    #[test]
+    fn lookup_followup_no_match() {
+        let mut followups = std::collections::HashMap::new();
+        followups.insert("Revise".to_string(), "prompt".to_string());
+        let result = super::lookup_followup(&followups, "Approve");
+        assert_eq!(result, None);
     }
 }

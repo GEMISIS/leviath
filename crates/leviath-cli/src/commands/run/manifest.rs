@@ -95,7 +95,7 @@ pub fn parse_manifest(content: &str) -> anyhow::Result<Blueprint> {
         for (stage_name, stage_value) in stages_table {
             let model_table = stage_value.get("model").and_then(|v| v.as_table());
             let model_config = if let Some(mt) = model_table {
-                ModelConfig::new(
+                let mut mc = ModelConfig::new(
                     mt.get("provider")
                         .and_then(|v| v.as_str())
                         .unwrap_or("anthropic")
@@ -104,7 +104,35 @@ pub fn parse_manifest(content: &str) -> anyhow::Result<Blueprint> {
                         .and_then(|v| v.as_str())
                         .unwrap_or("claude-sonnet-4-6")
                         .to_string(),
-                )
+                );
+                // Parse parameters
+                if let Some(params) = mt.get("parameters").and_then(|v| v.as_table()) {
+                    for (k, v) in params {
+                        if let Ok(json_val) = serde_json::to_value(v) {
+                            mc.parameters.insert(k.clone(), json_val);
+                        }
+                    }
+                }
+                // Parse fallbacks
+                if let Some(fallbacks_arr) = mt.get("fallbacks").and_then(|v| v.as_array()) {
+                    for fb in fallbacks_arr {
+                        if let Some(fb_table) = fb.as_table() {
+                            mc.fallbacks.push(ModelConfig::new(
+                                fb_table
+                                    .get("provider")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("anthropic")
+                                    .to_string(),
+                                fb_table
+                                    .get("model")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("claude-sonnet-4-6")
+                                    .to_string(),
+                            ));
+                        }
+                    }
+                }
+                mc
             } else {
                 ModelConfig::new("anthropic".to_string(), "claude-sonnet-4-6".to_string())
             };
@@ -849,6 +877,70 @@ model = { provider = "google", model = "gemini-3.5-pro" }
         let stage = bp.find_stage("main").unwrap();
         assert_eq!(stage.model.provider, "google");
         assert_eq!(stage.model.model, "gemini-3.5-pro");
+    }
+
+    #[test]
+    fn parse_manifest_model_with_fallbacks() {
+        let toml = r#"
+[agent]
+name = "fallback-test"
+
+[stages.main.model]
+provider = "anthropic"
+model = "claude-sonnet-4-6"
+
+[[stages.main.model.fallbacks]]
+provider = "openai"
+model = "gpt-4o"
+
+[[stages.main.model.fallbacks]]
+provider = "ollama"
+model = "llama3"
+"#;
+        let bp = parse_manifest(toml).unwrap();
+        let stage = bp.find_stage("main").unwrap();
+        assert_eq!(stage.model.provider, "anthropic");
+        assert_eq!(stage.model.fallbacks.len(), 2);
+        assert_eq!(stage.model.fallbacks[0].provider, "openai");
+        assert_eq!(stage.model.fallbacks[0].model, "gpt-4o");
+        assert_eq!(stage.model.fallbacks[1].provider, "ollama");
+        assert_eq!(stage.model.fallbacks[1].model, "llama3");
+    }
+
+    #[test]
+    fn parse_manifest_model_with_parameters() {
+        let toml = r#"
+[agent]
+name = "params-test"
+
+[stages.main]
+
+[stages.main.model]
+provider = "anthropic"
+model = "claude-sonnet-4-6"
+
+[stages.main.model.parameters]
+temperature = 0.3
+max_output_tokens = 8192
+"#;
+        let bp = parse_manifest(toml).unwrap();
+        let stage = bp.find_stage("main").unwrap();
+        assert_eq!(
+            stage
+                .model
+                .parameters
+                .get("temperature")
+                .and_then(|v| v.as_f64()),
+            Some(0.3)
+        );
+        assert_eq!(
+            stage
+                .model
+                .parameters
+                .get("max_output_tokens")
+                .and_then(|v| v.as_u64()),
+            Some(8192)
+        );
     }
 
     #[test]

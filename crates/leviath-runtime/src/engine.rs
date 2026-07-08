@@ -262,6 +262,34 @@ impl AgentEngine {
         }
     }
 
+    /// Drain any undelivered messages from an agent's inbox at stage
+    /// transitions. Messages that were never delivered (because the stage
+    /// didn't accept them) are logged at warn level and discarded rather
+    /// than silently accumulating across stages.
+    pub fn drain_pending_messages(&mut self, entity: Entity) {
+        // First, pull any messages still sitting in the channel
+        self.process_messages();
+
+        // Then drain the inbox
+        if let Some(mut inbox) = self.world.get_mut::<MessageInbox>(entity) {
+            let pending = inbox.drain_all();
+            if !pending.is_empty() {
+                tracing::warn!(
+                    count = pending.len(),
+                    "Draining undelivered messages at stage transition"
+                );
+                for msg in &pending {
+                    tracing::debug!(
+                        agent_id = %msg.agent_id,
+                        content_len = msg.content.len(),
+                        priority = msg.priority,
+                        "Discarded undelivered message"
+                    );
+                }
+            }
+        }
+    }
+
     /// Cancel a running agent by setting its cancellation token and status.
     pub fn cancel_agent(&mut self, agent_id: &str) -> std::result::Result<(), ProviderError> {
         let mut found = false;
@@ -336,7 +364,13 @@ impl AgentEngine {
 
             let messages = window.assemble_messages();
             let remaining = window.max_tokens.saturating_sub(window.current_tokens);
-            let max_tokens = remaining.min(4096); // Cap at 4096 for response
+            // Use per-stage override, then model capability, then 4096 as last resort
+            let output_cap = self
+                .world
+                .get::<crate::components::InferenceConfig>(entity)
+                .and_then(|c| c.max_output_tokens)
+                .unwrap_or_else(|| provider.capabilities(model).max_output_tokens);
+            let max_tokens = remaining.min(output_cap);
             (messages, max_tokens)
         };
 
@@ -354,9 +388,13 @@ impl AgentEngine {
             tools // None = include all
         };
 
+        // Use per-stage temperature override if set, otherwise default to 0.7.
         // Respect each model's temperature support (e.g. claude-opus-4-8 deprecates it).
         let temperature = if provider.capabilities(model).supports_temperature {
-            0.7
+            self.world
+                .get::<crate::components::InferenceConfig>(entity)
+                .and_then(|c| c.temperature)
+                .unwrap_or(0.7)
         } else {
             0.0
         };
@@ -3242,5 +3280,281 @@ mod tests {
         assert_eq!(p.count_tokens("hi", "m"), 1);
         assert_eq!(p.max_context_tokens("m"), 100_000);
         let _ = p.capabilities("m");
+    }
+
+    // ─── drain_pending_messages ────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn drain_pending_messages_clears_inbox() {
+        let (mut engine, entity) = make_engine_with_mock();
+        let tx = engine.get_message_sender();
+
+        // Send some messages but don't process them
+        let _ = tx.send(AgentMessage {
+            agent_id: "test-mock".to_string(),
+            content: "hello".to_string(),
+            target_region: None,
+            priority: 10,
+        });
+        let _ = tx.send(AgentMessage {
+            agent_id: "test-mock".to_string(),
+            content: "world".to_string(),
+            target_region: None,
+            priority: 5,
+        });
+
+        // Disable message acceptance so messages stay in inbox
+        engine
+            .world_mut()
+            .get_mut::<AgentState>(entity)
+            .unwrap()
+            .accepts_messages = false;
+
+        // drain_pending_messages should pull from channel and clear inbox
+        engine.drain_pending_messages(entity);
+
+        // Inbox should be empty now
+        let inbox = engine.world().get::<MessageInbox>(entity).unwrap();
+        assert!(inbox.messages.is_empty());
+    }
+
+    #[tokio::test]
+    async fn drain_pending_messages_noop_when_empty() {
+        let (mut engine, entity) = make_engine_with_mock();
+        // Should not panic when inbox is empty
+        engine.drain_pending_messages(entity);
+        let inbox = engine.world().get::<MessageInbox>(entity).unwrap();
+        assert!(inbox.messages.is_empty());
+    }
+
+    // ─── InferenceConfig: temperature + max_output_tokens override ──────
+
+    #[tokio::test]
+    async fn inference_config_temperature_override() {
+        let (mut engine, entity) = make_engine_with_mock();
+        engine
+            .providers_mut()
+            .register("no-temp".to_string(), Arc::new(NoTemperatureMockProvider));
+
+        // Set a temperature override of 0.3
+        engine
+            .world_mut()
+            .entity_mut(entity)
+            .insert(crate::components::InferenceConfig {
+                temperature: Some(0.3),
+                max_output_tokens: None,
+            });
+
+        // NoTemperatureMockProvider echoes the temperature, but its caps say
+        // supports_temperature=false, so the override is ignored and 0.0 is used.
+        let result = engine
+            .run_inference(entity, "no-temp", "reasoning-model", Vec::new())
+            .await
+            .unwrap();
+        assert_eq!(result.content, "temperature=0");
+
+        // Now test with a provider that supports temperature — use a provider
+        // that echoes the temperature.
+        struct TempEchoProvider;
+        #[async_trait::async_trait]
+        impl leviath_providers::Provider for TempEchoProvider {
+            async fn infer(
+                &self,
+                request: InferenceRequest,
+            ) -> leviath_providers::Result<InferenceResponse> {
+                Ok(InferenceResponse {
+                    content: format!("temperature={}", request.temperature),
+                    tool_calls: vec![],
+                    tokens_used: leviath_providers::TokenUsage {
+                        prompt_tokens: 1,
+                        completion_tokens: 1,
+                        total_tokens: 2,
+                        cached_tokens: 0,
+                        cache_write_tokens: 0,
+                    },
+                    finish_reason: leviath_providers::FinishReason::Complete,
+                })
+            }
+            fn count_tokens(&self, _text: &str, _model: &str) -> usize {
+                4
+            }
+            fn max_context_tokens(&self, _model: &str) -> usize {
+                100_000
+            }
+            fn name(&self) -> &str {
+                "temp-echo"
+            }
+            fn capabilities(&self, _model: &str) -> leviath_providers::ModelCapabilities {
+                leviath_providers::ModelCapabilities::default()
+            }
+        }
+
+        engine
+            .providers_mut()
+            .register("temp-echo".to_string(), Arc::new(TempEchoProvider));
+
+        let result = engine
+            .run_inference(entity, "temp-echo", "test-model", Vec::new())
+            .await
+            .unwrap();
+        // Should use our 0.3 override
+        assert!(
+            result.content.contains("0.3"),
+            "Expected temperature 0.3, got: {}",
+            result.content
+        );
+    }
+
+    #[tokio::test]
+    async fn inference_config_temperature_default_when_no_override() {
+        let (mut engine, entity) = make_engine_with_mock();
+
+        struct TempEchoProvider;
+        #[async_trait::async_trait]
+        impl leviath_providers::Provider for TempEchoProvider {
+            async fn infer(
+                &self,
+                request: InferenceRequest,
+            ) -> leviath_providers::Result<InferenceResponse> {
+                Ok(InferenceResponse {
+                    content: format!("temperature={}", request.temperature),
+                    tool_calls: vec![],
+                    tokens_used: leviath_providers::TokenUsage {
+                        prompt_tokens: 1,
+                        completion_tokens: 1,
+                        total_tokens: 2,
+                        cached_tokens: 0,
+                        cache_write_tokens: 0,
+                    },
+                    finish_reason: leviath_providers::FinishReason::Complete,
+                })
+            }
+            fn count_tokens(&self, _text: &str, _model: &str) -> usize {
+                4
+            }
+            fn max_context_tokens(&self, _model: &str) -> usize {
+                100_000
+            }
+            fn name(&self) -> &str {
+                "temp-echo"
+            }
+            fn capabilities(&self, _model: &str) -> leviath_providers::ModelCapabilities {
+                leviath_providers::ModelCapabilities::default()
+            }
+        }
+
+        engine
+            .providers_mut()
+            .register("temp-echo".to_string(), Arc::new(TempEchoProvider));
+
+        // No InferenceConfig on entity — should default to 0.7
+        let result = engine
+            .run_inference(entity, "temp-echo", "test-model", Vec::new())
+            .await
+            .unwrap();
+        assert!(
+            result.content.contains("0.7"),
+            "Expected default temperature 0.7, got: {}",
+            result.content
+        );
+    }
+
+    #[tokio::test]
+    async fn inference_config_max_output_tokens_override() {
+        struct MaxTokensEchoProvider;
+        #[async_trait::async_trait]
+        impl leviath_providers::Provider for MaxTokensEchoProvider {
+            async fn infer(
+                &self,
+                request: InferenceRequest,
+            ) -> leviath_providers::Result<InferenceResponse> {
+                Ok(InferenceResponse {
+                    content: format!("max_tokens={}", request.max_tokens),
+                    tool_calls: vec![],
+                    tokens_used: leviath_providers::TokenUsage {
+                        prompt_tokens: 1,
+                        completion_tokens: 1,
+                        total_tokens: 2,
+                        cached_tokens: 0,
+                        cache_write_tokens: 0,
+                    },
+                    finish_reason: leviath_providers::FinishReason::Complete,
+                })
+            }
+            fn count_tokens(&self, _text: &str, _model: &str) -> usize {
+                4
+            }
+            fn max_context_tokens(&self, _model: &str) -> usize {
+                100_000
+            }
+            fn name(&self) -> &str {
+                "max-echo"
+            }
+            fn capabilities(&self, _model: &str) -> leviath_providers::ModelCapabilities {
+                leviath_providers::ModelCapabilities {
+                    max_output_tokens: 8192,
+                    ..Default::default()
+                }
+            }
+        }
+
+        let mut registry = ProviderRegistry::new();
+        registry.register("max-echo".to_string(), Arc::new(MaxTokensEchoProvider));
+        let mut engine = AgentEngine::with_providers(registry);
+
+        let mut window = ContextWindow::new(10000);
+        window.add_region(leviath_core::Region::new(
+            "system".to_string(),
+            leviath_core::RegionKind::Pinned,
+            2000,
+        ));
+        let _ = window.add_to_region("system", "prompt".to_string(), 6);
+
+        let entity = engine
+            .world_mut()
+            .spawn((
+                AgentState {
+                    agent_id: "test".to_string(),
+                    current_stage: "main".to_string(),
+                    iteration: 0,
+                    status: AgentStatus::Active,
+                    spawned_children_ids: Vec::new(),
+                    pending_wait: None,
+                    accepts_messages: true,
+                },
+                MessageInbox::new(),
+                CancellationToken::new(),
+                window,
+            ))
+            .id();
+
+        // Without InferenceConfig, should use model capability (8192)
+        let result = engine
+            .run_inference(entity, "max-echo", "test-model", Vec::new())
+            .await
+            .unwrap();
+        assert!(
+            result.content.contains("8192"),
+            "Expected max_output_tokens from capability (8192), got: {}",
+            result.content
+        );
+
+        // With InferenceConfig override to 2048
+        engine
+            .world_mut()
+            .entity_mut(entity)
+            .insert(crate::components::InferenceConfig {
+                temperature: None,
+                max_output_tokens: Some(2048),
+            });
+        let result = engine
+            .run_inference(entity, "max-echo", "test-model", Vec::new())
+            .await
+            .unwrap();
+        assert!(
+            result.content.contains("2048"),
+            "Expected max_output_tokens override (2048), got: {}",
+            result.content
+        );
     }
 }

@@ -519,6 +519,11 @@ pub struct ModelConfig {
 
     /// Optional parameters for this model
     pub parameters: HashMap<String, serde_json::Value>,
+
+    /// Fallback model configurations to try if the primary provider/model
+    /// is unavailable. Tried in order until one succeeds.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub fallbacks: Vec<ModelConfig>,
 }
 
 impl ModelConfig {
@@ -528,7 +533,14 @@ impl ModelConfig {
             provider,
             model,
             parameters: HashMap::new(),
+            fallbacks: Vec::new(),
         }
+    }
+
+    /// Add fallback configurations.
+    pub fn with_fallbacks(mut self, fallbacks: Vec<ModelConfig>) -> Self {
+        self.fallbacks = fallbacks;
+        self
     }
 }
 
@@ -1050,6 +1062,53 @@ mod tests {
         assert!(stage.tool_result_routing.is_some());
         let r = stage.tool_result_routing.unwrap();
         assert_eq!(r.max_result_tokens, Some(5000));
+    }
+
+    #[test]
+    fn test_model_config_fallbacks_default_empty() {
+        let mc = ModelConfig::new("anthropic".to_string(), "claude-sonnet-4-6".to_string());
+        assert!(mc.fallbacks.is_empty());
+    }
+
+    #[test]
+    fn test_model_config_with_fallbacks() {
+        let mc = ModelConfig::new("anthropic".to_string(), "claude-sonnet-4-6".to_string())
+            .with_fallbacks(vec![
+                ModelConfig::new("openai".to_string(), "gpt-4o".to_string()),
+                ModelConfig::new("ollama".to_string(), "llama3".to_string()),
+            ]);
+        assert_eq!(mc.fallbacks.len(), 2);
+        assert_eq!(mc.fallbacks[0].provider, "openai");
+        assert_eq!(mc.fallbacks[1].provider, "ollama");
+    }
+
+    #[test]
+    fn test_model_config_fallbacks_serde_roundtrip() {
+        let mc = ModelConfig::new("anthropic".to_string(), "claude-sonnet-4-6".to_string())
+            .with_fallbacks(vec![ModelConfig::new(
+                "openai".to_string(),
+                "gpt-4o".to_string(),
+            )]);
+        let json = serde_json::to_string(&mc).unwrap();
+        let back: ModelConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.fallbacks.len(), 1);
+        assert_eq!(back.fallbacks[0].provider, "openai");
+    }
+
+    #[test]
+    fn test_model_config_fallbacks_serde_default_when_missing() {
+        // Old JSON without fallbacks field should deserialize with empty fallbacks
+        let json = r#"{"provider": "anthropic", "model": "claude-sonnet-4-6", "parameters": {}}"#;
+        let mc: ModelConfig = serde_json::from_str(json).unwrap();
+        assert!(mc.fallbacks.is_empty());
+    }
+
+    #[test]
+    fn test_model_config_fallbacks_skip_serializing_if_empty() {
+        let mc = ModelConfig::new("anthropic".to_string(), "claude-sonnet-4-6".to_string());
+        let json = serde_json::to_string(&mc).unwrap();
+        // "fallbacks" key should not appear when empty
+        assert!(!json.contains("fallbacks"));
     }
 
     fn make_model() -> ModelConfig {

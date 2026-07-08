@@ -481,9 +481,41 @@ impl Stream for OllamaNdjsonStream {
                         .and_then(|v| v.as_u64())
                         .unwrap_or(0) as usize;
 
+                    // Parse tool calls from the final chunk's message.tool_calls
+                    let mut tool_calls = Vec::new();
+                    if let Some(tcs) = message
+                        .and_then(|m| m.get("tool_calls"))
+                        .and_then(|tc| tc.as_array())
+                    {
+                        for (i, tc) in tcs.iter().enumerate() {
+                            let function = tc.get("function").unwrap_or(&serde_json::Value::Null);
+                            let name = function
+                                .get("name")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("")
+                                .to_string();
+                            let arguments = function
+                                .get("arguments")
+                                .cloned()
+                                .unwrap_or(serde_json::Value::Object(serde_json::Map::new()));
+                            tool_calls.push(crate::provider::ToolCallDelta {
+                                index: i,
+                                id: Some(format!("ollama_{}", i)),
+                                name: Some(name),
+                                arguments_delta: arguments.to_string(),
+                            });
+                        }
+                    }
+
+                    let finish_reason = if tool_calls.is_empty() {
+                        FinishReason::Complete
+                    } else {
+                        FinishReason::ToolCall
+                    };
+
                     return std::task::Poll::Ready(Some(Ok(StreamChunk {
                         delta: content,
-                        tool_calls: Vec::new(),
+                        tool_calls,
                         tokens: Some(TokenUsage {
                             prompt_tokens: prompt_eval_count,
                             completion_tokens: eval_count,
@@ -491,7 +523,7 @@ impl Stream for OllamaNdjsonStream {
                             cached_tokens: 0,
                             cache_write_tokens: 0,
                         }),
-                        finish_reason: Some(FinishReason::Complete),
+                        finish_reason: Some(finish_reason),
                     })));
                 }
 
@@ -1561,6 +1593,106 @@ mod tests {
             let chunks: Vec<_> = ndjson_stream.collect().await;
             assert_eq!(chunks.len(), 1);
             assert_eq!(chunks[0].as_ref().unwrap().delta, "hi");
+        });
+    }
+
+    #[test]
+    fn test_ollama_ndjson_stream_parses_tool_calls_from_done_chunk() {
+        use futures_core::Stream;
+        use std::pin::Pin;
+        use std::task::{Context, Poll};
+
+        struct StaticStream {
+            data: Vec<Vec<u8>>,
+            idx: usize,
+        }
+
+        impl Stream for StaticStream {
+            type Item = std::result::Result<bytes::Bytes, reqwest::Error>;
+            fn poll_next(
+                mut self: Pin<&mut Self>,
+                _cx: &mut Context<'_>,
+            ) -> Poll<Option<Self::Item>> {
+                if self.idx < self.data.len() {
+                    let chunk = bytes::Bytes::from(self.data[self.idx].clone());
+                    self.idx += 1;
+                    Poll::Ready(Some(Ok(chunk)))
+                } else {
+                    Poll::Ready(None)
+                }
+            }
+        }
+
+        // The done chunk includes tool_calls in the message
+        let chunk1 = br#"{"message":{"role":"assistant","content":"","tool_calls":[{"function":{"name":"search","arguments":{"query":"rust"}}}]},"done":true,"eval_count":5,"prompt_eval_count":10}"#.to_vec();
+        let mut chunk1_with_newline = chunk1;
+        chunk1_with_newline.push(b'\n');
+
+        let static_stream = StaticStream {
+            data: vec![chunk1_with_newline],
+            idx: 0,
+        };
+
+        let ndjson_stream = OllamaNdjsonStream::new(static_stream);
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            use tokio_stream::StreamExt;
+            let chunks: Vec<_> = ndjson_stream.collect().await;
+            assert_eq!(chunks.len(), 1);
+            let chunk = chunks[0].as_ref().unwrap();
+            assert_eq!(chunk.finish_reason, Some(FinishReason::ToolCall));
+            assert_eq!(chunk.tool_calls.len(), 1);
+            assert_eq!(chunk.tool_calls[0].name, Some("search".to_string()));
+            assert_eq!(chunk.tool_calls[0].id, Some("ollama_0".to_string()));
+            assert!(chunk.tool_calls[0].arguments_delta.contains("rust"));
+        });
+    }
+
+    #[test]
+    fn test_ollama_ndjson_stream_no_tool_calls_still_works() {
+        use futures_core::Stream;
+        use std::pin::Pin;
+        use std::task::{Context, Poll};
+
+        struct StaticStream {
+            data: Vec<Vec<u8>>,
+            idx: usize,
+        }
+
+        impl Stream for StaticStream {
+            type Item = std::result::Result<bytes::Bytes, reqwest::Error>;
+            fn poll_next(
+                mut self: Pin<&mut Self>,
+                _cx: &mut Context<'_>,
+            ) -> Poll<Option<Self::Item>> {
+                if self.idx < self.data.len() {
+                    let chunk = bytes::Bytes::from(self.data[self.idx].clone());
+                    self.idx += 1;
+                    Poll::Ready(Some(Ok(chunk)))
+                } else {
+                    Poll::Ready(None)
+                }
+            }
+        }
+
+        // Done chunk without tool_calls — should still be FinishReason::Complete
+        let chunk1 = b"{\"message\":{\"content\":\"done\"},\"done\":true,\"eval_count\":1,\"prompt_eval_count\":1}\n".to_vec();
+        let static_stream = StaticStream {
+            data: vec![chunk1],
+            idx: 0,
+        };
+
+        let ndjson_stream = OllamaNdjsonStream::new(static_stream);
+
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            use tokio_stream::StreamExt;
+            let chunks: Vec<_> = ndjson_stream.collect().await;
+            assert_eq!(chunks.len(), 1);
+            let chunk = chunks[0].as_ref().unwrap();
+            assert_eq!(chunk.finish_reason, Some(FinishReason::Complete));
+            assert!(chunk.tool_calls.is_empty());
         });
     }
 

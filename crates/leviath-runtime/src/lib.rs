@@ -19,7 +19,8 @@ mod test_support;
 
 pub use components::{
     AgentMessage, AgentState, AgentStatus, CancellationToken, ContextWindow, EvictionResult,
-    InferenceResult, MessageInbox, NeedsCompaction, ParentRef, SubAgentChildren, TaskAssignment,
+    InferenceConfig, InferenceResult, MessageInbox, NeedsCompaction, ParentRef, SubAgentChildren,
+    TaskAssignment,
 };
 pub use engine::{AgentEngine, ProviderRegistry, ToolResultRoutingConfig};
 pub use pool::AgentPool;

@@ -9,7 +9,9 @@ use leviath_core::blueprint::{StageMode, StageResult};
 use leviath_core::lifecycle::CompactionConfig;
 use leviath_core::Blueprint;
 use leviath_providers::{InferenceResponse, ToolCall};
-use leviath_runtime::{AgentEngine, AgentPool, AgentState, ContextWindow, ToolResultRoutingConfig};
+use leviath_runtime::{
+    AgentEngine, AgentPool, AgentState, ContextWindow, InferenceConfig, ToolResultRoutingConfig,
+};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -195,8 +197,48 @@ where
             .expect("resolve_entry_stage_name and resolve_transition both guarantee a valid name");
 
         let stage_idx = current_stage_idx_val;
-        let provider_name = &stage.model.provider;
-        let model_name = ctx.model_override.as_deref().unwrap_or(&stage.model.model);
+
+        // Resolve provider + model, supporting:
+        //   1. --model provider/model   (override both)
+        //   2. --model model-name       (override model only, keep stage provider)
+        //   3. Fallback chain from ModelConfig.fallbacks
+        let (resolved_provider, resolved_model) = {
+            let (override_provider, override_model) = match ctx.model_override.as_deref() {
+                Some(ov) if ov.contains('/') => {
+                    let (p, m) = ov.split_once('/').unwrap();
+                    (Some(p.to_string()), Some(m.to_string()))
+                }
+                Some(ov) => (None, Some(ov.to_string())),
+                None => (None, None),
+            };
+
+            let primary_provider = override_provider
+                .as_deref()
+                .unwrap_or(&stage.model.provider);
+            let primary_model = override_model.as_deref().unwrap_or(&stage.model.model);
+
+            if ctx.engine.providers().has(primary_provider) {
+                (primary_provider.to_string(), primary_model.to_string())
+            } else {
+                // Try fallbacks from the stage's model config
+                let mut found = None;
+                for fb in &stage.model.fallbacks {
+                    if ctx.engine.providers().has(&fb.provider) {
+                        tracing::info!(
+                            primary_provider = primary_provider,
+                            fallback_provider = %fb.provider,
+                            fallback_model = %fb.model,
+                            "Primary provider unavailable, using fallback"
+                        );
+                        found = Some((fb.provider.clone(), fb.model.clone()));
+                        break;
+                    }
+                }
+                found.unwrap_or_else(|| (primary_provider.to_string(), primary_model.to_string()))
+            }
+        };
+        let provider_name = &resolved_provider;
+        let model_name = &resolved_model;
 
         // Update shared locks: perms, idx, name
         {
@@ -212,7 +254,7 @@ where
             *sn = stage.name.clone();
         }
 
-        // Provider check
+        // Provider check (after fallback resolution)
         if !ctx.engine.providers().has(provider_name)
             && cb.on_provider_missing(provider_name, stage_idx).await
         {
@@ -255,6 +297,29 @@ where
         // Stage layout swap
         if let Some(ref stage_layout) = stage.context_layout {
             swap_context_layout(ctx.engine, ctx.entity, stage_layout);
+        }
+
+        // Set per-stage inference config from ModelConfig.parameters
+        {
+            let temperature = stage
+                .model
+                .parameters
+                .get("temperature")
+                .and_then(|v| v.as_f64())
+                .map(|t| t as f32);
+            let max_output_tokens = stage
+                .model
+                .parameters
+                .get("max_output_tokens")
+                .and_then(|v| v.as_u64())
+                .map(|t| t as usize);
+            ctx.engine
+                .world_mut()
+                .entity_mut(ctx.entity)
+                .insert(InferenceConfig {
+                    temperature,
+                    max_output_tokens,
+                });
         }
 
         // System prompt injection (ContextWindow is always present after spawn_agent)
@@ -416,6 +481,10 @@ where
         if let Some(handle) = stdin_handle {
             handle.abort();
         }
+
+        // Drain any undelivered messages at stage boundary so they don't
+        // silently accumulate and leak into the next stage's context.
+        ctx.engine.drain_pending_messages(ctx.entity);
 
         *visit_counts.entry(stage_name_owned.clone()).or_default() += 1;
 
@@ -1668,5 +1737,246 @@ mod tests {
 
         // IPC write failure should propagate Err from InteractivePoints.
         assert!(result.is_err());
+    }
+
+    // ─── Fallback chain tests ─────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn fallback_used_when_primary_provider_missing() {
+        // Create a stage with primary provider "nonexistent" and fallback "anthropic"
+        let mut stage = make_stage("main");
+        stage.model = ModelConfig::new("nonexistent".to_string(), "some-model".to_string())
+            .with_fallbacks(vec![ModelConfig::new(
+                "anthropic".to_string(),
+                "claude-sonnet-4-6".to_string(),
+            )]);
+        let bp = make_blueprint(vec![stage]);
+        // make_engine_and_entity_with_provider registers "anthropic"
+        let (mut engine, mut pool, entity) = make_engine_and_entity_with_provider(&bp);
+        let tool_registry = make_tool_registry().await;
+
+        // Track which model was entered
+        struct ModelCapture {
+            models: Vec<(String, String)>,
+        }
+        #[async_trait]
+        impl StageCallbacks for ModelCapture {
+            async fn on_provider_missing(&mut self, _p: &str, _i: usize) -> bool {
+                false
+            }
+            async fn on_stage_enter(
+                &mut self,
+                _n: &str,
+                _i: usize,
+                provider: &str,
+                model: &str,
+                _v: &str,
+            ) {
+                self.models.push((provider.to_string(), model.to_string()));
+            }
+            async fn on_claude_code_warning(&mut self, _i: usize) {}
+            fn start_message_reader(
+                &mut self,
+                _e: &AgentEngine,
+                _a: &str,
+                _acc: bool,
+            ) -> Option<tokio::task::JoinHandle<()>> {
+                None
+            }
+            fn get_run_context(&mut self) -> Option<(&str, &mut RunMeta)> {
+                None
+            }
+            async fn run_autonomous<F, Fut>(
+                &mut self,
+                _e: &mut AgentEngine,
+                _ent: bevy_ecs::prelude::Entity,
+                _p: &str,
+                _m: &str,
+                _mi: usize,
+                _t: Vec<leviath_providers::Tool>,
+                _r: Option<&ToolResultRoutingConfig>,
+                _c: Option<&CompactionConfig>,
+                _io: &mut dyn RunIO,
+                _ex: &mut F,
+            ) -> anyhow::Result<(StageResult, Option<InferenceResponse>)>
+            where
+                F: FnMut(Vec<leviath_providers::ToolCall>) -> Fut + Send,
+                Fut: std::future::Future<Output = Vec<(String, String)>> + Send,
+            {
+                Ok((StageResult::Success, None))
+            }
+            async fn on_stage_result(
+                &mut self,
+                _n: &str,
+                _i: usize,
+                _r: &StageResult,
+                _resp: Option<&InferenceResponse>,
+                _e: &mut AgentEngine,
+                _ent: bevy_ecs::prelude::Entity,
+            ) {
+            }
+            async fn on_stage_error(
+                &mut self,
+                _n: &str,
+                _i: usize,
+                _err: &anyhow::Error,
+                _g: bool,
+            ) -> Option<StageResult> {
+                None
+            }
+            async fn on_transition(&mut self, _f: &str, _t: &str, _i: usize) {}
+            async fn on_complete(&mut self, _i: usize) {}
+            async fn on_post_stage(
+                &mut self,
+                _e: &AgentEngine,
+                _ent: bevy_ecs::prelude::Entity,
+                _n: &str,
+            ) {
+            }
+        }
+
+        let mut cb = ModelCapture { models: Vec::new() };
+        let mut ctx = StageContext {
+            blueprint: &bp,
+            engine: &mut engine,
+            entity,
+            pool: &mut pool,
+            tool_registry: &tool_registry,
+            current_stage_name: Arc::new(Mutex::new(String::new())),
+            current_stage_perms: Arc::new(Mutex::new(HashMap::new())),
+            current_stage_idx: Arc::new(Mutex::new(0)),
+            model_override: None,
+            compaction_ref: None,
+        };
+
+        run_stage_loop(
+            &mut ctx,
+            &mut cb,
+            "agent-1",
+            &mut MockIO::new(),
+            &mut noop_exec,
+        )
+        .await
+        .unwrap();
+
+        // Should have used the fallback provider/model
+        assert_eq!(cb.models.len(), 1);
+        assert_eq!(cb.models[0].0, "anthropic");
+        assert_eq!(cb.models[0].1, "claude-sonnet-4-6");
+    }
+
+    #[tokio::test]
+    async fn model_override_with_provider_slash_syntax() {
+        let bp = make_blueprint(vec![make_stage("main")]);
+        let (mut engine, mut pool, entity) = make_engine_and_entity_with_provider(&bp);
+        let tool_registry = make_tool_registry().await;
+
+        struct ModelCapture {
+            models: Vec<(String, String)>,
+        }
+        #[async_trait]
+        impl StageCallbacks for ModelCapture {
+            async fn on_provider_missing(&mut self, _p: &str, _i: usize) -> bool {
+                false
+            }
+            async fn on_stage_enter(
+                &mut self,
+                _n: &str,
+                _i: usize,
+                provider: &str,
+                model: &str,
+                _v: &str,
+            ) {
+                self.models.push((provider.to_string(), model.to_string()));
+            }
+            async fn on_claude_code_warning(&mut self, _i: usize) {}
+            fn start_message_reader(
+                &mut self,
+                _e: &AgentEngine,
+                _a: &str,
+                _acc: bool,
+            ) -> Option<tokio::task::JoinHandle<()>> {
+                None
+            }
+            fn get_run_context(&mut self) -> Option<(&str, &mut RunMeta)> {
+                None
+            }
+            async fn run_autonomous<F, Fut>(
+                &mut self,
+                _e: &mut AgentEngine,
+                _ent: bevy_ecs::prelude::Entity,
+                _p: &str,
+                _m: &str,
+                _mi: usize,
+                _t: Vec<leviath_providers::Tool>,
+                _r: Option<&ToolResultRoutingConfig>,
+                _c: Option<&CompactionConfig>,
+                _io: &mut dyn RunIO,
+                _ex: &mut F,
+            ) -> anyhow::Result<(StageResult, Option<InferenceResponse>)>
+            where
+                F: FnMut(Vec<leviath_providers::ToolCall>) -> Fut + Send,
+                Fut: std::future::Future<Output = Vec<(String, String)>> + Send,
+            {
+                Ok((StageResult::Success, None))
+            }
+            async fn on_stage_result(
+                &mut self,
+                _n: &str,
+                _i: usize,
+                _r: &StageResult,
+                _resp: Option<&InferenceResponse>,
+                _e: &mut AgentEngine,
+                _ent: bevy_ecs::prelude::Entity,
+            ) {
+            }
+            async fn on_stage_error(
+                &mut self,
+                _n: &str,
+                _i: usize,
+                _err: &anyhow::Error,
+                _g: bool,
+            ) -> Option<StageResult> {
+                None
+            }
+            async fn on_transition(&mut self, _f: &str, _t: &str, _i: usize) {}
+            async fn on_complete(&mut self, _i: usize) {}
+            async fn on_post_stage(
+                &mut self,
+                _e: &AgentEngine,
+                _ent: bevy_ecs::prelude::Entity,
+                _n: &str,
+            ) {
+            }
+        }
+
+        let mut cb = ModelCapture { models: Vec::new() };
+        let mut ctx = StageContext {
+            blueprint: &bp,
+            engine: &mut engine,
+            entity,
+            pool: &mut pool,
+            tool_registry: &tool_registry,
+            current_stage_name: Arc::new(Mutex::new(String::new())),
+            current_stage_perms: Arc::new(Mutex::new(HashMap::new())),
+            current_stage_idx: Arc::new(Mutex::new(0)),
+            model_override: Some("anthropic/gpt-custom".to_string()),
+            compaction_ref: None,
+        };
+
+        run_stage_loop(
+            &mut ctx,
+            &mut cb,
+            "agent-1",
+            &mut MockIO::new(),
+            &mut noop_exec,
+        )
+        .await
+        .unwrap();
+
+        // Should have used the provider/model from the override
+        assert_eq!(cb.models.len(), 1);
+        assert_eq!(cb.models[0].0, "anthropic");
+        assert_eq!(cb.models[0].1, "gpt-custom");
     }
 }

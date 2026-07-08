@@ -99,6 +99,19 @@ pub struct NeedsCompaction {
     pub regions: Vec<String>,
 }
 
+/// Per-stage inference configuration overrides.
+///
+/// Set on the agent entity before each stage to override default inference
+/// parameters like temperature and max output tokens. When absent, defaults
+/// are used (temperature 0.7, max output 4096).
+#[derive(Component, Debug, Clone)]
+pub struct InferenceConfig {
+    /// Temperature override. If None, uses 0.7 (or 0.0 if model doesn't support it).
+    pub temperature: Option<f32>,
+    /// Max output tokens override. If None, caps at model's max_output_tokens capability.
+    pub max_output_tokens: Option<usize>,
+}
+
 /// Context window component storing the agent's memory regions.
 #[derive(Component, Debug, Clone)]
 pub struct ContextWindow {
