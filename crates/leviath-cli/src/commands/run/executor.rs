@@ -45,6 +45,10 @@ pub struct StageContext<'a> {
     pub current_stage_idx: Arc<Mutex<usize>>,
     /// Optional model override from CLI args.
     pub model_override: Option<String>,
+    /// User's configured default model from config file (default_provider/default_model).
+    /// Used as a last-resort fallback when `allow_user_default` is true and all
+    /// models in the stage's models list are unavailable.
+    pub user_default_model: Option<(String, String)>,
     /// Optional compaction configuration for context management.
     pub compaction_ref: Option<&'a CompactionConfig>,
 }
@@ -243,12 +247,60 @@ where
                         break;
                     }
                 }
-                found.unwrap_or_else(|| {
+                if let Some(f) = found {
+                    f
+                } else if stage.model.allow_user_default {
+                    // All listed models unavailable — try user defaults
+                    if let Some(ref om) = override_model {
+                        // CLI --model flag as last resort
+                        let provider = ctx
+                            .user_default_model
+                            .as_ref()
+                            .map(|(p, _)| p.clone())
+                            .unwrap_or_else(|| stage.model.provider().to_string());
+                        tracing::info!(
+                            model = %om,
+                            provider = %provider,
+                            "All listed models unavailable, falling back to user override"
+                        );
+                        (provider, om.clone())
+                    } else if let Some((ref dp, ref dm)) = ctx.user_default_model {
+                        // Config default_provider + default_model as last resort
+                        if ctx.engine.providers().has(dp) {
+                            tracing::info!(
+                                provider = %dp,
+                                model = %dm,
+                                "All listed models unavailable, falling back to user default from config"
+                            );
+                            (dp.clone(), dm.clone())
+                        } else {
+                            tracing::warn!(
+                                provider = %dp,
+                                "All listed models and user default provider unavailable"
+                            );
+                            (
+                                stage.model.provider().to_string(),
+                                stage.model.model().to_string(),
+                            )
+                        }
+                    } else {
+                        // No user default configured — use first listed model (will likely fail at provider check)
+                        (
+                            stage.model.provider().to_string(),
+                            stage.model.model().to_string(),
+                        )
+                    }
+                } else {
+                    // allow_user_default is false — no fallback allowed
+                    tracing::error!(
+                        stage = %stage.name,
+                        "All listed models unavailable and allow_user_default is false"
+                    );
                     (
                         stage.model.provider().to_string(),
                         stage.model.model().to_string(),
                     )
-                })
+                }
             }
         };
         let provider_name = &resolved_provider;
@@ -857,6 +909,7 @@ mod tests {
             current_stage_perms: Arc::new(Mutex::new(HashMap::new())),
             current_stage_idx: Arc::new(Mutex::new(0)),
             model_override: None,
+            user_default_model: None,
             compaction_ref: None,
         };
 
@@ -900,6 +953,7 @@ mod tests {
             current_stage_perms: Arc::new(Mutex::new(HashMap::new())),
             current_stage_idx: Arc::new(Mutex::new(0)),
             model_override: None,
+            user_default_model: None,
             compaction_ref: None,
         };
 
@@ -955,6 +1009,7 @@ mod tests {
             current_stage_perms: Arc::new(Mutex::new(HashMap::new())),
             current_stage_idx: Arc::new(Mutex::new(0)),
             model_override: None,
+            user_default_model: None,
             compaction_ref: None,
         };
 
@@ -997,6 +1052,7 @@ mod tests {
             current_stage_perms: Arc::new(Mutex::new(HashMap::new())),
             current_stage_idx: Arc::new(Mutex::new(0)),
             model_override: None,
+            user_default_model: None,
             compaction_ref: None,
         };
 
@@ -1038,6 +1094,7 @@ mod tests {
             current_stage_perms: Arc::new(Mutex::new(HashMap::new())),
             current_stage_idx: Arc::new(Mutex::new(0)),
             model_override: None,
+            user_default_model: None,
             compaction_ref: None,
         };
 
@@ -1081,6 +1138,7 @@ mod tests {
             current_stage_perms: Arc::new(Mutex::new(HashMap::new())),
             current_stage_idx: Arc::new(Mutex::new(0)),
             model_override: None,
+            user_default_model: None,
             compaction_ref: None,
         };
 
@@ -1142,6 +1200,7 @@ mod tests {
             current_stage_perms: Arc::new(Mutex::new(HashMap::new())),
             current_stage_idx: Arc::new(Mutex::new(0)),
             model_override: None,
+            user_default_model: None,
             compaction_ref: None,
         };
 
@@ -1199,6 +1258,7 @@ mod tests {
             current_stage_perms: Arc::new(Mutex::new(HashMap::new())),
             current_stage_idx: stage_idx.clone(),
             model_override: None,
+            user_default_model: None,
             compaction_ref: None,
         };
 
@@ -1235,6 +1295,7 @@ mod tests {
             current_stage_perms: Arc::new(Mutex::new(HashMap::new())),
             current_stage_idx: Arc::new(Mutex::new(0)),
             model_override: None,
+            user_default_model: None,
             compaction_ref: None,
         };
 
@@ -1351,6 +1412,7 @@ mod tests {
             current_stage_perms: Arc::new(Mutex::new(HashMap::new())),
             current_stage_idx: Arc::new(Mutex::new(0)),
             model_override: Some("my-custom-model".to_string()),
+            user_default_model: None,
             compaction_ref: None,
         };
 
@@ -1512,6 +1574,7 @@ mod tests {
             current_stage_perms: Arc::new(Mutex::new(HashMap::new())),
             current_stage_idx: Arc::new(Mutex::new(0)),
             model_override: None,
+            user_default_model: None,
             compaction_ref: None,
         };
 
@@ -1580,6 +1643,7 @@ mod tests {
             current_stage_perms: Arc::new(Mutex::new(HashMap::new())),
             current_stage_idx: Arc::new(Mutex::new(0)),
             model_override: None,
+            user_default_model: None,
             compaction_ref: None,
         };
 
@@ -1623,6 +1687,7 @@ mod tests {
             current_stage_perms: Arc::new(Mutex::new(HashMap::new())),
             current_stage_idx: Arc::new(Mutex::new(0)),
             model_override: None,
+            user_default_model: None,
             compaction_ref: None,
         };
 
@@ -1669,6 +1734,7 @@ mod tests {
             current_stage_perms: Arc::new(Mutex::new(HashMap::new())),
             current_stage_idx: Arc::new(Mutex::new(0)),
             model_override: None,
+            user_default_model: None,
             compaction_ref: None,
         };
 
@@ -1737,6 +1803,7 @@ mod tests {
             current_stage_perms: Arc::new(Mutex::new(HashMap::new())),
             current_stage_idx: Arc::new(Mutex::new(0)),
             model_override: None,
+            user_default_model: None,
             compaction_ref: None,
         };
 
@@ -1863,6 +1930,7 @@ mod tests {
             current_stage_perms: Arc::new(Mutex::new(HashMap::new())),
             current_stage_idx: Arc::new(Mutex::new(0)),
             model_override: None,
+            user_default_model: None,
             compaction_ref: None,
         };
 
@@ -1978,6 +2046,7 @@ mod tests {
             current_stage_perms: Arc::new(Mutex::new(HashMap::new())),
             current_stage_idx: Arc::new(Mutex::new(0)),
             model_override: Some("anthropic/gpt-custom".to_string()),
+            user_default_model: None,
             compaction_ref: None,
         };
 
@@ -1995,5 +2064,189 @@ mod tests {
         assert_eq!(cb.models.len(), 1);
         assert_eq!(cb.models[0].0, "anthropic");
         assert_eq!(cb.models[0].1, "gpt-custom");
+    }
+
+    // ─── allow_user_default tests ───────────────────────────────────────
+
+    #[tokio::test]
+    async fn allow_user_default_falls_back_to_config_default() {
+        // All listed providers unavailable, allow_user_default=true,
+        // user_default_model points to an available provider → use it
+        let mut stage = make_stage("main");
+        stage.model = ModelConfig {
+            models: vec![
+                ModelEntry::new("nonexistent1".to_string(), "model-a".to_string()),
+                ModelEntry::new("nonexistent2".to_string(), "model-b".to_string()),
+            ],
+            allow_user_default: true,
+            parameters: std::collections::HashMap::new(),
+        };
+        let bp = make_blueprint(vec![stage]);
+        let (mut engine, mut pool, entity) = make_engine_and_entity_with_provider(&bp);
+        let tool_registry = make_tool_registry().await;
+        let mut cb = MockCallbacks::new();
+
+        let mut ctx = StageContext {
+            blueprint: &bp,
+            engine: &mut engine,
+            entity,
+            pool: &mut pool,
+            tool_registry: &tool_registry,
+            current_stage_name: Arc::new(Mutex::new(String::new())),
+            current_stage_perms: Arc::new(Mutex::new(HashMap::new())),
+            current_stage_idx: Arc::new(Mutex::new(0)),
+            model_override: None,
+            user_default_model: Some(("anthropic".to_string(), "claude-haiku".to_string())),
+            compaction_ref: None,
+        };
+
+        run_stage_loop(
+            &mut ctx,
+            &mut cb,
+            "agent-1",
+            &mut MockIO::new(),
+            &mut noop_exec,
+        )
+        .await
+        .unwrap();
+
+        // Should have entered main stage (provider_missing fires but doesn't abort)
+        assert_eq!(cb.stage_entries.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn allow_user_default_false_does_not_fallback() {
+        // All listed providers unavailable, allow_user_default=false
+        // → does NOT use user_default_model, uses first listed instead
+        let mut stage = make_stage("main");
+        stage.model = ModelConfig {
+            models: vec![ModelEntry::new(
+                "nonexistent".to_string(),
+                "model-a".to_string(),
+            )],
+            allow_user_default: false,
+            parameters: std::collections::HashMap::new(),
+        };
+        let bp = make_blueprint(vec![stage]);
+        let (mut engine, mut pool, entity) = make_engine_and_entity_with_provider(&bp);
+        let tool_registry = make_tool_registry().await;
+        let mut cb = MockCallbacks::new();
+
+        let mut ctx = StageContext {
+            blueprint: &bp,
+            engine: &mut engine,
+            entity,
+            pool: &mut pool,
+            tool_registry: &tool_registry,
+            current_stage_name: Arc::new(Mutex::new(String::new())),
+            current_stage_perms: Arc::new(Mutex::new(HashMap::new())),
+            current_stage_idx: Arc::new(Mutex::new(0)),
+            model_override: None,
+            user_default_model: Some(("anthropic".to_string(), "claude-haiku".to_string())),
+            compaction_ref: None,
+        };
+
+        run_stage_loop(
+            &mut ctx,
+            &mut cb,
+            "agent-1",
+            &mut MockIO::new(),
+            &mut noop_exec,
+        )
+        .await
+        .unwrap();
+
+        // provider_missing should fire with "nonexistent", NOT "anthropic"
+        assert_eq!(cb.provider_missing, vec!["nonexistent"]);
+    }
+
+    #[tokio::test]
+    async fn allow_user_default_with_no_default_configured() {
+        // allow_user_default=true but no user_default_model → first listed
+        let mut stage = make_stage("main");
+        stage.model = ModelConfig {
+            models: vec![ModelEntry::new(
+                "nonexistent".to_string(),
+                "model-a".to_string(),
+            )],
+            allow_user_default: true,
+            parameters: std::collections::HashMap::new(),
+        };
+        let bp = make_blueprint(vec![stage]);
+        let (mut engine, mut pool, entity) = make_engine_and_entity_with_provider(&bp);
+        let tool_registry = make_tool_registry().await;
+        let mut cb = MockCallbacks::new();
+
+        let mut ctx = StageContext {
+            blueprint: &bp,
+            engine: &mut engine,
+            entity,
+            pool: &mut pool,
+            tool_registry: &tool_registry,
+            current_stage_name: Arc::new(Mutex::new(String::new())),
+            current_stage_perms: Arc::new(Mutex::new(HashMap::new())),
+            current_stage_idx: Arc::new(Mutex::new(0)),
+            model_override: None,
+            user_default_model: None,
+            compaction_ref: None,
+        };
+
+        run_stage_loop(
+            &mut ctx,
+            &mut cb,
+            "agent-1",
+            &mut MockIO::new(),
+            &mut noop_exec,
+        )
+        .await
+        .unwrap();
+
+        // Falls through to first listed — provider_missing fires with "nonexistent"
+        assert_eq!(cb.provider_missing, vec!["nonexistent"]);
+    }
+
+    #[tokio::test]
+    async fn allow_user_default_with_unavailable_default_provider() {
+        // allow_user_default=true, user default set but ITS provider also unavailable
+        let mut stage = make_stage("main");
+        stage.model = ModelConfig {
+            models: vec![ModelEntry::new(
+                "nonexistent".to_string(),
+                "model-a".to_string(),
+            )],
+            allow_user_default: true,
+            parameters: std::collections::HashMap::new(),
+        };
+        let bp = make_blueprint(vec![stage]);
+        let (mut engine, mut pool, entity) = make_engine_and_entity_with_provider(&bp);
+        let tool_registry = make_tool_registry().await;
+        let mut cb = MockCallbacks::new();
+
+        let mut ctx = StageContext {
+            blueprint: &bp,
+            engine: &mut engine,
+            entity,
+            pool: &mut pool,
+            tool_registry: &tool_registry,
+            current_stage_name: Arc::new(Mutex::new(String::new())),
+            current_stage_perms: Arc::new(Mutex::new(HashMap::new())),
+            current_stage_idx: Arc::new(Mutex::new(0)),
+            model_override: None,
+            user_default_model: Some(("also_nonexistent".to_string(), "model-x".to_string())),
+            compaction_ref: None,
+        };
+
+        run_stage_loop(
+            &mut ctx,
+            &mut cb,
+            "agent-1",
+            &mut MockIO::new(),
+            &mut noop_exec,
+        )
+        .await
+        .unwrap();
+
+        // User default provider is also unavailable → falls through to first listed
+        assert_eq!(cb.provider_missing, vec!["nonexistent"]);
     }
 }

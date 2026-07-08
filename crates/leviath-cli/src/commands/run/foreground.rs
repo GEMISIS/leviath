@@ -607,6 +607,14 @@ async fn run_foreground_with_registry(
         current_stage_perms: current_stage_perms.clone(),
         current_stage_idx: current_stage_idx.clone(),
         model_override: args.model.clone(),
+        user_default_model: config.default_model.as_ref().map(|m| {
+            if m.contains('/') {
+                let (p, n) = m.split_once('/').unwrap();
+                (p.to_string(), n.to_string())
+            } else {
+                (config.default_provider.clone(), m.clone())
+            }
+        }),
         compaction_ref,
     };
 
