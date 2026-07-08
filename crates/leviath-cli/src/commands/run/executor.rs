@@ -1841,87 +1841,7 @@ mod tests {
         let (mut engine, mut pool, entity) = make_engine_and_entity_with_provider(&bp);
         let tool_registry = make_tool_registry().await;
 
-        // Track which model was entered
-        struct ModelCapture {
-            models: Vec<(String, String)>,
-        }
-        #[async_trait]
-        impl StageCallbacks for ModelCapture {
-            async fn on_provider_missing(&mut self, _p: &str, _i: usize) -> bool {
-                false
-            }
-            async fn on_stage_enter(
-                &mut self,
-                _n: &str,
-                _i: usize,
-                provider: &str,
-                model: &str,
-                _v: &str,
-            ) {
-                self.models.push((provider.to_string(), model.to_string()));
-            }
-            async fn on_claude_code_warning(&mut self, _i: usize) {}
-            fn start_message_reader(
-                &mut self,
-                _e: &AgentEngine,
-                _a: &str,
-                _acc: bool,
-            ) -> Option<tokio::task::JoinHandle<()>> {
-                None
-            }
-            fn get_run_context(&mut self) -> Option<(&str, &mut RunMeta)> {
-                None
-            }
-            async fn run_autonomous<F, Fut>(
-                &mut self,
-                _e: &mut AgentEngine,
-                _ent: bevy_ecs::prelude::Entity,
-                _p: &str,
-                _m: &str,
-                _mi: usize,
-                _t: Vec<leviath_providers::Tool>,
-                _r: Option<&ToolResultRoutingConfig>,
-                _c: Option<&CompactionConfig>,
-                _io: &mut dyn RunIO,
-                _ex: &mut F,
-            ) -> anyhow::Result<(StageResult, Option<InferenceResponse>)>
-            where
-                F: FnMut(Vec<leviath_providers::ToolCall>) -> Fut + Send,
-                Fut: std::future::Future<Output = Vec<(String, String)>> + Send,
-            {
-                Ok((StageResult::Success, None))
-            }
-            async fn on_stage_result(
-                &mut self,
-                _n: &str,
-                _i: usize,
-                _r: &StageResult,
-                _resp: Option<&InferenceResponse>,
-                _e: &mut AgentEngine,
-                _ent: bevy_ecs::prelude::Entity,
-            ) {
-            }
-            async fn on_stage_error(
-                &mut self,
-                _n: &str,
-                _i: usize,
-                _err: &anyhow::Error,
-                _g: bool,
-            ) -> Option<StageResult> {
-                None
-            }
-            async fn on_transition(&mut self, _f: &str, _t: &str, _i: usize) {}
-            async fn on_complete(&mut self, _i: usize) {}
-            async fn on_post_stage(
-                &mut self,
-                _e: &AgentEngine,
-                _ent: bevy_ecs::prelude::Entity,
-                _n: &str,
-            ) {
-            }
-        }
-
-        let mut cb = ModelCapture { models: Vec::new() };
+        let mut cb = MockCallbacks::new();
         let mut ctx = StageContext {
             blueprint: &bp,
             engine: &mut engine,
@@ -1946,10 +1866,11 @@ mod tests {
         .await
         .unwrap();
 
-        // Should have used the fallback provider/model
-        assert_eq!(cb.models.len(), 1);
-        assert_eq!(cb.models[0].0, "anthropic");
-        assert_eq!(cb.models[0].1, "claude-sonnet-4-6");
+        // Should have selected the first available provider (skipping "nonexistent")
+        assert_eq!(
+            cb.resolved_models,
+            vec![("anthropic".to_string(), "claude-sonnet-4-6".to_string())]
+        );
     }
 
     #[tokio::test]
@@ -1958,86 +1879,7 @@ mod tests {
         let (mut engine, mut pool, entity) = make_engine_and_entity_with_provider(&bp);
         let tool_registry = make_tool_registry().await;
 
-        struct ModelCapture {
-            models: Vec<(String, String)>,
-        }
-        #[async_trait]
-        impl StageCallbacks for ModelCapture {
-            async fn on_provider_missing(&mut self, _p: &str, _i: usize) -> bool {
-                false
-            }
-            async fn on_stage_enter(
-                &mut self,
-                _n: &str,
-                _i: usize,
-                provider: &str,
-                model: &str,
-                _v: &str,
-            ) {
-                self.models.push((provider.to_string(), model.to_string()));
-            }
-            async fn on_claude_code_warning(&mut self, _i: usize) {}
-            fn start_message_reader(
-                &mut self,
-                _e: &AgentEngine,
-                _a: &str,
-                _acc: bool,
-            ) -> Option<tokio::task::JoinHandle<()>> {
-                None
-            }
-            fn get_run_context(&mut self) -> Option<(&str, &mut RunMeta)> {
-                None
-            }
-            async fn run_autonomous<F, Fut>(
-                &mut self,
-                _e: &mut AgentEngine,
-                _ent: bevy_ecs::prelude::Entity,
-                _p: &str,
-                _m: &str,
-                _mi: usize,
-                _t: Vec<leviath_providers::Tool>,
-                _r: Option<&ToolResultRoutingConfig>,
-                _c: Option<&CompactionConfig>,
-                _io: &mut dyn RunIO,
-                _ex: &mut F,
-            ) -> anyhow::Result<(StageResult, Option<InferenceResponse>)>
-            where
-                F: FnMut(Vec<leviath_providers::ToolCall>) -> Fut + Send,
-                Fut: std::future::Future<Output = Vec<(String, String)>> + Send,
-            {
-                Ok((StageResult::Success, None))
-            }
-            async fn on_stage_result(
-                &mut self,
-                _n: &str,
-                _i: usize,
-                _r: &StageResult,
-                _resp: Option<&InferenceResponse>,
-                _e: &mut AgentEngine,
-                _ent: bevy_ecs::prelude::Entity,
-            ) {
-            }
-            async fn on_stage_error(
-                &mut self,
-                _n: &str,
-                _i: usize,
-                _err: &anyhow::Error,
-                _g: bool,
-            ) -> Option<StageResult> {
-                None
-            }
-            async fn on_transition(&mut self, _f: &str, _t: &str, _i: usize) {}
-            async fn on_complete(&mut self, _i: usize) {}
-            async fn on_post_stage(
-                &mut self,
-                _e: &AgentEngine,
-                _ent: bevy_ecs::prelude::Entity,
-                _n: &str,
-            ) {
-            }
-        }
-
-        let mut cb = ModelCapture { models: Vec::new() };
+        let mut cb = MockCallbacks::new();
         let mut ctx = StageContext {
             blueprint: &bp,
             engine: &mut engine,
@@ -2062,10 +1904,11 @@ mod tests {
         .await
         .unwrap();
 
-        // Should have used the provider/model from the override
-        assert_eq!(cb.models.len(), 1);
-        assert_eq!(cb.models[0].0, "anthropic");
-        assert_eq!(cb.models[0].1, "gpt-custom");
+        // Should have used the provider/model from the override verbatim
+        assert_eq!(
+            cb.resolved_models,
+            vec![("anthropic".to_string(), "gpt-custom".to_string())]
+        );
     }
 
     // ─── allow_user_default tests ───────────────────────────────────────

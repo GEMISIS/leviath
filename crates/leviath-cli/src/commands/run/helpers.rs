@@ -19,6 +19,22 @@ pub fn default_title_model(provider: &str) -> &'static str {
     }
 }
 
+/// Resolve the user's configured default model into a `(provider, model)` pair.
+///
+/// `default_model` may itself name a provider via the `provider/model` syntax;
+/// otherwise the standalone `default_provider` is paired with it. Returns
+/// `None` when no default model is configured. Used as the executor's
+/// last-resort fallback when a stage's listed providers are all unavailable.
+pub fn resolve_user_default_model(config: &Config) -> Option<(String, String)> {
+    config.default_model.as_ref().map(|m| {
+        if let Some((provider, model)) = m.split_once('/') {
+            (provider.to_string(), model.to_string())
+        } else {
+            (config.default_provider.clone(), m.clone())
+        }
+    })
+}
+
 /// Attempt to generate a short title from the task prompt using a cheap model.
 ///
 /// Best-effort: any failure is logged and silently ignored — a missing title
@@ -268,6 +284,42 @@ mod tests {
         ProviderError, TokenUsage,
     };
     use leviath_runtime::{AgentPool, ProviderRegistry};
+
+    #[test]
+    fn resolve_user_default_model_none_when_unset() {
+        let config = Config {
+            default_model: None,
+            ..Config::default()
+        };
+        assert_eq!(resolve_user_default_model(&config), None);
+    }
+
+    #[test]
+    fn resolve_user_default_model_uses_default_provider_without_slash() {
+        let config = Config {
+            default_provider: "openai".to_string(),
+            default_model: Some("gpt-4o".to_string()),
+            ..Config::default()
+        };
+        assert_eq!(
+            resolve_user_default_model(&config),
+            Some(("openai".to_string(), "gpt-4o".to_string()))
+        );
+    }
+
+    #[test]
+    fn resolve_user_default_model_parses_provider_slash_syntax() {
+        let config = Config {
+            default_provider: "openai".to_string(),
+            default_model: Some("anthropic/claude-sonnet-4-6".to_string()),
+            ..Config::default()
+        };
+        // The `provider/model` syntax overrides default_provider.
+        assert_eq!(
+            resolve_user_default_model(&config),
+            Some(("anthropic".to_string(), "claude-sonnet-4-6".to_string()))
+        );
+    }
 
     /// A mock provider returning a fixed canned response, used to exercise
     /// generate_title()'s response-parsing logic without a real network call.
