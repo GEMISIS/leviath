@@ -57,29 +57,46 @@ pub async fn execute(args: PolicyArgs) -> anyhow::Result<()> {
 
 /// Load the policy config from the default path.
 fn load_policy() -> anyhow::Result<leviath_core::PolicyConfig> {
-    let policy_path = policy_path();
-    if policy_path.exists() {
-        let content = std::fs::read_to_string(&policy_path)?;
+    load_policy_from(&policy_path())
+}
+
+/// Load the policy config from a specific path — split out from `load_policy`
+/// (which injects the real default path) so the parse-error and missing-file
+/// arms are unit-testable without touching the user's real config.
+fn load_policy_from(path: &std::path::Path) -> anyhow::Result<leviath_core::PolicyConfig> {
+    if path.exists() {
+        let content = std::fs::read_to_string(path)?;
         leviath_core::PolicyConfig::from_toml(&content).map_err(|e| anyhow::anyhow!("{}", e))
     } else {
         Ok(leviath_core::PolicyConfig::default())
     }
 }
 
+/// Resolve the base `…/leviath` config directory, preferring the platform
+/// config dir and falling back to `~/.config`. Split out with injected dirs so
+/// the fallback arm is unit-testable (the real `dirs::config_dir()` is `Some`
+/// on CI runners, so the fallback would otherwise never be exercised).
+fn leviath_config_dir(
+    config_dir: Option<std::path::PathBuf>,
+    home_dir: Option<std::path::PathBuf>,
+) -> std::path::PathBuf {
+    config_dir
+        .unwrap_or_else(|| {
+            home_dir
+                .expect("no config or home directory")
+                .join(".config")
+        })
+        .join("leviath")
+}
+
 /// Get the default policy file path.
 fn policy_path() -> std::path::PathBuf {
-    dirs::config_dir()
-        .unwrap_or_else(|| dirs::home_dir().unwrap().join(".config"))
-        .join("leviath")
-        .join("policy.toml")
+    leviath_config_dir(dirs::config_dir(), dirs::home_dir()).join("policy.toml")
 }
 
 /// List the scripted rules directory.
 fn rules_dir() -> std::path::PathBuf {
-    dirs::config_dir()
-        .unwrap_or_else(|| dirs::home_dir().unwrap().join(".config"))
-        .join("leviath")
-        .join("rules")
+    leviath_config_dir(dirs::config_dir(), dirs::home_dir()).join("rules")
 }
 
 async fn execute_list() -> anyhow::Result<()> {
@@ -288,6 +305,39 @@ mod tests {
         let path = rules_dir();
         assert!(path.to_str().unwrap().contains("leviath"));
         assert!(path.to_str().unwrap().contains("rules"));
+    }
+
+    #[test]
+    fn leviath_config_dir_prefers_config_dir() {
+        let p = leviath_config_dir(
+            Some(std::path::PathBuf::from("/cfg")),
+            Some(std::path::PathBuf::from("/home/u")),
+        );
+        assert_eq!(p, std::path::PathBuf::from("/cfg/leviath"));
+    }
+
+    #[test]
+    fn leviath_config_dir_falls_back_to_home_config() {
+        // No platform config dir → fall back to ~/.config/leviath
+        let p = leviath_config_dir(None, Some(std::path::PathBuf::from("/home/u")));
+        assert_eq!(p, std::path::PathBuf::from("/home/u/.config/leviath"));
+    }
+
+    #[test]
+    fn load_policy_from_missing_file_returns_default() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("nope.toml");
+        let config = load_policy_from(&missing).unwrap();
+        assert!(config.allowlist.is_empty());
+    }
+
+    #[test]
+    fn load_policy_from_invalid_toml_is_err() {
+        // Exercises the parse-error map_err arm of load_policy_from.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("policy.toml");
+        std::fs::write(&path, "{{ not valid toml").unwrap();
+        assert!(load_policy_from(&path).is_err());
     }
 
     #[test]

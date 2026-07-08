@@ -1798,6 +1798,9 @@ mod tests {
 
     #[tokio::test]
     async fn models_list_selects_first_available_provider() {
+        // Install the always-on subscriber so the lower-priority-selection
+        // tracing::info! field expressions are actually evaluated (and covered).
+        crate::test_support::with_tracing(|| {});
         // Create a stage with models list: "nonexistent" first, "anthropic" second
         let mut stage = make_stage("main");
         stage.model = ModelConfig {
@@ -1887,6 +1890,7 @@ mod tests {
 
     #[tokio::test]
     async fn allow_user_default_falls_back_to_config_default() {
+        crate::test_support::with_tracing(|| {});
         // All listed providers unavailable, allow_user_default=true,
         // user_default_model points to an available provider → use it
         let mut stage = make_stage("main");
@@ -1933,6 +1937,7 @@ mod tests {
 
     #[tokio::test]
     async fn allow_user_default_false_does_not_fallback() {
+        crate::test_support::with_tracing(|| {});
         // All listed providers unavailable, allow_user_default=false
         // → does NOT use user_default_model, uses first listed instead
         let mut stage = make_stage("main");
@@ -2024,6 +2029,7 @@ mod tests {
 
     #[tokio::test]
     async fn allow_user_default_with_unavailable_default_provider() {
+        crate::test_support::with_tracing(|| {});
         // allow_user_default=true, user default set but ITS provider also unavailable
         let mut stage = make_stage("main");
         stage.model = ModelConfig {
@@ -2069,6 +2075,7 @@ mod tests {
 
     #[tokio::test]
     async fn model_only_override_falls_back_to_user_default_provider() {
+        crate::test_support::with_tracing(|| {});
         // A model-name-only `--model` override with NO available listed provider
         // must keep the override model but resolve the provider from the config
         // default (user_default_model), per the documented level-4 fallback.

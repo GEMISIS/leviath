@@ -346,6 +346,21 @@ search_public_docs = { sensitivity = "public" }
     }
 
     #[test]
+    fn parse_policy_mcp_override_with_direction_and_clearance() {
+        // Exercises the direction/clearance branches of `[mcp_overrides]`
+        // parsing, which a sensitivity-only override never reaches.
+        let toml = r#"
+[mcp_overrides."srv".tools]
+send_email = { sensitivity = "private", direction = "egress", clearance = "public" }
+"#;
+        let config = PolicyConfig::from_toml(toml).unwrap();
+        let ov = config.mcp_overrides.get("srv.send_email").unwrap();
+        assert_eq!(ov.sensitivity, Some(TaintLevel::Private));
+        assert_eq!(ov.direction.as_deref(), Some("egress"));
+        assert_eq!(ov.clearance, Some(TaintLevel::Public));
+    }
+
+    #[test]
     fn parse_policy_empty() {
         let config = PolicyConfig::from_toml("").unwrap();
         assert!(config.allowlist.is_empty());
