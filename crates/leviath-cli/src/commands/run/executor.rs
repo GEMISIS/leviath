@@ -218,20 +218,14 @@ where
             };
 
             if let Some(ref op) = override_provider {
-                // Full provider/model override — use directly
+                // Full provider/model override — use verbatim, regardless of
+                // whether the provider is currently registered.
                 (op.clone(), override_model.unwrap())
-            } else if let Some(ref om) = override_model {
-                // Model-name-only override — pair with first available provider
-                let provider = stage
-                    .model
-                    .models
-                    .iter()
-                    .find(|e| ctx.engine.providers().has(&e.provider))
-                    .map(|e| e.provider.clone())
-                    .unwrap_or_else(|| stage.model.provider().to_string());
-                (provider, om.clone())
             } else {
-                // No override — iterate models list in priority order
+                // No full override. `override_model` may still hold a
+                // model-name-only override. Iterate the models list in priority
+                // order; when a provider is available, keep the CLI-overridden
+                // model name (if any) but pair it with that available provider.
                 let mut found = None;
                 for (i, entry) in stage.model.models.iter().enumerate() {
                     if ctx.engine.providers().has(&entry.provider) {
@@ -243,7 +237,10 @@ where
                                 "Using lower-priority model (higher-priority providers unavailable)"
                             );
                         }
-                        found = Some((entry.provider.clone(), entry.model.clone()));
+                        let model = override_model
+                            .clone()
+                            .unwrap_or_else(|| entry.model.clone());
+                        found = Some((entry.provider.clone(), model));
                         break;
                     }
                 }
@@ -632,6 +629,8 @@ mod tests {
     /// Mock callbacks that track all calls for assertions.
     struct MockCallbacks {
         stage_entries: Vec<(String, usize)>,
+        /// Resolved (provider, model) captured at each `on_stage_enter`.
+        resolved_models: Vec<(String, String)>,
         stage_results: Vec<(String, StageResult)>,
         transitions: Vec<(String, String)>,
         provider_missing: Vec<String>,
@@ -653,6 +652,7 @@ mod tests {
         fn new() -> Self {
             Self {
                 stage_entries: Vec::new(),
+                resolved_models: Vec::new(),
                 stage_results: Vec::new(),
                 transitions: Vec::new(),
                 provider_missing: Vec::new(),
@@ -679,11 +679,13 @@ mod tests {
             &mut self,
             stage_name: &str,
             stage_idx: usize,
-            _provider: &str,
-            _model: &str,
+            provider: &str,
+            model: &str,
             _visit_label: &str,
         ) {
             self.stage_entries.push((stage_name.to_string(), stage_idx));
+            self.resolved_models
+                .push((provider.to_string(), model.to_string()));
         }
 
         async fn on_claude_code_warning(&mut self, stage_idx: usize) {
@@ -2248,5 +2250,110 @@ mod tests {
 
         // User default provider is also unavailable → falls through to first listed
         assert_eq!(cb.provider_missing, vec!["nonexistent"]);
+    }
+
+    #[tokio::test]
+    async fn model_only_override_falls_back_to_user_default_provider() {
+        // A model-name-only `--model` override with NO available listed provider
+        // must keep the override model but resolve the provider from the config
+        // default (user_default_model), per the documented level-4 fallback.
+        let mut stage = make_stage("main");
+        stage.model = ModelConfig {
+            models: vec![
+                ModelEntry::new("nonexistent1".to_string(), "model-a".to_string()),
+                ModelEntry::new("nonexistent2".to_string(), "model-b".to_string()),
+            ],
+            allow_user_default: true,
+            parameters: std::collections::HashMap::new(),
+        };
+        let bp = make_blueprint(vec![stage]);
+        // registers "anthropic"
+        let (mut engine, mut pool, entity) = make_engine_and_entity_with_provider(&bp);
+        let tool_registry = make_tool_registry().await;
+        let mut cb = MockCallbacks::new();
+
+        let mut ctx = StageContext {
+            blueprint: &bp,
+            engine: &mut engine,
+            entity,
+            pool: &mut pool,
+            tool_registry: &tool_registry,
+            current_stage_name: Arc::new(Mutex::new(String::new())),
+            current_stage_perms: Arc::new(Mutex::new(HashMap::new())),
+            current_stage_idx: Arc::new(Mutex::new(0)),
+            model_override: Some("my-override-model".to_string()),
+            user_default_model: Some(("anthropic".to_string(), "claude-haiku".to_string())),
+            compaction_ref: None,
+        };
+
+        run_stage_loop(
+            &mut ctx,
+            &mut cb,
+            "agent-1",
+            &mut MockIO::new(),
+            &mut noop_exec,
+        )
+        .await
+        .unwrap();
+
+        // Resolves to (config-default-provider, override-model) — provider is
+        // available, so the stage is entered with no provider_missing.
+        assert!(cb.provider_missing.is_empty());
+        assert_eq!(
+            cb.resolved_models,
+            vec![("anthropic".to_string(), "my-override-model".to_string())]
+        );
+    }
+
+    #[tokio::test]
+    async fn model_only_override_no_default_uses_stage_provider() {
+        // A model-name-only `--model` override with NO available listed provider
+        // and NO config default falls back to the first listed provider, still
+        // keeping the override model name.
+        let mut stage = make_stage("main");
+        stage.model = ModelConfig {
+            models: vec![ModelEntry::new(
+                "nonexistent".to_string(),
+                "model-a".to_string(),
+            )],
+            allow_user_default: true,
+            parameters: std::collections::HashMap::new(),
+        };
+        let bp = make_blueprint(vec![stage]);
+        let (mut engine, mut pool, entity) = make_engine_and_entity_with_provider(&bp);
+        let tool_registry = make_tool_registry().await;
+        let mut cb = MockCallbacks::new();
+
+        let mut ctx = StageContext {
+            blueprint: &bp,
+            engine: &mut engine,
+            entity,
+            pool: &mut pool,
+            tool_registry: &tool_registry,
+            current_stage_name: Arc::new(Mutex::new(String::new())),
+            current_stage_perms: Arc::new(Mutex::new(HashMap::new())),
+            current_stage_idx: Arc::new(Mutex::new(0)),
+            model_override: Some("my-override-model".to_string()),
+            user_default_model: None,
+            compaction_ref: None,
+        };
+
+        run_stage_loop(
+            &mut ctx,
+            &mut cb,
+            "agent-1",
+            &mut MockIO::new(),
+            &mut noop_exec,
+        )
+        .await
+        .unwrap();
+
+        // Provider falls back to the first listed ("nonexistent", unavailable) so
+        // provider_missing fires, but the override model name is preserved.
+        assert_eq!(cb.provider_missing, vec!["nonexistent"]);
+        assert_eq!(
+            cb.resolved_models,
+            vec![("nonexistent".to_string(), "my-override-model".to_string())]
+        );
     }
 }
