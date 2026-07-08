@@ -1042,6 +1042,88 @@ mode = "autonomous"
     }
 
     #[test]
+    fn parse_manifest_model_table_without_models_uses_default() {
+        // A model table that exists but declares no `models`, no top-level
+        // `provider`, and no `fallbacks` must fall through to the built-in
+        // default single entry.
+        let toml = r#"
+[agent]
+name = "empty-model-table"
+
+[stages.main.model]
+allow_user_default = false
+"#;
+        let bp = parse_manifest(toml).unwrap();
+        let stage = bp.find_stage("main").unwrap();
+        assert_eq!(stage.model.models.len(), 1);
+        assert_eq!(stage.model.models[0].provider, "anthropic");
+        assert_eq!(stage.model.models[0].model, "claude-sonnet-4-6");
+        assert!(!stage.model.allow_user_default);
+    }
+
+    #[test]
+    fn parse_manifest_models_array_skips_non_table_and_applies_defaults() {
+        // A non-table entry in the `models` array is skipped; table entries
+        // missing `provider`/`model` fall back to the per-field defaults.
+        let toml = r#"
+[agent]
+name = "models-defaults"
+
+[stages.main.model]
+models = ["skip-me", { provider = "openai" }, { model = "custom-model" }]
+"#;
+        let bp = parse_manifest(toml).unwrap();
+        let stage = bp.find_stage("main").unwrap();
+        assert_eq!(stage.model.models.len(), 2);
+        // provider given, model defaulted
+        assert_eq!(stage.model.models[0].provider, "openai");
+        assert_eq!(stage.model.models[0].model, "claude-sonnet-4-6");
+        // model given, provider defaulted
+        assert_eq!(stage.model.models[1].provider, "anthropic");
+        assert_eq!(stage.model.models[1].model, "custom-model");
+    }
+
+    #[test]
+    fn parse_manifest_top_level_provider_without_model() {
+        // Old single-model format with a top-level provider but no model →
+        // model defaults to claude-sonnet-4-6.
+        let toml = r#"
+[agent]
+name = "provider-only"
+
+[stages.main.model]
+provider = "openai"
+"#;
+        let bp = parse_manifest(toml).unwrap();
+        let stage = bp.find_stage("main").unwrap();
+        assert_eq!(stage.model.models.len(), 1);
+        assert_eq!(stage.model.models[0].provider, "openai");
+        assert_eq!(stage.model.models[0].model, "claude-sonnet-4-6");
+    }
+
+    #[test]
+    fn parse_manifest_fallbacks_without_top_level_provider() {
+        // `fallbacks` with no top-level provider: non-table entries are
+        // skipped and per-field defaults apply to the table entries.
+        let toml = r#"
+[agent]
+name = "fallbacks-only"
+
+[stages.main.model]
+fallbacks = ["skip-me", { provider = "openai" }, { model = "custom-model" }]
+"#;
+        let bp = parse_manifest(toml).unwrap();
+        let stage = bp.find_stage("main").unwrap();
+        assert_eq!(stage.model.models.len(), 2);
+        // provider given, model defaulted
+        assert_eq!(stage.model.models[0].provider, "openai");
+        assert_eq!(stage.model.models[0].model, "claude-sonnet-4-6");
+        // model given, provider defaulted
+        assert_eq!(stage.model.models[1].provider, "anthropic");
+        assert_eq!(stage.model.models[1].model, "custom-model");
+    }
+
+    #[test]
     fn parse_manifest_with_interaction_points() {
         let toml = r#"
 [agent]
