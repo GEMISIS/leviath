@@ -364,7 +364,7 @@ impl AgentEngine {
 
             let messages = window.assemble_messages();
             let remaining = window.max_tokens.saturating_sub(window.current_tokens);
-            // Use per-stage override, then model capability, then 4096 as last resort
+            // Use per-stage override, then model capability (which provides sensible defaults)
             let output_cap = self
                 .world
                 .get::<crate::components::InferenceConfig>(entity)

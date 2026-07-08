@@ -6,7 +6,7 @@ entry_stage = "research"
 
 [stages.research]
 mode = "autonomous"
-model = { provider = "anthropic", model = "claude-sonnet-4-6" }
+model = { models = [{provider = "anthropic", model = "claude-sonnet-4-6"}, {provider = "openai", model = "gpt-4o"}, {provider = "ollama", model = "llama3"}] }
 description = "Research the topic and gather supporting material"
 available_tools = ["read_file", "bash"]
 max_iterations = 20
@@ -27,7 +27,7 @@ hint = "Enough material to structure the piece"
 
 [stages.outline]
 mode = "interactive"
-model = { provider = "anthropic", model = "claude-sonnet-4-6" }
+model = { models = [{provider = "anthropic", model = "claude-sonnet-4-6"}, {provider = "openai", model = "gpt-4o"}, {provider = "ollama", model = "llama3"}] }
 description = "Create and refine an outline with user input"
 max_iterations = 15
 system_prompt = """
@@ -45,7 +45,7 @@ hint = "Outline approved"
 
 [stages.draft]
 mode = "autonomous"
-model = { provider = "anthropic", model = "claude-opus-4-6" }
+model = { models = [{provider = "anthropic", model = "claude-opus-4-6"}, {provider = "openai", model = "gpt-4o"}, {provider = "ollama", model = "llama3"}] }
 description = "Write the full draft"
 available_tools = ["write_file"]
 max_iterations = 25
@@ -68,7 +68,7 @@ transform = "compact"
 
 [stages.edit]
 mode = "autonomous"
-model = { provider = "anthropic", model = "claude-opus-4-6" }
+model = { models = [{provider = "anthropic", model = "claude-opus-4-6"}, {provider = "openai", model = "gpt-4o"}, {provider = "ollama", model = "llama3"}] }
 description = "Self-edit for clarity, accuracy, and flow"
 available_tools = ["read_file", "write_file"]
 max_iterations = 15

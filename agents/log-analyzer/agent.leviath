@@ -6,7 +6,7 @@ entry_stage = "ingest"
 
 [stages.ingest]
 mode = "autonomous"
-model = { provider = "anthropic", model = "claude-sonnet-4-6" }
+model = { models = [{provider = "anthropic", model = "claude-sonnet-4-6"}, {provider = "openai", model = "gpt-4o"}, {provider = "ollama", model = "llama3"}] }
 description = "Read log files, identify format and patterns"
 available_tools = ["read_file", "list_dir", "bash"]
 max_iterations = 15
@@ -26,7 +26,7 @@ hint = "Log format identified, ready to analyze"
 
 [stages.analyze]
 mode = "autonomous"
-model = { provider = "anthropic", model = "claude-opus-4-6" }
+model = { models = [{provider = "anthropic", model = "claude-opus-4-6"}, {provider = "openai", model = "gpt-4o"}, {provider = "ollama", model = "llama3"}] }
 description = "Identify anomalies, trends, and error patterns"
 available_tools = ["read_file", "bash"]
 max_iterations = 25
@@ -56,7 +56,7 @@ transform = "compact"
 
 [stages.script]
 mode = "autonomous"
-model = { provider = "anthropic", model = "claude-sonnet-4-6" }
+model = { models = [{provider = "anthropic", model = "claude-sonnet-4-6"}, {provider = "openai", model = "gpt-4o"}, {provider = "ollama", model = "llama3"}] }
 description = "Write and execute Rhai scripts to parse, filter, and aggregate log data"
 available_tools = ["read_file", "bash"]
 max_iterations = 20
@@ -88,7 +88,7 @@ transform = "compact"
 
 [stages.report]
 mode = "autonomous"
-model = { provider = "anthropic", model = "claude-opus-4-6" }
+model = { models = [{provider = "anthropic", model = "claude-opus-4-6"}, {provider = "openai", model = "gpt-4o"}, {provider = "ollama", model = "llama3"}] }
 description = "Produce a structured analysis report with findings"
 available_tools = ["write_file"]
 max_iterations = 10

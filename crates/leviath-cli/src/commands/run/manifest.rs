@@ -1,7 +1,8 @@
 //! Manifest finding and parsing for agent.leviath files.
 
 use leviath_core::blueprint::{
-    EdgeTransform, ModelConfig, StageMode, ToolResultRouting, TransitionCondition, TransitionEdge,
+    EdgeTransform, ModelConfig, ModelEntry, StageMode, ToolResultRouting, TransitionCondition,
+    TransitionEdge,
 };
 use leviath_core::layout::RegionDefinition;
 use leviath_core::lifecycle::CompactionConfig;
@@ -95,35 +96,19 @@ pub fn parse_manifest(content: &str) -> anyhow::Result<Blueprint> {
         for (stage_name, stage_value) in stages_table {
             let model_table = stage_value.get("model").and_then(|v| v.as_table());
             let model_config = if let Some(mt) = model_table {
-                let mut mc = ModelConfig::new(
-                    mt.get("provider")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("anthropic")
-                        .to_string(),
-                    mt.get("model")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("claude-sonnet-4-6")
-                        .to_string(),
-                );
-                // Parse parameters
-                if let Some(params) = mt.get("parameters").and_then(|v| v.as_table()) {
-                    for (k, v) in params {
-                        if let Ok(json_val) = serde_json::to_value(v) {
-                            mc.parameters.insert(k.clone(), json_val);
-                        }
-                    }
-                }
-                // Parse fallbacks
-                if let Some(fallbacks_arr) = mt.get("fallbacks").and_then(|v| v.as_array()) {
-                    for fb in fallbacks_arr {
-                        if let Some(fb_table) = fb.as_table() {
-                            mc.fallbacks.push(ModelConfig::new(
-                                fb_table
+                let mut models = Vec::new();
+
+                // New format: [[stages.<name>.model.models]] list
+                if let Some(models_arr) = mt.get("models").and_then(|v| v.as_array()) {
+                    for entry in models_arr {
+                        if let Some(entry_table) = entry.as_table() {
+                            models.push(ModelEntry::new(
+                                entry_table
                                     .get("provider")
                                     .and_then(|v| v.as_str())
                                     .unwrap_or("anthropic")
                                     .to_string(),
-                                fb_table
+                                entry_table
                                     .get("model")
                                     .and_then(|v| v.as_str())
                                     .unwrap_or("claude-sonnet-4-6")
@@ -132,7 +117,70 @@ pub fn parse_manifest(content: &str) -> anyhow::Result<Blueprint> {
                         }
                     }
                 }
-                mc
+
+                // Backward compat: old single-model format (provider + model at
+                // top level) or old fallbacks list — treat both as models entries.
+                if models.is_empty() {
+                    if let Some(provider) = mt.get("provider").and_then(|v| v.as_str()) {
+                        let model_name = mt
+                            .get("model")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("claude-sonnet-4-6");
+                        models.push(ModelEntry::new(
+                            provider.to_string(),
+                            model_name.to_string(),
+                        ));
+                    }
+
+                    // Old fallbacks become additional models entries
+                    if let Some(fallbacks_arr) = mt.get("fallbacks").and_then(|v| v.as_array()) {
+                        for fb in fallbacks_arr {
+                            if let Some(fb_table) = fb.as_table() {
+                                models.push(ModelEntry::new(
+                                    fb_table
+                                        .get("provider")
+                                        .and_then(|v| v.as_str())
+                                        .unwrap_or("anthropic")
+                                        .to_string(),
+                                    fb_table
+                                        .get("model")
+                                        .and_then(|v| v.as_str())
+                                        .unwrap_or("claude-sonnet-4-6")
+                                        .to_string(),
+                                ));
+                            }
+                        }
+                    }
+                }
+
+                // If still empty, use defaults
+                if models.is_empty() {
+                    models.push(ModelEntry::new(
+                        "anthropic".to_string(),
+                        "claude-sonnet-4-6".to_string(),
+                    ));
+                }
+
+                let allow_user_default = mt
+                    .get("allow_user_default")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(true);
+
+                // Parse parameters
+                let mut parameters = std::collections::HashMap::new();
+                if let Some(params) = mt.get("parameters").and_then(|v| v.as_table()) {
+                    for (k, v) in params {
+                        if let Ok(json_val) = serde_json::to_value(v) {
+                            parameters.insert(k.clone(), json_val);
+                        }
+                    }
+                }
+
+                ModelConfig {
+                    models,
+                    allow_user_default,
+                    parameters,
+                }
             } else {
                 ModelConfig::new("anthropic".to_string(), "claude-sonnet-4-6".to_string())
             };
@@ -654,8 +702,8 @@ conversation = { kind = "sliding_window", max_items = 20, max_tokens = 10000 }
 
         let start = bp.find_stage("start").unwrap();
         assert_eq!(start.mode, StageMode::Autonomous);
-        assert_eq!(start.model.provider, "openai");
-        assert_eq!(start.model.model, "gpt-5");
+        assert_eq!(start.model.provider(), "openai");
+        assert_eq!(start.model.model(), "gpt-5");
         assert_eq!(start.max_iterations, Some(25));
         assert_eq!(start.available_tools, vec!["read_file", "bash"]);
         assert!(start.requires_children);
@@ -875,12 +923,46 @@ model = { provider = "google", model = "gemini-3.5-pro" }
 "#;
         let bp = parse_manifest(toml).unwrap();
         let stage = bp.find_stage("main").unwrap();
-        assert_eq!(stage.model.provider, "google");
-        assert_eq!(stage.model.model, "gemini-3.5-pro");
+        assert_eq!(stage.model.provider(), "google");
+        assert_eq!(stage.model.model(), "gemini-3.5-pro");
     }
 
     #[test]
-    fn parse_manifest_model_with_fallbacks() {
+    fn parse_manifest_model_with_models_list() {
+        let toml = r#"
+[agent]
+name = "models-list-test"
+
+[stages.main.model]
+allow_user_default = false
+
+[[stages.main.model.models]]
+provider = "anthropic"
+model = "claude-sonnet-4-6"
+
+[[stages.main.model.models]]
+provider = "openai"
+model = "gpt-4o"
+
+[[stages.main.model.models]]
+provider = "ollama"
+model = "llama3"
+"#;
+        let bp = parse_manifest(toml).unwrap();
+        let stage = bp.find_stage("main").unwrap();
+        assert_eq!(stage.model.models.len(), 3);
+        assert_eq!(stage.model.models[0].provider, "anthropic");
+        assert_eq!(stage.model.models[0].model, "claude-sonnet-4-6");
+        assert_eq!(stage.model.models[1].provider, "openai");
+        assert_eq!(stage.model.models[1].model, "gpt-4o");
+        assert_eq!(stage.model.models[2].provider, "ollama");
+        assert_eq!(stage.model.models[2].model, "llama3");
+        assert!(!stage.model.allow_user_default);
+    }
+
+    #[test]
+    fn parse_manifest_model_backward_compat_fallbacks() {
+        // Old format with fallbacks should be converted to models list
         let toml = r#"
 [agent]
 name = "fallback-test"
@@ -899,12 +981,13 @@ model = "llama3"
 "#;
         let bp = parse_manifest(toml).unwrap();
         let stage = bp.find_stage("main").unwrap();
-        assert_eq!(stage.model.provider, "anthropic");
-        assert_eq!(stage.model.fallbacks.len(), 2);
-        assert_eq!(stage.model.fallbacks[0].provider, "openai");
-        assert_eq!(stage.model.fallbacks[0].model, "gpt-4o");
-        assert_eq!(stage.model.fallbacks[1].provider, "ollama");
-        assert_eq!(stage.model.fallbacks[1].model, "llama3");
+        assert_eq!(stage.model.models.len(), 3);
+        assert_eq!(stage.model.models[0].provider, "anthropic");
+        assert_eq!(stage.model.models[0].model, "claude-sonnet-4-6");
+        assert_eq!(stage.model.models[1].provider, "openai");
+        assert_eq!(stage.model.models[1].model, "gpt-4o");
+        assert_eq!(stage.model.models[2].provider, "ollama");
+        assert_eq!(stage.model.models[2].model, "llama3");
     }
 
     #[test]
@@ -954,8 +1037,8 @@ mode = "autonomous"
 "#;
         let bp = parse_manifest(toml).unwrap();
         let stage = bp.find_stage("main").unwrap();
-        assert_eq!(stage.model.provider, "anthropic");
-        assert_eq!(stage.model.model, "claude-sonnet-4-6");
+        assert_eq!(stage.model.provider(), "anthropic");
+        assert_eq!(stage.model.model(), "claude-sonnet-4-6");
     }
 
     #[test]
@@ -1858,6 +1941,161 @@ read_file = "allow"
                 .get("tool_perm:read_file")
                 .and_then(|v| v.as_str()),
             Some("allow")
+        );
+    }
+
+    // ─── Models list & allow_user_default tests ─────────────────────────────
+
+    #[test]
+    fn parse_manifest_models_list_priority_order() {
+        let toml = r#"
+[agent]
+name = "priority-test"
+
+[stages.main.model]
+allow_user_default = true
+
+[[stages.main.model.models]]
+provider = "anthropic"
+model = "claude-sonnet-4-6"
+
+[[stages.main.model.models]]
+provider = "openai"
+model = "gpt-4o"
+
+[[stages.main.model.models]]
+provider = "ollama"
+model = "llama3"
+"#;
+        let bp = parse_manifest(toml).unwrap();
+        let stage = bp.find_stage("main").unwrap();
+        assert_eq!(stage.model.models.len(), 3);
+        // Order preserved
+        assert_eq!(stage.model.models[0].provider, "anthropic");
+        assert_eq!(stage.model.models[0].model, "claude-sonnet-4-6");
+        assert_eq!(stage.model.models[1].provider, "openai");
+        assert_eq!(stage.model.models[1].model, "gpt-4o");
+        assert_eq!(stage.model.models[2].provider, "ollama");
+        assert_eq!(stage.model.models[2].model, "llama3");
+        assert!(stage.model.allow_user_default);
+    }
+
+    #[test]
+    fn parse_manifest_allow_user_default_false() {
+        let toml = r#"
+[agent]
+name = "no-fallback-test"
+
+[stages.main.model]
+allow_user_default = false
+
+[[stages.main.model.models]]
+provider = "anthropic"
+model = "claude-sonnet-4-6"
+"#;
+        let bp = parse_manifest(toml).unwrap();
+        let stage = bp.find_stage("main").unwrap();
+        assert!(!stage.model.allow_user_default);
+        assert_eq!(stage.model.models.len(), 1);
+    }
+
+    #[test]
+    fn parse_manifest_allow_user_default_defaults_true() {
+        let toml = r#"
+[agent]
+name = "default-aud-test"
+
+[stages.main.model]
+provider = "anthropic"
+model = "claude-sonnet-4-6"
+"#;
+        let bp = parse_manifest(toml).unwrap();
+        let stage = bp.find_stage("main").unwrap();
+        assert!(stage.model.allow_user_default);
+    }
+
+    #[test]
+    fn parse_manifest_backward_compat_single_model_inline() {
+        // Old inline format: model = { provider = "...", model = "..." }
+        let toml = r#"
+[agent]
+name = "compat-test"
+
+[stages.main]
+model = { provider = "google", model = "gemini-3.5-pro" }
+"#;
+        let bp = parse_manifest(toml).unwrap();
+        let stage = bp.find_stage("main").unwrap();
+        assert_eq!(stage.model.models.len(), 1);
+        assert_eq!(stage.model.models[0].provider, "google");
+        assert_eq!(stage.model.models[0].model, "gemini-3.5-pro");
+        assert!(stage.model.allow_user_default);
+    }
+
+    #[test]
+    fn parse_manifest_models_list_with_parameters() {
+        let toml = r#"
+[agent]
+name = "params-models-test"
+
+[stages.main.model]
+allow_user_default = true
+
+[stages.main.model.parameters]
+temperature = 0.3
+max_output_tokens = 16384
+
+[[stages.main.model.models]]
+provider = "anthropic"
+model = "claude-sonnet-4-6"
+
+[[stages.main.model.models]]
+provider = "openai"
+model = "gpt-4o"
+"#;
+        let bp = parse_manifest(toml).unwrap();
+        let stage = bp.find_stage("main").unwrap();
+        assert_eq!(stage.model.models.len(), 2);
+        assert_eq!(
+            stage
+                .model
+                .parameters
+                .get("temperature")
+                .and_then(|v| v.as_f64()),
+            Some(0.3)
+        );
+        assert_eq!(
+            stage
+                .model
+                .parameters
+                .get("max_output_tokens")
+                .and_then(|v| v.as_u64()),
+            Some(16384)
+        );
+    }
+
+    #[test]
+    fn parse_manifest_max_output_tokens_override_via_parameters() {
+        let toml = r#"
+[agent]
+name = "token-override-test"
+
+[stages.main.model]
+provider = "anthropic"
+model = "claude-sonnet-4-6"
+
+[stages.main.model.parameters]
+max_output_tokens = 2048
+"#;
+        let bp = parse_manifest(toml).unwrap();
+        let stage = bp.find_stage("main").unwrap();
+        assert_eq!(
+            stage
+                .model
+                .parameters
+                .get("max_output_tokens")
+                .and_then(|v| v.as_u64()),
+            Some(2048)
         );
     }
 }

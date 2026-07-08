@@ -6,7 +6,7 @@ entry_stage = "analyze"
 
 [stages.analyze]
 mode = "autonomous"
-model = { provider = "anthropic", model = "claude-sonnet-4-6" }
+model = { models = [{provider = "anthropic", model = "claude-sonnet-4-6"}, {provider = "openai", model = "gpt-4o"}, {provider = "ollama", model = "llama3"}] }
 description = "Understand requirements and plan implementation"
 available_tools = ["read_file", "list_dir"]
 max_iterations = 15
@@ -23,7 +23,7 @@ Be brief — the implement stage will do the actual coding.
 
 [stages.implement]
 mode = "autonomous"
-model = { provider = "anthropic", model = "claude-sonnet-4-6" }
+model = { models = [{provider = "anthropic", model = "claude-sonnet-4-6"}, {provider = "openai", model = "gpt-4o"}, {provider = "ollama", model = "llama3"}] }
 description = "Write code according to the plan"
 available_tools = ["write_file", "read_file", "edit_file", "list_dir", "bash"]
 max_iterations = 50
@@ -41,7 +41,7 @@ transform = "compact"
 
 [stages.review]
 mode = "interactive"
-model = { provider = "anthropic", model = "claude-opus-4-6" }
+model = { models = [{provider = "anthropic", model = "claude-opus-4-6"}, {provider = "openai", model = "gpt-4o"}, {provider = "ollama", model = "llama3"}] }
 description = "Review code before finalizing (requires human approval)"
 available_tools = ["read_file", "list_dir"]
 max_iterations = 10

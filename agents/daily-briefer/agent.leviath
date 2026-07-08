@@ -6,7 +6,7 @@ entry_stage = "collect"
 
 [stages.collect]
 mode = "autonomous"
-model = { provider = "anthropic", model = "claude-sonnet-4-6" }
+model = { models = [{provider = "anthropic", model = "claude-sonnet-4-6"}, {provider = "openai", model = "gpt-4o"}, {provider = "ollama", model = "llama3"}] }
 description = "Gather information from configured sources"
 available_tools = ["read_file", "bash"]
 max_iterations = 20
@@ -25,7 +25,7 @@ hint = "All sources checked"
 
 [stages.prioritize]
 mode = "autonomous"
-model = { provider = "anthropic", model = "claude-sonnet-4-6" }
+model = { models = [{provider = "anthropic", model = "claude-sonnet-4-6"}, {provider = "openai", model = "gpt-4o"}, {provider = "ollama", model = "llama3"}] }
 description = "Rank items by urgency and relevance"
 max_iterations = 10
 system_prompt = """
@@ -44,7 +44,7 @@ hint = "Items prioritized"
 
 [stages.brief]
 mode = "autonomous"
-model = { provider = "anthropic", model = "claude-sonnet-4-6" }
+model = { models = [{provider = "anthropic", model = "claude-sonnet-4-6"}, {provider = "openai", model = "gpt-4o"}, {provider = "ollama", model = "llama3"}] }
 description = "Compose the final briefing"
 available_tools = ["write_file"]
 max_iterations = 10

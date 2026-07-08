@@ -6,14 +6,14 @@ entry_stage = "scan"
 
 [stages.scan]
 mode = "autonomous"
-model = { provider = "anthropic", model = "claude-sonnet-4-6" }
+model = { models = [{provider = "anthropic", model = "claude-sonnet-4-6"}, {provider = "openai", model = "gpt-4o"}, {provider = "ollama", model = "llama3"}] }
 description = "Initial scan for obvious issues"
 
 [stages.scan.transitions.deep_review]
 
 [stages.deep_review]
 mode = "autonomous"
-model = { provider = "anthropic", model = "claude-opus-4-6" }
+model = { models = [{provider = "anthropic", model = "claude-opus-4-6"}, {provider = "openai", model = "gpt-4o"}, {provider = "ollama", model = "llama3"}] }
 description = "In-depth analysis of code quality, security, and architecture"
 max_revisits = 2
 
@@ -25,12 +25,12 @@ condition = "error"
 
 [stages.report]
 mode = "autonomous"
-model = { provider = "anthropic", model = "claude-sonnet-4-6" }
+model = { models = [{provider = "anthropic", model = "claude-sonnet-4-6"}, {provider = "openai", model = "gpt-4o"}, {provider = "ollama", model = "llama3"}] }
 description = "Generate actionable review report"
 
 [stages.error_handler]
 mode = "autonomous"
-model = { provider = "anthropic", model = "claude-sonnet-4-6" }
+model = { models = [{provider = "anthropic", model = "claude-sonnet-4-6"}, {provider = "openai", model = "gpt-4o"}, {provider = "ollama", model = "llama3"}] }
 description = "Handle errors encountered during deep review"
 available_tools = ["read_file", "bash"]
 max_iterations = 10

@@ -6,7 +6,7 @@ entry_stage = "gather"
 
 [stages.gather]
 mode = "autonomous"
-model = { provider = "anthropic", model = "claude-sonnet-4-6" }
+model = { models = [{provider = "anthropic", model = "claude-sonnet-4-6"}, {provider = "openai", model = "gpt-4o"}, {provider = "ollama", model = "llama3"}] }
 description = "Gather primary sources and key references on the topic"
 available_tools = ["read_file", "bash"]
 max_iterations = 30
@@ -29,7 +29,7 @@ hint = "Enough sources gathered for meaningful analysis"
 
 [stages.analyze]
 mode = "autonomous"
-model = { provider = "anthropic", model = "claude-opus-4-6" }
+model = { models = [{provider = "anthropic", model = "claude-opus-4-6"}, {provider = "openai", model = "gpt-4o"}, {provider = "ollama", model = "llama3"}] }
 description = "Analyze findings, identify patterns, and synthesize insights"
 available_tools = ["read_file"]
 max_iterations = 20
@@ -59,7 +59,7 @@ transform = "compact"
 
 [stages.synthesize]
 mode = "autonomous"
-model = { provider = "anthropic", model = "claude-opus-4-6" }
+model = { models = [{provider = "anthropic", model = "claude-opus-4-6"}, {provider = "openai", model = "gpt-4o"}, {provider = "ollama", model = "llama3"}] }
 description = "Produce a structured research report with citations"
 available_tools = ["write_file"]
 max_iterations = 15

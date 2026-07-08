@@ -201,7 +201,8 @@ where
         // Resolve provider + model, supporting:
         //   1. --model provider/model   (override both)
         //   2. --model model-name       (override model only, keep stage provider)
-        //   3. Fallback chain from ModelConfig.fallbacks
+        //   3. Models list: iterate in priority order, pick first available
+        //   4. allow_user_default: fall back to user default model when true
         let (resolved_provider, resolved_model) = {
             let (override_provider, override_model) = match ctx.model_override.as_deref() {
                 Some(ov) if ov.contains('/') => {
@@ -212,29 +213,42 @@ where
                 None => (None, None),
             };
 
-            let primary_provider = override_provider
-                .as_deref()
-                .unwrap_or(&stage.model.provider);
-            let primary_model = override_model.as_deref().unwrap_or(&stage.model.model);
-
-            if ctx.engine.providers().has(primary_provider) {
-                (primary_provider.to_string(), primary_model.to_string())
+            if let Some(ref op) = override_provider {
+                // Full provider/model override — use directly
+                (op.clone(), override_model.unwrap())
+            } else if let Some(ref om) = override_model {
+                // Model-name-only override — pair with first available provider
+                let provider = stage
+                    .model
+                    .models
+                    .iter()
+                    .find(|e| ctx.engine.providers().has(&e.provider))
+                    .map(|e| e.provider.clone())
+                    .unwrap_or_else(|| stage.model.provider().to_string());
+                (provider, om.clone())
             } else {
-                // Try fallbacks from the stage's model config
+                // No override — iterate models list in priority order
                 let mut found = None;
-                for fb in &stage.model.fallbacks {
-                    if ctx.engine.providers().has(&fb.provider) {
-                        tracing::info!(
-                            primary_provider = primary_provider,
-                            fallback_provider = %fb.provider,
-                            fallback_model = %fb.model,
-                            "Primary provider unavailable, using fallback"
-                        );
-                        found = Some((fb.provider.clone(), fb.model.clone()));
+                for (i, entry) in stage.model.models.iter().enumerate() {
+                    if ctx.engine.providers().has(&entry.provider) {
+                        if i > 0 {
+                            tracing::info!(
+                                preferred_provider = %stage.model.models[0].provider,
+                                selected_provider = %entry.provider,
+                                selected_model = %entry.model,
+                                "Using lower-priority model (higher-priority providers unavailable)"
+                            );
+                        }
+                        found = Some((entry.provider.clone(), entry.model.clone()));
                         break;
                     }
                 }
-                found.unwrap_or_else(|| (primary_provider.to_string(), primary_model.to_string()))
+                found.unwrap_or_else(|| {
+                    (
+                        stage.model.provider().to_string(),
+                        stage.model.model().to_string(),
+                    )
+                })
             }
         };
         let provider_name = &resolved_provider;
@@ -554,7 +568,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use leviath_core::blueprint::ModelConfig;
+    use leviath_core::blueprint::{ModelConfig, ModelEntry};
     use leviath_core::layout::RegionDefinition;
     use leviath_core::{ContextLayout, RegionKind, Stage};
     use leviath_runtime::ProviderRegistry;
@@ -924,7 +938,7 @@ mod tests {
     async fn provider_missing_aborts_run() {
         // Use a provider that isn't registered
         let mut stage = make_stage("main");
-        stage.model.provider = "nonexistent".to_string();
+        stage.model = ModelConfig::new("nonexistent".to_string(), "some-model".to_string());
         let bp = make_blueprint(vec![stage]);
         let (mut engine, mut pool, entity) = make_engine_and_entity(&bp);
         let tool_registry = make_tool_registry().await;
@@ -963,7 +977,7 @@ mod tests {
     #[tokio::test]
     async fn claude_code_warning_fires() {
         let mut stage = make_stage("main");
-        stage.model.provider = "claude-code".to_string();
+        stage.model = ModelConfig::new("claude-code".to_string(), "test".to_string());
         let bp = make_blueprint(vec![stage]);
         let (mut engine, mut pool, entity) = make_engine_and_entity(&bp);
         let tool_registry = make_tool_registry().await;
@@ -1739,17 +1753,20 @@ mod tests {
         assert!(result.is_err());
     }
 
-    // ─── Fallback chain tests ─────────────────────────────────────────────
+    // ─── Models list priority tests ──────────────────────────────────────
 
     #[tokio::test]
-    async fn fallback_used_when_primary_provider_missing() {
-        // Create a stage with primary provider "nonexistent" and fallback "anthropic"
+    async fn models_list_selects_first_available_provider() {
+        // Create a stage with models list: "nonexistent" first, "anthropic" second
         let mut stage = make_stage("main");
-        stage.model = ModelConfig::new("nonexistent".to_string(), "some-model".to_string())
-            .with_fallbacks(vec![ModelConfig::new(
-                "anthropic".to_string(),
-                "claude-sonnet-4-6".to_string(),
-            )]);
+        stage.model = ModelConfig {
+            models: vec![
+                ModelEntry::new("nonexistent".to_string(), "some-model".to_string()),
+                ModelEntry::new("anthropic".to_string(), "claude-sonnet-4-6".to_string()),
+            ],
+            allow_user_default: true,
+            parameters: std::collections::HashMap::new(),
+        };
         let bp = make_blueprint(vec![stage]);
         // make_engine_and_entity_with_provider registers "anthropic"
         let (mut engine, mut pool, entity) = make_engine_and_entity_with_provider(&bp);

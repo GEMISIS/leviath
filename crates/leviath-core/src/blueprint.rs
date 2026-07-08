@@ -508,39 +508,73 @@ impl Stage {
     }
 }
 
-/// Model configuration for a stage.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ModelConfig {
+/// A single model entry within a [`ModelConfig`] models list.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ModelEntry {
     /// Provider name (e.g., "anthropic", "openai")
     pub provider: String,
 
     /// Model identifier (e.g., "claude-sonnet-4-6")
     pub model: String,
+}
 
-    /// Optional parameters for this model
+impl ModelEntry {
+    pub fn new(provider: String, model: String) -> Self {
+        Self { provider, model }
+    }
+}
+
+/// Model configuration for a stage.
+///
+/// Models are specified as an ordered priority list in `models`. The first
+/// entry whose provider is registered at runtime is used. When
+/// `allow_user_default` is true (the default), the user's configured default
+/// model is tried as a last resort. When false, the stage fails if none of
+/// the listed models are available.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModelConfig {
+    /// Ordered list of models to try (first available wins).
+    #[serde(default)]
+    pub models: Vec<ModelEntry>,
+
+    /// When true (default), fall back to the user's configured default model
+    /// if none of the listed models are available.
+    #[serde(default = "default_allow_user_default")]
+    pub allow_user_default: bool,
+
+    /// Optional parameters that apply to whichever model gets selected.
+    #[serde(default)]
     pub parameters: HashMap<String, serde_json::Value>,
+}
 
-    /// Fallback model configurations to try if the primary provider/model
-    /// is unavailable. Tried in order until one succeeds.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub fallbacks: Vec<ModelConfig>,
+fn default_allow_user_default() -> bool {
+    true
 }
 
 impl ModelConfig {
-    /// Create a new model configuration.
+    /// Create a new model configuration with a single model entry.
     pub fn new(provider: String, model: String) -> Self {
         Self {
-            provider,
-            model,
+            models: vec![ModelEntry::new(provider, model)],
+            allow_user_default: true,
             parameters: HashMap::new(),
-            fallbacks: Vec::new(),
         }
     }
 
-    /// Add fallback configurations.
-    pub fn with_fallbacks(mut self, fallbacks: Vec<ModelConfig>) -> Self {
-        self.fallbacks = fallbacks;
-        self
+    /// Convenience: provider of the first model entry (for backward compat).
+    pub fn provider(&self) -> &str {
+        self.models
+            .first()
+            .map(|e| e.provider.as_str())
+            .unwrap_or("anthropic")
+    }
+
+    /// Convenience: model name of the first model entry (for backward compat).
+    pub fn model(&self) -> &str {
+        self.models
+            .first()
+            .map(|e| e.model.as_str())
+            .unwrap_or("claude-sonnet-4-6")
     }
 }
 
@@ -1065,50 +1099,74 @@ mod tests {
     }
 
     #[test]
-    fn test_model_config_fallbacks_default_empty() {
+    fn test_model_config_new_creates_single_entry() {
         let mc = ModelConfig::new("anthropic".to_string(), "claude-sonnet-4-6".to_string());
-        assert!(mc.fallbacks.is_empty());
+        assert_eq!(mc.models.len(), 1);
+        assert_eq!(mc.models[0].provider, "anthropic");
+        assert_eq!(mc.models[0].model, "claude-sonnet-4-6");
+        assert!(mc.allow_user_default);
     }
 
     #[test]
-    fn test_model_config_with_fallbacks() {
-        let mc = ModelConfig::new("anthropic".to_string(), "claude-sonnet-4-6".to_string())
-            .with_fallbacks(vec![
-                ModelConfig::new("openai".to_string(), "gpt-4o".to_string()),
-                ModelConfig::new("ollama".to_string(), "llama3".to_string()),
-            ]);
-        assert_eq!(mc.fallbacks.len(), 2);
-        assert_eq!(mc.fallbacks[0].provider, "openai");
-        assert_eq!(mc.fallbacks[1].provider, "ollama");
+    fn test_model_config_with_multiple_models() {
+        let mc = ModelConfig {
+            models: vec![
+                ModelEntry::new("anthropic".to_string(), "claude-sonnet-4-6".to_string()),
+                ModelEntry::new("openai".to_string(), "gpt-4o".to_string()),
+                ModelEntry::new("ollama".to_string(), "llama3".to_string()),
+            ],
+            allow_user_default: true,
+            parameters: HashMap::new(),
+        };
+        assert_eq!(mc.models.len(), 3);
+        assert_eq!(mc.models[0].provider, "anthropic");
+        assert_eq!(mc.models[1].provider, "openai");
+        assert_eq!(mc.models[2].provider, "ollama");
     }
 
     #[test]
-    fn test_model_config_fallbacks_serde_roundtrip() {
-        let mc = ModelConfig::new("anthropic".to_string(), "claude-sonnet-4-6".to_string())
-            .with_fallbacks(vec![ModelConfig::new(
-                "openai".to_string(),
-                "gpt-4o".to_string(),
-            )]);
+    fn test_model_config_serde_roundtrip() {
+        let mc = ModelConfig {
+            models: vec![
+                ModelEntry::new("anthropic".to_string(), "claude-sonnet-4-6".to_string()),
+                ModelEntry::new("openai".to_string(), "gpt-4o".to_string()),
+            ],
+            allow_user_default: false,
+            parameters: HashMap::new(),
+        };
         let json = serde_json::to_string(&mc).unwrap();
         let back: ModelConfig = serde_json::from_str(&json).unwrap();
-        assert_eq!(back.fallbacks.len(), 1);
-        assert_eq!(back.fallbacks[0].provider, "openai");
+        assert_eq!(back.models.len(), 2);
+        assert_eq!(back.models[0].provider, "anthropic");
+        assert_eq!(back.models[1].provider, "openai");
+        assert!(!back.allow_user_default);
     }
 
     #[test]
-    fn test_model_config_fallbacks_serde_default_when_missing() {
-        // Old JSON without fallbacks field should deserialize with empty fallbacks
-        let json = r#"{"provider": "anthropic", "model": "claude-sonnet-4-6", "parameters": {}}"#;
+    fn test_model_config_serde_defaults_when_fields_missing() {
+        // Minimal JSON — models defaults to empty, allow_user_default defaults to true
+        let json = r#"{"parameters": {}}"#;
         let mc: ModelConfig = serde_json::from_str(json).unwrap();
-        assert!(mc.fallbacks.is_empty());
+        assert!(mc.models.is_empty());
+        assert!(mc.allow_user_default);
     }
 
     #[test]
-    fn test_model_config_fallbacks_skip_serializing_if_empty() {
+    fn test_model_config_convenience_accessors() {
         let mc = ModelConfig::new("anthropic".to_string(), "claude-sonnet-4-6".to_string());
-        let json = serde_json::to_string(&mc).unwrap();
-        // "fallbacks" key should not appear when empty
-        assert!(!json.contains("fallbacks"));
+        assert_eq!(mc.provider(), "anthropic");
+        assert_eq!(mc.model(), "claude-sonnet-4-6");
+    }
+
+    #[test]
+    fn test_model_config_convenience_accessors_empty_models() {
+        let mc = ModelConfig {
+            models: vec![],
+            allow_user_default: true,
+            parameters: HashMap::new(),
+        };
+        assert_eq!(mc.provider(), "anthropic");
+        assert_eq!(mc.model(), "claude-sonnet-4-6");
     }
 
     fn make_model() -> ModelConfig {

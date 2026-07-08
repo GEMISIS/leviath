@@ -374,8 +374,10 @@ async fn run_test_case(
         .first()
         .ok_or(anyhow::anyhow!("Blueprint has no stages"))?;
 
-    let provider_name = &stage.model.provider;
-    let model_name = &stage.model.model;
+    let provider_name_owned = stage.model.provider().to_string();
+    let model_name_owned = stage.model.model().to_string();
+    let provider_name = &provider_name_owned;
+    let model_name = &model_name_owned;
 
     // Check if provider is available
     if !engine.providers().has(provider_name) {

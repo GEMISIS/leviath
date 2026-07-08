@@ -19,7 +19,7 @@ bash       = "ask"
 
 [stages.plan]
 mode = "interactive_points"
-model = { provider = "anthropic", model = "claude-sonnet-4-6", fallbacks = [{provider = "openai", model = "gpt-4o"}, {provider = "ollama", model = "llama3"}] }
+model = { models = [{provider = "anthropic", model = "claude-sonnet-4-6"}, {provider = "openai", model = "gpt-4o"}, {provider = "ollama", model = "llama3"}] }
 description = "Explore the codebase and produce a step-by-step implementation plan"
 available_tools = ["read_file", "list_dir", "ask_user_text", "ask_user_choice"]
 max_iterations = 20
@@ -100,7 +100,7 @@ options  = ["Approve — proceed to implementation", "Revise — I'll describe c
 
 [stages.implement]
 mode = "autonomous"
-model = { provider = "anthropic", model = "claude-sonnet-4-6", fallbacks = [{provider = "openai", model = "gpt-4o"}, {provider = "ollama", model = "llama3"}] }
+model = { models = [{provider = "anthropic", model = "claude-sonnet-4-6"}, {provider = "openai", model = "gpt-4o"}, {provider = "ollama", model = "llama3"}] }
 description = "Write code according to the approved plan"
 available_tools = ["write_file", "read_file", "edit_file", "list_dir", "bash", "ask_user_text", "ask_user_confirm"]
 max_iterations = 50
@@ -140,7 +140,7 @@ transform = "direct"
 
 [stages.review]
 mode = "autonomous"
-model = { provider = "anthropic", model = "claude-opus-4-8", fallbacks = [{provider = "openai", model = "gpt-4o"}, {provider = "ollama", model = "llama3"}] }
+model = { models = [{provider = "anthropic", model = "claude-opus-4-8"}, {provider = "openai", model = "gpt-4o"}, {provider = "ollama", model = "llama3"}] }
 description = "Review the implementation and evaluate code quality"
 available_tools = ["read_file", "list_dir"]
 max_revisits = 3
@@ -190,7 +190,7 @@ transform = "direct"
 
 [stages.error_recovery]
 mode = "autonomous"
-model = { provider = "anthropic", model = "claude-sonnet-4-6", fallbacks = [{provider = "openai", model = "gpt-4o"}, {provider = "ollama", model = "llama3"}] }
+model = { models = [{provider = "anthropic", model = "claude-sonnet-4-6"}, {provider = "openai", model = "gpt-4o"}, {provider = "ollama", model = "llama3"}] }
 description = "Diagnose and resolve errors encountered during implementation"
 available_tools = ["read_file", "bash"]
 max_iterations = 10
