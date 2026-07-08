@@ -316,7 +316,7 @@ impl<'a> StageCallbacks for WorkerCallbacks<'a> {
         Some((&self.run_id, self.meta))
     }
 
-    async fn run_autonomous<F, Fut>(
+    async fn run_autonomous(
         &mut self,
         engine: &mut leviath_runtime::AgentEngine,
         entity: bevy_ecs::prelude::Entity,
@@ -327,15 +327,11 @@ impl<'a> StageCallbacks for WorkerCallbacks<'a> {
         routing: Option<&ToolResultRoutingConfig>,
         compaction: Option<&leviath_core::lifecycle::CompactionConfig>,
         _io: &mut dyn RunIO,
-        executor: &mut F,
-    ) -> anyhow::Result<(StageResult, Option<InferenceResponse>)>
-    where
-        F: FnMut(Vec<leviath_providers::ToolCall>) -> Fut + Send,
-        Fut: std::future::Future<Output = Vec<(String, String)>> + Send,
-    {
-        // Worker calls engine.run_inference_loop_filtered directly (not run_autonomous_stage)
+        executor: &mut leviath_runtime::ToolExecutorDyn<'_>,
+    ) -> anyhow::Result<(StageResult, Option<InferenceResponse>)> {
+        // Worker calls engine.run_inference_loop_filtered_dyn directly (not run_autonomous_stage)
         let response = engine
-            .run_inference_loop_filtered(
+            .run_inference_loop_filtered_dyn(
                 entity,
                 provider,
                 model,
@@ -540,13 +536,11 @@ pub async fn execute_worker(args: WorkerArgs) -> anyhow::Result<()> {
 ///
 /// `build_registry` is a plain function pointer (not `impl FnOnce`)
 /// deliberately: every test below passes a non-capturing closure, and a
-/// generic `impl FnOnce` parameter would make `run_worker_inner` -- and
-/// therefore the `WorkerCallbacks`/`exec`-closure instantiation of the
-/// shared `run_stage_loop` it drives -- monomorphize separately per test.
-/// A concrete `fn` pointer type lets every call site (production and test)
-/// share one instantiation, which is what fixed a real llvm-cov
-/// instantiation-merging undercount in `run_stage_loop`'s coverage (see
-/// `executor.rs`'s `run_stage_loop` doc comment).
+/// generic `impl FnOnce` parameter would make `run_worker_inner` monomorphize
+/// separately per test for no benefit. A concrete `fn` pointer type lets every
+/// call site (production and test) share one instantiation. (`run_stage_loop`
+/// itself is now fully type-erased — see its doc comment — so this no longer
+/// affects its coverage.)
 async fn run_worker_inner(
     args: &WorkerArgs,
     meta: &mut RunMeta,
@@ -651,9 +645,9 @@ async fn run_worker_inner(
         stage_idx: current_stage_idx.clone(),
         stage_name: current_stage_name.clone(),
     });
-    let mut exec = move |calls: Vec<leviath_providers::ToolCall>| {
+    let mut exec = move |calls: Vec<leviath_providers::ToolCall>| -> leviath_runtime::ToolResultsFuture<'static> {
         let dispatch_state = dispatch_state.clone();
-        async move { dispatch_tool_calls(&dispatch_state, calls).await }
+        Box::pin(async move { dispatch_tool_calls(&dispatch_state, calls).await })
     };
 
     let compaction_config = blueprint.compaction_config.clone();
@@ -2120,8 +2114,8 @@ mode = "autonomous"
         // Use a raw entity (no context window) to force an error
         let entity = bevy_ecs::prelude::Entity::from_raw(9999);
 
-        let mut exec = |_calls: Vec<leviath_providers::ToolCall>| {
-            std::future::ready(Vec::<(String, String)>::new())
+        let mut exec = |_calls: Vec<leviath_providers::ToolCall>| -> leviath_runtime::ToolResultsFuture<'static> {
+            Box::pin(std::future::ready(Vec::<(String, String)>::new()))
         };
         // Drive the closure body once so LLVM marks it as covered; the future
         // is immediately ready and can safely be dropped without polling.

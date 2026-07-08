@@ -334,7 +334,7 @@ impl StageCallbacks for ForegroundCallbacks {
         None // foreground uses stdin
     }
 
-    async fn run_autonomous<F, Fut>(
+    async fn run_autonomous(
         &mut self,
         engine: &mut leviath_runtime::AgentEngine,
         entity: bevy_ecs::prelude::Entity,
@@ -345,12 +345,8 @@ impl StageCallbacks for ForegroundCallbacks {
         routing: Option<&ToolResultRoutingConfig>,
         compaction: Option<&leviath_core::lifecycle::CompactionConfig>,
         io: &mut dyn RunIO,
-        executor: &mut F,
-    ) -> anyhow::Result<(StageResult, Option<InferenceResponse>)>
-    where
-        F: FnMut(Vec<leviath_providers::ToolCall>) -> Fut + Send,
-        Fut: std::future::Future<Output = Vec<(String, String)>> + Send,
-    {
+        executor: &mut leviath_runtime::ToolExecutorDyn<'_>,
+    ) -> anyhow::Result<(StageResult, Option<InferenceResponse>)> {
         run_autonomous_stage(
             engine,
             entity,
@@ -451,13 +447,11 @@ fn log_running_agent_foreground() {}
 /// `build_registry` is a plain function pointer (not `impl FnOnce`)
 /// deliberately: every test below passes a non-capturing closure, and a
 /// generic `impl FnOnce` parameter would make `run_foreground_with_registry`
-/// -- and therefore the `ForegroundCallbacks`/`exec`-closure instantiation of
-/// the shared `run_stage_loop` it drives -- monomorphize separately per
-/// test. A concrete `fn` pointer type lets every call site (production and
-/// test) share one instantiation, which is what fixed a real llvm-cov
-/// instantiation-merging undercount in `run_stage_loop`'s coverage (see
-/// `executor.rs`'s `run_stage_loop` doc comment, and the identical fix
-/// applied to `worker.rs`'s `run_worker_inner`).
+/// monomorphize separately per test for no benefit. A concrete `fn` pointer
+/// type lets every call site (production and test) share one instantiation.
+/// (`run_stage_loop` itself is now fully type-erased — see its doc comment —
+/// so this no longer affects its coverage, but the `fn`-pointer form is still
+/// the right minimal-instantiation choice here.)
 async fn run_foreground_with_registry(
     args: RunArgs,
     build_registry: fn(&Config) -> leviath_runtime::ProviderRegistry,
@@ -567,7 +561,7 @@ async fn run_foreground_with_registry(
     let exec_stage_name = current_stage_name.clone();
     let exec_agent_perms = agent_perms_arc.clone();
     let exec_global_perms = Arc::new(global_perms);
-    let mut exec = move |calls: Vec<leviath_providers::ToolCall>| {
+    let mut exec = move |calls: Vec<leviath_providers::ToolCall>| -> leviath_runtime::ToolResultsFuture<'static> {
         let state = ForegroundToolDispatchState {
             builtins: builtins.clone(),
             mcp: mcp.clone(),
@@ -579,7 +573,7 @@ async fn run_foreground_with_registry(
             agent_perms: exec_agent_perms.clone(),
             global_perms: exec_global_perms.clone(),
         };
-        async move {
+        Box::pin(async move {
             let interaction_backend = ForegroundInteractionBackend;
             dispatch_tool_calls_foreground(
                 &state,
@@ -588,7 +582,7 @@ async fn run_foreground_with_registry(
                 &crate::interaction::request_interaction_stdin,
             )
             .await
-        }
+        })
     };
 
     let compaction_config = blueprint.compaction_config.clone();

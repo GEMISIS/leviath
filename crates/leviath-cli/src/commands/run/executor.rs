@@ -8,7 +8,7 @@ use async_trait::async_trait;
 use leviath_core::blueprint::{StageMode, StageResult};
 use leviath_core::lifecycle::CompactionConfig;
 use leviath_core::Blueprint;
-use leviath_providers::{InferenceResponse, ToolCall};
+use leviath_providers::InferenceResponse;
 use leviath_runtime::{
     AgentEngine, AgentPool, AgentState, ContextWindow, InferenceConfig, ToolResultRoutingConfig,
 };
@@ -24,6 +24,13 @@ use super::io::RunIO;
 use super::stages::{run_interactive_points_stage, run_interactive_stage};
 
 use crate::runstate::RunMeta;
+
+/// Type-erased tool-executor plumbing, re-exported from leviath-runtime so the
+/// CLI stage loop and the engine's inference loop share one identical boxed
+/// closure type. Erasing the executor closure (instead of a generic `F: FnMut`)
+/// is what keeps `run_stage_loop`/`StageCallbacks` to a single monomorphization
+/// across the foreground, worker, and test callers — see `run_stage_loop`'s doc.
+pub use leviath_runtime::{ToolExecutorDyn, ToolResultsFuture};
 
 /// Shared state for the stage loop, passed by the caller.
 pub struct StageContext<'a> {
@@ -94,7 +101,7 @@ pub trait StageCallbacks: Send {
     ///
     /// Foreground calls `run_autonomous_stage`; worker calls
     /// `engine.run_inference_loop_filtered` directly.
-    async fn run_autonomous<F, Fut>(
+    async fn run_autonomous(
         &mut self,
         engine: &mut AgentEngine,
         entity: bevy_ecs::prelude::Entity,
@@ -105,11 +112,8 @@ pub trait StageCallbacks: Send {
         routing: Option<&ToolResultRoutingConfig>,
         compaction: Option<&CompactionConfig>,
         io: &mut dyn RunIO,
-        executor: &mut F,
-    ) -> anyhow::Result<(StageResult, Option<InferenceResponse>)>
-    where
-        F: FnMut(Vec<ToolCall>) -> Fut + Send,
-        Fut: std::future::Future<Output = Vec<(String, String)>> + Send;
+        executor: &mut ToolExecutorDyn<'_>,
+    ) -> anyhow::Result<(StageResult, Option<InferenceResponse>)>;
 
     /// Handle post-execution: record output, update tokens, mark stage complete/error.
     async fn on_stage_result(
@@ -150,40 +154,22 @@ pub trait StageCallbacks: Send {
 /// The unified stage loop. Both foreground and worker modes call this with
 /// their respective `StageCallbacks` implementation.
 ///
-/// COVERAGE-CONFIRMED-ARTIFACT: this function is generic over both
-/// `CB: StageCallbacks` and the executor closure `F`/`Fut`, so every distinct
-/// (`CB`, `F`)
-/// combination a caller uses compiles as a separate monomorphized
-/// instantiation. `cargo-llvm-cov`'s own instantiation-group merging can
-/// under-report a handful of regions/lines for this function even when every
-/// branch is genuinely exercised by some instantiation (confirmed by
-/// inspecting the merged per-file segment data directly: it shows 100% real
-/// coverage even when the summary table's region/line counts show a small
-/// residual miss). `run_worker_inner` (worker.rs) and
-/// `run_foreground_with_registry` (foreground.rs) both take their
-/// provider-registry builder as a concrete `fn` pointer rather than `impl
-/// FnOnce` specifically to keep their own (and therefore this function's)
-/// instantiation count to the legitimate minimum -- one per production
-/// `StageCallbacks` impl, plus one per test double that genuinely needs
-/// distinct behavior (see this module's `MockCallbacks`/`ModelCapture`/
-/// `VisitCapture`). Making `StageCallbacks` object-safe (erasing `CB` too)
-/// would remove the rest, but `run_autonomous`'s own `<F, Fut>` generics
-/// make that a cascading refactor through every implementor and through
-/// `stages.rs`'s executor-closure plumbing -- out of scope for a
-/// coverage-only pass.
+/// Fully type-erased: `cb` is a `&mut dyn StageCallbacks` and `exec` a
+/// `&mut ToolExecutorDyn`, so this function (and everything it inlines) compiles
+/// as a *single* monomorphization shared by the foreground, worker, and test
+/// callers — rather than one per (`CB`, `F`) combination. That single
+/// instantiation is exercised end-to-end by this module's tests, so its
+/// coverage no longer depends on `cargo-llvm-cov`'s instantiation-group merging
+/// (which previously under-reported this function's regions/lines whenever a
+/// branch was covered only in some other, real-IO-only instantiation).
 #[allow(clippy::too_many_arguments)]
-pub async fn run_stage_loop<CB, F, Fut>(
+pub async fn run_stage_loop(
     ctx: &mut StageContext<'_>,
-    cb: &mut CB,
+    cb: &mut dyn StageCallbacks,
     agent_id: &str,
     io: &mut dyn RunIO,
-    exec: &mut F,
-) -> anyhow::Result<()>
-where
-    CB: StageCallbacks,
-    F: FnMut(Vec<ToolCall>) -> Fut + Send,
-    Fut: std::future::Future<Output = Vec<(String, String)>> + Send,
-{
+    exec: &mut ToolExecutorDyn<'_>,
+) -> anyhow::Result<()> {
     let entry_name = ctx.blueprint.resolve_entry_stage_name();
     let mut current_stage_name_val = entry_name;
     let mut current_stage_idx_val = ctx
@@ -714,7 +700,7 @@ mod tests {
                 .map(|(id, meta)| (id.as_str(), meta))
         }
 
-        async fn run_autonomous<F, Fut>(
+        async fn run_autonomous(
             &mut self,
             _engine: &mut AgentEngine,
             _entity: bevy_ecs::prelude::Entity,
@@ -725,12 +711,8 @@ mod tests {
             _routing: Option<&ToolResultRoutingConfig>,
             _compaction: Option<&CompactionConfig>,
             _io: &mut dyn RunIO,
-            _executor: &mut F,
-        ) -> anyhow::Result<(StageResult, Option<InferenceResponse>)>
-        where
-            F: FnMut(Vec<leviath_providers::ToolCall>) -> Fut + Send,
-            Fut: std::future::Future<Output = Vec<(String, String)>> + Send,
-        {
+            _executor: &mut ToolExecutorDyn<'_>,
+        ) -> anyhow::Result<(StageResult, Option<InferenceResponse>)> {
             if self.run_autonomous_should_error {
                 return Err(anyhow::anyhow!("simulated autonomous failure"));
             }
@@ -886,10 +868,8 @@ mod tests {
         (engine, pool, entity)
     }
 
-    fn noop_exec(
-        _calls: Vec<leviath_providers::ToolCall>,
-    ) -> std::future::Ready<Vec<(String, String)>> {
-        std::future::ready(vec![])
+    fn noop_exec(_calls: Vec<leviath_providers::ToolCall>) -> ToolResultsFuture<'static> {
+        Box::pin(std::future::ready(vec![]))
     }
 
     // ─── Tests ──────────────────────────────────────────────────────────────
@@ -1353,7 +1333,7 @@ mod tests {
             fn get_run_context(&mut self) -> Option<(&str, &mut RunMeta)> {
                 None
             }
-            async fn run_autonomous<F, Fut>(
+            async fn run_autonomous(
                 &mut self,
                 _e: &mut AgentEngine,
                 _ent: bevy_ecs::prelude::Entity,
@@ -1364,12 +1344,8 @@ mod tests {
                 _r: Option<&ToolResultRoutingConfig>,
                 _c: Option<&CompactionConfig>,
                 _io: &mut dyn RunIO,
-                _ex: &mut F,
-            ) -> anyhow::Result<(StageResult, Option<InferenceResponse>)>
-            where
-                F: FnMut(Vec<leviath_providers::ToolCall>) -> Fut + Send,
-                Fut: std::future::Future<Output = Vec<(String, String)>> + Send,
-            {
+                _ex: &mut ToolExecutorDyn<'_>,
+            ) -> anyhow::Result<(StageResult, Option<InferenceResponse>)> {
                 Ok((StageResult::Success, None))
             }
             async fn on_stage_result(
@@ -1515,7 +1491,7 @@ mod tests {
             fn get_run_context(&mut self) -> Option<(&str, &mut RunMeta)> {
                 None
             }
-            async fn run_autonomous<F, Fut>(
+            async fn run_autonomous(
                 &mut self,
                 _e: &mut AgentEngine,
                 _ent: bevy_ecs::prelude::Entity,
@@ -1526,12 +1502,8 @@ mod tests {
                 _r: Option<&ToolResultRoutingConfig>,
                 _c: Option<&CompactionConfig>,
                 _io: &mut dyn RunIO,
-                _ex: &mut F,
-            ) -> anyhow::Result<(StageResult, Option<InferenceResponse>)>
-            where
-                F: FnMut(Vec<leviath_providers::ToolCall>) -> Fut + Send,
-                Fut: std::future::Future<Output = Vec<(String, String)>> + Send,
-            {
+                _ex: &mut ToolExecutorDyn<'_>,
+            ) -> anyhow::Result<(StageResult, Option<InferenceResponse>)> {
                 Ok((StageResult::Success, None))
             }
             async fn on_stage_result(
@@ -2198,5 +2170,61 @@ mod tests {
             cb.resolved_models,
             vec![("nonexistent".to_string(), "my-override-model".to_string())]
         );
+    }
+
+    #[tokio::test]
+    async fn stage_parameters_populate_inference_config() {
+        // A stage whose model.parameters carry temperature/max_output_tokens
+        // exercises the per-stage InferenceConfig resolution block, and the
+        // resulting InferenceConfig is written onto the entity.
+        let mut stage = make_stage("main");
+        let mut parameters = std::collections::HashMap::new();
+        parameters.insert("temperature".to_string(), serde_json::json!(0.5));
+        parameters.insert("max_output_tokens".to_string(), serde_json::json!(1024));
+        stage.model = ModelConfig {
+            models: vec![ModelEntry::new(
+                "anthropic".to_string(),
+                "claude-sonnet-4-6".to_string(),
+            )],
+            allow_user_default: true,
+            parameters,
+        };
+        let bp = make_blueprint(vec![stage]);
+        // registers "anthropic" so the stage resolves and runs
+        let (mut engine, mut pool, entity) = make_engine_and_entity_with_provider(&bp);
+        let tool_registry = make_tool_registry().await;
+        let mut cb = MockCallbacks::new();
+
+        let mut ctx = StageContext {
+            blueprint: &bp,
+            engine: &mut engine,
+            entity,
+            pool: &mut pool,
+            tool_registry: &tool_registry,
+            current_stage_name: Arc::new(Mutex::new(String::new())),
+            current_stage_perms: Arc::new(Mutex::new(HashMap::new())),
+            current_stage_idx: Arc::new(Mutex::new(0)),
+            model_override: None,
+            user_default_model: None,
+            compaction_ref: None,
+        };
+
+        run_stage_loop(
+            &mut ctx,
+            &mut cb,
+            "agent-1",
+            &mut MockIO::new(),
+            &mut noop_exec,
+        )
+        .await
+        .unwrap();
+
+        let cfg = ctx
+            .engine
+            .world()
+            .get::<InferenceConfig>(entity)
+            .expect("InferenceConfig should be set from stage parameters");
+        assert_eq!(cfg.temperature, Some(0.5));
+        assert_eq!(cfg.max_output_tokens, Some(1024));
     }
 }

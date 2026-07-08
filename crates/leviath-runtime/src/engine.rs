@@ -83,12 +83,12 @@ pub struct AgentEngine {
 /// Boxed future returned by a type-erased tool executor. See
 /// [`AgentEngine::run_inference_loop_filtered`] for why the executor
 /// closure is boxed instead of staying generic.
-type ToolResultsFuture<'a> =
+pub type ToolResultsFuture<'a> =
     std::pin::Pin<Box<dyn std::future::Future<Output = Vec<(String, String)>> + Send + 'a>>;
 
 /// Type-erased tool executor: takes a batch of tool calls, returns a boxed
 /// future resolving to `(tool_call_id, result)` pairs.
-type ToolExecutorDyn<'a> =
+pub type ToolExecutorDyn<'a> =
     dyn FnMut(Vec<leviath_providers::ToolCall>) -> ToolResultsFuture<'a> + Send + 'a;
 
 impl AgentEngine {
@@ -539,7 +539,11 @@ impl AgentEngine {
     /// Non-generic core of [`Self::run_inference_loop_filtered`]. See that
     /// method's doc comment for why this split exists.
     #[allow(clippy::too_many_arguments)]
-    async fn run_inference_loop_filtered_dyn<'e>(
+    /// Type-erased core of [`Self::run_inference_loop_filtered`]. Exposed so
+    /// callers that already hold a boxed [`ToolExecutorDyn`] (e.g. the CLI's
+    /// single-monomorphization stage loop) can invoke it without re-boxing
+    /// through the generic wrapper.
+    pub async fn run_inference_loop_filtered_dyn<'e>(
         &mut self,
         entity: Entity,
         provider_name: &str,

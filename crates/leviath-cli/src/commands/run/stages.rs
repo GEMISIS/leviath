@@ -1,7 +1,7 @@
 //! Stage runner functions: interactive, autonomous, interactive_points.
 
 use leviath_core::lifecycle::CompactionConfig;
-use leviath_runtime::AgentEngine;
+use leviath_runtime::{AgentEngine, ToolExecutorDyn};
 
 use crate::runstate::{self, RunMeta};
 
@@ -70,7 +70,7 @@ fn log_streaming_unavailable<E: std::fmt::Display>(_e: &E) {}
 /// file-based IPC channel (background worker). If `None`, stdin is used
 /// (foreground) via `io.get_user_input()`.
 #[allow(clippy::too_many_arguments)]
-pub async fn run_interactive_stage<F, Fut>(
+pub async fn run_interactive_stage(
     engine: &mut AgentEngine,
     entity: bevy_ecs::prelude::Entity,
     provider_name: &str,
@@ -80,12 +80,8 @@ pub async fn run_interactive_stage<F, Fut>(
     run_context: Option<(&str, &mut RunMeta)>,
     stage_name: &str,
     io: &mut dyn RunIO,
-    executor: &mut F,
-) -> anyhow::Result<()>
-where
-    F: FnMut(Vec<leviath_providers::ToolCall>) -> Fut + Send,
-    Fut: std::future::Future<Output = Vec<(String, String)>> + Send,
-{
+    executor: &mut ToolExecutorDyn<'_>,
+) -> anyhow::Result<()> {
     use crate::interaction::{
         make_interaction_id, request_interaction_async, response_as_text, InteractionRequest,
     };
@@ -113,7 +109,7 @@ where
         if has_tools {
             let per_turn_iters = 10_usize.min(max_iterations.saturating_sub(turn));
             let response = engine
-                .run_inference_loop_filtered(
+                .run_inference_loop_filtered_dyn(
                     entity,
                     provider_name,
                     model_name,
@@ -244,7 +240,7 @@ where
 
 /// Run an autonomous stage with the real tool executor.
 #[allow(clippy::too_many_arguments)]
-pub async fn run_autonomous_stage<F, Fut>(
+pub async fn run_autonomous_stage(
     engine: &mut AgentEngine,
     entity: bevy_ecs::prelude::Entity,
     provider_name: &str,
@@ -254,14 +250,10 @@ pub async fn run_autonomous_stage<F, Fut>(
     routing: Option<&leviath_runtime::ToolResultRoutingConfig>,
     compaction_config: Option<&CompactionConfig>,
     io: &mut dyn RunIO,
-    executor: &mut F,
-) -> anyhow::Result<()>
-where
-    F: FnMut(Vec<leviath_providers::ToolCall>) -> Fut + Send,
-    Fut: std::future::Future<Output = Vec<(String, String)>> + Send,
-{
+    executor: &mut ToolExecutorDyn<'_>,
+) -> anyhow::Result<()> {
     let response = engine
-        .run_inference_loop_filtered(
+        .run_inference_loop_filtered_dyn(
             entity,
             provider_name,
             model_name,
@@ -297,7 +289,7 @@ where
 /// file-based IPC channel (background worker). If `None`, stdin is used
 /// (foreground).
 #[allow(clippy::too_many_arguments)]
-pub async fn run_interactive_points_stage<F, Fut>(
+pub async fn run_interactive_points_stage(
     engine: &mut AgentEngine,
     entity: bevy_ecs::prelude::Entity,
     provider_name: &str,
@@ -309,12 +301,8 @@ pub async fn run_interactive_points_stage<F, Fut>(
     points: &[leviath_core::blueprint::InteractionPoint],
     run_context: Option<(&str, &mut RunMeta)>,
     io: &mut dyn RunIO,
-    executor: &mut F,
-) -> anyhow::Result<()>
-where
-    F: FnMut(Vec<leviath_providers::ToolCall>) -> Fut + Send,
-    Fut: std::future::Future<Output = Vec<(String, String)>> + Send,
-{
+    executor: &mut ToolExecutorDyn<'_>,
+) -> anyhow::Result<()> {
     run_interactive_points_stage_with(
         engine,
         entity,
@@ -339,7 +327,7 @@ where
 /// process stdin. Production callers always go through the public wrapper
 /// above, which passes the real [`crate::interaction::request_interaction_stdin`].
 #[allow(clippy::too_many_arguments)]
-async fn run_interactive_points_stage_with<F, Fut>(
+async fn run_interactive_points_stage_with(
     engine: &mut AgentEngine,
     entity: bevy_ecs::prelude::Entity,
     provider_name: &str,
@@ -351,14 +339,10 @@ async fn run_interactive_points_stage_with<F, Fut>(
     points: &[leviath_core::blueprint::InteractionPoint],
     run_context: Option<(&str, &mut RunMeta)>,
     io: &mut dyn RunIO,
-    executor: &mut F,
+    executor: &mut ToolExecutorDyn<'_>,
     ask_foreground: &(dyn Fn(&crate::interaction::InteractionRequest) -> crate::interaction::InteractionResponse
           + Sync),
-) -> anyhow::Result<()>
-where
-    F: FnMut(Vec<leviath_providers::ToolCall>) -> Fut + Send,
-    Fut: std::future::Future<Output = Vec<(String, String)>> + Send,
-{
+) -> anyhow::Result<()> {
     use crate::interaction::{
         make_interaction_id, request_interaction_async, response_as_choice, response_as_text,
         InteractionRequest,
@@ -403,7 +387,7 @@ where
             let iters = iterations_per_segment.min(remaining_iterations);
             if iters > 0 {
                 let response = engine
-                    .run_inference_loop_filtered(
+                    .run_inference_loop_filtered_dyn(
                         entity,
                         provider_name,
                         model_name,
@@ -548,7 +532,7 @@ where
 
     if remaining_iterations > 0 {
         let response = engine
-            .run_inference_loop_filtered(
+            .run_inference_loop_filtered_dyn(
                 entity,
                 provider_name,
                 model_name,
@@ -825,8 +809,8 @@ mod tests {
 
     fn noop_exec(
         _calls: Vec<leviath_providers::ToolCall>,
-    ) -> std::future::Ready<Vec<(String, String)>> {
-        std::future::ready(vec![])
+    ) -> leviath_runtime::ToolResultsFuture<'static> {
+        Box::pin(std::future::ready(vec![]))
     }
 
     // ─── Tests ──────────────────────────────────────────────────────────────
