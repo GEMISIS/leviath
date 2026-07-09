@@ -268,6 +268,30 @@ cargo llvm-cov --package <crate> --lib --html --open   # browsable per-crate rep
 
 Branch coverage isn't collected: `cargo llvm-cov --branch` reliably crashes with SIGSEGV inside LLVM's own coverage-mapping code, an [open, unresolved upstream bug](https://github.com/llvm/llvm-project/issues/119558) — see the doc comment at the top of `xtask/src/coverage.rs` for the full investigation.
 
+## Releases
+
+Leviath ships on three rolling channels, published automatically from CI:
+
+| Channel | Cadence | GitHub release/tag | Stability |
+|---|---|---|---|
+| **Alpha** | Nightly | `alpha` | Bleeding edge |
+| **Beta** | Weekly (Monday) | `beta` | Tested |
+| **Stable** | Weekly (Thursday, approval-gated) | `latest` | Production |
+
+Each channel tag is a *rolling* release — it's deleted and recreated on every
+publish so it always points at the newest build for that channel. That's what
+the shell/PowerShell installers resolve (`--channel alpha|beta|stable` →
+`alpha`/`beta`/`latest`).
+
+Separately, every **stable** deploy also cuts an **immutable versioned release**
+(`vX.Y.Z`, which carries GitHub's "Latest" badge). These never change, so they're
+what Homebrew and Scoop pin to and what `cargo install --tag vX.Y.Z` fetches. So
+if you see a `vX.Y.Z` release *and* a `latest` release for the same version, that's
+by design — one is the permanent archive, the other is the moving pointer.
+
+Install commands for each channel are in the
+[distribution repo](https://github.com/Sun-Forge-AI/leviath-dist).
+
 ## License
 
 [MIT](LICENSE)
