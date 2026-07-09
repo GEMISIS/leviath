@@ -329,6 +329,17 @@ pub fn parse_manifest(content: &str) -> anyhow::Result<Blueprint> {
                 stage.allow_complete = ac;
             }
 
+            // Parse accepts_messages flag: whether mid-run user messages are
+            // injected into context between inference calls. Defaults to true
+            // (via the Stage constructor); set false for stages that shouldn't
+            // be interrupted (e.g. a final report generation stage).
+            if let Some(am) = stage_value
+                .get("accepts_messages")
+                .and_then(|v| v.as_bool())
+            {
+                stage.accepts_messages = am;
+            }
+
             // Parse per-stage tool permissions: [stages.<name>.tool_permissions]
             if let Some(tp_table) = stage_value
                 .get("tool_permissions")
@@ -1254,6 +1265,35 @@ mode = "autonomous"
         let bp = parse_manifest(toml).unwrap();
         let stage = bp.find_stage("review").unwrap();
         assert!(!stage.allow_complete);
+    }
+
+    #[test]
+    fn parse_manifest_stage_accepts_messages_false() {
+        let toml = r#"
+[agent]
+name = "accepts-messages-test"
+
+[stages.report]
+mode = "autonomous"
+accepts_messages = false
+"#;
+        let bp = parse_manifest(toml).unwrap();
+        let stage = bp.find_stage("report").unwrap();
+        assert!(!stage.accepts_messages);
+    }
+
+    #[test]
+    fn parse_manifest_stage_accepts_messages_defaults_true() {
+        let toml = r#"
+[agent]
+name = "accepts-messages-default-test"
+
+[stages.report]
+mode = "autonomous"
+"#;
+        let bp = parse_manifest(toml).unwrap();
+        let stage = bp.find_stage("report").unwrap();
+        assert!(stage.accepts_messages);
     }
 
     #[test]
