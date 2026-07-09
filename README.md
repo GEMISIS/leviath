@@ -115,7 +115,64 @@ This generates an `agent.leviath` config you can customize — pick models per s
 
 ## Features
 
-**🧠 Structured Context Memory** — Six region types with deterministic eviction. Architecture docs stay pinned. Tool results evict first. Conversation auto-compacts into summaries. Route tool results to specific regions so file reads don't push out your system prompt. [Learn more →](https://leviath.dev/docs/context)
+<table>
+<tr>
+<td width="33%" valign="top">
+
+**🧠 Structured Context Memory**
+
+Six region types with deterministic eviction — architecture stays pinned, tool results evict first, conversation auto-compacts into summaries. Route reads to specific regions so a file dump can't push out your system prompt.
+
+[Learn more →](https://leviath.dev/docs/context)
+
+</td>
+<td width="33%" valign="top">
+
+**🔀 Multi-Stage Workflows**
+
+Each stage gets its own model, tools, and context layout. Run them linearly or as a [directed graph](https://leviath.dev/docs/stages#graph) with conditional transitions, error recovery, and LLM-driven routing — check it with `lev validate`.
+
+[Learn more →](https://leviath.dev/docs/stages)
+
+</td>
+<td width="33%" valign="top">
+
+**🎮 ECS Agent Engine**
+
+Agents run as entities in a [bevy_ecs](https://bevyengine.org/) world. Dozens share one process with game-engine-style scheduling, instead of that many OS processes fighting for resources.
+
+[Learn more →](https://leviath.dev/docs/engine)
+
+</td>
+</tr>
+<tr>
+<td width="33%" valign="top">
+
+**🧬 Sub-Agents**
+
+Agents spawn children with different blueprints. Any sub-agent, at any depth, can ask the user questions directly — no fire-and-forget, no routing through the parent.
+
+[Learn more →](https://leviath.dev/docs/sub-agents)
+
+</td>
+<td width="33%" valign="top">
+
+**💬 Mid-Run Collaboration**
+
+Message agents while they work, from the terminal or the dashboard. Input is injected between inference calls, so you can redirect, answer a question, or add constraints without restarting. On by default.
+
+</td>
+<td width="33%" valign="top">
+
+**🙋 Human-in-the-Loop**
+
+Force a checkpoint every time a stage runs with `interaction_points` (plus `followups` for detail), or grant the agent `ask_user_*` tools so it asks on its own judgment. Both gated by the same per-stage tool permissions.
+
+</td>
+</tr>
+</table>
+
+Context regions are the core primitive — declare them per agent, and each stage inherits or overrides the layout:
 
 ```toml
 [context.regions]
@@ -124,16 +181,6 @@ conversation = { kind = "compacting", threshold_tokens = 8000 } # auto-summarize
 tool_results = { kind = "temporary", max_tokens = 20000 }      # oldest evicts first
 scratch      = { kind = "clearable", max_tokens = 5000 }       # wipes clean between stages
 ```
-
-**🔀 Multi-Stage Workflows** — Each stage gets its own model, tools, context layout, and interaction mode. Sonnet for analysis, Opus for review, each seeing only the context it needs. Stages can be linear or a [directed graph](https://leviath.dev/docs/stages#graph) with conditional transitions, error recovery, and LLM-driven routing — check your graph with `lev validate`. [Learn more →](https://leviath.dev/docs/stages)
-
-**🎮 ECS Agent Engine** — Agents run as entities in a [bevy_ecs](https://bevyengine.org/) world. 50 agents share one process with game-engine-style scheduling, instead of 50 OS processes fighting for resources. [Learn more →](https://leviath.dev/docs/engine)
-
-**🧬 Sub-Agents** — Agents spawn children with different blueprints. Unlike other tools, sub-agents at any depth can independently ask the user questions — no fire-and-forget, no routing through the parent. [Learn more →](https://leviath.dev/docs/sub-agents)
-
-**💬 Mid-Run Collaboration** — Send messages to agents while they work. Type in the terminal or use the dashboard — your input is injected between inference calls so the agent sees it naturally. Redirect an implementation, answer a question, or add constraints without restarting. Enabled by default on all stages.
-
-**🙋 Two Ways to Put a Human in the Loop** — `interaction_points` in a stage's config force a checkpoint every time that stage runs (with optional `followups` so a multiple-choice answer like "Revise" can prompt for the actual details, not just a label). For input the *agent* decides it needs, grant it the `ask_user_text` / `ask_user_choice` / `ask_user_confirm` built-in tools via `available_tools` — it calls them on its own judgment, mid-reasoning, instead of guessing. Both are gated by the same `tool_permissions`/`available_tools` allow-or-deny rules as every other tool, so you decide per-stage which mechanism (forced checkpoint, agent's own judgment, or both) applies.
 
 ## Benchmarks
 
