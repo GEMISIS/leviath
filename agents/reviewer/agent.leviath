@@ -1,46 +1,112 @@
 [agent]
 name = "reviewer"
-version = "0.1.0"
-description = "Code review agent with focus on quality, security, and best practices"
+version = "0.2.0"
+description = "Code review agent — scan, deep review, and report with error recovery and multi-provider fallback"
 entry_stage = "scan"
 
+# Read-only agent: it inspects a diff/codebase and reports. No write access.
+[tool_permissions]
+read_file = "allow"
+list_dir  = "allow"
+bash      = "ask"
+
+# ─── Stage 1: Scan ────────────────────────────────────────────────────────────
 [stages.scan]
 mode = "autonomous"
-model = { models = [{provider = "anthropic", model = "claude-sonnet-4-6"}, {provider = "openai", model = "gpt-4o"}, {provider = "ollama", model = "llama3"}] }
-description = "Initial scan for obvious issues"
+model = { models = [{ provider = "anthropic", model = "claude-sonnet-4-6" }, { provider = "openai", model = "gpt-5.4-mini" }, { provider = "ollama", model = "qwen3.5:9b" }] }
+description = "Fast first pass for obvious issues"
+available_tools = ["read_file", "list_dir"]
+max_iterations = 12
+system_prompt = """
+Do a fast first pass over the diff/codebase. Flag the obvious: syntax smells,
+missing error handling, dead code, TODO/FIXME markers, and anything that looks
+risky. Don't go deep yet — just build a list of areas the deep review should
+scrutinize.
+"""
+
+[stages.scan.tool_routing]
+default_region = "analysis"
+[stages.scan.tool_routing.overrides]
+read_file = "findings"
 
 [stages.scan.transitions.deep_review]
+hint = "First pass complete — scrutinize the flagged areas"
+transform = "direct"
 
+[stages.scan.transitions.error_handler]
+condition = "error"
+transform = "direct"
+
+# ─── Stage 2: Deep review ─────────────────────────────────────────────────────
 [stages.deep_review]
 mode = "autonomous"
-model = { models = [{provider = "anthropic", model = "claude-opus-4-6"}, {provider = "openai", model = "gpt-4o"}, {provider = "ollama", model = "llama3"}] }
-description = "In-depth analysis of code quality, security, and architecture"
+model = { models = [{ provider = "anthropic", model = "claude-opus-4-8" }, { provider = "openai", model = "gpt-5.5" }, { provider = "ollama", model = "devstral:24b" }] }
+description = "In-depth analysis of correctness, security, and architecture"
+available_tools = ["read_file", "list_dir", "bash"]
+max_iterations = 25
 max_revisits = 2
+system_prompt = """
+Scrutinize the code in depth. For each finding, give: the location, the concrete
+failure scenario (inputs/state → wrong result or crash), the severity, and a
+recommended fix. Cover correctness bugs, security issues, race conditions,
+resource leaks, and architectural concerns. Use bash only to confirm a
+hypothesis (e.g. run a test), never to modify anything.
+"""
+
+[stages.deep_review.tool_routing]
+default_region = "analysis"
+[stages.deep_review.tool_routing.overrides]
+read_file = "findings"
 
 [stages.deep_review.transitions.report]
+hint = "Analysis complete — write the report"
 transform = "compact"
 
 [stages.deep_review.transitions.error_handler]
 condition = "error"
+transform = "direct"
 
+# ─── Stage 3: Report (terminal) ───────────────────────────────────────────────
 [stages.report]
 mode = "autonomous"
-model = { models = [{provider = "anthropic", model = "claude-sonnet-4-6"}, {provider = "openai", model = "gpt-4o"}, {provider = "ollama", model = "llama3"}] }
-description = "Generate actionable review report"
+model = { models = [{ provider = "anthropic", model = "claude-sonnet-4-6" }, { provider = "openai", model = "gpt-5.4-mini" }, { provider = "ollama", model = "qwen3.5:9b" }] }
+description = "Produce an actionable, ranked review report"
+available_tools = ["read_file"]
+max_iterations = 10
+system_prompt = """
+Produce the review report, findings ranked most-severe first. For each: file
+and line, one-sentence defect summary, the failure scenario, severity, and the
+fix. End with a short overall assessment (ship / ship-with-fixes / needs-work).
+"""
 
+# Explicit empty transitions = terminal.
+[stages.report.transitions]
+
+# ─── Stage 4: Error handler ───────────────────────────────────────────────────
 [stages.error_handler]
 mode = "autonomous"
-model = { models = [{provider = "anthropic", model = "claude-sonnet-4-6"}, {provider = "openai", model = "gpt-4o"}, {provider = "ollama", model = "llama3"}] }
-description = "Handle errors encountered during deep review"
+model = { models = [{ provider = "anthropic", model = "claude-sonnet-4-6" }, { provider = "openai", model = "gpt-5.4-mini" }, { provider = "ollama", model = "qwen3.5:9b" }] }
+description = "Handle errors encountered during scanning or review"
 available_tools = ["read_file", "bash"]
 max_iterations = 10
 max_revisits = 1
+system_prompt = """
+An error occurred during review. Diagnose it from context, note a workaround
+(e.g. skip an unreadable file and record why), then return to deep_review to
+continue with the rest.
+"""
 
 [stages.error_handler.transitions.deep_review]
+hint = "Recovered — resume the deep review"
+transform = "compact"
+
+[compaction]
+provider = "anthropic"
+model = "claude-sonnet-4-6"
 
 [context.regions]
-guidelines = { kind = "pinned", max_tokens = 3000 }
-diff = { kind = "pinned", max_tokens = 20000 }
-findings = { kind = "temporary", max_tokens = 25000 }
-analysis = { kind = "sliding_window", max_items = 15, max_tokens = 20000 }
-report = { kind = "clearable", max_tokens = 8000 }
+guidelines = { kind = "pinned",         max_tokens = 3000 }
+diff       = { kind = "pinned",         max_tokens = 20000 }
+findings   = { kind = "temporary",      max_tokens = 25000 }
+analysis   = { kind = "sliding_window", max_items = 15, max_tokens = 20000 }
+report     = { kind = "clearable",      max_tokens = 8000 }

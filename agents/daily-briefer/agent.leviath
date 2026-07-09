@@ -1,15 +1,18 @@
 [agent]
 name = "daily-briefer"
-version = "0.1.0"
-description = "Morning summary agent — gathers from multiple sources, prioritizes, delivers a concise briefing"
+version = "0.2.0"
+description = "Morning summary agent — gathers from multiple sources, prioritizes, and delivers a concise briefing, with a prioritize→collect gap-filling loop and error recovery"
 entry_stage = "collect"
 
+# ─── Stage 1: Collect ─────────────────────────────────────────────────────────
 [stages.collect]
 mode = "autonomous"
-model = { models = [{provider = "anthropic", model = "claude-sonnet-4-6"}, {provider = "openai", model = "gpt-4o"}, {provider = "ollama", model = "llama3"}] }
+model = { models = [{ provider = "anthropic", model = "claude-sonnet-4-6" }, { provider = "openai", model = "gpt-5.4-mini" }, { provider = "ollama", model = "qwen3.5:9b" }] }
 description = "Gather information from configured sources"
 available_tools = ["read_file", "bash"]
 max_iterations = 20
+# Prioritize can send us back here to fill a gap; cap the round-trips.
+max_revisits = 2
 system_prompt = """
 You are gathering information for a daily briefing. Check each configured source:
 - Read local files (notes, logs, task lists)
@@ -17,20 +20,42 @@ You are gathering information for a daily briefing. Check each configured source
 - Check for new items since the last briefing
 
 Collect raw data. Don't analyze yet — just gather everything relevant.
-Tag each item with its source and timestamp.
+Tag each item with its source and timestamp. If you were sent back to fill a
+specific gap, focus only on that gap.
 """
 
-[stages.collect.transitions.prioritize]
-hint = "All sources checked"
+# Raw pulls go into the raw_data region.
+[stages.collect.tool_routing]
+default_region = "scratch"
+[stages.collect.tool_routing.overrides]
+read_file = "raw_data"
+bash      = "raw_data"
 
+[stages.collect.transitions.prioritize]
+hint = "Sources checked — rank what was found"
+transform = "direct"
+
+[stages.collect.transitions.error_recovery]
+condition = "error"
+transform = "direct"
+
+# ─── Stage 2: Prioritize ──────────────────────────────────────────────────────
+# Branches: usually → brief, but can loop back to collect if a critical source
+# turned up nothing and a gap needs filling.
 [stages.prioritize]
 mode = "autonomous"
-model = { models = [{provider = "anthropic", model = "claude-sonnet-4-6"}, {provider = "openai", model = "gpt-4o"}, {provider = "ollama", model = "llama3"}] }
+model = { models = [{ provider = "anthropic", model = "claude-opus-4-8" }, { provider = "openai", model = "gpt-5.5" }, { provider = "ollama", model = "qwen3.6:27b" }] }
 description = "Rank items by urgency and relevance"
-max_iterations = 10
+max_iterations = 12
+max_revisits = 3
+transition_prompt = """
+You've triaged everything collected. Decide what happens next:
+- If a critical source came back empty and it's worth one more pass, respond with: collect
+- Otherwise, respond with: brief
+"""
 system_prompt = """
 Review everything collected and prioritize:
-1. **Action required** — things that need a decision or response today
+1. **Action required** — needs a decision or response today
 2. **Important updates** — significant changes or news worth knowing
 3. **FYI** — interesting but not urgent
 4. **Skip** — noise, duplicates, or irrelevant items
@@ -40,11 +65,21 @@ Drop anything in the Skip tier entirely.
 """
 
 [stages.prioritize.transitions.brief]
-hint = "Items prioritized"
+hint = "Items prioritized — compose the briefing"
+transform = "compact"
 
+[stages.prioritize.transitions.collect]
+hint = "A critical source came back empty — gather more"
+transform = "compact"
+
+[stages.prioritize.transitions.error_recovery]
+condition = "error"
+transform = "direct"
+
+# ─── Stage 3: Brief (terminal) ────────────────────────────────────────────────
 [stages.brief]
 mode = "autonomous"
-model = { models = [{provider = "anthropic", model = "claude-sonnet-4-6"}, {provider = "openai", model = "gpt-4o"}, {provider = "ollama", model = "llama3"}] }
+model = { models = [{ provider = "anthropic", model = "claude-sonnet-4-6" }, { provider = "openai", model = "gpt-5.4-mini" }, { provider = "ollama", model = "qwen3.5:9b" }] }
 description = "Compose the final briefing"
 available_tools = ["write_file"]
 max_iterations = 10
@@ -66,12 +101,33 @@ Keep each item to 1-2 sentences. Link to sources where relevant.
 The entire briefing should be readable in under 2 minutes.
 """
 
+# Explicit empty transitions = terminal.
+[stages.brief.transitions]
+
+# ─── Stage 4: Error recovery ──────────────────────────────────────────────────
+[stages.error_recovery]
+mode = "autonomous"
+model = { models = [{ provider = "anthropic", model = "claude-sonnet-4-6" }, { provider = "openai", model = "gpt-5.4-mini" }, { provider = "ollama", model = "qwen3.5:9b" }] }
+description = "Recover from a failed source fetch or parse"
+available_tools = ["read_file", "bash"]
+max_iterations = 8
+max_revisits = 1
+system_prompt = """
+A source fetch or parse failed. Read the error from context, note which source
+is unavailable, and record that gap so the briefing can flag it. Then return to
+prioritize with whatever was successfully collected.
+"""
+
+[stages.error_recovery.transitions.prioritize]
+hint = "Recovered — triage what we have"
+transform = "compact"
+
 [compaction]
 provider = "anthropic"
 model = "claude-sonnet-4-6"
 
 [context.regions]
-task = { kind = "pinned", max_tokens = 1000 }
-raw_data = { kind = "temporary", max_tokens = 40000 }
+task        = { kind = "pinned",         max_tokens = 1000 }
+raw_data    = { kind = "temporary",      max_tokens = 40000 }
 prioritized = { kind = "sliding_window", max_tokens = 15000 }
-scratch = { kind = "clearable", max_tokens = 5000 }
+scratch     = { kind = "clearable",      max_tokens = 5000 }

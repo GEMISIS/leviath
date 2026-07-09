@@ -1,13 +1,19 @@
 [agent]
 name = "log-analyzer"
-version = "0.1.0"
-description = "Analyzes log files — identifies anomalies, trends, and error patterns using Rhai scripts"
+version = "0.2.0"
+description = "Analyzes log files — identifies anomalies, trends, and error patterns via a scripted analyze↔script loop, with error recovery and multi-provider fallback"
 entry_stage = "ingest"
 
+[tool_permissions]
+read_file = "allow"
+list_dir  = "allow"
+bash      = "ask"
+
+# ─── Stage 1: Ingest ──────────────────────────────────────────────────────────
 [stages.ingest]
 mode = "autonomous"
-model = { models = [{provider = "anthropic", model = "claude-sonnet-4-6"}, {provider = "openai", model = "gpt-4o"}, {provider = "ollama", model = "llama3"}] }
-description = "Read log files, identify format and patterns"
+model = { models = [{ provider = "anthropic", model = "claude-sonnet-4-6" }, { provider = "openai", model = "gpt-5.4-mini" }, { provider = "ollama", model = "qwen3.5:9b" }] }
+description = "Read log files, identify format and structure"
 available_tools = ["read_file", "list_dir", "bash"]
 max_iterations = 15
 system_prompt = """
@@ -21,22 +27,34 @@ You are ingesting log files for analysis. Your job:
 Store your findings about format and structure in context for the next stage.
 """
 
+[stages.ingest.tool_routing]
+default_region = "scratch"
+[stages.ingest.tool_routing.overrides]
+read_file = "logs"
+
 [stages.ingest.transitions.analyze]
 hint = "Log format identified, ready to analyze"
+transform = "direct"
 
+[stages.ingest.transitions.error_recovery]
+condition = "error"
+transform = "direct"
+
+# ─── Stage 2: Analyze ─────────────────────────────────────────────────────────
 [stages.analyze]
 mode = "autonomous"
-model = { models = [{provider = "anthropic", model = "claude-opus-4-6"}, {provider = "openai", model = "gpt-4o"}, {provider = "ollama", model = "llama3"}] }
+model = { models = [{ provider = "anthropic", model = "claude-opus-4-8" }, { provider = "openai", model = "gpt-5.5" }, { provider = "ollama", model = "qwen3.6:27b" }] }
 description = "Identify anomalies, trends, and error patterns"
 available_tools = ["read_file", "bash"]
 max_iterations = 25
 max_revisits = 3
 transition_prompt = """
-You've analyzed the logs. Do you need to write a script to parse/filter/aggregate
-the data more precisely, or do you have enough findings to produce a report?
+You've analyzed the logs. Decide what happens next:
+- If you need a script to parse/filter/aggregate the data more precisely, respond with: script
+- If you have enough findings to produce a report, respond with: report
 """
 system_prompt = """
-You are analyzing log data. Look for:
+Analyze the log data. Look for:
 1. Error patterns — recurring errors, error spikes, cascading failures
 2. Anomalies — unusual request rates, latency outliers, unexpected status codes
 3. Trends — gradual degradation, growing queue depths, memory creep
@@ -46,6 +64,11 @@ You are analyzing log data. Look for:
 Quantify everything. Note timestamps and frequencies. Rank findings by severity.
 """
 
+[stages.analyze.tool_routing]
+default_region = "scratch"
+[stages.analyze.tool_routing.overrides]
+read_file = "logs"
+
 [stages.analyze.transitions.script]
 hint = "Need a script to parse/filter/aggregate log data"
 transform = "compact"
@@ -54,19 +77,27 @@ transform = "compact"
 hint = "Analysis complete — ready to produce report"
 transform = "compact"
 
+[stages.analyze.transitions.error_recovery]
+condition = "error"
+transform = "direct"
+
+# ─── Stage 3: Script ──────────────────────────────────────────────────────────
+# Self-loops for iterative script refinement (capped by max_revisits), and
+# hands results back to analyze.
 [stages.script]
 mode = "autonomous"
-model = { models = [{provider = "anthropic", model = "claude-sonnet-4-6"}, {provider = "openai", model = "gpt-4o"}, {provider = "ollama", model = "llama3"}] }
-description = "Write and execute Rhai scripts to parse, filter, and aggregate log data"
+model = { models = [{ provider = "anthropic", model = "claude-sonnet-4-6" }, { provider = "openai", model = "gpt-5.4-mini" }, { provider = "ollama", model = "qwen3.5:9b" }] }
+description = "Write and execute scripts to parse, filter, and aggregate log data"
 available_tools = ["read_file", "bash"]
 max_iterations = 20
 max_revisits = 5
 transition_prompt = """
-Your script has produced results. Do you need to refine the script or write
-another one, or are you ready to return to analysis with these results?
+Your script has produced results. Decide what happens next:
+- If you need to refine this script or write another, respond with: script
+- If the results answer the analysis questions, respond with: analyze
 """
 system_prompt = """
-You are writing Rhai scripts to process log data. Use bash to run your scripts
+You are writing scripts to process log data. Use bash to run your scripts
 against the log files. Common tasks:
 - Parse structured fields from log lines
 - Filter by time range, severity, or pattern
@@ -78,21 +109,30 @@ Write small, focused scripts. Test each one before building on it.
 Iterate until the output answers the analysis questions.
 """
 
+[stages.script.tool_routing]
+default_region = "scripts"
+[stages.script.tool_routing.overrides]
+read_file = "logs"
+
 [stages.script.transitions.script]
-hint = "Need to refine or write another script"
+hint = "Refine or write another script"
 transform = "direct"
 
 [stages.script.transitions.analyze]
 hint = "Script results ready — return to analysis"
 transform = "compact"
 
+[stages.script.transitions.error_recovery]
+condition = "error"
+transform = "direct"
+
+# ─── Stage 4: Report (terminal) ───────────────────────────────────────────────
 [stages.report]
 mode = "autonomous"
-model = { models = [{provider = "anthropic", model = "claude-opus-4-6"}, {provider = "openai", model = "gpt-4o"}, {provider = "ollama", model = "llama3"}] }
+model = { models = [{ provider = "anthropic", model = "claude-opus-4-8" }, { provider = "openai", model = "gpt-5.5" }, { provider = "ollama", model = "qwen3.6:27b" }] }
 description = "Produce a structured analysis report with findings"
 available_tools = ["write_file"]
 max_iterations = 10
-accepts_messages = false  # generating final report, don't interrupt
 system_prompt = """
 Write a structured log analysis report. Include:
 - Executive summary (top findings in 3-5 bullets)
@@ -106,12 +146,33 @@ Write a structured log analysis report. Include:
 Be precise. Include timestamps, counts, and percentages. Reference specific log lines.
 """
 
+# Explicit empty transitions = terminal.
+[stages.report.transitions]
+
+# ─── Stage 5: Error recovery ──────────────────────────────────────────────────
+[stages.error_recovery]
+mode = "autonomous"
+model = { models = [{ provider = "anthropic", model = "claude-sonnet-4-6" }, { provider = "openai", model = "gpt-5.4-mini" }, { provider = "ollama", model = "qwen3.5:9b" }] }
+description = "Recover from a failed read or script execution"
+available_tools = ["read_file", "bash"]
+max_iterations = 10
+max_revisits = 1
+system_prompt = """
+A read or script execution failed. Read the error from context, diagnose it
+(e.g. a malformed log line, a script bug, a missing file), note a workaround,
+then return to analyze to continue with the data available.
+"""
+
+[stages.error_recovery.transitions.analyze]
+hint = "Recovered — resume analysis"
+transform = "compact"
+
 [compaction]
 provider = "anthropic"
 model = "claude-sonnet-4-6"
 
 [context.regions]
-logs = { kind = "temporary", max_tokens = 50000 }
+logs    = { kind = "temporary",  max_tokens = 50000 }
 scripts = { kind = "compacting", threshold_tokens = 20000, max_tokens = 30000 }
-findings = { kind = "pinned", max_tokens = 15000 }
-scratch = { kind = "clearable", max_tokens = 5000 }
+findings = { kind = "pinned",    max_tokens = 15000 }
+scratch = { kind = "clearable",  max_tokens = 5000 }

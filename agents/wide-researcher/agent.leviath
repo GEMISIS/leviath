@@ -1,36 +1,55 @@
 [agent]
 name = "wide-researcher"
-version = "0.1.0"
-description = "Broad multi-topic survey — cast a wide net, compare approaches, surface what's interesting"
+version = "0.2.0"
+description = "Broad multi-topic survey — cast a wide net, compare approaches, surface what's interesting, with a survey↔compare loop and error recovery"
 entry_stage = "survey"
 
+# ─── Stage 1: Survey ──────────────────────────────────────────────────────────
 [stages.survey]
 mode = "autonomous"
-model = { models = [{provider = "anthropic", model = "claude-sonnet-4-6"}, {provider = "openai", model = "gpt-4o"}, {provider = "ollama", model = "llama3"}] }
+model = { models = [{ provider = "anthropic", model = "claude-sonnet-4-6" }, { provider = "openai", model = "gpt-5.4-mini" }, { provider = "ollama", model = "qwen3.5:9b" }] }
 description = "Survey the landscape across multiple sub-topics"
 available_tools = ["read_file", "bash"]
 max_iterations = 30
 max_revisits = 2
 system_prompt = """
-You are conducting a broad survey across a topic area. Your goal is to map the landscape:
+Conduct a broad survey across a topic area. Map the landscape:
 - What are the major approaches/schools of thought?
 - Who are the key players/projects/companies?
 - What's the current state of the art?
 - What's actively being worked on vs mature vs abandoned?
 
-Cast a wide net. Breadth over depth. Note interesting threads worth pulling on later.
+Cast a wide net. Breadth over depth. Note interesting threads worth pulling on
+later. If you were sent back, focus on the coverage gap named.
 """
+
+[stages.survey.tool_routing]
+default_region = "scratch"
+[stages.survey.tool_routing.overrides]
+read_file = "landscape"
+bash      = "landscape"
 
 [stages.survey.transitions.compare]
 hint = "Landscape mapped — ready to compare approaches"
+transform = "direct"
 
+[stages.survey.transitions.error_recovery]
+condition = "error"
+transform = "direct"
+
+# ─── Stage 2: Compare ─────────────────────────────────────────────────────────
 [stages.compare]
 mode = "autonomous"
-model = { models = [{provider = "anthropic", model = "claude-opus-4-6"}, {provider = "openai", model = "gpt-4o"}, {provider = "ollama", model = "llama3"}] }
+model = { models = [{ provider = "anthropic", model = "claude-opus-4-8" }, { provider = "openai", model = "gpt-5.5" }, { provider = "ollama", model = "qwen3.6:27b" }] }
 description = "Compare and contrast findings across sub-topics"
 available_tools = ["read_file"]
 max_iterations = 15
-transition_prompt = "Have you covered enough ground to write a useful summary, or are there areas worth surveying further?"
+max_revisits = 2
+transition_prompt = """
+You've compared the approaches you found. Decide what happens next:
+- If there are areas worth surveying further before you can write a useful overview, respond with: survey
+- If you've covered enough ground, respond with: summarize
+"""
 system_prompt = """
 Compare what you found across the landscape:
 - What patterns emerge across different approaches?
@@ -43,16 +62,21 @@ Organize by theme, not by source. Help the reader see the shape of the field.
 """
 
 [stages.compare.transitions.survey]
-hint = "Gaps in coverage — need to survey additional areas"
+hint = "Gaps in coverage — survey additional areas"
 transform = "compact"
 
 [stages.compare.transitions.summarize]
-hint = "Comparison complete"
+hint = "Comparison complete — write the overview"
 transform = "compact"
 
+[stages.compare.transitions.error_recovery]
+condition = "error"
+transform = "direct"
+
+# ─── Stage 3: Summarize (terminal) ────────────────────────────────────────────
 [stages.summarize]
 mode = "autonomous"
-model = { models = [{provider = "anthropic", model = "claude-sonnet-4-6"}, {provider = "openai", model = "gpt-4o"}, {provider = "ollama", model = "llama3"}] }
+model = { models = [{ provider = "anthropic", model = "claude-sonnet-4-6" }, { provider = "openai", model = "gpt-5.4-mini" }, { provider = "ollama", model = "qwen3.5:9b" }] }
 description = "Produce a landscape overview with recommendations"
 available_tools = ["write_file"]
 max_iterations = 10
@@ -68,13 +92,33 @@ Write a landscape overview based on your survey. Include:
 Write concisely. The reader wants to understand the lay of the land quickly.
 """
 
+# Explicit empty transitions = terminal.
+[stages.summarize.transitions]
+
+# ─── Stage 4: Error recovery ──────────────────────────────────────────────────
+[stages.error_recovery]
+mode = "autonomous"
+model = { models = [{ provider = "anthropic", model = "claude-sonnet-4-6" }, { provider = "openai", model = "gpt-5.4-mini" }, { provider = "ollama", model = "qwen3.5:9b" }] }
+description = "Recover from a failed source fetch during the survey"
+available_tools = ["read_file", "bash"]
+max_iterations = 8
+max_revisits = 1
+system_prompt = """
+A source fetch failed during the survey. Read the error from context, note the
+gap, and return to compare to continue with the coverage you have.
+"""
+
+[stages.error_recovery.transitions.compare]
+hint = "Recovered — continue comparing"
+transform = "compact"
+
 [compaction]
 provider = "anthropic"
 model = "claude-sonnet-4-6"
 
 [context.regions]
-query = { kind = "pinned", max_tokens = 1000 }
-landscape = { kind = "temporary", max_tokens = 50000 }
-comparisons = { kind = "compacting", threshold_tokens = 25000, max_tokens = 35000 }
+query              = { kind = "pinned",          max_tokens = 1000 }
+landscape          = { kind = "temporary",       max_tokens = 50000 }
+comparisons        = { kind = "compacting",      threshold_tokens = 25000, max_tokens = 35000 }
 comparison_history = { kind = "compact_history", source_region = "comparisons", max_tokens = 10000 }
-scratch = { kind = "clearable", max_tokens = 5000 }
+scratch            = { kind = "clearable",       max_tokens = 5000 }

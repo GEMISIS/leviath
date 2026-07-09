@@ -1,12 +1,13 @@
 [agent]
 name = "writing-assistant"
-version = "0.1.0"
-description = "Research-backed writing — from topic to polished draft with self-editing"
+version = "0.2.0"
+description = "Research-backed writing — from topic to polished draft, with an interactive outline checkpoint, a draft↔edit polish loop, and error recovery"
 entry_stage = "research"
 
+# ─── Stage 1: Research ────────────────────────────────────────────────────────
 [stages.research]
 mode = "autonomous"
-model = { models = [{provider = "anthropic", model = "claude-sonnet-4-6"}, {provider = "openai", model = "gpt-4o"}, {provider = "ollama", model = "llama3"}] }
+model = { models = [{ provider = "anthropic", model = "claude-sonnet-4-6" }, { provider = "openai", model = "gpt-5.4-mini" }, { provider = "ollama", model = "qwen3.5:9b" }] }
 description = "Research the topic and gather supporting material"
 available_tools = ["read_file", "bash"]
 max_iterations = 20
@@ -18,34 +19,90 @@ You are researching a topic to prepare for writing. Gather:
 - Existing coverage (what's already been written about this)
 - Counterarguments and alternative perspectives
 
-Organize your findings by theme. Note which points are well-supported
-vs speculative. Flag anything that needs verification.
+Organize your findings by theme. Note which points are well-supported vs
+speculative. Flag anything that needs verification. If you were sent back to
+research more, focus on the gap the user or outline identified.
 """
+
+[stages.research.tool_routing]
+default_region = "scratch"
+[stages.research.tool_routing.overrides]
+read_file = "research"
+bash      = "research"
 
 [stages.research.transitions.outline]
 hint = "Enough material to structure the piece"
+transform = "direct"
 
+[stages.research.transitions.error_recovery]
+condition = "error"
+transform = "direct"
+
+# ─── Stage 2: Outline (human-in-the-loop) ─────────────────────────────────────
+# The user reviews the proposed outline and chooses how to proceed. The choice
+# is fed into the transition decision (multiple outgoing edges force LLM
+# routing); allow_complete lets the user abort the piece entirely.
 [stages.outline]
-mode = "interactive"
-model = { models = [{provider = "anthropic", model = "claude-sonnet-4-6"}, {provider = "openai", model = "gpt-4o"}, {provider = "ollama", model = "llama3"}] }
+mode = "interactive_points"
+model = { models = [{ provider = "anthropic", model = "claude-opus-4-8" }, { provider = "openai", model = "gpt-5.5" }, { provider = "ollama", model = "qwen3.6:27b" }] }
 description = "Create and refine an outline with user input"
+available_tools = ["ask_user_text"]
 max_iterations = 15
+max_revisits = 4
+allow_complete = true
+transition_prompt = """
+You've shown the outline and asked the user what to do:
+- If they approved it, transition to 'draft'.
+- If they asked to revise or expand it, transition back to 'outline', address
+  their specific feedback (see the "detail" message in context), and present an
+  updated outline before asking again.
+- If they want to gather more material first, transition to 'research'.
+- If they chose to abort, respond DONE — do not draft anything.
+"""
 system_prompt = """
-Based on your research, propose an outline for the piece. Include:
+Based on your research, propose an outline for the piece:
 - Thesis / main argument
 - Section structure with key points per section
 - Where specific evidence or examples will go
 - Estimated length
 
-Present the outline and ask for feedback. Iterate based on the user's direction.
+Present the outline, then let the user steer. If they revise or expand, produce
+an updated outline grounded in their actual feedback before asking again.
 """
 
 [stages.outline.transitions.draft]
-hint = "Outline approved"
+hint = "Outline approved — write the draft"
+transform = "compact"
 
+[stages.outline.transitions.outline]
+hint = "User asked to revise or expand — keep refining the outline"
+transform = "direct"
+
+[stages.outline.transitions.research]
+hint = "User wants more material before committing to a structure"
+transform = "compact"
+
+[stages.outline.transitions.error_recovery]
+condition = "error"
+transform = "direct"
+
+[[stages.outline.interaction_points]]
+name     = "outline_approval"
+prompt   = "Review the outline above. What would you like to do?"
+required = true
+style    = "multiple_choice"
+options  = ["Approve — write the draft", "Revise — I'll describe changes", "Expand a section — I'll say which", "Research more first", "Abort — cancel this piece"]
+
+# Revise/Expand promise the user a chance to describe what they want — without a
+# followup, only the static label reaches the model and the intent is lost.
+[stages.outline.interaction_points.followups]
+"Revise — I'll describe changes" = "What would you like to change about the outline?"
+"Expand a section — I'll say which" = "Which section should be expanded, and what should it cover?"
+
+# ─── Stage 3: Draft ───────────────────────────────────────────────────────────
 [stages.draft]
 mode = "autonomous"
-model = { models = [{provider = "anthropic", model = "claude-opus-4-6"}, {provider = "openai", model = "gpt-4o"}, {provider = "ollama", model = "llama3"}] }
+model = { models = [{ provider = "anthropic", model = "claude-opus-4-8" }, { provider = "openai", model = "gpt-5.5" }, { provider = "ollama", model = "qwen3.6:27b" }] }
 description = "Write the full draft"
 available_tools = ["write_file"]
 max_iterations = 25
@@ -63,18 +120,29 @@ Write the complete piece. Don't leave placeholders or TODO markers.
 """
 
 [stages.draft.transitions.edit]
-hint = "Draft complete"
+hint = "Draft complete — self-edit"
 transform = "compact"
 
+[stages.draft.transitions.error_recovery]
+condition = "error"
+transform = "direct"
+
+# ─── Stage 4: Edit ────────────────────────────────────────────────────────────
+# allow_complete lets the editor ship the piece (DONE) instead of being forced
+# into another rewrite pass.
 [stages.edit]
 mode = "autonomous"
-model = { models = [{provider = "anthropic", model = "claude-opus-4-6"}, {provider = "openai", model = "gpt-4o"}, {provider = "ollama", model = "llama3"}] }
+model = { models = [{ provider = "anthropic", model = "claude-opus-4-8" }, { provider = "openai", model = "gpt-5.5" }, { provider = "ollama", model = "qwen3.6:27b" }] }
 description = "Self-edit for clarity, accuracy, and flow"
 available_tools = ["read_file", "write_file"]
 max_iterations = 15
 max_revisits = 2
+allow_complete = true
 transition_prompt = """
-Review your edits. Is the piece ready for the reader, or does it need another pass?
+Review your edits. Decide what happens next:
+- If there are structural problems that need a significant rewrite, respond with: draft
+- If the piece is ready for the reader, respond with: DONE
+
 Be honest — if it's good, ship it. Don't over-polish.
 """
 system_prompt = """
@@ -89,20 +157,47 @@ Edit the draft with fresh eyes. Check for:
 Make the edits directly. Write the improved version to the output file.
 """
 
+# Custom transform: keep the task/outline/research pinned, compact the draft
+# discussion into a rewrite brief, and clear scratch before rewriting.
 [stages.edit.transitions.draft]
-hint = "Structural issues found — needs significant rewriting"
-transform = "compact"
+hint = "Structural issues found — needs a significant rewrite"
+transform = "custom"
+[stages.edit.transitions.draft.transform_config]
+carry = ["task", "outline", "research"]
+compact = ["draft"]
+clear = ["scratch"]
+compact_prompt = "Summarize the structural problems as a numbered rewrite brief."
 
-# edit with no other always-transitions = terminal when satisfied
+[stages.edit.transitions.error_recovery]
+condition = "error"
+transform = "direct"
+
+# ─── Stage 5: Error recovery ──────────────────────────────────────────────────
+[stages.error_recovery]
+mode = "autonomous"
+model = { models = [{ provider = "anthropic", model = "claude-sonnet-4-6" }, { provider = "openai", model = "gpt-5.4-mini" }, { provider = "ollama", model = "qwen3.5:9b" }] }
+description = "Recover from a failed research fetch or file write"
+available_tools = ["read_file", "bash"]
+max_iterations = 8
+max_revisits = 1
+system_prompt = """
+Something failed (a research fetch or a file write). Read the error from
+context, note a workaround, then return to draft to continue with the material
+available.
+"""
+
+[stages.error_recovery.transitions.draft]
+hint = "Recovered — continue drafting"
+transform = "compact"
 
 [compaction]
 provider = "anthropic"
 model = "claude-sonnet-4-6"
 
 [context.regions]
-task = { kind = "pinned", max_tokens = 2000 }
-research = { kind = "temporary", max_tokens = 40000 }
-outline = { kind = "pinned", max_tokens = 3000 }
-draft = { kind = "compacting", threshold_tokens = 35000, max_tokens = 50000 }
+task          = { kind = "pinned",          max_tokens = 2000 }
+research      = { kind = "temporary",       max_tokens = 40000 }
+outline       = { kind = "pinned",          max_tokens = 3000 }
+draft         = { kind = "compacting",      threshold_tokens = 35000, max_tokens = 50000 }
 draft_history = { kind = "compact_history", source_region = "draft", max_tokens = 10000 }
-scratch = { kind = "clearable", max_tokens = 5000 }
+scratch       = { kind = "clearable",       max_tokens = 5000 }

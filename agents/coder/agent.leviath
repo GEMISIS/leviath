@@ -1,72 +1,165 @@
 [agent]
 name = "coder"
-version = "0.1.0"
-description = "Multi-stage coding agent with structured context"
+version = "0.2.0"
+description = "Multi-stage coding agent — analyze, implement, and review with graph-based error recovery and multi-provider model fallback"
 entry_stage = "analyze"
 
+# Model selection is an ordered fallback list per stage: the first provider
+# configured at runtime wins. Anthropic first, then OpenAI, then a local Ollama
+# model as a last resort. `allow_user_default` (on by default) still lets the
+# user's configured default model catch anything unlisted.
+
+# Global tool permissions: write/exec require approval unless overridden.
+[tool_permissions]
+read_file  = "allow"
+list_dir   = "allow"
+write_file = "ask"
+edit_file  = "ask"
+bash       = "ask"
+
+# ─── Stage 1: Analyze ─────────────────────────────────────────────────────────
 [stages.analyze]
 mode = "autonomous"
-model = { models = [{provider = "anthropic", model = "claude-sonnet-4-6"}, {provider = "openai", model = "gpt-4o"}, {provider = "ollama", model = "llama3"}] }
-description = "Understand requirements and plan implementation"
+model = { models = [{ provider = "anthropic", model = "claude-sonnet-4-6" }, { provider = "openai", model = "gpt-5.4-mini" }, { provider = "ollama", model = "qwen3.5:9b" }] }
+description = "Understand requirements and plan the implementation"
 available_tools = ["read_file", "list_dir"]
 max_iterations = 15
-
 system_prompt = """
 You are analyzing a coding task to produce a concise implementation plan.
 Use list_dir or read_file only if you need to check what already exists in the project.
 For a fresh task with no existing code, skip exploration entirely.
-Output a short bullet-list plan: which files to create, what each does, and any key decisions.
+Output a short bullet-list plan: which files to create/modify, what each does, and any key decisions.
 Be brief — the implement stage will do the actual coding.
 """
 
-[stages.analyze.transitions.implement]
+# Route exploration output into the persistent codebase region, not scratch.
+[stages.analyze.tool_routing]
+default_region = "scratch"
+[stages.analyze.tool_routing.overrides]
+read_file = "codebase"
+list_dir  = "codebase"
 
+[stages.analyze.transitions.implement]
+hint = "Plan ready — begin implementation"
+transform = "direct"
+
+[stages.analyze.transitions.error_recovery]
+condition = "error"
+transform = "direct"
+
+# ─── Stage 2: Implement ───────────────────────────────────────────────────────
 [stages.implement]
 mode = "autonomous"
-model = { models = [{provider = "anthropic", model = "claude-sonnet-4-6"}, {provider = "openai", model = "gpt-4o"}, {provider = "ollama", model = "llama3"}] }
+model = { models = [{ provider = "anthropic", model = "claude-opus-4-8" }, { provider = "openai", model = "gpt-5.5" }, { provider = "ollama", model = "devstral:24b" }] }
 description = "Write code according to the plan"
-available_tools = ["write_file", "read_file", "edit_file", "list_dir", "bash"]
+available_tools = ["write_file", "read_file", "edit_file", "list_dir", "bash", "ask_user_confirm"]
 max_iterations = 50
 max_revisits = 3
-
 system_prompt = """
 You are implementing a coding task. Write working, production-quality code.
-Use write_file to create each file. Use bash to run tests or verify the build once all files are written.
+Use write_file to create files and edit_file to modify existing ones.
+Use bash to run tests or verify the build once files are written.
 Do NOT spend iterations reading the codebase unless you need to check something specific.
-Create all files needed to complete the task, then confirm with a short summary of what was created.
+
+If you hit a destructive or hard-to-reverse action you're unsure about, use
+ask_user_confirm before proceeding. Otherwise work autonomously.
+
+Create/modify all files needed, then confirm with a short summary of what changed
+and whether tests passed.
 """
+
+[stages.implement.tool_routing]
+default_region = "scratch"
+[stages.implement.tool_routing.overrides]
+read_file = "codebase"
+list_dir  = "codebase"
 
 [stages.implement.transitions.review]
+hint = "Implementation complete, ready for review"
 transform = "compact"
 
+[stages.implement.transitions.error_recovery]
+condition = "error"
+transform = "direct"
+
+# ─── Stage 3: Review ──────────────────────────────────────────────────────────
+# Interactive: the user sees the review before it decides. allow_complete lets
+# the reviewer end the run (DONE) when the code is clean instead of being forced
+# back into another implementation pass by a lone outgoing edge.
 [stages.review]
 mode = "interactive"
-model = { models = [{provider = "anthropic", model = "claude-opus-4-6"}, {provider = "openai", model = "gpt-4o"}, {provider = "ollama", model = "llama3"}] }
-description = "Review code before finalizing (requires human approval)"
+model = { models = [{ provider = "anthropic", model = "claude-opus-4-8" }, { provider = "openai", model = "gpt-5.5" }, { provider = "ollama", model = "devstral:24b" }] }
+description = "Review the code before finalizing"
 available_tools = ["read_file", "list_dir"]
 max_iterations = 10
-max_revisits = 2
-transition_prompt = "Review complete. Is the code ready, or does it need fixes?"
+max_revisits = 3
+allow_complete = true
+transition_prompt = """
+Review complete. Based on your findings:
+- If there are issues that must be fixed, respond with: implement
+- If the code is clean and correct, respond with: DONE
 
+Minor style nits don't warrant another implementation pass.
+"""
 system_prompt = """
-You are reviewing the implementation. Use read_file to read the files that were just created.
-Provide concise, actionable feedback: correctness, edge cases, error handling, and code quality.
-End with a clear verdict: approve as-is, or list specific changes needed.
+You are reviewing the implementation. Use read_file to read the files that were
+just created or modified. Provide concise, actionable feedback: correctness,
+edge cases, error handling, security, and code quality.
+
+End with one of:
+  APPROVED — no significant issues
+  NEEDS CHANGES — <numbered list of specific required fixes>
 """
 
+[stages.review.tool_permissions]
+read_file = "allow"
+list_dir  = "allow"
+
+# Custom transform: carry the plan/architecture/codebase forward, compact the
+# review conversation into a fix list, and clear scratch before re-implementing.
 [stages.review.transitions.implement]
-hint = "Issues found"
+hint = "Issues found — needs another implementation pass"
+transform = "custom"
+[stages.review.transitions.implement.transform_config]
+carry = ["architecture", "task", "codebase"]
+compact = ["conversation"]
+clear = ["scratch"]
+compact_prompt = "Summarize the review findings as a numbered list of required fixes."
+
+[stages.review.transitions.error_recovery]
+condition = "error"
+transform = "direct"
+
+# ─── Stage 4: Error recovery ──────────────────────────────────────────────────
+# Only reachable via error edges — invisible during normal flow.
+[stages.error_recovery]
+mode = "autonomous"
+model = { models = [{ provider = "anthropic", model = "claude-sonnet-4-6" }, { provider = "openai", model = "gpt-5.4-mini" }, { provider = "ollama", model = "qwen3.5:9b" }] }
+description = "Diagnose and resolve errors encountered during implementation"
+available_tools = ["read_file", "bash"]
+max_iterations = 10
+max_revisits = 2
+system_prompt = """
+An error occurred. Read the error details from the conversation context, diagnose
+the root cause, and suggest a fix or workaround. Then transition back to implement
+to retry.
+"""
+
+[stages.error_recovery.transitions.implement]
+hint = "Error diagnosed — retry implementation"
 transform = "compact"
 
+# ─── Compaction ───────────────────────────────────────────────────────────────
 [compaction]
 provider = "anthropic"
 model = "claude-sonnet-4-6"
 
+# ─── Context layout ───────────────────────────────────────────────────────────
 [context.regions]
-architecture = { kind = "pinned", max_tokens = 4000 }
-task = { kind = "pinned", max_tokens = 2000 }
-codebase = { kind = "temporary", max_tokens = 30000 }
-conversation = { kind = "sliding_window", max_items = 20, max_tokens = 15000 }
-implementation = { kind = "compacting", threshold_tokens = 25000, max_tokens = 40000 }
-history = { kind = "compact_history", source_region = "implementation", max_tokens = 8000 }
-scratch = { kind = "clearable", max_tokens = 10000 }
+architecture   = { kind = "pinned",          max_tokens = 4000 }
+task           = { kind = "pinned",          max_tokens = 2000 }
+codebase       = { kind = "temporary",       max_tokens = 30000 }
+conversation   = { kind = "sliding_window",  max_items = 20, max_tokens = 15000 }
+implementation = { kind = "compacting",      threshold_tokens = 25000, max_tokens = 40000 }
+history        = { kind = "compact_history", source_region = "implementation", max_tokens = 8000 }
+scratch        = { kind = "clearable",       max_tokens = 10000 }
