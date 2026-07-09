@@ -26,7 +26,9 @@ Most agent tools hand an LLM a flat message array and hope for the best. Leviath
 
 Pick a pre-built agent or write your own, run it, and watch it actually remember what it read 50 tool calls ago.
 
-<!-- TODO: hero gif of dashboard with agents running -->
+<p align="center">
+  <img src="docs/assets/hero-final.gif" alt="Leviath's terminal dashboard running several agents concurrently" width="900">
+</p>
 
 ## 📋 Requirements
 
@@ -219,24 +221,9 @@ Nine agents ship out of the box — each a multi-stage graph with model fallback
 
 ## 🖥️ Dashboard
 
-<!-- TODO: replace with real screenshot -->
-
-```
-┌─ Agents ──────────────────────────────────┐┌─ Stage: implement (2/3) ─────────────────┐
-│ ● software-engineer  Active   3m 22s      ││ ⠋ Implementing CSV parser module...      │
-│ ○ deep-researcher    Waiting  1m 05s      ││                                          │
-│ ○ daily-briefer      Complete 0m 48s      ││ ┌─ Context ─────────────────────────────┐ │
-│                                           ││ │ ████████░░░░░ 61% (42K/68K tokens)   │ │
-│                                           ││ │ pinned: 4K  conv: 18K  tools: 20K    │ │
-│                                           ││ └───────────────────────────────────────┘ │
-├─ Log ─────────────────────────────────────┤│                                          │
-│ [3:22] write_file src/parser.rs           ││ > fn parse_record(line: &str) -> Vec... │
-│ [3:18] read_file Cargo.toml              ││ > fn detect_delimiter(header: &str)...  │
-│ [3:15] bash cargo check                  ││ >                                        │
-│ [3:10] write_file src/main.rs            ││ > // Handle quoted fields containing    │
-│ [3:02] ✓ Stage 'analyze' complete         ││ > // delimiters and newlines             │
-└───────────────────────────────────────────┘└──────────────────────────────────────────┘
-```
+<p align="center">
+  <img src="docs/assets/dashboard-final.png" alt="lev dash — the Leviath terminal dashboard showing the agent list and live activity log" width="900">
+</p>
 
 `lev dash` is a full TUI for managing concurrent agents: stage tabs, context-window visualization, markdown rendering, search/filter, sub-agent tree view, clipboard yank, and mouse support.
 
