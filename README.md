@@ -38,18 +38,40 @@ Pick a pre-built agent or create your own. Run it. Watch it actually remember wh
 
 ### 1. Install
 
+> **Private alpha:** the repo and its releases are currently private, so
+> installing requires a GitHub Personal Access Token (`repo` scope) — exported
+> as `GITHUB_TOKEN` for the install scripts, and `HOMEBREW_GITHUB_API_TOKEN`
+> for Homebrew. The [distribution repo](https://github.com/Sun-Forge-AI/leviath-dist)
+> has the one-time token setup and the full instructions.
+
+**macOS (Homebrew):**
+
 ```bash
-# macOS
-brew install gemisis/tap/leviath
+brew tap sun-forge-ai/leviath https://github.com/Sun-Forge-AI/leviath-dist.git
+brew trust sun-forge-ai/leviath          # newer Homebrew requires trusting third-party taps
+brew install leviath                     # stable — or: leviath-beta, leviath-alpha
+```
 
-# Linux
-curl -fsSL https://github.com/Sun-Forge-AI/leviath/releases/latest/download/leviath-linux-x64.tar.gz | tar xz -C /usr/local/bin
+**Linux:**
 
-# Windows — download from GitHub Releases
-# https://github.com/Sun-Forge-AI/leviath/releases
+```bash
+curl -fsSL -H "Authorization: token $GITHUB_TOKEN" \
+  https://raw.githubusercontent.com/Sun-Forge-AI/leviath-dist/main/install.sh | bash -s -- --channel stable
+# Channels: alpha (default), beta, stable
+```
 
-# Build from source (any platform, requires Rust)
-cargo install --path crates/leviath-cli
+**Windows (PowerShell):**
+
+```powershell
+irm -Headers @{Authorization="token $env:GITHUB_TOKEN"} `
+  https://raw.githubusercontent.com/Sun-Forge-AI/leviath-dist/main/install.ps1 | iex
+# For a specific channel, download the script and run: .\install.ps1 -Channel stable
+```
+
+**Build from source (any platform, requires [Rust](https://rustup.rs/)):**
+
+```bash
+cargo install --git https://github.com/Sun-Forge-AI/leviath.git --bin lev
 ```
 
 ### 2. Configure a Provider
