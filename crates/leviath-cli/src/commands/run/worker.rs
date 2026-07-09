@@ -471,6 +471,15 @@ impl<'a> StageCallbacks for WorkerCallbacks<'a> {
         }
     }
 
+    async fn on_cancel(&mut self, stage_idx: usize) {
+        let msg = "[Run cancelled by user]";
+        println!("\n{}", msg);
+        record_stage_log(&self.run_id, stage_idx, msg);
+        self.meta.status = RunStatus::Cancelled;
+        self.meta.touch();
+        let _ = runstate::write_meta(self.meta);
+    }
+
     async fn on_post_stage(
         &mut self,
         engine: &leviath_runtime::AgentEngine,
@@ -515,7 +524,13 @@ pub async fn execute_worker(args: WorkerArgs) -> anyhow::Result<()> {
     let result = run_worker_inner(&args, &mut meta, build_provider_registry).await;
 
     match &result {
-        Ok(()) => meta.status = RunStatus::Complete,
+        // A user abort sets `Cancelled` mid-run (via on_cancel); don't clobber
+        // it with `Complete` on the successful-return path.
+        Ok(()) => {
+            if meta.status != RunStatus::Cancelled {
+                meta.status = RunStatus::Complete;
+            }
+        }
         Err(e) => {
             meta.status = RunStatus::Error;
             meta.error = Some(e.to_string());
@@ -920,6 +935,32 @@ mod tests {
             blueprint_stages_len: 2,
         };
         cb.on_transition("plan", "code", 0).await;
+    }
+
+    #[tokio::test]
+    async fn worker_callbacks_on_cancel_sets_cancelled_and_persists() {
+        let _guard = crate::runstate::isolate_runs_dir_for_test("worker-cb-cancel");
+        let mut meta = RunMeta::new(
+            "test-cancel".into(),
+            "agent".into(),
+            "/p".into(),
+            "t".into(),
+            None,
+            "/w".into(),
+            2,
+        );
+        runstate::create_run(&meta).unwrap();
+        let mut cb = WorkerCallbacks {
+            run_id: "test-cancel".to_string(),
+            meta: &mut meta,
+            blueprint_stages_len: 2,
+        };
+        cb.on_cancel(0).await;
+
+        assert_eq!(meta.status, RunStatus::Cancelled);
+        // Persisted to disk as well.
+        let persisted = runstate::read_meta("test-cancel").unwrap();
+        assert_eq!(persisted.status, RunStatus::Cancelled);
     }
 
     #[tokio::test]

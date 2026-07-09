@@ -229,11 +229,13 @@ pub fn parse_manifest(content: &str) -> anyhow::Result<Blueprint> {
                                             .collect()
                                     })
                                     .unwrap_or_default();
-                                // Follow-up free-text prompts, keyed by option label:
-                                // [stages.<name>.interaction_points.followups]
-                                // "Revise — I'll describe changes" = "What would you like to change?"
-                                let pt_followups: std::collections::HashMap<String, String> = pt
-                                    .get("followups")
+                                // Per-option directives, keyed by option label:
+                                // [stages.<name>.interaction_points.directives]
+                                // "Revise — I'll describe changes" = "Call ask_user_text ..."
+                                // `followups` is accepted as a backward-compat alias.
+                                let pt_directives: std::collections::HashMap<String, String> = pt
+                                    .get("directives")
+                                    .or_else(|| pt.get("followups"))
                                     .and_then(|v| v.as_table())
                                     .map(|tbl| {
                                         tbl.iter()
@@ -243,13 +245,25 @@ pub fn parse_manifest(content: &str) -> anyhow::Result<Blueprint> {
                                             .collect()
                                     })
                                     .unwrap_or_default();
+                                // Options that immediately abort the run:
+                                // abort_options = ["Abort — cancel this run"]
+                                let pt_abort_options: Vec<String> = pt
+                                    .get("abort_options")
+                                    .and_then(|v| v.as_array())
+                                    .map(|arr| {
+                                        arr.iter()
+                                            .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                                            .collect()
+                                    })
+                                    .unwrap_or_default();
                                 points.push(leviath_core::blueprint::InteractionPoint {
                                     name: pt_name,
                                     prompt: pt_prompt,
                                     required: pt_required,
                                     style: pt_style,
                                     options: pt_options,
-                                    followups: pt_followups,
+                                    directives: pt_directives,
+                                    abort_options: pt_abort_options,
                                 });
                             }
                         }
@@ -1190,10 +1204,10 @@ style = "confirm"
     }
 
     #[test]
-    fn parse_manifest_interaction_point_followups() {
+    fn parse_manifest_interaction_point_directives_and_abort() {
         let toml = r#"
 [agent]
-name = "followup-test"
+name = "directive-test"
 
 [stages.plan]
 mode = "interactive_points"
@@ -1204,25 +1218,53 @@ prompt   = "Approve?"
 required = true
 style    = "multiple_choice"
 options  = ["Approve", "Revise", "Abort"]
-followups = { "Revise" = "What would you like to change?" }
+abort_options = ["Abort"]
+directives = { "Revise" = "Call ask_user_text to find out what to change." }
 "#;
         let bp = parse_manifest(toml).unwrap();
         let stage = bp.find_stage("plan").unwrap();
         let points = unwrap_interactive_points(&stage.mode);
         assert_eq!(points.len(), 1);
         assert_eq!(
-            points[0].followups.get("Revise").map(|s| s.as_str()),
-            Some("What would you like to change?")
+            points[0].directives.get("Revise").map(|s| s.as_str()),
+            Some("Call ask_user_text to find out what to change.")
         );
-        assert!(!points[0].followups.contains_key("Approve"));
-        assert!(!points[0].followups.contains_key("Abort"));
+        assert!(!points[0].directives.contains_key("Approve"));
+        assert_eq!(points[0].abort_options, vec!["Abort".to_string()]);
     }
 
     #[test]
-    fn parse_manifest_interaction_point_no_followups_defaults_empty() {
+    fn parse_manifest_interaction_point_followups_alias_maps_to_directives() {
+        // Backward compat: the old `followups` key is accepted as an alias.
         let toml = r#"
 [agent]
-name = "no-followup-test"
+name = "followup-alias-test"
+
+[stages.plan]
+mode = "interactive_points"
+
+[[stages.plan.interaction_points]]
+name     = "plan_approval"
+prompt   = "Approve?"
+required = true
+style    = "multiple_choice"
+options  = ["Approve", "Revise"]
+followups = { "Revise" = "What would you like to change?" }
+"#;
+        let bp = parse_manifest(toml).unwrap();
+        let stage = bp.find_stage("plan").unwrap();
+        let points = unwrap_interactive_points(&stage.mode);
+        assert_eq!(
+            points[0].directives.get("Revise").map(|s| s.as_str()),
+            Some("What would you like to change?")
+        );
+    }
+
+    #[test]
+    fn parse_manifest_interaction_point_no_directives_defaults_empty() {
+        let toml = r#"
+[agent]
+name = "no-directive-test"
 
 [stages.main]
 mode = "interactive_points"
@@ -1235,7 +1277,8 @@ style    = "confirm"
         let bp = parse_manifest(toml).unwrap();
         let stage = bp.find_stage("main").unwrap();
         let points = unwrap_interactive_points(&stage.mode);
-        assert!(points[0].followups.is_empty());
+        assert!(points[0].directives.is_empty());
+        assert!(points[0].abort_options.is_empty());
     }
 
     #[test]
@@ -1715,7 +1758,7 @@ version = "1.0.0"
     }
 
     #[test]
-    fn software_engineer_plan_approval_has_followups_for_non_terminal_choices() {
+    fn software_engineer_plan_approval_has_directives_and_abort_option() {
         let manifest_content =
             include_str!("../../../../../agents/software-engineer/agent.leviath");
         let bp = parse_manifest(manifest_content).unwrap();
@@ -1726,9 +1769,8 @@ version = "1.0.0"
             .find(|p| p.name == "plan_approval")
             .expect("plan_approval interaction point must exist");
 
-        // "Revise" and "Add detail" promise the user a chance to describe
-        // what they want — without a followup prompt, only the static label
-        // ever reaches the model and the user's actual feedback is lost.
+        // "Revise" and "Add detail" carry directives so the run stays in-stage
+        // and the agent drives the next step via a tool call.
         let revise_key = approval
             .options
             .iter()
@@ -1739,17 +1781,27 @@ version = "1.0.0"
             .iter()
             .find(|o| o.starts_with("Add detail"))
             .expect("an Add detail option must exist");
-        // Revise/Add detail options must have a followup prompt asking for details.
-        assert!(approval.followups.contains_key(revise_key));
-        assert!(approval.followups.contains_key(detail_key));
+        assert!(approval.directives.contains_key(revise_key));
+        assert!(approval.directives.contains_key(detail_key));
+        // The Add-detail directive drives the direct-edit tool.
+        assert!(approval.directives[detail_key].contains("edit_document"));
 
-        // Approve/Abort are terminal/decisive — they must NOT have followups
-        // (no further elaboration needed).
-        for opt in &approval.options {
-            if opt.starts_with("Approve") || opt.starts_with("Abort") {
-                assert!(!approval.followups.contains_key(opt));
-            }
-        }
+        // Approve is a plain (completing) option — no directive.
+        let approve_key = approval
+            .options
+            .iter()
+            .find(|o| o.starts_with("Approve"))
+            .expect("an Approve option must exist");
+        assert!(!approval.directives.contains_key(approve_key));
+
+        // Abort is handled deterministically via abort_options, not a directive.
+        let abort_key = approval
+            .options
+            .iter()
+            .find(|o| o.starts_with("Abort"))
+            .expect("an Abort option must exist");
+        assert!(!approval.directives.contains_key(abort_key));
+        assert!(approval.abort_options.contains(abort_key));
     }
 
     #[test]

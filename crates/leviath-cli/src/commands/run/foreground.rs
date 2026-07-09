@@ -410,6 +410,11 @@ impl StageCallbacks for ForegroundCallbacks {
         println!("\n[All stages complete]");
     }
 
+    async fn on_cancel(&mut self, _stage_idx: usize) {
+        // Foreground has no run-state meta to persist; just notify the user.
+        println!("\n[Run cancelled by user]");
+    }
+
     async fn on_post_stage(
         &mut self,
         _engine: &leviath_runtime::AgentEngine,

@@ -93,8 +93,13 @@ impl Dashboard {
     ) {
         use interaction::InteractionKind;
 
-        if self.input_mode && matches!(kind, Some(InteractionKind::FreeText) | None) {
-            // ── FreeText: render the multi-line tui-textarea widget ──────────
+        if self.input_mode
+            && matches!(
+                kind,
+                Some(InteractionKind::FreeText) | Some(InteractionKind::EditText) | None
+            )
+        {
+            // ── FreeText / EditText: render the multi-line tui-textarea widget ──
             // No pending interaction request/prompt means this is a mid-run
             // message to a still-running agent rather than a response to a
             // specific question — label it accordingly for consistent UX.

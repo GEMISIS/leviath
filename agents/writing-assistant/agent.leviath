@@ -57,7 +57,6 @@ You've shown the outline and asked the user what to do:
   their specific feedback (see the "detail" message in context), and present an
   updated outline before asking again.
 - If they want to gather more material first, transition to 'research'.
-- If they chose to abort, respond DONE — do not draft anything.
 """
 system_prompt = """
 Based on your research, propose an outline for the piece:
@@ -93,11 +92,15 @@ required = true
 style    = "multiple_choice"
 options  = ["Approve — write the draft", "Revise — I'll describe changes", "Expand a section — I'll say which", "Research more first", "Abort — cancel this piece"]
 
-# Revise/Expand promise the user a chance to describe what they want — without a
-# followup, only the static label reaches the model and the intent is lost.
-[stages.outline.interaction_points.followups]
-"Revise — I'll describe changes" = "What would you like to change about the outline?"
-"Expand a section — I'll say which" = "Which section should be expanded, and what should it cover?"
+# "Abort" ends the run immediately (engine-level, deterministic).
+abort_options = ["Abort — cancel this piece"]
+
+# Directives keep the run in the outline stage and tell the agent to gather the
+# user's intent via a tool call before revising, rather than acting on the bare
+# option label.
+[stages.outline.interaction_points.directives]
+"Revise — I'll describe changes" = "The user wants to revise the outline. Call the ask_user_text tool to ask exactly what they want changed, then present an updated outline before asking again."
+"Expand a section — I'll say which" = "The user wants to expand a section. Call the ask_user_text tool to ask which section and what it should cover, then present an updated outline before asking again."
 
 # ─── Stage 3: Draft ───────────────────────────────────────────────────────────
 [stages.draft]

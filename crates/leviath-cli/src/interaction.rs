@@ -38,6 +38,9 @@ pub enum InteractionKind {
     Confirm,
     /// Approve or deny a specific tool call before it executes.
     ToolApproval,
+    /// Edit a document in place: the request carries the current text in
+    /// `body`; the user edits it and the (possibly modified) text is returned.
+    EditText,
 }
 
 /// Format of an optional rich body attached to an interaction request.
@@ -125,6 +128,29 @@ impl InteractionRequest {
             stage_name: stage.into(),
             body: Some(markdown.into()),
             body_format: BodyFormat::Markdown,
+        }
+    }
+
+    /// Create an "edit document" request: shows `initial_content` in an
+    /// editable field pre-seeded with it (via `body`); the user edits it and
+    /// the modified text is returned as the response text.
+    pub fn edit_text(
+        id: impl Into<String>,
+        prompt: impl Into<String>,
+        stage: impl Into<String>,
+        initial_content: impl Into<String>,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            kind: InteractionKind::EditText,
+            prompt: prompt.into(),
+            options: vec![],
+            tool_name: None,
+            tool_arguments: None,
+            required: true,
+            stage_name: stage.into(),
+            body: Some(initial_content.into()),
+            body_format: BodyFormat::Plain,
         }
     }
 
@@ -616,6 +642,26 @@ pub fn request_interaction_from_reader<R: std::io::BufRead>(
             InteractionResponse::text(&req.id, input.trim())
         }
 
+        InteractionKind::EditText => {
+            println!("{}", req.prompt);
+            let current = req.body.clone().unwrap_or_default();
+            println!("--- current content ---\n{}", current);
+            println!("--- enter replacement (empty line keeps current) ---");
+            print!("Edit: ");
+            std::io::stdout().flush().ok();
+            let mut input = String::new();
+            if reader.read_line(&mut input).unwrap_or(0) == 0 {
+                // EOF — keep the current content unchanged.
+                return InteractionResponse::text(&req.id, current);
+            }
+            let trimmed = input.trim();
+            if trimmed.is_empty() {
+                InteractionResponse::text(&req.id, current)
+            } else {
+                InteractionResponse::text(&req.id, trimmed)
+            }
+        }
+
         InteractionKind::MultipleChoice => {
             println!("{}", req.prompt);
             for (i, opt) in req.options.iter().enumerate() {
@@ -725,6 +771,26 @@ mod tests {
         );
         assert_eq!(r.kind, InteractionKind::ToolApproval);
         assert_eq!(r.options.len(), 3);
+    }
+
+    #[test]
+    fn test_edit_text_request_builder_seeds_body() {
+        let r = InteractionRequest::edit_text("id4", "Edit this", "plan", "current text");
+        assert_eq!(r.kind, InteractionKind::EditText);
+        assert!(r.required);
+        assert_eq!(r.body.as_deref(), Some("current text"));
+        assert_eq!(r.prompt, "Edit this");
+    }
+
+    #[test]
+    fn test_edit_text_kind_serde_roundtrip_snake_case() {
+        let r = InteractionRequest::edit_text("id5", "p", "plan", "seed");
+        let json = serde_json::to_string(&r).unwrap();
+        // snake_case rename ⇒ "edit_text"
+        assert!(json.contains("\"edit_text\""));
+        let back: InteractionRequest = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.kind, InteractionKind::EditText);
+        assert_eq!(back.body.as_deref(), Some("seed"));
     }
 
     #[test]
@@ -2411,6 +2477,47 @@ mod tests {
         let mut reader = reader_from(""); // immediate EOF, no newline
         let resp = request_interaction_from_reader(&req, &mut reader);
         assert_eq!(resp.value.as_deref(), Some(""));
+    }
+
+    #[test]
+    fn stdin_edit_text_replacement_line_replaces_body() {
+        let req = InteractionRequest::edit_text("et1", "Edit", "plan", "old content");
+        let mut reader = reader_from("new content\n");
+        let resp = request_interaction_from_reader(&req, &mut reader);
+        assert_eq!(resp.value.as_deref(), Some("new content"));
+        assert_eq!(resp.request_id, "et1");
+    }
+
+    #[test]
+    fn stdin_edit_text_empty_line_keeps_body() {
+        let req = InteractionRequest::edit_text("et2", "Edit", "plan", "keep me");
+        let mut reader = reader_from("\n");
+        let resp = request_interaction_from_reader(&req, &mut reader);
+        assert_eq!(resp.value.as_deref(), Some("keep me"));
+    }
+
+    #[test]
+    fn stdin_edit_text_eof_keeps_body() {
+        let req = InteractionRequest::edit_text("et3", "Edit", "plan", "unchanged");
+        let mut reader = reader_from(""); // immediate EOF
+        let resp = request_interaction_from_reader(&req, &mut reader);
+        assert_eq!(resp.value.as_deref(), Some("unchanged"));
+    }
+
+    #[test]
+    fn test_edit_text_request_ipc_roundtrip() {
+        let _guard =
+            crate::runstate::isolate_runs_dir_for_test("test_edit_text_request_ipc_roundtrip");
+        let run_id = "edit-ipc-run";
+        let dir = crate::runstate::run_dir(run_id);
+        std::fs::create_dir_all(&dir).unwrap();
+        let req = InteractionRequest::edit_text("er1", "Edit the plan", "plan", "line 1\nline 2");
+        write_request(run_id, &req).unwrap();
+        let back = read_request(run_id).expect("request should round-trip");
+        assert_eq!(back.kind, InteractionKind::EditText);
+        assert_eq!(back.body.as_deref(), Some("line 1\nline 2"));
+        assert_eq!(back.id, "er1");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

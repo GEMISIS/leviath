@@ -106,9 +106,15 @@ impl Dashboard {
             0
         };
 
-        // Review body: shown when the pending interaction carries markdown for review
+        // Review body: shown when the pending interaction carries markdown for
+        // review. `EditText` also uses `body`, but that is the editable document
+        // (rendered in the seeded textarea once the user starts editing), not a
+        // read-only review doc — so it is excluded here.
         let review_body = if !self.input_mode && has_prompt {
-            pending_req.as_ref().and_then(|r| r.body.as_deref())
+            pending_req
+                .as_ref()
+                .filter(|r| r.kind != InteractionKind::EditText)
+                .and_then(|r| r.body.as_deref())
         } else {
             None
         };
