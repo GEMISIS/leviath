@@ -49,7 +49,13 @@ pub(super) fn truncate(s: &str, max: usize) -> String {
     if s.len() <= max {
         s.to_string()
     } else {
-        format!("{}…", &s[..max])
+        // Find the nearest char boundary at or before `max` to avoid
+        // panicking on multi-byte UTF-8 characters (e.g. em-dashes).
+        let mut end = max;
+        while end > 0 && !s.is_char_boundary(end) {
+            end -= 1;
+        }
+        format!("{}…", &s[..end])
     }
 }
 
@@ -441,10 +447,40 @@ mod tests {
 
     #[test]
     fn test_truncate_unicode() {
-        // Truncation with simple ASCII substring (may split multi-byte in real usage,
-        // but the function uses byte indexing)
         let result = truncate("abcdef", 3);
         assert_eq!(result, "abc…");
+    }
+
+    #[test]
+    fn test_truncate_multibyte_char_boundary() {
+        // Em-dash (–) is 3 bytes (U+2013, bytes E2 80 93).
+        // Slicing at a byte index inside the em-dash must not panic.
+        let s = "Research the history – covering all topics";
+        // "Research the history " is 21 bytes, then "–" is bytes 21..24.
+        // Truncating at max=22 would land inside the em-dash without the fix.
+        let result = truncate(s, 22);
+        assert!(!result.is_empty());
+        assert!(result.ends_with('…'));
+        // Should back up to byte 21 (the space before the em-dash)
+        assert_eq!(result, "Research the history …");
+
+        // Also test truncating right at the start of the em-dash
+        let result2 = truncate(s, 21);
+        assert_eq!(result2, "Research the history …");
+
+        // And right after the em-dash
+        let result3 = truncate(s, 24);
+        assert_eq!(result3, "Research the history –…");
+    }
+
+    #[test]
+    fn test_truncate_emoji() {
+        // Emoji like 🔥 is 4 bytes. Truncating in the middle must not panic.
+        let s = "Hello 🔥 world";
+        let result = truncate(s, 7); // lands inside the emoji (bytes 6..10)
+        assert!(!result.is_empty());
+        assert!(result.ends_with('…'));
+        assert_eq!(result, "Hello …");
     }
 
     #[test]
