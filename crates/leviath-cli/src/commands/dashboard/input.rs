@@ -98,6 +98,37 @@ impl Dashboard {
         self.handle_main_list_key(key_code);
     }
 
+    /// Seed the input textarea when entering input mode. For an `EditText`
+    /// pending request the buffer is pre-filled with the request's `body` (the
+    /// current document) so the user edits it in place; otherwise it starts empty.
+    fn seed_input_textarea(&mut self) {
+        use interaction::InteractionKind;
+        let seed = self
+            .selected_agent()
+            .and_then(|a| a.pending_request.as_ref())
+            .filter(|r| r.kind == InteractionKind::EditText)
+            .and_then(|r| r.body.clone());
+        self.input_textarea = match seed {
+            Some(body) => {
+                tui_textarea::TextArea::new(body.lines().map(|s| s.to_string()).collect())
+            }
+            None => tui_textarea::TextArea::default(),
+        };
+    }
+
+    /// Whether the pending request carries a scrollable review document.
+    /// `EditText` also uses `body`, but for editing (not scrolling), so it is
+    /// explicitly excluded here.
+    fn has_scrollable_review(&self) -> bool {
+        use interaction::InteractionKind;
+        self.selected_agent()
+            .and_then(|a| a.pending_request.as_ref())
+            .filter(|r| r.kind != InteractionKind::EditText)
+            .and_then(|r| r.body.as_deref())
+            .map(|b| !b.is_empty())
+            .unwrap_or(false)
+    }
+
     fn handle_input_mode_key(&mut self, key_code: KeyCode, key: crossterm::event::KeyEvent) {
         use interaction::InteractionKind;
         let kind = self
@@ -111,19 +142,21 @@ impl Dashboard {
             .unwrap_or(0);
 
         match &kind {
-            Some(InteractionKind::FreeText) | None => match key_code {
-                KeyCode::Enter if key.modifiers.is_empty() => {
-                    self.submit_input();
+            Some(InteractionKind::FreeText) | Some(InteractionKind::EditText) | None => {
+                match key_code {
+                    KeyCode::Enter if key.modifiers.is_empty() => {
+                        self.submit_input();
+                    }
+                    KeyCode::Esc => {
+                        self.input_mode = false;
+                        self.input_textarea = tui_textarea::TextArea::default();
+                        self.choice_selected = 0;
+                    }
+                    _ => {
+                        self.input_textarea.input(tui_textarea::Input::from(key));
+                    }
                 }
-                KeyCode::Esc => {
-                    self.input_mode = false;
-                    self.input_textarea = tui_textarea::TextArea::default();
-                    self.choice_selected = 0;
-                }
-                _ => {
-                    self.input_textarea.input(tui_textarea::Input::from(key));
-                }
-            },
+            }
             _ => match key_code {
                 KeyCode::Esc => {
                     self.input_mode = false;
@@ -219,17 +252,12 @@ impl Dashboard {
                 if self.selected_stage_can_respond() || self.selected_agent_accepts_messages() {
                     self.input_mode = true;
                     self.choice_selected = 0;
-                    self.input_textarea = tui_textarea::TextArea::default();
+                    self.seed_input_textarea();
                 }
             }
             KeyCode::Up => {
                 // When a review body is present, Up scrolls the review document
-                let has_review = self
-                    .selected_agent()
-                    .and_then(|a| a.pending_request.as_ref())
-                    .and_then(|r| r.body.as_deref())
-                    .map(|b| !b.is_empty())
-                    .unwrap_or(false);
+                let has_review = self.has_scrollable_review();
                 if has_review {
                     self.review_scroll = self.review_scroll.saturating_add(1);
                 } else {
@@ -237,12 +265,7 @@ impl Dashboard {
                 }
             }
             KeyCode::Down => {
-                let has_review = self
-                    .selected_agent()
-                    .and_then(|a| a.pending_request.as_ref())
-                    .and_then(|r| r.body.as_deref())
-                    .map(|b| !b.is_empty())
-                    .unwrap_or(false);
+                let has_review = self.has_scrollable_review();
                 if has_review {
                     self.review_scroll = self.review_scroll.saturating_sub(1);
                 } else {
@@ -250,12 +273,7 @@ impl Dashboard {
                 }
             }
             KeyCode::PageUp => {
-                let has_review = self
-                    .selected_agent()
-                    .and_then(|a| a.pending_request.as_ref())
-                    .and_then(|r| r.body.as_deref())
-                    .map(|b| !b.is_empty())
-                    .unwrap_or(false);
+                let has_review = self.has_scrollable_review();
                 if has_review {
                     self.review_scroll = self.review_scroll.saturating_add(10);
                 } else {
@@ -263,12 +281,7 @@ impl Dashboard {
                 }
             }
             KeyCode::PageDown => {
-                let has_review = self
-                    .selected_agent()
-                    .and_then(|a| a.pending_request.as_ref())
-                    .and_then(|r| r.body.as_deref())
-                    .map(|b| !b.is_empty())
-                    .unwrap_or(false);
+                let has_review = self.has_scrollable_review();
                 if has_review {
                     self.review_scroll = self.review_scroll.saturating_sub(10);
                 } else {
@@ -585,6 +598,17 @@ impl Dashboard {
                         "(end)".to_string()
                     } else {
                         truncate(&input, 40)
+                    };
+                    (InteractionResponse::text(&r.id, &input), d)
+                }
+                InteractionKind::EditText => {
+                    // Preserve indentation / internal newlines — only trim the
+                    // display label, not the submitted content.
+                    let input = self.input_textarea.lines().join("\n");
+                    let d = if input.trim().is_empty() {
+                        "(no changes)".to_string()
+                    } else {
+                        truncate(input.trim(), 40)
                     };
                     (InteractionResponse::text(&r.id, &input), d)
                 }
@@ -1202,6 +1226,88 @@ mod tests {
         dash.handle_key(key(KeyCode::Char('h')));
         dash.handle_key(key(KeyCode::Char('i')));
         assert_eq!(dash.input_textarea.lines(), vec!["hi".to_string()]);
+    }
+
+    #[test]
+    fn input_mode_edit_text_typing_appends_to_textarea() {
+        // EditText routes through the text-editing key arm just like FreeText.
+        let mut dash = make_test_dashboard();
+        let mut agent = make_test_agent("run-1", AgentDisplayStatus::Waiting);
+        agent.pending_request = Some(crate::interaction::InteractionRequest::edit_text(
+            "et1", "Edit", "main", "seed",
+        ));
+        dash.agents.push(agent);
+        dash.update_display_indices();
+        dash.detail_view = true;
+        dash.input_mode = true;
+
+        dash.handle_key(key(KeyCode::Char('!')));
+        assert_eq!(dash.input_textarea.lines(), vec!["!".to_string()]);
+    }
+
+    #[test]
+    fn seed_input_textarea_prefills_edit_text_body() {
+        let mut dash = make_test_dashboard();
+        let mut agent = make_test_agent("run-1", AgentDisplayStatus::Waiting);
+        agent.pending_request = Some(crate::interaction::InteractionRequest::edit_text(
+            "et1",
+            "Edit",
+            "main",
+            "line A\nline B",
+        ));
+        dash.agents.push(agent);
+        dash.update_display_indices();
+
+        dash.seed_input_textarea();
+        assert_eq!(
+            dash.input_textarea.lines(),
+            vec!["line A".to_string(), "line B".to_string()]
+        );
+    }
+
+    #[test]
+    fn seed_input_textarea_empty_for_free_text() {
+        let mut dash = make_test_dashboard();
+        let mut agent = make_test_agent("run-1", AgentDisplayStatus::Waiting);
+        agent.pending_request = Some(crate::interaction::InteractionRequest::free_text(
+            "ft1", "Q?", "main", true,
+        ));
+        dash.agents.push(agent);
+        dash.update_display_indices();
+
+        dash.input_textarea.insert_str("stale");
+        dash.seed_input_textarea();
+        // FreeText is not seeded from body → cleared to empty.
+        assert_eq!(dash.input_textarea.lines(), vec!["".to_string()]);
+    }
+
+    #[test]
+    fn submit_input_edit_text_preserves_newlines() {
+        let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
+        let mut dash = Dashboard::new(cmd_tx);
+        let mut agent = make_test_agent("run-1", AgentDisplayStatus::Waiting);
+        agent.is_run_state = false; // cmd_tx path — capture the SendInput value
+        agent.pending_request = Some(crate::interaction::InteractionRequest::edit_text(
+            "et1", "Edit", "main", "old",
+        ));
+        dash.agents.push(agent);
+        dash.update_display_indices();
+        dash.detail_view = true;
+        dash.input_mode = true;
+
+        dash.input_textarea =
+            tui_textarea::TextArea::new(vec!["  indented".to_string(), "second line".to_string()]);
+        dash.submit_input();
+
+        assert!(!dash.input_mode);
+        assert!(dash.agents[0].pending_request.is_none());
+        // The edited text reached the engine with indentation + newline intact.
+        match cmd_rx.try_recv() {
+            Ok(EngineCommand::SendInput { input, .. }) => {
+                assert_eq!(input, "  indented\nsecond line");
+            }
+            other => panic!("expected SendInput, got {:?}", other),
+        }
     }
 
     #[test]

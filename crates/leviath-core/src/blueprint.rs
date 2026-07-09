@@ -323,17 +323,25 @@ pub struct InteractionPoint {
     #[serde(default)]
     pub options: Vec<String>,
 
-    /// Follow-up free-text prompts, keyed by option label.
+    /// Directives keyed by option label.
     ///
     /// When the user picks an option present in this map (e.g. "Revise — I'll
-    /// describe changes"), a second `FreeText` interaction is requested using
-    /// the mapped prompt so the user can actually describe what they want —
-    /// otherwise only the static option label ever reaches the model, and
-    /// the user's intent is lost. After the follow-up is answered, the stage
-    /// runs another inference segment and re-prompts the same interaction
-    /// point (bounded by a retry cap) instead of falling through.
+    /// describe changes"), the mapped directive text is injected into the
+    /// agent's conversation context and the stage re-runs inference IN-STAGE
+    /// (bounded by a revision cap) instead of falling through to a stage
+    /// transition. The directive tells the agent what to do next — e.g. call
+    /// `ask_user_text` to learn what to change, or `edit_document` to let the
+    /// user edit the plan directly — so the routing decision is deterministic
+    /// (code) while the actual input capture is an agent tool call.
+    #[serde(default, alias = "followups")]
+    pub directives: HashMap<String, String>,
+
+    /// Options that, when selected, immediately abort the run: the engine
+    /// marks the run cancelled and stops with no further inference and no
+    /// transition resolution. Matched against the selected option label with
+    /// the same dash/whitespace normalization used for directive lookup.
     #[serde(default)]
-    pub followups: HashMap<String, String>,
+    pub abort_options: Vec<String>,
 }
 
 /// Configuration for routing tool results to specific context window regions.
@@ -1003,24 +1011,26 @@ mod tests {
     }
 
     #[test]
-    fn test_interaction_point_followups_default_empty() {
+    fn test_interaction_point_directives_default_empty() {
         let point = InteractionPoint {
             name: "plan_approval".to_string(),
             prompt: "Approve?".to_string(),
             required: true,
             style: InteractionStyle::MultipleChoice,
             options: vec!["Approve".to_string(), "Revise".to_string()],
-            followups: HashMap::new(),
+            directives: HashMap::new(),
+            abort_options: Vec::new(),
         };
-        assert!(point.followups.is_empty());
+        assert!(point.directives.is_empty());
+        assert!(point.abort_options.is_empty());
     }
 
     #[test]
-    fn test_interaction_point_followups_roundtrip() {
-        let mut followups = HashMap::new();
-        followups.insert(
+    fn test_interaction_point_directives_roundtrip() {
+        let mut directives = HashMap::new();
+        directives.insert(
             "Revise".to_string(),
-            "What would you like to change?".to_string(),
+            "Ask what to change, then re-plan.".to_string(),
         );
         let point = InteractionPoint {
             name: "plan_approval".to_string(),
@@ -1028,18 +1038,20 @@ mod tests {
             required: true,
             style: InteractionStyle::MultipleChoice,
             options: vec!["Approve".to_string(), "Revise".to_string()],
-            followups,
+            directives,
+            abort_options: vec!["Abort".to_string()],
         };
         let json = serde_json::to_string(&point).unwrap();
         let back: InteractionPoint = serde_json::from_str(&json).unwrap();
         assert_eq!(
-            back.followups.get("Revise").map(|s| s.as_str()),
-            Some("What would you like to change?")
+            back.directives.get("Revise").map(|s| s.as_str()),
+            Some("Ask what to change, then re-plan.")
         );
+        assert_eq!(back.abort_options, vec!["Abort".to_string()]);
     }
 
     #[test]
-    fn test_interaction_point_followups_serde_default_when_missing() {
+    fn test_interaction_point_directives_serde_default_when_missing() {
         let json = r#"{
             "name": "plan_approval",
             "prompt": "Approve?",
@@ -1048,7 +1060,26 @@ mod tests {
             "options": ["Approve", "Revise"]
         }"#;
         let point: InteractionPoint = serde_json::from_str(json).unwrap();
-        assert!(point.followups.is_empty());
+        assert!(point.directives.is_empty());
+        assert!(point.abort_options.is_empty());
+    }
+
+    #[test]
+    fn test_interaction_point_followups_alias_still_deserializes() {
+        // Backward compat: old serialized blueprints used "followups".
+        let json = r#"{
+            "name": "plan_approval",
+            "prompt": "Approve?",
+            "required": true,
+            "style": "multiple_choice",
+            "options": ["Approve", "Revise"],
+            "followups": { "Revise": "What to change?" }
+        }"#;
+        let point: InteractionPoint = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            point.directives.get("Revise").map(|s| s.as_str()),
+            Some("What to change?")
+        );
     }
 
     #[test]

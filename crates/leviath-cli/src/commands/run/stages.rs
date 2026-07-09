@@ -25,29 +25,50 @@ fn normalize_for_followup(s: &str) -> String {
         .join(" ")
 }
 
-/// Look up a followup prompt in the followups map, trying exact match first,
+/// Look up a directive in the directives map, trying exact match first,
 /// then normalized comparison (whitespace + Unicode dash normalization).
-fn lookup_followup<'a>(
-    followups: &'a std::collections::HashMap<String, String>,
+fn lookup_directive<'a>(
+    directives: &'a std::collections::HashMap<String, String>,
     user_text: &str,
 ) -> Option<&'a str> {
     // Exact match first
-    if let Some(prompt) = followups.get(user_text) {
-        return Some(prompt.as_str());
+    if let Some(directive) = directives.get(user_text) {
+        return Some(directive.as_str());
     }
     // Normalized match
     let normalized = normalize_for_followup(user_text);
-    for (key, prompt) in followups {
+    for (key, directive) in directives {
         if normalize_for_followup(key) == normalized {
             tracing::debug!(
                 user_text = %user_text,
                 key = %key,
-                "Followup matched via normalization (original text didn't match exactly)"
+                "Directive matched via normalization (original text didn't match exactly)"
             );
-            return Some(prompt.as_str());
+            return Some(directive.as_str());
         }
     }
     None
+}
+
+/// Whether `user_text` matches one of the point's abort options (exact match
+/// first, then the same normalization used for directive lookup).
+fn is_abort_option(abort_options: &[String], user_text: &str) -> bool {
+    if abort_options.iter().any(|o| o == user_text) {
+        return true;
+    }
+    let normalized = normalize_for_followup(user_text);
+    abort_options
+        .iter()
+        .any(|o| normalize_for_followup(o) == normalized)
+}
+
+/// Outcome of running an interactive-points stage. `Aborted` signals the
+/// executor to cancel the run immediately — no final inference and no stage
+/// transition.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PointsOutcome {
+    Completed,
+    Aborted,
 }
 
 /// COVERAGE-EXCLUDED: llvm-cov's tracing-macro message-literal region is
@@ -302,7 +323,7 @@ pub async fn run_interactive_points_stage(
     run_context: Option<(&str, &mut RunMeta)>,
     io: &mut dyn RunIO,
     executor: &mut ToolExecutorDyn<'_>,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<PointsOutcome> {
     run_interactive_points_stage_with(
         engine,
         entity,
@@ -342,7 +363,7 @@ async fn run_interactive_points_stage_with(
     executor: &mut ToolExecutorDyn<'_>,
     ask_foreground: &(dyn Fn(&crate::interaction::InteractionRequest) -> crate::interaction::InteractionResponse
           + Sync),
-) -> anyhow::Result<()> {
+) -> anyhow::Result<PointsOutcome> {
     use crate::interaction::{
         make_interaction_id, request_interaction_async, response_as_choice, response_as_text,
         InteractionRequest,
@@ -350,7 +371,7 @@ async fn run_interactive_points_stage_with(
     use leviath_runtime::ContextWindow;
 
     if points.is_empty() {
-        return run_autonomous_stage(
+        run_autonomous_stage(
             engine,
             entity,
             provider_name,
@@ -362,7 +383,8 @@ async fn run_interactive_points_stage_with(
             io,
             executor,
         )
-        .await;
+        .await?;
+        return Ok(PointsOutcome::Completed);
     }
 
     let (run_id_owned, mut meta_holder): (Option<String>, Option<&mut RunMeta>) = match run_context
@@ -483,6 +505,19 @@ async fn run_interactive_points_stage_with(
                 }
             };
 
+            // Deterministic abort: if the selection is an abort option, signal
+            // the executor to cancel the run immediately. No label injection,
+            // no final inference, no transition — the executor's `on_cancel`
+            // owns marking the run Cancelled (consistent with `on_stage_error`).
+            if is_abort_option(&point.abort_options, &user_text) {
+                tracing::info!(
+                    point = %point.name,
+                    selection = %user_text,
+                    "Interaction point aborted by user"
+                );
+                return Ok(PointsOutcome::Aborted);
+            }
+
             if !user_text.is_empty() {
                 if let Some(mut window) = engine.world_mut().get_mut::<ContextWindow>(entity) {
                     let tokens = user_text.len() / 4 + 1;
@@ -491,15 +526,18 @@ async fn run_interactive_points_stage_with(
                 }
             }
 
-            // If the chosen option has a configured followup, ask the user to
-            // actually describe what they want instead of letting the model
-            // act on the bare option label alone, then loop back and re-ask
-            // the same point so the user can review what changed.
-            let Some(followup_prompt) = lookup_followup(&point.followups, &user_text) else {
+            // If the chosen option has a configured directive, inject it into
+            // the agent's context and loop back to re-run inference IN-STAGE.
+            // The agent reads the directive and drives the next step itself
+            // (e.g. calling `ask_user_text` or `edit_document`), then the same
+            // point is re-presented — deterministic routing, no fall-through to
+            // a stage transition. A plain option (no directive) breaks and
+            // completes the stage normally.
+            let Some(directive) = lookup_directive(&point.directives, &user_text) else {
                 tracing::debug!(
                     user_text = %user_text,
-                    followup_keys = ?point.followups.keys().collect::<Vec<_>>(),
-                    "No followup match found for user selection"
+                    directive_keys = ?point.directives.keys().collect::<Vec<_>>(),
+                    "No directive match found for user selection — completing stage"
                 );
                 break 'point;
             };
@@ -507,23 +545,10 @@ async fn run_interactive_points_stage_with(
                 break 'point;
             }
 
-            let followup_req_id = make_interaction_id(pt_idx, revision_round * 2 + 1);
-            let followup_req =
-                InteractionRequest::free_text(followup_req_id, followup_prompt, &point.name, true);
-            let followup_text =
-                if let (Some(run_id), Some(ref mut meta)) = (&run_id_owned, &mut meta_holder) {
-                    let resp = request_interaction_async(run_id, meta, followup_req, None).await?;
-                    response_as_text(&resp)
-                } else {
-                    response_as_text(&ask_foreground(&followup_req))
-                };
-
-            if !followup_text.is_empty() {
-                if let Some(mut window) = engine.world_mut().get_mut::<ContextWindow>(entity) {
-                    let tokens = followup_text.len() / 4 + 1;
-                    let content = format!("User [{}] detail: {}", point.name, followup_text);
-                    let _ = window.add_to_region("conversation", content, tokens);
-                }
+            if let Some(mut window) = engine.world_mut().get_mut::<ContextWindow>(entity) {
+                let content = format!("User [{}] directive: {}", point.name, directive);
+                let tokens = content.len() / 4 + 1;
+                let _ = window.add_to_region("conversation", content, tokens);
             }
 
             revision_round += 1;
@@ -568,7 +593,7 @@ async fn run_interactive_points_stage_with(
         }
     }
 
-    Ok(())
+    Ok(PointsOutcome::Completed)
 }
 
 #[cfg(test)]
@@ -1398,7 +1423,8 @@ mod tests {
             required: false,
             style: leviath_core::blueprint::InteractionStyle::FreeText,
             options: vec![],
-            followups: std::collections::HashMap::new(),
+            directives: std::collections::HashMap::new(),
+            abort_options: Vec::new(),
         }
     }
 
@@ -1413,15 +1439,16 @@ mod tests {
             required: false,
             style: leviath_core::blueprint::InteractionStyle::MultipleChoice,
             options,
-            followups: std::collections::HashMap::new(),
+            directives: std::collections::HashMap::new(),
+            abort_options: Vec::new(),
         }
     }
 
-    fn make_multiple_choice_point_with_followups(
+    fn make_multiple_choice_point_with_directives(
         name: &str,
         prompt: &str,
         options: Vec<String>,
-        followups: std::collections::HashMap<String, String>,
+        directives: std::collections::HashMap<String, String>,
     ) -> leviath_core::blueprint::InteractionPoint {
         leviath_core::blueprint::InteractionPoint {
             name: name.to_string(),
@@ -1429,7 +1456,25 @@ mod tests {
             required: false,
             style: leviath_core::blueprint::InteractionStyle::MultipleChoice,
             options,
-            followups,
+            directives,
+            abort_options: Vec::new(),
+        }
+    }
+
+    fn make_multiple_choice_point_with_abort(
+        name: &str,
+        prompt: &str,
+        options: Vec<String>,
+        abort_options: Vec<String>,
+    ) -> leviath_core::blueprint::InteractionPoint {
+        leviath_core::blueprint::InteractionPoint {
+            name: name.to_string(),
+            prompt: prompt.to_string(),
+            required: false,
+            style: leviath_core::blueprint::InteractionStyle::MultipleChoice,
+            options,
+            directives: std::collections::HashMap::new(),
+            abort_options,
         }
     }
 
@@ -1440,7 +1485,8 @@ mod tests {
             required: false,
             style: leviath_core::blueprint::InteractionStyle::Confirm,
             options: vec![],
-            followups: std::collections::HashMap::new(),
+            directives: std::collections::HashMap::new(),
+            abort_options: Vec::new(),
         }
     }
 
@@ -1597,9 +1643,9 @@ mod tests {
     // chosen option's bare label (e.g. "Revise") being the only thing that
     // ever reaches the model.
     #[tokio::test]
-    async fn interactive_points_choice_with_followup_loops_back_for_revision() {
+    async fn interactive_points_directive_option_stays_in_stage_and_injects_directive() {
         let _guard = crate::runstate::isolate_runs_dir_for_test(
-            "interactive_points_choice_with_followup_loops_back_for_revision",
+            "interactive_points_directive_option_stays_in_stage_and_injects_directive",
         );
         use crate::interaction::InteractionResponse;
 
@@ -1626,31 +1672,31 @@ mod tests {
         );
         runstate::create_run(&meta).unwrap();
 
-        let mut followups = std::collections::HashMap::new();
-        followups.insert(
+        let mut directives = std::collections::HashMap::new();
+        directives.insert(
             "Revise".to_string(),
-            "What would you like to change?".to_string(),
+            "Call ask_user_text to learn what to change, then re-plan.".to_string(),
         );
-        let points = vec![make_multiple_choice_point_with_followups(
+        let points = vec![make_multiple_choice_point_with_directives(
             "plan_approval",
             "Approve the plan?",
             vec!["Approve".to_string(), "Revise".to_string()],
-            followups,
+            directives,
         )];
 
-        // Round 1: pick "Revise" (choice_index 1) → must trigger a followup
-        // FreeText request. Answer it. Round 2: pick "Approve" (choice_index 0,
-        // no followup) → the point loop must end after this.
+        // Round 1: pick "Revise" (choice_index 1) → must inject the directive
+        // and loop back IN-STAGE (no second free-text request is issued — the
+        // agent drives the next step itself). Round 2: pick "Approve"
+        // (choice_index 0, no directive) → the point loop ends.
         let responder = spawn_interaction_responder(
             run_id.clone(),
             vec![
                 InteractionResponse::choice("", 1),
-                InteractionResponse::text("", "please add error handling"),
                 InteractionResponse::choice("", 0),
             ],
         );
 
-        run_interactive_points_stage(
+        let outcome = run_interactive_points_stage(
             &mut engine,
             entity,
             "mock",
@@ -1669,9 +1715,11 @@ mod tests {
 
         responder.abort();
 
-        // The elaboration text must have made it into the agent's context —
-        // proof the user's actual feedback (not just the option label) was
-        // surfaced to the model.
+        // Completed (not aborted) after the revision loop.
+        assert_eq!(outcome, PointsOutcome::Completed);
+
+        // The directive text must have been injected into the agent's context,
+        // proving the run stayed in-stage and told the agent what to do next.
         let window = engine
             .world()
             .get::<leviath_runtime::ContextWindow>(entity)
@@ -1684,14 +1732,137 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         assert_contains_display(
-            all_content.contains("please add error handling"),
-            "expected the followup elaboration in context, got",
+            all_content.contains("directive: Call ask_user_text"),
+            "expected the injected directive in context, got",
             &all_content,
         );
         assert!(all_content.contains("Revise"));
         assert!(all_content.contains("Approve"));
 
         let _ = std::fs::remove_dir_all(runstate::run_dir(&run_id));
+    }
+
+    #[tokio::test]
+    async fn interactive_points_abort_option_returns_aborted() {
+        // Selecting an abort option must short-circuit the stage with
+        // PointsOutcome::Aborted — no directive, no fall-through — so the
+        // executor can cancel the run deterministically.
+        let _guard = crate::runstate::isolate_runs_dir_for_test(
+            "interactive_points_abort_option_returns_aborted",
+        );
+        use crate::interaction::InteractionResponse;
+
+        let bp = make_blueprint(vec![make_stage("main")]);
+        let (mut engine, _pool, entity) = make_engine_and_entity(&bp, "Agent response");
+        let mut io = MockIO::new();
+
+        let run_id = format!(
+            "test-ip-abort-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .subsec_nanos()
+        );
+        let mut meta = RunMeta::new(
+            run_id.clone(),
+            "test".into(),
+            "/p".into(),
+            "t".into(),
+            None,
+            "/tmp".into(),
+            1,
+        );
+        runstate::create_run(&meta).unwrap();
+
+        let points = vec![make_multiple_choice_point_with_abort(
+            "plan_approval",
+            "Approve the plan?",
+            vec!["Approve".to_string(), "Abort".to_string()],
+            vec!["Abort".to_string()],
+        )];
+
+        // Pick "Abort" (choice_index 1).
+        let responder =
+            spawn_interaction_responder(run_id.clone(), vec![InteractionResponse::choice("", 1)]);
+
+        let outcome = run_interactive_points_stage(
+            &mut engine,
+            entity,
+            "mock",
+            "test-model",
+            8,
+            &[],
+            None,
+            None,
+            &points,
+            Some((&run_id, &mut meta)),
+            &mut io,
+            &mut noop_exec,
+        )
+        .await
+        .unwrap();
+
+        responder.abort();
+
+        assert_eq!(outcome, PointsOutcome::Aborted);
+
+        // The abort short-circuits before the option label is injected, so the
+        // conversation region must NOT carry an "Abort" acknowledgement line.
+        let window = engine
+            .world()
+            .get::<leviath_runtime::ContextWindow>(entity)
+            .unwrap();
+        let conversation = window.get_region("conversation").unwrap();
+        let all_content: String = conversation
+            .content
+            .iter()
+            .map(|e| e.content.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(!all_content.contains("User [plan_approval]: Abort"));
+
+        let _ = std::fs::remove_dir_all(runstate::run_dir(&run_id));
+    }
+
+    #[tokio::test]
+    async fn interactive_points_foreground_abort_option_returns_aborted() {
+        // Same deterministic abort on the foreground (stdin) path.
+        use crate::interaction::InteractionResponse;
+
+        let bp = make_blueprint(vec![make_stage("main")]);
+        let (mut engine, _pool, entity) = make_engine_and_entity(&bp, "Agent response");
+        let mut io = MockIO::new();
+
+        let points = vec![make_multiple_choice_point_with_abort(
+            "plan_approval",
+            "Approve the plan?",
+            vec!["Approve".to_string(), "Abort".to_string()],
+            vec!["Abort".to_string()],
+        )];
+
+        let ask_foreground =
+            move |_req: &crate::interaction::InteractionRequest| InteractionResponse::choice("", 1);
+
+        let outcome = run_interactive_points_stage_with(
+            &mut engine,
+            entity,
+            "mock",
+            "test-model",
+            8,
+            &[],
+            None,
+            None,
+            &points,
+            None,
+            &mut io,
+            &mut noop_exec,
+            &ask_foreground,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(outcome, PointsOutcome::Aborted);
     }
 
     // ─── run_interactive_points_stage: real foreground (stdin) path ─────────
@@ -1803,7 +1974,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn foreground_path_choice_with_followup_loops_back_for_revision() {
+    async fn foreground_path_directive_option_stays_in_stage_and_injects_directive() {
         use crate::interaction::InteractionResponse;
         use std::collections::VecDeque;
         use std::sync::Mutex;
@@ -1812,35 +1983,34 @@ mod tests {
         let (mut engine, _pool, entity) = make_engine_and_entity(&bp, "Agent response");
         let mut io = MockIO::new();
 
-        let mut followups = std::collections::HashMap::new();
-        followups.insert(
+        let mut directives = std::collections::HashMap::new();
+        directives.insert(
             "Revise".to_string(),
-            "What would you like to change?".to_string(),
+            "Call ask_user_text to learn what to change.".to_string(),
         );
-        let points = vec![make_multiple_choice_point_with_followups(
+        let points = vec![make_multiple_choice_point_with_directives(
             "plan_approval",
             "Approve the plan?",
             vec!["Approve".to_string(), "Revise".to_string()],
-            followups,
+            directives,
         )];
 
-        // Round 1: "Revise" (index 1) -> triggers the followup FreeText ask
-        // (also dispatched through `ask_foreground`). Round 2: "Approve"
-        // (index 0, no followup) -> the point loop ends.
+        // Round 1: "Revise" (index 1) -> injects the directive and loops back
+        // IN-STAGE (no second free-text ask). Round 2: "Approve" (index 0, no
+        // directive) -> the point loop ends. So `ask_foreground` is called
+        // exactly twice — proving no engine-issued elaboration prompt.
         let queued = Mutex::new(VecDeque::from(vec![
             InteractionResponse::choice("", 1),
-            InteractionResponse::text("", "please add error handling"),
             InteractionResponse::choice("", 0),
         ]));
-        let ask_foreground = move |_req: &crate::interaction::InteractionRequest| {
-            queued
-                .lock()
-                .unwrap()
-                .pop_front()
-                .expect("ask_foreground called more times than expected")
-        };
+        let ask_foreground =
+            move |_req: &crate::interaction::InteractionRequest| {
+                queued.lock().unwrap().pop_front().expect(
+                    "ask_foreground called more times than expected (no elaboration prompt)",
+                )
+            };
 
-        run_interactive_points_stage_with(
+        let outcome = run_interactive_points_stage_with(
             &mut engine,
             entity,
             "mock",
@@ -1858,6 +2028,8 @@ mod tests {
         .await
         .unwrap();
 
+        assert_eq!(outcome, PointsOutcome::Completed);
+
         let window = engine
             .world()
             .get::<leviath_runtime::ContextWindow>(entity)
@@ -1870,8 +2042,8 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         assert_contains_display(
-            all_content.contains("please add error handling"),
-            "expected the followup elaboration in context, got",
+            all_content.contains("directive: Call ask_user_text"),
+            "expected the injected directive in context, got",
             &all_content,
         );
         assert!(all_content.contains("Revise"));
@@ -1884,36 +2056,33 @@ mod tests {
         use std::collections::VecDeque;
         use std::sync::Mutex;
 
-        // A user who always picks "Revise" must eventually be cut off by
-        // MAX_REVISION_ROUNDS (4) rather than looping forever -- this
-        // exercises the `revision_round + 1 >= MAX_REVISION_ROUNDS` guard,
-        // previously unreached by any test (every other followup test picks
-        // "Approve" after exactly one revision).
+        // A user who always picks a directive option ("Revise") must eventually
+        // be cut off by MAX_REVISION_ROUNDS (4) rather than looping forever.
+        // `max_iterations = 1` makes the per-segment iteration budget 0, so the
+        // `remaining_iterations == 0` guard never fires and ONLY the
+        // `revision_round + 1 >= MAX_REVISION_ROUNDS` guard can break the loop.
         let bp = make_blueprint(vec![make_stage("main")]);
         let (mut engine, _pool, entity) = make_engine_and_entity(&bp, "Agent response");
         let mut io = MockIO::new();
 
-        let mut followups = std::collections::HashMap::new();
-        followups.insert(
+        let mut directives = std::collections::HashMap::new();
+        directives.insert(
             "Revise".to_string(),
-            "What would you like to change?".to_string(),
+            "Call ask_user_text to learn what to change.".to_string(),
         );
-        let points = vec![make_multiple_choice_point_with_followups(
+        let points = vec![make_multiple_choice_point_with_directives(
             "plan_approval",
             "Approve the plan?",
             vec!["Approve".to_string(), "Revise".to_string()],
-            followups,
+            directives,
         )];
 
-        // "Revise" every time; a followup answer follows each "Revise" until
-        // the cap breaks the loop before a 4th followup is ever asked.
+        // "Revise" every round. The cap breaks the loop after exactly 4 asks;
+        // a 5th `pop_front` would panic on the empty queue.
         let queued = Mutex::new(VecDeque::from(vec![
             InteractionResponse::choice("", 1),
-            InteractionResponse::text("", "change 1"),
             InteractionResponse::choice("", 1),
-            InteractionResponse::text("", "change 2"),
             InteractionResponse::choice("", 1),
-            InteractionResponse::text("", "change 3"),
             InteractionResponse::choice("", 1),
         ]));
         let ask_foreground = move |_req: &crate::interaction::InteractionRequest| {
@@ -1924,12 +2093,12 @@ mod tests {
                 .expect("ask_foreground called more times than the revision cap allows")
         };
 
-        run_interactive_points_stage_with(
+        let outcome = run_interactive_points_stage_with(
             &mut engine,
             entity,
             "mock",
             "test-model",
-            100,
+            1,
             &[],
             None,
             None,
@@ -1942,9 +2111,8 @@ mod tests {
         .await
         .unwrap();
 
-        // The loop must have stopped after exactly 4 choice picks (no 4th
-        // followup ask) -- if it looped forever, `pop_front` above would
-        // have panicked on an empty queue instead.
+        // Terminated normally (not aborted) after the cap — no infinite loop.
+        assert_eq!(outcome, PointsOutcome::Completed);
     }
 
     #[tokio::test]
@@ -2819,12 +2987,14 @@ mod tests {
         .unwrap();
     }
 
-    // ─── Coverage: followup empty text (lines 485:17, 486:13) ───────────────
+    // ─── Coverage: directive injection with no ContextWindow ────────────────
 
     #[tokio::test]
-    async fn interactive_points_followup_empty_text_no_context_window() {
-        // Covers lines 485:17 and 486:13: followup_text.is_empty() is true.
-        // Entity has no ContextWindow → else branch also hit.
+    async fn interactive_points_directive_no_context_window() {
+        // Covers the `None` branch of the directive-injection `if let Some(mut
+        // window) = ...get_mut::<ContextWindow>` — a bare entity has no
+        // ContextWindow, so the directive can't be injected but the loop must
+        // still proceed and complete without panicking.
         use crate::interaction::InteractionResponse;
         use std::collections::VecDeque;
         use std::sync::Mutex;
@@ -2832,21 +3002,20 @@ mod tests {
         let (mut engine, entity) = make_engine_bare_entity("Agent response");
         let mut io = MockIO::new();
 
-        let mut followups = std::collections::HashMap::new();
-        followups.insert("Revise".to_string(), "What to change?".to_string());
-        let points = vec![make_multiple_choice_point_with_followups(
+        let mut directives = std::collections::HashMap::new();
+        directives.insert("Revise".to_string(), "Ask what to change.".to_string());
+        let points = vec![make_multiple_choice_point_with_directives(
             "plan",
             "Pick",
             vec!["Approve".to_string(), "Revise".to_string()],
-            followups,
+            directives,
         )];
 
-        // Round 1: "Revise" → followup asked → empty answer → hits line 485 else.
+        // Round 1: "Revise" → directive path (no ContextWindow to inject into).
         // Round 2: "Approve" → exits.
         let queued = Mutex::new(VecDeque::from(vec![
-            InteractionResponse::choice("", 1), // "Revise" → triggers followup
-            InteractionResponse::text("", ""),  // empty followup → hits line 485 else
-            InteractionResponse::choice("", 0), // "Approve" → exits
+            InteractionResponse::choice("", 1),
+            InteractionResponse::choice("", 0),
         ]));
         let ask_foreground = move |_req: &crate::interaction::InteractionRequest| {
             queued
@@ -2856,7 +3025,7 @@ mod tests {
                 .expect("ask_foreground called more times than expected")
         };
 
-        run_interactive_points_stage_with(
+        let outcome = run_interactive_points_stage_with(
             &mut engine,
             entity,
             "mock",
@@ -2873,6 +3042,7 @@ mod tests {
         )
         .await
         .unwrap();
+        assert_eq!(outcome, PointsOutcome::Completed);
     }
 
     // ─── Coverage: final segment None run_context (line 513:13) ─────────────
@@ -3064,19 +3234,17 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn interactive_points_followup_request_interaction_async_error() {
+    async fn interactive_points_request_interaction_async_error_propagates() {
         let _guard = crate::runstate::isolate_runs_dir_for_test(
-            "interactive_points_followup_request_interaction_async_error",
+            "interactive_points_request_interaction_async_error_propagates",
         );
-        // Covers line 474:97: `?` on `request_interaction_async` for the followup
-        // request in the background path.
+        // Covers the `?` on `request_interaction_async` in the background path.
         //
-        // We respond to the main choice with "Revise" (which has a followup).
-        // We immediately make the run dir read-only after writing the response so:
+        // We respond to the first choice with "Revise" (which has a directive),
+        // then immediately make the run dir read-only so:
         //   1) response.json is readable (already written before chmod)
-        //   2) take_response reads it; remove_file silently fails (read-only dir)
-        //   3) write_meta silently fails (let _); request_interaction_async → Ok(resp)
-        //   4) stage builds followup → write_request fails → Err propagates via ?
+        //   2) the directive is injected and the loop re-runs inference
+        //   3) round 2's choice request → write_request fails → Err via `?`
         use crate::interaction::InteractionResponse;
         use std::os::unix::fs::PermissionsExt;
 
@@ -3103,13 +3271,13 @@ mod tests {
         );
         runstate::create_run(&meta).unwrap();
 
-        let mut followups = std::collections::HashMap::new();
-        followups.insert("Revise".to_string(), "What to change?".to_string());
-        let points = vec![make_multiple_choice_point_with_followups(
+        let mut directives = std::collections::HashMap::new();
+        directives.insert("Revise".to_string(), "Ask what to change.".to_string());
+        let points = vec![make_multiple_choice_point_with_directives(
             "plan",
             "Pick",
             vec!["Approve".to_string(), "Revise".to_string()],
-            followups,
+            directives,
         )];
 
         let run_id_for_responder = run_id.clone();
@@ -3166,7 +3334,7 @@ mod tests {
         });
         let _ = std::fs::remove_dir_all(&dir);
 
-        // The error from write_request (read-only dir) propagates via `?` at line 474
+        // The error from write_request (read-only dir) propagates via `?`.
         assert!(result.is_err());
     }
 
@@ -3309,66 +3477,7 @@ mod tests {
         assert!(result.is_err());
     }
 
-    // ─── Coverage: followup non-empty text + no ContextWindow (line 485:17) ────
-
-    #[tokio::test]
-    async fn interactive_points_followup_nonempty_text_no_context_window() {
-        // Covers line 485:17: `}` of `if let Some(mut window)` in the followup
-        // block when followup_text IS non-empty but the entity has NO ContextWindow.
-        // The `get_mut::<ContextWindow>` returns None → inner block is skipped.
-        use crate::interaction::InteractionResponse;
-        use std::collections::VecDeque;
-        use std::sync::Mutex;
-
-        // Bare entity — spawned without ContextWindow
-        let (mut engine, entity) = make_engine_bare_entity("Agent response");
-        let mut io = MockIO::new();
-
-        let mut followups = std::collections::HashMap::new();
-        followups.insert("Revise".to_string(), "What to change?".to_string());
-        let points = vec![make_multiple_choice_point_with_followups(
-            "plan",
-            "Pick",
-            vec!["Approve".to_string(), "Revise".to_string()],
-            followups,
-        )];
-
-        // Round 1: "Revise" → followup asked → NON-empty text → entity has no
-        //          ContextWindow → if let Some(mut window) is None → line 485:17 hit.
-        // Round 2: "Approve" → exits.
-        let queued = Mutex::new(VecDeque::from(vec![
-            InteractionResponse::choice("", 1), // "Revise" → triggers followup
-            InteractionResponse::text("", "add more tests"), // non-empty followup
-            InteractionResponse::choice("", 0), // "Approve" → exits
-        ]));
-        let ask_foreground = move |_req: &crate::interaction::InteractionRequest| {
-            queued
-                .lock()
-                .unwrap()
-                .pop_front()
-                .expect("ask_foreground called more times than expected")
-        };
-
-        run_interactive_points_stage_with(
-            &mut engine,
-            entity,
-            "mock",
-            "test-model",
-            8,
-            &[],
-            None,
-            None,
-            &points,
-            None,
-            &mut io,
-            &mut noop_exec,
-            &ask_foreground,
-        )
-        .await
-        .unwrap();
-    }
-
-    // ─── normalize_for_followup + lookup_followup tests ──────────────────
+    // ─── normalize_for_followup + lookup_directive tests ──────────────────
 
     #[test]
     fn normalize_for_followup_preserves_simple_text() {
@@ -3400,46 +3509,65 @@ mod tests {
     }
 
     #[test]
-    fn lookup_followup_exact_match() {
-        let mut followups = std::collections::HashMap::new();
-        followups.insert(
+    fn lookup_directive_exact_match() {
+        let mut directives = std::collections::HashMap::new();
+        directives.insert(
             "Revise \u{2014} I'll describe changes".to_string(),
-            "What would you like to change?".to_string(),
+            "Ask what to change.".to_string(),
         );
-        let result = super::lookup_followup(&followups, "Revise \u{2014} I'll describe changes");
-        assert_eq!(result, Some("What would you like to change?"));
+        let result = super::lookup_directive(&directives, "Revise \u{2014} I'll describe changes");
+        assert_eq!(result, Some("Ask what to change."));
     }
 
     #[test]
-    fn lookup_followup_normalized_match_em_dash_vs_hyphen() {
-        let mut followups = std::collections::HashMap::new();
-        followups.insert(
+    fn lookup_directive_normalized_match_em_dash_vs_hyphen() {
+        let mut directives = std::collections::HashMap::new();
+        directives.insert(
             "Revise \u{2014} I'll describe changes".to_string(),
-            "What would you like to change?".to_string(),
+            "Ask what to change.".to_string(),
         );
         // User text uses ASCII hyphen instead of em dash
-        let result = super::lookup_followup(&followups, "Revise - I'll describe changes");
-        assert_eq!(result, Some("What would you like to change?"));
+        let result = super::lookup_directive(&directives, "Revise - I'll describe changes");
+        assert_eq!(result, Some("Ask what to change."));
     }
 
     #[test]
-    fn lookup_followup_normalized_match_extra_whitespace() {
-        let mut followups = std::collections::HashMap::new();
-        followups.insert(
+    fn lookup_directive_normalized_match_extra_whitespace() {
+        let mut directives = std::collections::HashMap::new();
+        directives.insert(
             "Revise \u{2014} I'll describe changes".to_string(),
-            "What would you like to change?".to_string(),
+            "Ask what to change.".to_string(),
         );
         // User text has extra whitespace and an en dash
         let result =
-            super::lookup_followup(&followups, "Revise  \u{2013}  I'll  describe  changes");
-        assert_eq!(result, Some("What would you like to change?"));
+            super::lookup_directive(&directives, "Revise  \u{2013}  I'll  describe  changes");
+        assert_eq!(result, Some("Ask what to change."));
     }
 
     #[test]
-    fn lookup_followup_no_match() {
-        let mut followups = std::collections::HashMap::new();
-        followups.insert("Revise".to_string(), "prompt".to_string());
-        let result = super::lookup_followup(&followups, "Approve");
+    fn lookup_directive_no_match() {
+        let mut directives = std::collections::HashMap::new();
+        directives.insert("Revise".to_string(), "prompt".to_string());
+        let result = super::lookup_directive(&directives, "Approve");
         assert_eq!(result, None);
+    }
+
+    #[test]
+    fn is_abort_option_exact_and_normalized() {
+        let aborts = vec!["Abort \u{2014} cancel this run".to_string()];
+        // Exact match
+        assert!(super::is_abort_option(
+            &aborts,
+            "Abort \u{2014} cancel this run"
+        ));
+        // Normalized (ASCII hyphen + extra whitespace)
+        assert!(super::is_abort_option(
+            &aborts,
+            "Abort  -  cancel  this  run"
+        ));
+        // Non-abort option
+        assert!(!super::is_abort_option(&aborts, "Approve"));
+        // Empty abort list
+        assert!(!super::is_abort_option(&[], "Abort"));
     }
 }

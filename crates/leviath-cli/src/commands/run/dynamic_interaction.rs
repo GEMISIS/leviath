@@ -1,5 +1,5 @@
 //! Agent-initiated dynamic interaction tools: `present_for_review`,
-//! `ask_user_text`, `ask_user_choice`, `ask_user_confirm`.
+//! `ask_user_text`, `ask_user_choice`, `ask_user_confirm`, `edit_document`.
 //!
 //! Unlike `interaction_points` (declared statically in a blueprint and
 //! always fired), these are ordinary tool calls the model makes on its own
@@ -64,6 +64,9 @@ pub async fn dispatch_dynamic_interaction(
         }
         "ask_user_confirm" => {
             Some(handle_ask_user_confirm(backend, tool_call_id, arguments, stage_name).await)
+        }
+        "edit_document" => {
+            Some(handle_edit_document(backend, tool_call_id, arguments, stage_name).await)
         }
         _ => None,
     }
@@ -201,6 +204,39 @@ async fn handle_ask_user_confirm(
     format!("User answered: {}", if approved { "Yes" } else { "No" })
 }
 
+async fn handle_edit_document(
+    backend: &dyn InteractionBackend,
+    tool_call_id: &str,
+    arguments: &serde_json::Value,
+    stage_name: &str,
+) -> String {
+    let content = arg_str(arguments, "content", "");
+    let prompt = arg_str(
+        arguments,
+        "prompt",
+        "Edit the document below, then submit your changes:",
+    );
+
+    backend.log("[tool] edit_document \u{2192} waiting for user edits");
+
+    let req = InteractionRequest::edit_text(
+        format!("edit-{}", tool_call_id),
+        &prompt,
+        stage_name,
+        &content,
+    );
+    let resp = backend.ask(req).await;
+    let edited = response_as_text(&resp);
+
+    backend.log("[tool] edit_document \u{2192} done");
+
+    if edited.trim().is_empty() {
+        format!("User made no changes. Current document:\n{}", content)
+    } else {
+        format!("User-edited document:\n{}", edited)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -274,6 +310,7 @@ mod tests {
             "ask_user_text",
             "ask_user_choice",
             "ask_user_confirm",
+            "edit_document",
         ];
         for name in names {
             let backend = MockBackend::with_responses(vec![InteractionResponse::text("", "ok")]);
@@ -615,6 +652,44 @@ mod tests {
         assert_eq!(asked[0].id, "ask-call4");
         assert_eq!(asked[0].kind, crate::interaction::InteractionKind::Confirm);
         assert_eq!(asked[0].options, vec!["Yes".to_string(), "No".to_string()]);
+    }
+
+    // ─── edit_document ──────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn edit_document_returns_edited_text() {
+        let backend =
+            MockBackend::with_responses(vec![InteractionResponse::text("", "edited plan")]);
+        let result = dispatch_dynamic_interaction(
+            &backend,
+            "edit_document",
+            "call1",
+            &serde_json::json!({"content": "original plan"}),
+            "plan",
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result, "User-edited document:\nedited plan");
+        let asked = backend.asked.lock().unwrap();
+        assert_eq!(asked[0].id, "edit-call1");
+        assert_eq!(asked[0].kind, crate::interaction::InteractionKind::EditText);
+        assert_eq!(asked[0].body.as_deref(), Some("original plan"));
+    }
+
+    #[tokio::test]
+    async fn edit_document_empty_edit_returns_original_content() {
+        let backend = MockBackend::with_responses(vec![InteractionResponse::text("", "")]);
+        let result = dispatch_dynamic_interaction(
+            &backend,
+            "edit_document",
+            "call2",
+            &serde_json::json!({"content": "keep this"}),
+            "plan",
+        )
+        .await
+        .unwrap();
+        assert_eq!(result, "User made no changes. Current document:\nkeep this");
     }
 
     // ─── log() / on_review_document() default no-ops don't panic ──────────

@@ -183,6 +183,24 @@ impl BuiltinTools {
                     "required": ["prompt"]
                 }),
             },
+            Tool {
+                name: "edit_document".to_string(),
+                description: "Present a document to the user in an editable field pre-filled with its current text, and wait for them to edit it directly. The run pauses until they submit. Use this when the user wants to modify content themselves (e.g. tweak a plan or draft) rather than describe changes for you to make. Pass the current full text as `content`; the returned text is the user's edited version, which you should adopt as authoritative.".to_string(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "content": {
+                            "type": "string",
+                            "description": "The current full document text to present for editing"
+                        },
+                        "prompt": {
+                            "type": "string",
+                            "description": "Optional instruction shown above the editable field"
+                        }
+                    },
+                    "required": ["content"]
+                }),
+            },
         ]
     }
 
@@ -314,6 +332,7 @@ impl BuiltinTools {
             "ask_user_text".to_string(),
             "ask_user_choice".to_string(),
             "ask_user_confirm".to_string(),
+            "edit_document".to_string(),
         ]
     }
 
@@ -608,11 +627,11 @@ mod tests {
     // ── Tool definitions ──────────────────────────────────────────────────
 
     #[test]
-    fn tool_defs_returns_nine_tools() {
+    fn tool_defs_returns_ten_tools() {
         let dir = std::env::temp_dir();
         let tools = make_tools(&dir);
         let defs = tools.tool_defs();
-        assert_eq!(defs.len(), 9);
+        assert_eq!(defs.len(), 10);
     }
 
     #[test]
@@ -629,6 +648,23 @@ mod tests {
         assert!(names.contains(&"ask_user_text".to_string()));
         assert!(names.contains(&"ask_user_choice".to_string()));
         assert!(names.contains(&"ask_user_confirm".to_string()));
+        assert!(names.contains(&"edit_document".to_string()));
+    }
+
+    #[test]
+    fn tool_defs_edit_document_requires_content() {
+        let dir = std::env::temp_dir();
+        let tools = make_tools(&dir);
+        let def = tools
+            .tool_defs()
+            .into_iter()
+            .find(|t| t.name == "edit_document")
+            .expect("edit_document tool def must exist");
+        let required = def.parameters["required"].as_array().unwrap();
+        assert!(required.iter().any(|v| v == "content"));
+        assert_eq!(def.parameters["properties"]["content"]["type"], "string");
+        // Also present in the builtin name list.
+        assert!(tools.names().contains(&"edit_document".to_string()));
     }
 
     #[test]
@@ -652,7 +688,12 @@ mod tests {
         // exactly like present_for_review — execute() must never run them.
         let dir = std::env::temp_dir();
         let tools = make_tools(&dir);
-        for name in ["ask_user_text", "ask_user_choice", "ask_user_confirm"] {
+        for name in [
+            "ask_user_text",
+            "ask_user_choice",
+            "ask_user_confirm",
+            "edit_document",
+        ] {
             let result = tools.execute(name, serde_json::json!({})).await;
             assert!(result.contains("Unknown built-in tool"));
         }
@@ -712,10 +753,10 @@ mod tests {
     }
 
     #[test]
-    fn names_returns_ten_entries() {
+    fn names_returns_eleven_entries() {
         let dir = std::env::temp_dir();
         let tools = make_tools(&dir);
-        assert_eq!(tools.names().len(), 10);
+        assert_eq!(tools.names().len(), 11);
     }
 
     // ── Sub-agent tool definitions ────────────────────────────────────────

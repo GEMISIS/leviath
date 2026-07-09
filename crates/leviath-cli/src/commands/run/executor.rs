@@ -21,7 +21,7 @@ use crate::tools::ToolRegistry;
 use super::graph::{apply_edge_transform, is_graph_mode, resolve_transition};
 use super::helpers::swap_context_layout;
 use super::io::RunIO;
-use super::stages::{run_interactive_points_stage, run_interactive_stage};
+use super::stages::{run_interactive_points_stage, run_interactive_stage, PointsOutcome};
 
 use crate::runstate::RunMeta;
 
@@ -142,6 +142,14 @@ pub trait StageCallbacks: Send {
     /// Called after all stages complete.
     async fn on_complete(&mut self, last_stage_idx: usize);
 
+    /// Called when an interactive-points stage is aborted by the user. The
+    /// implementer should mark the run cancelled and persist that state. The
+    /// run then ends terminally with no further inference or transition.
+    /// Default no-op for callers with no run state (e.g. tests, foreground).
+    async fn on_cancel(&mut self, stage_idx: usize) {
+        let _ = stage_idx;
+    }
+
     /// Post-stage state update (worker writes meta + context snapshot).
     async fn on_post_stage(
         &mut self,
@@ -179,6 +187,7 @@ pub async fn run_stage_loop(
         .position(|s| s.name == current_stage_name_val)
         .unwrap_or(0);
     let mut visit_counts: HashMap<String, usize> = HashMap::new();
+    let mut aborted = false;
 
     loop {
         let stage = ctx
@@ -449,7 +458,7 @@ pub async fn run_stage_loop(
             StageMode::InteractivePoints { points } => {
                 let pts = points.clone();
                 let run_context = cb.get_run_context();
-                run_interactive_points_stage(
+                let outcome = run_interactive_points_stage(
                     ctx.engine,
                     ctx.entity,
                     provider_name,
@@ -464,16 +473,30 @@ pub async fn run_stage_loop(
                     exec,
                 )
                 .await?;
-                stage_result_val = StageResult::Success;
-                cb.on_stage_result(
-                    &stage_name_owned,
-                    stage_idx,
-                    &stage_result_val,
-                    None,
-                    ctx.engine,
-                    ctx.entity,
-                )
-                .await;
+                match outcome {
+                    PointsOutcome::Aborted => {
+                        // Deterministic user abort: mark the run cancelled and
+                        // end terminally — no transition, no completion.
+                        cb.on_cancel(stage_idx).await;
+                        aborted = true;
+                        if let Some(handle) = stdin_handle {
+                            handle.abort();
+                        }
+                        break;
+                    }
+                    PointsOutcome::Completed => {
+                        stage_result_val = StageResult::Success;
+                        cb.on_stage_result(
+                            &stage_name_owned,
+                            stage_idx,
+                            &stage_result_val,
+                            None,
+                            ctx.engine,
+                            ctx.entity,
+                        )
+                        .await;
+                    }
+                }
             }
             StageMode::Autonomous => {
                 match cb
@@ -596,7 +619,9 @@ pub async fn run_stage_loop(
         }
     }
 
-    cb.on_complete(current_stage_idx_val).await;
+    if !aborted {
+        cb.on_complete(current_stage_idx_val).await;
+    }
     Ok(())
 }
 
@@ -632,6 +657,8 @@ mod tests {
         run_autonomous_should_error: bool,
         /// When Some, get_run_context returns a borrow of this pair instead of None.
         run_context: Option<(String, RunMeta)>,
+        /// Stage index recorded by on_cancel (None if never cancelled).
+        cancelled_at: Option<usize>,
     }
 
     impl MockCallbacks {
@@ -650,6 +677,7 @@ mod tests {
                 graph_error_result: true,
                 run_autonomous_should_error: false,
                 run_context: None,
+                cancelled_at: None,
             }
         }
     }
@@ -756,6 +784,10 @@ mod tests {
 
         async fn on_complete(&mut self, last_stage_idx: usize) {
             self.completed_at = Some(last_stage_idx);
+        }
+
+        async fn on_cancel(&mut self, stage_idx: usize) {
+            self.cancelled_at = Some(stage_idx);
         }
 
         async fn on_post_stage(
@@ -1683,6 +1715,100 @@ mod tests {
         assert_eq!(cb.completed_at, Some(0));
     }
 
+    #[tokio::test]
+    async fn interactive_points_abort_cancels_run_and_skips_transition() {
+        // Selecting an abort option must call on_cancel and end the run
+        // terminally: NO transition resolution, NO on_stage_result, and
+        // on_complete must NOT fire (the run is cancelled, not completed).
+        let _guard = crate::runstate::isolate_runs_dir_for_test(
+            "interactive_points_abort_cancels_run_and_skips_transition",
+        );
+        use crate::runstate::{self, RunMeta};
+        use leviath_core::blueprint::InteractionPoint;
+
+        let mut stage = make_stage("plan");
+        stage.mode = StageMode::InteractivePoints {
+            points: vec![InteractionPoint {
+                name: "plan_approval".to_string(),
+                prompt: "Approve?".to_string(),
+                required: false,
+                style: leviath_core::blueprint::InteractionStyle::MultipleChoice,
+                options: vec!["Approve".to_string(), "Abort".to_string()],
+                directives: Default::default(),
+                abort_options: vec!["Abort".to_string()],
+            }],
+        };
+        stage.max_iterations = Some(2);
+        stage.accepts_messages = false;
+        let bp = make_blueprint(vec![stage]);
+        let (mut engine, mut pool, entity) = make_engine_and_entity_with_provider(&bp);
+        let tool_registry = make_tool_registry().await;
+
+        let run_id = "exec-abort-run".to_string();
+        let meta = RunMeta::new(
+            run_id.clone(),
+            "test".into(),
+            "/p".into(),
+            "t".into(),
+            None,
+            "/tmp".into(),
+            1,
+        );
+        runstate::create_run(&meta).unwrap();
+
+        let mut cb = MockCallbacks::new();
+        cb.run_context = Some((run_id.clone(), meta));
+
+        // Answer the plan_approval choice with "Abort" (index 1).
+        let responder_run_id = run_id.clone();
+        let responder = tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+                if let Some(req) = crate::interaction::read_request(&responder_run_id) {
+                    let mut resp = crate::interaction::InteractionResponse::choice("", 1);
+                    resp.request_id = req.id.clone();
+                    crate::interaction::write_response(&responder_run_id, &resp).unwrap();
+                    break;
+                }
+            }
+        });
+
+        let mut ctx = StageContext {
+            blueprint: &bp,
+            engine: &mut engine,
+            entity,
+            pool: &mut pool,
+            tool_registry: &tool_registry,
+            current_stage_name: Arc::new(Mutex::new(String::new())),
+            current_stage_perms: Arc::new(Mutex::new(HashMap::new())),
+            current_stage_idx: Arc::new(Mutex::new(0)),
+            model_override: None,
+            user_default_model: None,
+            compaction_ref: None,
+        };
+
+        run_stage_loop(
+            &mut ctx,
+            &mut cb,
+            "agent-1",
+            &mut MockIO::new(),
+            &mut noop_exec,
+        )
+        .await
+        .unwrap();
+
+        let _ = responder.await;
+
+        // on_cancel fired for stage 0; the run did NOT complete or transition,
+        // and no stage_result was recorded (the stage was aborted, not run).
+        assert_eq!(cb.cancelled_at, Some(0));
+        assert_eq!(cb.completed_at, None);
+        assert!(cb.transitions.is_empty());
+        assert!(cb.stage_results.is_empty());
+
+        let _ = std::fs::remove_dir_all(runstate::run_dir(&run_id));
+    }
+
     // ─── Interactive/InteractivePoints error propagation ────────────────────
 
     #[tokio::test]
@@ -1744,7 +1870,8 @@ mod tests {
                 required: false,
                 style: Default::default(),
                 options: vec![],
-                followups: Default::default(),
+                directives: Default::default(),
+                abort_options: Default::default(),
             }],
         };
         stage.accepts_messages = false;

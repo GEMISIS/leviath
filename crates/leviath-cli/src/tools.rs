@@ -662,7 +662,9 @@ pub fn default_tool_policy(tool_name: &str, is_builtin: bool) -> ToolPolicy {
         // These tools ARE the human-in-the-loop mechanism — gating them behind
         // a separate tool-approval prompt would mean asking the user "may I
         // ask you something?" before actually asking them.
-        "ask_user_text" | "ask_user_choice" | "ask_user_confirm" => ToolPolicy::Allow,
+        "ask_user_text" | "ask_user_choice" | "ask_user_confirm" | "edit_document" => {
+            ToolPolicy::Allow
+        }
         _ => {
             // All other tools (built-in or MCP) default to Ask
             let _ = is_builtin;
@@ -1677,6 +1679,10 @@ mod policy_tests {
         );
         assert_eq!(
             default_tool_policy("ask_user_confirm", true),
+            ToolPolicy::Allow
+        );
+        assert_eq!(
+            default_tool_policy("edit_document", true),
             ToolPolicy::Allow
         );
     }
