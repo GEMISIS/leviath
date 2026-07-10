@@ -110,7 +110,7 @@ impl ToolExecutor {
     /// are discarded here too.
     pub async fn shutdown_all(&mut self) -> anyhow::Result<()> {
         tracing::info!("Shutting down all MCP clients");
-        for (_, client) in self.clients.iter_mut() {
+        for client in self.clients.values_mut() {
             let _ = client.shutdown().await;
         }
         self.clients.clear();
