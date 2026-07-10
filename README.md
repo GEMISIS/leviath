@@ -174,7 +174,7 @@ Force a checkpoint every time a stage runs with `interaction_points` (plus `foll
 
 ## 📊 Benchmarks
 
-# Fake Nubmers! To be filled in!
+# Fake Numbers! To be filled in!
 <!-- ⚠️ Numbers below are targets — replace with actuals from benchmark runs before launch -->
 
 **Context retention** — same model, same tools; only context management differs:
