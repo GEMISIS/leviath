@@ -66,6 +66,12 @@ pub struct RunMeta {
     /// Cumulative tokens read from provider cache.
     #[serde(default)]
     pub cached_tokens: usize,
+    /// Cumulative tokens written to provider cache.
+    #[serde(default)]
+    pub cache_write_tokens: usize,
+    /// Total number of tool calls made across all iterations.
+    #[serde(default)]
+    pub tool_calls: usize,
     /// Absolute path to the working directory for tool execution
     pub workdir: String,
     /// Unix timestamp (seconds)
@@ -113,6 +119,8 @@ impl RunMeta {
             prompt_tokens: 0,
             completion_tokens: 0,
             cached_tokens: 0,
+            cache_write_tokens: 0,
+            tool_calls: 0,
             workdir,
             started_at: now,
             updated_at: now,

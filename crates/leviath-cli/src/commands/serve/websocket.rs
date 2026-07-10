@@ -428,6 +428,7 @@ mod tests {
                 status: "running".to_string(),
                 stage: "plan".to_string(),
                 iteration: 1,
+                tool_calls: 0,
                 accepts_messages: true,
             },
             ServerEvent::ContextUpdate {
@@ -458,6 +459,8 @@ mod tests {
                 run_id: "run-match".to_string(),
                 prompt_tokens: 1,
                 completion_tokens: 2,
+                cached_tokens: 0,
+                cache_write_tokens: 0,
             },
         ];
 
@@ -829,6 +832,7 @@ mod tests {
             status: "running".to_string(),
             stage: "plan".to_string(),
             iteration: 1,
+            tool_calls: 0,
             accepts_messages: true,
         };
         assert_eq!(get_run_id(&ev), "run-123");
@@ -888,6 +892,8 @@ mod tests {
                     run_id: "run-tok".to_string(),
                     prompt_tokens: 0,
                     completion_tokens: 0,
+                    cached_tokens: 0,
+                    cache_write_tokens: 0,
                 },
                 "run-tok",
             ),
@@ -907,6 +913,7 @@ mod tests {
             status: "running".to_string(),
             stage: "plan".to_string(),
             iteration: 1,
+            tool_calls: 0,
             accepts_messages: true,
         };
         let non_matching = ServerEvent::AgentStatus {
@@ -915,6 +922,7 @@ mod tests {
             status: "running".to_string(),
             stage: "plan".to_string(),
             iteration: 1,
+            tool_calls: 0,
             accepts_messages: true,
         };
 
@@ -930,6 +938,7 @@ mod tests {
             status: "running".to_string(),
             stage: "plan".to_string(),
             iteration: 3,
+            tool_calls: 0,
             accepts_messages: false,
         };
         let json = serde_json::to_string(&ev).unwrap();

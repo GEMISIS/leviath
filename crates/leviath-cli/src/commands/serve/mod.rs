@@ -582,6 +582,7 @@ model = "claude-sonnet-4-6"
             status: "running".to_string(),
             stage: "implement".to_string(),
             iteration: 5,
+            tool_calls: 0,
             accepts_messages: true,
         };
         let json = serde_json::to_string(&event).unwrap();
@@ -593,6 +594,8 @@ model = "claude-sonnet-4-6"
             run_id: "run-123".to_string(),
             prompt_tokens: 5000,
             completion_tokens: 1200,
+            cached_tokens: 0,
+            cache_write_tokens: 0,
         };
         let json2 = serde_json::to_string(&event2).unwrap();
         assert!(json2.contains("\"type\":\"tokens\""));

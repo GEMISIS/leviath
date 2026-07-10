@@ -40,6 +40,8 @@ pub enum ServerEvent {
         status: String,
         stage: String,
         iteration: usize,
+        #[serde(default)]
+        tool_calls: usize,
         accepts_messages: bool,
     },
     ContextUpdate {
@@ -75,6 +77,10 @@ pub enum ServerEvent {
         run_id: String,
         prompt_tokens: usize,
         completion_tokens: usize,
+        #[serde(default)]
+        cached_tokens: usize,
+        #[serde(default)]
+        cache_write_tokens: usize,
     },
 }
 
@@ -250,12 +256,14 @@ mod tests {
             status: "running".to_string(),
             stage: "implement".to_string(),
             iteration: 5,
+            tool_calls: 12,
             accepts_messages: true,
         };
         let json = serde_json::to_string(&event).unwrap();
         assert!(json.contains("\"type\":\"agent_status\""));
         assert!(json.contains("\"agent_id\":\"coder\""));
         assert!(json.contains("\"iteration\":5"));
+        assert!(json.contains("\"tool_calls\":12"));
     }
 
     #[test]
@@ -265,10 +273,14 @@ mod tests {
             run_id: "run-123".to_string(),
             prompt_tokens: 5000,
             completion_tokens: 1200,
+            cached_tokens: 200,
+            cache_write_tokens: 100,
         };
         let json = serde_json::to_string(&event).unwrap();
         assert!(json.contains("\"type\":\"tokens\""));
         assert!(json.contains("\"prompt_tokens\":5000"));
+        assert!(json.contains("\"cached_tokens\":200"));
+        assert!(json.contains("\"cache_write_tokens\":100"));
     }
 
     #[test]

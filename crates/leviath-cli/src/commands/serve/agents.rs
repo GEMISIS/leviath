@@ -582,6 +582,8 @@ prompt = "Plan the work"
             run_id: "pre-event-run".to_string(),
             prompt_tokens: 0,
             completion_tokens: 0,
+            cached_tokens: 0,
+            cache_write_tokens: 0,
         });
         let app = Router::new()
             .route("/api/agents", axum::routing::post(spawn_agent))

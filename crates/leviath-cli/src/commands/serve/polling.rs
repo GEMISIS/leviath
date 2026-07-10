@@ -9,8 +9,8 @@ use crate::runstate::{self, RunStatus};
 
 /// Cached state for change detection.
 struct PollState {
-    /// run_id → (status_string, iteration, prompt_tokens, completion_tokens)
-    last_status: HashMap<String, (String, usize, usize, usize)>,
+    /// run_id → (status_string, iteration, tool_calls, prompt_tokens, completion_tokens)
+    last_status: HashMap<String, (String, usize, usize, usize, usize)>,
     /// run_id → total_tokens from last context snapshot
     last_context_tokens: HashMap<String, usize>,
     /// run_id → whether we saw a pending interaction
@@ -93,6 +93,7 @@ fn poll_once(
         let key = (
             status_str.clone(),
             meta.iteration,
+            meta.tool_calls,
             meta.prompt_tokens,
             meta.completion_tokens,
         );
@@ -105,6 +106,7 @@ fn poll_once(
                 status: status_str.clone(),
                 stage: meta.current_stage.clone(),
                 iteration: meta.iteration,
+                tool_calls: meta.tool_calls,
                 accepts_messages: true,
             });
 
@@ -113,12 +115,14 @@ fn poll_once(
                 run_id: meta.run_id.clone(),
                 prompt_tokens: meta.prompt_tokens,
                 completion_tokens: meta.completion_tokens,
+                cached_tokens: meta.cached_tokens,
+                cache_write_tokens: meta.cache_write_tokens,
             });
 
             let was_terminal = poll
                 .last_status
                 .get(&meta.run_id)
-                .is_some_and(|(s, _, _, _)| {
+                .is_some_and(|(s, _, _, _, _)| {
                     matches!(s.as_str(), "Complete" | "Error" | "Cancelled")
                 });
 
@@ -233,7 +237,7 @@ mod tests {
             callback_fired: HashMap::new(),
         };
 
-        let key = ("Running".to_string(), 1, 500, 100);
+        let key = ("Running".to_string(), 1, 0, 500, 100);
         poll.last_status.insert("run-1".to_string(), key.clone());
 
         assert_eq!(poll.last_status.get("run-1"), Some(&key));
@@ -350,11 +354,13 @@ mod tests {
         // Insert a running (non-terminal) status. The closure is called and
         // all three match arms return false, covering the false branches.
         poll.last_status
-            .insert("run-1".to_string(), ("Running".to_string(), 1, 0, 0));
+            .insert("run-1".to_string(), ("Running".to_string(), 1, 0, 0, 0));
         let was_terminal = poll
             .last_status
             .get("run-1")
-            .is_some_and(|(s, _, _, _)| matches!(s.as_str(), "Complete" | "Error" | "Cancelled"));
+            .is_some_and(|(s, _, _, _, _)| {
+                matches!(s.as_str(), "Complete" | "Error" | "Cancelled")
+            });
         assert!(!was_terminal);
 
         // Iterate through all three terminal statuses at ONE source position so
@@ -363,10 +369,13 @@ mod tests {
         // is the single instrumented region that receives all three inputs.
         for (i, status) in ["Complete", "Error", "Cancelled"].iter().enumerate() {
             poll.last_status
-                .insert("run-1".to_string(), (status.to_string(), i + 5, 100, 50));
-            let was_terminal = poll.last_status.get("run-1").is_some_and(|(s, _, _, _)| {
-                matches!(s.as_str(), "Complete" | "Error" | "Cancelled")
-            });
+                .insert("run-1".to_string(), (status.to_string(), i + 5, 0, 100, 50));
+            let was_terminal = poll
+                .last_status
+                .get("run-1")
+                .is_some_and(|(s, _, _, _, _)| {
+                    matches!(s.as_str(), "Complete" | "Error" | "Cancelled")
+                });
             assert_is_terminal(was_terminal, status);
         }
     }
@@ -390,12 +399,12 @@ mod tests {
             callback_fired: HashMap::new(),
         };
 
-        let key1 = ("Running".to_string(), 1, 100, 50);
+        let key1 = ("Running".to_string(), 1, 0, 100, 50);
         poll.last_status.insert("run-1".to_string(), key1.clone());
 
         // Same key → no change
         assert_eq!(poll.last_status.get("run-1"), Some(&key1));
-        let key2 = ("Running".to_string(), 2, 200, 100); // iteration changed
+        let key2 = ("Running".to_string(), 2, 0, 200, 100); // iteration changed
         assert_ne!(poll.last_status.get("run-1"), Some(&key2));
     }
 
@@ -739,6 +748,8 @@ mod tests {
             run_id: "noise-run".to_string(),
             prompt_tokens: 0,
             completion_tokens: 0,
+            cached_tokens: 0,
+            cache_write_tokens: 0,
         });
         let _ = state.event_tx.send(ServerEvent::ContextUpdate {
             agent_id: "other-agent".to_string(),
@@ -1240,6 +1251,7 @@ mod tests {
             status: "Running".into(),
             stage: String::new(),
             iteration: 0,
+            tool_calls: 0,
             accepts_messages: true,
         });
         let meta_clone = meta.clone();

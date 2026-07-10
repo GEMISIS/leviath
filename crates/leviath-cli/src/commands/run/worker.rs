@@ -44,6 +44,7 @@ struct ToolDispatchState {
     run_id: Arc<String>,
     stage_idx: CurrentStageIdx,
     stage_name: Arc<Mutex<String>>,
+    tool_calls_counter: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 /// Resolve tool policy, handle approvals/dynamic interactions, and execute a
@@ -179,6 +180,9 @@ async fn dispatch_tool_calls(
             }
         };
         out.push((tc.id.clone(), res));
+        state
+            .tool_calls_counter
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
     out
 }
@@ -224,6 +228,7 @@ struct WorkerCallbacks<'a> {
     run_id: String,
     meta: &'a mut RunMeta,
     blueprint_stages_len: usize,
+    tool_calls_counter: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 impl<'a> WorkerCallbacks<'a> {
@@ -376,6 +381,7 @@ impl<'a> StageCallbacks for WorkerCallbacks<'a> {
             self.meta.prompt_tokens += resp.tokens_used.prompt_tokens;
             self.meta.completion_tokens += resp.tokens_used.completion_tokens;
             self.meta.cached_tokens += resp.tokens_used.cached_tokens;
+            self.meta.cache_write_tokens += resp.tokens_used.cache_write_tokens;
 
             // Carry the final response forward so the next stage sees the previous stage's output
             if !resp.content.is_empty() {
@@ -489,6 +495,10 @@ impl<'a> StageCallbacks for WorkerCallbacks<'a> {
         if let Some(state) = engine.world().get::<AgentState>(entity) {
             self.meta.iteration = state.iteration;
         }
+        // Update tool_calls from the counter
+        self.meta.tool_calls = self
+            .tool_calls_counter
+            .load(std::sync::atomic::Ordering::Relaxed);
         self.meta.touch();
         let _ = runstate::write_meta(self.meta);
 
@@ -647,6 +657,7 @@ async fn run_worker_inner(
     // Shared current stage name for present_for_review interactions.
     let current_stage_name: Arc<Mutex<String>> = Arc::new(Mutex::new(String::new()));
 
+    let tool_calls_counter = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let dispatch_state = Arc::new(ToolDispatchState {
         builtins: tool_registry.builtins.clone(),
         mcp: tool_registry.mcp.clone(),
@@ -659,6 +670,7 @@ async fn run_worker_inner(
         run_id: run_id_arc.clone(),
         stage_idx: current_stage_idx.clone(),
         stage_name: current_stage_name.clone(),
+        tool_calls_counter: tool_calls_counter.clone(),
     });
     let mut exec = move |calls: Vec<leviath_providers::ToolCall>| -> leviath_runtime::ToolResultsFuture<'static> {
         let dispatch_state = dispatch_state.clone();
@@ -689,6 +701,7 @@ async fn run_worker_inner(
         run_id: args.run_id.clone(),
         meta,
         blueprint_stages_len,
+        tool_calls_counter: tool_calls_counter.clone(),
     };
     let mut io = ConsoleIO::new();
 
@@ -820,6 +833,7 @@ mod tests {
             run_id: "test-run".to_string(),
             meta: &mut meta,
             blueprint_stages_len: 3,
+            tool_calls_counter: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         };
         assert_eq!(cb.run_id, "test-run");
         assert_eq!(cb.blueprint_stages_len, 3);
@@ -840,6 +854,7 @@ mod tests {
             run_id: "test-complete".to_string(),
             meta: &mut meta,
             blueprint_stages_len: 0,
+            tool_calls_counter: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         };
         // Should not panic even with 0 stages
         cb.on_complete(0).await;
@@ -860,6 +875,7 @@ mod tests {
             run_id: "ctx-run".to_string(),
             meta: &mut meta,
             blueprint_stages_len: 1,
+            tool_calls_counter: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         };
         let ctx = cb.get_run_context();
         assert!(ctx.is_some());
@@ -882,6 +898,7 @@ mod tests {
             run_id: "msg-run".to_string(),
             meta: &mut meta,
             blueprint_stages_len: 1,
+            tool_calls_counter: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         };
         let registry = leviath_runtime::ProviderRegistry::new();
         let engine = leviath_runtime::AgentEngine::with_providers(registry);
@@ -910,6 +927,7 @@ mod tests {
             run_id: "test-complete-pos".to_string(),
             meta: &mut meta,
             blueprint_stages_len: 3,
+            tool_calls_counter: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         };
         // Should not panic with positive stages
         cb.on_complete(2).await;
@@ -933,6 +951,7 @@ mod tests {
             run_id: "test-trans".to_string(),
             meta: &mut meta,
             blueprint_stages_len: 2,
+            tool_calls_counter: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         };
         cb.on_transition("plan", "code", 0).await;
     }
@@ -954,6 +973,7 @@ mod tests {
             run_id: "test-cancel".to_string(),
             meta: &mut meta,
             blueprint_stages_len: 2,
+            tool_calls_counter: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         };
         cb.on_cancel(0).await;
 
@@ -981,6 +1001,7 @@ mod tests {
             run_id: "test-ccw".to_string(),
             meta: &mut meta,
             blueprint_stages_len: 1,
+            tool_calls_counter: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         };
         cb.on_claude_code_warning(0).await;
     }
@@ -1012,6 +1033,7 @@ mod tests {
             run_id: run_id.to_string(),
             meta: &mut meta,
             blueprint_stages_len: 1,
+            tool_calls_counter: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         };
         let result = cb.on_provider_missing("nonexistent", 0).await;
         // on_provider_missing should return true (abort).
@@ -1051,6 +1073,7 @@ mod tests {
             run_id: run_id.to_string(),
             meta: &mut meta,
             blueprint_stages_len: 2,
+            tool_calls_counter: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         };
         cb.on_stage_enter("plan", 0, "anthropic", "claude-sonnet-4-6", "")
             .await;
@@ -1086,6 +1109,7 @@ mod tests {
             run_id: run_id.to_string(),
             meta: &mut meta,
             blueprint_stages_len: 1,
+            tool_calls_counter: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         };
         cb.on_stage_enter("code", 0, "anthropic", "claude-sonnet-4-6", " (visit 2)")
             .await;
@@ -1119,6 +1143,7 @@ mod tests {
             run_id: run_id.to_string(),
             meta: &mut meta,
             blueprint_stages_len: 1,
+            tool_calls_counter: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         };
 
         let err = anyhow::anyhow!("test error");
@@ -1153,6 +1178,7 @@ mod tests {
             run_id: run_id.to_string(),
             meta: &mut meta,
             blueprint_stages_len: 1,
+            tool_calls_counter: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         };
 
         let err = anyhow::anyhow!("linear error");
@@ -1192,6 +1218,7 @@ mod tests {
             run_id: run_id.to_string(),
             meta: &mut meta,
             blueprint_stages_len: 1,
+            tool_calls_counter: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         };
 
         let registry = leviath_runtime::ProviderRegistry::new();
@@ -1261,6 +1288,7 @@ mod tests {
             run_id: run_id.to_string(),
             meta: &mut meta,
             blueprint_stages_len: 1,
+            tool_calls_counter: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         };
 
         let registry = leviath_runtime::ProviderRegistry::new();
@@ -1309,6 +1337,7 @@ mod tests {
             run_id: run_id.to_string(),
             meta: &mut meta,
             blueprint_stages_len: 1,
+            tool_calls_counter: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         };
 
         // Empty content — the `add_to_region` branch is NOT taken
@@ -1355,6 +1384,7 @@ mod tests {
             run_id: run_id.to_string(),
             meta: &mut meta,
             blueprint_stages_len: 1,
+            tool_calls_counter: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         };
 
         // Non-empty content — `add_to_region` branch IS taken
@@ -1398,6 +1428,7 @@ mod tests {
             run_id: run_id.to_string(),
             meta: &mut meta,
             blueprint_stages_len: 1,
+            tool_calls_counter: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         };
 
         // Should not panic; updates meta.iteration from AgentState and writes meta
@@ -1428,6 +1459,7 @@ mod tests {
             run_id: run_id.to_string(),
             meta: &mut meta,
             blueprint_stages_len: 1,
+            tool_calls_counter: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         };
 
         // on_post_stage with an entity that has no AgentState — should not panic
@@ -2140,6 +2172,7 @@ mode = "autonomous"
             run_id: run_id.to_string(),
             meta: &mut meta,
             blueprint_stages_len: 1,
+            tool_calls_counter: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         };
 
         let registry = leviath_runtime::ProviderRegistry::new();
@@ -2202,6 +2235,7 @@ mode = "autonomous"
             run_id: run_id.to_string(),
             meta: &mut meta,
             blueprint_stages_len: 2,
+            tool_calls_counter: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         };
 
         // graph mode → Some(StageResult::Error) returned; meta NOT set to Error
@@ -2234,6 +2268,7 @@ mode = "autonomous"
             run_id: run_id.to_string(),
             meta: &mut meta,
             blueprint_stages_len: 0,
+            tool_calls_counter: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         };
 
         let result = cb.on_provider_missing("missing-provider", 0).await;
@@ -2263,6 +2298,7 @@ mode = "autonomous"
             run_id: run_id.to_string(),
             meta: &mut meta,
             blueprint_stages_len: 3,
+            tool_calls_counter: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         };
 
         // Should not panic even with stages > 0
@@ -2293,6 +2329,7 @@ mode = "autonomous"
             run_id: run_id.to_string(),
             meta: &mut meta,
             blueprint_stages_len: 1,
+            tool_calls_counter: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         };
 
         // stage_idx=5 but only 1 stage — the `if let Some(r)` guard handles this safely
@@ -2325,6 +2362,7 @@ mode = "autonomous"
             run_id: run_id.to_string(),
             meta: &mut meta,
             blueprint_stages_len: 0,
+            tool_calls_counter: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         };
 
         let err = anyhow::anyhow!("oob error");
@@ -2451,6 +2489,7 @@ mode = "autonomous"
             run_id: Arc::new(run_id.to_string()),
             stage_idx: Arc::new(Mutex::new(0usize)),
             stage_name: Arc::new(Mutex::new("main".to_string())),
+            tool_calls_counter: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         }
     }
 
@@ -2556,6 +2595,7 @@ mode = "autonomous"
             run_id: Arc::new(run_id.to_string()),
             stage_idx: Arc::new(Mutex::new(0usize)),
             stage_name: Arc::new(Mutex::new("main".to_string())),
+            tool_calls_counter: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         };
 
         let calls = vec![make_tool_call(
@@ -2760,6 +2800,7 @@ mode = "autonomous"
             run_id: Arc::new(run_id.to_string()),
             stage_idx: Arc::new(Mutex::new(0usize)),
             stage_name: Arc::new(Mutex::new("main".to_string())),
+            tool_calls_counter: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         };
 
         let tool_name = "read_file";
@@ -3015,6 +3056,7 @@ for line in sys.stdin:
             run_id: Arc::new(run_id.to_string()),
             stage_idx: Arc::new(Mutex::new(0usize)),
             stage_name: Arc::new(Mutex::new("main".to_string())),
+            tool_calls_counter: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         }
     }
 
