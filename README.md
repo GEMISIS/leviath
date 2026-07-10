@@ -157,16 +157,16 @@ Agents spawn children with different blueprints. Any sub-agent, at any depth, ca
 </td>
 <td width="33%" valign="top">
 
-**💬 Mid-Run Collaboration**
+**🙋 Human-in-the-Loop**
 
-Message agents while they work, from the terminal or the dashboard. Input is injected between inference calls, so you can redirect, answer a question, or add constraints without restarting. On by default.
+Message a running agent from the terminal or dashboard — input is injected between inference calls, so you redirect, answer, or add constraints without restarting. Force checkpoints with a stage's `interaction_points`, or grant `ask_user_*` tools so the agent asks on its own judgment — all gated by per-stage tool permissions.
 
 </td>
 <td width="33%" valign="top">
 
-**🙋 Human-in-the-Loop**
+**🛡️ Taint-Tracked Data Flow (In Progress)**
 
-Force a checkpoint every time a stage runs with `interaction_points` (plus `followups` for detail), or grant the agent `ask_user_*` tools so it asks on its own judgment. Both gated by the same per-stage tool permissions.
+A deterministic sensitivity model (Public / Internal / Private) tags every context region — set by the runtime, never by model output. Tools declare a direction and clearance, so an outbound call carrying data above its level gets blocked before it fires, and taint recovers automatically as entries evict. Configure it with an opt-in `[security]` block, layer on allowlists and Rhai policy rules, and dry-run any tool with `lev policy test`.
 
 </td>
 </tr>
