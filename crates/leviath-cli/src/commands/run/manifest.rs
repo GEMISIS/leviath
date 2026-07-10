@@ -256,6 +256,17 @@ pub fn parse_manifest(content: &str) -> anyhow::Result<Blueprint> {
                                             .collect()
                                     })
                                     .unwrap_or_default();
+                                // Options that open the last output for direct editing:
+                                // edit_options = ["Add detail — expand a section"]
+                                let pt_edit_options: Vec<String> = pt
+                                    .get("edit_options")
+                                    .and_then(|v| v.as_array())
+                                    .map(|arr| {
+                                        arr.iter()
+                                            .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                                            .collect()
+                                    })
+                                    .unwrap_or_default();
                                 points.push(leviath_core::blueprint::InteractionPoint {
                                     name: pt_name,
                                     prompt: pt_prompt,
@@ -264,6 +275,7 @@ pub fn parse_manifest(content: &str) -> anyhow::Result<Blueprint> {
                                     options: pt_options,
                                     directives: pt_directives,
                                     abort_options: pt_abort_options,
+                                    edit_options: pt_edit_options,
                                 });
                             }
                         }
@@ -1217,8 +1229,9 @@ name     = "plan_approval"
 prompt   = "Approve?"
 required = true
 style    = "multiple_choice"
-options  = ["Approve", "Revise", "Abort"]
+options  = ["Approve", "Revise", "Edit", "Abort"]
 abort_options = ["Abort"]
+edit_options = ["Edit"]
 directives = { "Revise" = "Call ask_user_text to find out what to change." }
 "#;
         let bp = parse_manifest(toml).unwrap();
@@ -1231,6 +1244,7 @@ directives = { "Revise" = "Call ask_user_text to find out what to change." }
         );
         assert!(!points[0].directives.contains_key("Approve"));
         assert_eq!(points[0].abort_options, vec!["Abort".to_string()]);
+        assert_eq!(points[0].edit_options, vec!["Edit".to_string()]);
     }
 
     #[test]
@@ -1279,6 +1293,7 @@ style    = "confirm"
         let points = unwrap_interactive_points(&stage.mode);
         assert!(points[0].directives.is_empty());
         assert!(points[0].abort_options.is_empty());
+        assert!(points[0].edit_options.is_empty());
     }
 
     #[test]
@@ -1758,7 +1773,7 @@ version = "1.0.0"
     }
 
     #[test]
-    fn software_engineer_plan_approval_has_directives_and_abort_option() {
+    fn software_engineer_plan_approval_option_routing() {
         let manifest_content =
             include_str!("../../../../../agents/software-engineer/agent.leviath");
         let bp = parse_manifest(manifest_content).unwrap();
@@ -1769,39 +1784,30 @@ version = "1.0.0"
             .find(|p| p.name == "plan_approval")
             .expect("plan_approval interaction point must exist");
 
-        // "Revise" and "Add detail" carry directives so the run stays in-stage
-        // and the agent drives the next step via a tool call.
-        let revise_key = approval
-            .options
-            .iter()
-            .find(|o| o.starts_with("Revise"))
-            .expect("a Revise option must exist");
-        let detail_key = approval
-            .options
-            .iter()
-            .find(|o| o.starts_with("Add detail"))
-            .expect("an Add detail option must exist");
-        assert!(approval.directives.contains_key(revise_key));
-        assert!(approval.directives.contains_key(detail_key));
-        // The Add-detail directive drives the direct-edit tool.
-        assert!(approval.directives[detail_key].contains("edit_document"));
+        let opt = |prefix: &str| {
+            approval
+                .options
+                .iter()
+                .find(|o| o.starts_with(prefix))
+                .unwrap_or_else(|| panic!("a {} option must exist", prefix))
+                .clone()
+        };
+        let approve = opt("Approve");
+        let revise = opt("Revise");
+        let detail = opt("Add detail");
+        let abort = opt("Abort");
 
-        // Approve is a plain (completing) option — no directive.
-        let approve_key = approval
-            .options
-            .iter()
-            .find(|o| o.starts_with("Approve"))
-            .expect("an Approve option must exist");
-        assert!(!approval.directives.contains_key(approve_key));
-
-        // Abort is handled deterministically via abort_options, not a directive.
-        let abort_key = approval
-            .options
-            .iter()
-            .find(|o| o.starts_with("Abort"))
-            .expect("an Abort option must exist");
-        assert!(!approval.directives.contains_key(abort_key));
-        assert!(approval.abort_options.contains(abort_key));
+        // "Revise" carries a directive (agent-driven, calls ask_user_text).
+        assert!(approval.directives.contains_key(&revise));
+        // "Add detail" is a deterministic edit option (engine opens an editor).
+        assert!(approval.edit_options.contains(&detail));
+        assert!(!approval.directives.contains_key(&detail));
+        // "Abort" is a deterministic abort option.
+        assert!(approval.abort_options.contains(&abort));
+        // "Approve" is a plain completing option — none of the above.
+        assert!(!approval.directives.contains_key(&approve));
+        assert!(!approval.abort_options.contains(&approve));
+        assert!(!approval.edit_options.contains(&approve));
     }
 
     #[test]

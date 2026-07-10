@@ -50,16 +50,27 @@ fn lookup_directive<'a>(
     None
 }
 
-/// Whether `user_text` matches one of the point's abort options (exact match
-/// first, then the same normalization used for directive lookup).
-fn is_abort_option(abort_options: &[String], user_text: &str) -> bool {
-    if abort_options.iter().any(|o| o == user_text) {
+/// Whether `user_text` matches one of the given option labels (exact match
+/// first, then the same normalization used for directive lookup). Shared by
+/// the abort- and edit-option checks.
+fn option_matches(candidates: &[String], user_text: &str) -> bool {
+    if candidates.iter().any(|o| o == user_text) {
         return true;
     }
     let normalized = normalize_for_followup(user_text);
-    abort_options
+    candidates
         .iter()
         .any(|o| normalize_for_followup(o) == normalized)
+}
+
+/// Whether `user_text` matches one of the point's abort options.
+fn is_abort_option(abort_options: &[String], user_text: &str) -> bool {
+    option_matches(abort_options, user_text)
+}
+
+/// Whether `user_text` matches one of the point's edit options.
+fn is_edit_option(edit_options: &[String], user_text: &str) -> bool {
+    option_matches(edit_options, user_text)
 }
 
 /// Outcome of running an interactive-points stage. `Aborted` signals the
@@ -397,6 +408,11 @@ async fn run_interactive_points_stage_with(
     let iterations_per_segment = max_iterations / segments;
     let mut remaining_iterations = max_iterations;
 
+    // The most recent non-empty inference output for the current stage (e.g.
+    // the plan). Used to seed an "edit" option's editable field with the text
+    // the user is choosing to modify.
+    let mut last_output: Option<String> = None;
+
     // Cap how many times a single interaction point can loop back on itself
     // via a followup (e.g. repeatedly picking "Revise"). Bounded independently
     // of the iteration budget so a chatty user can't spin forever.
@@ -429,6 +445,7 @@ async fn run_interactive_points_stage_with(
                         if let (Some(run_id), Some(ref m)) = (&run_id_owned, &meta_holder) {
                             record_stage_output(run_id, m.stage_index, &resp.content);
                         }
+                        last_output = Some(resp.content.clone());
                     }
                     // Update token counts in meta so the dashboard shows them before WaitingInput
                     if let Some(ref mut m) = meta_holder {
@@ -524,6 +541,49 @@ async fn run_interactive_points_stage_with(
                     let content = format!("User [{}]: {}", point.name, user_text);
                     let _ = window.add_to_region("conversation", content, tokens);
                 }
+            }
+
+            // Deterministic direct-edit: if the selection is an edit option,
+            // the engine itself opens the stage's most recent output in an
+            // editable field (seeded via `body`) and injects the user's edited
+            // text back into context, then loops back to re-present the point.
+            // Unlike a directive, this does NOT depend on the model choosing to
+            // call an edit tool — the editor always appears.
+            if is_edit_option(&point.edit_options, &user_text) {
+                if revision_round + 1 >= MAX_REVISION_ROUNDS || remaining_iterations == 0 {
+                    break 'point;
+                }
+                let edit_req_id = make_interaction_id(pt_idx, revision_round * 2 + 1);
+                let seed = last_output.clone().unwrap_or_default();
+                let edit_req = InteractionRequest::edit_text(
+                    edit_req_id,
+                    "Edit the text below, then submit your changes:",
+                    &point.name,
+                    seed,
+                );
+                let edited =
+                    if let (Some(run_id), Some(ref mut meta)) = (&run_id_owned, &mut meta_holder) {
+                        let resp = request_interaction_async(run_id, meta, edit_req, None).await?;
+                        response_as_text(&resp)
+                    } else {
+                        response_as_text(&ask_foreground(&edit_req))
+                    };
+                if !edited.is_empty() {
+                    if let Some(mut window) = engine.world_mut().get_mut::<ContextWindow>(entity) {
+                        let content = format!(
+                            "User [{}] edited the output directly. Adopt this exact text as the \
+                             authoritative version and re-present it:\n{}",
+                            point.name, edited
+                        );
+                        let tokens = content.len() / 4 + 1;
+                        let _ = window.add_to_region("conversation", content, tokens);
+                    }
+                    // Reflect the edit as the current output too, so the next
+                    // seed (if edited again) and the dashboard stay in sync.
+                    last_output = Some(edited);
+                }
+                revision_round += 1;
+                continue 'point;
             }
 
             // If the chosen option has a configured directive, inject it into
@@ -1425,6 +1485,7 @@ mod tests {
             options: vec![],
             directives: std::collections::HashMap::new(),
             abort_options: Vec::new(),
+            edit_options: Vec::new(),
         }
     }
 
@@ -1441,6 +1502,7 @@ mod tests {
             options,
             directives: std::collections::HashMap::new(),
             abort_options: Vec::new(),
+            edit_options: Vec::new(),
         }
     }
 
@@ -1458,6 +1520,7 @@ mod tests {
             options,
             directives,
             abort_options: Vec::new(),
+            edit_options: Vec::new(),
         }
     }
 
@@ -1475,6 +1538,25 @@ mod tests {
             options,
             directives: std::collections::HashMap::new(),
             abort_options,
+            edit_options: Vec::new(),
+        }
+    }
+
+    fn make_multiple_choice_point_with_edit(
+        name: &str,
+        prompt: &str,
+        options: Vec<String>,
+        edit_options: Vec<String>,
+    ) -> leviath_core::blueprint::InteractionPoint {
+        leviath_core::blueprint::InteractionPoint {
+            name: name.to_string(),
+            prompt: prompt.to_string(),
+            required: false,
+            style: leviath_core::blueprint::InteractionStyle::MultipleChoice,
+            options,
+            directives: std::collections::HashMap::new(),
+            abort_options: Vec::new(),
+            edit_options,
         }
     }
 
@@ -1487,6 +1569,7 @@ mod tests {
             options: vec![],
             directives: std::collections::HashMap::new(),
             abort_options: Vec::new(),
+            edit_options: Vec::new(),
         }
     }
 
@@ -1863,6 +1946,89 @@ mod tests {
         .unwrap();
 
         assert_eq!(outcome, PointsOutcome::Aborted);
+    }
+
+    #[tokio::test]
+    async fn interactive_points_edit_option_opens_editor_seeded_with_output() {
+        // Selecting an edit option must DETERMINISTICALLY open an EditText
+        // interaction seeded with the stage's last output (the plan), inject
+        // the edited text, and re-present the point — no dependence on the
+        // model calling an edit tool.
+        use crate::interaction::{InteractionKind, InteractionResponse};
+        use std::sync::Mutex;
+
+        let bp = make_blueprint(vec![make_stage("main")]);
+        // Mock provider returns "Agent response" → becomes the edit seed.
+        let (mut engine, _pool, entity) = make_engine_and_entity(&bp, "Agent response");
+        let mut io = MockIO::new();
+
+        let points = vec![make_multiple_choice_point_with_edit(
+            "plan_approval",
+            "Approve the plan?",
+            vec!["Approve".to_string(), "Add detail".to_string()],
+            vec!["Add detail".to_string()],
+        )];
+
+        // Records the body of the EditText request the engine issued.
+        let seen_edit_body: Mutex<Option<String>> = Mutex::new(None);
+        let choice_round = Mutex::new(0usize);
+        let ask_foreground = |req: &crate::interaction::InteractionRequest| match req.kind {
+            InteractionKind::EditText => {
+                *seen_edit_body.lock().unwrap() = req.body.clone();
+                InteractionResponse::text(&req.id, "EDITED PLAN")
+            }
+            _ => {
+                // Round 1: "Add detail" (index 1). Round 2: "Approve" (index 0).
+                let mut r = choice_round.lock().unwrap();
+                let idx = if *r == 0 { 1 } else { 0 };
+                *r += 1;
+                InteractionResponse::choice(&req.id, idx)
+            }
+        };
+
+        let outcome = run_interactive_points_stage_with(
+            &mut engine,
+            entity,
+            "mock",
+            "test-model",
+            8,
+            &[],
+            None,
+            None,
+            &points,
+            None,
+            &mut io,
+            &mut noop_exec,
+            &ask_foreground,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(outcome, PointsOutcome::Completed);
+        // The editor was seeded with the stage's last output (the plan).
+        assert_eq!(
+            seen_edit_body.lock().unwrap().as_deref(),
+            Some("Agent response")
+        );
+
+        // The edited text was injected into the agent's context.
+        let window = engine
+            .world()
+            .get::<leviath_runtime::ContextWindow>(entity)
+            .unwrap();
+        let conversation = window.get_region("conversation").unwrap();
+        let all_content: String = conversation
+            .content
+            .iter()
+            .map(|e| e.content.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert_contains_display(
+            all_content.contains("edited the output directly")
+                && all_content.contains("EDITED PLAN"),
+            "expected the edited text injected into context, got",
+            &all_content,
+        );
     }
 
     // ─── run_interactive_points_stage: real foreground (stdin) path ─────────
