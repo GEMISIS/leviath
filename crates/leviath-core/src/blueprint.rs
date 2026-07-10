@@ -425,6 +425,13 @@ pub struct Stage {
     /// available edge.
     #[serde(default)]
     pub allow_complete: bool,
+
+    /// Per-stage taint/security override. `None` inherits the agent-level
+    /// `Blueprint.security` (which in turn inherits the global config toggle).
+    /// Set `taint_tracking = false` here to opt a single stage out, or `true`
+    /// to opt it in independently of the agent/global setting.
+    #[serde(default)]
+    pub security: Option<crate::taint::SecurityConfig>,
 }
 
 /// Default value for bool fields that should default to true.
@@ -451,6 +458,7 @@ impl Stage {
             transition_prompt: None,
             accepts_messages: true,
             allow_complete: false,
+            security: None,
         }
     }
 

@@ -1923,6 +1923,92 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn interactive_points_edit_option_ipc_path() {
+        // Edit option over the background file-IPC path: the engine issues an
+        // EditText request, the user's edited text is injected, then the point
+        // is re-presented. (The foreground path is covered separately.)
+        let _guard =
+            crate::runstate::isolate_runs_dir_for_test("interactive_points_edit_option_ipc_path");
+        use crate::interaction::InteractionResponse;
+
+        let bp = make_blueprint(vec![make_stage("main")]);
+        let (mut engine, _pool, entity) = make_engine_and_entity(&bp, "Agent response");
+        let mut io = MockIO::new();
+
+        let run_id = format!(
+            "test-ip-edit-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .subsec_nanos()
+        );
+        let mut meta = RunMeta::new(
+            run_id.clone(),
+            "test".into(),
+            "/p".into(),
+            "t".into(),
+            None,
+            "/tmp".into(),
+            1,
+        );
+        runstate::create_run(&meta).unwrap();
+
+        let points = vec![make_multiple_choice_point_with_edit(
+            "plan_approval",
+            "Approve the plan?",
+            vec!["Approve".to_string(), "Add detail".to_string()],
+            vec!["Add detail".to_string()],
+        )];
+
+        // Round 1: "Add detail" (index 1) → engine issues EditText → user
+        // submits edited text → Round 2: "Approve" (index 0) → complete.
+        let responder = spawn_interaction_responder(
+            run_id.clone(),
+            vec![
+                InteractionResponse::choice("", 1),
+                InteractionResponse::text("", "EDITED VIA IPC"),
+                InteractionResponse::choice("", 0),
+            ],
+        );
+
+        let outcome = run_interactive_points_stage(
+            &mut engine,
+            entity,
+            "mock",
+            "test-model",
+            8,
+            &[],
+            None,
+            &points,
+            Some((&run_id, &mut meta)),
+            &mut io,
+            &mut noop_exec,
+        )
+        .await
+        .unwrap();
+
+        responder.abort();
+        assert_eq!(outcome, PointsOutcome::Completed);
+
+        let window = engine
+            .world()
+            .get::<leviath_runtime::ContextWindow>(entity)
+            .unwrap();
+        let conversation = window.get_region("conversation").unwrap();
+        let all_content: String = conversation
+            .content
+            .iter()
+            .map(|e| e.content.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(all_content.contains("edited the output directly"));
+        assert!(all_content.contains("EDITED VIA IPC"));
+
+        let _ = std::fs::remove_dir_all(runstate::run_dir(&run_id));
+    }
+
+    #[tokio::test]
     async fn interactive_points_foreground_abort_option_returns_aborted() {
         // Same deterministic abort on the foreground (stdin) path.
         use crate::interaction::InteractionResponse;

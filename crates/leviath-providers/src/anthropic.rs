@@ -929,6 +929,27 @@ mod tests {
     }
 
     #[test]
+    fn test_builtin_capabilities_sonnet5() {
+        let provider = AnthropicProvider::new("test-key".to_string());
+        let caps = provider.builtin_capabilities("claude-sonnet-5");
+        assert!(!caps.supports_temperature);
+        assert!(caps.supports_streaming);
+        assert!(caps.supports_tools);
+        assert_eq!(caps.max_context_tokens, 1_000_000);
+        assert_eq!(caps.max_output_tokens, 128_000);
+    }
+
+    #[test]
+    fn test_builtin_capabilities_fable_and_opus46() {
+        let provider = AnthropicProvider::new("test-key".to_string());
+        for m in ["claude-fable-5", "claude-mythos-5", "claude-opus-4-6"] {
+            let caps = provider.builtin_capabilities(m);
+            assert!(caps.supports_streaming);
+            assert!(caps.max_context_tokens >= 200_000);
+        }
+    }
+
+    #[test]
     fn test_builtin_capabilities_haiku45() {
         let provider = AnthropicProvider::new("test-key".to_string());
         let caps = provider.builtin_capabilities("claude-haiku-4-5-20251001");

@@ -323,6 +323,11 @@ pub fn parse_manifest(content: &str) -> anyhow::Result<Blueprint> {
                 stage.allow_complete = ac;
             }
 
+            // Parse per-stage security override: [stages.<name>.security]
+            if let Some(sec_table) = stage_value.get("security").and_then(|v| v.as_table()) {
+                stage.security = Some(parse_security_config(sec_table));
+            }
+
             // Parse accepts_messages flag: whether mid-run user messages are
             // injected into context between inference calls. Defaults to true
             // (via the Stage constructor); set false for stages that shouldn't
@@ -564,37 +569,9 @@ pub fn parse_manifest(content: &str) -> anyhow::Result<Blueprint> {
         blueprint.compaction_config = Some(cc);
     }
 
-    // Parse security config: [security]
+    // Parse agent-level security config: [security]
     if let Some(security_table) = parsed.get("security").and_then(|v| v.as_table()) {
-        let mut sc = leviath_core::SecurityConfig::default();
-
-        if let Some(tt) = security_table
-            .get("taint_tracking")
-            .and_then(|v| v.as_bool())
-        {
-            sc.taint_tracking = tt;
-        }
-        if let Some(pm) = security_table.get("pointer_mode").and_then(|v| v.as_bool()) {
-            sc.pointer_mode = pm;
-        }
-        if let Some(fm_val) = security_table.get("filter_mode") {
-            if let Some(fm_str) = fm_val.as_str() {
-                sc.filter_mode = leviath_core::FilterMode::from_str_loose(fm_str);
-            } else if let Some(false) = fm_val.as_bool() {
-                sc.filter_mode = None;
-            }
-        }
-        if let Some(deg_arr) = security_table.get("degradation").and_then(|v| v.as_array()) {
-            let modes: Vec<leviath_core::InputMode> = deg_arr
-                .iter()
-                .filter_map(|v| v.as_str().and_then(leviath_core::InputMode::from_str_loose))
-                .collect();
-            if !modes.is_empty() {
-                sc.degradation = modes;
-            }
-        }
-
-        blueprint.security = Some(sc);
+        blueprint.security = Some(parse_security_config(security_table));
     }
 
     // Parse agent-level tool permissions: [tool_permissions]
@@ -610,6 +587,40 @@ pub fn parse_manifest(content: &str) -> anyhow::Result<Blueprint> {
     }
 
     Ok(blueprint)
+}
+
+/// Parse a `[security]` / `[stages.X.security]` table into a `SecurityConfig`.
+/// A present block defaults `taint_tracking` to `true` (block presence implies
+/// intent to configure security); omit the block entirely to inherit the
+/// broader (agent/global) setting.
+fn parse_security_config(security_table: &toml::value::Table) -> leviath_core::SecurityConfig {
+    let mut sc = leviath_core::SecurityConfig::default();
+    if let Some(tt) = security_table
+        .get("taint_tracking")
+        .and_then(|v| v.as_bool())
+    {
+        sc.taint_tracking = tt;
+    }
+    if let Some(pm) = security_table.get("pointer_mode").and_then(|v| v.as_bool()) {
+        sc.pointer_mode = pm;
+    }
+    if let Some(fm_val) = security_table.get("filter_mode") {
+        if let Some(fm_str) = fm_val.as_str() {
+            sc.filter_mode = leviath_core::FilterMode::from_str_loose(fm_str);
+        } else if let Some(false) = fm_val.as_bool() {
+            sc.filter_mode = None;
+        }
+    }
+    if let Some(deg_arr) = security_table.get("degradation").and_then(|v| v.as_array()) {
+        let modes: Vec<leviath_core::InputMode> = deg_arr
+            .iter()
+            .filter_map(|v| v.as_str().and_then(leviath_core::InputMode::from_str_loose))
+            .collect();
+        if !modes.is_empty() {
+            sc.degradation = modes;
+        }
+    }
+    sc
 }
 
 #[cfg(test)]
@@ -1206,6 +1217,52 @@ followups = { "Revise" = "What would you like to change?" }
             points[0].directives.get("Revise").map(|s| s.as_str()),
             Some("What would you like to change?")
         );
+    }
+
+    #[test]
+    fn parse_manifest_agent_and_stage_security() {
+        let toml = r#"
+[agent]
+name = "sec-test"
+
+[security]
+taint_tracking = true
+
+[stages.plan]
+mode = "autonomous"
+
+[stages.plan.security]
+taint_tracking = false
+
+[stages.build]
+mode = "autonomous"
+"#;
+        let bp = parse_manifest(toml).unwrap();
+        // Agent-level [security] parsed.
+        assert!(bp.security.as_ref().unwrap().taint_tracking);
+        // Stage-level [stages.plan.security] opts this stage out.
+        let plan = bp.find_stage("plan").unwrap();
+        assert_eq!(
+            plan.security.as_ref().map(|s| s.taint_tracking),
+            Some(false)
+        );
+        // A stage with no [security] inherits (None).
+        let build = bp.find_stage("build").unwrap();
+        assert!(build.security.is_none());
+    }
+
+    #[test]
+    fn parse_manifest_no_security_is_none() {
+        let toml = r#"
+[agent]
+name = "no-sec"
+
+[stages.main]
+mode = "autonomous"
+"#;
+        let bp = parse_manifest(toml).unwrap();
+        assert!(bp.security.is_none());
+        assert!(bp.find_stage("main").unwrap().security.is_none());
     }
 
     #[test]

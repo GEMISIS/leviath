@@ -441,6 +441,40 @@ impl Default for SecurityConfig {
     }
 }
 
+/// Resolve whether taint tracking is enabled for a stage, cascading
+/// stage → agent → global (default off when nothing is set). A `Some(_)`
+/// config at a level overrides broader levels with its `taint_tracking`.
+pub fn resolve_taint_enabled(
+    global: bool,
+    agent: Option<&SecurityConfig>,
+    stage: Option<&SecurityConfig>,
+) -> bool {
+    stage
+        .map(|s| s.taint_tracking)
+        .or_else(|| agent.map(|a| a.taint_tracking))
+        .unwrap_or(global)
+}
+
+/// Resolve the effective [`SecurityConfig`] for a stage: the most specific
+/// present config (stage over agent), or a default whose `taint_tracking`
+/// follows the global toggle when neither level configures it.
+pub fn resolve_security(
+    global: bool,
+    agent: Option<&SecurityConfig>,
+    stage: Option<&SecurityConfig>,
+) -> SecurityConfig {
+    if let Some(s) = stage {
+        return s.clone();
+    }
+    if let Some(a) = agent {
+        return a.clone();
+    }
+    SecurityConfig {
+        taint_tracking: global,
+        ..SecurityConfig::default()
+    }
+}
+
 /// Result of a gate check — whether a tool invocation is allowed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GateDecision {
@@ -463,6 +497,19 @@ impl GateDecision {
     /// Returns true if the gate allows the action.
     pub fn is_allowed(&self) -> bool {
         matches!(self, GateDecision::Allowed)
+    }
+
+    /// For a `Blocked` decision, the `(taint_level, clearance)` that caused the
+    /// block; `None` for `Allowed`.
+    pub fn blocked_levels(&self) -> Option<(TaintLevel, TaintLevel)> {
+        match self {
+            GateDecision::Blocked {
+                taint_level,
+                clearance,
+                ..
+            } => Some((*taint_level, *clearance)),
+            GateDecision::Allowed => None,
+        }
     }
 }
 
@@ -1213,5 +1260,70 @@ mod tests {
         assert_eq!(tc.sensitivity, TaintLevel::Internal);
         assert_eq!(tc.direction, ToolDirection::Inbound);
         assert_eq!(tc.clearance, TaintLevel::Public);
+    }
+
+    // ─── resolve_taint_enabled / resolve_security cascade ───────────────────
+
+    fn sec(taint: bool) -> SecurityConfig {
+        SecurityConfig {
+            taint_tracking: taint,
+            ..SecurityConfig::default()
+        }
+    }
+
+    #[test]
+    fn resolve_taint_enabled_inherits_global_when_unset() {
+        assert!(!resolve_taint_enabled(false, None, None));
+        assert!(resolve_taint_enabled(true, None, None));
+    }
+
+    #[test]
+    fn resolve_taint_enabled_agent_overrides_global() {
+        // Global on, agent opts out.
+        assert!(!resolve_taint_enabled(true, Some(&sec(false)), None));
+        // Global off, agent opts in.
+        assert!(resolve_taint_enabled(false, Some(&sec(true)), None));
+    }
+
+    #[test]
+    fn resolve_taint_enabled_stage_overrides_agent_and_global() {
+        // Stage opt-out beats agent opt-in and global on.
+        assert!(!resolve_taint_enabled(
+            true,
+            Some(&sec(true)),
+            Some(&sec(false))
+        ));
+        // Stage opt-in beats agent opt-out and global off.
+        assert!(resolve_taint_enabled(
+            false,
+            Some(&sec(false)),
+            Some(&sec(true))
+        ));
+    }
+
+    #[test]
+    fn gate_decision_blocked_levels() {
+        let blocked = GateDecision::Blocked {
+            taint_level: TaintLevel::Private,
+            clearance: TaintLevel::Public,
+            source_regions: vec![],
+            tool_name: "shell".into(),
+        };
+        assert_eq!(
+            blocked.blocked_levels(),
+            Some((TaintLevel::Private, TaintLevel::Public))
+        );
+        assert_eq!(GateDecision::Allowed.blocked_levels(), None);
+    }
+
+    #[test]
+    fn resolve_security_prefers_most_specific() {
+        // Neither set → default whose taint_tracking follows global.
+        assert!(resolve_security(true, None, None).taint_tracking);
+        assert!(!resolve_security(false, None, None).taint_tracking);
+        // Agent present → used.
+        assert!(!resolve_security(true, Some(&sec(false)), None).taint_tracking);
+        // Stage present → wins over agent.
+        assert!(resolve_security(false, Some(&sec(false)), Some(&sec(true))).taint_tracking);
     }
 }

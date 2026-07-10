@@ -12,6 +12,29 @@ use std::collections::HashMap;
 
 use crate::components::ContextWindow;
 
+/// The user's resolution of a blocked outbound tool call.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GateResolution {
+    /// Allow this one call.
+    AllowOnce,
+    /// Allow this tool for the rest of the run (session allow).
+    AlwaysAllow,
+    /// Deny the call — it is not executed; the model gets a blocked result.
+    Deny,
+}
+
+/// Injected resolver used when the gate blocks an outbound tool call.
+///
+/// The runtime cannot prompt the user itself (no stdin/IPC), so the CLI
+/// provides an implementation that asks via the dashboard/stdin and returns
+/// the user's decision. Mirrors how tool execution is injected as a closure.
+#[async_trait::async_trait]
+pub trait GatePrompt: Send + Sync {
+    /// Ask the user how to resolve a blocked outbound call. Implementations
+    /// should default to [`GateResolution::Deny`] when no answer is available.
+    async fn resolve(&self, decision: &GateDecision) -> GateResolution;
+}
+
 /// Type alias for a scripted rule checker function.
 /// Takes (tool_name, target, taint_level) and returns Some(script_name) if the rule allows.
 pub type ScriptRuleChecker = dyn Fn(&str, Option<&str>, TaintLevel) -> Option<String>;
@@ -349,6 +372,84 @@ impl TaintGate {
         self.log_event(
             agent_id, tool_name, input_mode, taint, clearance, true, source,
         );
+    }
+
+    /// Record a deny decision (the user or a default policy denied the call).
+    pub fn record_deny(
+        &mut self,
+        agent_id: &str,
+        tool_name: &str,
+        input_mode: InputMode,
+        taint: TaintLevel,
+        clearance: TaintLevel,
+        source: GateDecisionSource,
+    ) {
+        self.log_event(
+            agent_id, tool_name, input_mode, taint, clearance, false, source,
+        );
+    }
+
+    /// Apply the user's resolution of a blocked outbound call: record the
+    /// audit event and, for `AlwaysAllow`, raise the tool's clearance for the
+    /// rest of the run. Returns `Some((tool_id, message))` when the call is
+    /// denied (and must be skipped), or `None` when it should execute.
+    ///
+    /// Synchronous so it can be unit-tested directly, keeping the async run-loop
+    /// path that awaits the prompt as thin as possible.
+    pub fn apply_resolution(
+        &mut self,
+        agent_id: &str,
+        tool_name: &str,
+        tool_id: &str,
+        taint: TaintLevel,
+        clearance: TaintLevel,
+        resolution: GateResolution,
+    ) -> Option<(String, String)> {
+        match resolution {
+            GateResolution::AllowOnce => {
+                self.record_allow(
+                    agent_id,
+                    tool_name,
+                    InputMode::Traditional,
+                    taint,
+                    clearance,
+                    GateDecisionSource::UserAllowOnce,
+                );
+                None
+            }
+            GateResolution::AlwaysAllow => {
+                self.record_allow(
+                    agent_id,
+                    tool_name,
+                    InputMode::Traditional,
+                    taint,
+                    clearance,
+                    GateDecisionSource::UserAlwaysAllow,
+                );
+                let mut cls = self.tool_classification(tool_name);
+                cls.clearance = TaintLevel::Private;
+                self.set_tool_classification(tool_name.to_string(), cls);
+                None
+            }
+            GateResolution::Deny => {
+                self.record_deny(
+                    agent_id,
+                    tool_name,
+                    InputMode::Traditional,
+                    taint,
+                    clearance,
+                    GateDecisionSource::UserDenied,
+                );
+                Some((
+                    tool_id.to_string(),
+                    format!(
+                        "[blocked] Tool '{}' would send data at {} sensitivity, above its {} \
+                         clearance. Denied by user.",
+                        tool_name, taint, clearance
+                    ),
+                ))
+            }
+        }
     }
 
     /// Get the audit log.
@@ -1818,5 +1919,70 @@ mod tests {
         // tool_b has Private clearance — should be allowed
         let decision_b = gate.check_traditional("agent-1", "tool_b", &window);
         assert!(decision_b.is_allowed());
+    }
+
+    // ─── apply_resolution (synchronous resolution handling) ─────────────────
+
+    #[test]
+    fn apply_resolution_allow_once_records_and_executes() {
+        let mut gate = TaintGate::new(SecurityConfig::default());
+        let out = gate.apply_resolution(
+            "a",
+            "shell",
+            "call1",
+            TaintLevel::Private,
+            TaintLevel::Public,
+            GateResolution::AllowOnce,
+        );
+        assert!(out.is_none()); // execute
+        assert!(gate
+            .audit_log()
+            .iter()
+            .any(|e| e.allowed && matches!(e.decision_source, GateDecisionSource::UserAllowOnce)));
+    }
+
+    #[test]
+    fn apply_resolution_always_allow_raises_clearance() {
+        let mut gate = TaintGate::new(SecurityConfig::default());
+        let out = gate.apply_resolution(
+            "a",
+            "shell",
+            "call1",
+            TaintLevel::Private,
+            TaintLevel::Public,
+            GateResolution::AlwaysAllow,
+        );
+        assert!(out.is_none());
+        // Clearance raised so future calls of this tool auto-pass.
+        assert_eq!(
+            gate.tool_classification("shell").clearance,
+            TaintLevel::Private
+        );
+        assert!(
+            gate.audit_log()
+                .iter()
+                .any(|e| e.allowed
+                    && matches!(e.decision_source, GateDecisionSource::UserAlwaysAllow))
+        );
+    }
+
+    #[test]
+    fn apply_resolution_deny_returns_blocked_result() {
+        let mut gate = TaintGate::new(SecurityConfig::default());
+        let out = gate.apply_resolution(
+            "a",
+            "shell",
+            "call1",
+            TaintLevel::Private,
+            TaintLevel::Public,
+            GateResolution::Deny,
+        );
+        let (id, msg) = out.expect("deny yields a blocked result");
+        assert_eq!(id, "call1");
+        assert!(msg.contains("[blocked]") && msg.contains("shell"));
+        assert!(gate
+            .audit_log()
+            .iter()
+            .any(|e| !e.allowed && matches!(e.decision_source, GateDecisionSource::UserDenied)));
     }
 }

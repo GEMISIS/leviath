@@ -507,6 +507,13 @@ prompt = "Implement"
         // when the executable path does not exist. We call execute_background
         // directly (the private inner function) with a non-existent exe path so
         // the spawn fails immediately.
+        // Hold the runs-dir isolation lock for the whole test (like the
+        // happy-path siblings) so a concurrent test can't swap LEVIATH_RUNS_DIR
+        // between `create_run` and `open_log_file` and delete the dir underneath
+        // us — a race llvm-cov's slower timing reliably exposed.
+        let _guard = crate::runstate::isolate_runs_dir_for_test(
+            "execute_background_bad_exe_returns_spawn_error",
+        );
         let agent_name = "test-execute-bg-bad-exe";
         let _cleanup = RunPrefixCleanup(agent_name);
         let temp_dir = std::env::temp_dir().join(agent_name);

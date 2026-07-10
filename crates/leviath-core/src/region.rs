@@ -246,6 +246,55 @@ impl Region {
         Ok(())
     }
 
+    /// Add a typed entry with a taint level.
+    ///
+    /// Combines [`add_typed_entry`](Self::add_typed_entry) (the entry carries a
+    /// typed [`EntryKind`] so eviction can group turns) with
+    /// [`add_tainted_entry`](Self::add_tainted_entry) (the entry contributes a
+    /// specific taint level rather than defaulting to `Public`). Used for tool
+    /// results when taint tracking is enabled, so a sensitive tool's output
+    /// both keeps its `ToolResult` kind and raises the region's taint level.
+    pub fn add_typed_tainted_entry(
+        &mut self,
+        content: String,
+        tokens: usize,
+        kind: EntryKind,
+        taint_level: crate::taint::TaintLevel,
+    ) -> crate::error::Result<()> {
+        // Validate against schema if present
+        if let Some(schema) = &self.schema {
+            schema.validate(&content)?;
+        }
+
+        // Check token budget
+        if self.current_tokens + tokens > self.max_tokens {
+            return Err(crate::error::Error::TokenBudgetExceeded {
+                used: self.current_tokens + tokens,
+                max: self.max_tokens,
+            });
+        }
+
+        // Add entry
+        self.content.push(RegionEntry {
+            content,
+            tokens,
+            timestamp: chrono::Utc::now().timestamp(),
+            metadata: None,
+            kind,
+        });
+        self.current_tokens += tokens;
+
+        // Update taint tracking with the supplied level
+        if let Some(taint) = &mut self.taint {
+            taint.add_entry(taint_level);
+        }
+
+        // Enforce SlidingWindow max_items limit
+        self.enforce_sliding_window();
+
+        Ok(())
+    }
+
     /// Add a validation schema to this region.
     pub fn with_schema(mut self, schema: RegionSchema) -> Self {
         self.schema = Some(schema);

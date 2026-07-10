@@ -20,6 +20,45 @@ use super::graph::{apply_edge_transform, is_graph_mode, resolve_transition};
 use super::helpers::swap_context_layout;
 use super::io::RunIO;
 use super::stages::{run_interactive_points_stage, run_interactive_stage, PointsOutcome};
+use leviath_core::taint::{
+    resolve_security, resolve_taint_enabled, SecurityConfig, ToolClassification, ToolDirection,
+};
+use leviath_core::PolicyConfig;
+use leviath_runtime::taint::TaintGate;
+
+/// Build the taint gate for a stage, cascading global → agent → stage. Returns
+/// `None` when taint tracking resolves to disabled for this stage. Applies any
+/// per-tool classification overrides from the policy's `mcp_overrides`.
+fn build_stage_taint_gate(
+    global: bool,
+    agent_sec: Option<&SecurityConfig>,
+    stage_sec: Option<&SecurityConfig>,
+    policy: &PolicyConfig,
+) -> Option<TaintGate> {
+    if !resolve_taint_enabled(global, agent_sec, stage_sec) {
+        return None;
+    }
+    let sec = resolve_security(global, agent_sec, stage_sec);
+    let mut gate = TaintGate::new(sec);
+    for (tool_key, ov) in &policy.mcp_overrides {
+        let mut cls = ToolClassification::default();
+        if let Some(s) = ov.sensitivity {
+            cls.sensitivity = s;
+        }
+        if let Some(dir) = ov
+            .direction
+            .as_deref()
+            .and_then(ToolDirection::from_str_loose)
+        {
+            cls.direction = dir;
+        }
+        if let Some(c) = ov.clearance {
+            cls.clearance = c;
+        }
+        gate.set_tool_classification(tool_key.clone(), cls);
+    }
+    Some(gate)
+}
 
 use crate::runstate::RunMeta;
 
@@ -145,6 +184,34 @@ pub trait StageCallbacks: Send {
     /// Default no-op for callers with no run state (e.g. tests, foreground).
     async fn on_cancel(&mut self, stage_idx: usize) {
         let _ = stage_idx;
+    }
+
+    /// Global taint-tracking master switch (from user config). Default off, so
+    /// callers that don't opt in (tests) get no enforcement.
+    fn taint_global_enabled(&self) -> bool {
+        false
+    }
+
+    /// Policy (allowlists / MCP overrides) consulted when the gate blocks.
+    fn taint_policy(&self) -> leviath_core::PolicyConfig {
+        leviath_core::PolicyConfig::default()
+    }
+
+    /// Build a resolver for interactively deciding a blocked outbound call.
+    /// `None` → blocked calls are denied outright. Foreground/worker override
+    /// this to prompt via stdin / the dashboard.
+    fn make_gate_prompt(&self) -> Option<Box<dyn leviath_runtime::taint::GatePrompt>> {
+        None
+    }
+
+    /// Called at the end of a stage with the taint audit events recorded during
+    /// it, so the implementer can persist them. Default no-op.
+    async fn on_taint_audit(
+        &mut self,
+        stage_idx: usize,
+        events: &[leviath_core::taint::GateEvent],
+    ) {
+        let _ = (stage_idx, events);
     }
 
     /// Post-stage state update (worker writes meta + context snapshot).
@@ -411,6 +478,24 @@ pub async fn run_stage_loop(
         // Clone values needed after the match (stage is borrowed from blueprint)
         let stage_name_owned = stage.name.clone();
         let stage_mode = stage.mode.clone();
+
+        // ── Taint enforcement: resolve global → agent → stage and configure
+        // the engine's gate for this stage (or clear it when disabled). ──
+        {
+            let global = cb.taint_global_enabled();
+            let agent_sec = ctx.blueprint.security.as_ref();
+            let stage_sec = stage.security.as_ref();
+            if let Some(gate) =
+                build_stage_taint_gate(global, agent_sec, stage_sec, &cb.taint_policy())
+            {
+                ctx.engine
+                    .configure_taint(gate, cb.taint_policy(), cb.make_gate_prompt());
+                ctx.engine.enable_entity_taint_tracking(ctx.entity);
+            } else {
+                ctx.engine.clear_taint();
+            }
+        }
+
         // Stage execution
         let stage_result_val: StageResult;
 
@@ -533,6 +618,12 @@ pub async fn run_stage_loop(
             }
         }
 
+        // Persist this stage's taint audit events (if any) before moving on.
+        let taint_audit = ctx.engine.taint_audit_log().to_vec();
+        if !taint_audit.is_empty() {
+            cb.on_taint_audit(stage_idx, &taint_audit).await;
+        }
+
         // Cancel the stdin reader task now that the stage is complete
         if let Some(handle) = stdin_handle {
             handle.abort();
@@ -643,6 +734,11 @@ mod tests {
         run_context: Option<(String, RunMeta)>,
         /// Stage index recorded by on_cancel (None if never cancelled).
         cancelled_at: Option<usize>,
+        /// When true, taint_global_enabled() returns true (drives the per-stage
+        /// taint-config path in run_stage_loop).
+        taint_global: bool,
+        /// Stage indexes for which on_taint_audit fired.
+        taint_audits: Vec<usize>,
     }
 
     impl MockCallbacks {
@@ -662,6 +758,8 @@ mod tests {
                 run_autonomous_should_error: false,
                 run_context: None,
                 cancelled_at: None,
+                taint_global: false,
+                taint_audits: Vec::new(),
             }
         }
     }
@@ -767,6 +865,18 @@ mod tests {
 
         async fn on_complete(&mut self, last_stage_idx: usize) {
             self.completed_at = Some(last_stage_idx);
+        }
+
+        fn taint_global_enabled(&self) -> bool {
+            self.taint_global
+        }
+
+        async fn on_taint_audit(
+            &mut self,
+            stage_idx: usize,
+            _events: &[leviath_core::taint::GateEvent],
+        ) {
+            self.taint_audits.push(stage_idx);
         }
 
         async fn on_cancel(&mut self, stage_idx: usize) {
@@ -1432,6 +1542,12 @@ mod tests {
         cb.on_transition("a", "b", 0).await;
         cb.on_complete(0).await;
         cb.on_post_stage(&engine, entity, "main").await;
+        // Default (non-overridden) taint/cancel trait-method bodies.
+        cb.on_cancel(0).await;
+        assert!(!cb.taint_global_enabled());
+        let _ = cb.taint_policy();
+        assert!(cb.make_gate_prompt().is_none());
+        cb.on_taint_audit(0, &[]).await;
     }
 
     #[tokio::test]
@@ -2341,5 +2457,93 @@ mod tests {
             .expect("InferenceConfig should be set from stage parameters");
         assert_eq!(cfg.temperature, Some(0.5));
         assert_eq!(cfg.max_output_tokens, Some(1024));
+    }
+
+    // ─── build_stage_taint_gate ─────────────────────────────────────────────
+
+    fn sec(taint: bool) -> SecurityConfig {
+        SecurityConfig {
+            taint_tracking: taint,
+            ..SecurityConfig::default()
+        }
+    }
+
+    #[test]
+    fn build_stage_taint_gate_disabled_returns_none() {
+        // Global off, nothing opts in.
+        assert!(build_stage_taint_gate(false, None, None, &PolicyConfig::default()).is_none());
+        // Global on but agent opts out.
+        assert!(
+            build_stage_taint_gate(true, Some(&sec(false)), None, &PolicyConfig::default())
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn build_stage_taint_gate_enabled_when_global_on() {
+        let gate = build_stage_taint_gate(true, None, None, &PolicyConfig::default())
+            .expect("gate should be built when global taint is on");
+        assert!(gate.is_enabled());
+    }
+
+    #[test]
+    fn build_stage_taint_gate_applies_mcp_overrides() {
+        let mut policy = PolicyConfig::default();
+        policy.mcp_overrides.insert(
+            "srv.sender".to_string(),
+            leviath_core::policy::McpToolOverride {
+                sensitivity: Some(leviath_core::TaintLevel::Public),
+                direction: Some("outbound".to_string()),
+                clearance: Some(leviath_core::TaintLevel::Public),
+            },
+        );
+        // Stage opts in even though global is off.
+        let gate = build_stage_taint_gate(false, None, Some(&sec(true)), &policy)
+            .expect("stage opt-in should build a gate");
+        let cls = gate.tool_classification("srv.sender");
+        assert!(cls.is_outbound());
+        assert_eq!(cls.clearance, leviath_core::TaintLevel::Public);
+    }
+
+    #[tokio::test]
+    async fn run_stage_loop_configures_taint_when_global_enabled() {
+        // With the global taint switch on, the per-stage taint-config path in
+        // run_stage_loop must build+configure the gate and enable window taint
+        // tracking for the stage (then run to completion).
+        let mut stage = make_stage("main");
+        stage.max_iterations = Some(1);
+        let bp = make_blueprint(vec![stage]);
+        let (mut engine, mut pool, entity) = make_engine_and_entity_with_provider(&bp);
+        let tool_registry = make_tool_registry().await;
+        let mut cb = MockCallbacks::new();
+        cb.taint_global = true;
+
+        let mut ctx = StageContext {
+            blueprint: &bp,
+            engine: &mut engine,
+            entity,
+            pool: &mut pool,
+            tool_registry: &tool_registry,
+            current_stage_name: Arc::new(Mutex::new(String::new())),
+            current_stage_perms: Arc::new(Mutex::new(HashMap::new())),
+            current_stage_idx: Arc::new(Mutex::new(0)),
+            model_override: None,
+            user_default_model: None,
+            compaction_ref: None,
+        };
+
+        run_stage_loop(
+            &mut ctx,
+            &mut cb,
+            "agent-1",
+            &mut MockIO::new(),
+            &mut noop_exec,
+        )
+        .await
+        .unwrap();
+
+        // The run completed with the per-stage taint-config path exercised
+        // (build_stage_taint_gate → configure_taint → enable_entity_taint_tracking).
+        assert_eq!(cb.completed_at, Some(0));
     }
 }

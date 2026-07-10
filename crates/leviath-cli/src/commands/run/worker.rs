@@ -200,6 +200,42 @@ async fn dispatch_tool_calls(
     out
 }
 
+/// Background-worker taint [`GatePrompt`]: when the gate blocks an outbound
+/// call, ask the user via the file-based IPC approval channel (allow-once /
+/// allow-session / deny) and map the answer to a [`GateResolution`].
+struct WorkerGatePrompt {
+    run_id: String,
+}
+
+#[async_trait::async_trait]
+impl leviath_runtime::taint::GatePrompt for WorkerGatePrompt {
+    async fn resolve(
+        &self,
+        decision: &leviath_core::taint::GateDecision,
+    ) -> leviath_runtime::taint::GateResolution {
+        use super::dynamic_interaction::{gate_block_info, gate_prompt_args, map_gate_approval};
+        use crate::interaction::{
+            request_tool_approval_background, ApprovalScope, TOOL_APPROVAL_TIMEOUT,
+        };
+        use leviath_runtime::taint::GateResolution;
+
+        let Some((tool_name, taint_level, clearance)) = gate_block_info(decision) else {
+            // Not a block — nothing to resolve.
+            return GateResolution::AllowOnce;
+        };
+        let args = gate_prompt_args(&tool_name, taint_level, clearance);
+        let (approved, scope) = request_tool_approval_background(
+            &self.run_id,
+            &tool_name,
+            &args,
+            "taint-gate",
+            TOOL_APPROVAL_TIMEOUT,
+        )
+        .await;
+        map_gate_approval(approved, scope == ApprovalScope::Session)
+    }
+}
+
 /// Background-worker [`InteractionBackend`]: answers via the file-based IPC
 /// channel and logs to the per-stage log file.
 struct WorkerInteractionBackend<'a> {
@@ -242,6 +278,10 @@ struct WorkerCallbacks<'a> {
     meta: &'a mut RunMeta,
     blueprint_stages_len: usize,
     tool_calls_counter: Arc<std::sync::atomic::AtomicUsize>,
+    /// Global taint-tracking master switch (from user config).
+    taint_global: bool,
+    /// Taint policy (allowlists / MCP overrides) for the run.
+    taint_policy: leviath_core::PolicyConfig,
 }
 
 impl<'a> WorkerCallbacks<'a> {
@@ -497,6 +537,37 @@ impl<'a> StageCallbacks for WorkerCallbacks<'a> {
         let _ = runstate::write_meta(self.meta);
     }
 
+    fn taint_global_enabled(&self) -> bool {
+        self.taint_global
+    }
+
+    fn taint_policy(&self) -> leviath_core::PolicyConfig {
+        self.taint_policy.clone()
+    }
+
+    fn make_gate_prompt(&self) -> Option<Box<dyn leviath_runtime::taint::GatePrompt>> {
+        Some(Box::new(WorkerGatePrompt {
+            run_id: self.run_id.clone(),
+        }))
+    }
+
+    async fn on_taint_audit(
+        &mut self,
+        stage_idx: usize,
+        events: &[leviath_core::taint::GateEvent],
+    ) {
+        let dir = runstate::stage_dir(&self.run_id, stage_idx);
+        let _ = std::fs::create_dir_all(&dir);
+        if let Ok(json) = serde_json::to_string_pretty(events) {
+            let _ = std::fs::write(dir.join("taint_audit.json"), json);
+        }
+        record_stage_log(
+            &self.run_id,
+            stage_idx,
+            &format!("[taint] {} gate event(s) recorded", events.len()),
+        );
+    }
+
     async fn on_post_stage(
         &mut self,
         engine: &leviath_runtime::AgentEngine,
@@ -713,11 +784,14 @@ async fn run_worker_inner(
 
     let blueprint_stages_len = blueprint.stages.len();
 
+    let taint_policy = crate::commands::policy::load_policy().unwrap_or_default();
     let mut callbacks = WorkerCallbacks {
         run_id: args.run_id.clone(),
         meta,
         blueprint_stages_len,
         tool_calls_counter: tool_calls_counter.clone(),
+        taint_global: config.taint_tracking,
+        taint_policy,
     };
     let mut io = ConsoleIO::new();
 
@@ -850,6 +924,8 @@ mod tests {
             meta: &mut meta,
             blueprint_stages_len: 3,
             tool_calls_counter: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            taint_global: false,
+            taint_policy: leviath_core::PolicyConfig::default(),
         };
         assert_eq!(cb.run_id, "test-run");
         assert_eq!(cb.blueprint_stages_len, 3);
@@ -871,6 +947,8 @@ mod tests {
             meta: &mut meta,
             blueprint_stages_len: 0,
             tool_calls_counter: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            taint_global: false,
+            taint_policy: leviath_core::PolicyConfig::default(),
         };
         // Should not panic even with 0 stages
         cb.on_complete(0).await;
@@ -892,6 +970,8 @@ mod tests {
             meta: &mut meta,
             blueprint_stages_len: 1,
             tool_calls_counter: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            taint_global: false,
+            taint_policy: leviath_core::PolicyConfig::default(),
         };
         let ctx = cb.get_run_context();
         assert!(ctx.is_some());
@@ -915,6 +995,8 @@ mod tests {
             meta: &mut meta,
             blueprint_stages_len: 1,
             tool_calls_counter: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            taint_global: false,
+            taint_policy: leviath_core::PolicyConfig::default(),
         };
         let registry = leviath_runtime::ProviderRegistry::new();
         let engine = leviath_runtime::AgentEngine::with_providers(registry);
@@ -944,6 +1026,8 @@ mod tests {
             meta: &mut meta,
             blueprint_stages_len: 3,
             tool_calls_counter: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            taint_global: false,
+            taint_policy: leviath_core::PolicyConfig::default(),
         };
         // Should not panic with positive stages
         cb.on_complete(2).await;
@@ -968,6 +1052,8 @@ mod tests {
             meta: &mut meta,
             blueprint_stages_len: 2,
             tool_calls_counter: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            taint_global: false,
+            taint_policy: leviath_core::PolicyConfig::default(),
         };
         cb.on_transition("plan", "code", 0).await;
     }
@@ -990,6 +1076,8 @@ mod tests {
             meta: &mut meta,
             blueprint_stages_len: 2,
             tool_calls_counter: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            taint_global: false,
+            taint_policy: leviath_core::PolicyConfig::default(),
         };
         cb.on_cancel(0).await;
 
@@ -997,6 +1085,139 @@ mod tests {
         // Persisted to disk as well.
         let persisted = runstate::read_meta("test-cancel").unwrap();
         assert_eq!(persisted.status, RunStatus::Cancelled);
+    }
+
+    #[tokio::test]
+    async fn worker_on_taint_audit_persists_events() {
+        let _guard = crate::runstate::isolate_runs_dir_for_test("worker-cb-taint-audit");
+        let mut meta = RunMeta::new(
+            "test-taint-audit".into(),
+            "agent".into(),
+            "/p".into(),
+            "t".into(),
+            None,
+            "/w".into(),
+            1,
+        );
+        runstate::create_run(&meta).unwrap();
+        let mut cb = WorkerCallbacks {
+            run_id: "test-taint-audit".to_string(),
+            meta: &mut meta,
+            blueprint_stages_len: 1,
+            tool_calls_counter: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            taint_global: true,
+            taint_policy: leviath_core::PolicyConfig::default(),
+        };
+        let events = vec![leviath_core::taint::GateEvent {
+            timestamp: 0,
+            agent_id: "a".into(),
+            tool_name: "shell".into(),
+            input_mode: leviath_core::taint::InputMode::Traditional,
+            taint_level: leviath_core::TaintLevel::Private,
+            clearance: leviath_core::TaintLevel::Public,
+            allowed: false,
+            decision_source: leviath_core::taint::GateDecisionSource::UserDenied,
+        }];
+        cb.on_taint_audit(0, &events).await;
+
+        let path = runstate::stage_dir("test-taint-audit", 0).join("taint_audit.json");
+        assert!(path.exists());
+        let content = std::fs::read_to_string(path).unwrap();
+        assert!(content.contains("shell"));
+        // Trait accessors reflect the configured values.
+        assert!(cb.taint_global_enabled());
+    }
+
+    async fn resolve_gate_prompt_with(
+        run_id: &str,
+        approved: bool,
+        scope: crate::interaction::ApprovalScope,
+    ) -> leviath_runtime::taint::GateResolution {
+        use leviath_runtime::taint::GatePrompt;
+        let _ = runstate::create_run(&RunMeta::new(
+            run_id.into(),
+            "agent".into(),
+            "/p".into(),
+            "t".into(),
+            None,
+            "/w".into(),
+            1,
+        ));
+        let rid = run_id.to_string();
+        let responder = tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_millis(40)).await;
+                if let Some(req) = crate::interaction::read_request(&rid) {
+                    let mut resp =
+                        crate::interaction::InteractionResponse::approval("", approved, scope);
+                    resp.request_id = req.id.clone();
+                    crate::interaction::write_response(&rid, &resp).unwrap();
+                    break;
+                }
+            }
+        });
+        let prompt = WorkerGatePrompt {
+            run_id: run_id.to_string(),
+        };
+        let decision = leviath_core::taint::GateDecision::Blocked {
+            taint_level: leviath_core::TaintLevel::Private,
+            clearance: leviath_core::TaintLevel::Public,
+            source_regions: vec![],
+            tool_name: "shell".to_string(),
+        };
+        let res = prompt.resolve(&decision).await;
+        // Await (not abort) so the responder's write+exit is deterministic.
+        let _ = responder.await;
+        res
+    }
+
+    #[test]
+    fn worker_callbacks_taint_accessors() {
+        let mut meta = RunMeta::new(
+            "wc-taint".into(),
+            "agent".into(),
+            "/p".into(),
+            "t".into(),
+            None,
+            "/w".into(),
+            1,
+        );
+        let cb = WorkerCallbacks {
+            run_id: "wc-taint".to_string(),
+            meta: &mut meta,
+            blueprint_stages_len: 1,
+            tool_calls_counter: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            taint_global: true,
+            taint_policy: leviath_core::PolicyConfig::default(),
+        };
+        assert!(cb.taint_global_enabled());
+        let _ = cb.taint_policy();
+        assert!(cb.make_gate_prompt().is_some());
+    }
+
+    #[tokio::test]
+    async fn worker_gate_prompt_maps_deny() {
+        let _guard = crate::runstate::isolate_runs_dir_for_test("worker-gate-prompt-deny");
+        let res =
+            resolve_gate_prompt_with("gp-deny", false, crate::interaction::ApprovalScope::Once)
+                .await;
+        assert_eq!(res, leviath_runtime::taint::GateResolution::Deny);
+    }
+
+    #[tokio::test]
+    async fn worker_gate_prompt_maps_allow_once_and_session() {
+        let _guard = crate::runstate::isolate_runs_dir_for_test("worker-gate-prompt-allow");
+        let once =
+            resolve_gate_prompt_with("gp-once", true, crate::interaction::ApprovalScope::Once)
+                .await;
+        assert_eq!(once, leviath_runtime::taint::GateResolution::AllowOnce);
+        let session = resolve_gate_prompt_with(
+            "gp-session",
+            true,
+            crate::interaction::ApprovalScope::Session,
+        )
+        .await;
+        assert_eq!(session, leviath_runtime::taint::GateResolution::AlwaysAllow);
     }
 
     #[tokio::test]
@@ -1018,6 +1239,8 @@ mod tests {
             meta: &mut meta,
             blueprint_stages_len: 1,
             tool_calls_counter: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            taint_global: false,
+            taint_policy: leviath_core::PolicyConfig::default(),
         };
         cb.on_claude_code_warning(0).await;
     }
@@ -1050,6 +1273,8 @@ mod tests {
             meta: &mut meta,
             blueprint_stages_len: 1,
             tool_calls_counter: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            taint_global: false,
+            taint_policy: leviath_core::PolicyConfig::default(),
         };
         let result = cb.on_provider_missing("nonexistent", 0).await;
         // on_provider_missing should return true (abort).
@@ -1090,6 +1315,8 @@ mod tests {
             meta: &mut meta,
             blueprint_stages_len: 2,
             tool_calls_counter: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            taint_global: false,
+            taint_policy: leviath_core::PolicyConfig::default(),
         };
         cb.on_stage_enter("plan", 0, "anthropic", "claude-sonnet-4-6", "")
             .await;
@@ -1126,6 +1353,8 @@ mod tests {
             meta: &mut meta,
             blueprint_stages_len: 1,
             tool_calls_counter: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            taint_global: false,
+            taint_policy: leviath_core::PolicyConfig::default(),
         };
         cb.on_stage_enter("code", 0, "anthropic", "claude-sonnet-4-6", " (visit 2)")
             .await;
@@ -1160,6 +1389,8 @@ mod tests {
             meta: &mut meta,
             blueprint_stages_len: 1,
             tool_calls_counter: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            taint_global: false,
+            taint_policy: leviath_core::PolicyConfig::default(),
         };
 
         let err = anyhow::anyhow!("test error");
@@ -1195,6 +1426,8 @@ mod tests {
             meta: &mut meta,
             blueprint_stages_len: 1,
             tool_calls_counter: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            taint_global: false,
+            taint_policy: leviath_core::PolicyConfig::default(),
         };
 
         let err = anyhow::anyhow!("linear error");
@@ -1235,6 +1468,8 @@ mod tests {
             meta: &mut meta,
             blueprint_stages_len: 1,
             tool_calls_counter: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            taint_global: false,
+            taint_policy: leviath_core::PolicyConfig::default(),
         };
 
         let registry = leviath_runtime::ProviderRegistry::new();
@@ -1305,6 +1540,8 @@ mod tests {
             meta: &mut meta,
             blueprint_stages_len: 1,
             tool_calls_counter: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            taint_global: false,
+            taint_policy: leviath_core::PolicyConfig::default(),
         };
 
         let registry = leviath_runtime::ProviderRegistry::new();
@@ -1354,6 +1591,8 @@ mod tests {
             meta: &mut meta,
             blueprint_stages_len: 1,
             tool_calls_counter: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            taint_global: false,
+            taint_policy: leviath_core::PolicyConfig::default(),
         };
 
         // Empty content — the `add_to_region` branch is NOT taken
@@ -1401,6 +1640,8 @@ mod tests {
             meta: &mut meta,
             blueprint_stages_len: 1,
             tool_calls_counter: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            taint_global: false,
+            taint_policy: leviath_core::PolicyConfig::default(),
         };
 
         // Non-empty content — `add_to_region` branch IS taken
@@ -1445,6 +1686,8 @@ mod tests {
             meta: &mut meta,
             blueprint_stages_len: 1,
             tool_calls_counter: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            taint_global: false,
+            taint_policy: leviath_core::PolicyConfig::default(),
         };
 
         // Should not panic; updates meta.iteration from AgentState and writes meta
@@ -1476,6 +1719,8 @@ mod tests {
             meta: &mut meta,
             blueprint_stages_len: 1,
             tool_calls_counter: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            taint_global: false,
+            taint_policy: leviath_core::PolicyConfig::default(),
         };
 
         // on_post_stage with an entity that has no AgentState — should not panic
@@ -2189,6 +2434,8 @@ mode = "autonomous"
             meta: &mut meta,
             blueprint_stages_len: 1,
             tool_calls_counter: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            taint_global: false,
+            taint_policy: leviath_core::PolicyConfig::default(),
         };
 
         let registry = leviath_runtime::ProviderRegistry::new();
@@ -2251,6 +2498,8 @@ mode = "autonomous"
             meta: &mut meta,
             blueprint_stages_len: 2,
             tool_calls_counter: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            taint_global: false,
+            taint_policy: leviath_core::PolicyConfig::default(),
         };
 
         // graph mode → Some(StageResult::Error) returned; meta NOT set to Error
@@ -2284,6 +2533,8 @@ mode = "autonomous"
             meta: &mut meta,
             blueprint_stages_len: 0,
             tool_calls_counter: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            taint_global: false,
+            taint_policy: leviath_core::PolicyConfig::default(),
         };
 
         let result = cb.on_provider_missing("missing-provider", 0).await;
@@ -2314,6 +2565,8 @@ mode = "autonomous"
             meta: &mut meta,
             blueprint_stages_len: 3,
             tool_calls_counter: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            taint_global: false,
+            taint_policy: leviath_core::PolicyConfig::default(),
         };
 
         // Should not panic even with stages > 0
@@ -2345,6 +2598,8 @@ mode = "autonomous"
             meta: &mut meta,
             blueprint_stages_len: 1,
             tool_calls_counter: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            taint_global: false,
+            taint_policy: leviath_core::PolicyConfig::default(),
         };
 
         // stage_idx=5 but only 1 stage — the `if let Some(r)` guard handles this safely
@@ -2378,6 +2633,8 @@ mode = "autonomous"
             meta: &mut meta,
             blueprint_stages_len: 0,
             tool_calls_counter: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            taint_global: false,
+            taint_policy: leviath_core::PolicyConfig::default(),
         };
 
         let err = anyhow::anyhow!("oob error");

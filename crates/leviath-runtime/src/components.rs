@@ -557,6 +557,29 @@ impl ContextWindow {
         }
     }
 
+    /// Add a typed entry to a region with a specific taint level.
+    ///
+    /// The typed+tainted counterpart of [`add_typed_entry`](Self::add_typed_entry)
+    /// and [`add_tainted_to_region`](Self::add_tainted_to_region): the entry keeps
+    /// its [`EntryKind`] (so turn-group eviction stays intact) while contributing
+    /// the given taint level (so the taint gate sees sensitive tool output).
+    pub fn add_typed_tainted_to_region(
+        &mut self,
+        region_name: &str,
+        kind: leviath_core::EntryKind,
+        content: String,
+        tokens: usize,
+        taint_level: leviath_core::TaintLevel,
+    ) -> leviath_core::Result<()> {
+        if let Some(region) = self.get_region_mut(region_name) {
+            region.add_typed_tainted_entry(content, tokens, kind, taint_level)?;
+            self.current_tokens = self.calculate_tokens();
+            Ok(())
+        } else {
+            Err(leviath_core::Error::RegionNotFound(region_name.to_string()))
+        }
+    }
+
     /// Get the overall taint level (max across all regions).
     /// Returns None if no region has taint tracking enabled.
     pub fn overall_taint(&self) -> Option<leviath_core::TaintLevel> {

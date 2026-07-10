@@ -13,7 +13,81 @@
 use async_trait::async_trait;
 
 use crate::interaction::{response_approved, response_as_choice, response_as_text};
-use crate::interaction::{InteractionRequest, InteractionResponse};
+use crate::interaction::{ApprovalScope, InteractionRequest, InteractionResponse};
+
+// ─── Shared taint-gate prompt helpers ──────────────────────────────────────
+// Used by both the worker (IPC) and foreground (stdin) GatePrompt impls so the
+// decision-parsing / arg-building / approval-mapping logic is written and
+// tested once, not duplicated across two untestable I/O closures.
+
+/// Extract `(tool_name, taint, clearance)` from a blocked gate decision, or
+/// `None` if the decision isn't a block.
+pub(crate) fn gate_block_info(
+    decision: &leviath_core::taint::GateDecision,
+) -> Option<(String, leviath_core::TaintLevel, leviath_core::TaintLevel)> {
+    match decision {
+        leviath_core::taint::GateDecision::Blocked {
+            tool_name,
+            taint_level,
+            clearance,
+            ..
+        } => Some((tool_name.clone(), *taint_level, *clearance)),
+        _ => None,
+    }
+}
+
+/// Build the approval-prompt arguments explaining why an outbound call was gated.
+pub(crate) fn gate_prompt_args(
+    tool_name: &str,
+    taint: leviath_core::TaintLevel,
+    clearance: leviath_core::TaintLevel,
+) -> serde_json::Value {
+    serde_json::json!({
+        "taint_gate": true,
+        "reason": format!(
+            "Outbound tool '{}' would carry {}-sensitivity data above its {} clearance.",
+            tool_name, taint, clearance
+        ),
+    })
+}
+
+/// Map an approval outcome (approved, session-scope) to a gate resolution.
+pub(crate) fn map_gate_approval(
+    approved: bool,
+    session: bool,
+) -> leviath_runtime::taint::GateResolution {
+    use leviath_runtime::taint::GateResolution;
+    match (approved, session) {
+        (false, _) => GateResolution::Deny,
+        (true, true) => GateResolution::AlwaysAllow,
+        (true, false) => GateResolution::AllowOnce,
+    }
+}
+
+/// Resolve a foreground taint-gate block by asking via `ask` (real stdin in
+/// production, a mock in tests) and mapping the response. Kept free of the
+/// blocking stdin call itself so the request-building + mapping are testable.
+pub(crate) fn resolve_gate_with_asker(
+    decision: &leviath_core::taint::GateDecision,
+    stage_name: &str,
+    ask: impl Fn(&InteractionRequest) -> InteractionResponse,
+) -> leviath_runtime::taint::GateResolution {
+    use leviath_runtime::taint::GateResolution;
+    let Some((tool_name, taint, clearance)) = gate_block_info(decision) else {
+        return GateResolution::AllowOnce;
+    };
+    let req = InteractionRequest::tool_approval(
+        format!("taint-{}", tool_name),
+        &tool_name,
+        gate_prompt_args(&tool_name, taint, clearance),
+        stage_name,
+    );
+    let resp = ask(&req);
+    map_gate_approval(
+        response_approved(&resp),
+        resp.scope == Some(ApprovalScope::Session),
+    )
+}
 
 /// How a dynamically-requested interaction is dispatched and logged.
 ///
@@ -725,5 +799,72 @@ mod tests {
         )
         .await;
         assert_eq!(result, Some("User feedback: answer".to_string()));
+    }
+
+    // ─── taint-gate prompt helpers ──────────────────────────────────────────
+
+    fn blocked_decision(tool: &str) -> leviath_core::taint::GateDecision {
+        leviath_core::taint::GateDecision::Blocked {
+            taint_level: leviath_core::TaintLevel::Private,
+            clearance: leviath_core::TaintLevel::Public,
+            source_regions: vec!["notes".into()],
+            tool_name: tool.to_string(),
+        }
+    }
+
+    #[test]
+    fn gate_block_info_extracts_blocked_fields() {
+        let (tool, taint, clearance) = gate_block_info(&blocked_decision("shell")).unwrap();
+        assert_eq!(tool, "shell");
+        assert_eq!(taint, leviath_core::TaintLevel::Private);
+        assert_eq!(clearance, leviath_core::TaintLevel::Public);
+        // Allowed decisions yield None.
+        assert!(gate_block_info(&leviath_core::taint::GateDecision::Allowed).is_none());
+    }
+
+    #[test]
+    fn gate_prompt_args_mentions_tool() {
+        let args = gate_prompt_args(
+            "send_email",
+            leviath_core::TaintLevel::Private,
+            leviath_core::TaintLevel::Public,
+        );
+        assert_eq!(args["taint_gate"], true);
+        assert!(args["reason"].as_str().unwrap().contains("send_email"));
+    }
+
+    #[test]
+    fn map_gate_approval_covers_all_outcomes() {
+        use leviath_runtime::taint::GateResolution;
+        assert_eq!(map_gate_approval(false, false), GateResolution::Deny);
+        assert_eq!(map_gate_approval(false, true), GateResolution::Deny);
+        assert_eq!(map_gate_approval(true, false), GateResolution::AllowOnce);
+        assert_eq!(map_gate_approval(true, true), GateResolution::AlwaysAllow);
+    }
+
+    #[test]
+    fn resolve_gate_with_asker_maps_response() {
+        use leviath_runtime::taint::GateResolution;
+        // Deny.
+        let r = resolve_gate_with_asker(&blocked_decision("shell"), "plan", |_req| {
+            InteractionResponse::approval("", false, ApprovalScope::Once)
+        });
+        assert_eq!(r, GateResolution::Deny);
+        // Always-allow (session scope). Also assert the request the asker saw is
+        // a taint-gate tool-approval for the right tool.
+        let r = resolve_gate_with_asker(&blocked_decision("shell"), "plan", |req| {
+            assert_eq!(req.tool_name.as_deref(), Some("shell"));
+            assert_eq!(req.stage_name, "plan");
+            InteractionResponse::approval("", true, ApprovalScope::Session)
+        });
+        assert_eq!(r, GateResolution::AlwaysAllow);
+        // A non-block decision short-circuits to AllowOnce without asking (the
+        // asker is never invoked, so its body is a single trivial line).
+        let r = resolve_gate_with_asker(
+            &leviath_core::taint::GateDecision::Allowed,
+            "plan",
+            |_req| InteractionResponse::text("", ""),
+        );
+        assert_eq!(r, GateResolution::AllowOnce);
     }
 }

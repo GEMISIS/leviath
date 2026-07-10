@@ -78,6 +78,18 @@ pub struct AgentEngine {
 
     /// Receiver side of the message channel
     message_rx: mpsc::UnboundedReceiver<AgentMessage>,
+
+    /// Taint gate for the current stage, when taint tracking is active. `None`
+    /// means no enforcement (the common/default case). Reconfigured per stage
+    /// by the CLI via [`AgentEngine::configure_taint`].
+    taint_gate: Option<crate::taint::TaintGate>,
+
+    /// Policy (allowlists / MCP overrides) consulted when the gate blocks.
+    taint_policy: leviath_core::PolicyConfig,
+
+    /// Injected resolver used to interactively decide a blocked outbound call.
+    /// `None` → blocked calls are denied outright.
+    gate_prompt: Option<Box<dyn crate::taint::GatePrompt>>,
 }
 
 /// Boxed future returned by a type-erased tool executor. See
@@ -117,6 +129,9 @@ impl AgentEngine {
             provider_registry: ProviderRegistry::new(),
             message_tx,
             message_rx,
+            taint_gate: None,
+            taint_policy: leviath_core::PolicyConfig::default(),
+            gate_prompt: None,
         }
     }
 
@@ -145,6 +160,9 @@ impl AgentEngine {
             provider_registry,
             message_tx,
             message_rx,
+            taint_gate: None,
+            taint_policy: leviath_core::PolicyConfig::default(),
+            gate_prompt: None,
         }
     }
 
@@ -163,6 +181,123 @@ impl AgentEngine {
     /// Get a mutable reference to the ECS world.
     pub fn world_mut(&mut self) -> &mut World {
         &mut self.world
+    }
+
+    /// Configure taint enforcement for the upcoming stage. When set, the
+    /// inference loop tags tool results with the tool's declared sensitivity
+    /// and gates outbound calls whose data exceeds the tool's clearance,
+    /// prompting via `prompt` (or denying outright when `prompt` is `None`).
+    pub fn configure_taint(
+        &mut self,
+        gate: crate::taint::TaintGate,
+        policy: leviath_core::PolicyConfig,
+        prompt: Option<Box<dyn crate::taint::GatePrompt>>,
+    ) {
+        self.taint_gate = Some(gate);
+        self.taint_policy = policy;
+        self.gate_prompt = prompt;
+    }
+
+    /// Disable taint enforcement (no tagging, no gating).
+    pub fn clear_taint(&mut self) {
+        self.taint_gate = None;
+        self.gate_prompt = None;
+    }
+
+    /// Turn on taint tracking for the given entity's context window (idempotent).
+    pub fn enable_entity_taint_tracking(&mut self, entity: bevy_ecs::prelude::Entity) {
+        if let Some(mut w) = self.world.get_mut::<ContextWindow>(entity) {
+            w.enable_taint_tracking();
+        }
+    }
+
+    /// The current stage's taint audit log (empty when taint is inactive).
+    pub fn taint_audit_log(&self) -> &[leviath_core::taint::GateEvent] {
+        self.taint_gate
+            .as_ref()
+            .map(|g| g.audit_log())
+            .unwrap_or(&[])
+    }
+
+    /// Partition a batch of tool calls into `(calls_to_execute, denied_results)`
+    /// per the taint gate. Outbound calls whose incoming data exceeds the
+    /// tool's clearance are resolved via the injected prompt (allow-once /
+    /// always-allow / deny); a deny substitutes a `[blocked]` result and skips
+    /// execution. When the gate is inactive, every call executes.
+    /// Synchronously classify a batch of tool calls against the current taint
+    /// state. Extracted from [`Self::taint_gate_partition`] so all the
+    /// gate/policy logic lives in a non-async function (fully unit-testable and
+    /// not subject to async-instantiation coverage artifacts); the async fn
+    /// only awaits the prompt.
+    fn gate_decisions(
+        &mut self,
+        entity: Entity,
+        agent_id: &str,
+        policy: &leviath_core::PolicyConfig,
+        calls: &[leviath_providers::ToolCall],
+    ) -> Vec<(
+        leviath_providers::ToolCall,
+        leviath_core::taint::GateDecision,
+    )> {
+        let window = self.world.get::<ContextWindow>(entity).unwrap();
+        let gate = self.taint_gate.as_mut().unwrap();
+        calls
+            .iter()
+            .map(|tc| {
+                let d = gate.check_with_policy(agent_id, &tc.name, window, None, policy, None);
+                (tc.clone(), d)
+            })
+            .collect()
+    }
+
+    async fn taint_gate_partition(
+        &mut self,
+        entity: Entity,
+        calls: &[leviath_providers::ToolCall],
+    ) -> (Vec<leviath_providers::ToolCall>, Vec<(String, String)>) {
+        use crate::taint::GateResolution;
+
+        if !self
+            .taint_gate
+            .as_ref()
+            .map(|g| g.is_enabled())
+            .unwrap_or(false)
+        {
+            return (calls.to_vec(), Vec::new());
+        }
+
+        let agent_id = self
+            .world
+            .get::<AgentState>(entity)
+            .map(|s| s.agent_id.clone())
+            .unwrap_or_default();
+        let policy = self.taint_policy.clone();
+        let decisions = self.gate_decisions(entity, &agent_id, &policy, calls);
+
+        // Resolve blocks (the only async step) and partition. All non-async
+        // work is delegated to the synchronous `TaintGate::apply_resolution`.
+        let mut to_execute = Vec::new();
+        let mut denied = Vec::new();
+        for (tc, decision) in decisions {
+            let Some((taint, clearance)) = decision.blocked_levels() else {
+                to_execute.push(tc);
+                continue;
+            };
+            let resolution = match self.gate_prompt.as_ref() {
+                Some(prompt) => prompt.resolve(&decision).await,
+                None => GateResolution::Deny,
+            };
+            let outcome = self
+                .taint_gate
+                .as_mut()
+                .unwrap()
+                .apply_resolution(&agent_id, &tc.name, &tc.id, taint, clearance, resolution);
+            match outcome {
+                Some(blocked) => denied.push(blocked),
+                None => to_execute.push(tc),
+            }
+        }
+        (to_execute, denied)
     }
 
     /// Get a reference to the provider registry.
@@ -659,7 +794,31 @@ impl AgentEngine {
             // Execute tool calls
             let tool_calls_snapshot = response.tool_calls.clone();
             total_tool_calls += tool_calls_snapshot.len();
-            let tool_results = tool_executor(tool_calls_snapshot.clone()).await;
+
+            // ── Taint gate ──────────────────────────────────────────────────
+            // When taint tracking is active, check each outbound call against
+            // the current context taint BEFORE executing it. Blocked calls are
+            // resolved interactively (allow-once / always-allow / deny) via the
+            // injected prompt, or denied outright when no prompt is available.
+            let (calls_to_execute, mut denied_results) = self
+                .taint_gate_partition(entity, &tool_calls_snapshot)
+                .await;
+            let mut tool_results = tool_executor(calls_to_execute).await;
+            tool_results.append(&mut denied_results);
+
+            // When taint tracking is active, precompute each tool's declared
+            // output sensitivity (before borrowing the window) so results are
+            // tagged as they are routed into regions.
+            let tool_sensitivities: Option<HashMap<String, leviath_core::TaintLevel>> = self
+                .taint_gate
+                .as_ref()
+                .filter(|g| g.is_enabled())
+                .map(|g| {
+                    tool_calls_snapshot
+                        .iter()
+                        .map(|tc| (tc.name.clone(), g.tool_classification(&tc.name).sensitivity))
+                        .collect()
+                });
 
             // Add tool results to context window.
             // Safety: `run_inference_filtered` already confirmed the entity has
@@ -703,22 +862,49 @@ impl AgentEngine {
 
                 let kind = leviath_core::EntryKind::ToolResult {
                     tool_call_id: tool_call_id.clone(),
-                    tool_name,
+                    tool_name: tool_name.clone(),
                     is_error: false,
                 };
 
-                // Try adding the full result first
-                if window
-                    .add_typed_entry(
-                        "conversation",
-                        kind.clone(),
-                        result_text.clone(),
-                        result_tokens,
-                    )
-                    .is_err()
+                // When taint tracking is enabled, a tool result carries the
+                // tool's configured sensitivity level so the taint gate sees
+                // sensitive output flow into context; otherwise it's added as a
+                // plain typed entry (tracked as Public). Either way it keeps its
+                // ToolResult kind so turn-group eviction stays intact.
+                let taint_level = tool_sensitivities.as_ref().map(|sens| {
+                    sens.get(&tool_name)
+                        .copied()
+                        .unwrap_or(leviath_core::TaintLevel::Public)
+                });
+                let add_tool_result = |window: &mut ContextWindow,
+                                       kind: leviath_core::EntryKind,
+                                       content: String,
+                                       tokens: usize| {
+                    match taint_level {
+                        Some(level) => window.add_typed_tainted_to_region(
+                            "conversation",
+                            kind,
+                            content,
+                            tokens,
+                            level,
+                        ),
+                        None => window.add_typed_entry("conversation", kind, content, tokens),
+                    }
+                };
+
+                // Try adding the full result first. These MUST succeed — an
+                // AssistantTurn with tool_calls was just added above, and
+                // Anthropic requires every tool_use to have a matching
+                // tool_result. If the region is at its token budget, truncate
+                // rather than dropping (which would orphan the tool_use block).
+                if add_tool_result(
+                    &mut window,
+                    kind.clone(),
+                    result_text.clone(),
+                    result_tokens,
+                )
+                .is_err()
                 {
-                    // Token budget exceeded — truncate to fit rather than
-                    // dropping (which would orphan the tool_use block).
                     let available = window
                         .get_region("conversation")
                         .map(|r| r.max_tokens.saturating_sub(r.current_tokens))
@@ -737,21 +923,14 @@ impl AgentEngine {
                     };
                     let trunc_tokens = truncated.len() / 4 + 1;
 
-                    if window
-                        .add_typed_entry("conversation", kind, truncated, trunc_tokens)
-                        .is_err()
-                    {
+                    if add_tool_result(&mut window, kind, truncated, trunc_tokens).is_err() {
                         // Last resort: add a minimal placeholder
                         let placeholder = "[result omitted]".to_string();
-                        let _ = window.add_typed_entry(
-                            "conversation",
+                        let _ = add_tool_result(
+                            &mut window,
                             leviath_core::EntryKind::ToolResult {
                                 tool_call_id: tool_call_id.clone(),
-                                tool_name: tool_calls_snapshot
-                                    .iter()
-                                    .find(|tc| tc.id == *tool_call_id)
-                                    .map(|tc| tc.name.clone())
-                                    .unwrap_or_default(),
+                                tool_name: tool_name.clone(),
                                 is_error: false,
                             },
                             placeholder,
@@ -3606,5 +3785,313 @@ mod tests {
             100_000
         );
         assert_eq!(leviath_providers::Provider::name(&probe), "max-echo");
+    }
+
+    // ─── Taint gate enforcement in the inference loop ───────────────────────
+
+    struct FixedPrompt(crate::taint::GateResolution);
+
+    #[async_trait::async_trait]
+    impl crate::taint::GatePrompt for FixedPrompt {
+        async fn resolve(
+            &self,
+            _decision: &leviath_core::taint::GateDecision,
+        ) -> crate::taint::GateResolution {
+            self.0
+        }
+    }
+
+    fn outbound_tool_response(tool: &str) -> InferenceResponse {
+        InferenceResponse {
+            content: "calling a tool".to_string(),
+            tool_calls: vec![leviath_providers::ToolCall {
+                id: "call_1".to_string(),
+                name: tool.to_string(),
+                arguments: serde_json::json!({}),
+            }],
+            tokens_used: leviath_providers::TokenUsage {
+                prompt_tokens: 1,
+                completion_tokens: 1,
+                total_tokens: 2,
+                cached_tokens: 0,
+                cache_write_tokens: 0,
+            },
+            finish_reason: leviath_providers::FinishReason::ToolCall,
+        }
+    }
+
+    /// Engine with a Private-tainted context and the gate enabled; the model's
+    /// first response calls `tool`. `prompt` is the injected resolver (None →
+    /// blocked calls auto-deny), `policy` supplies allowlist rules.
+    fn tainted_engine_with(
+        tool: &str,
+        prompt: Option<Box<dyn crate::taint::GatePrompt>>,
+        policy: leviath_core::PolicyConfig,
+    ) -> (AgentEngine, Entity) {
+        let mut registry = ProviderRegistry::new();
+        registry.register(
+            "mock".to_string(),
+            Arc::new(MockProvider::with_responses(
+                "mock",
+                vec![outbound_tool_response(tool), default_response()],
+            )),
+        );
+        let mut engine = AgentEngine::with_providers(registry);
+        let entity = engine
+            .world_mut()
+            .spawn({
+                let mut window = ContextWindow::new(1000);
+                window.add_region(leviath_core::Region::new(
+                    "notes".to_string(),
+                    leviath_core::RegionKind::Pinned,
+                    500,
+                ));
+                window.add_region(leviath_core::Region::new(
+                    "conversation".to_string(),
+                    leviath_core::RegionKind::SlidingWindow { max_items: 50 },
+                    200,
+                ));
+                window.enable_taint_tracking();
+                window
+                    .add_tainted_to_region(
+                        "notes",
+                        "secret data".to_string(),
+                        10,
+                        leviath_core::TaintLevel::Private,
+                    )
+                    .unwrap();
+                window
+            })
+            .id();
+        let gate = crate::taint::TaintGate::new(leviath_core::SecurityConfig {
+            taint_tracking: true,
+            ..leviath_core::SecurityConfig::default()
+        });
+        engine.configure_taint(gate, policy, prompt);
+        (engine, entity)
+    }
+
+    fn tainted_engine(resolution: crate::taint::GateResolution) -> (AgentEngine, Entity) {
+        tainted_engine_with(
+            "shell",
+            Some(Box::new(FixedPrompt(resolution))),
+            leviath_core::PolicyConfig::default(),
+        )
+    }
+
+    async fn run_and_record_executed(
+        engine: &mut AgentEngine,
+        entity: Entity,
+    ) -> std::sync::Arc<std::sync::Mutex<Vec<String>>> {
+        let executed = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let ex = executed.clone();
+        engine
+            .run_inference_loop_filtered(
+                entity,
+                "mock",
+                "test-model",
+                Vec::new(),
+                5,
+                None,
+                None,
+                &mut |calls: Vec<leviath_providers::ToolCall>| {
+                    let ex = ex.clone();
+                    async move {
+                        let mut names = ex.lock().unwrap();
+                        calls
+                            .iter()
+                            .map(|c| {
+                                names.push(c.name.clone());
+                                (c.id.clone(), "executed".to_string())
+                            })
+                            .collect()
+                    }
+                },
+            )
+            .await
+            .unwrap();
+        executed
+    }
+
+    fn tool_results_text(engine: &AgentEngine, entity: Entity) -> String {
+        let window = engine.world().get::<ContextWindow>(entity).unwrap();
+        window
+            .get_region("conversation")
+            .unwrap()
+            .content
+            .iter()
+            .map(|e| e.content.as_str())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[tokio::test]
+    async fn taint_gate_denies_blocked_outbound_call() {
+        let (mut engine, entity) = tainted_engine(crate::taint::GateResolution::Deny);
+        let executed = run_and_record_executed(&mut engine, entity).await;
+        // shell was NOT executed (gate denied it before the executor ran).
+        assert!(!executed.lock().unwrap().contains(&"shell".to_string()));
+        // A [blocked] result was substituted into context.
+        assert!(tool_results_text(&engine, entity).contains("[blocked]"));
+        // A denied event was audited.
+        assert!(engine.taint_audit_log().iter().any(|e| !e.allowed));
+    }
+
+    #[tokio::test]
+    async fn taint_gate_allow_once_executes_blocked_call() {
+        let (mut engine, entity) = tainted_engine(crate::taint::GateResolution::AllowOnce);
+        let executed = run_and_record_executed(&mut engine, entity).await;
+        // shell WAS executed after the user allowed it once.
+        assert!(executed.lock().unwrap().contains(&"shell".to_string()));
+        assert!(!tool_results_text(&engine, entity).contains("[blocked]"));
+        // The allow was audited.
+        assert!(engine.taint_audit_log().iter().any(|e| e.allowed
+            && matches!(
+                e.decision_source,
+                leviath_core::taint::GateDecisionSource::UserAllowOnce
+            )));
+    }
+
+    #[tokio::test]
+    async fn taint_gate_always_allow_executes_and_raises_clearance() {
+        let (mut engine, entity) = tainted_engine(crate::taint::GateResolution::AlwaysAllow);
+        let executed = run_and_record_executed(&mut engine, entity).await;
+        // Executed after the user chose "always allow".
+        assert!(executed.lock().unwrap().contains(&"shell".to_string()));
+        // Audited as an always-allow decision.
+        assert!(engine.taint_audit_log().iter().any(|e| e.allowed
+            && matches!(
+                e.decision_source,
+                leviath_core::taint::GateDecisionSource::UserAlwaysAllow
+            )));
+        // The tool's clearance was raised to Private for the rest of the run.
+        let cls = engine
+            .taint_gate
+            .as_ref()
+            .unwrap()
+            .tool_classification("shell");
+        assert_eq!(cls.clearance, leviath_core::TaintLevel::Private);
+    }
+
+    #[tokio::test]
+    async fn taint_gate_disabled_executes_everything() {
+        // No gate configured → fast path, tool executes, no audit.
+        let mut registry = ProviderRegistry::new();
+        registry.register(
+            "mock".to_string(),
+            Arc::new(MockProvider::with_responses(
+                "mock",
+                vec![outbound_tool_response("shell"), default_response()],
+            )),
+        );
+        let mut engine = AgentEngine::with_providers(registry);
+        let entity = engine
+            .world_mut()
+            .spawn({
+                let mut window = ContextWindow::new(1000);
+                window.add_region(leviath_core::Region::new(
+                    "tool_results".to_string(),
+                    leviath_core::RegionKind::SlidingWindow { max_items: 50 },
+                    200,
+                ));
+                window
+            })
+            .id();
+        let executed = run_and_record_executed(&mut engine, entity).await;
+        assert!(executed.lock().unwrap().contains(&"shell".to_string()));
+        assert!(engine.taint_audit_log().is_empty());
+    }
+
+    #[tokio::test]
+    async fn taint_gate_no_prompt_auto_denies() {
+        // Gate enabled but no resolver injected → a blocked outbound call is
+        // denied outright (covers the `None => Deny` arm of the partition).
+        let (mut engine, entity) =
+            tainted_engine_with("shell", None, leviath_core::PolicyConfig::default());
+        let executed = run_and_record_executed(&mut engine, entity).await;
+        assert!(!executed.lock().unwrap().contains(&"shell".to_string()));
+        assert!(tool_results_text(&engine, entity).contains("[blocked]"));
+        assert!(engine.taint_audit_log().iter().any(|e| !e.allowed));
+    }
+
+    #[tokio::test]
+    async fn taint_gate_allows_non_outbound_tool() {
+        // An inbound tool (read_file) is never gated even with tainted context;
+        // it executes without any prompt (covers the non-outbound path).
+        let (mut engine, entity) = tainted_engine_with(
+            "read_file",
+            None, // resolver must never be consulted for a non-outbound tool
+            leviath_core::PolicyConfig::default(),
+        );
+        let executed = run_and_record_executed(&mut engine, entity).await;
+        assert!(executed.lock().unwrap().contains(&"read_file".to_string()));
+        assert!(!tool_results_text(&engine, entity).contains("[blocked]"));
+    }
+
+    #[tokio::test]
+    async fn taint_gate_allowlist_rule_permits_blocked_call() {
+        // A matching allowlist rule lets an over-clearance outbound call
+        // through without prompting (covers the AllowlistRule branch).
+        let mut policy = leviath_core::PolicyConfig::default();
+        policy.allowlist.push(leviath_core::policy::AllowlistRule {
+            tool: "shell".to_string(),
+            to: vec![],
+            channel: vec![],
+            max_sensitivity: leviath_core::TaintLevel::Private,
+        });
+        let (mut engine, entity) = tainted_engine_with("shell", None, policy);
+        let executed = run_and_record_executed(&mut engine, entity).await;
+        assert!(executed.lock().unwrap().contains(&"shell".to_string()));
+        assert!(engine.taint_audit_log().iter().any(|e| e.allowed
+            && matches!(
+                e.decision_source,
+                leviath_core::taint::GateDecisionSource::AllowlistRule { .. }
+            )));
+    }
+
+    #[test]
+    fn configure_and_clear_taint() {
+        let mut engine = AgentEngine::new();
+        assert!(engine.taint_audit_log().is_empty());
+        let gate = crate::taint::TaintGate::new(leviath_core::SecurityConfig::default());
+        engine.configure_taint(gate, leviath_core::PolicyConfig::default(), None);
+        engine.clear_taint();
+        assert!(engine.taint_audit_log().is_empty());
+    }
+
+    #[test]
+    fn enable_entity_taint_tracking_turns_on_region_taint() {
+        let mut engine = AgentEngine::new();
+        let entity = engine
+            .world_mut()
+            .spawn({
+                let mut window = ContextWindow::new(1000);
+                window.add_region(leviath_core::Region::new(
+                    "notes".to_string(),
+                    leviath_core::RegionKind::Pinned,
+                    500,
+                ));
+                window
+            })
+            .id();
+        // No taint tracking yet → overall_taint is None.
+        assert!(engine
+            .world()
+            .get::<ContextWindow>(entity)
+            .unwrap()
+            .overall_taint()
+            .is_none());
+        engine.enable_entity_taint_tracking(entity);
+        // Now tracking is on → overall_taint reports (Public with no tainted data).
+        assert_eq!(
+            engine
+                .world()
+                .get::<ContextWindow>(entity)
+                .unwrap()
+                .overall_taint(),
+            Some(leviath_core::TaintLevel::Public)
+        );
+        // Idempotent + safe on a missing entity.
+        engine.enable_entity_taint_tracking(entity);
     }
 }
