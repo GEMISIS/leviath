@@ -115,6 +115,15 @@ pub struct Config {
     /// When set, requests that exceed this duration will be aborted.
     /// Default is None (no timeout).
     pub request_timeout_secs: Option<u64>,
+
+    /// Global master switch for taint tracking / data-flow enforcement.
+    ///
+    /// **Off by default (opt-in).** When `true`, every agent enforces taint
+    /// tracking by default; individual agents or stages can opt out via a
+    /// `[security] taint_tracking = false` block. When `false`, an agent still
+    /// opts *in* by setting `taint_tracking = true` in its own `[security]`.
+    #[serde(default)]
+    pub taint_tracking: bool,
 }
 
 /// Provider configuration.
@@ -149,6 +158,7 @@ impl Default for Config {
             tool_permissions: HashMap::new(),
             title: TitleConfig::default(),
             request_timeout_secs: None,
+            taint_tracking: false,
         }
     }
 }
@@ -1798,6 +1808,7 @@ anthropic_api_key = "sk-ant-test-key"
                 model: Some("gpt-5-mini".to_string()),
             },
             request_timeout_secs: None,
+            taint_tracking: false,
         };
 
         let serialized = toml::to_string_pretty(&config).unwrap();

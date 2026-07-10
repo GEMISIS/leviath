@@ -56,7 +56,7 @@ pub async fn execute(args: PolicyArgs) -> anyhow::Result<()> {
 }
 
 /// Load the policy config from the default path.
-fn load_policy() -> anyhow::Result<leviath_core::PolicyConfig> {
+pub(crate) fn load_policy() -> anyhow::Result<leviath_core::PolicyConfig> {
     load_policy_from(&policy_path())
 }
 
@@ -351,6 +351,25 @@ mod tests {
         // Just verify it doesn't panic
         let result = execute_list().await;
         assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn execute_dispatches_subcommands() {
+        // Exercise the top-level `execute` dispatcher for the read-only arms.
+        assert!(execute(PolicyArgs {
+            command: PolicyCommand::List(PolicyListArgs {}),
+        })
+        .await
+        .is_ok());
+        assert!(execute(PolicyArgs {
+            command: PolicyCommand::Test(PolicyTestArgs {
+                tool: "read_file".to_string(),
+                target: None,
+                taint: "internal".to_string(),
+            }),
+        })
+        .await
+        .is_ok());
     }
 
     #[tokio::test]

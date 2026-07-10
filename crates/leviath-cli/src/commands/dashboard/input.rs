@@ -1302,11 +1302,36 @@ mod tests {
         assert!(!dash.input_mode);
         assert!(dash.agents[0].pending_request.is_none());
         // The edited text reached the engine with indentation + newline intact.
-        match cmd_rx.try_recv() {
-            Ok(EngineCommand::SendInput { input, .. }) => {
-                assert_eq!(input, "  indented\nsecond line");
-            }
-            other => panic!("expected SendInput, got {:?}", other),
+        let cmd = cmd_rx.try_recv().expect("a SendInput command was queued");
+        assert!(matches!(cmd, EngineCommand::SendInput { .. }));
+        if let EngineCommand::SendInput { input, .. } = cmd {
+            assert_eq!(input, "  indented\nsecond line");
+        }
+    }
+
+    #[test]
+    fn submit_input_edit_text_empty_reports_no_changes() {
+        // Covers the empty-edit display branch of the EditText submit arm.
+        let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
+        let mut dash = Dashboard::new(cmd_tx);
+        let mut agent = make_test_agent("run-1", AgentDisplayStatus::Waiting);
+        agent.is_run_state = false;
+        agent.pending_request = Some(crate::interaction::InteractionRequest::edit_text(
+            "et1", "Edit", "main", "old",
+        ));
+        dash.agents.push(agent);
+        dash.update_display_indices();
+        dash.detail_view = true;
+        dash.input_mode = true;
+
+        // Whitespace-only edit → trimmed empty → "(no changes)" display path.
+        dash.input_textarea = tui_textarea::TextArea::new(vec!["   ".to_string()]);
+        dash.submit_input();
+
+        assert!(!dash.input_mode);
+        let cmd = cmd_rx.try_recv().expect("a SendInput command was queued");
+        if let EngineCommand::SendInput { input, .. } = cmd {
+            assert_eq!(input, "   ");
         }
     }
 

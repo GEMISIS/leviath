@@ -413,6 +413,22 @@ impl StageCallbacks for ForegroundCallbacks {
         println!("\n[Run cancelled by user]");
     }
 
+    fn taint_global_enabled(&self) -> bool {
+        // Foreground is a single short-lived process; load lazily rather than
+        // threading config through every ForegroundCallbacks literal.
+        crate::config::Config::load()
+            .map(|c| c.taint_tracking)
+            .unwrap_or(false)
+    }
+
+    fn taint_policy(&self) -> leviath_core::PolicyConfig {
+        crate::commands::policy::load_policy().unwrap_or_default()
+    }
+
+    fn make_gate_prompt(&self) -> Option<Box<dyn leviath_runtime::taint::GatePrompt>> {
+        Some(Box::new(ForegroundGatePrompt))
+    }
+
     async fn on_post_stage(
         &mut self,
         _engine: &leviath_runtime::AgentEngine,
@@ -420,6 +436,26 @@ impl StageCallbacks for ForegroundCallbacks {
         _stage_name: &str,
     ) {
         // Foreground: no-op
+    }
+}
+
+/// Foreground taint [`GatePrompt`]: prompts on stdin (allow-once / session /
+/// deny) when the gate blocks an outbound call.
+struct ForegroundGatePrompt;
+
+#[async_trait::async_trait]
+impl leviath_runtime::taint::GatePrompt for ForegroundGatePrompt {
+    async fn resolve(
+        &self,
+        decision: &leviath_core::taint::GateDecision,
+    ) -> leviath_runtime::taint::GateResolution {
+        // All request-building + response-mapping lives in the tested
+        // `resolve_gate_with_asker`; only the real-stdin read is untestable.
+        super::dynamic_interaction::resolve_gate_with_asker(
+            decision,
+            "taint-gate",
+            crate::interaction::request_interaction_stdin,
+        )
     }
 }
 
@@ -1876,5 +1912,36 @@ allowed = ["read_file"]
         assert!(result.is_err());
 
         let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[tokio::test]
+    async fn foreground_taint_trait_methods_callable() {
+        // Exercises the foreground taint overrides + default hooks (Config/policy
+        // load are read-only real IO; we assert shape, not specific values).
+        let mut cb = ForegroundCallbacks {};
+        let _enabled: bool = cb.taint_global_enabled();
+        let _policy = cb.taint_policy();
+        assert!(cb.make_gate_prompt().is_some());
+        // on_cancel + the default on_taint_audit hook must not panic.
+        cb.on_cancel(0).await;
+        cb.on_taint_audit(0, &[]).await;
+    }
+
+    #[tokio::test]
+    async fn foreground_gate_prompt_resolve_denies_via_stdin_reader() {
+        // Drive ForegroundGatePrompt::resolve through the tested helper by
+        // constructing the same path with a mock asker (Deny).
+        use super::super::dynamic_interaction::resolve_gate_with_asker;
+        use crate::interaction::{ApprovalScope, InteractionResponse};
+        let decision = leviath_core::taint::GateDecision::Blocked {
+            taint_level: leviath_core::TaintLevel::Private,
+            clearance: leviath_core::TaintLevel::Public,
+            source_regions: vec![],
+            tool_name: "shell".into(),
+        };
+        let r = resolve_gate_with_asker(&decision, "taint-gate", |_req| {
+            InteractionResponse::approval("", false, ApprovalScope::Once)
+        });
+        assert_eq!(r, leviath_runtime::taint::GateResolution::Deny);
     }
 }
