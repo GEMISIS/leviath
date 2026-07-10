@@ -342,6 +342,14 @@ pub struct InteractionPoint {
     /// the same dash/whitespace normalization used for directive lookup.
     #[serde(default)]
     pub abort_options: Vec<String>,
+
+    /// Options that, when selected, open the stage's most recent output (e.g.
+    /// the plan) in an editable field so the user can modify it directly. The
+    /// engine issues the edit interaction itself and injects the edited text
+    /// back into context — deterministic, with no dependence on the model
+    /// choosing to call an edit tool. Matched with the same normalization.
+    #[serde(default)]
+    pub edit_options: Vec<String>,
 }
 
 /// Configuration for routing tool results to specific context window regions.
@@ -1020,9 +1028,11 @@ mod tests {
             options: vec!["Approve".to_string(), "Revise".to_string()],
             directives: HashMap::new(),
             abort_options: Vec::new(),
+            edit_options: Vec::new(),
         };
         assert!(point.directives.is_empty());
         assert!(point.abort_options.is_empty());
+        assert!(point.edit_options.is_empty());
     }
 
     #[test]
@@ -1040,6 +1050,7 @@ mod tests {
             options: vec!["Approve".to_string(), "Revise".to_string()],
             directives,
             abort_options: vec!["Abort".to_string()],
+            edit_options: vec!["Add detail".to_string()],
         };
         let json = serde_json::to_string(&point).unwrap();
         let back: InteractionPoint = serde_json::from_str(&json).unwrap();
@@ -1048,6 +1059,7 @@ mod tests {
             Some("Ask what to change, then re-plan.")
         );
         assert_eq!(back.abort_options, vec!["Abort".to_string()]);
+        assert_eq!(back.edit_options, vec!["Add detail".to_string()]);
     }
 
     #[test]

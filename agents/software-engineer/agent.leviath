@@ -92,12 +92,16 @@ options  = ["Approve — proceed to implementation", "Revise — I'll describe c
 # inference, no transition.
 abort_options = ["Abort — cancel this run"]
 
+# "Add detail" opens the current plan in an editable field (engine-level,
+# deterministic) so the user modifies it directly — no dependence on the model
+# choosing to call an edit tool. The edited text becomes the authoritative plan.
+edit_options = ["Add detail — expand a section"]
+
 # Directives keyed by option label. Selecting one keeps the run in the plan
 # stage and injects the directive into the agent's context so it drives the
 # next step via a tool call (deterministic routing, agent-driven capture).
 [stages.plan.interaction_points.directives]
 "Revise — I'll describe changes" = "The user wants to revise the plan. Call the ask_user_text tool to ask exactly what they want changed, then produce an updated plan ending with the '## Plan' and '## Files' sections so it can be re-approved."
-"Add detail — expand a section" = "The user wants to edit the plan directly. Call the edit_document tool, passing the CURRENT full plan text as the `content` argument, so they can edit it in place. Treat the returned edited document as the new authoritative plan and re-present it."
 
 # ─── Stage 2: Implement ──────────────────────────────────────────────────────
 # Executes the approved plan. Write/edit/bash require tool-approval unless

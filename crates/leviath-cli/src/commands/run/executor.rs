@@ -1736,6 +1736,7 @@ mod tests {
                 options: vec!["Approve".to_string(), "Abort".to_string()],
                 directives: Default::default(),
                 abort_options: vec!["Abort".to_string()],
+                edit_options: Default::default(),
             }],
         };
         stage.max_iterations = Some(2);
@@ -1872,6 +1873,7 @@ mod tests {
                 options: vec![],
                 directives: Default::default(),
                 abort_options: Default::default(),
+                edit_options: Default::default(),
             }],
         };
         stage.accepts_messages = false;
