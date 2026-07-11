@@ -274,12 +274,15 @@ fn launch_editor_with(
 pub fn build_provider_registry(config: &Config) -> ProviderRegistry {
     let mut registry = ProviderRegistry::new();
 
+    let timeout = config.request_timeout_secs;
+
     if let Some(ref key) = config.providers.anthropic_api_key {
         registry.register(
             "anthropic".to_string(),
             Arc::new(leviath_providers::AnthropicProvider::with_overrides(
                 key.clone(),
                 config.model_capabilities.clone(),
+                timeout,
             )),
         );
     }
@@ -290,6 +293,7 @@ pub fn build_provider_registry(config: &Config) -> ProviderRegistry {
             Arc::new(leviath_providers::OpenAIProvider::with_overrides(
                 key.clone(),
                 config.model_capabilities.clone(),
+                timeout,
             )),
         );
     }
@@ -300,6 +304,7 @@ pub fn build_provider_registry(config: &Config) -> ProviderRegistry {
             Arc::new(leviath_providers::GeminiProvider::with_overrides(
                 key.clone(),
                 config.model_capabilities.clone(),
+                timeout,
             )),
         );
     }
@@ -310,6 +315,7 @@ pub fn build_provider_registry(config: &Config) -> ProviderRegistry {
             Arc::new(leviath_providers::OpenRouterProvider::with_overrides(
                 key.clone(),
                 config.model_capabilities.clone(),
+                timeout,
             )),
         );
     }
@@ -323,6 +329,7 @@ pub fn build_provider_registry(config: &Config) -> ProviderRegistry {
         Arc::new(leviath_providers::OllamaProvider::with_overrides(
             ollama_url.to_string(),
             config.model_capabilities.clone(),
+            timeout,
         )),
     );
 

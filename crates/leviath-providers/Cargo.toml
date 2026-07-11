@@ -6,6 +6,9 @@ edition.workspace = true
 license.workspace = true
 authors.workspace = true
 
+[features]
+debug-http = []
+
 [dependencies]
 leviath-core = { workspace = true }
 tokio = { workspace = true }

@@ -12,6 +12,8 @@
 
 pub mod anthropic;
 pub mod claude_code;
+#[cfg(feature = "debug-http")]
+pub mod debug_http;
 pub mod gemini;
 pub mod ollama;
 pub mod openai;
@@ -31,8 +33,9 @@ pub use ollama::OllamaProvider;
 pub use openai::OpenAIProvider;
 pub use openrouter::OpenRouterProvider;
 pub use provider::{
-    check_http_response, parse_openai_finish_reason, FinishReason, InferenceRequest,
-    InferenceResponse, Message, ModelCapabilities, ModelInfo, Provider, ProviderConfig,
-    ProviderError, RateLimitConfig, Result, StreamChunk, TokenUsage, Tool, ToolCall, ToolCallDelta,
+    build_http_client, check_http_response, parse_openai_finish_reason, FinishReason,
+    InferenceRequest, InferenceResponse, Message, ModelCapabilities, ModelInfo, Provider,
+    ProviderConfig, ProviderError, RateLimitConfig, Result, StreamChunk, TokenUsage, Tool,
+    ToolCall, ToolCallDelta,
 };
 pub use rate_limit::RateLimiter;

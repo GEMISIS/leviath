@@ -11,14 +11,13 @@ use crate::provider::{
 use crate::rate_limit::RateLimiter;
 use async_trait::async_trait;
 use futures_core::Stream;
-use reqwest::Client;
 use std::collections::HashMap;
 use std::pin::Pin;
 
 /// OpenRouter provider.
 pub struct OpenRouterProvider {
     /// HTTP client
-    client: Client,
+    client: reqwest::Client,
 
     /// API key
     api_key: String,
@@ -37,7 +36,7 @@ impl OpenRouterProvider {
     /// Create a new OpenRouter provider.
     pub fn new(api_key: String) -> Self {
         Self {
-            client: Client::new(),
+            client: crate::provider::build_http_client(None),
             api_key,
             base_url: "https://openrouter.ai/api/v1".to_string(),
             rate_limiter: None,
@@ -48,8 +47,9 @@ impl OpenRouterProvider {
     /// Create a new OpenRouter provider with full configuration.
     pub fn with_config(config: ProviderConfig) -> Self {
         let rate_limiter = config.rate_limit.as_ref().map(RateLimiter::new);
+        let client = crate::provider::build_http_client(config.request_timeout_secs);
         Self {
-            client: Client::new(),
+            client,
             api_key: config.api_key,
             base_url: config
                 .base_url
@@ -60,9 +60,13 @@ impl OpenRouterProvider {
     }
 
     /// Create a new OpenRouter provider with per-model capability overrides.
-    pub fn with_overrides(api_key: String, overrides: HashMap<String, ModelCapabilities>) -> Self {
+    pub fn with_overrides(
+        api_key: String,
+        overrides: HashMap<String, ModelCapabilities>,
+        timeout_secs: Option<u64>,
+    ) -> Self {
         Self {
-            client: Client::new(),
+            client: crate::provider::build_http_client(timeout_secs),
             api_key,
             base_url: "https://openrouter.ai/api/v1".to_string(),
             rate_limiter: None,
@@ -149,17 +153,47 @@ impl Provider for OpenRouterProvider {
         }
 
         let body = self.build_request_body(&request);
+        let url = format!("{}/chat/completions", self.base_url);
+
+        #[cfg(feature = "debug-http")]
+        {
+            let mut headers = reqwest::header::HeaderMap::new();
+            headers.insert(
+                "authorization",
+                format!("Bearer {}", self.api_key).parse().unwrap(),
+            );
+            headers.insert("http-referer", "https://leviath.dev".parse().unwrap());
+            headers.insert("content-type", "application/json".parse().unwrap());
+            let body_size = serde_json::to_vec(&body).map(|b| b.len()).unwrap_or(0);
+            crate::debug_http::log_request("openrouter", "POST", &url, &headers, body_size);
+        }
+        #[cfg(feature = "debug-http")]
+        let start = std::time::Instant::now();
 
         let response = self
             .client
-            .post(format!("{}/chat/completions", self.base_url))
+            .post(&url)
             .header("Authorization", format!("Bearer {}", self.api_key))
             .header("HTTP-Referer", "https://leviath.dev")
             .header("Content-Type", "application/json")
             .json(&body)
             .send()
             .await
-            .map_err(|e| ProviderError::RequestFailed(e.to_string()))?;
+            .map_err(|e| {
+                #[cfg(feature = "debug-http")]
+                crate::debug_http::log_error("openrouter", &url, &e.to_string());
+                ProviderError::RequestFailed(e.to_string())
+            })?;
+
+        #[cfg(feature = "debug-http")]
+        crate::debug_http::log_response(
+            "openrouter",
+            &url,
+            response.status().as_u16(),
+            response.headers(),
+            response.content_length(),
+            start.elapsed(),
+        );
 
         let response = check_http_response(response, self.rate_limiter.as_ref()).await?;
 
@@ -193,17 +227,47 @@ impl Provider for OpenRouterProvider {
 
         let mut body = self.build_request_body(&request);
         body["stream"] = serde_json::Value::Bool(true);
+        let url = format!("{}/chat/completions", self.base_url);
+
+        #[cfg(feature = "debug-http")]
+        {
+            let mut headers = reqwest::header::HeaderMap::new();
+            headers.insert(
+                "authorization",
+                format!("Bearer {}", self.api_key).parse().unwrap(),
+            );
+            headers.insert("http-referer", "https://leviath.dev".parse().unwrap());
+            headers.insert("content-type", "application/json".parse().unwrap());
+            let body_size = serde_json::to_vec(&body).map(|b| b.len()).unwrap_or(0);
+            crate::debug_http::log_request("openrouter", "POST", &url, &headers, body_size);
+        }
+        #[cfg(feature = "debug-http")]
+        let start = std::time::Instant::now();
 
         let response = self
             .client
-            .post(format!("{}/chat/completions", self.base_url))
+            .post(&url)
             .header("Authorization", format!("Bearer {}", self.api_key))
             .header("HTTP-Referer", "https://leviath.dev")
             .header("Content-Type", "application/json")
             .json(&body)
             .send()
             .await
-            .map_err(|e| ProviderError::RequestFailed(e.to_string()))?;
+            .map_err(|e| {
+                #[cfg(feature = "debug-http")]
+                crate::debug_http::log_error("openrouter", &url, &e.to_string());
+                ProviderError::RequestFailed(e.to_string())
+            })?;
+
+        #[cfg(feature = "debug-http")]
+        crate::debug_http::log_response(
+            "openrouter",
+            &url,
+            response.status().as_u16(),
+            response.headers(),
+            response.content_length(),
+            start.elapsed(),
+        );
 
         let response = check_http_response(response, self.rate_limiter.as_ref()).await?;
 
@@ -528,6 +592,7 @@ mod tests {
             api_key: "key".to_string(),
             base_url: None,
             rate_limit: None,
+            request_timeout_secs: None,
         };
         let provider = OpenRouterProvider::with_config(config);
         assert_eq!(provider.base_url, "https://openrouter.ai/api/v1");
@@ -539,6 +604,7 @@ mod tests {
             api_key: "key".to_string(),
             base_url: Some("https://custom.openrouter.ai".to_string()),
             rate_limit: None,
+            request_timeout_secs: None,
         };
         let provider = OpenRouterProvider::with_config(config);
         assert_eq!(provider.base_url, "https://custom.openrouter.ai");
@@ -558,7 +624,7 @@ mod tests {
                 max_output_tokens: 10,
             },
         );
-        let provider = OpenRouterProvider::with_overrides("key".to_string(), overrides);
+        let provider = OpenRouterProvider::with_overrides("key".to_string(), overrides, None);
         let caps = provider.capabilities("custom/model");
         assert_eq!(caps.max_context_tokens, 99);
     }
@@ -851,6 +917,7 @@ mod tests {
             api_key: "test-key".to_string(),
             base_url: Some(url),
             rate_limit: None,
+            request_timeout_secs: None,
         })
     }
 

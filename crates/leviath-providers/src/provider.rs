@@ -254,6 +254,12 @@ pub struct ProviderConfig {
 
     /// Optional rate limit configuration
     pub rate_limit: Option<RateLimitConfig>,
+
+    /// Optional request timeout in seconds.
+    /// When set, the reqwest client will abort requests that exceed this duration.
+    /// Default is None (no timeout).
+    #[serde(default)]
+    pub request_timeout_secs: Option<u64>,
 }
 
 /// Rate limit configuration.
@@ -264,6 +270,20 @@ pub struct RateLimitConfig {
 
     /// Maximum tokens per minute
     pub tokens_per_minute: u32,
+}
+
+/// Build a `reqwest::Client` with an optional timeout.
+///
+/// All providers should use this instead of `Client::new()` to respect
+/// the `request_timeout_secs` setting in `ProviderConfig`.
+pub fn build_http_client(timeout_secs: Option<u64>) -> reqwest::Client {
+    match timeout_secs {
+        Some(secs) => reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(secs))
+            .build()
+            .expect("failed to build reqwest client"),
+        None => reqwest::Client::new(),
+    }
 }
 
 /// Trait for LLM providers.
@@ -607,6 +627,7 @@ mod tests {
                 requests_per_minute: 30,
                 tokens_per_minute: 50_000,
             }),
+            request_timeout_secs: None,
         };
         let json = serde_json::to_string(&cfg).unwrap();
         let back: ProviderConfig = serde_json::from_str(&json).unwrap();

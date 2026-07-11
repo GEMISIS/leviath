@@ -7,14 +7,13 @@ use crate::provider::{
 use crate::rate_limit::RateLimiter;
 use async_trait::async_trait;
 use futures_core::Stream;
-use reqwest::Client;
 use std::collections::HashMap;
 use std::pin::Pin;
 
 /// Anthropic Claude provider.
 pub struct AnthropicProvider {
     /// HTTP client
-    client: Client,
+    client: reqwest::Client,
 
     /// API key
     api_key: String,
@@ -33,7 +32,7 @@ impl AnthropicProvider {
     /// Create a new Anthropic provider.
     pub fn new(api_key: String) -> Self {
         Self {
-            client: Client::new(),
+            client: crate::provider::build_http_client(None),
             api_key,
             base_url: "https://api.anthropic.com/v1".to_string(),
             rate_limiter: None,
@@ -44,8 +43,9 @@ impl AnthropicProvider {
     /// Create a new Anthropic provider with full configuration.
     pub fn with_config(config: ProviderConfig) -> Self {
         let rate_limiter = config.rate_limit.as_ref().map(RateLimiter::new);
+        let client = crate::provider::build_http_client(config.request_timeout_secs);
         Self {
-            client: Client::new(),
+            client,
             api_key: config.api_key,
             base_url: config
                 .base_url
@@ -56,9 +56,13 @@ impl AnthropicProvider {
     }
 
     /// Create a new Anthropic provider with per-model capability overrides.
-    pub fn with_overrides(api_key: String, overrides: HashMap<String, ModelCapabilities>) -> Self {
+    pub fn with_overrides(
+        api_key: String,
+        overrides: HashMap<String, ModelCapabilities>,
+        timeout_secs: Option<u64>,
+    ) -> Self {
         Self {
-            client: Client::new(),
+            client: crate::provider::build_http_client(timeout_secs),
             api_key,
             base_url: "https://api.anthropic.com/v1".to_string(),
             rate_limiter: None,
@@ -329,17 +333,45 @@ impl Provider for AnthropicProvider {
         }
 
         let body = self.build_request_body(&request);
+        let url = format!("{}/messages", self.base_url);
+
+        #[cfg(feature = "debug-http")]
+        let body_bytes = serde_json::to_vec(&body).unwrap_or_default();
+        #[cfg(feature = "debug-http")]
+        {
+            let mut headers = reqwest::header::HeaderMap::new();
+            headers.insert("x-api-key", self.api_key.parse().unwrap());
+            headers.insert("anthropic-version", "2023-06-01".parse().unwrap());
+            headers.insert("content-type", "application/json".parse().unwrap());
+            crate::debug_http::log_request("anthropic", "POST", &url, &headers, body_bytes.len());
+        }
+        #[cfg(feature = "debug-http")]
+        let start = std::time::Instant::now();
 
         let response = self
             .client
-            .post(format!("{}/messages", self.base_url))
+            .post(&url)
             .header("x-api-key", &self.api_key)
             .header("anthropic-version", "2023-06-01")
             .header("content-type", "application/json")
             .json(&body)
             .send()
             .await
-            .map_err(|e| ProviderError::RequestFailed(e.to_string()))?;
+            .map_err(|e| {
+                #[cfg(feature = "debug-http")]
+                crate::debug_http::log_error("anthropic", &url, &e.to_string());
+                ProviderError::RequestFailed(e.to_string())
+            })?;
+
+        #[cfg(feature = "debug-http")]
+        crate::debug_http::log_response(
+            "anthropic",
+            &url,
+            response.status().as_u16(),
+            response.headers(),
+            response.content_length(),
+            start.elapsed(),
+        );
 
         let status = response.status();
 
@@ -396,17 +428,45 @@ impl Provider for AnthropicProvider {
 
         let mut body = self.build_request_body(&request);
         body["stream"] = serde_json::Value::Bool(true);
+        let url = format!("{}/messages", self.base_url);
+
+        #[cfg(feature = "debug-http")]
+        let body_bytes = serde_json::to_vec(&body).unwrap_or_default();
+        #[cfg(feature = "debug-http")]
+        {
+            let mut headers = reqwest::header::HeaderMap::new();
+            headers.insert("x-api-key", self.api_key.parse().unwrap());
+            headers.insert("anthropic-version", "2023-06-01".parse().unwrap());
+            headers.insert("content-type", "application/json".parse().unwrap());
+            crate::debug_http::log_request("anthropic", "POST", &url, &headers, body_bytes.len());
+        }
+        #[cfg(feature = "debug-http")]
+        let start = std::time::Instant::now();
 
         let response = self
             .client
-            .post(format!("{}/messages", self.base_url))
+            .post(&url)
             .header("x-api-key", &self.api_key)
             .header("anthropic-version", "2023-06-01")
             .header("content-type", "application/json")
             .json(&body)
             .send()
             .await
-            .map_err(|e| ProviderError::RequestFailed(e.to_string()))?;
+            .map_err(|e| {
+                #[cfg(feature = "debug-http")]
+                crate::debug_http::log_error("anthropic", &url, &e.to_string());
+                ProviderError::RequestFailed(e.to_string())
+            })?;
+
+        #[cfg(feature = "debug-http")]
+        crate::debug_http::log_response(
+            "anthropic",
+            &url,
+            response.status().as_u16(),
+            response.headers(),
+            response.content_length(),
+            start.elapsed(),
+        );
 
         let status = response.status();
         if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
@@ -892,7 +952,7 @@ mod tests {
                 max_output_tokens: 32_768,
             },
         );
-        let provider = AnthropicProvider::with_overrides("test-key".to_string(), overrides);
+        let provider = AnthropicProvider::with_overrides("test-key".to_string(), overrides, None);
         let caps = provider.capabilities("claude-sonnet-4-6");
         // Override should take precedence over built-in
         assert!(!caps.supports_temperature);
@@ -1060,6 +1120,7 @@ mod tests {
             api_key: "test-key".to_string(),
             base_url: None,
             rate_limit: None,
+            request_timeout_secs: None,
         };
         let provider = AnthropicProvider::with_config(config);
         assert_eq!(provider.base_url, "https://api.anthropic.com/v1");
@@ -1071,6 +1132,7 @@ mod tests {
             api_key: "test-key".to_string(),
             base_url: Some("https://custom.api.com".to_string()),
             rate_limit: None,
+            request_timeout_secs: None,
         };
         let provider = AnthropicProvider::with_config(config);
         assert_eq!(provider.base_url, "https://custom.api.com");
@@ -1085,6 +1147,7 @@ mod tests {
                 requests_per_minute: 10,
                 tokens_per_minute: 50000,
             }),
+            request_timeout_secs: None,
         };
         let provider = AnthropicProvider::with_config(config);
         assert!(provider.rate_limiter.is_some());
@@ -1153,7 +1216,7 @@ mod tests {
                 max_output_tokens: 10,
             },
         );
-        let provider = AnthropicProvider::with_overrides("key".to_string(), overrides);
+        let provider = AnthropicProvider::with_overrides("key".to_string(), overrides, None);
         let caps = provider.capabilities("custom-model");
         assert_eq!(caps.max_context_tokens, 42);
         assert!(!caps.supports_streaming);
@@ -1161,7 +1224,7 @@ mod tests {
 
     #[test]
     fn test_capabilities_falls_through_to_builtin() {
-        let provider = AnthropicProvider::with_overrides("key".to_string(), HashMap::new());
+        let provider = AnthropicProvider::with_overrides("key".to_string(), HashMap::new(), None);
         let caps = provider.capabilities("claude-sonnet-4-6");
         assert_eq!(caps.max_context_tokens, 1_000_000);
     }
@@ -1840,6 +1903,7 @@ mod tests {
             api_key: "test-key".to_string(),
             base_url: Some(url),
             rate_limit: None,
+            request_timeout_secs: None,
         })
     }
 

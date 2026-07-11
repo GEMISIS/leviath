@@ -110,6 +110,11 @@ pub struct Config {
     /// the task prompt at worker startup.
     #[serde(default)]
     pub title: TitleConfig,
+
+    /// Optional request timeout in seconds for HTTP calls to provider APIs.
+    /// When set, requests that exceed this duration will be aborted.
+    /// Default is None (no timeout).
+    pub request_timeout_secs: Option<u64>,
 }
 
 /// Provider configuration.
@@ -143,6 +148,7 @@ impl Default for Config {
             model_capabilities: HashMap::new(),
             tool_permissions: HashMap::new(),
             title: TitleConfig::default(),
+            request_timeout_secs: None,
         }
     }
 }
@@ -1791,6 +1797,7 @@ anthropic_api_key = "sk-ant-test-key"
                 provider: Some("openai".to_string()),
                 model: Some("gpt-5-mini".to_string()),
             },
+            request_timeout_secs: None,
         };
 
         let serialized = toml::to_string_pretty(&config).unwrap();

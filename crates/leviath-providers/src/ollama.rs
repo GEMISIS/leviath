@@ -8,14 +8,13 @@ use crate::provider::{
 };
 use async_trait::async_trait;
 use futures_core::Stream;
-use reqwest::Client;
 use std::collections::HashMap;
 use std::pin::Pin;
 
 /// Ollama provider for local LLM execution.
 pub struct OllamaProvider {
     /// HTTP client
-    client: Client,
+    client: reqwest::Client,
 
     /// API base URL (defaults to local)
     base_url: String,
@@ -28,7 +27,7 @@ impl OllamaProvider {
     /// Create a new Ollama provider.
     pub fn new() -> Self {
         Self {
-            client: Client::new(),
+            client: crate::provider::build_http_client(None),
             base_url: "http://localhost:11434".to_string(),
             capability_overrides: HashMap::new(),
         }
@@ -40,19 +39,23 @@ impl OllamaProvider {
             tracing::warn!(url = %base_url, "Ollama base URL should start with http:// or https://");
         }
         Self {
-            client: Client::new(),
+            client: crate::provider::build_http_client(None),
             base_url,
             capability_overrides: HashMap::new(),
         }
     }
 
     /// Create a new Ollama provider with a custom base URL and per-model capability overrides.
-    pub fn with_overrides(base_url: String, overrides: HashMap<String, ModelCapabilities>) -> Self {
+    pub fn with_overrides(
+        base_url: String,
+        overrides: HashMap<String, ModelCapabilities>,
+        timeout_secs: Option<u64>,
+    ) -> Self {
         if !base_url.starts_with("http://") && !base_url.starts_with("https://") {
             tracing::warn!(url = %base_url, "Ollama base URL should start with http:// or https://");
         }
         Self {
-            client: Client::new(),
+            client: crate::provider::build_http_client(timeout_secs),
             base_url,
             capability_overrides: overrides,
         }
@@ -273,15 +276,40 @@ impl Provider for OllamaProvider {
 
         let mut body = self.build_request_body(&request);
         body["stream"] = serde_json::Value::Bool(false);
+        let url = format!("{}/api/chat", self.base_url);
+
+        #[cfg(feature = "debug-http")]
+        {
+            let mut headers = reqwest::header::HeaderMap::new();
+            headers.insert("content-type", "application/json".parse().unwrap());
+            let body_size = serde_json::to_vec(&body).map(|b| b.len()).unwrap_or(0);
+            crate::debug_http::log_request("ollama", "POST", &url, &headers, body_size);
+        }
+        #[cfg(feature = "debug-http")]
+        let start = std::time::Instant::now();
 
         let response = self
             .client
-            .post(format!("{}/api/chat", self.base_url))
+            .post(&url)
             .header("Content-Type", "application/json")
             .json(&body)
             .send()
             .await
-            .map_err(|e| ProviderError::RequestFailed(e.to_string()))?;
+            .map_err(|e| {
+                #[cfg(feature = "debug-http")]
+                crate::debug_http::log_error("ollama", &url, &e.to_string());
+                ProviderError::RequestFailed(e.to_string())
+            })?;
+
+        #[cfg(feature = "debug-http")]
+        crate::debug_http::log_response(
+            "ollama",
+            &url,
+            response.status().as_u16(),
+            response.headers(),
+            response.content_length(),
+            start.elapsed(),
+        );
 
         let status = response.status();
         if !status.is_success() {
@@ -311,15 +339,40 @@ impl Provider for OllamaProvider {
 
         let mut body = self.build_request_body(&request);
         body["stream"] = serde_json::Value::Bool(true);
+        let url = format!("{}/api/chat", self.base_url);
+
+        #[cfg(feature = "debug-http")]
+        {
+            let mut headers = reqwest::header::HeaderMap::new();
+            headers.insert("content-type", "application/json".parse().unwrap());
+            let body_size = serde_json::to_vec(&body).map(|b| b.len()).unwrap_or(0);
+            crate::debug_http::log_request("ollama", "POST", &url, &headers, body_size);
+        }
+        #[cfg(feature = "debug-http")]
+        let start = std::time::Instant::now();
 
         let response = self
             .client
-            .post(format!("{}/api/chat", self.base_url))
+            .post(&url)
             .header("Content-Type", "application/json")
             .json(&body)
             .send()
             .await
-            .map_err(|e| ProviderError::RequestFailed(e.to_string()))?;
+            .map_err(|e| {
+                #[cfg(feature = "debug-http")]
+                crate::debug_http::log_error("ollama", &url, &e.to_string());
+                ProviderError::RequestFailed(e.to_string())
+            })?;
+
+        #[cfg(feature = "debug-http")]
+        crate::debug_http::log_response(
+            "ollama",
+            &url,
+            response.status().as_u16(),
+            response.headers(),
+            response.content_length(),
+            start.elapsed(),
+        );
 
         let status = response.status();
         if !status.is_success() {
@@ -636,7 +689,7 @@ mod tests {
             },
         );
         let provider =
-            OllamaProvider::with_overrides("http://localhost:11434".to_string(), overrides);
+            OllamaProvider::with_overrides("http://localhost:11434".to_string(), overrides, None);
         let caps = provider.capabilities("custom-model");
         assert_eq!(caps.max_context_tokens, 42);
         assert!(!caps.supports_temperature);
@@ -644,8 +697,11 @@ mod tests {
 
     #[test]
     fn test_capabilities_falls_through_to_builtin() {
-        let provider =
-            OllamaProvider::with_overrides("http://localhost:11434".to_string(), HashMap::new());
+        let provider = OllamaProvider::with_overrides(
+            "http://localhost:11434".to_string(),
+            HashMap::new(),
+            None,
+        );
         let caps = provider.capabilities("llama3-8b");
         assert_eq!(caps.max_context_tokens, 131_072);
     }
@@ -1144,7 +1200,7 @@ mod tests {
             },
         );
         let provider =
-            OllamaProvider::with_overrides("http://localhost:11434".to_string(), overrides);
+            OllamaProvider::with_overrides("http://localhost:11434".to_string(), overrides, None);
         let caps = provider.capabilities("llama3-8b");
         assert_eq!(caps.max_context_tokens, 99);
         assert!(!caps.supports_temperature);
@@ -1154,7 +1210,7 @@ mod tests {
     fn test_capabilities_no_override_uses_builtin() {
         let overrides = HashMap::new();
         let provider =
-            OllamaProvider::with_overrides("http://localhost:11434".to_string(), overrides);
+            OllamaProvider::with_overrides("http://localhost:11434".to_string(), overrides, None);
         let caps = provider.capabilities("llama3-8b");
         assert_eq!(caps.max_context_tokens, 131_072); // builtin
     }
@@ -1267,7 +1323,7 @@ mod tests {
         // exercised.
         let _guard = always_on_tracing_guard();
         let provider =
-            OllamaProvider::with_overrides("ftp://invalid:11434".to_string(), HashMap::new());
+            OllamaProvider::with_overrides("ftp://invalid:11434".to_string(), HashMap::new(), None);
         assert_eq!(provider.base_url, "ftp://invalid:11434");
     }
 
@@ -1711,7 +1767,7 @@ mod tests {
             },
         );
         let provider =
-            OllamaProvider::with_overrides("http://localhost:11434".to_string(), overrides);
+            OllamaProvider::with_overrides("http://localhost:11434".to_string(), overrides, None);
         let request = InferenceRequest {
             messages: vec![crate::provider::Message {
                 role: "user".to_string(),

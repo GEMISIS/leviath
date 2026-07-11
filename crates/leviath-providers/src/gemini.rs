@@ -10,14 +10,13 @@ use crate::provider::{
 use crate::rate_limit::RateLimiter;
 use async_trait::async_trait;
 use futures_core::Stream;
-use reqwest::Client;
 use std::collections::HashMap;
 use std::pin::Pin;
 
 /// Google Gemini provider using the OpenAI-compatible endpoint.
 pub struct GeminiProvider {
     /// HTTP client
-    client: Client,
+    client: reqwest::Client,
 
     /// API key
     api_key: String,
@@ -36,7 +35,7 @@ impl GeminiProvider {
     /// Create a new Gemini provider.
     pub fn new(api_key: String) -> Self {
         Self {
-            client: Client::new(),
+            client: crate::provider::build_http_client(None),
             api_key,
             base_url: "https://generativelanguage.googleapis.com/v1beta/openai".to_string(),
             rate_limiter: None,
@@ -47,8 +46,9 @@ impl GeminiProvider {
     /// Create a new Gemini provider with full configuration.
     pub fn with_config(config: ProviderConfig) -> Self {
         let rate_limiter = config.rate_limit.as_ref().map(RateLimiter::new);
+        let client = crate::provider::build_http_client(config.request_timeout_secs);
         Self {
-            client: Client::new(),
+            client,
             api_key: config.api_key,
             base_url: config.base_url.unwrap_or_else(|| {
                 "https://generativelanguage.googleapis.com/v1beta/openai".to_string()
@@ -59,9 +59,13 @@ impl GeminiProvider {
     }
 
     /// Create a new Gemini provider with per-model capability overrides.
-    pub fn with_overrides(api_key: String, overrides: HashMap<String, ModelCapabilities>) -> Self {
+    pub fn with_overrides(
+        api_key: String,
+        overrides: HashMap<String, ModelCapabilities>,
+        timeout_secs: Option<u64>,
+    ) -> Self {
         Self {
-            client: Client::new(),
+            client: crate::provider::build_http_client(timeout_secs),
             api_key,
             base_url: "https://generativelanguage.googleapis.com/v1beta/openai".to_string(),
             rate_limiter: None,
@@ -103,16 +107,45 @@ impl Provider for GeminiProvider {
         }
 
         let body = build_openai_request_body(&request);
+        let url = format!("{}/chat/completions", self.base_url);
+
+        #[cfg(feature = "debug-http")]
+        {
+            let mut headers = reqwest::header::HeaderMap::new();
+            headers.insert(
+                "authorization",
+                format!("Bearer {}", self.api_key).parse().unwrap(),
+            );
+            headers.insert("content-type", "application/json".parse().unwrap());
+            let body_size = serde_json::to_vec(&body).map(|b| b.len()).unwrap_or(0);
+            crate::debug_http::log_request("gemini", "POST", &url, &headers, body_size);
+        }
+        #[cfg(feature = "debug-http")]
+        let start = std::time::Instant::now();
 
         let response = self
             .client
-            .post(format!("{}/chat/completions", self.base_url))
+            .post(&url)
             .header("Authorization", format!("Bearer {}", self.api_key))
             .header("Content-Type", "application/json")
             .json(&body)
             .send()
             .await
-            .map_err(|e| ProviderError::RequestFailed(e.to_string()))?;
+            .map_err(|e| {
+                #[cfg(feature = "debug-http")]
+                crate::debug_http::log_error("gemini", &url, &e.to_string());
+                ProviderError::RequestFailed(e.to_string())
+            })?;
+
+        #[cfg(feature = "debug-http")]
+        crate::debug_http::log_response(
+            "gemini",
+            &url,
+            response.status().as_u16(),
+            response.headers(),
+            response.content_length(),
+            start.elapsed(),
+        );
 
         let response = check_http_response(response, self.rate_limiter.as_ref()).await?;
 
@@ -147,16 +180,45 @@ impl Provider for GeminiProvider {
         let mut body = build_openai_request_body(&request);
         body["stream"] = serde_json::Value::Bool(true);
         body["stream_options"] = serde_json::json!({ "include_usage": true });
+        let url = format!("{}/chat/completions", self.base_url);
+
+        #[cfg(feature = "debug-http")]
+        {
+            let mut headers = reqwest::header::HeaderMap::new();
+            headers.insert(
+                "authorization",
+                format!("Bearer {}", self.api_key).parse().unwrap(),
+            );
+            headers.insert("content-type", "application/json".parse().unwrap());
+            let body_size = serde_json::to_vec(&body).map(|b| b.len()).unwrap_or(0);
+            crate::debug_http::log_request("gemini", "POST", &url, &headers, body_size);
+        }
+        #[cfg(feature = "debug-http")]
+        let start = std::time::Instant::now();
 
         let response = self
             .client
-            .post(format!("{}/chat/completions", self.base_url))
+            .post(&url)
             .header("Authorization", format!("Bearer {}", self.api_key))
             .header("Content-Type", "application/json")
             .json(&body)
             .send()
             .await
-            .map_err(|e| ProviderError::RequestFailed(e.to_string()))?;
+            .map_err(|e| {
+                #[cfg(feature = "debug-http")]
+                crate::debug_http::log_error("gemini", &url, &e.to_string());
+                ProviderError::RequestFailed(e.to_string())
+            })?;
+
+        #[cfg(feature = "debug-http")]
+        crate::debug_http::log_response(
+            "gemini",
+            &url,
+            response.status().as_u16(),
+            response.headers(),
+            response.content_length(),
+            start.elapsed(),
+        );
 
         let response = check_http_response(response, self.rate_limiter.as_ref()).await?;
 
@@ -327,7 +389,7 @@ mod tests {
                 max_output_tokens: 1,
             },
         );
-        let provider = GeminiProvider::with_overrides("test-key".to_string(), overrides);
+        let provider = GeminiProvider::with_overrides("test-key".to_string(), overrides, None);
         let caps = provider.capabilities("gemini-3.5-flash");
         assert!(!caps.supports_temperature);
         assert_eq!(caps.max_context_tokens, 1);
@@ -428,6 +490,7 @@ mod tests {
             api_key: "key".to_string(),
             base_url: None,
             rate_limit: None,
+            request_timeout_secs: None,
         };
         let provider = GeminiProvider::with_config(config);
         assert!(provider
@@ -441,6 +504,7 @@ mod tests {
             api_key: "key".to_string(),
             base_url: Some("https://custom.google.com".to_string()),
             rate_limit: None,
+            request_timeout_secs: None,
         };
         let provider = GeminiProvider::with_config(config);
         assert_eq!(provider.base_url, "https://custom.google.com");
@@ -455,6 +519,7 @@ mod tests {
                 requests_per_minute: 30,
                 tokens_per_minute: 50000,
             }),
+            request_timeout_secs: None,
         };
         let provider = GeminiProvider::with_config(config);
         assert!(provider.rate_limiter.is_some());
@@ -488,7 +553,7 @@ mod tests {
                 max_output_tokens: 10,
             },
         );
-        let provider = GeminiProvider::with_overrides("key".to_string(), overrides);
+        let provider = GeminiProvider::with_overrides("key".to_string(), overrides, None);
         let caps = provider.capabilities("gemini-custom");
         assert_eq!(caps.max_context_tokens, 42);
         assert!(!caps.supports_temperature);
@@ -496,7 +561,7 @@ mod tests {
 
     #[test]
     fn test_capabilities_builtin_fallthrough() {
-        let provider = GeminiProvider::with_overrides("key".to_string(), HashMap::new());
+        let provider = GeminiProvider::with_overrides("key".to_string(), HashMap::new(), None);
         let caps = provider.capabilities("gemini-3.5-flash");
         assert_eq!(caps.max_context_tokens, 1_048_576);
     }
@@ -556,6 +621,7 @@ mod tests {
             api_key: "test-key".to_string(),
             base_url: Some(url),
             rate_limit: None,
+            request_timeout_secs: None,
         })
     }
 
