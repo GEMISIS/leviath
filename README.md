@@ -182,7 +182,7 @@ A deterministic sensitivity model (Public / Internal / Private) tags every conte
 | Runtime | 11 min | 31 min | **2.8× faster** |
 | API cost | $9.16 | $79.97 | **8.7× cheaper** |
 | Truncation events | 0 | 312 | — |
-| Source files produced | 12 | 12 | Same output |
+| Tests passing | 35/35¹ | 89/89 | Both pass all |
 
 **What happened:** The flat baseline hit its context window ceiling 312 times, losing spec details and re-reading the same files. Probes injected at late tool calls (110+) came back empty — the agent couldn't recall specs it had read earlier. Leviath's structured regions kept specs in compacting storage (summarized instead of evicted), so the agent built everything without re-reading.
 
@@ -203,7 +203,9 @@ Leviath's structured regions create a stable prefix that Anthropic's prompt cach
 | Per-agent overhead | <1 MB | Full process clone |
 | Spawn latency | <1 ms | ~2 s |
 
-> **Methodology:** Benchmarks run from [leviath-benchmarks](https://github.com/Sun-Forge-AI/leviath-benchmarks) (private). The flat baseline is an independent Rust binary calling the same Anthropic API with the same tools and system prompt — no Leviath dependency, no shared code. Both agents receive identical seed files and task descriptions.
+> ¹ Leviath uses a two-stage blueprint (implement → test/fix loop) to match the flat baseline's natural test-and-iterate behavior. Test counts differ because both agents write their own tests — quality is measured by pass rate, not test count.
+>
+> **Methodology:** Benchmarks run from [leviath-benchmarks](https://github.com/Sun-Forge-AI/leviath-benchmarks) (private). The flat baseline is an independent Rust binary calling the same Anthropic API with the same tools and system prompt — no Leviath dependency, no shared code. Both agents receive identical seed files and task descriptions. Output quality is verified by running each agent's test suite post-completion — raw test results are included in benchmark JSON.
 
 ## 🤖 Pre-built Agents
 
