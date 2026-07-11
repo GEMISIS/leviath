@@ -575,11 +575,16 @@ impl AgentEngine {
                     if let Some(mut state) = self.world.get_mut::<AgentState>(entity) {
                         state.status = AgentStatus::Cancelled;
                     }
-                    return last_response.ok_or_else(|| {
-                        ProviderError::Other(
-                            "Agent cancelled before producing a response".to_string(),
-                        )
-                    });
+                    return last_response
+                        .map(|r| InferenceResponse {
+                            tokens_used: cumulative_tokens.clone(),
+                            ..r
+                        })
+                        .ok_or_else(|| {
+                            ProviderError::Other(
+                                "Agent cancelled before producing a response".to_string(),
+                            )
+                        });
                 }
             }
 
@@ -745,7 +750,12 @@ impl AgentEngine {
         }
 
         tracing::warn!(max_iterations, "Inference loop hit max iterations");
-        last_response.ok_or_else(|| ProviderError::Other("No response generated".to_string()))
+        last_response
+            .map(|r| InferenceResponse {
+                tokens_used: cumulative_tokens,
+                ..r
+            })
+            .ok_or_else(|| ProviderError::Other("No response generated".to_string()))
     }
 
     /// Check if the context window needs eviction, evict what can be evicted
