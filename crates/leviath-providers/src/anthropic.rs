@@ -355,19 +355,6 @@ impl Provider for AnthropicProvider {
         let body = self.build_request_body(&request);
         let url = format!("{}/messages", self.base_url);
 
-        // Temporary debug: dump request body
-        if let Ok(body_json) = serde_json::to_string_pretty(&body) {
-            let _ = std::fs::write("/tmp/leviath-refactored-request.json", &body_json);
-            eprintln!("DEBUG: Request written ({} bytes)", body_json.len());
-            if let Some(msgs) = body.get("messages").and_then(|v| v.as_array()) {
-                let roles: Vec<&str> = msgs
-                    .iter()
-                    .filter_map(|m| m.get("role").and_then(|r| r.as_str()))
-                    .collect();
-                eprintln!("DEBUG: Roles: {:?}", roles);
-            }
-        }
-
         #[cfg(feature = "debug-http")]
         let body_bytes = serde_json::to_vec(&body).unwrap_or_default();
         #[cfg(feature = "debug-http")]
