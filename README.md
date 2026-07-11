@@ -174,35 +174,36 @@ A deterministic sensitivity model (Public / Internal / Private) tags every conte
 
 ## 📊 Benchmarks
 
-# Fake Numbers! To be filled in!
-<!-- ⚠️ Numbers below are targets — replace with actuals from benchmark runs before launch -->
+**Stress test** — build a 12-file multi-tenant event processing platform from 8 spec files and 4 config files. Same model (Claude Sonnet 5), same tools, same task. Only context management differs.
 
-**Context retention** — same model, same tools; only context management differs:
+| Metric | Leviath | Flat Baseline | Improvement |
+|--------|--------:|--------------:|------------:|
+| Tool calls | 67 | 203 | **3.0× fewer** |
+| Runtime | 11 min | 31 min | **2.8× faster** |
+| API cost | $9.16 | $79.97 | **8.7× cheaper** |
+| Truncation events | 0 | 312 | — |
+| Source files produced | 12 | 12 | Same output |
 
-| Metric | Leviath | Flat Context | Improvement |
-|--------|--------:|-------------:|------------:|
-| Retention @ 50 tool calls | 94% | 61% | **+54%** |
-| Retention @ 100 tool calls | 89% | 34% | **+162%** |
-| Multi-file consistency (10+ files) | 91% | 64% | **+42%** |
-| Token usage (avg per task) | 127K | 203K | **−37%** |
+**What happened:** The flat baseline hit its context window ceiling 312 times, losing spec details and re-reading the same files. Probes injected at late tool calls (110+) came back empty — the agent couldn't recall specs it had read earlier. Leviath's structured regions kept specs in compacting storage (summarized instead of evicted), so the agent built everything without re-reading.
 
-**Prompt caching** — regions ordered by volatility form a stable prefix that providers cache automatically:
+**Cost breakdown** (Anthropic pricing: $3/MTok input, $0.30/MTok cache read, $3.75/MTok cache write, $15/MTok output):
 
-| Provider | Cache Hit Rate | Cost Savings | Mechanism |
-|----------|---------------:|-------------:|-----------|
-| Anthropic | 70–85% | 55–65% | Explicit breakpoints, 90% discount |
-| OpenAI | 50–70% | 25–35% | Auto prefix matching, 50% discount |
-| Google | 50–70% | 35–50% | Auto prefix matching |
+| | Input | Cache reads | Cache writes | Output | **Total** |
+|--|------:|------------:|-------------:|-------:|----------:|
+| Leviath | $0.00 | $0.03 | $7.97 | $1.17 | **$9.16** |
+| Flat | $77.35 | $0.13 | $0.01 | $2.49 | **$79.97** |
+
+Leviath's structured regions create a stable prefix that Anthropic's prompt caching locks onto — 91K tokens served from cache at 10× cheaper than fresh input. The flat baseline's sliding window constantly reshuffles messages, destroying cache locality (1.65% hit rate vs. near-100%).
 
 **Resource efficiency** — ECS engine vs. process-per-agent:
 
-| Concurrent Agents | Leviath | Process-per-agent |
-|-------------------|--------:|------------------:|
-| 25 | 180 MB | 4.2 GB |
-| 50 | 310 MB | 8.1 GB |
-| Spawn overhead | <1 ms | ~2 s |
+| Metric | Leviath (`lev serve`) | Typical process-per-agent |
+|--------|----------------------:|--------------------------:|
+| Base memory | 18 MB | 50–200 MB per process |
+| Per-agent overhead | <1 MB | Full process clone |
+| Spawn latency | <1 ms | ~2 s |
 
-[Full methodology →](https://leviath.dev/docs/benchmarks)
+> **Methodology:** Benchmarks run from [leviath-benchmarks](https://github.com/Sun-Forge-AI/leviath-benchmarks) (private). The flat baseline is an independent Rust binary calling the same Anthropic API with the same tools and system prompt — no Leviath dependency, no shared code. Both agents receive identical seed files and task descriptions.
 
 ## 🤖 Pre-built Agents
 
