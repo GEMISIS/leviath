@@ -556,6 +556,9 @@ impl AgentEngine {
         tool_executor: &mut ToolExecutorDyn<'e>,
     ) -> std::result::Result<InferenceResponse, ProviderError> {
         let mut last_response = None;
+        let mut total_tool_calls: usize = 0;
+        let mut text_only_nudges: usize = 0;
+        const MAX_TEXT_ONLY_NUDGES: usize = 3;
 
         for iteration in 0..max_iterations {
             // Check cancellation token before each iteration
@@ -584,16 +587,49 @@ impl AgentEngine {
 
             // Check if we're done (no tool calls)
             if response.tool_calls.is_empty() {
-                tracing::info!(
+                if total_tool_calls > 0 || text_only_nudges >= MAX_TEXT_ONLY_NUDGES {
+                    // Agent has done real work and is finishing, or we've
+                    // exhausted nudge attempts — accept the text response.
+                    tracing::info!(
+                        iteration,
+                        total_tool_calls,
+                        text_only_nudges,
+                        finish_reason = ?response.finish_reason,
+                        "Inference loop complete"
+                    );
+                    return Ok(response);
+                }
+
+                // No tool calls yet — model responded with text only (e.g.
+                // asking a clarifying question or explaining its plan).
+                // Add the text to conversation and nudge it to use tools.
+                text_only_nudges += 1;
+                tracing::warn!(
                     iteration,
-                    finish_reason = ?response.finish_reason,
-                    "Inference loop complete"
+                    text_only_nudges,
+                    content_len = response.content.len(),
+                    "Model responded with text only before making any tool calls, nudging to use tools ({}/{})",
+                    text_only_nudges,
+                    MAX_TEXT_ONLY_NUDGES,
                 );
-                return Ok(response);
+                let mut window = self.world.get_mut::<ContextWindow>(entity).unwrap();
+                let response_tokens = response.content.len() / 4 + 1;
+                let _ = window.add_to_region(
+                    "conversation",
+                    format!("Assistant: {}", response.content),
+                    response_tokens,
+                );
+                let nudge = "You have tools available. Please use them to complete the task. Start by reading the relevant files in the working directory.";
+                let nudge_tokens = nudge.len() / 4 + 1;
+                let _ =
+                    window.add_to_region("conversation", format!("User: {}", nudge), nudge_tokens);
+                last_response = Some(response);
+                continue;
             }
 
             // Execute tool calls
             let tool_calls_snapshot = response.tool_calls.clone();
+            total_tool_calls += tool_calls_snapshot.len();
             let tool_results = tool_executor(tool_calls_snapshot.clone()).await;
 
             // Add tool results to context window.
