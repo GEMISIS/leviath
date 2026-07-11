@@ -135,8 +135,8 @@ async fn dispatch_tool_calls(
                             Err(e) => format!("[error] tool error: {}", e),
                         }
                     };
-                    let short_result = if result.len() > 120 {
-                        format!("{}\u{2026}", &result[..120])
+                    let short_result = if result.chars().count() > 120 {
+                        format!("{}\u{2026}", result.chars().take(120).collect::<String>())
                     } else {
                         result.clone()
                     };
@@ -166,8 +166,8 @@ async fn dispatch_tool_calls(
                         Err(e) => format!("[error] tool error: {}", e),
                     }
                 };
-                let short_result = if result.len() > 120 {
-                    format!("{}\u{2026}", &result[..120])
+                let short_result = if result.chars().count() > 120 {
+                    format!("{}\u{2026}", result.chars().take(120).collect::<String>())
                 } else {
                     result.clone()
                 };
