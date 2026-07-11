@@ -1081,8 +1081,19 @@ mod tests {
 
         responder.abort();
 
-        assert_eq!(meta.prompt_tokens, 10);
-        assert_eq!(meta.completion_tokens, 5);
+        // Tokens are now cumulative across all inference calls in the loop.
+        // The mock returns 10 prompt / 5 completion per call; the exact total
+        // depends on how many iterations the loop runs.
+        assert!(
+            meta.prompt_tokens >= 10,
+            "expected cumulative prompt tokens >= 10, got {}",
+            meta.prompt_tokens
+        );
+        assert!(
+            meta.completion_tokens >= 5,
+            "expected cumulative completion tokens >= 5, got {}",
+            meta.completion_tokens
+        );
         let output = crate::runstate::tail_stage_output(&run_id, meta.stage_index, 65536);
         assert_contains_display(
             output.contains("Agent reply with tools"),

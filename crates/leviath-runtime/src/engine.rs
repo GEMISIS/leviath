@@ -559,6 +559,13 @@ impl AgentEngine {
         let mut total_tool_calls: usize = 0;
         let mut text_only_nudges: usize = 0;
         const MAX_TEXT_ONLY_NUDGES: usize = 3;
+        let mut cumulative_tokens = leviath_providers::TokenUsage {
+            prompt_tokens: 0,
+            completion_tokens: 0,
+            total_tokens: 0,
+            cached_tokens: 0,
+            cache_write_tokens: 0,
+        };
 
         for iteration in 0..max_iterations {
             // Check cancellation token before each iteration
@@ -585,6 +592,13 @@ impl AgentEngine {
                 .run_inference_filtered(entity, provider_name, model, tools.clone(), tool_filter)
                 .await?;
 
+            // Accumulate token usage across all iterations
+            cumulative_tokens.prompt_tokens += response.tokens_used.prompt_tokens;
+            cumulative_tokens.completion_tokens += response.tokens_used.completion_tokens;
+            cumulative_tokens.total_tokens += response.tokens_used.total_tokens;
+            cumulative_tokens.cached_tokens += response.tokens_used.cached_tokens;
+            cumulative_tokens.cache_write_tokens += response.tokens_used.cache_write_tokens;
+
             // Check if we're done (no tool calls)
             if response.tool_calls.is_empty() {
                 if total_tool_calls > 0 || text_only_nudges >= MAX_TEXT_ONLY_NUDGES {
@@ -594,10 +608,15 @@ impl AgentEngine {
                         iteration,
                         total_tool_calls,
                         text_only_nudges,
+                        cumulative_prompt_tokens = cumulative_tokens.prompt_tokens,
+                        cumulative_completion_tokens = cumulative_tokens.completion_tokens,
                         finish_reason = ?response.finish_reason,
                         "Inference loop complete"
                     );
-                    return Ok(response);
+                    return Ok(InferenceResponse {
+                        tokens_used: cumulative_tokens,
+                        ..response
+                    });
                 }
 
                 // No tool calls yet — model responded with text only (e.g.
