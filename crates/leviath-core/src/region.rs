@@ -382,12 +382,49 @@ impl Region {
         if let RegionKind::SlidingWindow { max_items } = &self.kind {
             let max = *max_items;
             while self.content.len() > max {
-                self.current_tokens -= self.content[0].tokens;
-                self.content.remove(0);
-                if let Some(taint) = &mut self.taint {
-                    taint.remove_oldest();
+                // Evict in turn groups: an AssistantTurn and its following
+                // ToolResults form an atomic unit. Evicting one without the
+                // others leaves orphaned tool_use/tool_result blocks that
+                // providers (especially Anthropic) will reject.
+                let group_size = self.turn_group_size_at(0);
+                for _ in 0..group_size {
+                    if self.content.is_empty() {
+                        break;
+                    }
+                    self.current_tokens -= self.content[0].tokens;
+                    self.content.remove(0);
+                    if let Some(taint) = &mut self.taint {
+                        taint.remove_oldest();
+                    }
                 }
             }
+        }
+    }
+
+    /// Returns the number of entries in the turn group starting at `idx`.
+    ///
+    /// A turn group is:
+    /// - A single Text or UserMessage entry (group size = 1)
+    /// - An AssistantTurn followed by consecutive ToolResult entries
+    ///   (group size = 1 + number of following ToolResults)
+    /// - A lone ToolResult (shouldn't happen, but size = 1 for safety)
+    fn turn_group_size_at(&self, idx: usize) -> usize {
+        if idx >= self.content.len() {
+            return 0;
+        }
+        match &self.content[idx].kind {
+            EntryKind::AssistantTurn { .. } => {
+                let mut size = 1;
+                while idx + size < self.content.len() {
+                    if matches!(self.content[idx + size].kind, EntryKind::ToolResult { .. }) {
+                        size += 1;
+                    } else {
+                        break;
+                    }
+                }
+                size
+            }
+            _ => 1,
         }
     }
 
