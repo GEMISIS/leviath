@@ -242,23 +242,29 @@ pub async fn prompt_llm_transition(
     // Inject the transition prompt into the context window
     if let Some(mut window) = engine.world_mut().get_mut::<ContextWindow>(entity) {
         let tokens = prompt.len() / 4 + 1;
-        let _ = window.add_to_region("conversation", format!("User: {}", prompt), tokens);
+        let _ = window.add_typed_entry(
+            "conversation",
+            leviath_core::EntryKind::UserMessage,
+            prompt.clone(),
+            tokens,
+        );
     }
 
     // Run a single inference call to get the LLM's choice
     let provider = engine.get_provider(provider_name)?;
-    let (messages, max_tokens) = {
+    let (assembled, max_tokens) = {
         let window = engine.world().get::<ContextWindow>(entity)?;
-        let messages = window.assemble_messages();
+        let assembled = window.assemble();
         let remaining = window.max_tokens.saturating_sub(window.current_tokens);
         let max_tokens = remaining.min(256); // short response expected
-        (messages, max_tokens)
+        (assembled, max_tokens)
     };
 
     let temperature = 0.0; // deterministic for routing
 
     let request = leviath_providers::InferenceRequest {
-        messages,
+        messages: assembled.messages,
+        system: assembled.system_blocks,
         model: model_name.to_string(),
         max_tokens,
         temperature,
@@ -283,9 +289,10 @@ pub async fn prompt_llm_transition(
         .get_mut::<ContextWindow>(entity)
         .expect("ContextWindow present: confirmed above and unremovable since");
     let tokens = choice.len() / 4 + 1;
-    let _ = window.add_to_region(
+    let _ = window.add_typed_entry(
         "conversation",
-        format!("Assistant: Transitioning to: {}", choice),
+        leviath_core::EntryKind::AssistantTurn { tool_calls: vec![] },
+        format!("Transitioning to: {}", choice),
         tokens,
     );
 
@@ -481,12 +488,12 @@ pub async fn apply_compact_transform(
     let messages = vec![
         leviath_providers::Message {
             role: "system".to_string(),
-            content: prompt.to_string(),
+            content: prompt.to_string().into(),
             cache_breakpoint: false,
         },
         leviath_providers::Message {
             role: "user".to_string(),
-            content: content_to_compact,
+            content: content_to_compact.into(),
             cache_breakpoint: false,
         },
     ];
@@ -501,6 +508,7 @@ pub async fn apply_compact_transform(
         max_tokens: max_summary_tokens,
         temperature: compaction_config.map(|cc| cc.temperature).unwrap_or(0.3),
         tools: Vec::new(),
+        system: vec![],
         extra: serde_json::Value::Null,
     };
 

@@ -6,6 +6,38 @@
 
 use serde::{Deserialize, Serialize};
 
+/// The kind of content stored in a region entry.
+///
+/// Entries carry typed metadata instead of relying on text-prefix parsing
+/// (e.g., "Assistant: " / "User: ") to determine message roles. This
+/// eliminates the bug where tool results stored outside the conversation
+/// region all become "user" role messages.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "type")]
+pub enum EntryKind {
+    /// Plain text (system content, summaries, scratch).
+    #[default]
+    Text,
+    /// User message in conversation.
+    UserMessage,
+    /// Assistant response with optional tool calls.
+    AssistantTurn { tool_calls: Vec<SerializedToolCall> },
+    /// Tool execution result, paired with a tool_call_id.
+    ToolResult {
+        tool_call_id: String,
+        tool_name: String,
+        is_error: bool,
+    },
+}
+
+/// A serialized tool call stored within an `AssistantTurn` entry.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SerializedToolCall {
+    pub id: String,
+    pub name: String,
+    pub arguments: serde_json::Value,
+}
+
 /// A typed memory region within an agent's context window.
 ///
 /// Regions have different lifecycle policies controlling how they behave
@@ -199,6 +231,7 @@ impl Region {
             tokens,
             timestamp: chrono::Utc::now().timestamp(),
             metadata: None,
+            kind: EntryKind::default(),
         });
         self.current_tokens += tokens;
 
@@ -243,6 +276,7 @@ impl Region {
             tokens,
             timestamp: chrono::Utc::now().timestamp(),
             metadata: None,
+            kind: EntryKind::default(),
         });
         self.current_tokens += tokens;
 
@@ -283,6 +317,52 @@ impl Region {
             tokens,
             timestamp: chrono::Utc::now().timestamp(),
             metadata: Some(metadata),
+            kind: EntryKind::default(),
+        });
+        self.current_tokens += tokens;
+
+        // Track taint as Public for untagged entries
+        if let Some(taint) = &mut self.taint {
+            taint.add_entry(crate::taint::TaintLevel::Public);
+        }
+
+        // Enforce SlidingWindow max_items limit
+        self.enforce_sliding_window();
+
+        Ok(())
+    }
+
+    /// Add an entry with a specific [`EntryKind`] to this region.
+    ///
+    /// Like [`add_entry`](Self::add_entry), but the caller supplies the entry
+    /// kind so the entry carries typed metadata rather than relying on
+    /// text-prefix parsing.
+    pub fn add_typed_entry(
+        &mut self,
+        content: String,
+        tokens: usize,
+        kind: EntryKind,
+    ) -> crate::error::Result<()> {
+        // Validate against schema if present
+        if let Some(schema) = &self.schema {
+            schema.validate(&content)?;
+        }
+
+        // Check token budget
+        if self.current_tokens + tokens > self.max_tokens {
+            return Err(crate::error::Error::TokenBudgetExceeded {
+                used: self.current_tokens + tokens,
+                max: self.max_tokens,
+            });
+        }
+
+        // Add entry
+        self.content.push(RegionEntry {
+            content,
+            tokens,
+            timestamp: chrono::Utc::now().timestamp(),
+            metadata: None,
+            kind,
         });
         self.current_tokens += tokens;
 
@@ -365,6 +445,12 @@ pub struct RegionEntry {
 
     /// Optional metadata about this entry
     pub metadata: Option<serde_json::Value>,
+
+    /// The kind of content stored in this entry.
+    /// Defaults to `EntryKind::Text` for backward compatibility with
+    /// serialized data that predates the typed-entry system.
+    #[serde(default)]
+    pub kind: EntryKind,
 }
 
 /// Validation schema for a region's content.

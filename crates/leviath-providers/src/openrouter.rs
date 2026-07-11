@@ -543,9 +543,10 @@ mod tests {
     fn test_build_request_body() {
         let provider = OpenRouterProvider::new("test-key".to_string());
         let request = InferenceRequest {
+            system: vec![],
             messages: vec![crate::provider::Message {
                 role: "user".to_string(),
-                content: "Hello".to_string(),
+                content: "Hello".into(),
                 cache_breakpoint: false,
             }],
             model: "anthropic/claude-sonnet-4".to_string(),
@@ -765,15 +766,16 @@ mod tests {
     fn test_build_request_body_anthropic_cache_breakpoint() {
         let provider = OpenRouterProvider::new("key".to_string());
         let request = InferenceRequest {
+            system: vec![],
             messages: vec![
                 crate::provider::Message {
                     role: "user".to_string(),
-                    content: "First".to_string(),
+                    content: "First".into(),
                     cache_breakpoint: true,
                 },
                 crate::provider::Message {
                     role: "user".to_string(),
-                    content: "Second".to_string(),
+                    content: "Second".into(),
                     cache_breakpoint: false,
                 },
             ],
@@ -797,9 +799,10 @@ mod tests {
     fn test_build_request_body_non_anthropic_no_cache_breakpoint() {
         let provider = OpenRouterProvider::new("key".to_string());
         let request = InferenceRequest {
+            system: vec![],
             messages: vec![crate::provider::Message {
                 role: "user".to_string(),
-                content: "Hello".to_string(),
+                content: "Hello".into(),
                 cache_breakpoint: true,
             }],
             model: "openai/gpt-5.4-mini".to_string(),
@@ -821,12 +824,13 @@ mod tests {
         let messages: Vec<crate::provider::Message> = (0..6)
             .map(|i| crate::provider::Message {
                 role: "user".to_string(),
-                content: format!("msg {}", i),
+                content: format!("msg {}", i).into(),
                 cache_breakpoint: true,
             })
             .collect();
 
         let request = InferenceRequest {
+            system: vec![],
             messages,
             model: "anthropic/claude-sonnet-4-6".to_string(),
             max_tokens: 1024,
@@ -845,9 +849,10 @@ mod tests {
     fn test_build_request_body_with_tools() {
         let provider = OpenRouterProvider::new("key".to_string());
         let request = InferenceRequest {
+            system: vec![],
             messages: vec![crate::provider::Message {
                 role: "user".to_string(),
-                content: "Search".to_string(),
+                content: "Search".into(),
                 cache_breakpoint: false,
             }],
             model: "openai/gpt-5.4-mini".to_string(),
@@ -871,9 +876,10 @@ mod tests {
     fn test_build_request_body_no_temp_for_deepseek_r1() {
         let provider = OpenRouterProvider::new("key".to_string());
         let request = InferenceRequest {
+            system: vec![],
             messages: vec![crate::provider::Message {
                 role: "user".to_string(),
-                content: "Think".to_string(),
+                content: "Think".into(),
                 cache_breakpoint: false,
             }],
             model: "deepseek/deepseek-r1".to_string(),
@@ -923,9 +929,10 @@ mod tests {
 
     fn simple_request() -> InferenceRequest {
         InferenceRequest {
+            system: vec![],
             messages: vec![crate::provider::Message {
                 role: "user".to_string(),
-                content: "hi".to_string(),
+                content: "hi".into(),
                 cache_breakpoint: false,
             }],
             model: "openai/gpt-4o".to_string(),

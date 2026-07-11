@@ -92,17 +92,17 @@ impl ClaudeCodeProvider {
                 "assistant" => "Assistant",
                 other => other,
             };
-            parts.push(format!("{}: {}", role_label, msg.content));
+            parts.push(format!("{}: {}", role_label, msg.content.as_text()));
         }
         parts.join("\n")
     }
 
     /// Extract system prompt from messages.
     fn extract_system_prompt(messages: &[Message]) -> Option<String> {
-        let system_parts: Vec<&str> = messages
+        let system_parts: Vec<String> = messages
             .iter()
             .filter(|m| m.role == "system")
-            .map(|m| m.content.as_str())
+            .map(|m| m.content.as_text())
             .collect();
 
         if system_parts.is_empty() {
@@ -715,22 +715,22 @@ mod tests {
         let messages = vec![
             Message {
                 role: "system".to_string(),
-                content: "You are helpful.".to_string(),
+                content: "You are helpful.".into(),
                 cache_breakpoint: false,
             },
             Message {
                 role: "user".to_string(),
-                content: "Hello".to_string(),
+                content: "Hello".into(),
                 cache_breakpoint: false,
             },
             Message {
                 role: "assistant".to_string(),
-                content: "Hi there!".to_string(),
+                content: "Hi there!".into(),
                 cache_breakpoint: false,
             },
             Message {
                 role: "user".to_string(),
-                content: "How are you?".to_string(),
+                content: "How are you?".into(),
                 cache_breakpoint: false,
             },
         ];
@@ -747,17 +747,17 @@ mod tests {
         let messages = vec![
             Message {
                 role: "system".to_string(),
-                content: "You are helpful.".to_string(),
+                content: "You are helpful.".into(),
                 cache_breakpoint: false,
             },
             Message {
                 role: "system".to_string(),
-                content: "Be concise.".to_string(),
+                content: "Be concise.".into(),
                 cache_breakpoint: false,
             },
             Message {
                 role: "user".to_string(),
-                content: "Hello".to_string(),
+                content: "Hello".into(),
                 cache_breakpoint: false,
             },
         ];
@@ -771,7 +771,7 @@ mod tests {
     fn test_extract_system_prompt_none() {
         let messages = vec![Message {
             role: "user".to_string(),
-            content: "Hello".to_string(),
+            content: "Hello".into(),
             cache_breakpoint: false,
         }];
 
@@ -892,7 +892,7 @@ mod tests {
     fn test_build_prompt_unknown_role() {
         let messages = vec![Message {
             role: "tool".to_string(),
-            content: "result data".to_string(),
+            content: "result data".into(),
             cache_breakpoint: false,
         }];
         let prompt = ClaudeCodeProvider::build_prompt(&messages);
@@ -972,9 +972,10 @@ mod tests {
 
     fn make_request() -> InferenceRequest {
         InferenceRequest {
+            system: vec![],
             messages: vec![Message {
                 role: "user".to_string(),
-                content: "hi".to_string(),
+                content: "hi".into(),
                 cache_breakpoint: false,
             }],
             model: "claude-sonnet-4-6".to_string(),
@@ -1153,7 +1154,7 @@ mod tests {
             0,
             Message {
                 role: "system".to_string(),
-                content: "be nice".to_string(),
+                content: "be nice".into(),
                 cache_breakpoint: false,
             },
         );
@@ -1200,7 +1201,7 @@ mod tests {
             0,
             Message {
                 role: "system".to_string(),
-                content: "be nice".to_string(),
+                content: "be nice".into(),
                 cache_breakpoint: false,
             },
         );

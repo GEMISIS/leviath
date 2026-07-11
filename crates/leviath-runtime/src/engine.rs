@@ -255,8 +255,12 @@ impl AgentEngine {
                 for msg in msgs {
                     let region_name = msg.target_region.as_deref().unwrap_or("conversation");
                     let tokens = msg.content.len() / 4 + 1;
-                    let _ =
-                        window.add_to_region(region_name, format!("User: {}", msg.content), tokens);
+                    let _ = window.add_typed_entry(
+                        region_name,
+                        leviath_core::EntryKind::UserMessage,
+                        msg.content.clone(),
+                        tokens,
+                    );
                 }
             }
         }
@@ -356,13 +360,13 @@ impl AgentEngine {
             .clone();
 
         // Build structured messages from the context window
-        let (messages, max_tokens) = {
+        let (assembled, max_tokens) = {
             let window = self
                 .world
                 .get::<ContextWindow>(entity)
                 .ok_or_else(|| ProviderError::Other("Entity has no ContextWindow".to_string()))?;
 
-            let messages = window.assemble_messages();
+            let assembled = window.assemble();
             let remaining = window.max_tokens.saturating_sub(window.current_tokens);
             // Use per-stage override, then model capability (which provides sensible defaults)
             let output_cap = self
@@ -371,7 +375,7 @@ impl AgentEngine {
                 .and_then(|c| c.max_output_tokens)
                 .unwrap_or_else(|| provider.capabilities(model).max_output_tokens);
             let max_tokens = remaining.min(output_cap);
-            (messages, max_tokens)
+            (assembled, max_tokens)
         };
 
         // Apply tool filter if provided
@@ -399,7 +403,8 @@ impl AgentEngine {
             0.0
         };
         let request = InferenceRequest {
-            messages,
+            system: assembled.system_blocks,
+            messages: assembled.messages,
             model: model.to_string(),
             max_tokens,
             temperature,
@@ -468,16 +473,14 @@ impl AgentEngine {
             max_iterations,
             None,
             None,
-            None,
             &mut tool_executor,
         )
         .await
     }
 
-    /// Run the full inference loop with optional tool filtering and tool result routing.
+    /// Run the full inference loop with optional tool filtering.
     ///
     /// `tool_filter`: if Some, only tools matching these names are included.
-    /// `tool_result_routing`: if Some, routes tool results to configured regions.
     /// `compaction_config`: if Some, automatically runs eviction + compaction after
     /// each iteration when the context window is filling up.
     ///
@@ -506,7 +509,6 @@ impl AgentEngine {
         tools: Vec<Tool>,
         max_iterations: usize,
         tool_filter: Option<&[String]>,
-        tool_result_routing: Option<&ToolResultRoutingConfig>,
         compaction_config: Option<&leviath_core::CompactionConfig>,
         tool_executor: &'p mut F,
     ) -> std::result::Result<InferenceResponse, ProviderError>
@@ -529,7 +531,6 @@ impl AgentEngine {
             tools,
             max_iterations,
             tool_filter,
-            tool_result_routing,
             compaction_config,
             &mut boxed_executor,
         )
@@ -551,7 +552,6 @@ impl AgentEngine {
         tools: Vec<Tool>,
         max_iterations: usize,
         tool_filter: Option<&[String]>,
-        tool_result_routing: Option<&ToolResultRoutingConfig>,
         compaction_config: Option<&leviath_core::CompactionConfig>,
         tool_executor: &mut ToolExecutorDyn<'e>,
     ) -> std::result::Result<InferenceResponse, ProviderError> {
@@ -638,15 +638,20 @@ impl AgentEngine {
                 );
                 let mut window = self.world.get_mut::<ContextWindow>(entity).unwrap();
                 let response_tokens = response.content.len() / 4 + 1;
-                let _ = window.add_to_region(
+                let _ = window.add_typed_entry(
                     "conversation",
-                    format!("Assistant: {}", response.content),
+                    leviath_core::EntryKind::AssistantTurn { tool_calls: vec![] },
+                    response.content.clone(),
                     response_tokens,
                 );
                 let nudge = "You have tools available. Please use them to complete the task. Start by reading the relevant files in the working directory.";
                 let nudge_tokens = nudge.len() / 4 + 1;
-                let _ =
-                    window.add_to_region("conversation", format!("User: {}", nudge), nudge_tokens);
+                let _ = window.add_typed_entry(
+                    "conversation",
+                    leviath_core::EntryKind::UserMessage,
+                    nudge.to_string(),
+                    nudge_tokens,
+                );
                 last_response = Some(response);
                 continue;
             }
@@ -661,68 +666,48 @@ impl AgentEngine {
             // a ContextWindow; it cannot be removed between that call and here.
             let mut window = self.world.get_mut::<ContextWindow>(entity).unwrap();
 
-            // Add assistant response
+            // Add assistant response with tool calls as a typed entry
             let response_tokens = response.content.len() / 4;
-            let _ = window.add_to_region(
+            let serialized_tool_calls: Vec<leviath_core::SerializedToolCall> = tool_calls_snapshot
+                .iter()
+                .map(|tc| leviath_core::SerializedToolCall {
+                    id: tc.id.clone(),
+                    name: tc.name.clone(),
+                    arguments: tc.arguments.clone(),
+                })
+                .collect();
+            let _ = window.add_typed_entry(
                 "conversation",
-                format!("Assistant: {}", response.content),
+                leviath_core::EntryKind::AssistantTurn {
+                    tool_calls: serialized_tool_calls,
+                },
+                response.content.clone(),
                 response_tokens,
             );
 
-            // Route tool results based on routing config
+            // Add tool results as typed entries in the messages region
             for (tool_call_id, result) in &tool_results {
-                let mut result_text = result.clone();
-
-                // Apply max_result_tokens truncation if configured
-                if let Some(routing) = tool_result_routing {
-                    if let Some(max_tokens) = routing.max_result_tokens {
-                        let max_chars = max_tokens * 4; // approximate
-                        if result_text.len() > max_chars {
-                            result_text.truncate(max_chars);
-                            result_text.push_str("\n[...truncated]");
-                        }
-                    }
-                }
-
+                let result_text = result.clone();
                 let result_tokens = result_text.len() / 4 + 1;
-                let formatted = format!("[Tool {}]: {}", tool_call_id, result_text);
 
-                // Find the tool name for this tool_call_id to use for routing lookup
+                // Find the tool name for this tool_call_id
                 let tool_name = tool_calls_snapshot
                     .iter()
                     .find(|tc| tc.id == *tool_call_id)
-                    .map(|tc| tc.name.as_str())
-                    .unwrap_or("");
+                    .map(|tc| tc.name.clone())
+                    .unwrap_or_default();
 
-                // Determine target region
-                let target_region = if let Some(routing) = tool_result_routing {
-                    // Check per-tool overrides using tool NAME (not call ID)
-                    if let Some(override_region) = routing.tool_overrides.get(tool_name) {
-                        override_region.as_str()
-                    } else {
-                        routing.default_region.as_str()
-                    }
-                } else {
-                    "tool_results"
-                };
-
-                // If persist is false in routing, add to a clearable region instead
-                let actual_region = if let Some(routing) = tool_result_routing {
-                    if !routing.persist {
-                        // Try clearable scratch region, fall back to target
-                        if window.get_region("scratch").is_some() {
-                            "scratch"
-                        } else {
-                            target_region
-                        }
-                    } else {
-                        target_region
-                    }
-                } else {
-                    target_region
-                };
-
-                let _ = window.add_to_region(actual_region, formatted, result_tokens);
+                // All tool results go in the conversation/messages region
+                let _ = window.add_typed_entry(
+                    "conversation",
+                    leviath_core::EntryKind::ToolResult {
+                        tool_call_id: tool_call_id.clone(),
+                        tool_name,
+                        is_error: false,
+                    },
+                    result_text,
+                    result_tokens,
+                );
             }
             let _ = window; // release borrow before process_messages
 
@@ -847,15 +832,16 @@ impl AgentEngine {
         let user_prompt = compaction_config.user_prompt(&content, &source_region_name);
 
         let request = InferenceRequest {
+            system: vec![],
             messages: vec![
                 Message {
                     role: "system".to_string(),
-                    content: system_prompt,
+                    content: system_prompt.into(),
                     cache_breakpoint: false,
                 },
                 Message {
                     role: "user".to_string(),
-                    content: user_prompt,
+                    content: user_prompt.into(),
                     cache_breakpoint: false,
                 },
             ],
@@ -895,30 +881,6 @@ impl AgentEngine {
         tracing::info!(region = region_name, "Compaction complete");
 
         Ok(())
-    }
-}
-
-/// Configuration for routing tool results to specific context window regions.
-#[derive(Debug, Clone)]
-pub struct ToolResultRoutingConfig {
-    /// Default region for tool results (default: "tool_results")
-    pub default_region: String,
-    /// Per-tool overrides: tool_name → region_name
-    pub tool_overrides: HashMap<String, String>,
-    /// Whether to keep tool results (true) or discard after use (false)
-    pub persist: bool,
-    /// Max tokens per tool result (truncate if larger)
-    pub max_result_tokens: Option<usize>,
-}
-
-impl Default for ToolResultRoutingConfig {
-    fn default() -> Self {
-        Self {
-            default_region: "tool_results".to_string(),
-            tool_overrides: HashMap::new(),
-            persist: true,
-            max_result_tokens: None,
-        }
     }
 }
 
@@ -1028,15 +990,6 @@ mod tests {
     }
 
     #[test]
-    fn test_tool_result_routing_config_default() {
-        let config = ToolResultRoutingConfig::default();
-        assert_eq!(config.default_region, "tool_results");
-        assert!(config.persist);
-        assert!(config.max_result_tokens.is_none());
-        assert!(config.tool_overrides.is_empty());
-    }
-
-    #[test]
     fn test_deliver_inbox_messages_respects_accepts_messages_false() {
         let mut engine = AgentEngine::new();
         let entity = engine
@@ -1130,7 +1083,7 @@ mod tests {
         let window = engine.world().get::<ContextWindow>(entity).unwrap();
         let conv = window.get_region("conversation").unwrap();
         assert_eq!(conv.content.len(), 1);
-        assert!(conv.content[0].content.starts_with("User: "));
+        assert_eq!(conv.content[0].kind, leviath_core::EntryKind::UserMessage);
         assert!(conv.content[0].content.contains("focus on error handling"));
 
         // Inbox should be drained
@@ -1372,20 +1325,6 @@ mod tests {
         // conversation should be empty
         let conv = window.get_region("conversation").unwrap();
         assert!(conv.content.is_empty());
-    }
-
-    #[test]
-    fn test_tool_result_routing_config_with_overrides() {
-        let mut config = ToolResultRoutingConfig::default();
-        config
-            .tool_overrides
-            .insert("bash".to_string(), "scratch".to_string());
-        config.max_result_tokens = Some(1000);
-        config.persist = false;
-
-        assert_eq!(config.tool_overrides.get("bash").unwrap(), "scratch");
-        assert_eq!(config.max_result_tokens, Some(1000));
-        assert!(!config.persist);
     }
 
     #[tokio::test]
@@ -1664,7 +1603,6 @@ mod tests {
             Vec::new(),
             5,
             None,
-            None,
             Some(&cc),
             &mut |_tool_calls| async { vec![("call_1".to_string(), "ok".to_string())] },
         ))
@@ -1743,7 +1681,6 @@ mod tests {
             Vec::new(),
             5,
             None,
-            None,
             Some(&cc),
             &mut |_tool_calls| async { vec![("call_1".to_string(), "ok".to_string())] },
         ))
@@ -1816,7 +1753,6 @@ mod tests {
                 "test-model",
                 Vec::new(),
                 5,
-                None,
                 None,
                 Some(&cc),
                 &mut |_tool_calls| async { vec![("call_1".to_string(), "ok".to_string())] },
@@ -1913,7 +1849,7 @@ mod tests {
             leviath_core::RegionKind::SlidingWindow { max_items: 50 },
             2000,
         ));
-        // Add a system message so assemble_messages returns something
+        // Add a system message for the context window
         let _ = window.add_to_region("system", "You are a helpful assistant.".to_string(), 6);
 
         let entity = engine
@@ -2255,13 +2191,6 @@ mod tests {
             ))
             .id();
 
-        let routing = ToolResultRoutingConfig {
-            default_region: "tool_results".to_string(),
-            tool_overrides: HashMap::new(),
-            persist: true,
-            max_result_tokens: Some(2), // very small = truncation at 8 chars
-        };
-
         let result = engine
             .run_inference_loop_filtered(
                 entity,
@@ -2270,7 +2199,6 @@ mod tests {
                 Vec::new(),
                 10,
                 None,
-                Some(&routing),
                 None,
                 &mut |_tool_calls| async {
                     vec![(
@@ -2553,14 +2481,6 @@ mod tests {
             ))
             .id();
 
-        // persist=false and scratch region exists, so tool results go to "scratch"
-        let routing = ToolResultRoutingConfig {
-            default_region: "tool_results".to_string(),
-            tool_overrides: HashMap::new(),
-            persist: false,
-            max_result_tokens: None,
-        };
-
         let result = engine
             .run_inference_loop_filtered(
                 entity,
@@ -2569,7 +2489,6 @@ mod tests {
                 Vec::new(),
                 10,
                 None,
-                Some(&routing),
                 None,
                 &mut |_tool_calls| async {
                     vec![("call_1".to_string(), "tool output".to_string())]
@@ -2579,18 +2498,20 @@ mod tests {
 
         assert!(result.is_ok());
 
-        // Tool results should be in scratch (not tool_results) because persist=false
+        // Tool results now go to "conversation" as typed entries
         let w = engine.world().get::<ContextWindow>(entity).unwrap();
-        let scratch = w.get_region("scratch").unwrap();
-        assert!(!scratch.content.is_empty());
+        let conv = w.get_region("conversation").unwrap();
+        assert!(conv
+            .content
+            .iter()
+            .any(|e| matches!(&e.kind, leviath_core::EntryKind::ToolResult { .. })));
     }
 
     #[tokio::test]
     async fn test_run_inference_loop_filtered_non_persist_routing_falls_back_without_scratch() {
-        // Same as `..._non_persist_routing` above, but the window has no
-        // "scratch" region at all -- exercises the `else { target_region }`
-        // fallback inside the `!routing.persist` branch, distinct from the
-        // "scratch exists" case the other test covers.
+        // Tool results now always go to "conversation" regardless of routing
+        // config — this test verifies the loop still runs correctly when
+        // routing is configured but no scratch region exists.
         let mut registry = ProviderRegistry::new();
         registry.register(
             "mock".to_string(),
@@ -2650,13 +2571,6 @@ mod tests {
             ))
             .id();
 
-        let routing = ToolResultRoutingConfig {
-            default_region: "tool_results".to_string(),
-            tool_overrides: HashMap::new(),
-            persist: false,
-            max_result_tokens: None,
-        };
-
         let result = engine
             .run_inference_loop_filtered(
                 entity,
@@ -2665,7 +2579,6 @@ mod tests {
                 Vec::new(),
                 10,
                 None,
-                Some(&routing),
                 None,
                 &mut |_tool_calls| async {
                     vec![("call_1".to_string(), "tool output".to_string())]
@@ -2674,11 +2587,13 @@ mod tests {
             .await;
         assert!(result.is_ok());
 
-        // No scratch region exists, so results fall back to the default
-        // ("tool_results") target region even though persist=false.
+        // Tool results now go to "conversation" as typed entries
         let w = engine.world().get::<ContextWindow>(entity).unwrap();
-        let tool_results = w.get_region("tool_results").unwrap();
-        assert!(!tool_results.content.is_empty());
+        let conv = w.get_region("conversation").unwrap();
+        assert!(conv
+            .content
+            .iter()
+            .any(|e| matches!(&e.kind, leviath_core::EntryKind::ToolResult { .. })));
     }
 
     #[tokio::test]
@@ -2746,15 +2661,6 @@ mod tests {
             ))
             .id();
 
-        let mut overrides = HashMap::new();
-        overrides.insert("bash".to_string(), "bash_output".to_string());
-        let routing = ToolResultRoutingConfig {
-            default_region: "tool_results".to_string(),
-            tool_overrides: overrides,
-            persist: true,
-            max_result_tokens: None,
-        };
-
         let result = engine
             .run_inference_loop_filtered(
                 entity,
@@ -2763,7 +2669,6 @@ mod tests {
                 Vec::new(),
                 10,
                 None,
-                Some(&routing),
                 None,
                 &mut |_tool_calls| async {
                     vec![("call_1".to_string(), "file listing".to_string())]
@@ -2773,10 +2678,13 @@ mod tests {
 
         assert!(result.is_ok());
 
-        // bash tool results should go to bash_output (override)
+        // Tool results now go to "conversation" as typed entries
         let w = engine.world().get::<ContextWindow>(entity).unwrap();
-        let bash_output = w.get_region("bash_output").unwrap();
-        assert!(!bash_output.content.is_empty());
+        let conv = w.get_region("conversation").unwrap();
+        assert!(conv
+            .content
+            .iter()
+            .any(|e| matches!(&e.kind, leviath_core::EntryKind::ToolResult { .. })));
     }
 
     #[test]
@@ -2995,7 +2903,6 @@ mod tests {
                 0,
                 None,
                 None,
-                None,
                 &mut noop_tool_exec,
             )
             .await;
@@ -3149,7 +3056,6 @@ mod tests {
                 1,
                 None,
                 None,
-                None,
                 &mut noop_tool_exec,
             )
             .await;
@@ -3198,7 +3104,6 @@ mod tests {
                 "test-model",
                 Vec::new(),
                 5,
-                None,
                 None,
                 None,
                 &mut noop_tool_exec,
@@ -3270,13 +3175,6 @@ mod tests {
             ))
             .id();
 
-        let routing = ToolResultRoutingConfig {
-            default_region: "tool_results".to_string(),
-            tool_overrides: HashMap::new(),
-            persist: true,
-            max_result_tokens: Some(1000), // 4000 chars — much larger than "ok"
-        };
-
         engine
             .run_inference_loop_filtered(
                 entity,
@@ -3285,11 +3183,8 @@ mod tests {
                 Vec::new(),
                 10,
                 None,
-                Some(&routing),
                 None,
-                &mut |_| async {
-                    vec![("call_1".to_string(), "ok".to_string())] // "ok" is short → no truncation
-                },
+                &mut |_| async { vec![("call_1".to_string(), "ok".to_string())] },
             )
             .await
             .unwrap();

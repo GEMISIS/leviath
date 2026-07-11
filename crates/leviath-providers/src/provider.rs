@@ -88,9 +88,89 @@ pub struct ModelInfo {
     pub capabilities: ModelCapabilities,
 }
 
+/// Rich message content: either a plain text string or structured content blocks.
+///
+/// Provider serialization converts this to the appropriate API format
+/// (e.g., Anthropic content blocks, OpenAI message + tool_calls).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum MessageContent {
+    /// Plain text content (backward compatible).
+    Text(String),
+    /// Structured content blocks (tool_use, tool_result, text).
+    Blocks(Vec<ContentBlock>),
+}
+
+impl From<String> for MessageContent {
+    fn from(s: String) -> Self {
+        MessageContent::Text(s)
+    }
+}
+
+impl From<&str> for MessageContent {
+    fn from(s: &str) -> Self {
+        MessageContent::Text(s.to_string())
+    }
+}
+
+impl MessageContent {
+    /// Get the plain text content, concatenating text blocks if needed.
+    pub fn as_text(&self) -> String {
+        match self {
+            MessageContent::Text(s) => s.clone(),
+            MessageContent::Blocks(blocks) => blocks
+                .iter()
+                .filter_map(|b| match b {
+                    ContentBlock::Text { text } => Some(text.as_str()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join(""),
+        }
+    }
+}
+
+/// A content block within a rich message.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum ContentBlock {
+    /// A text content block.
+    #[serde(rename = "text")]
+    Text { text: String },
+    /// A tool use request from the assistant.
+    #[serde(rename = "tool_use")]
+    ToolUse {
+        id: String,
+        name: String,
+        input: serde_json::Value,
+    },
+    /// A tool result from executing a tool.
+    #[serde(rename = "tool_result")]
+    ToolResult {
+        tool_use_id: String,
+        content: String,
+        is_error: bool,
+    },
+}
+
+/// A system prompt block, separated from conversation messages.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SystemBlock {
+    /// The text content of this system block.
+    pub text: String,
+    /// Cache hint for this system block.
+    pub cache_hint: leviath_core::CacheHint,
+}
+
 /// Request for LLM inference.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InferenceRequest {
+    /// System prompt blocks, separate from conversation messages.
+    /// Providers that support a dedicated system prompt (Anthropic, OpenAI)
+    /// will serialize these appropriately. Defaults to empty.
+    #[serde(default)]
+    pub system: Vec<SystemBlock>,
+
     /// The prompt or messages to send
     pub messages: Vec<Message>,
 
@@ -116,8 +196,8 @@ pub struct Message {
     /// Role (system, user, assistant)
     pub role: String,
 
-    /// Message content
-    pub content: String,
+    /// Message content — plain text or structured content blocks.
+    pub content: MessageContent,
 
     /// If true, this message is a cache breakpoint -- the provider should
     /// mark everything up to and including this message as cacheable.
@@ -555,6 +635,7 @@ mod tests {
     #[test]
     fn inference_request_serde_roundtrip() {
         let req = InferenceRequest {
+            system: vec![],
             messages: vec![Message {
                 role: "user".into(),
                 content: "hi".into(),
@@ -712,6 +793,7 @@ mod tests {
 
         let provider = MinimalProvider;
         let request = InferenceRequest {
+            system: vec![],
             messages: vec![],
             model: "any".to_string(),
             max_tokens: 10,

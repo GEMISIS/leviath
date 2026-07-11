@@ -398,15 +398,16 @@ mod tests {
     #[test]
     fn test_build_request_body() {
         let request = InferenceRequest {
+            system: vec![],
             messages: vec![
                 crate::provider::Message {
                     role: "system".to_string(),
-                    content: "You are helpful.".to_string(),
+                    content: "You are helpful.".into(),
                     cache_breakpoint: false,
                 },
                 crate::provider::Message {
                     role: "user".to_string(),
-                    content: "Hello".to_string(),
+                    content: "Hello".into(),
                     cache_breakpoint: false,
                 },
             ],
@@ -627,9 +628,10 @@ mod tests {
 
     fn simple_request() -> InferenceRequest {
         InferenceRequest {
+            system: vec![],
             messages: vec![crate::provider::Message {
                 role: "user".to_string(),
-                content: "hi".to_string(),
+                content: "hi".into(),
                 cache_breakpoint: false,
             }],
             model: "gemini-3.5-flash".to_string(),

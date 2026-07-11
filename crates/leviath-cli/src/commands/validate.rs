@@ -216,6 +216,7 @@ description = "test blueprint"
 
 [context.regions]
 system = {{ kind = "pinned", max_tokens = 1000 }}
+conversation = {{ kind = "sliding_window", max_items = 50, max_tokens = 10000 }}
 "#,
             stages_toml
         )
@@ -564,6 +565,7 @@ max_iterations = 5
 
 [context.regions]
 system = { kind = "pinned", max_tokens = 1000 }
+conversation = { kind = "sliding_window", max_items = 50, max_tokens = 10000 }
 "#;
         let manifest_path = dir.path().join("agent.leviath");
         std::fs::write(&manifest_path, manifest).unwrap();
@@ -594,6 +596,7 @@ max_iterations = 5
 
 [context.regions]
 system = { kind = "pinned", max_tokens = 1000 }
+conversation = { kind = "sliding_window", max_items = 50, max_tokens = 10000 }
 "#;
         std::fs::write(dir.path().join("agent.leviath"), manifest).unwrap();
 
@@ -694,6 +697,7 @@ max_iterations = 5
 
 [context.regions]
 system = { kind = "pinned", max_tokens = 1000 }
+conversation = { kind = "sliding_window", max_items = 50, max_tokens = 10000 }
 "#;
         write_manifest(dir.path(), manifest);
         let args = ValidateArgs {

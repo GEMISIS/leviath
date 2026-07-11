@@ -149,7 +149,6 @@ pub async fn run_interactive_stage(
                     per_turn_iters,
                     None,
                     None,
-                    None,
                     executor,
                 )
                 .await
@@ -185,11 +184,18 @@ pub async fn run_interactive_stage(
             }
 
             let _tokens_hint = response.content.len() / 4 + 1;
-            let _content_copy = format!("Assistant: {}", response.content);
-            let _window_result = engine
-                .world_mut()
-                .get_mut::<ContextWindow>(entity)
-                .map(|mut w| w.add_to_region("conversation", _content_copy, _tokens_hint));
+            let _window_result =
+                engine
+                    .world_mut()
+                    .get_mut::<ContextWindow>(entity)
+                    .map(|mut w| {
+                        w.add_typed_entry(
+                            "conversation",
+                            leviath_core::EntryKind::AssistantTurn { tool_calls: vec![] },
+                            response.content.clone(),
+                            _tokens_hint,
+                        )
+                    });
         } else {
             let response =
                 match stream_inference(engine, entity, provider_name, model_name, None, io).await {
@@ -227,11 +233,18 @@ pub async fn run_interactive_stage(
             }
 
             let _tokens_hint2 = response.content.len() / 4 + 1;
-            let _content_copy2 = format!("Assistant: {}", response.content);
-            let _window_result2 = engine
-                .world_mut()
-                .get_mut::<ContextWindow>(entity)
-                .map(|mut w| w.add_to_region("conversation", _content_copy2, _tokens_hint2));
+            let _window_result2 =
+                engine
+                    .world_mut()
+                    .get_mut::<ContextWindow>(entity)
+                    .map(|mut w| {
+                        w.add_typed_entry(
+                            "conversation",
+                            leviath_core::EntryKind::AssistantTurn { tool_calls: vec![] },
+                            response.content.clone(),
+                            _tokens_hint2,
+                        )
+                    });
         }
 
         // Build and dispatch the input request
@@ -258,11 +271,18 @@ pub async fn run_interactive_stage(
         }
 
         let _user_tokens = input.len() / 4 + 1;
-        let _user_content = format!("User: {}", input);
-        let _user_window_result = engine
-            .world_mut()
-            .get_mut::<ContextWindow>(entity)
-            .map(|mut w| w.add_to_region("conversation", _user_content, _user_tokens));
+        let _user_window_result =
+            engine
+                .world_mut()
+                .get_mut::<ContextWindow>(entity)
+                .map(|mut w| {
+                    w.add_typed_entry(
+                        "conversation",
+                        leviath_core::EntryKind::UserMessage,
+                        input.clone(),
+                        _user_tokens,
+                    )
+                });
 
         turn += 1;
     }
@@ -279,7 +299,6 @@ pub async fn run_autonomous_stage(
     model_name: &str,
     max_iterations: usize,
     tools: &[leviath_providers::Tool],
-    routing: Option<&leviath_runtime::ToolResultRoutingConfig>,
     compaction_config: Option<&CompactionConfig>,
     io: &mut dyn RunIO,
     executor: &mut ToolExecutorDyn<'_>,
@@ -292,7 +311,6 @@ pub async fn run_autonomous_stage(
             tools.to_vec(),
             max_iterations,
             None,
-            routing,
             compaction_config,
             executor,
         )
@@ -328,7 +346,6 @@ pub async fn run_interactive_points_stage(
     model_name: &str,
     max_iterations: usize,
     tools: &[leviath_providers::Tool],
-    routing: Option<&leviath_runtime::ToolResultRoutingConfig>,
     compaction_config: Option<&CompactionConfig>,
     points: &[leviath_core::blueprint::InteractionPoint],
     run_context: Option<(&str, &mut RunMeta)>,
@@ -342,7 +359,6 @@ pub async fn run_interactive_points_stage(
         model_name,
         max_iterations,
         tools,
-        routing,
         compaction_config,
         points,
         run_context,
@@ -366,7 +382,6 @@ async fn run_interactive_points_stage_with(
     model_name: &str,
     max_iterations: usize,
     tools: &[leviath_providers::Tool],
-    routing: Option<&leviath_runtime::ToolResultRoutingConfig>,
     compaction_config: Option<&CompactionConfig>,
     points: &[leviath_core::blueprint::InteractionPoint],
     run_context: Option<(&str, &mut RunMeta)>,
@@ -389,7 +404,6 @@ async fn run_interactive_points_stage_with(
             model_name,
             max_iterations,
             tools,
-            routing,
             compaction_config,
             io,
             executor,
@@ -432,7 +446,6 @@ async fn run_interactive_points_stage_with(
                         tools.to_vec(),
                         iters,
                         None,
-                        routing,
                         compaction_config,
                         executor,
                     )
@@ -624,7 +637,6 @@ async fn run_interactive_points_stage_with(
                 tools.to_vec(),
                 remaining_iterations,
                 None,
-                routing,
                 compaction_config,
                 executor,
             )
@@ -1263,7 +1275,6 @@ mod tests {
             1,
             &[],
             None,
-            None,
             &mut io,
             &mut noop_exec,
         )
@@ -1292,7 +1303,6 @@ mod tests {
             1,
             &[],
             None,
-            None,
             &mut io,
             &mut noop_exec,
         )
@@ -1319,7 +1329,6 @@ mod tests {
             "test-model",
             1,
             &[],
-            None,
             None,
             &mut io,
             &mut noop_exec,
@@ -1348,7 +1357,6 @@ mod tests {
             "test-model",
             1,
             &[],
-            None,
             None,
             &[], // empty points
             None,
@@ -1444,7 +1452,6 @@ mod tests {
             "test-model",
             5,
             &[],
-            None,
             None,
             &mut io,
             &mut noop_exec,
@@ -1659,7 +1666,6 @@ mod tests {
             4,
             &[],
             None,
-            None,
             &points,
             Some((&run_id, &mut meta)),
             &mut io,
@@ -1718,7 +1724,6 @@ mod tests {
             "test-model",
             4,
             &[],
-            None,
             None,
             &points,
             Some((&run_id, &mut meta)),
@@ -1797,7 +1802,6 @@ mod tests {
             "test-model",
             8,
             &[],
-            None,
             None,
             &points,
             Some((&run_id, &mut meta)),
@@ -1888,7 +1892,6 @@ mod tests {
             8,
             &[],
             None,
-            None,
             &points,
             Some((&run_id, &mut meta)),
             &mut io,
@@ -1945,7 +1948,6 @@ mod tests {
             "test-model",
             8,
             &[],
-            None,
             None,
             &points,
             None,
@@ -2004,7 +2006,6 @@ mod tests {
             "test-model",
             8,
             &[],
-            None,
             None,
             &points,
             None,
@@ -2081,7 +2082,6 @@ mod tests {
             4,
             &[],
             None,
-            None,
             &points,
             None,
             &mut io,
@@ -2125,7 +2125,6 @@ mod tests {
             "test-model",
             4,
             &[],
-            None,
             None,
             &points,
             None,
@@ -2194,7 +2193,6 @@ mod tests {
             "test-model",
             8,
             &[],
-            None,
             None,
             &points,
             None,
@@ -2278,7 +2276,6 @@ mod tests {
             1,
             &[],
             None,
-            None,
             &points,
             None,
             &mut io,
@@ -2332,7 +2329,6 @@ mod tests {
             "test-model",
             4,
             &[],
-            None,
             None,
             &points,
             Some((&run_id, &mut meta)),
@@ -2399,7 +2395,6 @@ mod tests {
             9,
             &[],
             None,
-            None,
             &points,
             Some((&run_id, &mut meta)),
             &mut io,
@@ -2465,7 +2460,6 @@ mod tests {
             1, // small max_iterations
             &[],
             None,
-            None,
             &points,
             Some((&run_id, &mut meta)),
             &mut io,
@@ -2522,7 +2516,6 @@ mod tests {
             2,
             &[],
             None,
-            None,
             &points,
             Some((&run_id, &mut meta)),
             &mut io,
@@ -2555,7 +2548,6 @@ mod tests {
             "test-model",
             1,
             &tools,
-            None,
             None,
             &mut io,
             &mut noop_exec,
@@ -3004,7 +2996,6 @@ mod tests {
             4,
             &[],
             None,
-            None,
             &points,
             None, // run_context = None → no meta_holder, no run_id_owned
             &mut io,
@@ -3052,7 +3043,6 @@ mod tests {
             "test-model",
             4,
             &[],
-            None,
             None,
             &points,
             None,
@@ -3115,7 +3105,6 @@ mod tests {
             4,
             &[],
             None,
-            None,
             &points,
             Some((&run_id, &mut meta)),
             &mut io,
@@ -3152,7 +3141,6 @@ mod tests {
             "test-model",
             4,
             &[],
-            None,
             None,
             &points,
             None,
@@ -3210,7 +3198,6 @@ mod tests {
             12,
             &[],
             None,
-            None,
             &points,
             None,
             &mut io,
@@ -3247,7 +3234,6 @@ mod tests {
             "test-model",
             8,
             &[],
-            None,
             None,
             &points,
             None, // run_context = None → hits the else at line 513
@@ -3288,7 +3274,6 @@ mod tests {
             "test-model",
             8,
             &[],
-            None,
             None,
             &points,
             None,
@@ -3360,7 +3345,6 @@ mod tests {
             "test-model",
             4,
             &[],
-            None,
             None,
             &points,
             Some((&run_id, &mut meta)),
@@ -3492,7 +3476,6 @@ mod tests {
             8,
             &[],
             None,
-            None,
             &points,
             Some((&run_id, &mut meta)),
             &mut io,
@@ -3565,7 +3548,6 @@ mod tests {
             4,
             &[],
             None,
-            None,
             &points,
             Some((&run_id, &mut meta)),
             &mut io,
@@ -3634,7 +3616,6 @@ mod tests {
             "test-model",
             4,
             &[],
-            None,
             None,
             &points,
             Some((&run_id, &mut meta)),

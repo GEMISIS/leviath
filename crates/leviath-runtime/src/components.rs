@@ -112,6 +112,19 @@ pub struct InferenceConfig {
     pub max_output_tokens: Option<usize>,
 }
 
+/// Result of assembling a context window into system blocks and conversation messages.
+///
+/// Produced by [`ContextWindow::assemble()`]. System-bound regions (Pinned,
+/// CompactHistory, etc.) become `system_blocks`; the messages region
+/// (SlidingWindow) becomes typed `messages`.
+#[derive(Debug, Clone)]
+pub struct AssembledContext {
+    /// System prompt blocks (from Pinned, CompactHistory, etc. regions).
+    pub system_blocks: Vec<leviath_providers::SystemBlock>,
+    /// Conversation messages with proper role typing.
+    pub messages: Vec<leviath_providers::Message>,
+}
+
 /// Context window component storing the agent's memory regions.
 #[derive(Component, Debug, Clone)]
 pub struct ContextWindow {
@@ -160,6 +173,27 @@ impl ContextWindow {
     ) -> leviath_core::Result<()> {
         if let Some(region) = self.get_region_mut(region_name) {
             region.add_entry(content, tokens)?;
+            self.current_tokens = self.calculate_tokens();
+            Ok(())
+        } else {
+            Err(leviath_core::Error::RegionNotFound(region_name.to_string()))
+        }
+    }
+
+    /// Add a typed entry to a specific region.
+    ///
+    /// Like [`add_to_region`](Self::add_to_region) but the entry carries an
+    /// [`EntryKind`] so message roles are determined by type, not text-prefix
+    /// parsing.
+    pub fn add_typed_entry(
+        &mut self,
+        region_name: &str,
+        kind: leviath_core::EntryKind,
+        content: String,
+        tokens: usize,
+    ) -> leviath_core::Result<()> {
+        if let Some(region) = self.get_region_mut(region_name) {
+            region.add_typed_entry(content, tokens, kind)?;
             self.current_tokens = self.calculate_tokens();
             Ok(())
         } else {
@@ -294,162 +328,209 @@ impl ContextWindow {
         })
     }
 
-    /// Assemble structured messages from all regions for proper LLM API usage.
+    /// Result of assembling the context window into system blocks + messages.
     ///
-    /// Maps region types to appropriate message roles:
-    /// - Pinned → system messages
-    /// - CompactHistory → system messages (compressed knowledge)
-    /// - Conversation entries → parsed as user/assistant based on prefix
-    /// - Tool results → user messages with [Tool results] prefix
-    /// - Other regions → user messages with region header
-    pub fn assemble_messages(&self) -> Vec<leviath_providers::Message> {
-        use leviath_core::CacheHint;
+    /// System-bound regions become `system_blocks`; the messages region
+    /// becomes `messages` with proper typed entries (no text-prefix parsing).
+    pub fn assemble(&self) -> AssembledContext {
+        use leviath_core::{CacheHint, EntryKind};
 
-        let mut messages = Vec::new();
-        // Track region boundaries: (start_index, cache_hint) for each region
-        let mut region_boundaries: Vec<(usize, CacheHint)> = Vec::new();
+        let mut system_blocks = Vec::new();
+        let mut messages: Vec<leviath_providers::Message> = Vec::new();
 
         for region in &self.regions {
             if region.content.is_empty() {
                 continue;
             }
 
-            let start_idx = messages.len();
-            let hint = region.kind.cache_hint();
-
             match &region.kind {
-                leviath_core::RegionKind::Pinned
-                | leviath_core::RegionKind::CompactHistory { .. } => {
-                    // System-level content
-                    let content = region
+                // System-level content → system blocks
+                leviath_core::RegionKind::Pinned => {
+                    let text = region
                         .content
                         .iter()
                         .map(|e| e.content.as_str())
                         .collect::<Vec<_>>()
                         .join("\n\n");
-                    messages.push(leviath_providers::Message {
-                        role: "system".to_string(),
-                        content,
-                        cache_breakpoint: false,
+                    system_blocks.push(leviath_providers::SystemBlock {
+                        text,
+                        cache_hint: CacheHint::Always,
                     });
                 }
-                leviath_core::RegionKind::SlidingWindow { .. }
-                | leviath_core::RegionKind::Compacting { .. } => {
-                    // Conversation-style: parse each entry by prefix
+                leviath_core::RegionKind::CompactHistory { .. } => {
+                    let text = region
+                        .content
+                        .iter()
+                        .map(|e| e.content.as_str())
+                        .collect::<Vec<_>>()
+                        .join("\n\n");
+                    system_blocks.push(leviath_providers::SystemBlock {
+                        text,
+                        cache_hint: CacheHint::Always,
+                    });
+                }
+
+                // Messages region → Vec<Message> with proper typed entries.
+                // Consecutive ToolResult entries are merged into a single user
+                // message with multiple tool_result content blocks (required by
+                // Anthropic: one assistant tool_use msg → one user tool_result msg).
+                leviath_core::RegionKind::SlidingWindow { .. } => {
+                    let mut pending_tool_results: Vec<leviath_providers::ContentBlock> = Vec::new();
+
                     for entry in &region.content {
-                        let trimmed = entry.content.trim();
-                        if let Some(rest) = trimmed.strip_prefix("Assistant: ") {
-                            messages.push(leviath_providers::Message {
-                                role: "assistant".to_string(),
-                                content: rest.to_string(),
-                                cache_breakpoint: false,
-                            });
-                        } else if let Some(rest) = trimmed.strip_prefix("User: ") {
+                        // Flush any pending tool results when we hit a non-ToolResult entry
+                        if !matches!(entry.kind, EntryKind::ToolResult { .. })
+                            && !pending_tool_results.is_empty()
+                        {
                             messages.push(leviath_providers::Message {
                                 role: "user".to_string(),
-                                content: rest.to_string(),
-                                cache_breakpoint: false,
-                            });
-                        } else {
-                            messages.push(leviath_providers::Message {
-                                role: "user".to_string(),
-                                content: entry.content.clone(),
+                                content: leviath_providers::MessageContent::Blocks(std::mem::take(
+                                    &mut pending_tool_results,
+                                )),
                                 cache_breakpoint: false,
                             });
                         }
+
+                        match &entry.kind {
+                            EntryKind::UserMessage => {
+                                messages.push(leviath_providers::Message {
+                                    role: "user".to_string(),
+                                    content: entry.content.clone().into(),
+                                    cache_breakpoint: false,
+                                });
+                            }
+                            EntryKind::AssistantTurn { tool_calls } => {
+                                if tool_calls.is_empty() {
+                                    messages.push(leviath_providers::Message {
+                                        role: "assistant".to_string(),
+                                        content: entry.content.clone().into(),
+                                        cache_breakpoint: false,
+                                    });
+                                } else {
+                                    let mut blocks = Vec::new();
+                                    if !entry.content.is_empty() {
+                                        blocks.push(leviath_providers::ContentBlock::Text {
+                                            text: entry.content.clone(),
+                                        });
+                                    }
+                                    for tc in tool_calls {
+                                        blocks.push(leviath_providers::ContentBlock::ToolUse {
+                                            id: tc.id.clone(),
+                                            name: tc.name.clone(),
+                                            input: tc.arguments.clone(),
+                                        });
+                                    }
+                                    messages.push(leviath_providers::Message {
+                                        role: "assistant".to_string(),
+                                        content: leviath_providers::MessageContent::Blocks(blocks),
+                                        cache_breakpoint: false,
+                                    });
+                                }
+                            }
+                            EntryKind::ToolResult {
+                                tool_call_id,
+                                is_error,
+                                ..
+                            } => {
+                                // Accumulate — will be flushed on next non-ToolResult or end
+                                pending_tool_results.push(
+                                    leviath_providers::ContentBlock::ToolResult {
+                                        tool_use_id: tool_call_id.clone(),
+                                        content: entry.content.clone(),
+                                        is_error: *is_error,
+                                    },
+                                );
+                            }
+                            EntryKind::Text => {
+                                let trimmed = entry.content.trim();
+                                if let Some(rest) = trimmed.strip_prefix("Assistant: ") {
+                                    messages.push(leviath_providers::Message {
+                                        role: "assistant".to_string(),
+                                        content: rest.to_string().into(),
+                                        cache_breakpoint: false,
+                                    });
+                                } else if let Some(rest) = trimmed.strip_prefix("User: ") {
+                                    messages.push(leviath_providers::Message {
+                                        role: "user".to_string(),
+                                        content: rest.to_string().into(),
+                                        cache_breakpoint: false,
+                                    });
+                                } else {
+                                    messages.push(leviath_providers::Message {
+                                        role: "user".to_string(),
+                                        content: entry.content.clone().into(),
+                                        cache_breakpoint: false,
+                                    });
+                                }
+                            }
+                        }
+                    }
+
+                    // Flush any remaining tool results at the end of the region
+                    if !pending_tool_results.is_empty() {
+                        messages.push(leviath_providers::Message {
+                            role: "user".to_string(),
+                            content: leviath_providers::MessageContent::Blocks(std::mem::take(
+                                &mut pending_tool_results,
+                            )),
+                            cache_breakpoint: false,
+                        });
                     }
                 }
-                leviath_core::RegionKind::Temporary => {
-                    // Tool results or temporary data
-                    let content = region
+
+                // Compacting / Temporary / Clearable → system blocks
+                leviath_core::RegionKind::Compacting { .. } => {
+                    let text = region
                         .content
                         .iter()
                         .map(|e| e.content.as_str())
                         .collect::<Vec<_>>()
                         .join("\n\n");
-                    messages.push(leviath_providers::Message {
-                        role: "user".to_string(),
-                        content: format!("[Tool results from {}]:\n{}", region.name, content),
-                        cache_breakpoint: false,
+                    system_blocks.push(leviath_providers::SystemBlock {
+                        text: format!("[{}]:\n{}", region.name, text),
+                        cache_hint: CacheHint::UntilChanged,
+                    });
+                }
+                leviath_core::RegionKind::Temporary => {
+                    let text = region
+                        .content
+                        .iter()
+                        .map(|e| e.content.as_str())
+                        .collect::<Vec<_>>()
+                        .join("\n\n");
+                    system_blocks.push(leviath_providers::SystemBlock {
+                        text: format!("[{}]:\n{}", region.name, text),
+                        cache_hint: CacheHint::Never,
                     });
                 }
                 leviath_core::RegionKind::Clearable => {
-                    let content = region
+                    let text = region
                         .content
                         .iter()
                         .map(|e| e.content.as_str())
                         .collect::<Vec<_>>()
                         .join("\n\n");
-                    messages.push(leviath_providers::Message {
-                        role: "user".to_string(),
-                        content: format!("[{}]:\n{}", region.name, content),
-                        cache_breakpoint: false,
+                    system_blocks.push(leviath_providers::SystemBlock {
+                        text: format!("[{}]:\n{}", region.name, text),
+                        cache_hint: CacheHint::Never,
                     });
                 }
             }
-
-            region_boundaries.push((start_idx, hint));
         }
 
-        // Ensure there's at least one user message (LLM APIs require it)
+        // Ensure there's at least one user message
         if !messages.iter().any(|m| m.role == "user") {
             messages.push(leviath_providers::Message {
                 role: "user".to_string(),
-                content: "Begin.".to_string(),
+                content: "Begin.".into(),
                 cache_breakpoint: false,
             });
         }
 
-        // Apply cache breakpoints at region boundaries (max 4 for Anthropic compat)
-        let mut breakpoints_set = 0usize;
-        const MAX_BREAKPOINTS: usize = 4;
-
-        for (start_idx, hint) in &region_boundaries {
-            if breakpoints_set >= MAX_BREAKPOINTS {
-                break;
-            }
-            match hint {
-                CacheHint::Always | CacheHint::UntilChanged => {
-                    // Mark the last message of this region group
-                    // Find the end: it's just before the next region's start, or end of messages
-                    let region_end = region_boundaries
-                        .iter()
-                        .find(|(s, _)| *s > *start_idx)
-                        .map(|(s, _)| s - 1)
-                        .unwrap_or(messages.len() - 1);
-                    messages[region_end].cache_breakpoint = true;
-                    breakpoints_set += 1;
-                }
-                CacheHint::SlidingPrefix { stable_fraction } => {
-                    // Find end of this region's messages
-                    let region_end = region_boundaries
-                        .iter()
-                        .find(|(s, _)| *s > *start_idx)
-                        .map(|(s, _)| *s)
-                        .unwrap_or(messages.len());
-                    let region_msg_count = region_end - start_idx;
-                    if region_msg_count > 1 {
-                        let stable_count =
-                            ((region_msg_count as f32 * stable_fraction).floor() as usize).max(1);
-                        let bp_idx = start_idx + stable_count - 1;
-                        messages[bp_idx].cache_breakpoint = true;
-                        breakpoints_set += 1;
-                    }
-                }
-                CacheHint::Never => {}
-            }
+        AssembledContext {
+            system_blocks,
+            messages,
         }
-
-        messages
-    }
-
-    /// Assemble the complete prompt from all regions in order (convenience wrapper).
-    pub fn assemble_prompt(&self) -> String {
-        self.assemble_messages()
-            .iter()
-            .map(|m| format!("[{}]: {}", m.role, m.content))
-            .collect::<Vec<_>>()
-            .join("\n\n")
     }
 
     /// Enable taint tracking on all regions in this context window.
@@ -812,58 +893,6 @@ mod tests {
     }
 
     #[test]
-    fn test_assemble_prompt() {
-        let mut window = ContextWindow::new(10000);
-
-        let mut region1 = Region::new("system".to_string(), RegionKind::Pinned, 1000);
-        region1
-            .add_entry("You are a helpful assistant.".to_string(), 100)
-            .unwrap();
-        window.add_region(region1);
-
-        let mut region2 = Region::new("conversation".to_string(), RegionKind::Temporary, 2000);
-        region2.add_entry("User: Hello".to_string(), 50).unwrap();
-        region2
-            .add_entry("Assistant: Hi there!".to_string(), 50)
-            .unwrap();
-        window.add_region(region2);
-
-        let prompt = window.assemble_prompt();
-        assert!(prompt.contains("You are a helpful assistant."));
-        assert!(prompt.contains("User: Hello"));
-        assert!(prompt.contains("Hi there!"));
-    }
-
-    #[test]
-    fn test_assemble_messages() {
-        let mut window = ContextWindow::new(10000);
-
-        let mut system = Region::new("system".to_string(), RegionKind::Pinned, 1000);
-        system
-            .add_entry("You are a helpful assistant.".to_string(), 100)
-            .unwrap();
-        window.add_region(system);
-
-        let mut conv = Region::new(
-            "conversation".to_string(),
-            RegionKind::SlidingWindow { max_items: 10 },
-            5000,
-        );
-        conv.add_entry("User: Hello".to_string(), 50).unwrap();
-        conv.add_entry("Assistant: Hi there!".to_string(), 50)
-            .unwrap();
-        window.add_region(conv);
-
-        let msgs = window.assemble_messages();
-        assert_eq!(msgs[0].role, "system");
-        assert_eq!(msgs[0].content, "You are a helpful assistant.");
-        assert_eq!(msgs[1].role, "user");
-        assert_eq!(msgs[1].content, "Hello");
-        assert_eq!(msgs[2].role, "assistant");
-        assert_eq!(msgs[2].content, "Hi there!");
-    }
-
-    #[test]
     fn test_cancellation_token() {
         let token = CancellationToken::new();
         assert!(!token.is_cancelled());
@@ -1082,124 +1111,6 @@ mod tests {
         assert_eq!(state.pending_wait, Some("child-01".to_string()));
     }
 
-    fn assert_is_cache_breakpoint(is_breakpoint: bool, description: &str) {
-        assert!(is_breakpoint, "{description}");
-    }
-
-    #[test]
-    fn test_assemble_messages_cache_breakpoints_pinned() {
-        let mut window = ContextWindow::new(10000);
-
-        let mut system = Region::new("system".to_string(), RegionKind::Pinned, 1000);
-        system
-            .add_entry("You are a helpful assistant.".to_string(), 100)
-            .unwrap();
-        window.add_region(system);
-
-        let mut conv = Region::new(
-            "conversation".to_string(),
-            RegionKind::SlidingWindow { max_items: 10 },
-            5000,
-        );
-        conv.add_entry("User: Hello".to_string(), 50).unwrap();
-        conv.add_entry("Assistant: Hi".to_string(), 50).unwrap();
-        conv.add_entry("User: How are you?".to_string(), 50)
-            .unwrap();
-        conv.add_entry("Assistant: Good!".to_string(), 50).unwrap();
-        window.add_region(conv);
-
-        let msgs = window.assemble_messages();
-
-        // System (Pinned) message should have cache_breakpoint = true
-        assert_is_cache_breakpoint(
-            msgs[0].cache_breakpoint,
-            "Pinned region last message should be a cache breakpoint",
-        );
-
-        // SlidingWindow with 4 messages: stable prefix = floor(4 * 0.75) = 3
-        // So index 0 = system, index 1..4 = conversation, breakpoint at index 1+3-1 = 3
-        assert_is_cache_breakpoint(
-            msgs[3].cache_breakpoint,
-            "SlidingWindow stable prefix boundary should be a cache breakpoint",
-        );
-    }
-
-    #[test]
-    #[should_panic(expected = "Pinned region last message should be a cache breakpoint")]
-    fn test_assemble_messages_cache_breakpoints_pinned_panics_on_false() {
-        assert_is_cache_breakpoint(
-            false,
-            "Pinned region last message should be a cache breakpoint",
-        );
-    }
-
-    fn assert_max_cache_breakpoints(bp_count: usize) {
-        assert!(
-            bp_count <= 4,
-            "Should not exceed 4 cache breakpoints, got {bp_count}"
-        );
-    }
-
-    #[test]
-    fn test_assemble_messages_max_4_breakpoints() {
-        let mut window = ContextWindow::new(100000);
-
-        // Add 5 pinned regions — only first 4 should get breakpoints
-        for i in 0..5 {
-            let mut region = Region::new(format!("pinned_{}", i), RegionKind::Pinned, 10000);
-            region.add_entry(format!("Content {}", i), 100).unwrap();
-            window.add_region(region);
-        }
-
-        // Add a compacting region
-        let mut compacting = Region::new(
-            "compacting".to_string(),
-            RegionKind::Compacting {
-                threshold_tokens: 5000,
-            },
-            10000,
-        );
-        compacting
-            .add_entry("User: hello".to_string(), 100)
-            .unwrap();
-        window.add_region(compacting);
-
-        let msgs = window.assemble_messages();
-        let bp_count = msgs.iter().filter(|m| m.cache_breakpoint).count();
-        assert_max_cache_breakpoints(bp_count);
-    }
-
-    #[test]
-    #[should_panic(expected = "Should not exceed 4 cache breakpoints, got 5")]
-    fn test_assemble_messages_max_4_breakpoints_panics_on_excess() {
-        assert_max_cache_breakpoints(5);
-    }
-
-    fn assert_no_cache_breakpoints(any_breakpoint: bool) {
-        assert!(
-            !any_breakpoint,
-            "Temporary regions should never get cache breakpoints"
-        );
-    }
-
-    #[test]
-    fn test_assemble_messages_no_breakpoints_on_temporary() {
-        let mut window = ContextWindow::new(10000);
-
-        let mut temp = Region::new("temp".to_string(), RegionKind::Temporary, 5000);
-        temp.add_entry("tool output".to_string(), 100).unwrap();
-        window.add_region(temp);
-
-        let msgs = window.assemble_messages();
-        assert_no_cache_breakpoints(msgs.iter().any(|m| m.cache_breakpoint));
-    }
-
-    #[test]
-    #[should_panic(expected = "Temporary regions should never get cache breakpoints")]
-    fn test_assemble_messages_no_breakpoints_on_temporary_panics_on_true() {
-        assert_no_cache_breakpoints(true);
-    }
-
     // ── Additional coverage tests ──────────────────────────────────────────
 
     #[test]
@@ -1355,103 +1266,6 @@ mod tests {
     }
 
     #[test]
-    fn test_assemble_messages_empty_regions() {
-        let window = ContextWindow::new(10000);
-        let msgs = window.assemble_messages();
-        // Should have at least the default "Begin." user message
-        assert!(msgs
-            .iter()
-            .any(|m| m.role == "user" && m.content == "Begin."));
-    }
-
-    #[test]
-    fn test_assemble_messages_clearable_region() {
-        let mut window = ContextWindow::new(10000);
-        let mut region = Region::new("scratch".to_string(), RegionKind::Clearable, 5000);
-        region.add_entry("scratch data".to_string(), 100).unwrap();
-        window.add_region(region);
-
-        let msgs = window.assemble_messages();
-        assert!(msgs
-            .iter()
-            .any(|m| m.role == "user" && m.content.contains("[scratch]")));
-    }
-
-    #[test]
-    fn test_assemble_messages_temporary_region() {
-        let mut window = ContextWindow::new(10000);
-        let mut region = Region::new("tools".to_string(), RegionKind::Temporary, 5000);
-        region.add_entry("tool output".to_string(), 100).unwrap();
-        window.add_region(region);
-
-        let msgs = window.assemble_messages();
-        assert!(msgs
-            .iter()
-            .any(|m| m.role == "user" && m.content.contains("[Tool results from tools]")));
-    }
-
-    #[test]
-    fn test_assemble_messages_compact_history() {
-        let mut window = ContextWindow::new(10000);
-        let mut region = Region::new(
-            "history".to_string(),
-            RegionKind::CompactHistory {
-                source_region: "conv".to_string(),
-            },
-            5000,
-        );
-        region
-            .add_entry("compressed knowledge".to_string(), 100)
-            .unwrap();
-        window.add_region(region);
-
-        let msgs = window.assemble_messages();
-        assert!(msgs
-            .iter()
-            .any(|m| m.role == "system" && m.content.contains("compressed knowledge")));
-    }
-
-    #[test]
-    fn test_assemble_messages_compacting_region_parses_roles() {
-        let mut window = ContextWindow::new(10000);
-        let mut region = Region::new(
-            "impl".to_string(),
-            RegionKind::Compacting {
-                threshold_tokens: 5000,
-            },
-            5000,
-        );
-        region.add_entry("User: Tell me".to_string(), 50).unwrap();
-        region
-            .add_entry("Assistant: Sure!".to_string(), 50)
-            .unwrap();
-        region.add_entry("plain content".to_string(), 50).unwrap();
-        window.add_region(region);
-
-        let msgs = window.assemble_messages();
-        assert!(msgs
-            .iter()
-            .any(|m| m.role == "user" && m.content == "Tell me"));
-        assert!(msgs
-            .iter()
-            .any(|m| m.role == "assistant" && m.content == "Sure!"));
-        assert!(msgs
-            .iter()
-            .any(|m| m.role == "user" && m.content == "plain content"));
-    }
-
-    #[test]
-    fn test_assemble_prompt_includes_roles() {
-        let mut window = ContextWindow::new(10000);
-        let mut region = Region::new("sys".to_string(), RegionKind::Pinned, 1000);
-        region.add_entry("Be helpful".to_string(), 50).unwrap();
-        window.add_region(region);
-
-        let prompt = window.assemble_prompt();
-        assert!(prompt.contains("[system]: Be helpful"));
-    }
-
-    #[test]
     fn test_eviction_with_only_pinned_region_frees_nothing() {
         // When the only region is Pinned (within budget), eviction frees nothing.
         let mut window = ContextWindow::new(10000);
@@ -1540,35 +1354,6 @@ mod tests {
         // Target=200: removing 50 at a time is insufficient each pass
         let result = window.try_evict(200).unwrap();
         assert_eq!(result.tokens_freed, 100); // freed 50+50, but not enough for target
-    }
-
-    // ─── assemble_messages: empty SlidingWindow produces no messages ─────────
-    // Covers the false path of `if messages.len() > start_idx` (381:13).
-    // Pinned regions always push a message (even empty); SlidingWindow/Compacting
-    // only push when there are entries, so an empty SlidingWindow triggers the
-    // false branch.
-
-    #[test]
-    fn assemble_messages_empty_sliding_window_produces_no_boundary_entry() {
-        let mut window = ContextWindow::new(10000);
-        // Empty SlidingWindow — skipped by is_empty() guard at region loop start
-        window.add_region(Region::new(
-            "empty-conv".to_string(),
-            RegionKind::SlidingWindow { max_items: 10 },
-            5000,
-        ));
-        // Also add a non-empty SlidingWindow so the result is non-trivial
-        let mut conv = Region::new(
-            "conversation".to_string(),
-            RegionKind::SlidingWindow { max_items: 10 },
-            3000,
-        );
-        conv.add_entry("User: hello".to_string(), 3).unwrap();
-        window.add_region(conv);
-
-        let messages = window.assemble_messages();
-        // Should have at least the "User: hello" message
-        assert!(messages.iter().any(|m| m.content.contains("hello")));
     }
 
     // ─── Context window taint tracking ──────────────────────────────────────

@@ -21,16 +21,16 @@ pub async fn stream_inference(
         .get_provider(provider_name)
         .ok_or_else(|| anyhow::anyhow!("Provider '{}' not registered", provider_name))?;
 
-    let (messages, max_tokens) = {
+    let (assembled, max_tokens) = {
         let window = engine
             .world()
             .get::<ContextWindow>(entity)
             .expect("Entity always has ContextWindow — spawned via AgentPool");
 
-        let messages = window.assemble_messages();
+        let assembled = window.assemble();
         let remaining = window.max_tokens.saturating_sub(window.current_tokens);
         let max_tokens = remaining.min(4096);
-        (messages, max_tokens)
+        (assembled, max_tokens)
     };
 
     // Tool-less streaming: always empty tools list; filter is a no-op but
@@ -45,7 +45,8 @@ pub async fn stream_inference(
         0.0
     };
     let request = leviath_providers::InferenceRequest {
-        messages,
+        messages: assembled.messages,
+        system: assembled.system_blocks,
         model: model_name.to_string(),
         max_tokens,
         temperature,
@@ -731,6 +732,7 @@ mod tests {
         // Cover the `infer()` fallback path (returns an error rather than panicking).
         assert!(multi
             .infer(InferenceRequest {
+                system: vec![],
                 messages: vec![],
                 model: "m".to_string(),
                 max_tokens: 1,
@@ -749,6 +751,7 @@ mod tests {
         // Cover the `infer()` fallback path (returns an error rather than panicking).
         assert!(error_chunk
             .infer(InferenceRequest {
+                system: vec![],
                 messages: vec![],
                 model: "m".to_string(),
                 max_tokens: 1,

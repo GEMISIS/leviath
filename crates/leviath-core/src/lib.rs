@@ -20,7 +20,7 @@ pub mod region;
 pub mod taint;
 
 pub use blueprint::{
-    Blueprint, ContextTransform, EdgeTransform, Stage, StageResult, ToolFilter, ToolResultRouting,
+    Blueprint, ContextTransform, EdgeTransform, Stage, StageResult, ToolFilter,
     TransitionCondition, TransitionEdge,
 };
 pub use cache::{CacheBreakpoint, CacheHint};
@@ -28,7 +28,9 @@ pub use error::{Error, Result, ValidationError};
 pub use layout::{ContextLayout, RegionDefinition};
 pub use lifecycle::{CompactionConfig, CompactionStrategy, EvictionPolicy};
 pub use policy::{AllowlistRule, McpToolOverride, PolicyConfig, ScriptedRule};
-pub use region::{ContentFormat, Region, RegionEntry, RegionKind, RegionSchema};
+pub use region::{
+    ContentFormat, EntryKind, Region, RegionEntry, RegionKind, RegionSchema, SerializedToolCall,
+};
 pub use taint::{
     FilterInput, FilterMode, FilterOperation, GateDecision, GateDecisionSource, GateEvent,
     InputMode, PointerRef, RegionTaint, SecurityConfig, TaintLevel, ToolClassification,

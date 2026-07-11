@@ -74,12 +74,13 @@ pub async fn generate_title(
                 role: "system".to_string(),
                 content: "Write a terse 3-6 word title summarising the task. \
                           No quotes, no punctuation at the end, no markdown."
-                    .to_string(),
+                    .to_string()
+                    .into(),
                 cache_breakpoint: false,
             },
             leviath_providers::Message {
                 role: "user".to_string(),
-                content: task.to_string(),
+                content: task.to_string().into(),
                 cache_breakpoint: false,
             },
         ],
@@ -87,6 +88,7 @@ pub async fn generate_title(
         max_tokens: 20,
         temperature: 0.0,
         tools: vec![],
+        system: vec![],
         extra: serde_json::Value::Null,
     };
 

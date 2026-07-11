@@ -136,7 +136,7 @@ async fn handle_ask_user_text(
     if answer.trim().is_empty() {
         "User provided no answer.".to_string()
     } else {
-        format!("User: {}", answer)
+        answer
     }
 }
 
@@ -434,7 +434,7 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(result, "User: blue");
+        assert_eq!(result, "blue");
     }
 
     #[tokio::test]
@@ -714,7 +714,7 @@ mod tests {
             "plan",
         )
         .await;
-        assert_eq!(result, Some("User: answer".to_string()));
+        assert_eq!(result, Some("answer".to_string()));
 
         let result = dispatch_dynamic_interaction(
             &backend,

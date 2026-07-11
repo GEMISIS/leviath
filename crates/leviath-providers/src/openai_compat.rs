@@ -4,24 +4,102 @@
 //! OpenAI Chat Completions format.
 
 use crate::provider::{
-    parse_openai_finish_reason, InferenceRequest, InferenceResponse, ProviderError, Result,
-    StreamChunk, TokenUsage, ToolCall, ToolCallDelta,
+    parse_openai_finish_reason, ContentBlock, InferenceRequest, InferenceResponse, MessageContent,
+    ProviderError, Result, StreamChunk, TokenUsage, ToolCall, ToolCallDelta,
 };
 use futures_core::Stream;
 use std::pin::Pin;
 
 /// Build the JSON request body for the OpenAI Chat Completions API.
 pub fn build_openai_request_body(request: &InferenceRequest) -> serde_json::Value {
-    let messages: Vec<serde_json::Value> = request
-        .messages
-        .iter()
-        .map(|msg| {
-            serde_json::json!({
-                "role": msg.role,
-                "content": msg.content,
-            })
-        })
-        .collect();
+    let mut messages: Vec<serde_json::Value> = Vec::new();
+
+    // Prepend system blocks as system-role messages
+    for block in &request.system {
+        messages.push(serde_json::json!({
+            "role": "system",
+            "content": block.text,
+        }));
+    }
+
+    // Convert conversation messages to OpenAI format
+    for msg in &request.messages {
+        match &msg.content {
+            MessageContent::Text(text) => {
+                messages.push(serde_json::json!({
+                    "role": msg.role,
+                    "content": text,
+                }));
+            }
+            MessageContent::Blocks(blocks) => {
+                // Separate text, tool_use, and tool_result blocks
+                let text_parts: Vec<&str> = blocks
+                    .iter()
+                    .filter_map(|b| match b {
+                        ContentBlock::Text { text } => Some(text.as_str()),
+                        _ => None,
+                    })
+                    .collect();
+                let tool_uses: Vec<&ContentBlock> = blocks
+                    .iter()
+                    .filter(|b| matches!(b, ContentBlock::ToolUse { .. }))
+                    .collect();
+                let tool_results: Vec<&ContentBlock> = blocks
+                    .iter()
+                    .filter(|b| matches!(b, ContentBlock::ToolResult { .. }))
+                    .collect();
+
+                if !tool_uses.is_empty() {
+                    // Assistant message with tool calls
+                    let tool_calls: Vec<serde_json::Value> = tool_uses
+                        .iter()
+                        .map(|b| match b {
+                            ContentBlock::ToolUse { id, name, input } => serde_json::json!({
+                                "id": id,
+                                "type": "function",
+                                "function": {
+                                    "name": name,
+                                    "arguments": input.to_string(),
+                                }
+                            }),
+                            _ => unreachable!(),
+                        })
+                        .collect();
+                    let content = text_parts.join("");
+                    let mut msg_json = serde_json::json!({
+                        "role": "assistant",
+                        "tool_calls": tool_calls,
+                    });
+                    if !content.is_empty() {
+                        msg_json["content"] = serde_json::Value::String(content);
+                    }
+                    messages.push(msg_json);
+                } else if !tool_results.is_empty() {
+                    // Each tool result becomes a separate "tool" role message
+                    for block in &tool_results {
+                        if let ContentBlock::ToolResult {
+                            tool_use_id,
+                            content,
+                            ..
+                        } = block
+                        {
+                            messages.push(serde_json::json!({
+                                "role": "tool",
+                                "tool_call_id": tool_use_id,
+                                "content": content,
+                            }));
+                        }
+                    }
+                } else {
+                    // Text-only blocks
+                    messages.push(serde_json::json!({
+                        "role": msg.role,
+                        "content": text_parts.join(""),
+                    }));
+                }
+            }
+        }
+    }
 
     let mut body = serde_json::json!({
         "model": request.model,
@@ -334,6 +412,7 @@ mod tests {
 
     fn sample_request() -> InferenceRequest {
         InferenceRequest {
+            system: vec![],
             messages: vec![
                 Message {
                     role: "system".into(),
@@ -672,6 +751,7 @@ mod tests {
     #[test]
     fn build_request_body_empty_messages() {
         let req = InferenceRequest {
+            system: vec![],
             messages: vec![],
             model: "gpt-4".into(),
             max_tokens: 100,

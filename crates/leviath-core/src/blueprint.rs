@@ -352,30 +352,6 @@ pub struct InteractionPoint {
     pub edit_options: Vec<String>,
 }
 
-/// Configuration for routing tool results to specific context window regions.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ToolResultRouting {
-    /// Default region for tool results (default: "tool_results")
-    pub default_region: String,
-    /// Per-tool overrides: tool_name → region_name
-    pub tool_overrides: HashMap<String, String>,
-    /// Whether to keep tool results (true) or discard after use (false)
-    pub persist: bool,
-    /// Max tokens per tool result (truncate if larger)
-    pub max_result_tokens: Option<usize>,
-}
-
-impl Default for ToolResultRouting {
-    fn default() -> Self {
-        Self {
-            default_region: "tool_results".to_string(),
-            tool_overrides: HashMap::new(),
-            persist: true,
-            max_result_tokens: None,
-        }
-    }
-}
-
 /// A single execution stage in an agent's workflow.
 ///
 /// Stages allow an agent to use different models or configurations for
@@ -414,9 +390,6 @@ pub struct Stage {
 
     /// Custom configuration for this stage
     pub config: HashMap<String, serde_json::Value>,
-
-    /// Optional routing configuration for tool results
-    pub tool_result_routing: Option<ToolResultRouting>,
 
     /// Per-tool permission overrides for this stage.
     /// Keys: tool name. Values: "allow" | "ask" | "deny".
@@ -471,7 +444,6 @@ impl Stage {
             mode: StageMode::Autonomous,
             context_layout: None,
             config: HashMap::new(),
-            tool_result_routing: None,
             tool_permissions: HashMap::new(),
             requires_children: false,
             transitions: None,
@@ -999,7 +971,6 @@ mod tests {
             "max_iterations": null,
             "context_layout": null,
             "config": {},
-            "tool_result_routing": null,
             "transitions": null,
             "max_revisits": null,
             "transition_prompt": null
@@ -1092,53 +1063,6 @@ mod tests {
             point.directives.get("Revise").map(|s| s.as_str()),
             Some("What to change?")
         );
-    }
-
-    #[test]
-    fn test_tool_result_routing_default() {
-        let routing = ToolResultRouting::default();
-        assert_eq!(routing.default_region, "tool_results");
-        assert!(routing.persist);
-        assert!(routing.max_result_tokens.is_none());
-        assert!(routing.tool_overrides.is_empty());
-    }
-
-    #[test]
-    fn test_tool_result_routing_with_overrides() {
-        let mut routing = ToolResultRouting::default();
-        routing
-            .tool_overrides
-            .insert("read_file".to_string(), "codebase".to_string());
-        routing
-            .tool_overrides
-            .insert("search".to_string(), "findings".to_string());
-        routing.max_result_tokens = Some(5000);
-        routing.persist = false;
-
-        assert_eq!(routing.tool_overrides.len(), 2);
-        assert_eq!(routing.tool_overrides.get("read_file").unwrap(), "codebase");
-        assert!(!routing.persist);
-        assert_eq!(routing.max_result_tokens, Some(5000));
-    }
-
-    #[test]
-    fn test_stage_with_tool_result_routing() {
-        let mut stage = Stage::new(
-            "implement".to_string(),
-            ModelConfig::new("anthropic".to_string(), "claude-sonnet-4-6".to_string()),
-        );
-
-        let routing = ToolResultRouting {
-            default_region: "tool_results".to_string(),
-            persist: true,
-            max_result_tokens: Some(5000),
-            ..Default::default()
-        };
-        stage.tool_result_routing = Some(routing);
-
-        assert!(stage.tool_result_routing.is_some());
-        let r = stage.tool_result_routing.unwrap();
-        assert_eq!(r.max_result_tokens, Some(5000));
     }
 
     #[test]

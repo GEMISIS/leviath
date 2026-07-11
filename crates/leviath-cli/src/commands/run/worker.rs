@@ -3,7 +3,7 @@
 use async_trait::async_trait;
 use leviath_core::blueprint::StageResult;
 use leviath_providers::InferenceResponse;
-use leviath_runtime::{AgentPool, AgentState, ContextWindow, ToolResultRoutingConfig};
+use leviath_runtime::{AgentPool, AgentState, ContextWindow};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
@@ -329,7 +329,6 @@ impl<'a> StageCallbacks for WorkerCallbacks<'a> {
         model: &str,
         max_iterations: usize,
         tools: Vec<leviath_providers::Tool>,
-        routing: Option<&ToolResultRoutingConfig>,
         compaction: Option<&leviath_core::lifecycle::CompactionConfig>,
         _io: &mut dyn RunIO,
         executor: &mut leviath_runtime::ToolExecutorDyn<'_>,
@@ -343,7 +342,6 @@ impl<'a> StageCallbacks for WorkerCallbacks<'a> {
                 tools,
                 max_iterations,
                 None,
-                routing,
                 compaction,
                 executor,
             )
@@ -2203,7 +2201,6 @@ mode = "autonomous"
                 "claude-sonnet-4-6",
                 1,
                 vec![],
-                None,
                 None,
                 &mut super::super::io::ConsoleIO::new(),
                 &mut exec,

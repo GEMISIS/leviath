@@ -83,6 +83,19 @@ impl ContextLayout {
 
         // Warn if sum of max tokens exceeds budget (not necessarily an error,
         // since not all regions will be full simultaneously)
+        // Warn if no SlidingWindow region exists — agents should have a
+        // conversation region for typed message entries, but some agents
+        // (e.g., deep-researcher) use other region kinds exclusively.
+        let has_sliding_window = self
+            .regions
+            .iter()
+            .any(|r| matches!(r.kind, RegionKind::SlidingWindow { .. }));
+        if !has_sliding_window {
+            tracing::warn!(
+                "Layout has no SlidingWindow region — typed conversation entries require one"
+            );
+        }
+
         let total_max: usize = self.regions.iter().map(|r| r.max_tokens).sum();
         if total_max > self.total_budget_tokens {
             tracing::warn!(

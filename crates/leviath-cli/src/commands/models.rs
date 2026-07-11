@@ -1565,6 +1565,7 @@ mod tests {
             fail: false,
         };
         let request = leviath_providers::InferenceRequest {
+            system: vec![],
             messages: vec![],
             model: "mock".to_string(),
             max_tokens: 100,

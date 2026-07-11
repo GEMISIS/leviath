@@ -9,9 +9,7 @@ use leviath_core::blueprint::{StageMode, StageResult};
 use leviath_core::lifecycle::CompactionConfig;
 use leviath_core::Blueprint;
 use leviath_providers::InferenceResponse;
-use leviath_runtime::{
-    AgentEngine, AgentPool, AgentState, ContextWindow, InferenceConfig, ToolResultRoutingConfig,
-};
+use leviath_runtime::{AgentEngine, AgentPool, AgentState, ContextWindow, InferenceConfig};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -109,7 +107,6 @@ pub trait StageCallbacks: Send {
         model: &str,
         max_iterations: usize,
         tools: Vec<leviath_providers::Tool>,
-        routing: Option<&ToolResultRoutingConfig>,
         compaction: Option<&CompactionConfig>,
         io: &mut dyn RunIO,
         executor: &mut ToolExecutorDyn<'_>,
@@ -406,17 +403,6 @@ pub async fn run_stage_loop(
                 .collect()
         };
 
-        // Routing config
-        let routing_config = stage
-            .tool_result_routing
-            .as_ref()
-            .map(|r| ToolResultRoutingConfig {
-                default_region: r.default_region.clone(),
-                tool_overrides: r.tool_overrides.clone(),
-                persist: r.persist,
-                max_result_tokens: r.max_result_tokens,
-            });
-        let routing_ref = routing_config.as_ref();
         let max_iterations = stage.max_iterations.unwrap_or(20);
 
         // Mid-run message reader
@@ -465,7 +451,6 @@ pub async fn run_stage_loop(
                     model_name,
                     max_iterations,
                     &effective_tools,
-                    routing_ref,
                     ctx.compaction_ref,
                     &pts,
                     run_context,
@@ -507,7 +492,6 @@ pub async fn run_stage_loop(
                         model_name,
                         max_iterations,
                         effective_tools,
-                        routing_ref,
                         ctx.compaction_ref,
                         io,
                         exec,
@@ -736,7 +720,6 @@ mod tests {
             _model: &str,
             _max_iterations: usize,
             _tools: Vec<leviath_providers::Tool>,
-            _routing: Option<&ToolResultRoutingConfig>,
             _compaction: Option<&CompactionConfig>,
             _io: &mut dyn RunIO,
             _executor: &mut ToolExecutorDyn<'_>,
@@ -1179,11 +1162,10 @@ mod tests {
     #[tokio::test]
     async fn stage_with_layout_prompt_tool_filter_and_routing_completes() {
         // Exercises the per-stage context_layout swap, system_prompt
-        // injection, non-empty available_tools filter, and
-        // tool_result_routing construction -- all otherwise-untouched by
-        // every other test in this file, which use `make_stage`'s defaults
-        // (no layout override, no system_prompt, empty available_tools,
-        // no routing).
+        // injection, and non-empty available_tools filter -- all
+        // otherwise-untouched by every other test in this file, which use
+        // `make_stage`'s defaults (no layout override, no system_prompt,
+        // empty available_tools).
         let mut stage = make_stage("main");
         stage.context_layout = Some(ContextLayout::new(
             vec![RegionDefinition::new(
@@ -1197,7 +1179,6 @@ mod tests {
             .config
             .insert("system_prompt".to_string(), serde_json::json!("Be terse."));
         stage.available_tools = vec!["read_file".to_string()];
-        stage.tool_result_routing = Some(leviath_core::blueprint::ToolResultRouting::default());
 
         let bp = make_blueprint(vec![stage]);
         let (mut engine, mut pool, entity) = make_engine_and_entity(&bp);
@@ -1373,7 +1354,6 @@ mod tests {
                 _m: &str,
                 _mi: usize,
                 _t: Vec<leviath_providers::Tool>,
-                _r: Option<&ToolResultRoutingConfig>,
                 _c: Option<&CompactionConfig>,
                 _io: &mut dyn RunIO,
                 _ex: &mut ToolExecutorDyn<'_>,
@@ -1531,7 +1511,6 @@ mod tests {
                 _m: &str,
                 _mi: usize,
                 _t: Vec<leviath_providers::Tool>,
-                _r: Option<&ToolResultRoutingConfig>,
                 _c: Option<&CompactionConfig>,
                 _io: &mut dyn RunIO,
                 _ex: &mut ToolExecutorDyn<'_>,

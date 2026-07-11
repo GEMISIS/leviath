@@ -157,8 +157,23 @@ impl AnthropicProvider {
 
     /// Build the request body for the Anthropic API.
     fn build_request_body(&self, request: &InferenceRequest) -> serde_json::Value {
-        // Extract system messages and non-system messages
-        let mut system_parts: Vec<serde_json::Value> = Vec::new();
+        // Build system blocks from request.system
+        let system_parts: Vec<serde_json::Value> = request
+            .system
+            .iter()
+            .map(|block| {
+                let mut obj = serde_json::json!({
+                    "type": "text",
+                    "text": block.text,
+                });
+                if block.cache_hint != leviath_core::CacheHint::Never {
+                    obj["cache_control"] = serde_json::json!({ "type": "ephemeral" });
+                }
+                obj
+            })
+            .collect();
+
+        // Build conversation messages
         let mut messages: Vec<serde_json::Value> = Vec::new();
 
         // Track cache breakpoints — Anthropic allows max 4.
@@ -166,22 +181,28 @@ impl AnthropicProvider {
         const MAX_BREAKPOINTS: usize = 4;
 
         for msg in &request.messages {
-            if msg.role == "system" {
-                system_parts.push(serde_json::json!({
-                    "type": "text",
-                    "text": msg.content,
-                    "cache_control": { "type": "ephemeral" }
-                }));
-            } else if msg.cache_breakpoint && breakpoint_count < MAX_BREAKPOINTS {
+            if msg.cache_breakpoint && breakpoint_count < MAX_BREAKPOINTS {
                 breakpoint_count += 1;
-                messages.push(serde_json::json!({
-                    "role": msg.role,
-                    "content": [{
-                        "type": "text",
-                        "text": msg.content,
-                        "cache_control": { "type": "ephemeral" }
-                    }],
-                }));
+                // Wrap content with cache_control
+                match &msg.content {
+                    crate::MessageContent::Text(text) => {
+                        messages.push(serde_json::json!({
+                            "role": msg.role,
+                            "content": [{
+                                "type": "text",
+                                "text": text,
+                                "cache_control": { "type": "ephemeral" }
+                            }],
+                        }));
+                    }
+                    crate::MessageContent::Blocks(_) => {
+                        // For block content, serialize normally (cache on blocks is complex)
+                        messages.push(serde_json::json!({
+                            "role": msg.role,
+                            "content": msg.content,
+                        }));
+                    }
+                }
             } else {
                 messages.push(serde_json::json!({
                     "role": msg.role,
@@ -207,8 +228,7 @@ impl AnthropicProvider {
             })
         };
 
-        // Add system prompt as top-level field.
-        // system_parts entries always have "text" (set above) — index directly.
+        // Add system blocks as top-level field.
         if system_parts.len() == 1 {
             body["system"] = system_parts[0]["text"].clone();
         } else if system_parts.len() > 1 {
@@ -334,6 +354,19 @@ impl Provider for AnthropicProvider {
 
         let body = self.build_request_body(&request);
         let url = format!("{}/messages", self.base_url);
+
+        // Temporary debug: dump request body
+        if let Ok(body_json) = serde_json::to_string_pretty(&body) {
+            let _ = std::fs::write("/tmp/leviath-refactored-request.json", &body_json);
+            eprintln!("DEBUG: Request written ({} bytes)", body_json.len());
+            if let Some(msgs) = body.get("messages").and_then(|v| v.as_array()) {
+                let roles: Vec<&str> = msgs
+                    .iter()
+                    .filter_map(|m| m.get("role").and_then(|r| r.as_str()))
+                    .collect();
+                eprintln!("DEBUG: Roles: {:?}", roles);
+            }
+        }
 
         #[cfg(feature = "debug-http")]
         let body_bytes = serde_json::to_vec(&body).unwrap_or_default();
@@ -819,18 +852,15 @@ mod tests {
     fn test_build_request_body() {
         let provider = AnthropicProvider::new("test-key".to_string());
         let request = InferenceRequest {
-            messages: vec![
-                crate::provider::Message {
-                    role: "system".to_string(),
-                    content: "You are helpful.".to_string(),
-                    cache_breakpoint: false,
-                },
-                crate::provider::Message {
-                    role: "user".to_string(),
-                    content: "Hello".to_string(),
-                    cache_breakpoint: false,
-                },
-            ],
+            system: vec![crate::SystemBlock {
+                text: "You are helpful.".to_string(),
+                cache_hint: leviath_core::CacheHint::Always,
+            }],
+            messages: vec![crate::provider::Message {
+                role: "user".to_string(),
+                content: "Hello".into(),
+                cache_breakpoint: false,
+            }],
             model: "claude-sonnet-4-6".to_string(),
             max_tokens: 1024,
             temperature: 0.7,
@@ -963,20 +993,19 @@ mod tests {
     fn test_build_request_body_with_cache_breakpoint() {
         let provider = AnthropicProvider::new("test-key".to_string());
         let request = InferenceRequest {
+            system: vec![crate::SystemBlock {
+                text: "You are helpful.".to_string(),
+                cache_hint: leviath_core::CacheHint::Always,
+            }],
             messages: vec![
                 crate::provider::Message {
-                    role: "system".to_string(),
-                    content: "You are helpful.".to_string(),
-                    cache_breakpoint: false,
-                },
-                crate::provider::Message {
                     role: "user".to_string(),
-                    content: "Hello".to_string(),
+                    content: "Hello".into(),
                     cache_breakpoint: true,
                 },
                 crate::provider::Message {
                     role: "user".to_string(),
-                    content: "World".to_string(),
+                    content: "World".into(),
                     cache_breakpoint: false,
                 },
             ],
@@ -1007,7 +1036,7 @@ mod tests {
         let mut messages: Vec<crate::provider::Message> = (0..6)
             .map(|i| crate::provider::Message {
                 role: "user".to_string(),
-                content: format!("Message {}", i),
+                content: format!("Message {}", i).into(),
                 cache_breakpoint: true,
             })
             .collect();
@@ -1016,12 +1045,13 @@ mod tests {
             0,
             crate::provider::Message {
                 role: "system".to_string(),
-                content: "System".to_string(),
+                content: "System".into(),
                 cache_breakpoint: false,
             },
         );
 
         let request = InferenceRequest {
+            system: vec![],
             messages,
             model: "claude-sonnet-4-6".to_string(),
             max_tokens: 1024,
@@ -1343,9 +1373,10 @@ mod tests {
     fn test_build_request_body_with_tools() {
         let provider = AnthropicProvider::new("key".to_string());
         let request = InferenceRequest {
+            system: vec![],
             messages: vec![crate::provider::Message {
                 role: "user".to_string(),
-                content: "Use the tool".to_string(),
+                content: "Use the tool".into(),
                 cache_breakpoint: false,
             }],
             model: "claude-sonnet-4-6".to_string(),
@@ -1370,9 +1401,10 @@ mod tests {
     fn test_build_request_body_no_temperature_for_opus48() {
         let provider = AnthropicProvider::new("key".to_string());
         let request = InferenceRequest {
+            system: vec![],
             messages: vec![crate::provider::Message {
                 role: "user".to_string(),
-                content: "Hi".to_string(),
+                content: "Hi".into(),
                 cache_breakpoint: false,
             }],
             model: "claude-opus-4-8".to_string(),
@@ -1391,9 +1423,10 @@ mod tests {
     fn test_build_request_body_temperature_for_sonnet46() {
         let provider = AnthropicProvider::new("key".to_string());
         let request = InferenceRequest {
+            system: vec![],
             messages: vec![crate::provider::Message {
                 role: "user".to_string(),
-                content: "Hi".to_string(),
+                content: "Hi".into(),
                 cache_breakpoint: false,
             }],
             model: "claude-sonnet-4-6".to_string(),
@@ -1411,23 +1444,21 @@ mod tests {
     fn test_build_request_body_multiple_system_messages() {
         let provider = AnthropicProvider::new("key".to_string());
         let request = InferenceRequest {
-            messages: vec![
-                crate::provider::Message {
-                    role: "system".to_string(),
-                    content: "System part 1".to_string(),
-                    cache_breakpoint: false,
+            system: vec![
+                crate::SystemBlock {
+                    text: "System part 1".to_string(),
+                    cache_hint: leviath_core::CacheHint::Always,
                 },
-                crate::provider::Message {
-                    role: "system".to_string(),
-                    content: "System part 2".to_string(),
-                    cache_breakpoint: false,
-                },
-                crate::provider::Message {
-                    role: "user".to_string(),
-                    content: "Hello".to_string(),
-                    cache_breakpoint: false,
+                crate::SystemBlock {
+                    text: "System part 2".to_string(),
+                    cache_hint: leviath_core::CacheHint::Always,
                 },
             ],
+            messages: vec![crate::provider::Message {
+                role: "user".to_string(),
+                content: "Hello".into(),
+                cache_breakpoint: false,
+            }],
             model: "claude-sonnet-4-6".to_string(),
             max_tokens: 1024,
             temperature: 0.7,
@@ -1445,9 +1476,10 @@ mod tests {
     fn test_build_request_body_no_system_messages() {
         let provider = AnthropicProvider::new("key".to_string());
         let request = InferenceRequest {
+            system: vec![],
             messages: vec![crate::provider::Message {
                 role: "user".to_string(),
-                content: "Hello".to_string(),
+                content: "Hello".into(),
                 cache_breakpoint: false,
             }],
             model: "claude-sonnet-4-6".to_string(),
@@ -1628,9 +1660,10 @@ mod tests {
             capability_overrides: HashMap::new(),
         };
         let request = InferenceRequest {
+            system: vec![],
             messages: vec![crate::provider::Message {
                 role: "user".to_string(),
-                content: "Hello".to_string(),
+                content: "Hello".into(),
                 cache_breakpoint: false,
             }],
             model: "claude-sonnet-4-6".to_string(),
@@ -1657,9 +1690,10 @@ mod tests {
             capability_overrides: HashMap::new(),
         };
         let request = InferenceRequest {
+            system: vec![],
             messages: vec![crate::provider::Message {
                 role: "user".to_string(),
-                content: "Hello".to_string(),
+                content: "Hello".into(),
                 cache_breakpoint: false,
             }],
             model: "claude-sonnet-4-6".to_string(),
@@ -1771,12 +1805,13 @@ mod tests {
         let messages: Vec<crate::provider::Message> = (0..4)
             .map(|i| crate::provider::Message {
                 role: "user".to_string(),
-                content: format!("Message {}", i),
+                content: format!("Message {}", i).into(),
                 cache_breakpoint: true,
             })
             .collect();
 
         let request = InferenceRequest {
+            system: vec![],
             messages,
             model: "claude-sonnet-4-6".to_string(),
             max_tokens: 512,
@@ -1909,9 +1944,10 @@ mod tests {
 
     fn simple_request() -> InferenceRequest {
         InferenceRequest {
+            system: vec![],
             messages: vec![crate::provider::Message {
                 role: "user".to_string(),
-                content: "hi".to_string(),
+                content: "hi".into(),
                 cache_breakpoint: false,
             }],
             model: "claude-sonnet-4-6".to_string(),

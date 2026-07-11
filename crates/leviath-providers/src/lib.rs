@@ -33,9 +33,9 @@ pub use ollama::OllamaProvider;
 pub use openai::OpenAIProvider;
 pub use openrouter::OpenRouterProvider;
 pub use provider::{
-    build_http_client, check_http_response, parse_openai_finish_reason, FinishReason,
-    InferenceRequest, InferenceResponse, Message, ModelCapabilities, ModelInfo, Provider,
-    ProviderConfig, ProviderError, RateLimitConfig, Result, StreamChunk, TokenUsage, Tool,
-    ToolCall, ToolCallDelta,
+    build_http_client, check_http_response, parse_openai_finish_reason, ContentBlock, FinishReason,
+    InferenceRequest, InferenceResponse, Message, MessageContent, ModelCapabilities, ModelInfo,
+    Provider, ProviderConfig, ProviderError, RateLimitConfig, Result, StreamChunk, SystemBlock,
+    TokenUsage, Tool, ToolCall, ToolCallDelta,
 };
 pub use rate_limit::RateLimiter;

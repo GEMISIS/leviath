@@ -906,15 +906,16 @@ mod tests {
     fn test_build_request_body_basic() {
         let provider = OllamaProvider::new();
         let request = InferenceRequest {
+            system: vec![],
             messages: vec![
                 crate::provider::Message {
                     role: "system".to_string(),
-                    content: "Be helpful".to_string(),
+                    content: "Be helpful".into(),
                     cache_breakpoint: false,
                 },
                 crate::provider::Message {
                     role: "user".to_string(),
-                    content: "Hello".to_string(),
+                    content: "Hello".into(),
                     cache_breakpoint: false,
                 },
             ],
@@ -938,9 +939,10 @@ mod tests {
     fn test_build_request_body_with_tools() {
         let provider = OllamaProvider::new();
         let request = InferenceRequest {
+            system: vec![],
             messages: vec![crate::provider::Message {
                 role: "user".to_string(),
-                content: "Search".to_string(),
+                content: "Search".into(),
                 cache_breakpoint: false,
             }],
             model: "llama3-8b".to_string(),
@@ -1073,9 +1075,10 @@ mod tests {
     fn test_build_request_body_no_tools_no_tools_key() {
         let provider = OllamaProvider::new();
         let request = InferenceRequest {
+            system: vec![],
             messages: vec![crate::provider::Message {
                 role: "user".to_string(),
-                content: "Hello".to_string(),
+                content: "Hello".into(),
                 cache_breakpoint: false,
             }],
             model: "llama3-8b".to_string(),
@@ -1094,9 +1097,10 @@ mod tests {
     fn test_build_request_body_deepseek_r1_no_temperature() {
         let provider = OllamaProvider::new();
         let request = InferenceRequest {
+            system: vec![],
             messages: vec![crate::provider::Message {
                 role: "user".to_string(),
-                content: "Hello".to_string(),
+                content: "Hello".into(),
                 cache_breakpoint: false,
             }],
             model: "deepseek-r1:latest".to_string(),
@@ -1117,20 +1121,21 @@ mod tests {
     fn test_build_request_body_multiple_messages() {
         let provider = OllamaProvider::new();
         let request = InferenceRequest {
+            system: vec![],
             messages: vec![
                 crate::provider::Message {
                     role: "system".to_string(),
-                    content: "You are helpful.".to_string(),
+                    content: "You are helpful.".into(),
                     cache_breakpoint: false,
                 },
                 crate::provider::Message {
                     role: "user".to_string(),
-                    content: "Hello".to_string(),
+                    content: "Hello".into(),
                     cache_breakpoint: false,
                 },
                 crate::provider::Message {
                     role: "assistant".to_string(),
-                    content: "Hi there".to_string(),
+                    content: "Hi there".into(),
                     cache_breakpoint: false,
                 },
             ],
@@ -1153,9 +1158,10 @@ mod tests {
     fn test_build_request_body_multiple_tools() {
         let provider = OllamaProvider::new();
         let request = InferenceRequest {
+            system: vec![],
             messages: vec![crate::provider::Message {
                 role: "user".to_string(),
-                content: "Do things".to_string(),
+                content: "Do things".into(),
                 cache_breakpoint: false,
             }],
             model: "llama3-8b".to_string(),
@@ -1255,9 +1261,10 @@ mod tests {
     async fn test_infer_connection_refused() {
         let provider = OllamaProvider::with_base_url("http://127.0.0.1:19998".to_string());
         let request = InferenceRequest {
+            system: vec![],
             messages: vec![crate::provider::Message {
                 role: "user".to_string(),
-                content: "Hello".to_string(),
+                content: "Hello".into(),
                 cache_breakpoint: false,
             }],
             model: "llama3-8b".to_string(),
@@ -1276,9 +1283,10 @@ mod tests {
     async fn test_infer_stream_connection_refused() {
         let provider = OllamaProvider::with_base_url("http://127.0.0.1:19998".to_string());
         let request = InferenceRequest {
+            system: vec![],
             messages: vec![crate::provider::Message {
                 role: "user".to_string(),
-                content: "Hello".to_string(),
+                content: "Hello".into(),
                 cache_breakpoint: false,
             }],
             model: "llama3-8b".to_string(),
@@ -1769,9 +1777,10 @@ mod tests {
         let provider =
             OllamaProvider::with_overrides("http://localhost:11434".to_string(), overrides, None);
         let request = InferenceRequest {
+            system: vec![],
             messages: vec![crate::provider::Message {
                 role: "user".to_string(),
-                content: "hi".to_string(),
+                content: "hi".into(),
                 cache_breakpoint: false,
             }],
             model: "no-temp-model".to_string(),
@@ -1840,9 +1849,10 @@ mod tests {
 
     fn mock_request() -> InferenceRequest {
         InferenceRequest {
+            system: vec![],
             messages: vec![crate::provider::Message {
                 role: "user".to_string(),
-                content: "hi".to_string(),
+                content: "hi".into(),
                 cache_breakpoint: false,
             }],
             model: "llama3-8b".to_string(),

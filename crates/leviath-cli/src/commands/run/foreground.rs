@@ -3,7 +3,7 @@
 use async_trait::async_trait;
 use leviath_core::blueprint::StageResult;
 use leviath_providers::InferenceResponse;
-use leviath_runtime::{AgentMessage, AgentPool, AgentState, ToolResultRoutingConfig};
+use leviath_runtime::{AgentMessage, AgentPool, AgentState};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
@@ -342,7 +342,6 @@ impl StageCallbacks for ForegroundCallbacks {
         model: &str,
         max_iterations: usize,
         tools: Vec<leviath_providers::Tool>,
-        routing: Option<&ToolResultRoutingConfig>,
         compaction: Option<&leviath_core::lifecycle::CompactionConfig>,
         io: &mut dyn RunIO,
         executor: &mut leviath_runtime::ToolExecutorDyn<'_>,
@@ -354,7 +353,6 @@ impl StageCallbacks for ForegroundCallbacks {
             model,
             max_iterations,
             &tools,
-            routing,
             compaction,
             io,
             executor,

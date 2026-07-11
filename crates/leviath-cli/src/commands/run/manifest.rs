@@ -1,8 +1,7 @@
 //! Manifest finding and parsing for agent.leviath files.
 
 use leviath_core::blueprint::{
-    EdgeTransform, ModelConfig, ModelEntry, StageMode, ToolResultRouting, TransitionCondition,
-    TransitionEdge,
+    EdgeTransform, ModelConfig, ModelEntry, StageMode, TransitionCondition, TransitionEdge,
 };
 use leviath_core::layout::RegionDefinition;
 use leviath_core::lifecycle::CompactionConfig;
@@ -307,37 +306,6 @@ pub fn parse_manifest(content: &str) -> anyhow::Result<Blueprint> {
                     "system_prompt".to_string(),
                     serde_json::Value::String(sp.trim().to_string()),
                 );
-            }
-
-            if let Some(routing_table) = stage_value.get("tool_routing").and_then(|v| v.as_table())
-            {
-                let mut routing = ToolResultRouting::default();
-
-                if let Some(dr) = routing_table.get("default_region").and_then(|v| v.as_str()) {
-                    routing.default_region = dr.to_string();
-                }
-                if let Some(p) = routing_table.get("persist").and_then(|v| v.as_bool()) {
-                    routing.persist = p;
-                }
-                if let Some(mt) = routing_table
-                    .get("max_result_tokens")
-                    .and_then(|v| v.as_integer())
-                {
-                    routing.max_result_tokens = Some(mt as usize);
-                }
-                if let Some(overrides_table) =
-                    routing_table.get("overrides").and_then(|v| v.as_table())
-                {
-                    for (tool_name, region_val) in overrides_table {
-                        if let Some(region_name) = region_val.as_str() {
-                            routing
-                                .tool_overrides
-                                .insert(tool_name.clone(), region_name.to_string());
-                        }
-                    }
-                }
-
-                stage.tool_result_routing = Some(routing);
             }
 
             // Parse requires_children flag
@@ -912,40 +880,6 @@ hist = { kind = "compact_history", source_region = "conv", max_tokens = 4000 }
             RegionKind::CompactHistory {
                 source_region: "conv".to_string()
             }
-        );
-    }
-
-    #[test]
-    fn parse_manifest_with_tool_result_routing() {
-        let toml = r#"
-[agent]
-name = "routing-test"
-
-[stages.main]
-mode = "autonomous"
-
-[stages.main.tool_routing]
-default_region = "scratch"
-persist = true
-max_result_tokens = 5000
-
-[stages.main.tool_routing.overrides]
-read_file = "codebase"
-bash = "conversation"
-"#;
-        let bp = parse_manifest(toml).unwrap();
-        let stage = bp.find_stage("main").unwrap();
-        let routing = stage.tool_result_routing.as_ref().unwrap();
-        assert_eq!(routing.default_region, "scratch");
-        assert!(routing.persist);
-        assert_eq!(routing.max_result_tokens, Some(5000));
-        assert_eq!(
-            routing.tool_overrides.get("read_file").map(|s| s.as_str()),
-            Some("codebase")
-        );
-        assert_eq!(
-            routing.tool_overrides.get("bash").map(|s| s.as_str()),
-            Some("conversation")
         );
     }
 
@@ -1883,78 +1817,6 @@ mode = "interactive_points"
         let stage = bp.find_stage("main").unwrap();
         let points = unwrap_interactive_points(&stage.mode);
         assert!(points.is_empty());
-    }
-
-    /// tool_routing with only partial fields — covers the None-branches for
-    /// `default_region`, `persist`, and `max_result_tokens`.
-    #[test]
-    fn parse_manifest_tool_routing_partial_fields() {
-        // Only max_result_tokens is set; default_region and persist are absent.
-        let toml = r#"
-[agent]
-name = "partial-routing"
-
-[stages.main]
-mode = "autonomous"
-
-[stages.main.tool_routing]
-max_result_tokens = 1000
-"#;
-        let bp = parse_manifest(toml).unwrap();
-        let stage = bp.find_stage("main").unwrap();
-        let routing = stage.tool_result_routing.as_ref().unwrap();
-        // default_region absent — stays at ToolResultRouting::default() value
-        // (we just verify it's not "scratch" to confirm it was not set)
-        assert_ne!(routing.default_region, "scratch");
-        // persist absent — stays at ToolResultRouting::default() value (we don't
-        // prescribe what the default is, just verify it was not explicitly set to false)
-        let _ = routing.persist; // field exists, not set by this test
-        assert_eq!(routing.max_result_tokens, Some(1000));
-    }
-
-    /// tool_routing without any overrides table — covers the None-branch for
-    /// `routing_table.get("overrides")`.
-    #[test]
-    fn parse_manifest_tool_routing_no_overrides() {
-        let toml = r#"
-[agent]
-name = "no-overrides"
-
-[stages.main]
-mode = "autonomous"
-
-[stages.main.tool_routing]
-default_region = "scratch"
-"#;
-        let bp = parse_manifest(toml).unwrap();
-        let stage = bp.find_stage("main").unwrap();
-        let routing = stage.tool_result_routing.as_ref().unwrap();
-        assert_eq!(routing.default_region, "scratch");
-        assert!(routing.tool_overrides.is_empty());
-    }
-
-    /// tool_routing.overrides with a non-string value — the inner
-    /// `if let Some(region_name) = region_val.as_str()` should be skipped.
-    #[test]
-    fn parse_manifest_tool_routing_overrides_non_string_value_skipped() {
-        let toml = r#"
-[agent]
-name = "non-string-override"
-
-[stages.main]
-mode = "autonomous"
-
-[stages.main.tool_routing]
-default_region = "scratch"
-
-[stages.main.tool_routing.overrides]
-bash = 42
-"#;
-        let bp = parse_manifest(toml).unwrap();
-        let stage = bp.find_stage("main").unwrap();
-        let routing = stage.tool_result_routing.as_ref().unwrap();
-        // Non-string value for "bash" is silently skipped.
-        assert!(routing.tool_overrides.is_empty());
     }
 
     /// Per-stage tool_permissions with a non-string policy value — the inner
