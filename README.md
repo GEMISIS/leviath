@@ -174,26 +174,32 @@ A deterministic sensitivity model (Public / Internal / Private) tags every conte
 
 ## 📊 Benchmarks
 
-**Stress test** — build a 12-file multi-tenant event processing platform from 8 spec files and 4 config files. Same model (Claude Sonnet 5), same tools, same task. Only context management differs.
+Both approaches build the same 12-file multi-tenant event processing platform from 11 spec files and 4 config files. Same model (Claude Sonnet 5), same tools, same task. Quality is measured by a **hidden validation suite** of 69 tests the agent never sees — no self-grading.
 
-| Metric | Leviath | Flat Baseline | Improvement |
-|--------|--------:|--------------:|------------:|
-| Tool calls | 67 | 203 | **3.0× fewer** |
-| Runtime | 11 min | 31 min | **2.8× faster** |
-| API cost | $9.16 | $79.97 | **8.7× cheaper** |
-| Truncation events | 0 | 312 | — |
-| Tests passing | 35/35¹ | 89/89 | Both pass all |
+<p align="center">
+  <picture>
+    <img src="docs/benchmarks/hero-comparison.svg" alt="Leviath v3 vs Flat Baseline — headline metrics" width="800">
+  </picture>
+</p>
 
-**What happened:** The flat baseline hit its context window ceiling 312 times, losing spec details and re-reading the same files. Probes injected at late tool calls (110+) came back empty — the agent couldn't recall specs it had read earlier. Leviath's structured regions kept specs in compacting storage (summarized instead of evicted), so the agent built everything without re-reading.
+**Half the cost, same quality.** Leviath's structured context window keeps specs in compacting storage (summarized instead of evicted), so the agent doesn't waste tokens re-reading files it's already seen. The flat baseline's sliding window constantly reshuffles messages, destroying cache locality and burning tokens.
 
-**Cost breakdown** (Anthropic pricing: $3/MTok input, $0.30/MTok cache read, $3.75/MTok cache write, $15/MTok output):
+<p align="center">
+  <picture>
+    <img src="docs/benchmarks/cost-quality.svg" alt="Cost vs quality scatter plot" width="550">
+  </picture>
+</p>
 
-| | Input | Cache reads | Cache writes | Output | **Total** |
-|--|------:|------------:|-------------:|-------:|----------:|
-| Leviath | $0.00 | $0.03 | $7.97 | $1.17 | **$9.16** |
-| Flat | $77.35 | $0.13 | $0.01 | $2.49 | **$79.97** |
+<details>
+<summary><b>Detailed efficiency breakdown</b></summary>
 
-Leviath's structured regions create a stable prefix that Anthropic's prompt caching locks onto — 91K tokens served from cache at 10× cheaper than fresh input. The flat baseline's sliding window constantly reshuffles messages, destroying cache locality (1.65% hit rate vs. near-100%).
+<p align="center">
+  <picture>
+    <img src="docs/benchmarks/efficiency.svg" alt="Efficiency comparison — cost, tool calls, runtime" width="750">
+  </picture>
+</p>
+
+</details>
 
 **Resource efficiency** — ECS engine vs. process-per-agent:
 
@@ -203,9 +209,7 @@ Leviath's structured regions create a stable prefix that Anthropic's prompt cach
 | Per-agent overhead | <1 MB | Full process clone |
 | Spawn latency | <1 ms | ~2 s |
 
-> ¹ Leviath uses a two-stage blueprint (implement → test/fix loop) to match the flat baseline's natural test-and-iterate behavior. Test counts differ because both agents write their own tests — quality is measured by pass rate, not test count.
->
-> **Methodology:** Benchmarks run from [leviath-benchmarks](https://github.com/Sun-Forge-AI/leviath-benchmarks) (private). The flat baseline is an independent Rust binary calling the same Anthropic API with the same tools and system prompt — no Leviath dependency, no shared code. Both agents receive identical seed files and task descriptions. Output quality is verified by running each agent's test suite post-completion — raw test results are included in benchmark JSON.
+> **Methodology:** Results are averaged across multiple independent runs. Quality is measured by 69 hidden validation tests covering 13 categories (happy path, schema validation, auth, rate limiting, DLQ, etc.) that neither agent sees during the task. The flat baseline is an independent Rust binary calling the same Anthropic API with the same tools — no Leviath dependency, no shared code. Both receive identical seed files and task descriptions. Full methodology and raw data: [leviath-benchmarks](https://github.com/Sun-Forge-AI/leviath-benchmarks).
 
 ## 🤖 Pre-built Agents
 
