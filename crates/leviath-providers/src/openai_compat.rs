@@ -984,6 +984,225 @@ mod tests {
         assert_eq!(chunk.delta, "ok");
     }
 
+    // ─── MessageContent::Blocks code paths in build_openai_request_body ────
+
+    #[test]
+    fn build_request_body_blocks_tool_use_with_text() {
+        let req = InferenceRequest {
+            system: vec![],
+            messages: vec![Message {
+                role: "assistant".into(),
+                content: MessageContent::Blocks(vec![
+                    ContentBlock::Text {
+                        text: "Let me call a tool.".into(),
+                    },
+                    ContentBlock::ToolUse {
+                        id: "call_1".into(),
+                        name: "search".into(),
+                        input: serde_json::json!({"query": "rust"}),
+                    },
+                ]),
+                cache_breakpoint: false,
+            }],
+            model: "gpt-4".into(),
+            max_tokens: 1024,
+            temperature: 0.5,
+            tools: vec![],
+            extra: serde_json::json!({}),
+        };
+        let body = build_openai_request_body(&req);
+        let messages = body["messages"].as_array().unwrap();
+        assert_eq!(messages.len(), 1);
+        let msg = &messages[0];
+        assert_eq!(msg["role"], "assistant");
+        assert_eq!(msg["content"], "Let me call a tool.");
+        let tool_calls = msg["tool_calls"].as_array().unwrap();
+        assert_eq!(tool_calls.len(), 1);
+        assert_eq!(tool_calls[0]["id"], "call_1");
+        assert_eq!(tool_calls[0]["type"], "function");
+        assert_eq!(tool_calls[0]["function"]["name"], "search");
+        // arguments is serialized as a string
+        let args: serde_json::Value =
+            serde_json::from_str(tool_calls[0]["function"]["arguments"].as_str().unwrap()).unwrap();
+        assert_eq!(args["query"], "rust");
+    }
+
+    #[test]
+    fn build_request_body_blocks_tool_use_without_text() {
+        let req = InferenceRequest {
+            system: vec![],
+            messages: vec![Message {
+                role: "assistant".into(),
+                content: MessageContent::Blocks(vec![ContentBlock::ToolUse {
+                    id: "call_2".into(),
+                    name: "write_file".into(),
+                    input: serde_json::json!({"path": "/tmp/a.txt"}),
+                }]),
+                cache_breakpoint: false,
+            }],
+            model: "gpt-4".into(),
+            max_tokens: 512,
+            temperature: 0.0,
+            tools: vec![],
+            extra: serde_json::json!({}),
+        };
+        let body = build_openai_request_body(&req);
+        let msg = &body["messages"].as_array().unwrap()[0];
+        assert_eq!(msg["role"], "assistant");
+        // No text content → content key should be absent
+        assert!(msg.get("content").is_none());
+        assert_eq!(msg["tool_calls"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn build_request_body_blocks_tool_result() {
+        let req = InferenceRequest {
+            system: vec![],
+            messages: vec![Message {
+                role: "user".into(),
+                content: MessageContent::Blocks(vec![
+                    ContentBlock::ToolResult {
+                        tool_use_id: "call_1".into(),
+                        content: "result A".into(),
+                        is_error: false,
+                    },
+                    ContentBlock::ToolResult {
+                        tool_use_id: "call_2".into(),
+                        content: "result B".into(),
+                        is_error: true,
+                    },
+                ]),
+                cache_breakpoint: false,
+            }],
+            model: "gpt-4".into(),
+            max_tokens: 1024,
+            temperature: 0.5,
+            tools: vec![],
+            extra: serde_json::json!({}),
+        };
+        let body = build_openai_request_body(&req);
+        let messages = body["messages"].as_array().unwrap();
+        // Each tool result becomes a separate "tool" role message
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0]["role"], "tool");
+        assert_eq!(messages[0]["tool_call_id"], "call_1");
+        assert_eq!(messages[0]["content"], "result A");
+        assert_eq!(messages[1]["role"], "tool");
+        assert_eq!(messages[1]["tool_call_id"], "call_2");
+        assert_eq!(messages[1]["content"], "result B");
+    }
+
+    #[test]
+    fn build_request_body_blocks_text_only() {
+        let req = InferenceRequest {
+            system: vec![],
+            messages: vec![Message {
+                role: "user".into(),
+                content: MessageContent::Blocks(vec![
+                    ContentBlock::Text {
+                        text: "Hello ".into(),
+                    },
+                    ContentBlock::Text {
+                        text: "world".into(),
+                    },
+                ]),
+                cache_breakpoint: false,
+            }],
+            model: "gpt-4".into(),
+            max_tokens: 256,
+            temperature: 0.5,
+            tools: vec![],
+            extra: serde_json::json!({}),
+        };
+        let body = build_openai_request_body(&req);
+        let messages = body["messages"].as_array().unwrap();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0]["role"], "user");
+        assert_eq!(messages[0]["content"], "Hello world");
+    }
+
+    #[test]
+    fn build_request_body_system_blocks_prepended() {
+        let req = InferenceRequest {
+            system: vec![
+                crate::provider::SystemBlock {
+                    text: "You are helpful.".into(),
+                    cache_hint: leviath_core::CacheHint::Always,
+                },
+                crate::provider::SystemBlock {
+                    text: "Be concise.".into(),
+                    cache_hint: leviath_core::CacheHint::Always,
+                },
+            ],
+            messages: vec![Message {
+                role: "user".into(),
+                content: "Hi".into(),
+                cache_breakpoint: false,
+            }],
+            model: "gpt-4".into(),
+            max_tokens: 100,
+            temperature: 0.0,
+            tools: vec![],
+            extra: serde_json::json!({}),
+        };
+        let body = build_openai_request_body(&req);
+        let messages = body["messages"].as_array().unwrap();
+        // 2 system blocks + 1 user message
+        assert_eq!(messages.len(), 3);
+        assert_eq!(messages[0]["role"], "system");
+        assert_eq!(messages[0]["content"], "You are helpful.");
+        assert_eq!(messages[1]["role"], "system");
+        assert_eq!(messages[1]["content"], "Be concise.");
+        assert_eq!(messages[2]["role"], "user");
+        assert_eq!(messages[2]["content"], "Hi");
+    }
+
+    #[test]
+    fn parse_response_tool_call_no_function_key() {
+        let body = serde_json::json!({
+            "choices": [{
+                "message": {
+                    "content": "",
+                    "tool_calls": [{
+                        "id": "call_x"
+                    }]
+                },
+                "finish_reason": "tool_calls"
+            }],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1}
+        });
+        let resp = parse_openai_response(&body).unwrap();
+        assert_eq!(resp.tool_calls.len(), 1);
+        // function defaults to null, so name and arguments use defaults
+        assert_eq!(resp.tool_calls[0].id, "call_x");
+        assert_eq!(resp.tool_calls[0].name, "");
+        assert!(resp.tool_calls[0].arguments.is_object());
+    }
+
+    #[test]
+    fn parse_response_tool_call_no_id_field() {
+        let body = serde_json::json!({
+            "choices": [{
+                "message": {
+                    "content": "",
+                    "tool_calls": [{
+                        "function": {
+                            "name": "do_thing",
+                            "arguments": "{\"a\":1}"
+                        }
+                    }]
+                },
+                "finish_reason": "tool_calls"
+            }],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1}
+        });
+        let resp = parse_openai_response(&body).unwrap();
+        assert_eq!(resp.tool_calls.len(), 1);
+        assert_eq!(resp.tool_calls[0].id, "");
+        assert_eq!(resp.tool_calls[0].name, "do_thing");
+        assert_eq!(resp.tool_calls[0].arguments["a"], 1);
+    }
+
     /// Declares a `Content-Length` far larger than the bytes actually sent,
     /// then closes the connection -- forcing a genuine `reqwest::Error` when
     /// the byte stream itself is polled (not just `.text()`), so

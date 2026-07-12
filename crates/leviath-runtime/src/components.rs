@@ -1988,6 +1988,504 @@ mod tests {
         assert!(has_result, "Valid tool_result should remain");
     }
 
+    // ─── assemble() region kind coverage ──────────────────────────────────
+
+    #[test]
+    fn test_assemble_compact_history_region_produces_system_block_always() {
+        let mut window = ContextWindow::new(100_000);
+        let mut region = Region::new(
+            "history".to_string(),
+            RegionKind::CompactHistory {
+                source_region: "conv".to_string(),
+            },
+            10_000,
+        );
+        region
+            .add_entry("summary of earlier conversation".to_string(), 50)
+            .unwrap();
+        window.add_region(region);
+
+        let assembled = window.assemble();
+
+        assert_eq!(assembled.system_blocks.len(), 1);
+        assert_eq!(
+            assembled.system_blocks[0].text,
+            "summary of earlier conversation"
+        );
+        assert_eq!(
+            assembled.system_blocks[0].cache_hint,
+            leviath_core::CacheHint::Always
+        );
+    }
+
+    #[test]
+    fn test_assemble_compacting_region_produces_system_block_until_changed() {
+        let mut window = ContextWindow::new(100_000);
+        let mut region = Region::new(
+            "impl".to_string(),
+            RegionKind::Compacting {
+                threshold_tokens: 500,
+            },
+            10_000,
+        );
+        region
+            .add_entry("implementation details".to_string(), 50)
+            .unwrap();
+        window.add_region(region);
+
+        let assembled = window.assemble();
+
+        assert_eq!(assembled.system_blocks.len(), 1);
+        assert_eq!(
+            assembled.system_blocks[0].text,
+            "[impl]:\nimplementation details"
+        );
+        assert_eq!(
+            assembled.system_blocks[0].cache_hint,
+            leviath_core::CacheHint::UntilChanged
+        );
+    }
+
+    #[test]
+    fn test_assemble_temporary_region_produces_system_block_never() {
+        let mut window = ContextWindow::new(100_000);
+        let mut region = Region::new("scratch".to_string(), RegionKind::Temporary, 10_000);
+        region.add_entry("temp data".to_string(), 20).unwrap();
+        window.add_region(region);
+
+        let assembled = window.assemble();
+
+        assert_eq!(assembled.system_blocks.len(), 1);
+        assert_eq!(assembled.system_blocks[0].text, "[scratch]:\ntemp data");
+        assert_eq!(
+            assembled.system_blocks[0].cache_hint,
+            leviath_core::CacheHint::Never
+        );
+    }
+
+    #[test]
+    fn test_assemble_clearable_region_produces_system_block_never() {
+        let mut window = ContextWindow::new(100_000);
+        let mut region = Region::new("cache".to_string(), RegionKind::Clearable, 10_000);
+        region.add_entry("clearable data".to_string(), 20).unwrap();
+        window.add_region(region);
+
+        let assembled = window.assemble();
+
+        assert_eq!(assembled.system_blocks.len(), 1);
+        assert_eq!(assembled.system_blocks[0].text, "[cache]:\nclearable data");
+        assert_eq!(
+            assembled.system_blocks[0].cache_hint,
+            leviath_core::CacheHint::Never
+        );
+    }
+
+    // ─── assemble() EntryKind::Text prefix parsing ────────────────────────
+
+    #[test]
+    fn test_assemble_text_entry_with_assistant_prefix() {
+        let mut window = ContextWindow::new(100_000);
+        let region = Region::new(
+            "conv".to_string(),
+            RegionKind::SlidingWindow { max_items: 100 },
+            50_000,
+        );
+        window.add_region(region);
+
+        window
+            .add_typed_entry(
+                "conv",
+                leviath_core::EntryKind::Text,
+                "Assistant: I can help with that.".to_string(),
+                10,
+            )
+            .unwrap();
+
+        let assembled = window.assemble();
+
+        let assistant_msgs: Vec<_> = assembled
+            .messages
+            .iter()
+            .filter(|m| m.role == "assistant")
+            .collect();
+        assert_eq!(assistant_msgs.len(), 1);
+        assert_eq!(assistant_msgs[0].content.as_text(), "I can help with that.");
+    }
+
+    #[test]
+    fn test_assemble_text_entry_with_user_prefix() {
+        let mut window = ContextWindow::new(100_000);
+        let region = Region::new(
+            "conv".to_string(),
+            RegionKind::SlidingWindow { max_items: 100 },
+            50_000,
+        );
+        window.add_region(region);
+
+        window
+            .add_typed_entry(
+                "conv",
+                leviath_core::EntryKind::Text,
+                "User: What is Rust?".to_string(),
+                10,
+            )
+            .unwrap();
+
+        let assembled = window.assemble();
+
+        let user_msgs: Vec<_> = assembled
+            .messages
+            .iter()
+            .filter(|m| m.role == "user")
+            .collect();
+        assert_eq!(user_msgs.len(), 1);
+        assert_eq!(user_msgs[0].content.as_text(), "What is Rust?");
+    }
+
+    #[test]
+    fn test_assemble_text_entry_without_prefix_defaults_to_user() {
+        let mut window = ContextWindow::new(100_000);
+        let region = Region::new(
+            "conv".to_string(),
+            RegionKind::SlidingWindow { max_items: 100 },
+            50_000,
+        );
+        window.add_region(region);
+
+        window
+            .add_typed_entry(
+                "conv",
+                leviath_core::EntryKind::Text,
+                "some plain text".to_string(),
+                10,
+            )
+            .unwrap();
+
+        let assembled = window.assemble();
+
+        let user_msgs: Vec<_> = assembled
+            .messages
+            .iter()
+            .filter(|m| m.role == "user")
+            .collect();
+        assert_eq!(user_msgs.len(), 1);
+        assert_eq!(user_msgs[0].content.as_text(), "some plain text");
+    }
+
+    // ─── assemble() AssistantTurn variants ────────────────────────────────
+
+    #[test]
+    fn test_assemble_assistant_turn_with_text_and_tool_calls() {
+        let mut window = ContextWindow::new(100_000);
+        let region = Region::new(
+            "conv".to_string(),
+            RegionKind::SlidingWindow { max_items: 100 },
+            50_000,
+        );
+        window.add_region(region);
+
+        // User message first
+        window
+            .add_typed_entry(
+                "conv",
+                leviath_core::EntryKind::UserMessage,
+                "Read my file".to_string(),
+                10,
+            )
+            .unwrap();
+
+        // Assistant with text + tool_calls
+        window
+            .add_typed_entry(
+                "conv",
+                leviath_core::EntryKind::AssistantTurn {
+                    tool_calls: vec![leviath_core::SerializedToolCall {
+                        id: "tc_a".to_string(),
+                        name: "read_file".to_string(),
+                        arguments: serde_json::json!({"path": "foo.rs"}),
+                    }],
+                },
+                "Sure, let me read it.".to_string(),
+                20,
+            )
+            .unwrap();
+
+        // Matching tool result
+        window
+            .add_typed_entry(
+                "conv",
+                leviath_core::EntryKind::ToolResult {
+                    tool_call_id: "tc_a".to_string(),
+                    tool_name: "read_file".to_string(),
+                    is_error: false,
+                },
+                "fn main() {}".to_string(),
+                10,
+            )
+            .unwrap();
+
+        let assembled = window.assemble();
+
+        // Find the assistant message with blocks
+        let assistant_msg = assembled
+            .messages
+            .iter()
+            .find(|m| m.role == "assistant")
+            .expect("should have assistant message");
+
+        if let leviath_providers::MessageContent::Blocks(blocks) = &assistant_msg.content {
+            // First block should be Text
+            assert!(
+                matches!(&blocks[0], leviath_providers::ContentBlock::Text { text } if text == "Sure, let me read it."),
+                "First block should be Text with the assistant's message"
+            );
+            // Second block should be ToolUse
+            assert!(
+                matches!(&blocks[1], leviath_providers::ContentBlock::ToolUse { id, name, .. } if id == "tc_a" && name == "read_file"),
+                "Second block should be ToolUse"
+            );
+            assert_eq!(blocks.len(), 2);
+        } else {
+            panic!("Expected Blocks content for assistant turn with tool calls");
+        }
+    }
+
+    #[test]
+    fn test_assemble_assistant_turn_no_text_only_tool_calls() {
+        let mut window = ContextWindow::new(100_000);
+        let region = Region::new(
+            "conv".to_string(),
+            RegionKind::SlidingWindow { max_items: 100 },
+            50_000,
+        );
+        window.add_region(region);
+
+        // User message
+        window
+            .add_typed_entry(
+                "conv",
+                leviath_core::EntryKind::UserMessage,
+                "Do it".to_string(),
+                10,
+            )
+            .unwrap();
+
+        // Assistant with empty text + tool_calls
+        window
+            .add_typed_entry(
+                "conv",
+                leviath_core::EntryKind::AssistantTurn {
+                    tool_calls: vec![leviath_core::SerializedToolCall {
+                        id: "tc_b".to_string(),
+                        name: "bash".to_string(),
+                        arguments: serde_json::json!({"cmd": "ls"}),
+                    }],
+                },
+                "".to_string(),
+                10,
+            )
+            .unwrap();
+
+        // Matching tool result
+        window
+            .add_typed_entry(
+                "conv",
+                leviath_core::EntryKind::ToolResult {
+                    tool_call_id: "tc_b".to_string(),
+                    tool_name: "bash".to_string(),
+                    is_error: false,
+                },
+                "file1.rs\nfile2.rs".to_string(),
+                10,
+            )
+            .unwrap();
+
+        let assembled = window.assemble();
+
+        let assistant_msg = assembled
+            .messages
+            .iter()
+            .find(|m| m.role == "assistant")
+            .expect("should have assistant message");
+
+        if let leviath_providers::MessageContent::Blocks(blocks) = &assistant_msg.content {
+            // Should only have ToolUse, no Text block
+            assert_eq!(blocks.len(), 1);
+            assert!(
+                matches!(&blocks[0], leviath_providers::ContentBlock::ToolUse { id, .. } if id == "tc_b"),
+                "Should have only ToolUse block, no Text block for empty content"
+            );
+        } else {
+            panic!("Expected Blocks content");
+        }
+    }
+
+    // ─── assemble() consecutive ToolResults flushed ───────────────────────
+
+    #[test]
+    fn test_assemble_consecutive_tool_results_flushed_on_non_tool_result() {
+        let mut window = ContextWindow::new(100_000);
+        let region = Region::new(
+            "conv".to_string(),
+            RegionKind::SlidingWindow { max_items: 100 },
+            50_000,
+        );
+        window.add_region(region);
+
+        // User message
+        window
+            .add_typed_entry(
+                "conv",
+                leviath_core::EntryKind::UserMessage,
+                "Run two tools".to_string(),
+                10,
+            )
+            .unwrap();
+
+        // Assistant with two tool calls
+        window
+            .add_typed_entry(
+                "conv",
+                leviath_core::EntryKind::AssistantTurn {
+                    tool_calls: vec![
+                        leviath_core::SerializedToolCall {
+                            id: "tc_1".to_string(),
+                            name: "read_file".to_string(),
+                            arguments: serde_json::json!({"path": "a.rs"}),
+                        },
+                        leviath_core::SerializedToolCall {
+                            id: "tc_2".to_string(),
+                            name: "read_file".to_string(),
+                            arguments: serde_json::json!({"path": "b.rs"}),
+                        },
+                    ],
+                },
+                "".to_string(),
+                10,
+            )
+            .unwrap();
+
+        // Two consecutive ToolResults
+        window
+            .add_typed_entry(
+                "conv",
+                leviath_core::EntryKind::ToolResult {
+                    tool_call_id: "tc_1".to_string(),
+                    tool_name: "read_file".to_string(),
+                    is_error: false,
+                },
+                "content of a.rs".to_string(),
+                10,
+            )
+            .unwrap();
+        window
+            .add_typed_entry(
+                "conv",
+                leviath_core::EntryKind::ToolResult {
+                    tool_call_id: "tc_2".to_string(),
+                    tool_name: "read_file".to_string(),
+                    is_error: false,
+                },
+                "content of b.rs".to_string(),
+                10,
+            )
+            .unwrap();
+
+        // Then a UserMessage (should flush the pending tool results first)
+        window
+            .add_typed_entry(
+                "conv",
+                leviath_core::EntryKind::UserMessage,
+                "Now fix the bug".to_string(),
+                10,
+            )
+            .unwrap();
+
+        let assembled = window.assemble();
+
+        // Messages should be: user("Run two tools"), assistant(tool_uses),
+        // user(tool_result x2), user("Now fix the bug")
+        assert_eq!(assembled.messages.len(), 4);
+
+        // The third message should be a user message with two ToolResult blocks
+        let tool_result_msg = &assembled.messages[2];
+        assert_eq!(tool_result_msg.role, "user");
+        if let leviath_providers::MessageContent::Blocks(blocks) = &tool_result_msg.content {
+            assert_eq!(blocks.len(), 2);
+            assert!(matches!(
+                &blocks[0],
+                leviath_providers::ContentBlock::ToolResult { tool_use_id, .. } if tool_use_id == "tc_1"
+            ));
+            assert!(matches!(
+                &blocks[1],
+                leviath_providers::ContentBlock::ToolResult { tool_use_id, .. } if tool_use_id == "tc_2"
+            ));
+        } else {
+            panic!("Expected Blocks content for merged tool results");
+        }
+
+        // The fourth message should be the user follow-up
+        assert_eq!(assembled.messages[3].role, "user");
+        assert_eq!(assembled.messages[3].content.as_text(), "Now fix the bug");
+    }
+
+    // ─── assemble() "Begin." fallback ─────────────────────────────────────
+
+    #[test]
+    fn test_assemble_injects_begin_when_no_user_messages() {
+        let mut window = ContextWindow::new(100_000);
+        // Only a Pinned region, no SlidingWindow with user messages
+        let mut pinned = Region::new("system".to_string(), RegionKind::Pinned, 10_000);
+        pinned
+            .add_entry("You are a helpful assistant.".to_string(), 20)
+            .unwrap();
+        window.add_region(pinned);
+
+        let assembled = window.assemble();
+
+        // Should have injected a "Begin." fallback user message
+        assert_eq!(assembled.messages.len(), 1);
+        assert_eq!(assembled.messages[0].role, "user");
+        assert_eq!(assembled.messages[0].content.as_text(), "Begin.");
+    }
+
+    // ─── add_typed_entry / add_typed_tainted_to_region error paths ────────
+
+    #[test]
+    fn test_add_typed_entry_to_nonexistent_region() {
+        let mut window = ContextWindow::new(10000);
+        let result = window.add_typed_entry(
+            "nonexistent",
+            leviath_core::EntryKind::UserMessage,
+            "hello".to_string(),
+            10,
+        );
+        assert!(result.is_err());
+        let err_str = result.unwrap_err().to_string();
+        assert!(
+            err_str.contains("nonexistent"),
+            "Error should mention the missing region name"
+        );
+    }
+
+    #[test]
+    fn test_add_typed_tainted_to_nonexistent_region() {
+        let mut window = ContextWindow::new(10000);
+        let result = window.add_typed_tainted_to_region(
+            "ghost",
+            leviath_core::EntryKind::UserMessage,
+            "data".to_string(),
+            10,
+            leviath_core::TaintLevel::Public,
+        );
+        assert!(result.is_err());
+        let err_str = result.unwrap_err().to_string();
+        assert!(
+            err_str.contains("ghost"),
+            "Error should mention the missing region name"
+        );
+    }
+
     #[test]
     fn test_assemble_tool_result_before_any_tool_use() {
         // Edge case: tool_result appears in context but no tool_use exists at all

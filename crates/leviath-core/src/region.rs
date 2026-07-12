@@ -1321,4 +1321,337 @@ mod tests {
         assert_eq!(region.content.len(), 1);
         assert_eq!(region.taint_level(), None); // no tracking
     }
+
+    // ─── turn_group_size_at ────────────────────────────────────────────────
+
+    #[test]
+    fn test_turn_group_size_at_assistant_with_tool_results() {
+        let mut region = Region::new("conv".to_string(), RegionKind::Temporary, 50000);
+        region
+            .add_typed_entry(
+                "assistant response".to_string(),
+                10,
+                EntryKind::AssistantTurn {
+                    tool_calls: vec![
+                        SerializedToolCall {
+                            id: "tc_1".to_string(),
+                            name: "read_file".to_string(),
+                            arguments: serde_json::json!({}),
+                        },
+                        SerializedToolCall {
+                            id: "tc_2".to_string(),
+                            name: "write_file".to_string(),
+                            arguments: serde_json::json!({}),
+                        },
+                    ],
+                },
+            )
+            .unwrap();
+        region
+            .add_typed_entry(
+                "result 1".to_string(),
+                5,
+                EntryKind::ToolResult {
+                    tool_call_id: "tc_1".to_string(),
+                    tool_name: "read_file".to_string(),
+                    is_error: false,
+                },
+            )
+            .unwrap();
+        region
+            .add_typed_entry(
+                "result 2".to_string(),
+                5,
+                EntryKind::ToolResult {
+                    tool_call_id: "tc_2".to_string(),
+                    tool_name: "write_file".to_string(),
+                    is_error: false,
+                },
+            )
+            .unwrap();
+
+        assert_eq!(region.turn_group_size_at(0), 3);
+    }
+
+    #[test]
+    fn test_turn_group_size_at_assistant_at_end() {
+        let mut region = Region::new("conv".to_string(), RegionKind::Temporary, 50000);
+        region
+            .add_typed_entry(
+                "assistant with no tools".to_string(),
+                10,
+                EntryKind::AssistantTurn { tool_calls: vec![] },
+            )
+            .unwrap();
+
+        assert_eq!(region.turn_group_size_at(0), 1);
+    }
+
+    #[test]
+    fn test_turn_group_size_at_out_of_bounds() {
+        let region = Region::new("conv".to_string(), RegionKind::Temporary, 50000);
+        assert_eq!(region.turn_group_size_at(0), 0);
+        assert_eq!(region.turn_group_size_at(99), 0);
+    }
+
+    #[test]
+    fn test_turn_group_size_at_non_assistant_entries() {
+        let mut region = Region::new("conv".to_string(), RegionKind::Temporary, 50000);
+        region
+            .add_typed_entry("hello".to_string(), 5, EntryKind::Text)
+            .unwrap();
+        region
+            .add_typed_entry("hi".to_string(), 5, EntryKind::UserMessage)
+            .unwrap();
+        region
+            .add_typed_entry(
+                "orphan result".to_string(),
+                5,
+                EntryKind::ToolResult {
+                    tool_call_id: "tc_x".to_string(),
+                    tool_name: "tool".to_string(),
+                    is_error: false,
+                },
+            )
+            .unwrap();
+
+        assert_eq!(region.turn_group_size_at(0), 1); // Text
+        assert_eq!(region.turn_group_size_at(1), 1); // UserMessage
+        assert_eq!(region.turn_group_size_at(2), 1); // ToolResult (orphan)
+    }
+
+    // ─── remove_oldest with turn group eviction ────────────────────────────
+
+    #[test]
+    fn test_remove_oldest_evicts_entire_turn_group() {
+        let mut region = Region::new("conv".to_string(), RegionKind::Temporary, 50000);
+        // AssistantTurn with 2 tool calls
+        region
+            .add_typed_entry(
+                "assistant".to_string(),
+                100,
+                EntryKind::AssistantTurn {
+                    tool_calls: vec![
+                        SerializedToolCall {
+                            id: "tc_1".to_string(),
+                            name: "read_file".to_string(),
+                            arguments: serde_json::json!({}),
+                        },
+                        SerializedToolCall {
+                            id: "tc_2".to_string(),
+                            name: "list_dir".to_string(),
+                            arguments: serde_json::json!({}),
+                        },
+                    ],
+                },
+            )
+            .unwrap();
+        region
+            .add_typed_entry(
+                "result 1".to_string(),
+                30,
+                EntryKind::ToolResult {
+                    tool_call_id: "tc_1".to_string(),
+                    tool_name: "read_file".to_string(),
+                    is_error: false,
+                },
+            )
+            .unwrap();
+        region
+            .add_typed_entry(
+                "result 2".to_string(),
+                20,
+                EntryKind::ToolResult {
+                    tool_call_id: "tc_2".to_string(),
+                    tool_name: "list_dir".to_string(),
+                    is_error: false,
+                },
+            )
+            .unwrap();
+        // A trailing user message that should survive
+        region
+            .add_typed_entry("user msg".to_string(), 10, EntryKind::UserMessage)
+            .unwrap();
+
+        assert_eq!(region.entry_count(), 4);
+        assert_eq!(region.current_tokens, 160);
+
+        let removed = region.remove_oldest().unwrap();
+        // The returned entry is the AssistantTurn, with tokens adjusted to
+        // include the extra tokens from the 2 ToolResult entries.
+        assert_eq!(removed.content, "assistant");
+        assert_eq!(removed.tokens, 100 + 30 + 20); // 150
+                                                   // Only the user message remains
+        assert_eq!(region.entry_count(), 1);
+        assert_eq!(region.content[0].content, "user msg");
+        assert_eq!(region.current_tokens, 10);
+    }
+
+    // ─── remove_oldest with taint tracking and turn group ──────────────────
+
+    #[test]
+    fn test_remove_oldest_turn_group_calls_taint_remove_for_each_entry() {
+        let mut region =
+            Region::new("conv".to_string(), RegionKind::Temporary, 50000).with_taint_tracking();
+
+        // AssistantTurn (Private) + 1 ToolResult (Internal) + 1 trailing Public entry
+        region
+            .add_typed_tainted_entry(
+                "assistant".to_string(),
+                10,
+                EntryKind::AssistantTurn {
+                    tool_calls: vec![SerializedToolCall {
+                        id: "tc_1".to_string(),
+                        name: "tool".to_string(),
+                        arguments: serde_json::json!({}),
+                    }],
+                },
+                crate::taint::TaintLevel::Private,
+            )
+            .unwrap();
+        region
+            .add_typed_tainted_entry(
+                "result".to_string(),
+                5,
+                EntryKind::ToolResult {
+                    tool_call_id: "tc_1".to_string(),
+                    tool_name: "tool".to_string(),
+                    is_error: false,
+                },
+                crate::taint::TaintLevel::Internal,
+            )
+            .unwrap();
+        region
+            .add_tainted_entry(
+                "public stuff".to_string(),
+                5,
+                crate::taint::TaintLevel::Public,
+            )
+            .unwrap();
+
+        assert_eq!(
+            region.taint_level(),
+            Some(crate::taint::TaintLevel::Private)
+        );
+        assert_eq!(region.taint.as_ref().unwrap().entry_count(), 3);
+
+        // Evict the turn group (AssistantTurn + ToolResult)
+        let removed = region.remove_oldest().unwrap();
+        assert_eq!(removed.content, "assistant");
+        assert_eq!(region.entry_count(), 1);
+        // Taint should have called remove_oldest twice (once per group member),
+        // leaving only the Public entry's taint.
+        assert_eq!(region.taint.as_ref().unwrap().entry_count(), 1);
+        assert_eq!(region.taint_level(), Some(crate::taint::TaintLevel::Public));
+    }
+
+    // ─── enforce_sliding_window with turn group ────────────────────────────
+
+    #[test]
+    fn test_sliding_window_evicts_entire_turn_group() {
+        let mut region = Region::new(
+            "conv".to_string(),
+            RegionKind::SlidingWindow { max_items: 3 },
+            50000,
+        );
+
+        // Add an AssistantTurn + 2 ToolResults = 3 entries (fills the window)
+        region
+            .add_typed_entry(
+                "assistant".to_string(),
+                10,
+                EntryKind::AssistantTurn {
+                    tool_calls: vec![
+                        SerializedToolCall {
+                            id: "tc_1".to_string(),
+                            name: "t1".to_string(),
+                            arguments: serde_json::json!({}),
+                        },
+                        SerializedToolCall {
+                            id: "tc_2".to_string(),
+                            name: "t2".to_string(),
+                            arguments: serde_json::json!({}),
+                        },
+                    ],
+                },
+            )
+            .unwrap();
+        region
+            .add_typed_entry(
+                "r1".to_string(),
+                5,
+                EntryKind::ToolResult {
+                    tool_call_id: "tc_1".to_string(),
+                    tool_name: "t1".to_string(),
+                    is_error: false,
+                },
+            )
+            .unwrap();
+        region
+            .add_typed_entry(
+                "r2".to_string(),
+                5,
+                EntryKind::ToolResult {
+                    tool_call_id: "tc_2".to_string(),
+                    tool_name: "t2".to_string(),
+                    is_error: false,
+                },
+            )
+            .unwrap();
+
+        assert_eq!(region.entry_count(), 3);
+
+        // Adding a 4th entry should evict the entire turn group (3 entries)
+        // because the group at index 0 is an AssistantTurn with 2 ToolResults.
+        region
+            .add_typed_entry("user msg".to_string(), 15, EntryKind::UserMessage)
+            .unwrap();
+
+        // After eviction: only the new user message remains
+        assert_eq!(region.entry_count(), 1);
+        assert_eq!(region.content[0].content, "user msg");
+        assert_eq!(region.current_tokens, 15);
+    }
+
+    // ─── add_entry_with_metadata with taint tracking ───────────────────────
+
+    #[test]
+    fn test_add_entry_with_metadata_tracks_taint_as_public() {
+        let mut region =
+            Region::new("data".to_string(), RegionKind::Temporary, 1000).with_taint_tracking();
+
+        region
+            .add_entry_with_metadata("content".to_string(), 10, serde_json::json!({"key": "val"}))
+            .unwrap();
+
+        assert_eq!(region.taint_level(), Some(crate::taint::TaintLevel::Public));
+        assert_eq!(region.taint.as_ref().unwrap().entry_count(), 1);
+        assert_eq!(
+            region.taint.as_ref().unwrap().entry_taint(0),
+            Some(crate::taint::TaintLevel::Public)
+        );
+    }
+
+    // ─── add_typed_entry with taint tracking ───────────────────────────────
+
+    #[test]
+    fn test_add_typed_entry_tracks_taint_as_public() {
+        let mut region =
+            Region::new("conv".to_string(), RegionKind::Temporary, 1000).with_taint_tracking();
+
+        region
+            .add_typed_entry(
+                "assistant response".to_string(),
+                10,
+                EntryKind::AssistantTurn { tool_calls: vec![] },
+            )
+            .unwrap();
+
+        assert_eq!(region.taint_level(), Some(crate::taint::TaintLevel::Public));
+        assert_eq!(region.taint.as_ref().unwrap().entry_count(), 1);
+        assert_eq!(
+            region.taint.as_ref().unwrap().entry_taint(0),
+            Some(crate::taint::TaintLevel::Public)
+        );
+    }
 }

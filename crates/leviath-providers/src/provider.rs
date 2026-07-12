@@ -977,4 +977,70 @@ mod tests {
             std::mem::discriminant(&ProviderError::RateLimitExceeded)
         );
     }
+
+    // ─── build_http_client ─────────────────────────────────────────────────
+
+    #[test]
+    fn build_http_client_with_timeout() {
+        let client = build_http_client(Some(30));
+        // Should successfully build a client; we cannot inspect the timeout
+        // directly, but confirming it doesn't panic is the coverage goal.
+        drop(client);
+    }
+
+    #[test]
+    fn build_http_client_without_timeout() {
+        let client = build_http_client(None);
+        drop(client);
+    }
+
+    // ─── MessageContent::as_text for Blocks variant ────────────────────────
+
+    #[test]
+    fn message_content_as_text_blocks_mixed() {
+        let content = MessageContent::Blocks(vec![
+            ContentBlock::Text {
+                text: "hello ".to_string(),
+            },
+            ContentBlock::ToolUse {
+                id: "call_1".to_string(),
+                name: "search".to_string(),
+                input: serde_json::json!({}),
+            },
+            ContentBlock::Text {
+                text: "world".to_string(),
+            },
+            ContentBlock::ToolResult {
+                tool_use_id: "call_1".to_string(),
+                content: "result".to_string(),
+                is_error: false,
+            },
+        ]);
+        // Only Text blocks are concatenated; ToolUse and ToolResult are skipped.
+        assert_eq!(content.as_text(), "hello world");
+    }
+
+    // ─── MessageContent::from &str ─────────────────────────────────────────
+
+    #[test]
+    fn message_content_from_str_ref() {
+        let content: MessageContent = "hi there".into();
+        match &content {
+            MessageContent::Text(s) => assert_eq!(s, "hi there"),
+            _ => panic!("expected Text variant"),
+        }
+    }
+
+    // ─── FinishReason equality ─────────────────────────────────────────────
+
+    #[test]
+    fn finish_reason_stop_eq_stop() {
+        assert_eq!(FinishReason::Stop, FinishReason::Stop);
+    }
+
+    #[test]
+    fn finish_reason_different_variants_not_eq() {
+        assert_ne!(FinishReason::Stop, FinishReason::Complete);
+        assert_ne!(FinishReason::TokenLimit, FinishReason::ToolCall);
+    }
 }

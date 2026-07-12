@@ -4540,4 +4540,93 @@ mod tests {
         // The "notes" region has Private taint, so overall should be Private
         assert_eq!(w.overall_taint(), Some(leviath_core::TaintLevel::Private));
     }
+
+    // ─── Additional taint wiring coverage ─────────────────────────────────
+
+    #[test]
+    fn enable_entity_taint_tracking_on_missing_entity_is_noop() {
+        let mut engine = AgentEngine::new();
+        // Fabricate an entity that does not exist in the world.
+        let fake_entity = engine.world_mut().spawn_empty().id();
+        engine.world_mut().despawn(fake_entity);
+        // Should not panic when the entity is gone.
+        engine.enable_entity_taint_tracking(fake_entity);
+    }
+
+    #[test]
+    fn configure_taint_sets_gate_and_policy() {
+        let mut engine = AgentEngine::new();
+        let gate = crate::taint::TaintGate::new(leviath_core::SecurityConfig {
+            taint_tracking: true,
+            ..leviath_core::SecurityConfig::default()
+        });
+        let policy = leviath_core::PolicyConfig::default();
+        engine.configure_taint(gate, policy, None);
+        // Gate is active so audit log slice should be available (empty but not
+        // the None-fallback).
+        assert!(engine.taint_gate.is_some());
+        assert!(engine.taint_audit_log().is_empty());
+    }
+
+    #[test]
+    fn taint_audit_log_returns_empty_slice_when_no_gate() {
+        let engine = AgentEngine::new();
+        // No gate configured → returns the static empty fallback.
+        assert!(engine.taint_audit_log().is_empty());
+    }
+
+    #[test]
+    fn clear_taint_removes_gate_and_prompt() {
+        let mut engine = AgentEngine::new();
+        let gate = crate::taint::TaintGate::new(leviath_core::SecurityConfig {
+            taint_tracking: true,
+            ..leviath_core::SecurityConfig::default()
+        });
+        engine.configure_taint(
+            gate,
+            leviath_core::PolicyConfig::default(),
+            Some(Box::new(FixedPrompt(crate::taint::GateResolution::Deny))),
+        );
+        assert!(engine.taint_gate.is_some());
+        assert!(engine.gate_prompt.is_some());
+        engine.clear_taint();
+        assert!(engine.taint_gate.is_none());
+        assert!(engine.gate_prompt.is_none());
+    }
+
+    #[test]
+    fn gate_decisions_classifies_outbound_tool_as_blocked() {
+        // Directly test the synchronous gate_decisions method.
+        let (mut engine, entity) = tainted_engine(crate::taint::GateResolution::Deny);
+        let calls = vec![leviath_providers::ToolCall {
+            id: "call_test".to_string(),
+            name: "shell".to_string(),
+            arguments: serde_json::json!({}),
+        }];
+        let policy = leviath_core::PolicyConfig::default();
+        let decisions = engine.gate_decisions(entity, "test-agent", &policy, &calls);
+        assert_eq!(decisions.len(), 1);
+        // shell is outbound and context is Private → should be blocked.
+        assert!(decisions[0].1.blocked_levels().is_some());
+    }
+
+    #[test]
+    fn gate_decisions_classifies_inbound_tool_as_allowed() {
+        // An inbound tool (read_file) should pass through without blocking.
+        let (mut engine, entity) = tainted_engine_with(
+            "read_file",
+            Some(Box::new(FixedPrompt(crate::taint::GateResolution::Deny))),
+            leviath_core::PolicyConfig::default(),
+        );
+        let calls = vec![leviath_providers::ToolCall {
+            id: "call_read".to_string(),
+            name: "read_file".to_string(),
+            arguments: serde_json::json!({}),
+        }];
+        let policy = leviath_core::PolicyConfig::default();
+        let decisions = engine.gate_decisions(entity, "test-agent", &policy, &calls);
+        assert_eq!(decisions.len(), 1);
+        // read_file is inbound → not blocked.
+        assert!(decisions[0].1.blocked_levels().is_none());
+    }
 }
