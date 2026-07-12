@@ -382,20 +382,10 @@ impl Region {
         if let RegionKind::SlidingWindow { max_items } = &self.kind {
             let max = *max_items;
             while self.content.len() > max {
-                // Evict in turn groups: an AssistantTurn and its following
-                // ToolResults form an atomic unit. Evicting one without the
-                // others leaves orphaned tool_use/tool_result blocks that
-                // providers (especially Anthropic) will reject.
-                let group_size = self.turn_group_size_at(0);
-                for _ in 0..group_size {
-                    if self.content.is_empty() {
-                        break;
-                    }
-                    self.current_tokens -= self.content[0].tokens;
-                    self.content.remove(0);
-                    if let Some(taint) = &mut self.taint {
-                        taint.remove_oldest();
-                    }
+                // Delegate to remove_oldest which handles turn-group-aware
+                // eviction (AssistantTurn + ToolResults as an atomic unit).
+                if self.remove_oldest().is_none() {
+                    break;
                 }
             }
         }
