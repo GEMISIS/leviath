@@ -690,10 +690,56 @@ impl AgentEngine {
         compaction_config: Option<&leviath_core::CompactionConfig>,
         tool_executor: &mut ToolExecutorDyn<'e>,
     ) -> std::result::Result<InferenceResponse, ProviderError> {
+        self.run_inference_loop_filtered_dyn_inner(
+            entity,
+            provider_name,
+            model,
+            tools,
+            max_iterations,
+            tool_filter,
+            compaction_config,
+            tool_executor,
+            None,
+        )
+        .await
+    }
+
+    /// Inner implementation of [`Self::run_inference_loop_filtered_dyn`] with
+    /// optional repetition detection configuration.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn run_inference_loop_filtered_dyn_inner<'e>(
+        &mut self,
+        entity: Entity,
+        provider_name: &str,
+        model: &str,
+        tools: Vec<Tool>,
+        max_iterations: usize,
+        tool_filter: Option<&[String]>,
+        compaction_config: Option<&leviath_core::CompactionConfig>,
+        tool_executor: &mut ToolExecutorDyn<'e>,
+        repetition_config: Option<&leviath_core::RepetitionDetectionConfig>,
+    ) -> std::result::Result<InferenceResponse, ProviderError> {
         let mut last_response = None;
         let mut total_tool_calls: usize = 0;
         let mut text_only_nudges: usize = 0;
         const MAX_TEXT_ONLY_NUDGES: usize = 3;
+
+        // Set up repetition detector from config
+        let rep_config = {
+            let enabled = repetition_config.and_then(|c| c.enabled).unwrap_or(true);
+            let max_repeat = repetition_config
+                .and_then(|c| c.max_repeat_calls)
+                .unwrap_or(3);
+            let max_streak = repetition_config
+                .and_then(|c| c.max_readonly_streak)
+                .unwrap_or(10);
+            crate::repetition::RepetitionConfig {
+                max_repeat_calls: max_repeat,
+                max_readonly_streak: max_streak,
+                enabled,
+            }
+        };
+        let mut repetition_detector = crate::repetition::RepetitionDetector::new(rep_config);
         let mut cumulative_tokens = leviath_providers::TokenUsage {
             prompt_tokens: 0,
             completion_tokens: 0,
@@ -940,6 +986,26 @@ impl AgentEngine {
                 }
             }
             let _ = window; // release borrow before process_messages
+
+            // Feed tool calls into the repetition detector and inject nudges
+            for tc in &tool_calls_snapshot {
+                let args_str = tc.arguments.to_string();
+                if let Some(nudge) = repetition_detector.record_call(&tc.name, &args_str) {
+                    tracing::warn!(
+                        tool_name = %tc.name,
+                        iteration,
+                        "Repetition detected, injecting nudge"
+                    );
+                    let mut window = self.world.get_mut::<ContextWindow>(entity).unwrap();
+                    let nudge_tokens = nudge.len() / 4 + 1;
+                    let _ = window.add_typed_entry(
+                        "conversation",
+                        leviath_core::EntryKind::UserMessage,
+                        nudge,
+                        nudge_tokens,
+                    );
+                }
+            }
 
             // Check for any user messages that arrived during tool execution
             self.process_messages();

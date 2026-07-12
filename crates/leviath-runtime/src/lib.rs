@@ -9,6 +9,7 @@
 pub mod components;
 pub mod engine;
 pub mod pool;
+pub mod repetition;
 pub mod scheduler;
 pub mod systems;
 pub mod taint;

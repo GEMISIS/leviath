@@ -54,6 +54,10 @@ pub struct Blueprint {
     /// Security configuration for taint tracking.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub security: Option<crate::taint::SecurityConfig>,
+
+    /// Repetition detection configuration.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repetition_detection: Option<RepetitionDetectionConfig>,
 }
 
 impl Blueprint {
@@ -77,6 +81,7 @@ impl Blueprint {
             entry_stage: None,
             metadata: HashMap::new(),
             security: None,
+            repetition_detection: None,
         }
     }
 
@@ -249,6 +254,20 @@ impl Blueprint {
     pub fn find_stage(&self, name: &str) -> Option<&Stage> {
         self.stages.iter().find(|s| s.name == name)
     }
+}
+
+/// Configuration for repetition detection in the inference loop.
+///
+/// Controls thresholds for detecting degenerate read loops where agents
+/// call the same tool repeatedly without productive action.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RepetitionDetectionConfig {
+    /// Maximum times the same tool+args combo may repeat before a nudge.
+    pub max_repeat_calls: Option<usize>,
+    /// Maximum consecutive read-only calls with no productive calls in between.
+    pub max_readonly_streak: Option<usize>,
+    /// Whether detection is enabled. Default: true.
+    pub enabled: Option<bool>,
 }
 
 /// Interaction mode for a stage.
