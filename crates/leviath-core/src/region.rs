@@ -1966,4 +1966,144 @@ mod tests {
         assert_eq!(region.content[0].content, "Core identity block");
         assert_eq!(region.current_tokens, 20);
     }
+
+    #[test]
+    fn test_remove_entries_by_prefix_with_taint_tracking() {
+        let mut region =
+            Region::new("system".to_string(), RegionKind::Pinned, 50000).with_taint_tracking();
+        region
+            .add_tainted_entry(
+                "[Stage instructions: Be terse.]".to_string(),
+                10,
+                crate::taint::TaintLevel::Private,
+            )
+            .unwrap();
+        region
+            .add_tainted_entry(
+                "Core identity block".to_string(),
+                20,
+                crate::taint::TaintLevel::Public,
+            )
+            .unwrap();
+        region
+            .add_tainted_entry(
+                "[Stage instructions: Be verbose.]".to_string(),
+                15,
+                crate::taint::TaintLevel::Internal,
+            )
+            .unwrap();
+
+        assert_eq!(region.entry_count(), 3);
+        assert_eq!(
+            region.taint_level(),
+            Some(crate::taint::TaintLevel::Private)
+        );
+
+        region.remove_entries_by_prefix("[Stage instructions:");
+        assert_eq!(region.entry_count(), 1);
+        assert_eq!(region.content[0].content, "Core identity block");
+        assert_eq!(region.current_tokens, 20);
+        // After removing Private and Internal entries, only Public remains
+        assert_eq!(region.taint_level(), Some(crate::taint::TaintLevel::Public));
+        assert_eq!(region.taint.as_ref().unwrap().entry_count(), 1);
+    }
+
+    #[test]
+    fn test_compact_below_threshold_no_flag() {
+        // When entries are <= max_items + compact_count, no flag should be set
+        let mut region = Region::new(
+            "conv".to_string(),
+            RegionKind::SlidingWindow {
+                max_items: 5,
+                eviction_strategy: EvictionStrategy::Compact { compact_count: 3 },
+            },
+            50000,
+        );
+        for i in 0..8 {
+            region.add_entry(format!("msg{}", i), 10).unwrap();
+        }
+        // 8 == max_items(5) + compact_count(3), not >, so no flag
+        assert!(!region.needs_message_compaction);
+        assert_eq!(region.entry_count(), 8);
+    }
+
+    #[test]
+    fn test_bulk_eviction_with_taint_tracking() {
+        let mut region = Region::new(
+            "conv".to_string(),
+            RegionKind::SlidingWindow {
+                max_items: 3,
+                eviction_strategy: EvictionStrategy::Bulk { overflow: 2 },
+            },
+            50000,
+        )
+        .with_taint_tracking();
+
+        // Add 5 entries (3+2): at threshold, no eviction
+        region
+            .add_tainted_entry("private".to_string(), 10, crate::taint::TaintLevel::Private)
+            .unwrap();
+        for i in 1..5 {
+            region
+                .add_tainted_entry(format!("pub{}", i), 10, crate::taint::TaintLevel::Public)
+                .unwrap();
+        }
+        assert_eq!(region.entry_count(), 5);
+
+        // 6th entry triggers bulk eviction to max_items=3
+        region
+            .add_tainted_entry("pub5".to_string(), 10, crate::taint::TaintLevel::Public)
+            .unwrap();
+        assert_eq!(region.entry_count(), 3);
+        // Private entry was evicted, only public remain
+        assert_eq!(region.taint_level(), Some(crate::taint::TaintLevel::Public));
+    }
+
+    #[test]
+    fn test_eviction_strategy_serde_roundtrip() {
+        let bulk = EvictionStrategy::Bulk { overflow: 5 };
+        let json = serde_json::to_string(&bulk).unwrap();
+        let parsed: EvictionStrategy = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, bulk);
+
+        let compact = EvictionStrategy::Compact { compact_count: 10 };
+        let json = serde_json::to_string(&compact).unwrap();
+        let parsed: EvictionStrategy = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, compact);
+
+        let per_item = EvictionStrategy::PerItem;
+        let json = serde_json::to_string(&per_item).unwrap();
+        let parsed: EvictionStrategy = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, per_item);
+    }
+
+    #[test]
+    fn test_sliding_window_kind_equality_with_eviction_strategy() {
+        assert_eq!(
+            RegionKind::SlidingWindow {
+                max_items: 10,
+                eviction_strategy: EvictionStrategy::Bulk { overflow: 3 },
+            },
+            RegionKind::SlidingWindow {
+                max_items: 10,
+                eviction_strategy: EvictionStrategy::Bulk { overflow: 3 },
+            }
+        );
+        assert_ne!(
+            RegionKind::SlidingWindow {
+                max_items: 10,
+                eviction_strategy: EvictionStrategy::PerItem,
+            },
+            RegionKind::SlidingWindow {
+                max_items: 10,
+                eviction_strategy: EvictionStrategy::Bulk { overflow: 3 },
+            }
+        );
+    }
+
+    #[test]
+    fn test_needs_message_compaction_default_false() {
+        let region = Region::new("conv".to_string(), RegionKind::Temporary, 1000);
+        assert!(!region.needs_message_compaction);
+    }
 }

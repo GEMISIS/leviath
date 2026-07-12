@@ -4752,4 +4752,104 @@ mod tests {
         // read_file is inbound → not blocked.
         assert!(decisions[0].1.blocked_levels().is_none());
     }
+
+    #[tokio::test]
+    async fn test_evict_and_compact_removes_needs_compaction_marker() {
+        // After evict_and_compact, the NeedsCompaction component should be removed
+        // even when no compaction is actually needed (only temporary eviction).
+        let mut engine = AgentEngine::new();
+        let entity = engine
+            .world_mut()
+            .spawn({
+                let mut window = ContextWindow::new(1000);
+                let mut temp = leviath_core::Region::new(
+                    "scratch".to_string(),
+                    leviath_core::RegionKind::Temporary,
+                    1000,
+                );
+                temp.add_entry("disposable".to_string(), 950).unwrap();
+                window.add_region(temp);
+                window.current_tokens = 950;
+                window
+            })
+            .id();
+
+        // Manually add a NeedsCompaction marker
+        engine
+            .world_mut()
+            .entity_mut(entity)
+            .insert(NeedsCompaction {
+                regions: vec!["scratch".to_string()],
+            });
+        assert!(engine.world().get::<NeedsCompaction>(entity).is_some());
+
+        let cc = leviath_core::CompactionConfig {
+            provider: "unused".to_string(),
+            model: "test".to_string(),
+            max_summary_tokens: 500,
+            temperature: 0.3,
+            system_prompt: None,
+            user_prompt_template: None,
+        };
+
+        engine.evict_and_compact(entity, &cc).await.unwrap();
+
+        // NeedsCompaction should have been removed
+        assert!(engine.world().get::<NeedsCompaction>(entity).is_none());
+    }
+
+    #[tokio::test]
+    async fn test_compact_region_stores_summary_in_compact_history() {
+        // When a CompactHistory region exists for the source, the summary
+        // should be stored there and the source region should be cleared.
+        let mut registry = ProviderRegistry::new();
+        registry.register(
+            "compact-provider".to_string(),
+            Arc::new(MockProvider::new("compact-provider")),
+        );
+        let mut engine = AgentEngine::with_providers(registry);
+
+        let mut window = ContextWindow::new(10000);
+        let mut compacting = leviath_core::Region::new(
+            "impl".to_string(),
+            leviath_core::RegionKind::Compacting {
+                threshold_tokens: 100,
+            },
+            5000,
+        );
+        compacting
+            .add_entry("detailed analysis here".to_string(), 500)
+            .unwrap();
+        window.add_region(compacting);
+
+        window.add_region(leviath_core::Region::new(
+            "impl_history".to_string(),
+            leviath_core::RegionKind::CompactHistory {
+                source_region: "impl".to_string(),
+            },
+            5000,
+        ));
+        window.current_tokens = 500;
+
+        let entity = engine.world_mut().spawn(window).id();
+
+        let cc = leviath_core::CompactionConfig {
+            provider: "compact-provider".to_string(),
+            model: "test".to_string(),
+            max_summary_tokens: 200,
+            temperature: 0.3,
+            system_prompt: None,
+            user_prompt_template: None,
+        };
+
+        engine.compact_region(entity, "impl", &cc).await.unwrap();
+
+        let w = engine.world().get::<ContextWindow>(entity).unwrap();
+        // Source region should be cleared
+        let impl_region = w.get_region("impl").unwrap();
+        assert!(impl_region.content.is_empty());
+        // History region should have the summary
+        let history = w.get_region("impl_history").unwrap();
+        assert!(!history.content.is_empty());
+    }
 }

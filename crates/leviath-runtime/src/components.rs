@@ -2801,4 +2801,161 @@ mod tests {
             "Fourth system block should be Never"
         );
     }
+
+    // ─── Coverage for ContextWindow typed+tainted methods ─────────────────
+
+    #[test]
+    fn test_add_typed_tainted_to_region_success() {
+        let mut window = ContextWindow::new(10000);
+        let mut region = Region::new(
+            "conv".to_string(),
+            RegionKind::SlidingWindow {
+                max_items: 50,
+                eviction_strategy: EvictionStrategy::PerItem,
+            },
+            5000,
+        );
+        region.enable_taint_tracking();
+        window.add_region(region);
+
+        window
+            .add_typed_tainted_to_region(
+                "conv",
+                leviath_core::EntryKind::ToolResult {
+                    tool_call_id: "tc_1".to_string(),
+                    tool_name: "read_file".to_string(),
+                    is_error: false,
+                },
+                "secret data".to_string(),
+                100,
+                leviath_core::TaintLevel::Private,
+            )
+            .unwrap();
+
+        assert_eq!(window.current_tokens, 100);
+        assert_eq!(
+            window.region_taint("conv"),
+            Some(leviath_core::TaintLevel::Private)
+        );
+    }
+
+    #[test]
+    fn test_add_typed_tainted_to_region_not_found() {
+        let mut window = ContextWindow::new(10000);
+        let result = window.add_typed_tainted_to_region(
+            "nonexistent",
+            leviath_core::EntryKind::Text,
+            "data".to_string(),
+            10,
+            leviath_core::TaintLevel::Public,
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_assemble_consecutive_tool_results_flushed_at_end() {
+        // Tool results at the END of the region (not followed by a non-ToolResult)
+        // should still be flushed into a user message.
+        let mut window = ContextWindow::new(100_000);
+        let region = Region::new(
+            "conv".to_string(),
+            RegionKind::SlidingWindow {
+                max_items: 100,
+                eviction_strategy: EvictionStrategy::PerItem,
+            },
+            50_000,
+        );
+        window.add_region(region);
+
+        // Add user message, then assistant with tool calls, then tool results at end
+        window
+            .add_typed_entry(
+                "conv",
+                leviath_core::EntryKind::UserMessage,
+                "do something".to_string(),
+                10,
+            )
+            .unwrap();
+        window
+            .add_typed_entry(
+                "conv",
+                leviath_core::EntryKind::AssistantTurn {
+                    tool_calls: vec![leviath_core::SerializedToolCall {
+                        id: "tc_1".to_string(),
+                        name: "read_file".to_string(),
+                        arguments: serde_json::json!({"path": "foo.rs"}),
+                    }],
+                },
+                "Let me read that".to_string(),
+                10,
+            )
+            .unwrap();
+        window
+            .add_typed_entry(
+                "conv",
+                leviath_core::EntryKind::ToolResult {
+                    tool_call_id: "tc_1".to_string(),
+                    tool_name: "read_file".to_string(),
+                    is_error: false,
+                },
+                "fn main() {}".to_string(),
+                10,
+            )
+            .unwrap();
+
+        let assembled = window.assemble();
+        // user msg + assistant (with tool_use blocks) + user (with tool_result blocks)
+        assert_eq!(assembled.messages.len(), 3);
+        assert_eq!(assembled.messages[2].role, "user");
+        // The last message should be a Blocks message with ToolResult
+        if let leviath_providers::MessageContent::Blocks(blocks) = &assembled.messages[2].content {
+            assert!(matches!(
+                blocks[0],
+                leviath_providers::ContentBlock::ToolResult { .. }
+            ));
+        } else {
+            panic!("Expected Blocks content for tool result message");
+        }
+    }
+
+    #[test]
+    fn test_assemble_compact_history_with_sliding_prefix_sorting() {
+        // CompactHistory should sort before Compacting/Temporary in system blocks
+        use leviath_core::CacheHint;
+
+        let mut window = ContextWindow::new(100_000);
+
+        let mut temp = Region::new("temp".to_string(), RegionKind::Temporary, 10_000);
+        temp.add_entry("temp data".to_string(), 10).unwrap();
+        window.add_region(temp);
+
+        let mut history = Region::new(
+            "history".to_string(),
+            RegionKind::CompactHistory {
+                source_region: "impl".to_string(),
+            },
+            10_000,
+        );
+        history.add_entry("summary data".to_string(), 10).unwrap();
+        window.add_region(history);
+
+        let assembled = window.assemble();
+        assert_eq!(assembled.system_blocks.len(), 2);
+        // CompactHistory (Always) should come before Temporary (Never)
+        assert_eq!(assembled.system_blocks[0].cache_hint, CacheHint::Always);
+        assert_eq!(assembled.system_blocks[1].cache_hint, CacheHint::Never);
+    }
+
+    #[test]
+    fn test_assemble_empty_regions_skipped() {
+        let mut window = ContextWindow::new(100_000);
+        window.add_region(Region::new(
+            "system".to_string(),
+            RegionKind::Pinned,
+            10_000,
+        ));
+        // Empty pinned region should be skipped
+        let assembled = window.assemble();
+        assert!(assembled.system_blocks.is_empty());
+    }
 }
