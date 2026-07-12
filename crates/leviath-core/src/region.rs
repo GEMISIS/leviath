@@ -439,16 +439,39 @@ impl Region {
 
     /// Remove the oldest entry (for Temporary regions).
     pub fn remove_oldest(&mut self) -> Option<RegionEntry> {
-        if let Some(entry) = self.content.first() {
-            self.current_tokens -= entry.tokens;
+        if self.content.is_empty() {
+            return None;
+        }
+        // Respect turn groups: an AssistantTurn with tool_calls must be
+        // evicted together with its following ToolResult entries to avoid
+        // orphaned tool_use/tool_result blocks that providers reject.
+        let group_size = self.turn_group_size_at(0);
+        let mut first = None;
+        let mut extra_tokens = 0usize;
+        for i in 0..group_size {
+            if self.content.is_empty() {
+                break;
+            }
+            let entry_tokens = self.content[0].tokens;
+            self.current_tokens -= entry_tokens;
             let removed = self.content.remove(0);
             if let Some(taint) = &mut self.taint {
                 taint.remove_oldest();
             }
-            Some(removed)
-        } else {
-            None
+            if i == 0 {
+                first = Some(removed);
+            } else {
+                extra_tokens += entry_tokens;
+            }
         }
+        // Embed extra group tokens in the returned entry so callers that use
+        // `entry.tokens` to adjust their own totals account for the full group.
+        if extra_tokens > 0 {
+            if let Some(ref mut entry) = first {
+                entry.tokens += extra_tokens;
+            }
+        }
+        first
     }
 
     /// Get the number of entries in this region.
