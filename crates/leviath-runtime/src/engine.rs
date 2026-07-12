@@ -685,7 +685,11 @@ impl AgentEngine {
                 response_tokens,
             );
 
-            // Add tool results as typed entries in the messages region
+            // Add tool results as typed entries in the messages region.
+            // These MUST succeed — an AssistantTurn with tool_calls was just
+            // added above, and Anthropic requires every tool_use to have a
+            // matching tool_result. If the region is at its token budget,
+            // truncate the result content rather than silently dropping it.
             for (tool_call_id, result) in &tool_results {
                 let result_text = result.clone();
                 let result_tokens = result_text.len() / 4 + 1;
@@ -697,17 +701,64 @@ impl AgentEngine {
                     .map(|tc| tc.name.clone())
                     .unwrap_or_default();
 
-                // All tool results go in the conversation/messages region
-                let _ = window.add_typed_entry(
-                    "conversation",
-                    leviath_core::EntryKind::ToolResult {
-                        tool_call_id: tool_call_id.clone(),
-                        tool_name,
-                        is_error: false,
-                    },
-                    result_text,
-                    result_tokens,
-                );
+                let kind = leviath_core::EntryKind::ToolResult {
+                    tool_call_id: tool_call_id.clone(),
+                    tool_name,
+                    is_error: false,
+                };
+
+                // Try adding the full result first
+                if window
+                    .add_typed_entry(
+                        "conversation",
+                        kind.clone(),
+                        result_text.clone(),
+                        result_tokens,
+                    )
+                    .is_err()
+                {
+                    // Token budget exceeded — truncate to fit rather than
+                    // dropping (which would orphan the tool_use block).
+                    let available = window
+                        .get_region("conversation")
+                        .map(|r| r.max_tokens.saturating_sub(r.current_tokens))
+                        .unwrap_or(0);
+
+                    let truncated = if available > 100 {
+                        let char_budget = (available - 10) * 4; // rough tokens→chars
+                        let cut = result_text.len().min(char_budget);
+                        format!(
+                            "{}... [truncated, {} chars omitted]",
+                            &result_text[..cut],
+                            result_text.len() - cut
+                        )
+                    } else {
+                        "[tool result truncated — context window full]".to_string()
+                    };
+                    let trunc_tokens = truncated.len() / 4 + 1;
+
+                    if window
+                        .add_typed_entry("conversation", kind, truncated, trunc_tokens)
+                        .is_err()
+                    {
+                        // Last resort: add a minimal placeholder
+                        let placeholder = "[result omitted]".to_string();
+                        let _ = window.add_typed_entry(
+                            "conversation",
+                            leviath_core::EntryKind::ToolResult {
+                                tool_call_id: tool_call_id.clone(),
+                                tool_name: tool_calls_snapshot
+                                    .iter()
+                                    .find(|tc| tc.id == *tool_call_id)
+                                    .map(|tc| tc.name.clone())
+                                    .unwrap_or_default(),
+                                is_error: false,
+                            },
+                            placeholder,
+                            5,
+                        );
+                    }
+                }
             }
             let _ = window; // release borrow before process_messages
 
