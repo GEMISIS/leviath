@@ -2106,4 +2106,44 @@ mod tests {
         let region = Region::new("conv".to_string(), RegionKind::Temporary, 1000);
         assert!(!region.needs_message_compaction);
     }
+
+    // ─── add_typed_entry schema + budget edge cases ───────────────────────
+
+    #[test]
+    fn test_add_typed_entry_validates_schema() {
+        let mut region = Region::new("data".to_string(), RegionKind::Temporary, 1000)
+            .with_schema(RegionSchema::new(ContentFormat::Json));
+        let result = region.add_typed_entry("not json".to_string(), 5, EntryKind::Text);
+        assert!(result.is_err());
+        assert_eq!(region.entry_count(), 0);
+    }
+
+    #[test]
+    fn test_add_typed_entry_checks_budget() {
+        let mut region = Region::new("data".to_string(), RegionKind::Temporary, 10);
+        let result = region.add_typed_entry("too big".to_string(), 20, EntryKind::UserMessage);
+        assert!(result.is_err());
+        assert_eq!(region.entry_count(), 0);
+    }
+
+    #[test]
+    fn test_add_tainted_entry_without_taint_tracking() {
+        // When taint tracking is NOT enabled, the taint level is silently ignored.
+        let mut region = Region::new("data".to_string(), RegionKind::Temporary, 1000);
+        region
+            .add_tainted_entry("data".to_string(), 10, crate::taint::TaintLevel::Private)
+            .unwrap();
+        assert_eq!(region.entry_count(), 1);
+        assert_eq!(region.taint_level(), None);
+    }
+
+    #[test]
+    fn test_remove_entries_by_prefix_no_match() {
+        let mut region = Region::new("system".to_string(), RegionKind::Pinned, 50000);
+        region.add_entry("Keep this".to_string(), 10).unwrap();
+        region.add_entry("And this".to_string(), 20).unwrap();
+        region.remove_entries_by_prefix("[Stage instructions:");
+        assert_eq!(region.entry_count(), 2);
+        assert_eq!(region.current_tokens, 30);
+    }
 }
