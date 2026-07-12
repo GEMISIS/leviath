@@ -1222,4 +1222,103 @@ mod tests {
         let region: Region = serde_json::from_str(json).unwrap();
         assert!(region.taint.is_none());
     }
+
+    #[test]
+    fn test_add_typed_tainted_entry() {
+        let mut region = Region::new(
+            "conversation".to_string(),
+            RegionKind::SlidingWindow { max_items: 100 },
+            1000,
+        )
+        .with_taint_tracking();
+
+        region
+            .add_typed_tainted_entry(
+                "secret data".to_string(),
+                10,
+                EntryKind::ToolResult {
+                    tool_call_id: "tc_1".to_string(),
+                    tool_name: "calendar".to_string(),
+                    is_error: false,
+                },
+                crate::taint::TaintLevel::Private,
+            )
+            .unwrap();
+
+        assert_eq!(region.content.len(), 1);
+        assert_eq!(
+            region.content[0].kind,
+            EntryKind::ToolResult {
+                tool_call_id: "tc_1".to_string(),
+                tool_name: "calendar".to_string(),
+                is_error: false,
+            }
+        );
+        assert_eq!(
+            region.taint_level(),
+            Some(crate::taint::TaintLevel::Private)
+        );
+    }
+
+    #[test]
+    fn test_add_typed_tainted_entry_checks_budget() {
+        let mut region = Region::new(
+            "conversation".to_string(),
+            RegionKind::SlidingWindow { max_items: 100 },
+            5,
+        )
+        .with_taint_tracking();
+
+        let result = region.add_typed_tainted_entry(
+            "too large".to_string(),
+            100,
+            EntryKind::ToolResult {
+                tool_call_id: "tc_1".to_string(),
+                tool_name: "tool".to_string(),
+                is_error: false,
+            },
+            crate::taint::TaintLevel::Internal,
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_add_typed_tainted_entry_validates_schema() {
+        let mut region = Region::new("test".to_string(), RegionKind::Pinned, 1000)
+            .with_taint_tracking()
+            .with_schema(RegionSchema::new(ContentFormat::Json));
+
+        // Non-JSON content should fail validation
+        let result = region.add_typed_tainted_entry(
+            "not json".to_string(),
+            5,
+            EntryKind::Text,
+            crate::taint::TaintLevel::Public,
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_add_typed_tainted_entry_without_taint_tracking() {
+        // When taint tracking is NOT enabled, add_typed_tainted_entry still works
+        // but the taint level is not tracked
+        let mut region = Region::new(
+            "conversation".to_string(),
+            RegionKind::SlidingWindow { max_items: 100 },
+            1000,
+        );
+        // No .with_taint_tracking()
+
+        region
+            .add_typed_tainted_entry(
+                "data".to_string(),
+                10,
+                EntryKind::Text,
+                crate::taint::TaintLevel::Private,
+            )
+            .unwrap();
+
+        assert_eq!(region.content.len(), 1);
+        assert_eq!(region.taint_level(), None); // no tracking
+    }
 }

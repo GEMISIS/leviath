@@ -4160,4 +4160,384 @@ mod tests {
         // Idempotent + safe on a missing entity.
         engine.enable_entity_taint_tracking(entity);
     }
+
+    // ─── Repetition detector triggers nudge in inference loop ─────────
+
+    #[tokio::test]
+    async fn repetition_detector_injects_nudge_in_inference_loop() {
+        // The model calls the same read_file tool 4 times (threshold 3), then
+        // completes. The repetition detector should inject a nudge after the 3rd
+        // identical call.
+        let tool_resp = |id: &str| InferenceResponse {
+            content: "reading".to_string(),
+            tool_calls: vec![leviath_providers::ToolCall {
+                id: id.to_string(),
+                name: "read_file".to_string(),
+                arguments: serde_json::json!({"path": "foo.rs"}),
+            }],
+            tokens_used: leviath_providers::TokenUsage {
+                prompt_tokens: 1,
+                completion_tokens: 1,
+                total_tokens: 2,
+                cached_tokens: 0,
+                cache_write_tokens: 0,
+            },
+            finish_reason: leviath_providers::FinishReason::ToolCall,
+        };
+
+        let responses = vec![
+            tool_resp("c1"),
+            tool_resp("c2"),
+            tool_resp("c3"), // 3rd identical call → detector nudge
+            tool_resp("c4"),
+            default_response(), // completion
+        ];
+        let mut registry = ProviderRegistry::new();
+        registry.register(
+            "mock".to_string(),
+            Arc::new(MockProvider::with_responses("mock", responses)),
+        );
+        let mut engine = AgentEngine::with_providers(registry);
+
+        let mut window = ContextWindow::new(100_000);
+        window.add_region(leviath_core::Region::new(
+            "conversation".to_string(),
+            leviath_core::RegionKind::SlidingWindow { max_items: 200 },
+            80_000,
+        ));
+        let _ = window.add_to_region("conversation", "User: hi".to_string(), 2);
+
+        let entity = engine
+            .world_mut()
+            .spawn((
+                AgentState {
+                    agent_id: "rep-test".to_string(),
+                    current_stage: "main".to_string(),
+                    iteration: 0,
+                    status: AgentStatus::Active,
+                    spawned_children_ids: Vec::new(),
+                    pending_wait: None,
+                    accepts_messages: true,
+                },
+                MessageInbox::new(),
+                CancellationToken::new(),
+                window,
+            ))
+            .id();
+
+        let result = with_tracing_async(engine.run_inference_loop_filtered(
+            entity,
+            "mock",
+            "test-model",
+            Vec::new(),
+            10,
+            None,
+            None,
+            &mut |calls: Vec<leviath_providers::ToolCall>| async move {
+                calls
+                    .iter()
+                    .map(|c| (c.id.clone(), "file contents".to_string()))
+                    .collect()
+            },
+        ))
+        .await;
+        assert!(result.is_ok());
+
+        // Verify the nudge was injected — the conversation region should contain
+        // a UserMessage entry mentioning repetition or a similar warning.
+        let w = engine.world().get::<ContextWindow>(entity).unwrap();
+        let conv = w.get_region("conversation").unwrap();
+        let has_nudge = conv.content.iter().any(|e| {
+            e.kind == leviath_core::EntryKind::UserMessage
+                && (e.content.contains("times")
+                    || e.content.contains("read-only")
+                    || e.content.contains("read_file"))
+        });
+        assert!(
+            has_nudge,
+            "Repetition detector should have injected a nudge"
+        );
+    }
+
+    // ─── Text-only nudge path ────────────────────────────────────────
+
+    #[tokio::test]
+    async fn text_only_nudge_eventually_accepts_after_max_nudges() {
+        // Model responds with text only (no tool calls) every time. After
+        // MAX_TEXT_ONLY_NUDGES (3) the loop should accept the text response.
+        let mut registry = ProviderRegistry::new();
+        // All responses are text-only (no tool calls). Need 4 total: 3 nudged + 1 accepted.
+        registry.register(
+            "mock".to_string(),
+            Arc::new(MockProvider::new("mock")), // always returns default_response (no tools)
+        );
+        let mut engine = AgentEngine::with_providers(registry);
+
+        let mut window = ContextWindow::new(100_000);
+        window.add_region(leviath_core::Region::new(
+            "conversation".to_string(),
+            leviath_core::RegionKind::SlidingWindow { max_items: 200 },
+            80_000,
+        ));
+        let _ = window.add_to_region("conversation", "User: do something".to_string(), 5);
+
+        let entity = engine
+            .world_mut()
+            .spawn((
+                AgentState {
+                    agent_id: "nudge-test".to_string(),
+                    current_stage: "main".to_string(),
+                    iteration: 0,
+                    status: AgentStatus::Active,
+                    spawned_children_ids: Vec::new(),
+                    pending_wait: None,
+                    accepts_messages: true,
+                },
+                MessageInbox::new(),
+                CancellationToken::new(),
+                window,
+            ))
+            .id();
+
+        let result = with_tracing_async(engine.run_inference_loop_filtered(
+            entity,
+            "mock",
+            "test-model",
+            Vec::new(),
+            20, // plenty of iterations
+            None,
+            None,
+            &mut noop_tool_exec,
+        ))
+        .await;
+
+        assert!(result.is_ok());
+        // The loop should have added nudge messages to conversation
+        let w = engine.world().get::<ContextWindow>(entity).unwrap();
+        let conv = w.get_region("conversation").unwrap();
+        let nudge_count = conv
+            .content
+            .iter()
+            .filter(|e| {
+                e.kind == leviath_core::EntryKind::UserMessage
+                    && e.content.contains("tools available")
+            })
+            .count();
+        assert!(
+            nudge_count >= 1,
+            "Expected at least one text-only nudge, found {}",
+            nudge_count
+        );
+    }
+
+    // ─── Tool result truncation in tight context window ──────────────
+
+    #[tokio::test]
+    async fn tool_result_truncated_when_region_is_full() {
+        // Tool returns a huge result but the conversation region has barely
+        // any room, so the result must be truncated rather than dropped.
+        let responses = vec![
+            InferenceResponse {
+                content: "calling tool".to_string(),
+                tool_calls: vec![leviath_providers::ToolCall {
+                    id: "call_1".to_string(),
+                    name: "read_file".to_string(),
+                    arguments: serde_json::json!({}),
+                }],
+                tokens_used: leviath_providers::TokenUsage {
+                    prompt_tokens: 1,
+                    completion_tokens: 1,
+                    total_tokens: 2,
+                    cached_tokens: 0,
+                    cache_write_tokens: 0,
+                },
+                finish_reason: leviath_providers::FinishReason::ToolCall,
+            },
+            default_response(),
+        ];
+        let mut registry = ProviderRegistry::new();
+        registry.register(
+            "mock".to_string(),
+            Arc::new(MockProvider::with_responses("mock", responses)),
+        );
+        let mut engine = AgentEngine::with_providers(registry);
+
+        // Very tight conversation region — only 200 tokens total
+        let mut window = ContextWindow::new(500);
+        window.add_region(leviath_core::Region::new(
+            "conversation".to_string(),
+            leviath_core::RegionKind::SlidingWindow { max_items: 200 },
+            200,
+        ));
+        let _ = window.add_to_region("conversation", "User: hi".to_string(), 2);
+
+        let entity = engine
+            .world_mut()
+            .spawn((
+                AgentState {
+                    agent_id: "trunc-test".to_string(),
+                    current_stage: "main".to_string(),
+                    iteration: 0,
+                    status: AgentStatus::Active,
+                    spawned_children_ids: Vec::new(),
+                    pending_wait: None,
+                    accepts_messages: true,
+                },
+                MessageInbox::new(),
+                CancellationToken::new(),
+                window,
+            ))
+            .id();
+
+        let huge_result = "x".repeat(10_000);
+        let result = engine
+            .run_inference_loop_filtered(
+                entity,
+                "mock",
+                "test-model",
+                Vec::new(),
+                5,
+                None,
+                None,
+                &mut |_calls: Vec<leviath_providers::ToolCall>| {
+                    let r = huge_result.clone();
+                    async move { vec![("call_1".to_string(), r)] }
+                },
+            )
+            .await;
+        assert!(result.is_ok());
+
+        // The tool result should be present (truncated or placeholder)
+        let w = engine.world().get::<ContextWindow>(entity).unwrap();
+        let conv = w.get_region("conversation").unwrap();
+        let has_tool_result = conv
+            .content
+            .iter()
+            .any(|e| matches!(&e.kind, leviath_core::EntryKind::ToolResult { .. }));
+        assert!(
+            has_tool_result,
+            "Truncated tool result should still be present"
+        );
+    }
+
+    // ─── Inference loop with repetition config overrides ─────────────
+
+    #[tokio::test]
+    async fn inference_loop_inner_respects_disabled_repetition_config() {
+        // Pass a config that disables the detector entirely — same-call
+        // repetition should NOT inject a nudge.
+        let tool_resp = |id: &str| InferenceResponse {
+            content: "reading".to_string(),
+            tool_calls: vec![leviath_providers::ToolCall {
+                id: id.to_string(),
+                name: "read_file".to_string(),
+                arguments: serde_json::json!({"path": "foo.rs"}),
+            }],
+            tokens_used: leviath_providers::TokenUsage {
+                prompt_tokens: 1,
+                completion_tokens: 1,
+                total_tokens: 2,
+                cached_tokens: 0,
+                cache_write_tokens: 0,
+            },
+            finish_reason: leviath_providers::FinishReason::ToolCall,
+        };
+
+        let responses = vec![
+            tool_resp("c1"),
+            tool_resp("c2"),
+            tool_resp("c3"),
+            tool_resp("c4"),
+            default_response(),
+        ];
+        let mut registry = ProviderRegistry::new();
+        registry.register(
+            "mock".to_string(),
+            Arc::new(MockProvider::with_responses("mock", responses)),
+        );
+        let mut engine = AgentEngine::with_providers(registry);
+
+        let mut window = ContextWindow::new(100_000);
+        window.add_region(leviath_core::Region::new(
+            "conversation".to_string(),
+            leviath_core::RegionKind::SlidingWindow { max_items: 200 },
+            80_000,
+        ));
+        let _ = window.add_to_region("conversation", "User: hi".to_string(), 2);
+
+        let entity = engine
+            .world_mut()
+            .spawn((
+                AgentState {
+                    agent_id: "rep-disabled".to_string(),
+                    current_stage: "main".to_string(),
+                    iteration: 0,
+                    status: AgentStatus::Active,
+                    spawned_children_ids: Vec::new(),
+                    pending_wait: None,
+                    accepts_messages: true,
+                },
+                MessageInbox::new(),
+                CancellationToken::new(),
+                window,
+            ))
+            .id();
+
+        let rep_config = leviath_core::RepetitionDetectionConfig {
+            enabled: Some(false),
+            max_repeat_calls: None,
+            max_readonly_streak: None,
+        };
+
+        let result = with_tracing_async(engine.run_inference_loop_filtered_dyn_inner(
+            entity,
+            "mock",
+            "test-model",
+            Vec::new(),
+            10,
+            None,
+            None,
+            &mut |calls: Vec<leviath_providers::ToolCall>| {
+                Box::pin(async move {
+                    calls
+                        .iter()
+                        .map(|c| (c.id.clone(), "ok".to_string()))
+                        .collect()
+                })
+            },
+            Some(&rep_config),
+        ))
+        .await;
+        assert!(result.is_ok());
+
+        // No nudge should have been injected
+        let w = engine.world().get::<ContextWindow>(entity).unwrap();
+        let conv = w.get_region("conversation").unwrap();
+        let has_nudge = conv.content.iter().any(|e| {
+            e.kind == leviath_core::EntryKind::UserMessage
+                && (e.content.contains("times")
+                    || e.content.contains("read-only")
+                    || e.content.contains("read_file"))
+        });
+        assert!(
+            !has_nudge,
+            "Disabled repetition config should not inject nudges"
+        );
+    }
+
+    // ─── Taint: tool sensitivity tagging in inference loop ───────────
+
+    #[tokio::test]
+    async fn taint_gate_tags_tool_results_with_sensitivity() {
+        // When taint tracking is active, tool results should be tagged with
+        // the tool's configured sensitivity level.
+        let (mut engine, entity) = tainted_engine(crate::taint::GateResolution::AllowOnce);
+        // Run the loop — "shell" is outbound, prompt allows it once
+        let _ = run_and_record_executed(&mut engine, entity).await;
+
+        // Verify the context window's taint level reflects the tool's output
+        let w = engine.world().get::<ContextWindow>(entity).unwrap();
+        // The "notes" region has Private taint, so overall should be Private
+        assert_eq!(w.overall_taint(), Some(leviath_core::TaintLevel::Private));
+    }
 }

@@ -1828,4 +1828,205 @@ mod tests {
             "Assistant message with only orphaned tool_use should be removed entirely"
         );
     }
+
+    #[test]
+    fn test_assemble_strips_multiple_orphaned_tool_uses_in_one_message() {
+        let mut window = ContextWindow::new(100_000);
+        let region = Region::new(
+            "conversation".to_string(),
+            RegionKind::SlidingWindow { max_items: 100 },
+            50_000,
+        );
+        window.add_region(region);
+
+        // User message first
+        window
+            .add_typed_entry(
+                "conversation",
+                leviath_core::EntryKind::UserMessage,
+                "Do two things".to_string(),
+                10,
+            )
+            .unwrap();
+
+        // Assistant with TWO orphaned tool_uses (no matching results for either)
+        window
+            .add_typed_entry(
+                "conversation",
+                leviath_core::EntryKind::AssistantTurn {
+                    tool_calls: vec![
+                        leviath_core::SerializedToolCall {
+                            id: "tc_orphan_1".to_string(),
+                            name: "read_file".to_string(),
+                            arguments: serde_json::json!({"path": "a.rs"}),
+                        },
+                        leviath_core::SerializedToolCall {
+                            id: "tc_orphan_2".to_string(),
+                            name: "bash".to_string(),
+                            arguments: serde_json::json!({"cmd": "ls"}),
+                        },
+                    ],
+                },
+                "Let me do both.".to_string(),
+                50,
+            )
+            .unwrap();
+
+        let assembled = with_tracing(|| window.assemble());
+
+        // Both orphaned tool_uses should be stripped
+        for msg in &assembled.messages {
+            if let leviath_providers::MessageContent::Blocks(blocks) = &msg.content {
+                for block in blocks {
+                    assert!(
+                        !matches!(block, leviath_providers::ContentBlock::ToolUse { .. }),
+                        "All orphaned tool_uses should have been stripped"
+                    );
+                }
+            }
+        }
+        // The assistant text should still be present
+        assert!(assembled
+            .messages
+            .iter()
+            .any(|m| m.role == "assistant" && m.content.as_text().contains("do both")));
+    }
+
+    #[test]
+    fn test_assemble_mixed_valid_and_orphaned_in_same_message() {
+        let mut window = ContextWindow::new(100_000);
+        let region = Region::new(
+            "conversation".to_string(),
+            RegionKind::SlidingWindow { max_items: 100 },
+            50_000,
+        );
+        window.add_region(region);
+
+        // User message
+        window
+            .add_typed_entry(
+                "conversation",
+                leviath_core::EntryKind::UserMessage,
+                "Do stuff".to_string(),
+                10,
+            )
+            .unwrap();
+
+        // Assistant with one valid tool_use (tc_valid) and one orphaned (tc_orphan)
+        window
+            .add_typed_entry(
+                "conversation",
+                leviath_core::EntryKind::AssistantTurn {
+                    tool_calls: vec![
+                        leviath_core::SerializedToolCall {
+                            id: "tc_valid".to_string(),
+                            name: "read_file".to_string(),
+                            arguments: serde_json::json!({"path": "main.rs"}),
+                        },
+                        leviath_core::SerializedToolCall {
+                            id: "tc_orphan".to_string(),
+                            name: "bash".to_string(),
+                            arguments: serde_json::json!({"cmd": "ls"}),
+                        },
+                    ],
+                },
+                "".to_string(),
+                10,
+            )
+            .unwrap();
+
+        // Only provide tool_result for tc_valid
+        window
+            .add_typed_entry(
+                "conversation",
+                leviath_core::EntryKind::ToolResult {
+                    tool_call_id: "tc_valid".to_string(),
+                    tool_name: "read_file".to_string(),
+                    is_error: false,
+                },
+                "fn main() {}".to_string(),
+                10,
+            )
+            .unwrap();
+
+        let assembled = with_tracing(|| window.assemble());
+
+        // tc_valid tool_use should remain
+        let has_valid = assembled.messages.iter().any(|m| {
+            if let leviath_providers::MessageContent::Blocks(blocks) = &m.content {
+                blocks.iter().any(|b| {
+                    matches!(b, leviath_providers::ContentBlock::ToolUse { id, .. } if id == "tc_valid")
+                })
+            } else {
+                false
+            }
+        });
+        assert!(has_valid, "Valid tool_use should remain");
+
+        // tc_orphan tool_use should be stripped
+        let has_orphan = assembled.messages.iter().any(|m| {
+            if let leviath_providers::MessageContent::Blocks(blocks) = &m.content {
+                blocks.iter().any(|b| {
+                    matches!(b, leviath_providers::ContentBlock::ToolUse { id, .. } if id == "tc_orphan")
+                })
+            } else {
+                false
+            }
+        });
+        assert!(!has_orphan, "Orphaned tool_use should be stripped");
+
+        // tc_valid tool_result should remain
+        let has_result = assembled.messages.iter().any(|m| {
+            if let leviath_providers::MessageContent::Blocks(blocks) = &m.content {
+                blocks.iter().any(|b| {
+                    matches!(b, leviath_providers::ContentBlock::ToolResult { tool_use_id, .. } if tool_use_id == "tc_valid")
+                })
+            } else {
+                false
+            }
+        });
+        assert!(has_result, "Valid tool_result should remain");
+    }
+
+    #[test]
+    fn test_assemble_tool_result_before_any_tool_use() {
+        // Edge case: tool_result appears in context but no tool_use exists at all
+        let mut window = ContextWindow::new(100_000);
+        let region = Region::new(
+            "conversation".to_string(),
+            RegionKind::SlidingWindow { max_items: 100 },
+            50_000,
+        );
+        window.add_region(region);
+
+        // A tool_result with no tool_use anywhere
+        window
+            .add_typed_entry(
+                "conversation",
+                leviath_core::EntryKind::ToolResult {
+                    tool_call_id: "tc_nowhere".to_string(),
+                    tool_name: "read_file".to_string(),
+                    is_error: false,
+                },
+                "orphan result".to_string(),
+                10,
+            )
+            .unwrap();
+
+        let assembled = with_tracing(|| window.assemble());
+
+        // The orphaned tool_result should be stripped
+        for msg in &assembled.messages {
+            if let leviath_providers::MessageContent::Blocks(blocks) = &msg.content {
+                for block in blocks {
+                    assert!(
+                        !matches!(block, leviath_providers::ContentBlock::ToolResult { .. }),
+                        "Orphaned tool_result should have been stripped"
+                    );
+                }
+            }
+        }
+        // Should still have a fallback user message ("Begin.")
+        assert!(assembled.messages.iter().any(|m| m.role == "user"));
+    }
 }
