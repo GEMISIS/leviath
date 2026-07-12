@@ -174,6 +174,20 @@ A deterministic sensitivity model (Public / Internal / Private) tags every conte
 
 ## 📊 Benchmarks
 
+### Why these benchmarks exist
+
+Leviath is **not** a replacement for Claude Code, Codex, or any other coding agent — it's a runtime that orchestrates them. Today, orchestration tools that need multiple agents (parallel issue fixing, decomposed tasks, review loops) typically spawn each one as a **separate OS process**. That works, but it means every agent carries the full weight of a Node.js or Go runtime, and every agent manages its own flat context window — re-reading files, losing specs to eviction, and burning tokens.
+
+Leviath addresses both problems:
+1. **Structured context** — regions prevent important information from being evicted, cutting redundant reads and token waste
+2. **ECS engine** — all agents share a single Rust process, so spinning up 10 agents doesn't mean 10× the device RAM
+
+These benchmarks measure each claim independently.
+
+---
+
+### Context Quality: Structured vs Flat
+
 Both approaches build the same 12-file multi-tenant event processing platform from 11 spec files and 4 config files. Same model (Claude Sonnet 5), same tools, same task. Quality is measured by a **hidden validation suite** of 69 tests the agent never sees — no self-grading.
 
 <p align="center">
@@ -201,9 +215,15 @@ Both approaches build the same 12-file multi-tenant event processing platform fr
 
 </details>
 
-### System Resource Footprint
+> **Context benchmark methodology:** The "flat baseline" is an independent Rust binary calling the same Anthropic API with the same tools and system prompt — no Leviath dependency, no shared code. Both approaches receive identical seed files and task descriptions. Results are averaged across multiple independent runs. Quality is measured by 69 hidden validation tests covering 13 categories (happy path, schema validation, auth, rate limiting, DLQ, etc.) that neither agent sees during the task. Full methodology and raw data: [leviath-benchmarks](https://github.com/Sun-Forge-AI/leviath-benchmarks).
 
-Leviath's ECS architecture runs all agents in a single process — no per-agent process overhead. Measured against Claude Code, Codex CLI, Pi, and OpenCode on macOS (Apple Silicon, 16 GB):
+---
+
+### Device Resource Footprint: ECS vs Process-per-Agent
+
+When orchestration tools run multiple agents, each one is typically its own OS process. Anthropic's own [Agent SDK hosting docs](https://code.claude.com/docs/en/agent-sdk/hosting.md) confirm: *"Running N concurrent sessions means N subprocesses, each with its own process tree."* This adds up fast.
+
+Leviath's ECS architecture runs all agents as entities in a single Rust process — no per-agent process overhead. We measured peak device RAM (RSS) for Leviath against four popular coding agents at 1, 3, 5, and 10 concurrent instances:
 
 <p align="center">
   <picture>
@@ -211,9 +231,11 @@ Leviath's ECS architecture runs all agents in a single process — no per-agent 
   </picture>
 </p>
 
-At 10 concurrent agents, Leviath uses **18 MB** of device RAM vs. **3,209 MB** for Claude Code — **178× lighter**. All values are measured, not projected.
+At 10 concurrent agents, Leviath uses **18 MB** of device RAM vs. **3,209 MB** for Claude Code — **178× lighter**. All data points are measured, not projected.
 
-> **Methodology:** Results are averaged across multiple independent runs. Quality is measured by 69 hidden validation tests covering 13 categories (happy path, schema validation, auth, rate limiting, DLQ, etc.) that neither agent sees during the task. The flat baseline is an independent Rust binary calling the same Anthropic API with the same tools — no Leviath dependency, no shared code. Both receive identical seed files and task descriptions. Full methodology and raw data: [leviath-benchmarks](https://github.com/Sun-Forge-AI/leviath-benchmarks).
+> **Resource benchmark methodology:** Each tool was launched N times concurrently (same coding task, separate git-initialized temp directories). RSS was sampled every 1 second for 15 seconds after an 8-second warmup. Peak total RSS across all instances was recorded. All instances were verified alive at time of measurement. System: macOS 15.5, Apple Silicon, 16 GB. Tool versions: Claude Code 2.1.86, Codex CLI 0.144.1, Pi (latest), OpenCode 0.0.55. Leviath was measured via `lev serve` with tasks submitted through the API. Full data: [leviath-benchmarks](https://github.com/Sun-Forge-AI/leviath-benchmarks).
+>
+> **Note:** This compares the runtime footprint of the orchestration layer, not the inference cost or quality of each tool's underlying model. Claude Code, Codex, Pi, and OpenCode are excellent coding agents — the point is that wrapping them in a process-per-agent pattern has a measurable device cost that an ECS engine avoids.
 
 ## 🤖 Pre-built Agents
 
