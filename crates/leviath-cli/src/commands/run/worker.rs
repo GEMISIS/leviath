@@ -45,6 +45,7 @@ struct ToolDispatchState {
     stage_idx: CurrentStageIdx,
     stage_name: Arc<Mutex<String>>,
     tool_calls_counter: Arc<std::sync::atomic::AtomicUsize>,
+    iteration_counter: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 /// Resolve tool policy, handle approvals/dynamic interactions, and execute a
@@ -183,6 +184,18 @@ async fn dispatch_tool_calls(
         state
             .tool_calls_counter
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+    let current_tool_calls = state
+        .tool_calls_counter
+        .load(std::sync::atomic::Ordering::Relaxed);
+    let current_iteration = state
+        .iteration_counter
+        .load(std::sync::atomic::Ordering::Relaxed);
+    if let Ok(mut meta) = runstate::read_meta(&state.run_id) {
+        meta.tool_calls = current_tool_calls;
+        meta.iteration = current_iteration;
+        meta.touch();
+        let _ = runstate::write_meta(&meta);
     }
     out
 }
@@ -656,6 +669,7 @@ async fn run_worker_inner(
     let current_stage_name: Arc<Mutex<String>> = Arc::new(Mutex::new(String::new()));
 
     let tool_calls_counter = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let iteration_counter = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let dispatch_state = Arc::new(ToolDispatchState {
         builtins: tool_registry.builtins.clone(),
         mcp: tool_registry.mcp.clone(),
@@ -669,10 +683,14 @@ async fn run_worker_inner(
         stage_idx: current_stage_idx.clone(),
         stage_name: current_stage_name.clone(),
         tool_calls_counter: tool_calls_counter.clone(),
+        iteration_counter: iteration_counter.clone(),
     });
     let mut exec = move |calls: Vec<leviath_providers::ToolCall>| -> leviath_runtime::ToolResultsFuture<'static> {
         let dispatch_state = dispatch_state.clone();
-        Box::pin(async move { dispatch_tool_calls(&dispatch_state, calls).await })
+        Box::pin(async move {
+            dispatch_state.iteration_counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            dispatch_tool_calls(&dispatch_state, calls).await
+        })
     };
 
     let compaction_config = blueprint.compaction_config.clone();
@@ -2487,6 +2505,7 @@ mode = "autonomous"
             stage_idx: Arc::new(Mutex::new(0usize)),
             stage_name: Arc::new(Mutex::new("main".to_string())),
             tool_calls_counter: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            iteration_counter: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         }
     }
 
@@ -2593,6 +2612,7 @@ mode = "autonomous"
             stage_idx: Arc::new(Mutex::new(0usize)),
             stage_name: Arc::new(Mutex::new("main".to_string())),
             tool_calls_counter: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            iteration_counter: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         };
 
         let calls = vec![make_tool_call(
@@ -2798,6 +2818,7 @@ mode = "autonomous"
             stage_idx: Arc::new(Mutex::new(0usize)),
             stage_name: Arc::new(Mutex::new("main".to_string())),
             tool_calls_counter: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            iteration_counter: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         };
 
         let tool_name = "read_file";
@@ -3054,6 +3075,7 @@ for line in sys.stdin:
             stage_idx: Arc::new(Mutex::new(0usize)),
             stage_name: Arc::new(Mutex::new("main".to_string())),
             tool_calls_counter: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            iteration_counter: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         }
     }
 

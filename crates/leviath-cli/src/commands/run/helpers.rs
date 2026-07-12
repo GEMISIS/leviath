@@ -69,26 +69,21 @@ pub async fn generate_title(
         })?;
 
     let request = leviath_providers::InferenceRequest {
-        messages: vec![
-            leviath_providers::Message {
-                role: "system".to_string(),
-                content: "Write a terse 3-6 word title summarising the task. \
-                          No quotes, no punctuation at the end, no markdown."
-                    .to_string()
-                    .into(),
-                cache_breakpoint: false,
-            },
-            leviath_providers::Message {
-                role: "user".to_string(),
-                content: task.to_string().into(),
-                cache_breakpoint: false,
-            },
-        ],
+        messages: vec![leviath_providers::Message {
+            role: "user".to_string(),
+            content: task.to_string().into(),
+            cache_breakpoint: false,
+        }],
         model,
         max_tokens: 20,
         temperature: 0.0,
         tools: vec![],
-        system: vec![],
+        system: vec![leviath_providers::SystemBlock {
+            text: "Write a terse 3-6 word title summarising the task. \
+                   No quotes, no punctuation at the end, no markdown."
+                .to_string(),
+            cache_hint: leviath_core::CacheHint::Never,
+        }],
         extra: serde_json::Value::Null,
     };
 
