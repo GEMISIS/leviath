@@ -201,13 +201,17 @@ Both approaches build the same 12-file multi-tenant event processing platform fr
 
 </details>
 
-**Resource efficiency** — ECS engine vs. process-per-agent:
+### System Resource Footprint
 
-| Metric | Leviath (`lev serve`) | Typical process-per-agent |
-|--------|----------------------:|--------------------------:|
-| Base memory | 18 MB | 50–200 MB per process |
-| Per-agent overhead | <1 MB | Full process clone |
-| Spawn latency | <1 ms | ~2 s |
+Leviath's ECS architecture runs all agents in a single process — no per-agent process overhead. Measured against Claude Code, Codex CLI, Pi, and OpenCode on macOS (Apple Silicon, 16 GB):
+
+<p align="center">
+  <picture>
+    <img src="docs/benchmarks/resource-footprint.svg" alt="Device RAM scaling — Leviath ECS vs process-per-agent tools" width="800">
+  </picture>
+</p>
+
+At 5 concurrent agents, Leviath uses **22 MB** of device RAM vs. **1,574 MB** for Claude Code — **72× lighter**. At 10 agents (projected), the gap widens further: 28 MB vs. ~3 GB.
 
 > **Methodology:** Results are averaged across multiple independent runs. Quality is measured by 69 hidden validation tests covering 13 categories (happy path, schema validation, auth, rate limiting, DLQ, etc.) that neither agent sees during the task. The flat baseline is an independent Rust binary calling the same Anthropic API with the same tools — no Leviath dependency, no shared code. Both receive identical seed files and task descriptions. Full methodology and raw data: [leviath-benchmarks](https://github.com/Sun-Forge-AI/leviath-benchmarks).
 
