@@ -518,6 +518,76 @@ impl ContextWindow {
             }
         }
 
+        // ── Sanitize orphaned tool_use / tool_result blocks ──────────────
+        //
+        // Collect all tool_use IDs from assistant messages and all tool_result
+        // IDs from user messages. Strip any that don't have a matching pair.
+        let mut tool_use_ids = std::collections::HashSet::new();
+        let mut tool_result_ids = std::collections::HashSet::new();
+
+        for msg in &messages {
+            if let leviath_providers::MessageContent::Blocks(blocks) = &msg.content {
+                for block in blocks {
+                    match block {
+                        leviath_providers::ContentBlock::ToolUse { id, .. } => {
+                            tool_use_ids.insert(id.clone());
+                        }
+                        leviath_providers::ContentBlock::ToolResult { tool_use_id, .. } => {
+                            tool_result_ids.insert(tool_use_id.clone());
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+
+        let orphaned_tool_uses: std::collections::HashSet<_> =
+            tool_use_ids.difference(&tool_result_ids).cloned().collect();
+        let orphaned_tool_results: std::collections::HashSet<_> =
+            tool_result_ids.difference(&tool_use_ids).cloned().collect();
+
+        if !orphaned_tool_uses.is_empty() || !orphaned_tool_results.is_empty() {
+            tracing::warn!(
+                orphaned_tool_uses = orphaned_tool_uses.len(),
+                orphaned_tool_results = orphaned_tool_results.len(),
+                "Stripping orphaned tool_use/tool_result blocks from assembled context"
+            );
+
+            messages = messages
+                .into_iter()
+                .filter_map(|msg| {
+                    if let leviath_providers::MessageContent::Blocks(blocks) = &msg.content {
+                        let filtered: Vec<_> = blocks
+                            .iter()
+                            .filter(|block| match block {
+                                leviath_providers::ContentBlock::ToolUse { id, .. } => {
+                                    !orphaned_tool_uses.contains(id)
+                                }
+                                leviath_providers::ContentBlock::ToolResult {
+                                    tool_use_id, ..
+                                } => !orphaned_tool_results.contains(tool_use_id),
+                                _ => true,
+                            })
+                            .cloned()
+                            .collect();
+
+                        if filtered.is_empty() {
+                            // No content left — drop this message entirely
+                            None
+                        } else {
+                            Some(leviath_providers::Message {
+                                role: msg.role.clone(),
+                                content: leviath_providers::MessageContent::Blocks(filtered),
+                                cache_breakpoint: msg.cache_breakpoint,
+                            })
+                        }
+                    } else {
+                        Some(msg)
+                    }
+                })
+                .collect();
+        }
+
         // Ensure there's at least one user message
         if !messages.iter().any(|m| m.role == "user") {
             messages.push(leviath_providers::Message {
@@ -1534,6 +1604,228 @@ mod tests {
         assert_eq!(
             window.region_taint("temp"),
             Some(leviath_core::TaintLevel::Public)
+        );
+    }
+
+    // ─── Tool-use/tool-result pairing sanitization tests ────────────────
+
+    #[test]
+    fn test_assemble_strips_orphaned_tool_use() {
+        let mut window = ContextWindow::new(100_000);
+        let region = Region::new(
+            "conversation".to_string(),
+            RegionKind::SlidingWindow { max_items: 100 },
+            50_000,
+        );
+        window.add_region(region);
+
+        // Add an assistant turn with a tool_use but no matching tool_result
+        window
+            .add_typed_entry(
+                "conversation",
+                leviath_core::EntryKind::AssistantTurn {
+                    tool_calls: vec![leviath_core::SerializedToolCall {
+                        id: "tc_orphan".to_string(),
+                        name: "read_file".to_string(),
+                        arguments: serde_json::json!({"path": "foo.rs"}),
+                    }],
+                },
+                "Let me read that file.".to_string(),
+                50,
+            )
+            .unwrap();
+
+        let assembled = with_tracing(|| window.assemble());
+
+        // The orphaned tool_use should be stripped; text should remain
+        for msg in &assembled.messages {
+            if let leviath_providers::MessageContent::Blocks(blocks) = &msg.content {
+                for block in blocks {
+                    assert!(
+                        !matches!(block, leviath_providers::ContentBlock::ToolUse { .. }),
+                        "Orphaned tool_use should have been stripped"
+                    );
+                }
+            }
+        }
+        // The assistant text should still be present
+        assert!(assembled
+            .messages
+            .iter()
+            .any(|m| m.role == "assistant" && m.content.as_text().contains("read that file")));
+    }
+
+    #[test]
+    fn test_assemble_strips_orphaned_tool_result() {
+        let mut window = ContextWindow::new(100_000);
+        let region = Region::new(
+            "conversation".to_string(),
+            RegionKind::SlidingWindow { max_items: 100 },
+            50_000,
+        );
+        window.add_region(region);
+
+        // Add a user message first
+        window
+            .add_typed_entry(
+                "conversation",
+                leviath_core::EntryKind::UserMessage,
+                "Hello".to_string(),
+                10,
+            )
+            .unwrap();
+
+        // Add a tool_result with no preceding tool_use
+        window
+            .add_typed_entry(
+                "conversation",
+                leviath_core::EntryKind::ToolResult {
+                    tool_call_id: "tc_missing".to_string(),
+                    tool_name: "read_file".to_string(),
+                    is_error: false,
+                },
+                "file contents here".to_string(),
+                20,
+            )
+            .unwrap();
+
+        let assembled = with_tracing(|| window.assemble());
+
+        // The orphaned tool_result should be stripped
+        for msg in &assembled.messages {
+            if let leviath_providers::MessageContent::Blocks(blocks) = &msg.content {
+                for block in blocks {
+                    assert!(
+                        !matches!(block, leviath_providers::ContentBlock::ToolResult { .. }),
+                        "Orphaned tool_result should have been stripped"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_assemble_paired_tool_use_result_passes_through() {
+        let mut window = ContextWindow::new(100_000);
+        let region = Region::new(
+            "conversation".to_string(),
+            RegionKind::SlidingWindow { max_items: 100 },
+            50_000,
+        );
+        window.add_region(region);
+
+        // User message
+        window
+            .add_typed_entry(
+                "conversation",
+                leviath_core::EntryKind::UserMessage,
+                "Fix the bug".to_string(),
+                10,
+            )
+            .unwrap();
+
+        // Assistant with tool_use
+        window
+            .add_typed_entry(
+                "conversation",
+                leviath_core::EntryKind::AssistantTurn {
+                    tool_calls: vec![leviath_core::SerializedToolCall {
+                        id: "tc_1".to_string(),
+                        name: "read_file".to_string(),
+                        arguments: serde_json::json!({"path": "main.rs"}),
+                    }],
+                },
+                "".to_string(),
+                10,
+            )
+            .unwrap();
+
+        // Matching tool_result
+        window
+            .add_typed_entry(
+                "conversation",
+                leviath_core::EntryKind::ToolResult {
+                    tool_call_id: "tc_1".to_string(),
+                    tool_name: "read_file".to_string(),
+                    is_error: false,
+                },
+                "fn main() {}".to_string(),
+                10,
+            )
+            .unwrap();
+
+        let assembled = window.assemble();
+
+        // Both tool_use and tool_result should be present
+        let has_tool_use = assembled.messages.iter().any(|m| {
+            if let leviath_providers::MessageContent::Blocks(blocks) = &m.content {
+                blocks
+                    .iter()
+                    .any(|b| matches!(b, leviath_providers::ContentBlock::ToolUse { id, .. } if id == "tc_1"))
+            } else {
+                false
+            }
+        });
+        let has_tool_result = assembled.messages.iter().any(|m| {
+            if let leviath_providers::MessageContent::Blocks(blocks) = &m.content {
+                blocks
+                    .iter()
+                    .any(|b| matches!(b, leviath_providers::ContentBlock::ToolResult { tool_use_id, .. } if tool_use_id == "tc_1"))
+            } else {
+                false
+            }
+        });
+        assert!(has_tool_use, "Paired tool_use should remain");
+        assert!(has_tool_result, "Paired tool_result should remain");
+    }
+
+    #[test]
+    fn test_assemble_removes_empty_assistant_after_stripping() {
+        let mut window = ContextWindow::new(100_000);
+        let region = Region::new(
+            "conversation".to_string(),
+            RegionKind::SlidingWindow { max_items: 100 },
+            50_000,
+        );
+        window.add_region(region);
+
+        // User message
+        window
+            .add_typed_entry(
+                "conversation",
+                leviath_core::EntryKind::UserMessage,
+                "Do something".to_string(),
+                10,
+            )
+            .unwrap();
+
+        // Assistant with ONLY a tool_use (no text), and no matching result
+        window
+            .add_typed_entry(
+                "conversation",
+                leviath_core::EntryKind::AssistantTurn {
+                    tool_calls: vec![leviath_core::SerializedToolCall {
+                        id: "tc_gone".to_string(),
+                        name: "bash".to_string(),
+                        arguments: serde_json::json!({"command": "ls"}),
+                    }],
+                },
+                "".to_string(),
+                10,
+            )
+            .unwrap();
+
+        let assembled = with_tracing(|| window.assemble());
+
+        // The assistant message should be entirely removed (empty after stripping)
+        let assistant_msgs: Vec<_> = assembled
+            .messages
+            .iter()
+            .filter(|m| m.role == "assistant")
+            .collect();
+        assert!(
+            assistant_msgs.is_empty(),
+            "Assistant message with only orphaned tool_use should be removed entirely"
         );
     }
 }
