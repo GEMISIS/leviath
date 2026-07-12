@@ -1,6 +1,6 @@
 //! Shared helper functions: title generation, context window setup, snapshots.
 
-use leviath_core::{Blueprint, ContextLayout, Region, RegionKind};
+use leviath_core::{Blueprint, ContextLayout, EvictionStrategy, Region, RegionKind};
 use leviath_runtime::{AgentEngine, ContextWindow};
 
 use crate::config::Config;
@@ -151,7 +151,10 @@ pub fn initialize_context_window(
         if window.get_region("conversation").is_none() {
             let conv_region = Region::new(
                 "conversation".to_string(),
-                RegionKind::SlidingWindow { max_items: 50 },
+                RegionKind::SlidingWindow {
+                    max_items: 50,
+                    eviction_strategy: EvictionStrategy::PerItem,
+                },
                 10000,
             );
             window.add_region(conv_region);
@@ -414,7 +417,10 @@ mod tests {
             RegionDefinition::new("system".to_string(), RegionKind::Pinned, 2000),
             RegionDefinition::new(
                 "conversation".to_string(),
-                RegionKind::SlidingWindow { max_items: 10 },
+                RegionKind::SlidingWindow {
+                    max_items: 10,
+                    eviction_strategy: EvictionStrategy::PerItem,
+                },
                 10000,
             ),
         ]);
@@ -460,7 +466,10 @@ mod tests {
             RegionDefinition::new("tool_results".to_string(), RegionKind::Temporary, 1234),
             RegionDefinition::new(
                 "conversation".to_string(),
-                RegionKind::SlidingWindow { max_items: 5 },
+                RegionKind::SlidingWindow {
+                    max_items: 5,
+                    eviction_strategy: EvictionStrategy::PerItem,
+                },
                 4321,
             ),
         ]);
@@ -490,7 +499,10 @@ mod tests {
             RegionDefinition::new("system".to_string(), RegionKind::Pinned, 2000),
             RegionDefinition::new(
                 "conversation".to_string(),
-                RegionKind::SlidingWindow { max_items: 10 },
+                RegionKind::SlidingWindow {
+                    max_items: 10,
+                    eviction_strategy: EvictionStrategy::PerItem,
+                },
                 10000,
             ),
         ]);
@@ -507,7 +519,10 @@ mod tests {
                 RegionDefinition::new("system".to_string(), RegionKind::Pinned, 3000),
                 RegionDefinition::new(
                     "conversation".to_string(),
-                    RegionKind::SlidingWindow { max_items: 20 },
+                    RegionKind::SlidingWindow {
+                        max_items: 20,
+                        eviction_strategy: EvictionStrategy::PerItem,
+                    },
                     15000,
                 ),
                 RegionDefinition::new("scratch".to_string(), RegionKind::Clearable, 5000),
@@ -555,7 +570,10 @@ mod tests {
             RegionDefinition::new("system".to_string(), RegionKind::Pinned, 2000),
             RegionDefinition::new(
                 "conversation".to_string(),
-                RegionKind::SlidingWindow { max_items: 10 },
+                RegionKind::SlidingWindow {
+                    max_items: 10,
+                    eviction_strategy: EvictionStrategy::PerItem,
+                },
                 10000,
             ),
         ]);
@@ -600,7 +618,10 @@ mod tests {
             RegionDefinition::new("system".to_string(), RegionKind::Pinned, 2000),
             RegionDefinition::new(
                 "conversation".to_string(),
-                RegionKind::SlidingWindow { max_items: 10 },
+                RegionKind::SlidingWindow {
+                    max_items: 10,
+                    eviction_strategy: EvictionStrategy::PerItem,
+                },
                 10000,
             ),
         ]);
@@ -680,7 +701,10 @@ mod tests {
     fn initialize_context_window_no_pinned_region() {
         let bp = make_blueprint_with_regions(vec![RegionDefinition::new(
             "conversation".to_string(),
-            RegionKind::SlidingWindow { max_items: 10 },
+            RegionKind::SlidingWindow {
+                max_items: 10,
+                eviction_strategy: EvictionStrategy::PerItem,
+            },
             10000,
         )]);
         let (mut engine, entity) = make_engine_and_entity(&bp);
@@ -778,7 +802,10 @@ mod tests {
             RegionDefinition::new("system".to_string(), RegionKind::Pinned, 2000),
             RegionDefinition::new(
                 "conversation".to_string(),
-                RegionKind::SlidingWindow { max_items: 10 },
+                RegionKind::SlidingWindow {
+                    max_items: 10,
+                    eviction_strategy: EvictionStrategy::PerItem,
+                },
                 10000,
             ),
         ]);

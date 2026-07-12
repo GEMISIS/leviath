@@ -552,7 +552,7 @@ mod tests {
     use super::*;
     use leviath_core::blueprint::ModelConfig;
     use leviath_core::layout::RegionDefinition;
-    use leviath_core::ContextLayout;
+    use leviath_core::{ContextLayout, EvictionStrategy};
     use leviath_runtime::{AgentPool, ProviderRegistry};
 
     use crate::test_support::with_tracing;
@@ -598,7 +598,10 @@ mod tests {
                 RegionDefinition::new("system".to_string(), RegionKind::Pinned, 2000),
                 RegionDefinition::new(
                     "conversation".to_string(),
-                    RegionKind::SlidingWindow { max_items: 10 },
+                    RegionKind::SlidingWindow {
+                        max_items: 10,
+                        eviction_strategy: EvictionStrategy::PerItem,
+                    },
                     10000,
                 ),
             ],

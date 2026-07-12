@@ -156,10 +156,18 @@ model = "claude-sonnet-4-6"
 
 # ─── Context layout ───────────────────────────────────────────────────────────
 [context.regions]
-architecture   = { kind = "pinned",          max_tokens = 4000 }
-task           = { kind = "pinned",          max_tokens = 2000 }
-codebase       = { kind = "temporary",       max_tokens = 30000 }
-conversation   = { kind = "sliding_window",  max_items = 20, max_tokens = 15000 }
+# System-level (pinned, stable, cacheable — combined > 1024 tokens for Anthropic caching)
+architecture   = { kind = "pinned",          max_tokens = 6000 }
+task           = { kind = "pinned",          max_tokens = 4000 }
+
+# Knowledge (non-volatile, survives message eviction)
+codebase       = { kind = "compacting",      threshold_tokens = 25000, max_tokens = 40000 }
+codebase_history = { kind = "compact_history", source_region = "codebase", max_tokens = 8000 }
 implementation = { kind = "compacting",      threshold_tokens = 25000, max_tokens = 40000 }
-history        = { kind = "compact_history", source_region = "implementation", max_tokens = 8000 }
+impl_history   = { kind = "compact_history", source_region = "implementation", max_tokens = 8000 }
+
+# Conversation (bulk eviction for caching — 20 iterations of stable prefix between evictions)
+conversation   = { kind = "sliding_window",  max_items = 40, max_tokens = 30000, strategy = "bulk", overflow = 20 }
+
+# Working memory (volatile)
 scratch        = { kind = "clearable",       max_tokens = 10000 }

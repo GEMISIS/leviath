@@ -214,6 +214,15 @@ impl RegionTaint {
         }
     }
 
+    /// Record that the entry at `idx` was removed.
+    /// Recomputes taint from remaining entries.
+    pub fn remove_at(&mut self, idx: usize) {
+        if idx < self.entry_taints.len() {
+            self.entry_taints.remove(idx);
+            self.recompute();
+        }
+    }
+
     /// Record that all entries were cleared.
     pub fn clear(&mut self) {
         self.entry_taints.clear();

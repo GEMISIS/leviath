@@ -339,7 +339,7 @@ mod tests {
     use super::*;
     use crate::test_support::with_tracing;
     use crate::AgentMessage;
-    use leviath_core::{Region, RegionKind};
+    use leviath_core::{EvictionStrategy, Region, RegionKind};
 
     #[test]
     fn test_systems_compile() {
@@ -904,7 +904,10 @@ mod tests {
         let mut parent_window = ContextWindow::new(10000);
         let conv = Region::new(
             "conversation".to_string(),
-            RegionKind::SlidingWindow { max_items: 100 },
+            RegionKind::SlidingWindow {
+                max_items: 100,
+                eviction_strategy: EvictionStrategy::PerItem,
+            },
             5000,
         );
         parent_window.add_region(conv);
@@ -947,7 +950,10 @@ mod tests {
         let mut parent_window = ContextWindow::new(10000);
         let conv = Region::new(
             "conversation".to_string(),
-            RegionKind::SlidingWindow { max_items: 100 },
+            RegionKind::SlidingWindow {
+                max_items: 100,
+                eviction_strategy: EvictionStrategy::PerItem,
+            },
             5000,
         );
         parent_window.add_region(conv);
@@ -1046,7 +1052,10 @@ mod tests {
         let mut window = ContextWindow::new(10000);
         let conv = Region::new(
             "conversation".to_string(),
-            RegionKind::SlidingWindow { max_items: 100 },
+            RegionKind::SlidingWindow {
+                max_items: 100,
+                eviction_strategy: EvictionStrategy::PerItem,
+            },
             5000,
         );
         window.add_region(conv);
@@ -1122,7 +1131,10 @@ mod tests {
         let mut window = ContextWindow::new(10000);
         let conv = Region::new(
             "conversation".to_string(),
-            RegionKind::SlidingWindow { max_items: 100 },
+            RegionKind::SlidingWindow {
+                max_items: 100,
+                eviction_strategy: EvictionStrategy::PerItem,
+            },
             5000,
         );
         window.add_region(conv);

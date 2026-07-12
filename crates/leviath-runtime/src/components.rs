@@ -847,7 +847,7 @@ impl Default for MessageInbox {
 mod tests {
     use super::*;
     use crate::test_support::with_tracing;
-    use leviath_core::{Region, RegionKind};
+    use leviath_core::{EvictionStrategy, Region, RegionKind};
 
     #[test]
     fn test_context_window_creation() {
@@ -931,7 +931,10 @@ mod tests {
         let mut window = ContextWindow::new(10000);
         let mut region = Region::new(
             "conversation".to_string(),
-            RegionKind::SlidingWindow { max_items: 5 },
+            RegionKind::SlidingWindow {
+                max_items: 5,
+                eviction_strategy: EvictionStrategy::PerItem,
+            },
             5000,
         );
         region.add_entry("msg 1".to_string(), 1000).unwrap();
@@ -1489,7 +1492,10 @@ mod tests {
         let mut window = ContextWindow::new(10000);
         window.add_region(Region::new(
             "conv".to_string(),
-            RegionKind::SlidingWindow { max_items: 10 },
+            RegionKind::SlidingWindow {
+                max_items: 10,
+                eviction_strategy: EvictionStrategy::PerItem,
+            },
             5000,
         ));
         window.add_region(Region::new(
@@ -1647,7 +1653,10 @@ mod tests {
         let mut window = ContextWindow::new(100_000);
         let region = Region::new(
             "conversation".to_string(),
-            RegionKind::SlidingWindow { max_items: 100 },
+            RegionKind::SlidingWindow {
+                max_items: 100,
+                eviction_strategy: EvictionStrategy::PerItem,
+            },
             50_000,
         );
         window.add_region(region);
@@ -1693,7 +1702,10 @@ mod tests {
         let mut window = ContextWindow::new(100_000);
         let region = Region::new(
             "conversation".to_string(),
-            RegionKind::SlidingWindow { max_items: 100 },
+            RegionKind::SlidingWindow {
+                max_items: 100,
+                eviction_strategy: EvictionStrategy::PerItem,
+            },
             50_000,
         );
         window.add_region(region);
@@ -1742,7 +1754,10 @@ mod tests {
         let mut window = ContextWindow::new(100_000);
         let region = Region::new(
             "conversation".to_string(),
-            RegionKind::SlidingWindow { max_items: 100 },
+            RegionKind::SlidingWindow {
+                max_items: 100,
+                eviction_strategy: EvictionStrategy::PerItem,
+            },
             50_000,
         );
         window.add_region(region);
@@ -1817,7 +1832,10 @@ mod tests {
         let mut window = ContextWindow::new(100_000);
         let region = Region::new(
             "conversation".to_string(),
-            RegionKind::SlidingWindow { max_items: 100 },
+            RegionKind::SlidingWindow {
+                max_items: 100,
+                eviction_strategy: EvictionStrategy::PerItem,
+            },
             50_000,
         );
         window.add_region(region);
@@ -1867,7 +1885,10 @@ mod tests {
         let mut window = ContextWindow::new(100_000);
         let region = Region::new(
             "conversation".to_string(),
-            RegionKind::SlidingWindow { max_items: 100 },
+            RegionKind::SlidingWindow {
+                max_items: 100,
+                eviction_strategy: EvictionStrategy::PerItem,
+            },
             50_000,
         );
         window.add_region(region);
@@ -1930,7 +1951,10 @@ mod tests {
         let mut window = ContextWindow::new(100_000);
         let region = Region::new(
             "conversation".to_string(),
-            RegionKind::SlidingWindow { max_items: 100 },
+            RegionKind::SlidingWindow {
+                max_items: 100,
+                eviction_strategy: EvictionStrategy::PerItem,
+            },
             50_000,
         );
         window.add_region(region);
@@ -2120,7 +2144,10 @@ mod tests {
         let mut window = ContextWindow::new(100_000);
         let region = Region::new(
             "conv".to_string(),
-            RegionKind::SlidingWindow { max_items: 100 },
+            RegionKind::SlidingWindow {
+                max_items: 100,
+                eviction_strategy: EvictionStrategy::PerItem,
+            },
             50_000,
         );
         window.add_region(region);
@@ -2150,7 +2177,10 @@ mod tests {
         let mut window = ContextWindow::new(100_000);
         let region = Region::new(
             "conv".to_string(),
-            RegionKind::SlidingWindow { max_items: 100 },
+            RegionKind::SlidingWindow {
+                max_items: 100,
+                eviction_strategy: EvictionStrategy::PerItem,
+            },
             50_000,
         );
         window.add_region(region);
@@ -2180,7 +2210,10 @@ mod tests {
         let mut window = ContextWindow::new(100_000);
         let region = Region::new(
             "conv".to_string(),
-            RegionKind::SlidingWindow { max_items: 100 },
+            RegionKind::SlidingWindow {
+                max_items: 100,
+                eviction_strategy: EvictionStrategy::PerItem,
+            },
             50_000,
         );
         window.add_region(region);
@@ -2212,7 +2245,10 @@ mod tests {
         let mut window = ContextWindow::new(100_000);
         let region = Region::new(
             "conv".to_string(),
-            RegionKind::SlidingWindow { max_items: 100 },
+            RegionKind::SlidingWindow {
+                max_items: 100,
+                eviction_strategy: EvictionStrategy::PerItem,
+            },
             50_000,
         );
         window.add_region(region);
@@ -2288,7 +2324,10 @@ mod tests {
         let mut window = ContextWindow::new(100_000);
         let region = Region::new(
             "conv".to_string(),
-            RegionKind::SlidingWindow { max_items: 100 },
+            RegionKind::SlidingWindow {
+                max_items: 100,
+                eviction_strategy: EvictionStrategy::PerItem,
+            },
             50_000,
         );
         window.add_region(region);
@@ -2360,7 +2399,10 @@ mod tests {
         let mut window = ContextWindow::new(100_000);
         let region = Region::new(
             "conv".to_string(),
-            RegionKind::SlidingWindow { max_items: 100 },
+            RegionKind::SlidingWindow {
+                max_items: 100,
+                eviction_strategy: EvictionStrategy::PerItem,
+            },
             50_000,
         );
         window.add_region(region);
@@ -2525,7 +2567,10 @@ mod tests {
         let mut window = ContextWindow::new(100_000);
         let region = Region::new(
             "conversation".to_string(),
-            RegionKind::SlidingWindow { max_items: 100 },
+            RegionKind::SlidingWindow {
+                max_items: 100,
+                eviction_strategy: EvictionStrategy::PerItem,
+            },
             50_000,
         );
         window.add_region(region);
@@ -2568,7 +2613,10 @@ mod tests {
         let mut window = ContextWindow::new(100_000);
         let region = Region::new(
             "conv".to_string(),
-            RegionKind::SlidingWindow { max_items: 100 },
+            RegionKind::SlidingWindow {
+                max_items: 100,
+                eviction_strategy: EvictionStrategy::PerItem,
+            },
             50_000,
         );
         window.add_region(region);
@@ -2610,7 +2658,10 @@ mod tests {
         let mut window = ContextWindow::new(100_000);
         let region = Region::new(
             "conv".to_string(),
-            RegionKind::SlidingWindow { max_items: 100 },
+            RegionKind::SlidingWindow {
+                max_items: 100,
+                eviction_strategy: EvictionStrategy::PerItem,
+            },
             50_000,
         );
         window.add_region(region);
@@ -2658,7 +2709,10 @@ mod tests {
         let mut window = ContextWindow::new(100_000);
         let region = Region::new(
             "conv".to_string(),
-            RegionKind::SlidingWindow { max_items: 100 },
+            RegionKind::SlidingWindow {
+                max_items: 100,
+                eviction_strategy: EvictionStrategy::PerItem,
+            },
             50_000,
         );
         window.add_region(region);

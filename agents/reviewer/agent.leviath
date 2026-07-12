@@ -108,5 +108,5 @@ model = "claude-sonnet-4-6"
 guidelines = { kind = "pinned",         max_tokens = 3000 }
 diff       = { kind = "pinned",         max_tokens = 20000 }
 findings   = { kind = "temporary",      max_tokens = 25000 }
-analysis   = { kind = "sliding_window", max_items = 15, max_tokens = 20000 }
+analysis   = { kind = "sliding_window", max_items = 15, max_tokens = 20000, strategy = "bulk", overflow = 10 }
 report     = { kind = "clearable",      max_tokens = 8000 }

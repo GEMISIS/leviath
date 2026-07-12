@@ -334,7 +334,10 @@ impl SubAgentExecutor {
             if window.get_region("conversation").is_none() {
                 window.add_region(Region::new(
                     "conversation".to_string(),
-                    leviath_core::RegionKind::SlidingWindow { max_items: 50 },
+                    leviath_core::RegionKind::SlidingWindow {
+                        max_items: 50,
+                        eviction_strategy: leviath_core::EvictionStrategy::PerItem,
+                    },
                     10000,
                 ));
             }
@@ -854,7 +857,7 @@ mod subagent_tests {
     use super::*;
     use crate::test_support::with_tracing;
     use leviath_core::blueprint::ModelConfig;
-    use leviath_core::{ContextLayout, RegionDefinition, RegionKind, Stage};
+    use leviath_core::{ContextLayout, EvictionStrategy, RegionDefinition, RegionKind, Stage};
     use leviath_runtime::ProviderRegistry;
 
     fn make_blueprint(name: &str) -> Blueprint {
@@ -863,7 +866,10 @@ mod subagent_tests {
                 RegionDefinition::new("system".to_string(), RegionKind::Pinned, 2000),
                 RegionDefinition::new(
                     "conversation".to_string(),
-                    RegionKind::SlidingWindow { max_items: 50 },
+                    RegionKind::SlidingWindow {
+                        max_items: 50,
+                        eviction_strategy: EvictionStrategy::PerItem,
+                    },
                     10000,
                 ),
             ],

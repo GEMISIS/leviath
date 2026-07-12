@@ -444,19 +444,37 @@ pub async fn run_stage_loop(
                 });
         }
 
-        // System prompt injection (ContextWindow is always present after spawn_agent)
-        if let Some(sp) = stage.config.get("system_prompt").and_then(|v| v.as_str()) {
-            let tokens = sp.len() / 4 + 1;
-            let _ = ctx
+        // System prompt injection — inject into the first Pinned region so
+        // the instructions stay in the cacheable system block rather than
+        // getting evicted from the SlidingWindow conversation region.
+        {
+            let mut window = ctx
                 .engine
                 .world_mut()
                 .get_mut::<ContextWindow>(ctx.entity)
-                .expect("ContextWindow always present after spawn_agent")
-                .add_to_region(
-                    "conversation",
+                .expect("ContextWindow always present after spawn_agent");
+
+            // Find first pinned region, or fall back to conversation
+            let target_region = window
+                .regions
+                .iter()
+                .find(|r| matches!(r.kind, leviath_core::RegionKind::Pinned))
+                .map(|r| r.name.clone())
+                .unwrap_or_else(|| "conversation".to_string());
+
+            // Clear any previous stage instructions before injecting new ones
+            if let Some(region) = window.regions.iter_mut().find(|r| r.name == target_region) {
+                region.remove_entries_by_prefix("[Stage instructions:");
+            }
+
+            if let Some(sp) = stage.config.get("system_prompt").and_then(|v| v.as_str()) {
+                let tokens = sp.len() / 4 + 1;
+                let _ = window.add_to_region(
+                    &target_region,
                     format!("[Stage instructions: {}]", sp),
                     tokens,
                 );
+            }
         }
 
         // Tool filtering
@@ -705,7 +723,7 @@ mod tests {
     use super::*;
     use leviath_core::blueprint::{ModelConfig, ModelEntry};
     use leviath_core::layout::RegionDefinition;
-    use leviath_core::{ContextLayout, RegionKind, Stage};
+    use leviath_core::{ContextLayout, EvictionStrategy, RegionKind, Stage};
     use leviath_runtime::ProviderRegistry;
 
     use super::super::helpers::initialize_context_window;
@@ -903,7 +921,10 @@ mod tests {
                 RegionDefinition::new("system".to_string(), RegionKind::Pinned, 2000),
                 RegionDefinition::new(
                     "conversation".to_string(),
-                    RegionKind::SlidingWindow { max_items: 50 },
+                    RegionKind::SlidingWindow {
+                        max_items: 50,
+                        eviction_strategy: EvictionStrategy::PerItem,
+                    },
                     10000,
                 ),
             ],
@@ -1280,7 +1301,10 @@ mod tests {
         stage.context_layout = Some(ContextLayout::new(
             vec![RegionDefinition::new(
                 "conversation".to_string(),
-                RegionKind::SlidingWindow { max_items: 10 },
+                RegionKind::SlidingWindow {
+                    max_items: 10,
+                    eviction_strategy: EvictionStrategy::PerItem,
+                },
                 5000,
             )],
             5000,
@@ -1324,6 +1348,86 @@ mod tests {
             vec![("main".to_string(), StageResult::Success)]
         );
         assert_eq!(cb.completed_at, Some(0));
+    }
+
+    #[tokio::test]
+    async fn system_prompt_injected_into_pinned_region() {
+        // When a Pinned region exists, system_prompt should go there instead
+        // of the conversation SlidingWindow region.
+        let mut stage = make_stage("main");
+        stage.context_layout = Some(ContextLayout::new(
+            vec![
+                RegionDefinition::new("system".to_string(), RegionKind::Pinned, 2000),
+                RegionDefinition::new(
+                    "conversation".to_string(),
+                    RegionKind::SlidingWindow {
+                        max_items: 10,
+                        eviction_strategy: EvictionStrategy::PerItem,
+                    },
+                    5000,
+                ),
+            ],
+            7000,
+        ));
+        stage
+            .config
+            .insert("system_prompt".to_string(), serde_json::json!("Be terse."));
+
+        let bp = make_blueprint(vec![stage]);
+        let (mut engine, mut pool, entity) = make_engine_and_entity(&bp);
+        let tool_registry = make_tool_registry().await;
+        let mut cb = MockCallbacks::new();
+
+        let mut ctx = StageContext {
+            blueprint: &bp,
+            engine: &mut engine,
+            entity,
+            pool: &mut pool,
+            tool_registry: &tool_registry,
+            current_stage_name: Arc::new(Mutex::new(String::new())),
+            current_stage_perms: Arc::new(Mutex::new(HashMap::new())),
+            current_stage_idx: Arc::new(Mutex::new(0)),
+            model_override: None,
+            user_default_model: None,
+            compaction_ref: None,
+        };
+
+        run_stage_loop(
+            &mut ctx,
+            &mut cb,
+            "agent-1",
+            &mut MockIO::new(),
+            &mut noop_exec,
+        )
+        .await
+        .unwrap();
+
+        // Verify system_prompt landed in the "system" (Pinned) region
+        let window = ctx
+            .engine
+            .world_mut()
+            .get::<ContextWindow>(ctx.entity)
+            .unwrap();
+        let system_region = window.get_region("system").unwrap();
+        let has_stage_instruction = system_region
+            .content
+            .iter()
+            .any(|e| e.content.starts_with("[Stage instructions:"));
+        assert!(
+            has_stage_instruction,
+            "system_prompt should be in pinned region"
+        );
+
+        // Verify conversation region does NOT have it
+        let conv_region = window.get_region("conversation").unwrap();
+        let conv_has_stage = conv_region
+            .content
+            .iter()
+            .any(|e| e.content.starts_with("[Stage instructions:"));
+        assert!(
+            !conv_has_stage,
+            "system_prompt should NOT be in conversation region"
+        );
     }
 
     #[tokio::test]

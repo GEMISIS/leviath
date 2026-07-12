@@ -129,5 +129,5 @@ model = "claude-sonnet-4-6"
 [context.regions]
 task        = { kind = "pinned",         max_tokens = 1000 }
 raw_data    = { kind = "temporary",      max_tokens = 40000 }
-prioritized = { kind = "sliding_window", max_tokens = 15000 }
+prioritized = { kind = "sliding_window", max_tokens = 15000, strategy = "bulk", overflow = 10 }
 scratch     = { kind = "clearable",      max_tokens = 5000 }

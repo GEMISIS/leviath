@@ -5,7 +5,7 @@ use leviath_core::blueprint::{
 };
 use leviath_core::layout::RegionDefinition;
 use leviath_core::lifecycle::CompactionConfig;
-use leviath_core::{Blueprint, ContextLayout, RegionKind, Stage};
+use leviath_core::{Blueprint, ContextLayout, EvictionStrategy, RegionKind, Stage};
 use std::path::{Path, PathBuf};
 
 pub fn find_manifest(path: &str) -> anyhow::Result<PathBuf> {
@@ -485,7 +485,30 @@ pub fn parse_manifest(content: &str) -> anyhow::Result<Blueprint> {
                         .get("max_items")
                         .and_then(|v| v.as_integer())
                         .unwrap_or(10) as usize;
-                    RegionKind::SlidingWindow { max_items }
+                    let eviction_strategy =
+                        match region_value.get("strategy").and_then(|v| v.as_str()) {
+                            Some("bulk") => {
+                                let overflow = region_value
+                                    .get("overflow")
+                                    .and_then(|v| v.as_integer())
+                                    .unwrap_or(10)
+                                    as usize;
+                                EvictionStrategy::Bulk { overflow }
+                            }
+                            Some("compact") => {
+                                let compact_count = region_value
+                                    .get("compact_count")
+                                    .and_then(|v| v.as_integer())
+                                    .unwrap_or(10)
+                                    as usize;
+                                EvictionStrategy::Compact { compact_count }
+                            }
+                            _ => EvictionStrategy::PerItem,
+                        };
+                    RegionKind::SlidingWindow {
+                        max_items,
+                        eviction_strategy,
+                    }
                 }
                 "temporary" => RegionKind::Temporary,
                 "compacting" => {
@@ -525,7 +548,10 @@ pub fn parse_manifest(content: &str) -> anyhow::Result<Blueprint> {
         ));
         regions.push(RegionDefinition::new(
             "conversation".to_string(),
-            RegionKind::SlidingWindow { max_items: 10 },
+            RegionKind::SlidingWindow {
+                max_items: 10,
+                eviction_strategy: EvictionStrategy::default(),
+            },
             10000,
         ));
         total_tokens = 12000;
@@ -849,7 +875,13 @@ hist = { kind = "compact_history", source_region = "conv", max_tokens = 4000 }
             .iter()
             .find(|r| r.name == "conv")
             .unwrap();
-        assert_eq!(conv.kind, RegionKind::SlidingWindow { max_items: 15 });
+        assert_eq!(
+            conv.kind,
+            RegionKind::SlidingWindow {
+                max_items: 15,
+                eviction_strategy: EvictionStrategy::PerItem,
+            }
+        );
 
         let temp = bp
             .context_layout
@@ -1466,7 +1498,10 @@ name = "no-regions"
         assert_eq!(bp.context_layout.regions[1].name, "conversation");
         assert_eq!(
             bp.context_layout.regions[1].kind,
-            RegionKind::SlidingWindow { max_items: 10 }
+            RegionKind::SlidingWindow {
+                max_items: 10,
+                eviction_strategy: EvictionStrategy::default(),
+            }
         );
     }
 

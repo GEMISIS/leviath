@@ -1305,7 +1305,10 @@ mod tests {
                     let mut window = ContextWindow::new(10000);
                     window.add_region(leviath_core::Region::new(
                         "conversation".to_string(),
-                        leviath_core::RegionKind::SlidingWindow { max_items: 50 },
+                        leviath_core::RegionKind::SlidingWindow {
+                            max_items: 50,
+                            eviction_strategy: leviath_core::EvictionStrategy::PerItem,
+                        },
                         8000,
                     ));
                     window
@@ -1356,7 +1359,10 @@ mod tests {
                     let mut window = ContextWindow::new(10000);
                     window.add_region(leviath_core::Region::new(
                         "conversation".to_string(),
-                        leviath_core::RegionKind::SlidingWindow { max_items: 50 },
+                        leviath_core::RegionKind::SlidingWindow {
+                            max_items: 50,
+                            eviction_strategy: leviath_core::EvictionStrategy::PerItem,
+                        },
                         8000,
                     ));
                     window
@@ -1538,7 +1544,10 @@ mod tests {
                     let mut window = ContextWindow::new(10000);
                     window.add_region(leviath_core::Region::new(
                         "conversation".to_string(),
-                        leviath_core::RegionKind::SlidingWindow { max_items: 50 },
+                        leviath_core::RegionKind::SlidingWindow {
+                            max_items: 50,
+                            eviction_strategy: leviath_core::EvictionStrategy::PerItem,
+                        },
                         8000,
                     ));
                     window
@@ -1591,12 +1600,18 @@ mod tests {
                     let mut window = ContextWindow::new(10000);
                     window.add_region(leviath_core::Region::new(
                         "conversation".to_string(),
-                        leviath_core::RegionKind::SlidingWindow { max_items: 50 },
+                        leviath_core::RegionKind::SlidingWindow {
+                            max_items: 50,
+                            eviction_strategy: leviath_core::EvictionStrategy::PerItem,
+                        },
                         8000,
                     ));
                     window.add_region(leviath_core::Region::new(
                         "custom".to_string(),
-                        leviath_core::RegionKind::SlidingWindow { max_items: 10 },
+                        leviath_core::RegionKind::SlidingWindow {
+                            max_items: 10,
+                            eviction_strategy: leviath_core::EvictionStrategy::PerItem,
+                        },
                         2000,
                     ));
                     window
@@ -1681,7 +1696,10 @@ mod tests {
                 let mut window = ContextWindow::new(100000);
                 window.add_region(leviath_core::Region::new(
                     "conversation".to_string(),
-                    leviath_core::RegionKind::SlidingWindow { max_items: 50 },
+                    leviath_core::RegionKind::SlidingWindow {
+                        max_items: 50,
+                        eviction_strategy: leviath_core::EvictionStrategy::PerItem,
+                    },
                     80000,
                 ));
                 window
@@ -1872,7 +1890,10 @@ mod tests {
                 window.add_region(temp);
                 window.add_region(leviath_core::Region::new(
                     "tool_results".to_string(),
-                    leviath_core::RegionKind::SlidingWindow { max_items: 50 },
+                    leviath_core::RegionKind::SlidingWindow {
+                        max_items: 50,
+                        eviction_strategy: leviath_core::EvictionStrategy::PerItem,
+                    },
                     50,
                 ));
                 window.current_tokens = 920;
@@ -1953,7 +1974,10 @@ mod tests {
                 window.add_region(pinned);
                 window.add_region(leviath_core::Region::new(
                     "tool_results".to_string(),
-                    leviath_core::RegionKind::SlidingWindow { max_items: 50 },
+                    leviath_core::RegionKind::SlidingWindow {
+                        max_items: 50,
+                        eviction_strategy: leviath_core::EvictionStrategy::PerItem,
+                    },
                     50,
                 ));
                 window.current_tokens = 1500;
@@ -2021,12 +2045,18 @@ mod tests {
                 let mut window = ContextWindow::new(10000);
                 window.add_region(leviath_core::Region::new(
                     "conversation".to_string(),
-                    leviath_core::RegionKind::SlidingWindow { max_items: 50 },
+                    leviath_core::RegionKind::SlidingWindow {
+                        max_items: 50,
+                        eviction_strategy: leviath_core::EvictionStrategy::PerItem,
+                    },
                     8000,
                 ));
                 window.add_region(leviath_core::Region::new(
                     "tool_results".to_string(),
-                    leviath_core::RegionKind::SlidingWindow { max_items: 50 },
+                    leviath_core::RegionKind::SlidingWindow {
+                        max_items: 50,
+                        eviction_strategy: leviath_core::EvictionStrategy::PerItem,
+                    },
                     2000,
                 ));
                 window
@@ -2137,12 +2167,18 @@ mod tests {
         ));
         window.add_region(leviath_core::Region::new(
             "conversation".to_string(),
-            leviath_core::RegionKind::SlidingWindow { max_items: 50 },
+            leviath_core::RegionKind::SlidingWindow {
+                max_items: 50,
+                eviction_strategy: leviath_core::EvictionStrategy::PerItem,
+            },
             6000,
         ));
         window.add_region(leviath_core::Region::new(
             "tool_results".to_string(),
-            leviath_core::RegionKind::SlidingWindow { max_items: 50 },
+            leviath_core::RegionKind::SlidingWindow {
+                max_items: 50,
+                eviction_strategy: leviath_core::EvictionStrategy::PerItem,
+            },
             2000,
         ));
         // Add a system message for the context window
@@ -2386,12 +2422,18 @@ mod tests {
         let mut window = ContextWindow::new(10000);
         window.add_region(leviath_core::Region::new(
             "conversation".to_string(),
-            leviath_core::RegionKind::SlidingWindow { max_items: 50 },
+            leviath_core::RegionKind::SlidingWindow {
+                max_items: 50,
+                eviction_strategy: leviath_core::EvictionStrategy::PerItem,
+            },
             6000,
         ));
         window.add_region(leviath_core::Region::new(
             "tool_results".to_string(),
-            leviath_core::RegionKind::SlidingWindow { max_items: 50 },
+            leviath_core::RegionKind::SlidingWindow {
+                max_items: 50,
+                eviction_strategy: leviath_core::EvictionStrategy::PerItem,
+            },
             2000,
         ));
         let _ = window.add_to_region("conversation", "User: hi".to_string(), 2);
@@ -2459,12 +2501,18 @@ mod tests {
         let mut window = ContextWindow::new(10000);
         window.add_region(leviath_core::Region::new(
             "conversation".to_string(),
-            leviath_core::RegionKind::SlidingWindow { max_items: 50 },
+            leviath_core::RegionKind::SlidingWindow {
+                max_items: 50,
+                eviction_strategy: leviath_core::EvictionStrategy::PerItem,
+            },
             6000,
         ));
         window.add_region(leviath_core::Region::new(
             "tool_results".to_string(),
-            leviath_core::RegionKind::SlidingWindow { max_items: 50 },
+            leviath_core::RegionKind::SlidingWindow {
+                max_items: 50,
+                eviction_strategy: leviath_core::EvictionStrategy::PerItem,
+            },
             2000,
         ));
         let _ = window.add_to_region("conversation", "User: hi".to_string(), 2);
@@ -2541,12 +2589,18 @@ mod tests {
         let mut window = ContextWindow::new(100000);
         window.add_region(leviath_core::Region::new(
             "conversation".to_string(),
-            leviath_core::RegionKind::SlidingWindow { max_items: 50 },
+            leviath_core::RegionKind::SlidingWindow {
+                max_items: 50,
+                eviction_strategy: leviath_core::EvictionStrategy::PerItem,
+            },
             60000,
         ));
         window.add_region(leviath_core::Region::new(
             "tool_results".to_string(),
-            leviath_core::RegionKind::SlidingWindow { max_items: 50 },
+            leviath_core::RegionKind::SlidingWindow {
+                max_items: 50,
+                eviction_strategy: leviath_core::EvictionStrategy::PerItem,
+            },
             20000,
         ));
         let _ = window.add_to_region("conversation", "User: hi".to_string(), 2);
@@ -2596,7 +2650,10 @@ mod tests {
         let mut window = ContextWindow::new(10000);
         window.add_region(leviath_core::Region::new(
             "conversation".to_string(),
-            leviath_core::RegionKind::SlidingWindow { max_items: 50 },
+            leviath_core::RegionKind::SlidingWindow {
+                max_items: 50,
+                eviction_strategy: leviath_core::EvictionStrategy::PerItem,
+            },
             6000,
         ));
         window.add_region(leviath_core::Region::new(
@@ -2646,7 +2703,10 @@ mod tests {
         let mut window = ContextWindow::new(10000);
         window.add_region(leviath_core::Region::new(
             "conversation".to_string(),
-            leviath_core::RegionKind::SlidingWindow { max_items: 50 },
+            leviath_core::RegionKind::SlidingWindow {
+                max_items: 50,
+                eviction_strategy: leviath_core::EvictionStrategy::PerItem,
+            },
             6000,
         ));
         // No content added — should be empty
@@ -2672,7 +2732,10 @@ mod tests {
         let mut window = ContextWindow::new(10000);
         window.add_region(leviath_core::Region::new(
             "conversation".to_string(),
-            leviath_core::RegionKind::SlidingWindow { max_items: 50 },
+            leviath_core::RegionKind::SlidingWindow {
+                max_items: 50,
+                eviction_strategy: leviath_core::EvictionStrategy::PerItem,
+            },
             6000,
         ));
         let _ = window.add_to_region("conversation", "content".to_string(), 3);
@@ -2744,17 +2807,26 @@ mod tests {
         let mut window = ContextWindow::new(10000);
         window.add_region(leviath_core::Region::new(
             "conversation".to_string(),
-            leviath_core::RegionKind::SlidingWindow { max_items: 50 },
+            leviath_core::RegionKind::SlidingWindow {
+                max_items: 50,
+                eviction_strategy: leviath_core::EvictionStrategy::PerItem,
+            },
             4000,
         ));
         window.add_region(leviath_core::Region::new(
             "tool_results".to_string(),
-            leviath_core::RegionKind::SlidingWindow { max_items: 50 },
+            leviath_core::RegionKind::SlidingWindow {
+                max_items: 50,
+                eviction_strategy: leviath_core::EvictionStrategy::PerItem,
+            },
             2000,
         ));
         window.add_region(leviath_core::Region::new(
             "scratch".to_string(),
-            leviath_core::RegionKind::SlidingWindow { max_items: 50 },
+            leviath_core::RegionKind::SlidingWindow {
+                max_items: 50,
+                eviction_strategy: leviath_core::EvictionStrategy::PerItem,
+            },
             2000,
         ));
         let _ = window.add_to_region("conversation", "User: hi".to_string(), 2);
@@ -2839,12 +2911,18 @@ mod tests {
         let mut window = ContextWindow::new(10000);
         window.add_region(leviath_core::Region::new(
             "conversation".to_string(),
-            leviath_core::RegionKind::SlidingWindow { max_items: 50 },
+            leviath_core::RegionKind::SlidingWindow {
+                max_items: 50,
+                eviction_strategy: leviath_core::EvictionStrategy::PerItem,
+            },
             4000,
         ));
         window.add_region(leviath_core::Region::new(
             "tool_results".to_string(),
-            leviath_core::RegionKind::SlidingWindow { max_items: 50 },
+            leviath_core::RegionKind::SlidingWindow {
+                max_items: 50,
+                eviction_strategy: leviath_core::EvictionStrategy::PerItem,
+            },
             2000,
         ));
         // No "scratch" region.
@@ -2924,17 +3002,26 @@ mod tests {
         let mut window = ContextWindow::new(10000);
         window.add_region(leviath_core::Region::new(
             "conversation".to_string(),
-            leviath_core::RegionKind::SlidingWindow { max_items: 50 },
+            leviath_core::RegionKind::SlidingWindow {
+                max_items: 50,
+                eviction_strategy: leviath_core::EvictionStrategy::PerItem,
+            },
             4000,
         ));
         window.add_region(leviath_core::Region::new(
             "tool_results".to_string(),
-            leviath_core::RegionKind::SlidingWindow { max_items: 50 },
+            leviath_core::RegionKind::SlidingWindow {
+                max_items: 50,
+                eviction_strategy: leviath_core::EvictionStrategy::PerItem,
+            },
             2000,
         ));
         window.add_region(leviath_core::Region::new(
             "bash_output".to_string(),
-            leviath_core::RegionKind::SlidingWindow { max_items: 50 },
+            leviath_core::RegionKind::SlidingWindow {
+                max_items: 50,
+                eviction_strategy: leviath_core::EvictionStrategy::PerItem,
+            },
             2000,
         ));
         let _ = window.add_to_region("conversation", "User: hi".to_string(), 2);
@@ -3125,7 +3212,10 @@ mod tests {
         let mut window = ContextWindow::new(10000);
         window.add_region(leviath_core::Region::new(
             "conversation".to_string(),
-            leviath_core::RegionKind::SlidingWindow { max_items: 50 },
+            leviath_core::RegionKind::SlidingWindow {
+                max_items: 50,
+                eviction_strategy: leviath_core::EvictionStrategy::PerItem,
+            },
             9000,
         ));
         let _ = window.add_to_region("conversation", "User: hi".to_string(), 2);
@@ -3165,7 +3255,10 @@ mod tests {
         let mut window = ContextWindow::new(10000);
         window.add_region(leviath_core::Region::new(
             "conversation".to_string(),
-            leviath_core::RegionKind::SlidingWindow { max_items: 50 },
+            leviath_core::RegionKind::SlidingWindow {
+                max_items: 50,
+                eviction_strategy: leviath_core::EvictionStrategy::PerItem,
+            },
             9000,
         ));
         let _ = window.add_to_region("conversation", "User: hi".to_string(), 2);
@@ -3335,7 +3428,10 @@ mod tests {
         let mut window = ContextWindow::new(10000);
         window.add_region(leviath_core::Region::new(
             "conversation".to_string(),
-            leviath_core::RegionKind::SlidingWindow { max_items: 50 },
+            leviath_core::RegionKind::SlidingWindow {
+                max_items: 50,
+                eviction_strategy: leviath_core::EvictionStrategy::PerItem,
+            },
             9000,
         ));
         let _ = window.add_to_region("conversation", "User: hi".to_string(), 2);
@@ -3370,7 +3466,10 @@ mod tests {
         let mut window = ContextWindow::new(10000);
         window.add_region(leviath_core::Region::new(
             "conversation".to_string(),
-            leviath_core::RegionKind::SlidingWindow { max_items: 50 },
+            leviath_core::RegionKind::SlidingWindow {
+                max_items: 50,
+                eviction_strategy: leviath_core::EvictionStrategy::PerItem,
+            },
             9000,
         ));
         let _ = window.add_to_region("conversation", "User: hi".to_string(), 2);
@@ -3443,12 +3542,18 @@ mod tests {
         let mut window = ContextWindow::new(10000);
         window.add_region(leviath_core::Region::new(
             "conversation".to_string(),
-            leviath_core::RegionKind::SlidingWindow { max_items: 50 },
+            leviath_core::RegionKind::SlidingWindow {
+                max_items: 50,
+                eviction_strategy: leviath_core::EvictionStrategy::PerItem,
+            },
             6000,
         ));
         window.add_region(leviath_core::Region::new(
             "tool_results".to_string(),
-            leviath_core::RegionKind::SlidingWindow { max_items: 50 },
+            leviath_core::RegionKind::SlidingWindow {
+                max_items: 50,
+                eviction_strategy: leviath_core::EvictionStrategy::PerItem,
+            },
             2000,
         ));
         let _ = window.add_to_region("conversation", "User: hi".to_string(), 2);
@@ -3914,7 +4019,10 @@ mod tests {
                 ));
                 window.add_region(leviath_core::Region::new(
                     "conversation".to_string(),
-                    leviath_core::RegionKind::SlidingWindow { max_items: 50 },
+                    leviath_core::RegionKind::SlidingWindow {
+                        max_items: 50,
+                        eviction_strategy: leviath_core::EvictionStrategy::PerItem,
+                    },
                     200,
                 ));
                 window.enable_taint_tracking();
@@ -4057,7 +4165,10 @@ mod tests {
                 let mut window = ContextWindow::new(1000);
                 window.add_region(leviath_core::Region::new(
                     "tool_results".to_string(),
-                    leviath_core::RegionKind::SlidingWindow { max_items: 50 },
+                    leviath_core::RegionKind::SlidingWindow {
+                        max_items: 50,
+                        eviction_strategy: leviath_core::EvictionStrategy::PerItem,
+                    },
                     200,
                 ));
                 window
@@ -4202,7 +4313,10 @@ mod tests {
         let mut window = ContextWindow::new(100_000);
         window.add_region(leviath_core::Region::new(
             "conversation".to_string(),
-            leviath_core::RegionKind::SlidingWindow { max_items: 200 },
+            leviath_core::RegionKind::SlidingWindow {
+                max_items: 200,
+                eviction_strategy: leviath_core::EvictionStrategy::PerItem,
+            },
             80_000,
         ));
         let _ = window.add_to_region("conversation", "User: hi".to_string(), 2);
@@ -4276,7 +4390,10 @@ mod tests {
         let mut window = ContextWindow::new(100_000);
         window.add_region(leviath_core::Region::new(
             "conversation".to_string(),
-            leviath_core::RegionKind::SlidingWindow { max_items: 200 },
+            leviath_core::RegionKind::SlidingWindow {
+                max_items: 200,
+                eviction_strategy: leviath_core::EvictionStrategy::PerItem,
+            },
             80_000,
         ));
         let _ = window.add_to_region("conversation", "User: do something".to_string(), 5);
@@ -4366,7 +4483,10 @@ mod tests {
         let mut window = ContextWindow::new(500);
         window.add_region(leviath_core::Region::new(
             "conversation".to_string(),
-            leviath_core::RegionKind::SlidingWindow { max_items: 200 },
+            leviath_core::RegionKind::SlidingWindow {
+                max_items: 200,
+                eviction_strategy: leviath_core::EvictionStrategy::PerItem,
+            },
             200,
         ));
         let _ = window.add_to_region("conversation", "User: hi".to_string(), 2);
@@ -4460,7 +4580,10 @@ mod tests {
         let mut window = ContextWindow::new(100_000);
         window.add_region(leviath_core::Region::new(
             "conversation".to_string(),
-            leviath_core::RegionKind::SlidingWindow { max_items: 200 },
+            leviath_core::RegionKind::SlidingWindow {
+                max_items: 200,
+                eviction_strategy: leviath_core::EvictionStrategy::PerItem,
+            },
             80_000,
         ));
         let _ = window.add_to_region("conversation", "User: hi".to_string(), 2);

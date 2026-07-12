@@ -676,7 +676,7 @@ mod tests {
     use async_trait::async_trait;
     use leviath_core::blueprint::ModelConfig;
     use leviath_core::layout::RegionDefinition;
-    use leviath_core::{Blueprint, ContextLayout, RegionKind, Stage};
+    use leviath_core::{Blueprint, ContextLayout, EvictionStrategy, RegionKind, Stage};
     use leviath_providers::{
         FinishReason, InferenceRequest, InferenceResponse, ModelCapabilities, ModelInfo, Provider,
         ProviderError, TokenUsage,
@@ -780,7 +780,10 @@ mod tests {
                 RegionDefinition::new("system".to_string(), RegionKind::Pinned, 2000),
                 RegionDefinition::new(
                     "conversation".to_string(),
-                    RegionKind::SlidingWindow { max_items: 50 },
+                    RegionKind::SlidingWindow {
+                        max_items: 50,
+                        eviction_strategy: EvictionStrategy::PerItem,
+                    },
                     10000,
                 ),
             ],

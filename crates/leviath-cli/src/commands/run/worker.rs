@@ -865,7 +865,10 @@ mod tests {
             leviath_core::ContextLayout::new(
                 vec![leviath_core::layout::RegionDefinition::new(
                     "conversation".to_string(),
-                    leviath_core::RegionKind::SlidingWindow { max_items: 10 },
+                    leviath_core::RegionKind::SlidingWindow {
+                        max_items: 10,
+                        eviction_strategy: leviath_core::EvictionStrategy::PerItem,
+                    },
                     10000,
                 )],
                 10000,

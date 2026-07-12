@@ -38,6 +38,34 @@ pub struct SerializedToolCall {
     pub arguments: serde_json::Value,
 }
 
+/// Eviction strategy for `SlidingWindow` regions.
+///
+/// Controls how entries are removed when the window exceeds its `max_items` limit.
+/// The choice of strategy affects prompt caching effectiveness: PerItem eviction
+/// shifts the message prefix every iteration (breaking cache), while Bulk and
+/// Compact keep the prefix stable between eviction events.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "strategy", rename_all = "snake_case")]
+pub enum EvictionStrategy {
+    /// Evict one turn group at a time (current behavior). Default.
+    #[default]
+    PerItem,
+    /// Evict in bulk when items exceed max + overflow.
+    /// Between bulk evictions, the prefix stays stable for caching.
+    Bulk {
+        /// How many items over max_items before triggering a bulk eviction.
+        /// When triggered, evicts items back down to max_items.
+        overflow: usize,
+    },
+    /// Summarize oldest entries when threshold is hit (requires external LLM call).
+    /// The region stores a `pending_compaction` flag; the runtime checks this
+    /// and performs compaction externally.
+    Compact {
+        /// Number of oldest entries to compact into a summary when triggered.
+        compact_count: usize,
+    },
+}
+
 /// A typed memory region within an agent's context window.
 ///
 /// Regions have different lifecycle policies controlling how they behave
@@ -63,6 +91,8 @@ pub enum RegionKind {
     SlidingWindow {
         /// Maximum number of items to retain in the window
         max_items: usize,
+        /// Strategy used to evict entries when the window is full
+        eviction_strategy: EvictionStrategy,
     },
 
     /// First to be evicted when space is needed. Tool outputs, intermediate results.
@@ -109,7 +139,16 @@ impl PartialEq for RegionKind {
             (Self::Pinned, Self::Pinned)
             | (Self::Temporary, Self::Temporary)
             | (Self::Clearable, Self::Clearable) => true,
-            (Self::SlidingWindow { max_items: a }, Self::SlidingWindow { max_items: b }) => a == b,
+            (
+                Self::SlidingWindow {
+                    max_items: a,
+                    eviction_strategy: sa,
+                },
+                Self::SlidingWindow {
+                    max_items: b,
+                    eviction_strategy: sb,
+                },
+            ) => a == b && sa == sb,
             (
                 Self::Compacting {
                     threshold_tokens: a,
@@ -171,6 +210,12 @@ pub struct Region {
     /// Taint tracking state. Present when taint tracking is enabled.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub taint: Option<crate::taint::RegionTaint>,
+
+    /// When true, the Compact eviction strategy has determined that oldest
+    /// entries should be summarized. The runtime checks this flag and
+    /// performs the compaction externally (requires an LLM call).
+    #[serde(default)]
+    pub needs_message_compaction: bool,
 }
 
 impl Region {
@@ -184,6 +229,7 @@ impl Region {
             current_tokens: 0,
             schema: None,
             taint: None,
+            needs_message_compaction: false,
         }
     }
 
@@ -427,14 +473,52 @@ impl Region {
     }
 
     /// Enforce the SlidingWindow max_items limit by removing oldest entries.
+    ///
+    /// Behaviour depends on the configured [`EvictionStrategy`]:
+    /// - **PerItem** – evict one turn group at a time (original behaviour).
+    /// - **Bulk** – only evict when `len > max_items + overflow`, then evict
+    ///   down to `max_items`. Between bulk evictions the prefix is stable,
+    ///   which preserves Anthropic prompt-cache keys.
+    /// - **Compact** – set `needs_message_compaction` when `len > max_items + compact_count`.
+    ///   If the runtime hasn't compacted and `len > max_items + compact_count * 2`,
+    ///   fall back to bulk eviction to prevent unbounded growth.
     fn enforce_sliding_window(&mut self) {
-        if let RegionKind::SlidingWindow { max_items } = &self.kind {
+        if let RegionKind::SlidingWindow {
+            max_items,
+            eviction_strategy,
+        } = &self.kind
+        {
             let max = *max_items;
-            while self.content.len() > max {
-                // Delegate to remove_oldest which handles turn-group-aware
-                // eviction (AssistantTurn + ToolResults as an atomic unit).
-                if self.remove_oldest().is_none() {
-                    break;
+            match eviction_strategy.clone() {
+                EvictionStrategy::PerItem => {
+                    while self.content.len() > max {
+                        if self.remove_oldest().is_none() {
+                            break;
+                        }
+                    }
+                }
+                EvictionStrategy::Bulk { overflow } => {
+                    if self.content.len() > max + overflow {
+                        while self.content.len() > max {
+                            if self.remove_oldest().is_none() {
+                                break;
+                            }
+                        }
+                    }
+                }
+                EvictionStrategy::Compact { compact_count } => {
+                    if self.content.len() > max + compact_count * 2 {
+                        // Fallback: runtime hasn't compacted, bulk-evict to prevent
+                        // unbounded growth.
+                        while self.content.len() > max {
+                            if self.remove_oldest().is_none() {
+                                break;
+                            }
+                        }
+                        self.needs_message_compaction = false;
+                    } else if self.content.len() > max + compact_count {
+                        self.needs_message_compaction = true;
+                    }
                 }
             }
         }
@@ -511,6 +595,27 @@ impl Region {
             }
         }
         first
+    }
+
+    /// Remove all entries whose content starts with the given prefix.
+    ///
+    /// Used to clear tagged entries (e.g. stage instructions) before injecting
+    /// replacements, so stale instructions don't accumulate across stage
+    /// transitions.
+    pub fn remove_entries_by_prefix(&mut self, prefix: &str) {
+        let mut i = 0;
+        while i < self.content.len() {
+            if self.content[i].content.starts_with(prefix) {
+                let tokens = self.content[i].tokens;
+                self.content.remove(i);
+                self.current_tokens -= tokens;
+                if let Some(taint) = &mut self.taint {
+                    taint.remove_at(i);
+                }
+            } else {
+                i += 1;
+            }
+        }
     }
 
     /// Get the number of entries in this region.
@@ -690,7 +795,10 @@ mod tests {
 
     #[test]
     fn test_sliding_window_config() {
-        let kind = RegionKind::SlidingWindow { max_items: 10 };
+        let kind = RegionKind::SlidingWindow {
+            max_items: 10,
+            eviction_strategy: EvictionStrategy::PerItem,
+        };
         let region = Region::new("history".to_string(), kind.clone(), 5000);
         assert_eq!(region.kind, kind);
     }
@@ -721,7 +829,10 @@ mod tests {
     fn test_sliding_window_enforces_max_items() {
         let mut region = Region::new(
             "conv".to_string(),
-            RegionKind::SlidingWindow { max_items: 3 },
+            RegionKind::SlidingWindow {
+                max_items: 3,
+                eviction_strategy: EvictionStrategy::PerItem,
+            },
             50000,
         );
 
@@ -749,7 +860,10 @@ mod tests {
     fn test_sliding_window_enforces_max_items_with_metadata() {
         let mut region = Region::new(
             "conv".to_string(),
-            RegionKind::SlidingWindow { max_items: 2 },
+            RegionKind::SlidingWindow {
+                max_items: 2,
+                eviction_strategy: EvictionStrategy::PerItem,
+            },
             50000,
         );
 
@@ -793,7 +907,10 @@ mod tests {
 
     #[test]
     fn test_cache_hint_sliding_window() {
-        let kind = RegionKind::SlidingWindow { max_items: 10 };
+        let kind = RegionKind::SlidingWindow {
+            max_items: 10,
+            eviction_strategy: EvictionStrategy::PerItem,
+        };
         assert_eq!(
             kind.cache_hint(),
             crate::cache::CacheHint::SlidingPrefix {
@@ -1185,7 +1302,10 @@ mod tests {
     fn test_taint_recovery_on_sliding_window_eviction() {
         let mut region = Region::new(
             "conv".to_string(),
-            RegionKind::SlidingWindow { max_items: 2 },
+            RegionKind::SlidingWindow {
+                max_items: 2,
+                eviction_strategy: EvictionStrategy::PerItem,
+            },
             50000,
         )
         .with_taint_tracking();
@@ -1227,7 +1347,10 @@ mod tests {
     fn test_add_typed_tainted_entry() {
         let mut region = Region::new(
             "conversation".to_string(),
-            RegionKind::SlidingWindow { max_items: 100 },
+            RegionKind::SlidingWindow {
+                max_items: 100,
+                eviction_strategy: EvictionStrategy::PerItem,
+            },
             1000,
         )
         .with_taint_tracking();
@@ -1264,7 +1387,10 @@ mod tests {
     fn test_add_typed_tainted_entry_checks_budget() {
         let mut region = Region::new(
             "conversation".to_string(),
-            RegionKind::SlidingWindow { max_items: 100 },
+            RegionKind::SlidingWindow {
+                max_items: 100,
+                eviction_strategy: EvictionStrategy::PerItem,
+            },
             5,
         )
         .with_taint_tracking();
@@ -1304,7 +1430,10 @@ mod tests {
         // but the taint level is not tracked
         let mut region = Region::new(
             "conversation".to_string(),
-            RegionKind::SlidingWindow { max_items: 100 },
+            RegionKind::SlidingWindow {
+                max_items: 100,
+                eviction_strategy: EvictionStrategy::PerItem,
+            },
             1000,
         );
         // No .with_taint_tracking()
@@ -1551,7 +1680,10 @@ mod tests {
     fn test_sliding_window_evicts_entire_turn_group() {
         let mut region = Region::new(
             "conv".to_string(),
-            RegionKind::SlidingWindow { max_items: 3 },
+            RegionKind::SlidingWindow {
+                max_items: 3,
+                eviction_strategy: EvictionStrategy::PerItem,
+            },
             50000,
         );
 
@@ -1653,5 +1785,185 @@ mod tests {
             region.taint.as_ref().unwrap().entry_taint(0),
             Some(crate::taint::TaintLevel::Public)
         );
+    }
+
+    // ─── EvictionStrategy tests ───────────────────────────────────────────
+
+    #[test]
+    fn test_per_item_strategy_evicts_one_at_a_time() {
+        let mut region = Region::new(
+            "conv".to_string(),
+            RegionKind::SlidingWindow {
+                max_items: 3,
+                eviction_strategy: EvictionStrategy::PerItem,
+            },
+            50000,
+        );
+        for i in 0..5 {
+            region.add_entry(format!("msg{}", i), 10).unwrap();
+        }
+        assert_eq!(region.entry_count(), 3);
+        assert_eq!(region.content[0].content, "msg2");
+        assert_eq!(region.content[1].content, "msg3");
+        assert_eq!(region.content[2].content, "msg4");
+    }
+
+    #[test]
+    fn test_bulk_eviction_triggers_on_overflow() {
+        let mut region = Region::new(
+            "conv".to_string(),
+            RegionKind::SlidingWindow {
+                max_items: 5,
+                eviction_strategy: EvictionStrategy::Bulk { overflow: 3 },
+            },
+            50000,
+        );
+        // Add 8 entries: 5 (max) + 3 (overflow) = 8, which does NOT trigger
+        // because the check is > not >=.
+        for i in 0..8 {
+            region.add_entry(format!("msg{}", i), 10).unwrap();
+        }
+        assert_eq!(region.entry_count(), 8);
+
+        // Adding one more (9 total > 5+3=8) triggers bulk eviction → down to 5
+        region.add_entry("msg8".to_string(), 10).unwrap();
+        assert_eq!(region.entry_count(), 5);
+        assert_eq!(region.content[0].content, "msg4");
+    }
+
+    #[test]
+    fn test_bulk_eviction_respects_turn_groups() {
+        let mut region = Region::new(
+            "conv".to_string(),
+            RegionKind::SlidingWindow {
+                max_items: 3,
+                eviction_strategy: EvictionStrategy::Bulk { overflow: 2 },
+            },
+            50000,
+        );
+        // Add AssistantTurn + ToolResult (turn group of 2)
+        region
+            .add_typed_entry(
+                "assistant".to_string(),
+                10,
+                EntryKind::AssistantTurn {
+                    tool_calls: vec![SerializedToolCall {
+                        id: "tc1".to_string(),
+                        name: "tool".to_string(),
+                        arguments: serde_json::json!({}),
+                    }],
+                },
+            )
+            .unwrap();
+        region
+            .add_typed_entry(
+                "result".to_string(),
+                5,
+                EntryKind::ToolResult {
+                    tool_call_id: "tc1".to_string(),
+                    tool_name: "tool".to_string(),
+                    is_error: false,
+                },
+            )
+            .unwrap();
+        // Add more entries to exceed overflow
+        region.add_entry("msg2".to_string(), 10).unwrap();
+        region.add_entry("msg3".to_string(), 10).unwrap();
+        region.add_entry("msg4".to_string(), 10).unwrap();
+        // 5 entries, under overflow (5 < 3+2=5 is not >), no eviction yet
+        assert_eq!(region.entry_count(), 5);
+
+        // Adding 6th entry: 6 > 5 triggers bulk eviction
+        region.add_entry("msg5".to_string(), 10).unwrap();
+        // Turn group (assistant+result=2) evicted together, then msg2 evicted
+        // to get down to max_items=3
+        assert_eq!(region.entry_count(), 3);
+        assert_eq!(region.content[0].content, "msg3");
+    }
+
+    #[test]
+    fn test_bulk_eviction_under_overflow_no_eviction() {
+        let mut region = Region::new(
+            "conv".to_string(),
+            RegionKind::SlidingWindow {
+                max_items: 5,
+                eviction_strategy: EvictionStrategy::Bulk { overflow: 3 },
+            },
+            50000,
+        );
+        // Add exactly max_items + overflow - 1 = 7 entries
+        for i in 0..7 {
+            region.add_entry(format!("msg{}", i), 10).unwrap();
+        }
+        // 7 <= 8 (5+3), so no eviction
+        assert_eq!(region.entry_count(), 7);
+    }
+
+    #[test]
+    fn test_compact_sets_needs_message_compaction_flag() {
+        let mut region = Region::new(
+            "conv".to_string(),
+            RegionKind::SlidingWindow {
+                max_items: 5,
+                eviction_strategy: EvictionStrategy::Compact { compact_count: 3 },
+            },
+            50000,
+        );
+        assert!(!region.needs_message_compaction);
+
+        // Add 9 entries: > max_items(5) + compact_count(3) = 8
+        for i in 0..9 {
+            region.add_entry(format!("msg{}", i), 10).unwrap();
+        }
+        assert!(region.needs_message_compaction);
+        // No entries were evicted — compaction flag is set for the runtime
+        assert_eq!(region.entry_count(), 9);
+    }
+
+    #[test]
+    fn test_compact_fallback_to_bulk_eviction() {
+        let mut region = Region::new(
+            "conv".to_string(),
+            RegionKind::SlidingWindow {
+                max_items: 5,
+                eviction_strategy: EvictionStrategy::Compact { compact_count: 3 },
+            },
+            50000,
+        );
+        // Add enough entries to exceed 2x threshold:
+        // > max_items(5) + compact_count(3) * 2 = 11
+        for i in 0..12 {
+            region.add_entry(format!("msg{}", i), 10).unwrap();
+        }
+        // Should have bulk-evicted down to max_items=5
+        assert_eq!(region.entry_count(), 5);
+        assert_eq!(region.content[0].content, "msg7");
+        // Compaction flag should be cleared after fallback
+        assert!(!region.needs_message_compaction);
+    }
+
+    #[test]
+    fn test_eviction_strategy_default_is_per_item() {
+        assert_eq!(EvictionStrategy::default(), EvictionStrategy::PerItem);
+    }
+
+    #[test]
+    fn test_remove_entries_by_prefix() {
+        let mut region = Region::new("system".to_string(), RegionKind::Pinned, 50000);
+        region
+            .add_entry("[Stage instructions: Be terse.]".to_string(), 10)
+            .unwrap();
+        region
+            .add_entry("Core identity block".to_string(), 20)
+            .unwrap();
+        region
+            .add_entry("[Stage instructions: Be verbose.]".to_string(), 15)
+            .unwrap();
+
+        assert_eq!(region.entry_count(), 3);
+        region.remove_entries_by_prefix("[Stage instructions:");
+        assert_eq!(region.entry_count(), 1);
+        assert_eq!(region.content[0].content, "Core identity block");
+        assert_eq!(region.current_tokens, 20);
     }
 }

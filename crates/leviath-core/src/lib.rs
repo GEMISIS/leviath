@@ -29,7 +29,8 @@ pub use layout::{ContextLayout, RegionDefinition};
 pub use lifecycle::{CompactionConfig, CompactionStrategy, EvictionPolicy};
 pub use policy::{AllowlistRule, McpToolOverride, PolicyConfig, ScriptedRule};
 pub use region::{
-    ContentFormat, EntryKind, Region, RegionEntry, RegionKind, RegionSchema, SerializedToolCall,
+    ContentFormat, EntryKind, EvictionStrategy, Region, RegionEntry, RegionKind, RegionSchema,
+    SerializedToolCall,
 };
 pub use taint::{
     FilterInput, FilterMode, FilterOperation, GateDecision, GateDecisionSource, GateEvent,

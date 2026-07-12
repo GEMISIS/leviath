@@ -1,7 +1,7 @@
 //! Integration tests for context management and region lifecycle.
 
 use bevy_ecs::prelude::*;
-use leviath_core::{Region, RegionKind};
+use leviath_core::{EvictionStrategy, Region, RegionKind};
 use leviath_runtime::{
     AgentState, AgentStatus, CancellationToken, ContextWindow, MessageInbox, ParentRef,
     SubAgentChildren,
@@ -20,12 +20,15 @@ fn test_pinned_region_never_evicted() {
 fn test_sliding_window_configuration() {
     let region = Region::new(
         "conversation".to_string(),
-        RegionKind::SlidingWindow { max_items: 10 },
+        RegionKind::SlidingWindow {
+            max_items: 10,
+            eviction_strategy: EvictionStrategy::PerItem,
+        },
         8000,
     );
 
     match region.kind {
-        RegionKind::SlidingWindow { max_items } => {
+        RegionKind::SlidingWindow { max_items, .. } => {
             assert_eq!(max_items, 10);
         }
         _ => panic!("Expected SlidingWindow region"),
@@ -78,7 +81,10 @@ fn test_eviction_cascade_temporary_then_compacting() {
     // Add a SlidingWindow region (should never be touched)
     let mut sliding = Region::new(
         "conversation".to_string(),
-        RegionKind::SlidingWindow { max_items: 5 },
+        RegionKind::SlidingWindow {
+            max_items: 5,
+            eviction_strategy: EvictionStrategy::PerItem,
+        },
         4000,
     );
     sliding.add_entry("msg 1".to_string(), 500).unwrap();
@@ -451,7 +457,10 @@ fn test_child_completion_notifies_parent() {
     let mut parent_window = ContextWindow::new(10000);
     parent_window.add_region(Region::new(
         "conversation".to_string(),
-        RegionKind::SlidingWindow { max_items: 50 },
+        RegionKind::SlidingWindow {
+            max_items: 50,
+            eviction_strategy: EvictionStrategy::PerItem,
+        },
         8000,
     ));
 
