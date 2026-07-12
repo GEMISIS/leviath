@@ -518,6 +518,19 @@ impl ContextWindow {
             }
         }
 
+        // ── Sort system blocks for optimal prefix caching ────────────────
+        //
+        // Anthropic caches system content based on prefix matching.
+        // Stable blocks (Pinned, CompactHistory) should come first so
+        // they form the cacheable prefix, with volatile blocks
+        // (Compacting, Temporary, Clearable) after.
+        system_blocks.sort_by_key(|block| match block.cache_hint {
+            CacheHint::Always => 0,               // Pinned, CompactHistory — most stable
+            CacheHint::SlidingPrefix { .. } => 1, // Partially stable
+            CacheHint::UntilChanged => 2,         // Compacting — changes on compaction
+            CacheHint::Never => 3,                // Temporary, Clearable — changes every iteration
+        });
+
         // ── Sanitize orphaned tool_use / tool_result blocks ──────────────
         //
         // Collect all tool_use IDs from assistant messages and all tool_result
@@ -586,6 +599,26 @@ impl ContextWindow {
                     }
                 })
                 .collect();
+        }
+
+        // ── Set cache breakpoints on stable message prefix ──────────────
+        //
+        // In an iterative inference loop, only the last few messages change
+        // each iteration (new assistant turn + tool results). Everything
+        // before is stable across iterations and benefits from Anthropic's
+        // prompt caching. We place a cache breakpoint near the end of the
+        // stable prefix to maximize cache hits.
+        //
+        // Anthropic allows up to 4 breakpoints. We use 1 on messages
+        // (system blocks already have cache_control via CacheHint).
+        // Place it on the 4th-from-last message to give a buffer for the
+        // new messages added each iteration (typically 2-3).
+        if messages.len() >= 5 {
+            let bp_idx = messages.len() - 4;
+            messages[bp_idx].cache_breakpoint = true;
+        } else if messages.len() >= 2 {
+            // Small conversation — cache at least the first message
+            messages[0].cache_breakpoint = true;
         }
 
         // Ensure there's at least one user message
@@ -2526,5 +2559,192 @@ mod tests {
         }
         // Should still have a fallback user message ("Begin.")
         assert!(assembled.messages.iter().any(|m| m.role == "user"));
+    }
+
+    // ─── Prompt caching tests ────────────────────────────────────────────
+
+    #[test]
+    fn test_assemble_sets_cache_breakpoint_on_stable_prefix() {
+        let mut window = ContextWindow::new(100_000);
+        let region = Region::new(
+            "conv".to_string(),
+            RegionKind::SlidingWindow { max_items: 100 },
+            50_000,
+        );
+        window.add_region(region);
+
+        // Add 10 alternating user/assistant messages
+        for i in 0..10 {
+            let kind = if i % 2 == 0 {
+                leviath_core::EntryKind::UserMessage
+            } else {
+                leviath_core::EntryKind::AssistantTurn { tool_calls: vec![] }
+            };
+            window
+                .add_typed_entry("conv", kind, format!("message {i}"), 10)
+                .unwrap();
+        }
+
+        let assembled = window.assemble();
+        assert_eq!(assembled.messages.len(), 10);
+
+        // The 4th-from-last (index 6) should have cache_breakpoint = true
+        let bp_idx = assembled.messages.len() - 4;
+        for (i, msg) in assembled.messages.iter().enumerate() {
+            if i == bp_idx {
+                assert!(
+                    msg.cache_breakpoint,
+                    "Message at index {i} should have cache_breakpoint = true"
+                );
+            } else {
+                assert!(
+                    !msg.cache_breakpoint,
+                    "Message at index {i} should have cache_breakpoint = false"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_assemble_cache_breakpoint_small_conversation() {
+        let mut window = ContextWindow::new(100_000);
+        let region = Region::new(
+            "conv".to_string(),
+            RegionKind::SlidingWindow { max_items: 100 },
+            50_000,
+        );
+        window.add_region(region);
+
+        // Add 3 messages (user, assistant, user)
+        window
+            .add_typed_entry(
+                "conv",
+                leviath_core::EntryKind::UserMessage,
+                "Hello".to_string(),
+                10,
+            )
+            .unwrap();
+        window
+            .add_typed_entry(
+                "conv",
+                leviath_core::EntryKind::AssistantTurn { tool_calls: vec![] },
+                "Hi there".to_string(),
+                10,
+            )
+            .unwrap();
+        window
+            .add_typed_entry(
+                "conv",
+                leviath_core::EntryKind::UserMessage,
+                "How are you?".to_string(),
+                10,
+            )
+            .unwrap();
+
+        let assembled = window.assemble();
+        assert_eq!(assembled.messages.len(), 3);
+
+        // With < 5 messages but >= 2, first message gets the breakpoint
+        assert!(
+            assembled.messages[0].cache_breakpoint,
+            "First message should have cache_breakpoint in small conversation"
+        );
+        assert!(!assembled.messages[1].cache_breakpoint);
+        assert!(!assembled.messages[2].cache_breakpoint);
+    }
+
+    #[test]
+    fn test_assemble_cache_breakpoint_too_few_messages() {
+        let mut window = ContextWindow::new(100_000);
+        let region = Region::new(
+            "conv".to_string(),
+            RegionKind::SlidingWindow { max_items: 100 },
+            50_000,
+        );
+        window.add_region(region);
+
+        // Add only 1 message
+        window
+            .add_typed_entry(
+                "conv",
+                leviath_core::EntryKind::UserMessage,
+                "Solo message".to_string(),
+                10,
+            )
+            .unwrap();
+
+        let assembled = window.assemble();
+        assert_eq!(assembled.messages.len(), 1);
+
+        // With only 1 message, no breakpoints should be set
+        assert!(
+            !assembled.messages[0].cache_breakpoint,
+            "Single message should not get a cache breakpoint"
+        );
+    }
+
+    #[test]
+    fn test_assemble_system_blocks_sorted_by_cache_stability() {
+        use leviath_core::CacheHint;
+
+        let mut window = ContextWindow::new(100_000);
+
+        // Add regions in "wrong" order: volatile first, stable last
+        let mut clearable = Region::new("scratch".to_string(), RegionKind::Clearable, 10_000);
+        clearable
+            .add_entry("clearable data".to_string(), 20)
+            .unwrap();
+        window.add_region(clearable);
+
+        let mut temporary = Region::new("temp".to_string(), RegionKind::Temporary, 10_000);
+        temporary
+            .add_entry("temporary data".to_string(), 20)
+            .unwrap();
+        window.add_region(temporary);
+
+        let mut compacting = Region::new(
+            "impl".to_string(),
+            RegionKind::Compacting {
+                threshold_tokens: 500,
+            },
+            10_000,
+        );
+        compacting
+            .add_entry("compacting data".to_string(), 20)
+            .unwrap();
+        window.add_region(compacting);
+
+        let mut pinned = Region::new("system".to_string(), RegionKind::Pinned, 10_000);
+        pinned
+            .add_entry("pinned system prompt".to_string(), 20)
+            .unwrap();
+        window.add_region(pinned);
+
+        let assembled = window.assemble();
+
+        assert_eq!(assembled.system_blocks.len(), 4);
+
+        // Verify ordering: Always (Pinned) first, UntilChanged (Compacting) second,
+        // Never (Temporary, Clearable) last
+        assert_eq!(
+            assembled.system_blocks[0].cache_hint,
+            CacheHint::Always,
+            "First system block should be Always (Pinned)"
+        );
+        assert_eq!(
+            assembled.system_blocks[1].cache_hint,
+            CacheHint::UntilChanged,
+            "Second system block should be UntilChanged (Compacting)"
+        );
+        assert_eq!(
+            assembled.system_blocks[2].cache_hint,
+            CacheHint::Never,
+            "Third system block should be Never"
+        );
+        assert_eq!(
+            assembled.system_blocks[3].cache_hint,
+            CacheHint::Never,
+            "Fourth system block should be Never"
+        );
     }
 }
