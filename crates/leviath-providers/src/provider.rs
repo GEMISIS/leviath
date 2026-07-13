@@ -352,18 +352,45 @@ pub struct RateLimitConfig {
     pub tokens_per_minute: u32,
 }
 
-/// Build a `reqwest::Client` with an optional timeout.
+/// If no byte is received on a connection for this long, the request is
+/// aborted. This is a *stall* timeout, not a total-duration cap: every
+/// successful read resets it, so a legitimately slow streaming response (which
+/// keeps sending bytes) is never cut off, while a connection where the server
+/// accepted the request but produces no response bytes fails instead of hanging
+/// forever. That indefinite hang was observed on the large request that follows
+/// a `read_files` batch (file contents injected into the system prompt push the
+/// body over the HTTP/2 flow-control window).
+const READ_STALL_TIMEOUT_SECS: u64 = 300;
+
+/// Build a `reqwest::Client` with stall/keep-alive protection and an optional
+/// total-request timeout.
 ///
-/// All providers should use this instead of `Client::new()` to respect
-/// the `request_timeout_secs` setting in `ProviderConfig`.
+/// All providers should use this instead of `Client::new()`. It always applies:
+/// - a `read_timeout` (idle/stall timeout — see [`READ_STALL_TIMEOUT_SECS`]) so
+///   a stalled connection can never hang the process indefinitely;
+/// - HTTP/2 keep-alive pings, so a dead connection is detected proactively;
+/// - TCP keep-alive and idle-connection eviction, so a stale pooled connection
+///   (`reuse idle connection`) is not silently reused after the peer has gone
+///   away.
+///
+/// `timeout_secs` (`ProviderConfig::request_timeout_secs`) adds an optional
+/// hard cap on total request duration; when `None`, no total cap is applied and
+/// the stall timeout above is the backstop (so it does not cap legitimately
+/// long streaming responses).
 pub fn build_http_client(timeout_secs: Option<u64>) -> reqwest::Client {
-    match timeout_secs {
-        Some(secs) => reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(secs))
-            .build()
-            .expect("failed to build reqwest client"),
-        None => reqwest::Client::new(),
+    let mut builder = reqwest::Client::builder()
+        .read_timeout(std::time::Duration::from_secs(READ_STALL_TIMEOUT_SECS))
+        .http2_keep_alive_interval(std::time::Duration::from_secs(30))
+        .http2_keep_alive_timeout(std::time::Duration::from_secs(20))
+        .http2_keep_alive_while_idle(true)
+        .tcp_keepalive(std::time::Duration::from_secs(60))
+        .pool_idle_timeout(std::time::Duration::from_secs(90));
+
+    if let Some(secs) = timeout_secs {
+        builder = builder.timeout(std::time::Duration::from_secs(secs));
     }
+
+    builder.build().expect("failed to build reqwest client")
 }
 
 /// Trait for LLM providers.
