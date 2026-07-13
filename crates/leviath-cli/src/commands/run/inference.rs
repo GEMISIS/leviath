@@ -1028,4 +1028,15 @@ mod tests {
             .await
             .is_err());
     }
+
+    #[tokio::test]
+    async fn capturing_provider_trivial_trait_methods() {
+        // The CapturingProvider's non-`infer` trait methods are only reached
+        // when invoked directly (the engine paths under test never call them).
+        let provider = CapturingProvider::new();
+        assert_eq!(Provider::count_tokens(&provider, "abcd", "m"), 1);
+        assert_eq!(Provider::max_context_tokens(&provider, "m"), 100_000);
+        assert_eq!(Provider::name(&provider), "capturing");
+        assert!(Provider::list_models(&provider).await.unwrap().is_empty());
+    }
 }

@@ -2533,4 +2533,59 @@ max_result_tokens = 8192
         assert!(routing.persist);
         assert!(routing.tool_overrides.is_empty());
     }
+
+    #[test]
+    fn parse_manifest_sliding_window_bulk_and_compact_strategies() {
+        // Exercises the `bulk` and `compact` eviction-strategy arms of the
+        // sliding_window region parser (with and without their optional counts).
+        let toml = r#"
+[agent]
+name = "eviction-strategies"
+
+[context.regions]
+bulk_default = { kind = "sliding_window", max_items = 20, max_tokens = 3000, strategy = "bulk" }
+bulk_overflow = { kind = "sliding_window", max_items = 20, max_tokens = 3000, strategy = "bulk", overflow = 5 }
+compact_default = { kind = "sliding_window", max_items = 20, max_tokens = 3000, strategy = "compact" }
+compact_count = { kind = "sliding_window", max_items = 20, max_tokens = 3000, strategy = "compact", compact_count = 7 }
+"#;
+        let bp = parse_manifest(toml).unwrap();
+        let region = |name: &str| {
+            bp.context_layout
+                .regions
+                .iter()
+                .find(|r| r.name == name)
+                .unwrap()
+                .kind
+                .clone()
+        };
+
+        assert_eq!(
+            region("bulk_default"),
+            RegionKind::SlidingWindow {
+                max_items: 20,
+                eviction_strategy: EvictionStrategy::Bulk { overflow: 10 },
+            }
+        );
+        assert_eq!(
+            region("bulk_overflow"),
+            RegionKind::SlidingWindow {
+                max_items: 20,
+                eviction_strategy: EvictionStrategy::Bulk { overflow: 5 },
+            }
+        );
+        assert_eq!(
+            region("compact_default"),
+            RegionKind::SlidingWindow {
+                max_items: 20,
+                eviction_strategy: EvictionStrategy::Compact { compact_count: 10 },
+            }
+        );
+        assert_eq!(
+            region("compact_count"),
+            RegionKind::SlidingWindow {
+                max_items: 20,
+                eviction_strategy: EvictionStrategy::Compact { compact_count: 7 },
+            }
+        );
+    }
 }
