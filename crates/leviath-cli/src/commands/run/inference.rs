@@ -6,13 +6,15 @@ use tokio_stream::StreamExt;
 use super::io::RunIO;
 
 /// Stream inference output, collecting the full response.
-/// Used only for tool-less interactive stages.
+/// Used for interactive stages — supports both tool-less and tool-bearing modes.
+/// When `tools` is non-empty, the model may return tool calls in the response.
 pub async fn stream_inference(
     engine: &mut AgentEngine,
     entity: bevy_ecs::prelude::Entity,
     provider_name: &str,
     model_name: &str,
     tool_filter: Option<&[String]>,
+    tools: &[leviath_providers::Tool],
     io: &mut dyn RunIO,
 ) -> anyhow::Result<leviath_providers::InferenceResponse> {
     use leviath_runtime::ContextWindow;
@@ -33,10 +35,18 @@ pub async fn stream_inference(
         (assembled, max_tokens)
     };
 
-    // Tool-less streaming: always empty tools list; filter is a no-op but
-    // accepted to keep the call-site API uniform with tool-bearing paths.
-    let _ = tool_filter; // acknowledged but unused — no tools to filter
-    let filtered_tools: Vec<leviath_providers::Tool> = Vec::new();
+    // Filter tools based on tool_filter if provided
+    let filtered_tools: Vec<leviath_providers::Tool> = if tools.is_empty() {
+        Vec::new()
+    } else if let Some(filter) = tool_filter {
+        tools
+            .iter()
+            .filter(|t| filter.iter().any(|f| f == &t.name))
+            .cloned()
+            .collect()
+    } else {
+        tools.to_vec()
+    };
 
     // Respect each model's temperature support (e.g. claude-opus-4-8 deprecates it).
     let temperature = if provider.capabilities(model_name).supports_temperature {
@@ -507,9 +517,17 @@ mod tests {
         let (mut engine, _pool, entity) = make_engine_and_entity(&bp, "Streamed response");
         let mut io = MockIO::new();
 
-        let response = stream_inference(&mut engine, entity, "mock", "test-model", None, &mut io)
-            .await
-            .unwrap();
+        let response = stream_inference(
+            &mut engine,
+            entity,
+            "mock",
+            "test-model",
+            None,
+            &[],
+            &mut io,
+        )
+        .await
+        .unwrap();
 
         assert_eq!(response.content, "Streamed response");
 
@@ -525,9 +543,17 @@ mod tests {
         let (mut engine, _pool, entity) = make_engine_and_entity(&bp, "Test");
         let mut io = MockIO::new();
 
-        let response = stream_inference(&mut engine, entity, "mock", "test-model", None, &mut io)
-            .await
-            .unwrap();
+        let response = stream_inference(
+            &mut engine,
+            entity,
+            "mock",
+            "test-model",
+            None,
+            &[],
+            &mut io,
+        )
+        .await
+        .unwrap();
 
         assert_eq!(response.tokens_used.prompt_tokens, 20);
         assert_eq!(response.tokens_used.completion_tokens, 8);
@@ -545,6 +571,7 @@ mod tests {
             "nonexistent",
             "test-model",
             None,
+            &[],
             &mut io,
         )
         .await;
@@ -559,9 +586,17 @@ mod tests {
         let (mut engine, _pool, entity) = make_engine_and_entity(&bp, "Content");
         let mut io = MockIO::new();
 
-        stream_inference(&mut engine, entity, "mock", "test-model", None, &mut io)
-            .await
-            .unwrap();
+        stream_inference(
+            &mut engine,
+            entity,
+            "mock",
+            "test-model",
+            None,
+            &[],
+            &mut io,
+        )
+        .await
+        .unwrap();
 
         // Last output should be a newline
         assert_eq!(io.outputs.last().map(|s| s.as_str()), Some("\n"));
@@ -580,6 +615,7 @@ mod tests {
             "mock",
             "test-model",
             Some(&filter),
+            &[],
             &mut io,
         )
         .await
@@ -601,6 +637,7 @@ mod tests {
             "mock",
             "test-model",
             Some(&filter),
+            &[],
             &mut io,
         )
         .await
@@ -620,9 +657,17 @@ mod tests {
         // but a successful round trip with this provider exercises the
         // `temperature = 0.0` branch (`capabilities().supports_temperature`
         // is false) rather than panicking or diverging.
-        let response = stream_inference(&mut engine, entity, "mock", "test-model", None, &mut io)
-            .await
-            .unwrap();
+        let response = stream_inference(
+            &mut engine,
+            entity,
+            "mock",
+            "test-model",
+            None,
+            &[],
+            &mut io,
+        )
+        .await
+        .unwrap();
         assert_eq!(response.content, "no-temp");
     }
 
@@ -633,8 +678,16 @@ mod tests {
             make_engine_and_entity_with_provider(&bp, "mock", Arc::new(FailingInferProvider));
         let mut io = MockIO::new();
 
-        let result =
-            stream_inference(&mut engine, entity, "mock", "test-model", None, &mut io).await;
+        let result = stream_inference(
+            &mut engine,
+            entity,
+            "mock",
+            "test-model",
+            None,
+            &[],
+            &mut io,
+        )
+        .await;
 
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("Stream error"));
@@ -647,8 +700,16 @@ mod tests {
             make_engine_and_entity_with_provider(&bp, "mock", Arc::new(ErrorChunkStreamProvider));
         let mut io = MockIO::new();
 
-        let result =
-            stream_inference(&mut engine, entity, "mock", "test-model", None, &mut io).await;
+        let result = stream_inference(
+            &mut engine,
+            entity,
+            "mock",
+            "test-model",
+            None,
+            &[],
+            &mut io,
+        )
+        .await;
 
         assert!(result.is_err());
         assert!(result
@@ -664,9 +725,17 @@ mod tests {
             make_engine_and_entity_with_provider(&bp, "mock", Arc::new(MultiChunkStreamProvider));
         let mut io = MockIO::new();
 
-        let response = stream_inference(&mut engine, entity, "mock", "test-model", None, &mut io)
-            .await
-            .unwrap();
+        let response = stream_inference(
+            &mut engine,
+            entity,
+            "mock",
+            "test-model",
+            None,
+            &[],
+            &mut io,
+        )
+        .await
+        .unwrap();
 
         // Content accumulated only from non-empty deltas.
         assert_eq!(response.content, "hello world");

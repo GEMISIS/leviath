@@ -198,7 +198,9 @@ pub async fn run_interactive_stage(
                     });
         } else {
             let response =
-                match stream_inference(engine, entity, provider_name, model_name, None, io).await {
+                match stream_inference(engine, entity, provider_name, model_name, None, tools, io)
+                    .await
+                {
                     Ok(r) => r,
                     Err(e) => {
                         log_streaming_unavailable(&e);
