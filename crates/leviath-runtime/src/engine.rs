@@ -106,8 +106,7 @@ pub type ToolExecutorDyn<'a> =
 /// Sync callback invoked after tool execution when context tools were used.
 /// Receives the engine's World and the agent Entity so callers can sync
 /// external state (e.g. a shared ContextWindow copy) back to the entity.
-pub type PostToolSync =
-    dyn FnMut(&mut bevy_ecs::prelude::World, bevy_ecs::prelude::Entity) + Send;
+pub type PostToolSync = dyn FnMut(&mut bevy_ecs::prelude::World, bevy_ecs::prelude::Entity) + Send;
 
 impl AgentEngine {
     /// Create a new agent engine.
@@ -4907,5 +4906,401 @@ mod tests {
         // History region should have the summary
         let history = w.get_region("impl_history").unwrap();
         assert!(!history.content.is_empty());
+    }
+
+    // ─── PostToolSync / with_sync tests ─────────────────────────────────
+
+    #[tokio::test]
+    async fn test_with_sync_none_behaves_like_inner() {
+        // Passing None for post_tool_sync should work identically to _inner.
+        let responses = vec![
+            InferenceResponse {
+                content: "calling context tool".to_string(),
+                tool_calls: vec![leviath_providers::ToolCall {
+                    id: "call_1".to_string(),
+                    name: "context_write".to_string(),
+                    arguments: serde_json::json!({"region": "conversation", "content": "hi"}),
+                }],
+                tokens_used: leviath_providers::TokenUsage {
+                    prompt_tokens: 10,
+                    completion_tokens: 5,
+                    total_tokens: 15,
+                    cached_tokens: 0,
+                    cache_write_tokens: 0,
+                },
+                finish_reason: leviath_providers::FinishReason::ToolCall,
+            },
+            default_response(),
+        ];
+
+        let mut registry = ProviderRegistry::new();
+        registry.register(
+            "mock".to_string(),
+            Arc::new(MockProvider::with_responses("mock", responses)),
+        );
+        let mut engine = AgentEngine::with_providers(registry);
+
+        let mut window = ContextWindow::new(10000);
+        window.add_region(leviath_core::Region::new(
+            "conversation".to_string(),
+            leviath_core::RegionKind::SlidingWindow {
+                max_items: 50,
+                eviction_strategy: leviath_core::EvictionStrategy::PerItem,
+            },
+            6000,
+        ));
+        window.add_region(leviath_core::Region::new(
+            "tool_results".to_string(),
+            leviath_core::RegionKind::SlidingWindow {
+                max_items: 50,
+                eviction_strategy: leviath_core::EvictionStrategy::PerItem,
+            },
+            2000,
+        ));
+        let _ = window.add_to_region("conversation", "User: hi".to_string(), 2);
+
+        let entity = engine
+            .world_mut()
+            .spawn((
+                AgentState {
+                    agent_id: "sync-none-test".to_string(),
+                    current_stage: "main".to_string(),
+                    iteration: 0,
+                    status: AgentStatus::Active,
+                    spawned_children_ids: Vec::new(),
+                    pending_wait: None,
+                    accepts_messages: true,
+                },
+                MessageInbox::new(),
+                CancellationToken::new(),
+                window,
+            ))
+            .id();
+
+        let result = engine
+            .run_inference_loop_filtered_dyn_with_sync(
+                entity,
+                "mock",
+                "test-model",
+                Vec::new(),
+                10,
+                None,
+                None,
+                &mut |_tool_calls| {
+                    Box::pin(async { vec![("call_1".to_string(), "ok".to_string())] })
+                },
+                None,
+                None, // no sync callback
+            )
+            .await;
+
+        assert!(result.is_ok());
+        let resp = result.unwrap();
+        assert_eq!(resp.content, "mock response");
+    }
+
+    #[tokio::test]
+    async fn test_with_sync_callback_called_for_context_tools() {
+        // When a context_* tool is in the response, the sync callback should be
+        // invoked twice per iteration: once before adding tool results and once
+        // after eviction.
+        let sync_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let sync_count_clone = sync_count.clone();
+
+        let responses = vec![
+            InferenceResponse {
+                content: "writing context".to_string(),
+                tool_calls: vec![leviath_providers::ToolCall {
+                    id: "call_ctx".to_string(),
+                    name: "context_write".to_string(),
+                    arguments: serde_json::json!({"region": "conversation", "content": "data"}),
+                }],
+                tokens_used: leviath_providers::TokenUsage {
+                    prompt_tokens: 10,
+                    completion_tokens: 5,
+                    total_tokens: 15,
+                    cached_tokens: 0,
+                    cache_write_tokens: 0,
+                },
+                finish_reason: leviath_providers::FinishReason::ToolCall,
+            },
+            default_response(),
+        ];
+
+        let mut registry = ProviderRegistry::new();
+        registry.register(
+            "mock".to_string(),
+            Arc::new(MockProvider::with_responses("mock", responses)),
+        );
+        let mut engine = AgentEngine::with_providers(registry);
+
+        let mut window = ContextWindow::new(10000);
+        window.add_region(leviath_core::Region::new(
+            "conversation".to_string(),
+            leviath_core::RegionKind::SlidingWindow {
+                max_items: 50,
+                eviction_strategy: leviath_core::EvictionStrategy::PerItem,
+            },
+            6000,
+        ));
+        window.add_region(leviath_core::Region::new(
+            "tool_results".to_string(),
+            leviath_core::RegionKind::SlidingWindow {
+                max_items: 50,
+                eviction_strategy: leviath_core::EvictionStrategy::PerItem,
+            },
+            2000,
+        ));
+        let _ = window.add_to_region("conversation", "User: hi".to_string(), 2);
+
+        let entity = engine
+            .world_mut()
+            .spawn((
+                AgentState {
+                    agent_id: "sync-some-test".to_string(),
+                    current_stage: "main".to_string(),
+                    iteration: 0,
+                    status: AgentStatus::Active,
+                    spawned_children_ids: Vec::new(),
+                    pending_wait: None,
+                    accepts_messages: true,
+                },
+                MessageInbox::new(),
+                CancellationToken::new(),
+                window,
+            ))
+            .id();
+
+        let mut sync_cb: Box<PostToolSync> = Box::new(
+            move |_world: &mut bevy_ecs::prelude::World, _ent: bevy_ecs::prelude::Entity| {
+                sync_count_clone.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            },
+        );
+
+        let result = engine
+            .run_inference_loop_filtered_dyn_with_sync(
+                entity,
+                "mock",
+                "test-model",
+                Vec::new(),
+                10,
+                None,
+                None,
+                &mut |_tool_calls| {
+                    Box::pin(async { vec![("call_ctx".to_string(), "ok".to_string())] })
+                },
+                None,
+                Some(&mut *sync_cb),
+            )
+            .await;
+
+        assert!(result.is_ok());
+        // Sync should be called exactly 2 times: before tool results + after eviction
+        assert_eq!(sync_count.load(std::sync::atomic::Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn test_with_sync_not_called_for_non_context_tools() {
+        // When no context_* tools are called, the sync callback should NOT fire.
+        let sync_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let sync_count_clone = sync_count.clone();
+
+        let responses = vec![
+            InferenceResponse {
+                content: "running bash".to_string(),
+                tool_calls: vec![leviath_providers::ToolCall {
+                    id: "call_bash".to_string(),
+                    name: "bash".to_string(),
+                    arguments: serde_json::json!({"cmd": "echo hi"}),
+                }],
+                tokens_used: leviath_providers::TokenUsage {
+                    prompt_tokens: 10,
+                    completion_tokens: 5,
+                    total_tokens: 15,
+                    cached_tokens: 0,
+                    cache_write_tokens: 0,
+                },
+                finish_reason: leviath_providers::FinishReason::ToolCall,
+            },
+            default_response(),
+        ];
+
+        let mut registry = ProviderRegistry::new();
+        registry.register(
+            "mock".to_string(),
+            Arc::new(MockProvider::with_responses("mock", responses)),
+        );
+        let mut engine = AgentEngine::with_providers(registry);
+
+        let mut window = ContextWindow::new(10000);
+        window.add_region(leviath_core::Region::new(
+            "conversation".to_string(),
+            leviath_core::RegionKind::SlidingWindow {
+                max_items: 50,
+                eviction_strategy: leviath_core::EvictionStrategy::PerItem,
+            },
+            6000,
+        ));
+        window.add_region(leviath_core::Region::new(
+            "tool_results".to_string(),
+            leviath_core::RegionKind::SlidingWindow {
+                max_items: 50,
+                eviction_strategy: leviath_core::EvictionStrategy::PerItem,
+            },
+            2000,
+        ));
+        let _ = window.add_to_region("conversation", "User: hi".to_string(), 2);
+
+        let entity = engine
+            .world_mut()
+            .spawn((
+                AgentState {
+                    agent_id: "sync-no-ctx-test".to_string(),
+                    current_stage: "main".to_string(),
+                    iteration: 0,
+                    status: AgentStatus::Active,
+                    spawned_children_ids: Vec::new(),
+                    pending_wait: None,
+                    accepts_messages: true,
+                },
+                MessageInbox::new(),
+                CancellationToken::new(),
+                window,
+            ))
+            .id();
+
+        let mut sync_cb: Box<PostToolSync> = Box::new(
+            move |_world: &mut bevy_ecs::prelude::World, _ent: bevy_ecs::prelude::Entity| {
+                sync_count_clone.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            },
+        );
+
+        let result = engine
+            .run_inference_loop_filtered_dyn_with_sync(
+                entity,
+                "mock",
+                "test-model",
+                Vec::new(),
+                10,
+                None,
+                None,
+                &mut |_tool_calls| {
+                    Box::pin(async { vec![("call_bash".to_string(), "ok".to_string())] })
+                },
+                None,
+                Some(&mut *sync_cb),
+            )
+            .await;
+
+        assert!(result.is_ok());
+        // No context tools → sync should never be called
+        assert_eq!(sync_count.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn test_with_sync_alternating_direction() {
+        // Verify that the sync callback receives the correct world/entity and
+        // can observe context window state changes between calls.
+        let directions = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let directions_clone = directions.clone();
+
+        let responses = vec![
+            InferenceResponse {
+                content: "context tool".to_string(),
+                tool_calls: vec![leviath_providers::ToolCall {
+                    id: "call_ctx".to_string(),
+                    name: "context_read".to_string(),
+                    arguments: serde_json::json!({"region": "conversation"}),
+                }],
+                tokens_used: leviath_providers::TokenUsage {
+                    prompt_tokens: 10,
+                    completion_tokens: 5,
+                    total_tokens: 15,
+                    cached_tokens: 0,
+                    cache_write_tokens: 0,
+                },
+                finish_reason: leviath_providers::FinishReason::ToolCall,
+            },
+            default_response(),
+        ];
+
+        let mut registry = ProviderRegistry::new();
+        registry.register(
+            "mock".to_string(),
+            Arc::new(MockProvider::with_responses("mock", responses)),
+        );
+        let mut engine = AgentEngine::with_providers(registry);
+
+        let mut window = ContextWindow::new(10000);
+        window.add_region(leviath_core::Region::new(
+            "conversation".to_string(),
+            leviath_core::RegionKind::SlidingWindow {
+                max_items: 50,
+                eviction_strategy: leviath_core::EvictionStrategy::PerItem,
+            },
+            6000,
+        ));
+        window.add_region(leviath_core::Region::new(
+            "tool_results".to_string(),
+            leviath_core::RegionKind::SlidingWindow {
+                max_items: 50,
+                eviction_strategy: leviath_core::EvictionStrategy::PerItem,
+            },
+            2000,
+        ));
+        let _ = window.add_to_region("conversation", "User: hi".to_string(), 2);
+
+        let entity = engine
+            .world_mut()
+            .spawn((
+                AgentState {
+                    agent_id: "sync-dir-test".to_string(),
+                    current_stage: "main".to_string(),
+                    iteration: 0,
+                    status: AgentStatus::Active,
+                    spawned_children_ids: Vec::new(),
+                    pending_wait: None,
+                    accepts_messages: true,
+                },
+                MessageInbox::new(),
+                CancellationToken::new(),
+                window,
+            ))
+            .id();
+
+        let mut sync_cb: Box<PostToolSync> = Box::new(
+            move |world: &mut bevy_ecs::prelude::World, ent: bevy_ecs::prelude::Entity| {
+                // Record that we can access the entity's context window
+                let has_cw = world.get::<ContextWindow>(ent).is_some();
+                directions_clone
+                    .lock()
+                    .unwrap()
+                    .push(format!("sync:has_cw={}", has_cw));
+            },
+        );
+
+        let result = engine
+            .run_inference_loop_filtered_dyn_with_sync(
+                entity,
+                "mock",
+                "test-model",
+                Vec::new(),
+                10,
+                None,
+                None,
+                &mut |_tool_calls| {
+                    Box::pin(async { vec![("call_ctx".to_string(), "ok".to_string())] })
+                },
+                None,
+                Some(&mut *sync_cb),
+            )
+            .await;
+
+        assert!(result.is_ok());
+        let dirs = directions.lock().unwrap();
+        // Both sync calls should have access to the entity's ContextWindow
+        assert_eq!(dirs.len(), 2);
+        assert_eq!(dirs[0], "sync:has_cw=true");
+        assert_eq!(dirs[1], "sync:has_cw=true");
     }
 }

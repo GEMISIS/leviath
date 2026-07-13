@@ -304,13 +304,18 @@ async fn handle_context_tool(
                         let new_content = format!("{}\n{}", existing.content, content);
                         let new_tokens = new_content.len() / 4 + 1;
                         match region.upsert_by_key(k, new_content, new_tokens) {
-                            Ok(()) => format!("Appended to '{}' section under key '{}'.", region_name, k),
+                            Ok(()) => {
+                                format!("Appended to '{}' section under key '{}'.", region_name, k)
+                            }
                             Err(e) => format!("[error] {}", e),
                         }
                     } else {
                         match region.upsert_by_key(k, content.to_string(), tokens) {
                             Ok(()) => {
-                                format!("Created entry in '{}' section under key '{}'.", region_name, k)
+                                format!(
+                                    "Created entry in '{}' section under key '{}'.",
+                                    region_name, k
+                                )
                             }
                             Err(e) => format!("[error] {}", e),
                         }
@@ -748,10 +753,7 @@ impl<'a> StageCallbacks for WorkerCallbacks<'a> {
         // The shared copy is modified by context_write/append/delete tool calls.
         // After each tool batch with context_* calls, the engine calls our sync
         // callback to merge changes back to the entity's ContextWindow.
-        if let Some(cw) = engine
-            .world()
-            .get::<leviath_runtime::ContextWindow>(entity)
-        {
+        if let Some(cw) = engine.world().get::<leviath_runtime::ContextWindow>(entity) {
             *self.context_window.lock().await = Some(cw.clone());
         }
 
@@ -777,9 +779,7 @@ impl<'a> StageCallbacks for WorkerCallbacks<'a> {
                         }
                     } else {
                         // entity→shared: update shared copy with engine's changes
-                        if let Some(entity_cw) =
-                            world.get::<leviath_runtime::ContextWindow>(ent)
-                        {
+                        if let Some(entity_cw) = world.get::<leviath_runtime::ContextWindow>(ent) {
                             *guard = Some(entity_cw.clone());
                         }
                     }
@@ -806,10 +806,7 @@ impl<'a> StageCallbacks for WorkerCallbacks<'a> {
             .map_err(|e| anyhow::anyhow!("{}", e))?;
 
         // Final sync: entity→shared for any changes the engine made
-        if let Some(cw) = engine
-            .world()
-            .get::<leviath_runtime::ContextWindow>(entity)
-        {
+        if let Some(cw) = engine.world().get::<leviath_runtime::ContextWindow>(entity) {
             *self.context_window.lock().await = Some(cw.clone());
         }
 
