@@ -21,7 +21,7 @@ pub mod taint;
 
 pub use blueprint::{
     Blueprint, ContextTransform, EdgeTransform, FileTrackingConfig, RepetitionDetectionConfig,
-    Stage, StageResult, ToolFilter, TransitionCondition, TransitionEdge,
+    Stage, StageResult, ToolFilter, ToolResultRouting, TransitionCondition, TransitionEdge,
 };
 pub use cache::{CacheBreakpoint, CacheHint};
 pub use error::{Error, Result, ValidationError};

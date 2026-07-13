@@ -299,6 +299,30 @@ pub struct RepetitionDetectionConfig {
     pub enabled: Option<bool>,
 }
 
+/// Configuration for routing tool results to specific context window regions.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ToolResultRouting {
+    /// Default region for tool results (default: "tool_results")
+    pub default_region: String,
+    /// Per-tool overrides: tool_name → region_name
+    pub tool_overrides: HashMap<String, String>,
+    /// Whether to keep tool results (true) or discard after use (false)
+    pub persist: bool,
+    /// Max tokens per tool result (truncate if larger)
+    pub max_result_tokens: Option<usize>,
+}
+
+impl Default for ToolResultRouting {
+    fn default() -> Self {
+        Self {
+            default_region: "tool_results".to_string(),
+            tool_overrides: HashMap::new(),
+            persist: true,
+            max_result_tokens: None,
+        }
+    }
+}
+
 /// Interaction mode for a stage.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub enum StageMode {
@@ -480,6 +504,12 @@ pub struct Stage {
     /// to opt it in independently of the agent/global setting.
     #[serde(default)]
     pub security: Option<crate::taint::SecurityConfig>,
+
+    /// Optional routing configuration for tool results.
+    /// When set, tool results are routed to the configured region(s) instead
+    /// of the default "conversation" region.
+    #[serde(default)]
+    pub tool_result_routing: Option<ToolResultRouting>,
 }
 
 /// Default value for bool fields that should default to true.
@@ -507,6 +537,7 @@ impl Stage {
             accepts_messages: true,
             allow_complete: false,
             security: None,
+            tool_result_routing: None,
         }
     }
 

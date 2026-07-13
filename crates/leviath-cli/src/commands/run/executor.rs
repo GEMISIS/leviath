@@ -444,6 +444,18 @@ pub async fn run_stage_loop(
                 });
         }
 
+        // Set per-stage tool result routing config
+        {
+            let mut entity_mut = ctx.engine.world_mut().entity_mut(ctx.entity);
+            if let Some(ref routing) = stage.tool_result_routing {
+                entity_mut.insert(leviath_runtime::ToolResultRoutingComponent {
+                    routing: routing.clone(),
+                });
+            } else {
+                entity_mut.remove::<leviath_runtime::ToolResultRoutingComponent>();
+            }
+        }
+
         // System prompt injection — inject into the first Pinned region so
         // the instructions stay in the cacheable system block rather than
         // getting evicted from the SlidingWindow conversation region.

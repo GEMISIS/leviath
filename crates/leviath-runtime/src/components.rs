@@ -112,6 +112,16 @@ pub struct InferenceConfig {
     pub max_output_tokens: Option<usize>,
 }
 
+/// Per-entity tool result routing configuration.
+///
+/// When present on an entity, tool results are routed to the specified region(s)
+/// instead of the default "conversation" region.
+#[derive(Component, Debug, Clone)]
+pub struct ToolResultRoutingComponent {
+    /// The routing configuration.
+    pub routing: leviath_core::ToolResultRouting,
+}
+
 /// Result of assembling a context window into system blocks and conversation messages.
 ///
 /// Produced by [`ContextWindow::assemble()`]. System-bound regions (Pinned,

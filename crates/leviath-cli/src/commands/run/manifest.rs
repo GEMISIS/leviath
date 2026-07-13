@@ -308,6 +308,38 @@ pub fn parse_manifest(content: &str) -> anyhow::Result<Blueprint> {
                 );
             }
 
+            // Parse tool_routing configuration
+            if let Some(routing_table) = stage_value.get("tool_routing").and_then(|v| v.as_table())
+            {
+                let mut routing = leviath_core::blueprint::ToolResultRouting::default();
+
+                if let Some(dr) = routing_table.get("default_region").and_then(|v| v.as_str()) {
+                    routing.default_region = dr.to_string();
+                }
+                if let Some(p) = routing_table.get("persist").and_then(|v| v.as_bool()) {
+                    routing.persist = p;
+                }
+                if let Some(mt) = routing_table
+                    .get("max_result_tokens")
+                    .and_then(|v| v.as_integer())
+                {
+                    routing.max_result_tokens = Some(mt as usize);
+                }
+                if let Some(overrides_table) =
+                    routing_table.get("overrides").and_then(|v| v.as_table())
+                {
+                    for (tool_name, region_val) in overrides_table {
+                        if let Some(region_name) = region_val.as_str() {
+                            routing
+                                .tool_overrides
+                                .insert(tool_name.clone(), region_name.to_string());
+                        }
+                    }
+                }
+
+                stage.tool_result_routing = Some(routing);
+            }
+
             // Parse requires_children flag
             if let Some(rc) = stage_value
                 .get("requires_children")

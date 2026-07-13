@@ -909,6 +909,12 @@ impl AgentEngine {
                 sync(&mut self.world, entity);
             }
 
+            // Read tool result routing config from entity (if present).
+            let tool_result_routing = self
+                .world
+                .get::<crate::ToolResultRoutingComponent>(entity)
+                .map(|c| c.routing.clone());
+
             // Add tool results to context window.
             // Safety: `run_inference_filtered` already confirmed the entity has
             // a ContextWindow; it cannot be removed between that call and here.
@@ -939,15 +945,51 @@ impl AgentEngine {
             // matching tool_result. If the region is at its token budget,
             // truncate the result content rather than silently dropping it.
             for (tool_call_id, result) in &tool_results {
-                let result_text = result.clone();
-                let result_tokens = result_text.len() / 4 + 1;
-
-                // Find the tool name for this tool_call_id
+                let mut result_text = result.clone();
                 let tool_name = tool_calls_snapshot
                     .iter()
                     .find(|tc| tc.id == *tool_call_id)
                     .map(|tc| tc.name.clone())
                     .unwrap_or_default();
+
+                // Apply max_result_tokens truncation from routing config
+                if let Some(routing) = tool_result_routing.as_ref() {
+                    if let Some(max_tokens) = routing.max_result_tokens {
+                        let max_chars = max_tokens * 4;
+                        if result_text.len() > max_chars {
+                            result_text.truncate(max_chars);
+                            result_text.push_str("\n[...truncated]");
+                        }
+                    }
+                }
+
+                let result_tokens = result_text.len() / 4 + 1;
+
+                // Determine target region from routing config
+                let target_region = if let Some(routing) = tool_result_routing.as_ref() {
+                    if let Some(override_region) = routing.tool_overrides.get(&tool_name) {
+                        override_region.as_str()
+                    } else {
+                        routing.default_region.as_str()
+                    }
+                } else {
+                    "conversation"
+                };
+
+                // Handle persist=false: route to scratch if available
+                let target_region = if let Some(routing) = tool_result_routing.as_ref() {
+                    if !routing.persist {
+                        if window.get_region("scratch").is_some() {
+                            "scratch"
+                        } else {
+                            target_region
+                        }
+                    } else {
+                        target_region
+                    }
+                } else {
+                    target_region
+                };
 
                 let kind = leviath_core::EntryKind::ToolResult {
                     tool_call_id: tool_call_id.clone(),
@@ -966,18 +1008,15 @@ impl AgentEngine {
                         .unwrap_or(leviath_core::TaintLevel::Public)
                 });
                 let add_tool_result = |window: &mut ContextWindow,
+                                       region: &str,
                                        kind: leviath_core::EntryKind,
                                        content: String,
                                        tokens: usize| {
                     match taint_level {
-                        Some(level) => window.add_typed_tainted_to_region(
-                            "conversation",
-                            kind,
-                            content,
-                            tokens,
-                            level,
-                        ),
-                        None => window.add_typed_entry("conversation", kind, content, tokens),
+                        Some(level) => {
+                            window.add_typed_tainted_to_region(region, kind, content, tokens, level)
+                        }
+                        None => window.add_typed_entry(region, kind, content, tokens),
                     }
                 };
 
@@ -988,6 +1027,7 @@ impl AgentEngine {
                 // rather than dropping (which would orphan the tool_use block).
                 if add_tool_result(
                     &mut window,
+                    target_region,
                     kind.clone(),
                     result_text.clone(),
                     result_tokens,
@@ -995,7 +1035,7 @@ impl AgentEngine {
                 .is_err()
                 {
                     let available = window
-                        .get_region("conversation")
+                        .get_region(target_region)
                         .map(|r| r.max_tokens.saturating_sub(r.current_tokens))
                         .unwrap_or(0);
 
@@ -1012,11 +1052,14 @@ impl AgentEngine {
                     };
                     let trunc_tokens = truncated.len() / 4 + 1;
 
-                    if add_tool_result(&mut window, kind, truncated, trunc_tokens).is_err() {
+                    if add_tool_result(&mut window, target_region, kind, truncated, trunc_tokens)
+                        .is_err()
+                    {
                         // Last resort: add a minimal placeholder
                         let placeholder = "[result omitted]".to_string();
                         let _ = add_tool_result(
                             &mut window,
+                            target_region,
                             leviath_core::EntryKind::ToolResult {
                                 tool_call_id: tool_call_id.clone(),
                                 tool_name: tool_name.clone(),
