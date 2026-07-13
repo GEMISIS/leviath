@@ -244,6 +244,22 @@ async fn handle_context_tool(
         None => return "[error] No context window available".to_string(),
     };
 
+    // Helper: build error message listing available writable regions
+    let region_not_found = |name: &str, window: &ContextWindow| -> String {
+        let available: Vec<&str> = window
+            .regions
+            .iter()
+            .filter(|r| !matches!(r.kind, leviath_core::RegionKind::CompactHistory { .. }))
+            .filter(|r| r.name != "conversation")
+            .map(|r| r.name.as_str())
+            .collect();
+        format!(
+            "[error] Section '{}' not found. Available sections: {}",
+            name,
+            available.join(", ")
+        )
+    };
+
     match name {
         "context_write" => {
             let region_name = match args.get("region").and_then(|v| v.as_str()) {
@@ -259,7 +275,7 @@ async fn handle_context_tool(
 
             let region = match window.get_region_mut(region_name) {
                 Some(r) => r,
-                None => return format!("[error] Region '{}' not found", region_name),
+                None => return region_not_found(region_name, window),
             };
 
             if matches!(region.kind, leviath_core::RegionKind::HashMap { .. }) {
@@ -294,7 +310,7 @@ async fn handle_context_tool(
 
             let region = match window.get_region_mut(region_name) {
                 Some(r) => r,
-                None => return format!("[error] Region '{}' not found", region_name),
+                None => return region_not_found(region_name, window),
             };
 
             if matches!(region.kind, leviath_core::RegionKind::HashMap { .. }) {
@@ -339,7 +355,7 @@ async fn handle_context_tool(
 
             let region = match window.get_region(region_name) {
                 Some(r) => r,
-                None => return format!("[error] Region '{}' not found", region_name),
+                None => return region_not_found(region_name, window),
             };
 
             if matches!(region.kind, leviath_core::RegionKind::HashMap { .. }) {
@@ -392,7 +408,7 @@ async fn handle_context_tool(
 
             let region = match window.get_region_mut(region_name) {
                 Some(r) => r,
-                None => return format!("[error] Region '{}' not found", region_name),
+                None => return region_not_found(region_name, window),
             };
 
             if region.remove_by_key(key) {
@@ -410,7 +426,7 @@ async fn handle_context_tool(
             if let Some(rname) = region_name {
                 let region = match window.get_region(rname) {
                     Some(r) => r,
-                    None => return format!("[error] Region '{}' not found", rname),
+                    None => return region_not_found(rname, window),
                 };
                 let mut lines = Vec::new();
                 for entry in &region.content {
