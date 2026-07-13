@@ -57,6 +57,9 @@ const PRODUCTIVE_TOOLS: &[&str] = &[
     "run_command",
     "execute",
     "shell",
+    "context_write",
+    "context_append",
+    "context_delete",
 ];
 
 fn hash_arguments(args: &str) -> u64 {
