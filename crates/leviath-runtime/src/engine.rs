@@ -15,6 +15,19 @@ use crate::components::{
 };
 use crate::systems;
 
+/// Truncate `text` to at most `max_chars` characters, cutting only on UTF-8
+/// char boundaries.
+///
+/// Tool results — especially batch reads like `read_files`, which concatenate
+/// many UTF-8 files — routinely need truncating to fit a region's token budget.
+/// Byte-indexed truncation (`String::truncate` / `&s[..n]`) panics when the cut
+/// lands inside a multi-byte character; taking whole `char`s never does. This
+/// mirrors the char-safe idiom used on the worker side (`worker.rs`). `max_chars`
+/// is an approximate char budget (the caller derives it from a token estimate).
+fn truncate_on_char_boundary(text: &str, max_chars: usize) -> String {
+    text.chars().take(max_chars).collect()
+}
+
 /// Registry of LLM providers, keyed by provider name.
 ///
 /// Used by the engine to look up the correct provider for each agent's
@@ -957,7 +970,7 @@ impl AgentEngine {
                     if let Some(max_tokens) = routing.max_result_tokens {
                         let max_chars = max_tokens * 4;
                         if result_text.len() > max_chars {
-                            result_text.truncate(max_chars);
+                            result_text = truncate_on_char_boundary(&result_text, max_chars);
                             result_text.push_str("\n[...truncated]");
                         }
                     }
@@ -1041,12 +1054,9 @@ impl AgentEngine {
 
                     let truncated = if available > 100 {
                         let char_budget = (available - 10) * 4; // rough tokens→chars
-                        let cut = result_text.len().min(char_budget);
-                        format!(
-                            "{}... [truncated, {} chars omitted]",
-                            &result_text[..cut],
-                            result_text.len() - cut
-                        )
+                        let prefix = truncate_on_char_boundary(&result_text, char_budget);
+                        let omitted = result_text.len().saturating_sub(prefix.len());
+                        format!("{}... [truncated, {} chars omitted]", prefix, omitted)
                     } else {
                         "[tool result truncated — context window full]".to_string()
                     };
@@ -1306,6 +1316,56 @@ mod tests {
     fn test_engine_creation() {
         let engine = AgentEngine::new();
         assert!(engine.world().entities().is_empty());
+    }
+
+    /// Regression: tool-result truncation must never panic on multi-byte UTF-8.
+    ///
+    /// A `read_files` batch concatenates many UTF-8 files; when the result is
+    /// large enough to hit the truncation branches, byte-indexed truncation
+    /// (`String::truncate` / `&s[..n]`) panicked whenever the cut landed inside
+    /// a multi-byte char (em-dash, smart quote, accent, emoji). That panic ran
+    /// in a spawned tool-execution task whose `JoinHandle` is never awaited, so
+    /// tokio swallowed it and the run hung forever. `truncate_on_char_boundary`
+    /// cuts on char boundaries, so every budget below produces valid UTF-8.
+    #[test]
+    fn test_truncate_on_char_boundary_never_panics_on_multibyte() {
+        // Mixed-width content: em-dash (3 bytes), smart quotes (3), accent (2),
+        // emoji (4). Any byte-index cut is very likely to split a char.
+        let text = "café — “quote” 🚀 ".repeat(64);
+        assert!(
+            text.len() > text.chars().count(),
+            "must contain multi-byte chars"
+        );
+
+        // Sweep every char budget from 0 through the full length: exercises the
+        // mid-multibyte-char cut points that used to panic.
+        for max_chars in 0..=text.chars().count() + 5 {
+            let out = truncate_on_char_boundary(&text, max_chars);
+            // `out` is a valid `String` by construction; assert the invariants.
+            assert_eq!(out.chars().count(), max_chars.min(text.chars().count()));
+            assert!(text.starts_with(&out));
+        }
+    }
+
+    /// Mirrors the exact expressions at both engine truncation call sites with a
+    /// byte budget that lands mid-multibyte-char, proving neither panics.
+    #[test]
+    fn test_truncation_call_sites_are_char_safe() {
+        let result_text = "αβγδε— smart “quotes” 🚀".repeat(16);
+
+        // Site A: routing max_result_tokens truncation.
+        let max_chars = 25; // deliberately lands inside a multi-byte char by bytes
+        let mut a = truncate_on_char_boundary(&result_text, max_chars);
+        a.push_str("\n[...truncated]");
+        assert!(a.ends_with("[...truncated]"));
+
+        // Site B: region-full fallback truncation.
+        let char_budget = 37;
+        let prefix = truncate_on_char_boundary(&result_text, char_budget);
+        let omitted = result_text.len().saturating_sub(prefix.len());
+        let b = format!("{}... [truncated, {} chars omitted]", prefix, omitted);
+        assert!(b.contains("chars omitted"));
+        assert!(result_text.starts_with(&prefix));
     }
 
     #[test]
@@ -5698,6 +5758,49 @@ mod tests {
                 tool_results[0].content.len(),
                 long_result.len()
             );
+        })
+        .await;
+    }
+
+    /// Regression (through the real engine path) for the `read_files` hang:
+    /// max_result_tokens truncation of a multi-byte UTF-8 tool result.
+    ///
+    /// max_result_tokens=5 → max_chars=20. Byte 20 of the content below lands
+    /// inside a 3-byte "—", so the old `result_text.truncate(20)` panicked; that
+    /// panic in the tool-result path is what stalled `read_files` runs. With the
+    /// char-safe truncation this completes and produces valid UTF-8.
+    #[tokio::test]
+    async fn test_tool_result_truncation_multibyte_utf8_does_not_panic() {
+        with_tracing_async(async {
+            let responses = tool_call_then_done("call_1", "bash");
+            let mut engine = engine_with_mock(responses);
+            let window = basic_window();
+
+            let routing = leviath_core::ToolResultRouting {
+                default_region: "conversation".to_string(),
+                tool_overrides: HashMap::new(),
+                persist: true,
+                max_result_tokens: Some(5), // max_chars = 20
+            };
+            let entity =
+                spawn_routing_entity(&mut engine, "truncate-multibyte", window, Some(routing));
+
+            // 7 chars / 13 bytes per unit; byte 20 is mid-"—" (a non-boundary).
+            let long_result = "café—🚀 ".repeat(8);
+            let result = run_with_result(&mut engine, entity, "call_1", &long_result).await;
+            assert!(result.is_ok(), "engine loop must not panic on multibyte");
+
+            let window = engine.world().get::<ContextWindow>(entity).unwrap();
+            let conv = window.get_region("conversation").unwrap();
+            let tool_results: Vec<_> = conv
+                .content
+                .iter()
+                .filter(|e| matches!(e.kind, leviath_core::EntryKind::ToolResult { .. }))
+                .collect();
+            assert_eq!(tool_results.len(), 1);
+            assert!(tool_results[0].content.contains("[...truncated]"));
+            // Content is a valid `String` by construction; confirm it truncated.
+            assert!(tool_results[0].content.len() < long_result.len());
         })
         .await;
     }
