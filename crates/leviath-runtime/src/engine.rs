@@ -103,6 +103,12 @@ pub type ToolResultsFuture<'a> =
 pub type ToolExecutorDyn<'a> =
     dyn FnMut(Vec<leviath_providers::ToolCall>) -> ToolResultsFuture<'a> + Send + 'a;
 
+/// Sync callback invoked after tool execution when context tools were used.
+/// Receives the engine's World and the agent Entity so callers can sync
+/// external state (e.g. a shared ContextWindow copy) back to the entity.
+pub type PostToolSync =
+    dyn FnMut(&mut bevy_ecs::prelude::World, bevy_ecs::prelude::Entity) + Send;
+
 impl AgentEngine {
     /// Create a new agent engine.
     pub fn new() -> Self {
@@ -719,6 +725,37 @@ impl AgentEngine {
         tool_executor: &mut ToolExecutorDyn<'e>,
         repetition_config: Option<&leviath_core::RepetitionDetectionConfig>,
     ) -> std::result::Result<InferenceResponse, ProviderError> {
+        self.run_inference_loop_filtered_dyn_with_sync(
+            entity,
+            provider_name,
+            model,
+            tools,
+            max_iterations,
+            tool_filter,
+            compaction_config,
+            tool_executor,
+            repetition_config,
+            None,
+        )
+        .await
+    }
+
+    /// Like [`Self::run_inference_loop_filtered_dyn_inner`] but with an
+    /// optional post-tool-execution sync callback.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn run_inference_loop_filtered_dyn_with_sync<'e>(
+        &mut self,
+        entity: Entity,
+        provider_name: &str,
+        model: &str,
+        tools: Vec<Tool>,
+        max_iterations: usize,
+        tool_filter: Option<&[String]>,
+        compaction_config: Option<&leviath_core::CompactionConfig>,
+        tool_executor: &mut ToolExecutorDyn<'e>,
+        repetition_config: Option<&leviath_core::RepetitionDetectionConfig>,
+        mut post_tool_sync: Option<&mut PostToolSync>,
+    ) -> std::result::Result<InferenceResponse, ProviderError> {
         let mut last_response = None;
         let mut total_tool_calls: usize = 0;
         let mut text_only_nudges: usize = 0;
@@ -865,6 +902,17 @@ impl AgentEngine {
                         .map(|tc| (tc.name.clone(), g.tool_classification(&tc.name).sensitivity))
                         .collect()
                 });
+
+            // If any context tools were called, sync external state back to the
+            // entity's ContextWindow before we add tool results.
+            let had_context_tools = tool_calls_snapshot
+                .iter()
+                .any(|tc| tc.name.starts_with("context_"));
+            if had_context_tools {
+                if let Some(sync) = post_tool_sync.as_mut() {
+                    sync(&mut self.world, entity);
+                }
+            }
 
             // Add tool results to context window.
             // Safety: `run_inference_filtered` already confirmed the entity has
@@ -1024,6 +1072,14 @@ impl AgentEngine {
                         tracing::warn!(iteration, error = %e, "Auto-eviction/compaction failed during inference loop");
                     }
                     _ => {}
+                }
+            }
+
+            // After adding tool results and running eviction, sync entity→shared
+            // so context tools see the latest state on the next iteration.
+            if had_context_tools {
+                if let Some(sync) = post_tool_sync.as_mut() {
+                    sync(&mut self.world, entity);
                 }
             }
 

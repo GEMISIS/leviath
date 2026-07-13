@@ -268,14 +268,14 @@ async fn handle_context_tool(
                     None => return "[error] HashMap regions require a 'key' argument".to_string(),
                 };
                 match region.upsert_by_key(k, content.to_string(), tokens) {
-                    Ok(()) => format!("Wrote to region '{}' key '{}'", region_name, k),
+                    Ok(()) => format!("Stored in '{}' section under key '{}'.", region_name, k),
                     Err(e) => format!("[error] {}", e),
                 }
             } else {
                 // For non-HashMap regions, replace all content
                 region.clear();
                 match region.add_entry(content.to_string(), tokens) {
-                    Ok(()) => format!("Wrote to region '{}'", region_name),
+                    Ok(()) => format!("Stored in '{}' section.", region_name),
                     Err(e) => format!("[error] {}", e),
                 }
             }
@@ -304,13 +304,13 @@ async fn handle_context_tool(
                         let new_content = format!("{}\n{}", existing.content, content);
                         let new_tokens = new_content.len() / 4 + 1;
                         match region.upsert_by_key(k, new_content, new_tokens) {
-                            Ok(()) => format!("Appended to region '{}' key '{}'", region_name, k),
+                            Ok(()) => format!("Appended to '{}' section under key '{}'.", region_name, k),
                             Err(e) => format!("[error] {}", e),
                         }
                     } else {
                         match region.upsert_by_key(k, content.to_string(), tokens) {
                             Ok(()) => {
-                                format!("Created entry in region '{}' key '{}'", region_name, k)
+                                format!("Created entry in '{}' section under key '{}'.", region_name, k)
                             }
                             Err(e) => format!("[error] {}", e),
                         }
@@ -320,7 +320,7 @@ async fn handle_context_tool(
                 }
             } else {
                 match region.add_entry(content.to_string(), tokens) {
-                    Ok(()) => format!("Appended to region '{}'", region_name),
+                    Ok(()) => format!("Appended to '{}' section.", region_name),
                     Err(e) => format!("[error] {}", e),
                 }
             }
@@ -355,9 +355,9 @@ async fn handle_context_tool(
                         }
                     }
                     if lines.is_empty() {
-                        format!("Region '{}' is empty", region_name)
+                        format!("Section '{}' is empty.", region_name)
                     } else {
-                        format!("Region '{}' keys:\n{}", region_name, lines.join("\n"))
+                        format!("Section '{}' entries:\n{}", region_name, lines.join("\n"))
                     }
                 }
             } else {
@@ -369,7 +369,7 @@ async fn handle_context_tool(
                     .collect::<Vec<_>>()
                     .join("\n\n");
                 if text.is_empty() {
-                    format!("Region '{}' is empty", region_name)
+                    format!("Section '{}' is empty.", region_name)
                 } else {
                     text
                 }
@@ -391,7 +391,7 @@ async fn handle_context_tool(
             };
 
             if region.remove_by_key(key) {
-                format!("Deleted key '{}' from region '{}'", key, region_name)
+                format!("Removed '{}' from '{}' section.", key, region_name)
             } else {
                 format!(
                     "[not found] No entry with key '{}' in region '{}'",
@@ -416,7 +416,7 @@ async fn handle_context_tool(
                     }
                 }
                 if lines.is_empty() {
-                    format!("Region '{}' is empty", rname)
+                    format!("Section '{}' is empty.", rname)
                 } else {
                     format!(
                         "Region '{}' ({} entries, {} tokens):\n{}",
@@ -431,13 +431,13 @@ async fn handle_context_tool(
                 let mut lines = Vec::new();
                 for region in &window.regions {
                     let kind_str = match &region.kind {
-                        leviath_core::RegionKind::Pinned => "pinned",
-                        leviath_core::RegionKind::SlidingWindow { .. } => "sliding_window",
+                        leviath_core::RegionKind::Pinned => "permanent",
+                        leviath_core::RegionKind::SlidingWindow { .. } => "conversation",
                         leviath_core::RegionKind::Temporary => "temporary",
-                        leviath_core::RegionKind::Compacting { .. } => "compacting",
-                        leviath_core::RegionKind::Clearable => "clearable",
-                        leviath_core::RegionKind::CompactHistory { .. } => "compact_history",
-                        leviath_core::RegionKind::HashMap { .. } => "hashmap",
+                        leviath_core::RegionKind::Compacting { .. } => "summarized when full",
+                        leviath_core::RegionKind::Clearable => "temporary",
+                        leviath_core::RegionKind::CompactHistory { .. } => "summary archive",
+                        leviath_core::RegionKind::HashMap { .. } => "key-value store",
                     };
                     lines.push(format!(
                         "  {} ({}): {} entries, {}/{} tokens",
@@ -449,9 +449,9 @@ async fn handle_context_tool(
                     ));
                 }
                 if lines.is_empty() {
-                    "No regions configured".to_string()
+                    "No context window sections configured.".to_string()
                 } else {
-                    format!("Context regions:\n{}", lines.join("\n"))
+                    format!("Context window sections:\n{}", lines.join("\n"))
                 }
             }
         }
@@ -484,7 +484,7 @@ async fn maybe_track_file(
         "read_file" if ft.track_reads => {
             let tokens = result.len() / 4 + 1;
             let msg = format!(
-                "File '{}' ({} tokens) is available in the '{}' context region.",
+                "read_file '{}' ({} tokens) → stored in '{}' section of your context window.",
                 path, tokens, ft.region
             );
             (true, result.clone(), msg)
@@ -498,8 +498,8 @@ async fn maybe_track_file(
                 return result;
             }
             let msg = format!(
-                "{}. File tracked in '{}' context region.",
-                result, ft.region
+                "write_file '{}' → content tracked in '{}' section of your context window.",
+                path, ft.region
             );
             (true, content, msg)
         }
@@ -511,8 +511,8 @@ async fn maybe_track_file(
                 return result;
             }
             let msg = format!(
-                "{}. Updated content tracked in '{}' context region.",
-                result, ft.region
+                "edit_file '{}' → updated content tracked in '{}' section of your context window.",
+                path, ft.region
             );
             (true, content, msg)
         }
@@ -638,6 +638,8 @@ struct WorkerCallbacks<'a> {
     taint_global: bool,
     /// Taint policy (allowlists / MCP overrides) for the run.
     taint_policy: leviath_core::PolicyConfig,
+    /// Shared context window for context tools (synced with ECS entity).
+    context_window: Arc<Mutex<Option<leviath_runtime::ContextWindow>>>,
 }
 
 impl<'a> WorkerCallbacks<'a> {
@@ -742,9 +744,53 @@ impl<'a> StageCallbacks for WorkerCallbacks<'a> {
         _io: &mut dyn RunIO,
         executor: &mut leviath_runtime::ToolExecutorDyn<'_>,
     ) -> anyhow::Result<(StageResult, Option<InferenceResponse>)> {
-        // Worker calls engine.run_inference_loop_filtered_dyn directly (not run_autonomous_stage)
+        // Sync the ECS ContextWindow to the shared ref so context tools can access it.
+        // The shared copy is modified by context_write/append/delete tool calls.
+        // After each tool batch with context_* calls, the engine calls our sync
+        // callback to merge changes back to the entity's ContextWindow.
+        if let Some(cw) = engine
+            .world()
+            .get::<leviath_runtime::ContextWindow>(entity)
+        {
+            *self.context_window.lock().await = Some(cw.clone());
+        }
+
+        // Post-tool sync callback: copies regions modified by context tools
+        // from the shared ContextWindow back to the entity's ContextWindow.
+        let shared_cw_for_sync = self.context_window.clone();
+        // Sync callback for context tools.
+        // Called twice per tool batch: pre-results (shared→entity) and
+        // post-results (entity→shared). Alternates direction each call.
+        let mut sync_direction_to_entity = true;
+        let mut post_tool_sync =
+            move |world: &mut bevy_ecs::prelude::World, ent: bevy_ecs::prelude::Entity| {
+                if let Ok(mut guard) = shared_cw_for_sync.try_lock() {
+                    if sync_direction_to_entity {
+                        // shared→entity: merge context tool writes into entity CW
+                        if let Some(shared) = guard.as_ref() {
+                            if let Some(mut entity_cw) =
+                                world.get_mut::<leviath_runtime::ContextWindow>(ent)
+                            {
+                                entity_cw.regions = shared.regions.clone();
+                                entity_cw.current_tokens = shared.current_tokens;
+                            }
+                        }
+                    } else {
+                        // entity→shared: update shared copy with engine's changes
+                        if let Some(entity_cw) =
+                            world.get::<leviath_runtime::ContextWindow>(ent)
+                        {
+                            *guard = Some(entity_cw.clone());
+                        }
+                    }
+                    sync_direction_to_entity = !sync_direction_to_entity;
+                }
+            };
+
+        // Worker calls engine with sync callback so context tool changes
+        // are visible to the model on the next inference call.
         let response = engine
-            .run_inference_loop_filtered_dyn(
+            .run_inference_loop_filtered_dyn_with_sync(
                 entity,
                 provider,
                 model,
@@ -753,9 +799,19 @@ impl<'a> StageCallbacks for WorkerCallbacks<'a> {
                 None,
                 compaction,
                 executor,
+                None, // repetition config passed separately
+                Some(&mut post_tool_sync),
             )
             .await
             .map_err(|e| anyhow::anyhow!("{}", e))?;
+
+        // Final sync: entity→shared for any changes the engine made
+        if let Some(cw) = engine
+            .world()
+            .get::<leviath_runtime::ContextWindow>(entity)
+        {
+            *self.context_window.lock().await = Some(cw.clone());
+        }
 
         Ok((StageResult::Success, Some(response)))
     }
@@ -1152,6 +1208,7 @@ async fn run_worker_inner(
         tool_calls_counter: tool_calls_counter.clone(),
         taint_global: config.taint_tracking,
         taint_policy,
+        context_window: shared_context_window.clone(),
     };
     let mut io = ConsoleIO::new();
 
@@ -1289,6 +1346,7 @@ mod tests {
             tool_calls_counter: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             taint_global: false,
             taint_policy: leviath_core::PolicyConfig::default(),
+            context_window: Arc::new(Mutex::new(None)),
         };
         assert_eq!(cb.run_id, "test-run");
         assert_eq!(cb.blueprint_stages_len, 3);
@@ -1312,6 +1370,7 @@ mod tests {
             tool_calls_counter: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             taint_global: false,
             taint_policy: leviath_core::PolicyConfig::default(),
+            context_window: Arc::new(Mutex::new(None)),
         };
         // Should not panic even with 0 stages
         cb.on_complete(0).await;
@@ -1335,6 +1394,7 @@ mod tests {
             tool_calls_counter: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             taint_global: false,
             taint_policy: leviath_core::PolicyConfig::default(),
+            context_window: Arc::new(Mutex::new(None)),
         };
         let ctx = cb.get_run_context();
         assert!(ctx.is_some());
@@ -1360,6 +1420,7 @@ mod tests {
             tool_calls_counter: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             taint_global: false,
             taint_policy: leviath_core::PolicyConfig::default(),
+            context_window: Arc::new(Mutex::new(None)),
         };
         let registry = leviath_runtime::ProviderRegistry::new();
         let engine = leviath_runtime::AgentEngine::with_providers(registry);
@@ -1391,6 +1452,7 @@ mod tests {
             tool_calls_counter: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             taint_global: false,
             taint_policy: leviath_core::PolicyConfig::default(),
+            context_window: Arc::new(Mutex::new(None)),
         };
         // Should not panic with positive stages
         cb.on_complete(2).await;
@@ -1417,6 +1479,7 @@ mod tests {
             tool_calls_counter: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             taint_global: false,
             taint_policy: leviath_core::PolicyConfig::default(),
+            context_window: Arc::new(Mutex::new(None)),
         };
         cb.on_transition("plan", "code", 0).await;
     }
@@ -1441,6 +1504,7 @@ mod tests {
             tool_calls_counter: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             taint_global: false,
             taint_policy: leviath_core::PolicyConfig::default(),
+            context_window: Arc::new(Mutex::new(None)),
         };
         cb.on_cancel(0).await;
 
@@ -1470,6 +1534,7 @@ mod tests {
             tool_calls_counter: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             taint_global: true,
             taint_policy: leviath_core::PolicyConfig::default(),
+            context_window: Arc::new(Mutex::new(None)),
         };
         let events = vec![leviath_core::taint::GateEvent {
             timestamp: 0,
@@ -1552,6 +1617,7 @@ mod tests {
             tool_calls_counter: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             taint_global: true,
             taint_policy: leviath_core::PolicyConfig::default(),
+            context_window: Arc::new(Mutex::new(None)),
         };
         assert!(cb.taint_global_enabled());
         let _ = cb.taint_policy();
@@ -1604,6 +1670,7 @@ mod tests {
             tool_calls_counter: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             taint_global: false,
             taint_policy: leviath_core::PolicyConfig::default(),
+            context_window: Arc::new(Mutex::new(None)),
         };
         cb.on_claude_code_warning(0).await;
     }
@@ -1638,6 +1705,7 @@ mod tests {
             tool_calls_counter: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             taint_global: false,
             taint_policy: leviath_core::PolicyConfig::default(),
+            context_window: Arc::new(Mutex::new(None)),
         };
         let result = cb.on_provider_missing("nonexistent", 0).await;
         // on_provider_missing should return true (abort).
@@ -1680,6 +1748,7 @@ mod tests {
             tool_calls_counter: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             taint_global: false,
             taint_policy: leviath_core::PolicyConfig::default(),
+            context_window: Arc::new(Mutex::new(None)),
         };
         cb.on_stage_enter("plan", 0, "anthropic", "claude-sonnet-4-6", "")
             .await;
@@ -1718,6 +1787,7 @@ mod tests {
             tool_calls_counter: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             taint_global: false,
             taint_policy: leviath_core::PolicyConfig::default(),
+            context_window: Arc::new(Mutex::new(None)),
         };
         cb.on_stage_enter("code", 0, "anthropic", "claude-sonnet-4-6", " (visit 2)")
             .await;
@@ -1754,6 +1824,7 @@ mod tests {
             tool_calls_counter: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             taint_global: false,
             taint_policy: leviath_core::PolicyConfig::default(),
+            context_window: Arc::new(Mutex::new(None)),
         };
 
         let err = anyhow::anyhow!("test error");
@@ -1791,6 +1862,7 @@ mod tests {
             tool_calls_counter: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             taint_global: false,
             taint_policy: leviath_core::PolicyConfig::default(),
+            context_window: Arc::new(Mutex::new(None)),
         };
 
         let err = anyhow::anyhow!("linear error");
@@ -1833,6 +1905,7 @@ mod tests {
             tool_calls_counter: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             taint_global: false,
             taint_policy: leviath_core::PolicyConfig::default(),
+            context_window: Arc::new(Mutex::new(None)),
         };
 
         let registry = leviath_runtime::ProviderRegistry::new();
@@ -1905,6 +1978,7 @@ mod tests {
             tool_calls_counter: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             taint_global: false,
             taint_policy: leviath_core::PolicyConfig::default(),
+            context_window: Arc::new(Mutex::new(None)),
         };
 
         let registry = leviath_runtime::ProviderRegistry::new();
@@ -1956,6 +2030,7 @@ mod tests {
             tool_calls_counter: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             taint_global: false,
             taint_policy: leviath_core::PolicyConfig::default(),
+            context_window: Arc::new(Mutex::new(None)),
         };
 
         // Empty content — the `add_to_region` branch is NOT taken
@@ -2005,6 +2080,7 @@ mod tests {
             tool_calls_counter: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             taint_global: false,
             taint_policy: leviath_core::PolicyConfig::default(),
+            context_window: Arc::new(Mutex::new(None)),
         };
 
         // Non-empty content — `add_to_region` branch IS taken
@@ -2051,6 +2127,7 @@ mod tests {
             tool_calls_counter: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             taint_global: false,
             taint_policy: leviath_core::PolicyConfig::default(),
+            context_window: Arc::new(Mutex::new(None)),
         };
 
         // Should not panic; updates meta.iteration from AgentState and writes meta
@@ -2084,6 +2161,7 @@ mod tests {
             tool_calls_counter: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             taint_global: false,
             taint_policy: leviath_core::PolicyConfig::default(),
+            context_window: Arc::new(Mutex::new(None)),
         };
 
         // on_post_stage with an entity that has no AgentState — should not panic
@@ -2799,6 +2877,7 @@ mode = "autonomous"
             tool_calls_counter: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             taint_global: false,
             taint_policy: leviath_core::PolicyConfig::default(),
+            context_window: Arc::new(Mutex::new(None)),
         };
 
         let registry = leviath_runtime::ProviderRegistry::new();
@@ -2863,6 +2942,7 @@ mode = "autonomous"
             tool_calls_counter: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             taint_global: false,
             taint_policy: leviath_core::PolicyConfig::default(),
+            context_window: Arc::new(Mutex::new(None)),
         };
 
         // graph mode → Some(StageResult::Error) returned; meta NOT set to Error
@@ -2898,6 +2978,7 @@ mode = "autonomous"
             tool_calls_counter: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             taint_global: false,
             taint_policy: leviath_core::PolicyConfig::default(),
+            context_window: Arc::new(Mutex::new(None)),
         };
 
         let result = cb.on_provider_missing("missing-provider", 0).await;
@@ -2930,6 +3011,7 @@ mode = "autonomous"
             tool_calls_counter: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             taint_global: false,
             taint_policy: leviath_core::PolicyConfig::default(),
+            context_window: Arc::new(Mutex::new(None)),
         };
 
         // Should not panic even with stages > 0
@@ -2963,6 +3045,7 @@ mode = "autonomous"
             tool_calls_counter: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             taint_global: false,
             taint_policy: leviath_core::PolicyConfig::default(),
+            context_window: Arc::new(Mutex::new(None)),
         };
 
         // stage_idx=5 but only 1 stage — the `if let Some(r)` guard handles this safely
@@ -2998,6 +3081,7 @@ mode = "autonomous"
             tool_calls_counter: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             taint_global: false,
             taint_policy: leviath_core::PolicyConfig::default(),
+            context_window: Arc::new(Mutex::new(None)),
         };
 
         let err = anyhow::anyhow!("oob error");
@@ -3874,7 +3958,7 @@ for line in sys.stdin:
         });
         let result = handle_context_tool("context_write", &args, &cw).await;
         assert!(
-            result.contains("Wrote to region 'notes' key 'idea1'"),
+            result.contains("Stored in 'notes' section under key 'idea1'"),
             "unexpected result: {}",
             result
         );
@@ -3915,7 +3999,7 @@ for line in sys.stdin:
         assert!(result.contains("alpha"), "expected alpha in: {}", result);
         assert!(result.contains("beta"), "expected beta in: {}", result);
         assert!(
-            result.contains("keys"),
+            result.contains("entries"),
             "expected 'keys' header in: {}",
             result
         );
@@ -3927,7 +4011,7 @@ for line in sys.stdin:
         let args = serde_json::json!({});
         let result = handle_context_tool("context_list", &args, &cw).await;
         assert!(
-            result.contains("notes") && result.contains("hashmap"),
+            result.contains("notes") && result.contains("key-value store"),
             "unexpected result: {}",
             result
         );
@@ -3969,7 +4053,7 @@ for line in sys.stdin:
         });
         let result = handle_context_tool("context_delete", &delete_args, &cw).await;
         assert!(
-            result.contains("Deleted key 'del_me'"),
+            result.contains("Removed 'del_me' from 'notes' section"),
             "unexpected result: {}",
             result
         );
@@ -4023,7 +4107,7 @@ for line in sys.stdin:
         });
         let result = handle_context_tool("context_append", &append_args, &cw).await;
         assert!(
-            result.contains("Appended to region 'notes' key 'log'"),
+            result.contains("Appended to 'notes' section under key 'log'"),
             "unexpected result: {}",
             result
         );
@@ -4100,7 +4184,7 @@ for line in sys.stdin:
         .await;
 
         assert!(
-            result.contains("available in the"),
+            result.contains("stored in 'files' section"),
             "expected reference message, got: {}",
             result
         );
@@ -4142,7 +4226,7 @@ for line in sys.stdin:
         .await;
 
         assert!(
-            result.contains("tracked in 'files' context region"),
+            result.contains("tracked in 'files' section"),
             "expected tracking message, got: {}",
             result
         );

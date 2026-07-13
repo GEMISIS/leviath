@@ -203,21 +203,21 @@ impl BuiltinTools {
             },
             Tool {
                 name: "context_write".to_string(),
-                description: "Write or replace content in a named context region. For HashMap regions, upserts by key. For other regions, replaces entire content or appends a new entry.".to_string(),
+                description: "Store or update content in a named section of your context window. This content will be included in your system prompt on subsequent turns, making it available for reference. Use this to save analysis, plans, notes, or structured information. If a key is provided and an entry with that key already exists, it will be replaced with the new content.".to_string(),
                 parameters: json!({
                     "type": "object",
                     "properties": {
                         "region": {
                             "type": "string",
-                            "description": "Name of the context region to write to"
+                            "description": "Name of the context window section (e.g. 'architecture', 'plan')"
                         },
                         "key": {
                             "type": "string",
-                            "description": "Optional key for HashMap regions (upsert semantics)"
+                            "description": "Key for the entry. Replaces existing entry with the same key."
                         },
                         "content": {
                             "type": "string",
-                            "description": "Content to write"
+                            "description": "Content to store"
                         }
                     },
                     "required": ["region", "content"]
@@ -225,17 +225,17 @@ impl BuiltinTools {
             },
             Tool {
                 name: "context_append".to_string(),
-                description: "Append content to a named context region. For HashMap regions, appends to existing key's content or creates a new entry. For other regions, adds a new entry.".to_string(),
+                description: "Add content to an existing section of your context window without replacing what's already there.".to_string(),
                 parameters: json!({
                     "type": "object",
                     "properties": {
                         "region": {
                             "type": "string",
-                            "description": "Name of the context region"
+                            "description": "Name of the context window section"
                         },
                         "key": {
                             "type": "string",
-                            "description": "Optional key for HashMap regions"
+                            "description": "Key for the entry"
                         },
                         "content": {
                             "type": "string",
@@ -247,17 +247,17 @@ impl BuiltinTools {
             },
             Tool {
                 name: "context_read".to_string(),
-                description: "Read current content of a context region. For HashMap regions without a key, returns all keys and their sizes.".to_string(),
+                description: "Read what's currently stored in a section of your context window. If no key is specified and the section contains keyed entries, returns a summary of all keys and their sizes.".to_string(),
                 parameters: json!({
                     "type": "object",
                     "properties": {
                         "region": {
                             "type": "string",
-                            "description": "Name of the context region to read"
+                            "description": "Name of the context window section to read"
                         },
                         "key": {
                             "type": "string",
-                            "description": "Optional key for HashMap regions to read a specific entry"
+                            "description": "Key of a specific entry to read"
                         }
                     },
                     "required": ["region"]
@@ -265,17 +265,17 @@ impl BuiltinTools {
             },
             Tool {
                 name: "context_delete".to_string(),
-                description: "Remove an entry from a context region by key.".to_string(),
+                description: "Remove a specific keyed entry from a section of your context window.".to_string(),
                 parameters: json!({
                     "type": "object",
                     "properties": {
                         "region": {
                             "type": "string",
-                            "description": "Name of the context region"
+                            "description": "Name of the context window section"
                         },
                         "key": {
                             "type": "string",
-                            "description": "Key of the entry to delete"
+                            "description": "Key of the entry to remove"
                         }
                     },
                     "required": ["region", "key"]
@@ -283,7 +283,7 @@ impl BuiltinTools {
             },
             Tool {
                 name: "context_list".to_string(),
-                description: "List context regions and their contents. Without a region name, lists all regions with kind, token count, and entry count. With a region name, lists keys and sizes for that region.".to_string(),
+                description: "List available sections of your context window with their current usage — section names, token counts, and number of entries. Use this to see what's available and what you've already stored.".to_string(),
                 parameters: json!({
                     "type": "object",
                     "properties": {

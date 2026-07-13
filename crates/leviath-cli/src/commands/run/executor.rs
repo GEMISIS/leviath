@@ -488,6 +488,15 @@ pub async fn run_stage_loop(
                 .collect()
         };
 
+        // Log effective tools for debugging
+        let tool_names: Vec<&str> = effective_tools.iter().map(|t| t.name.as_str()).collect();
+        tracing::info!(
+            stage = %stage.name,
+            tool_count = effective_tools.len(),
+            tools = ?tool_names,
+            "Stage tools resolved"
+        );
+
         let max_iterations = stage.max_iterations.unwrap_or(20);
 
         // Mid-run message reader
