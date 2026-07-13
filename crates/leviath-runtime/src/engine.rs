@@ -5819,4 +5819,25 @@ mod tests {
         })
         .await;
     }
+
+    #[test]
+    fn drain_pending_messages_noop_when_entity_has_no_inbox() {
+        let mut engine = AgentEngine::new();
+        // Spawn an entity that has an AgentState but NO MessageInbox component.
+        let entity = engine
+            .world_mut()
+            .spawn(AgentState {
+                agent_id: "no-inbox".to_string(),
+                current_stage: "main".to_string(),
+                iteration: 0,
+                status: AgentStatus::Active,
+                spawned_children_ids: Vec::new(),
+                pending_wait: None,
+                accepts_messages: true,
+            })
+            .id();
+        // get_mut::<MessageInbox> returns None → the if-let body is skipped and
+        // the call is a no-op that must not panic.
+        engine.drain_pending_messages(entity);
+    }
 }

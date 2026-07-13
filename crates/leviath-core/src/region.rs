@@ -2761,4 +2761,55 @@ mod tests {
             crate::cache::CacheHint::UntilChanged
         );
     }
+
+    // ─── taint-vector fixups on keyed removal / LRU eviction ───────────────
+
+    #[test]
+    fn test_remove_by_key_recomputes_taint_when_tracking_enabled() {
+        // A taint-tracked region: remove_by_key must run its taint-vector
+        // fixup branch (`taint.remove_at`) without panicking.
+        let mut region = Region::new(
+            "kv".to_string(),
+            RegionKind::HashMap { max_entries: None },
+            10_000,
+        )
+        .with_taint_tracking();
+        region
+            .upsert_by_key("k1", "value one".to_string(), 10)
+            .unwrap();
+        region
+            .upsert_by_key("k2", "value two".to_string(), 10)
+            .unwrap();
+
+        assert!(region.remove_by_key("k1"));
+        assert!(!region.remove_by_key("missing"));
+        assert_eq!(region.entry_count(), 1);
+        assert_eq!(region.current_tokens, 10);
+    }
+
+    #[test]
+    fn test_evict_lru_entry_runs_taint_fixup() {
+        // A taint-tracked HashMap region with a max_entries cap: inserting past
+        // the cap triggers evict_lru_entry, which must run its taint-vector
+        // fixup branch.
+        let mut region = Region::new(
+            "kv".to_string(),
+            RegionKind::HashMap {
+                max_entries: Some(1),
+            },
+            10_000,
+        )
+        .with_taint_tracking();
+        region
+            .upsert_by_key("first", "aaa".to_string(), 10)
+            .unwrap();
+        region
+            .upsert_by_key("second", "bbb".to_string(), 10)
+            .unwrap();
+
+        // Only the most-recently-inserted key survives after LRU eviction.
+        assert_eq!(region.entry_count(), 1);
+        assert!(region.get_by_key("second").is_some());
+        assert!(region.get_by_key("first").is_none());
+    }
 }
