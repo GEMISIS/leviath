@@ -105,6 +105,21 @@ impl BuiltinTools {
                 }),
             },
             Tool {
+                name: "read_files".to_string(),
+                description: "Read multiple files at once. Returns the contents of all requested files in a single response, separated by file path headers. More efficient than calling read_file repeatedly. Use this when you need to read several files (e.g. after list_dir).".to_string(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "paths": {
+                            "type": "array",
+                            "items": { "type": "string" },
+                            "description": "Array of file paths relative to the working directory"
+                        }
+                    },
+                    "required": ["paths"]
+                }),
+            },
+            Tool {
                 name: "shell".to_string(),
                 description: "Execute a shell command in the working directory. Uses the system shell (bash/zsh on Unix, cmd on Windows). Use this for build commands, running tests, installing dependencies, or other shell operations. Has a 60-second timeout.".to_string(),
                 parameters: json!({
@@ -417,6 +432,7 @@ impl BuiltinTools {
     pub fn names(&self) -> Vec<String> {
         vec![
             "read_file".to_string(),
+            "read_files".to_string(),
             "write_file".to_string(),
             "edit_file".to_string(),
             "list_dir".to_string(),
@@ -439,6 +455,7 @@ impl BuiltinTools {
     pub async fn execute(&self, name: &str, args: Value) -> String {
         match name {
             "read_file" => self.read_file(&args).await,
+            "read_files" => self.read_files(&args).await,
             "write_file" => self.write_file(&args).await,
             "edit_file" => self.edit_file(&args).await,
             "list_dir" => self.list_dir(&args).await,
@@ -495,6 +512,47 @@ impl BuiltinTools {
             Ok(content) => content,
             Err(e) => format!("[error] Failed to read '{}': {}", path_str, e),
         }
+    }
+
+    async fn read_files(&self, args: &Value) -> String {
+        let paths = match args.get("paths").and_then(|v| v.as_array()) {
+            Some(arr) => arr,
+            None => return "[error] missing 'paths' argument (expected array)".to_string(),
+        };
+
+        if paths.is_empty() {
+            return "[error] 'paths' array is empty".to_string();
+        }
+
+        let mut results = Vec::with_capacity(paths.len());
+        for path_val in paths {
+            let path_str = match path_val.as_str() {
+                Some(p) => p,
+                None => {
+                    results.push("[error] non-string path in array".to_string());
+                    continue;
+                }
+            };
+
+            let path = match self.resolve(path_str) {
+                Ok(p) => p,
+                Err(e) => {
+                    results.push(format!("### [{}]\n[error] {}", path_str, e));
+                    continue;
+                }
+            };
+
+            match std::fs::read_to_string(&path) {
+                Ok(content) => {
+                    results.push(format!("### [{}]\n{}", path_str, content));
+                }
+                Err(e) => {
+                    results.push(format!("### [{}]\n[error] Failed to read: {}", path_str, e));
+                }
+            }
+        }
+
+        results.join("\n\n")
     }
 
     async fn write_file(&self, args: &Value) -> String {
@@ -729,11 +787,11 @@ mod tests {
     // ── Tool definitions ──────────────────────────────────────────────────
 
     #[test]
-    fn tool_defs_returns_fifteen_tools() {
+    fn tool_defs_returns_sixteen_tools() {
         let dir = std::env::temp_dir();
         let tools = make_tools(&dir);
         let defs = tools.tool_defs();
-        assert_eq!(defs.len(), 15);
+        assert_eq!(defs.len(), 16);
     }
 
     #[test]
@@ -742,6 +800,7 @@ mod tests {
         let tools = make_tools(&dir);
         let names: Vec<String> = tools.tool_defs().iter().map(|t| t.name.clone()).collect();
         assert!(names.contains(&"read_file".to_string()));
+        assert!(names.contains(&"read_files".to_string()));
         assert!(names.contains(&"write_file".to_string()));
         assert!(names.contains(&"edit_file".to_string()));
         assert!(names.contains(&"list_dir".to_string()));
@@ -916,10 +975,10 @@ mod tests {
     }
 
     #[test]
-    fn names_returns_sixteen_entries() {
+    fn names_returns_seventeen_entries() {
         let dir = std::env::temp_dir();
         let tools = make_tools(&dir);
-        assert_eq!(tools.names().len(), 16);
+        assert_eq!(tools.names().len(), 17);
     }
 
     // ── Sub-agent tool definitions ────────────────────────────────────────
