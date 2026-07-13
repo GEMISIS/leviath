@@ -47,6 +47,8 @@ const READONLY_TOOLS: &[&str] = &[
     "glob",
     "grep",
     "search",
+    "context_read",
+    "context_list",
 ];
 
 /// Tools considered "productive" (produce side effects / forward progress).
@@ -123,8 +125,9 @@ impl RepetitionDetector {
             let count_val = *count;
             return Some(format!(
                 "You have called {tool_name} with the same arguments {count_val} times. \
-                 This appears to be a loop. Take a different action — try running tests \
-                 with bash, writing code with write_file, or editing with edit_file."
+                 This appears to be a loop. Take a different action — try writing code \
+                 with write_file, editing with edit_file, running commands with bash, \
+                 or storing analysis with context_write."
             ));
         }
 
@@ -134,7 +137,8 @@ impl RepetitionDetector {
             return Some(format!(
                 "You have made {streak} consecutive read-only tool calls \
                  (read_file/list_dir) without any writes or command execution. \
-                 Break this pattern — run a command, write a file, or edit code."
+                 Break this pattern — write a file, edit code, run a command, \
+                 or use context_write to store your analysis."
             ));
         }
 
