@@ -58,6 +58,10 @@ pub struct Blueprint {
     /// Repetition detection configuration.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub repetition_detection: Option<RepetitionDetectionConfig>,
+
+    /// File tracking configuration.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file_tracking: Option<FileTrackingConfig>,
 }
 
 impl Blueprint {
@@ -82,6 +86,7 @@ impl Blueprint {
             metadata: HashMap::new(),
             security: None,
             repetition_detection: None,
+            file_tracking: None,
         }
     }
 
@@ -254,6 +259,30 @@ impl Blueprint {
     pub fn find_stage(&self, name: &str) -> Option<&Stage> {
         self.stages.iter().find(|s| s.name == name)
     }
+}
+
+/// Configuration for automatic file tracking in context regions.
+///
+/// When configured, read_file/write_file/edit_file results are automatically
+/// synced to a HashMap region, and tool results reference the system prompt
+/// instead of duplicating content.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FileTrackingConfig {
+    /// Name of the HashMap region to sync files to
+    pub region: String,
+    /// Auto-update on read_file
+    #[serde(default = "default_true_val")]
+    pub track_reads: bool,
+    /// Auto-update on write_file/edit_file
+    #[serde(default = "default_true_val")]
+    pub track_writes: bool,
+    /// Truncate files larger than this token count in context
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_file_tokens: Option<usize>,
+}
+
+fn default_true_val() -> bool {
+    true
 }
 
 /// Configuration for repetition detection in the inference loop.
@@ -1483,5 +1512,55 @@ mod tests {
                 message: "stage name cannot be empty".to_string(),
             }
         );
+    }
+
+    #[test]
+    fn test_file_tracking_config_defaults() {
+        let json = r#"{"region": "files"}"#;
+        let config: FileTrackingConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(config.region, "files");
+        assert!(config.track_reads);
+        assert!(config.track_writes);
+        assert!(config.max_file_tokens.is_none());
+    }
+
+    #[test]
+    fn test_file_tracking_config_serde_roundtrip() {
+        let config = FileTrackingConfig {
+            region: "files".to_string(),
+            track_reads: true,
+            track_writes: false,
+            max_file_tokens: Some(5000),
+        };
+        let json = serde_json::to_string(&config).unwrap();
+        let back: FileTrackingConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.region, "files");
+        assert!(back.track_reads);
+        assert!(!back.track_writes);
+        assert_eq!(back.max_file_tokens, Some(5000));
+    }
+
+    #[test]
+    fn test_blueprint_file_tracking_default_none() {
+        let stages = vec![Stage::new("plan".to_string(), make_model())];
+        let bp = Blueprint::new("t".into(), "d".into(), stages, make_layout());
+        assert!(bp.file_tracking.is_none());
+    }
+
+    #[test]
+    fn test_blueprint_file_tracking_serde_roundtrip() {
+        let stages = vec![Stage::new("plan".to_string(), make_model())];
+        let mut bp = Blueprint::new("t".into(), "d".into(), stages, make_layout());
+        bp.file_tracking = Some(FileTrackingConfig {
+            region: "files".to_string(),
+            track_reads: true,
+            track_writes: true,
+            max_file_tokens: Some(3000),
+        });
+        let json = serde_json::to_string(&bp).unwrap();
+        let back: Blueprint = serde_json::from_str(&json).unwrap();
+        let ft = back.file_tracking.unwrap();
+        assert_eq!(ft.region, "files");
+        assert_eq!(ft.max_file_tokens, Some(3000));
     }
 }

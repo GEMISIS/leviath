@@ -20,8 +20,8 @@ pub mod region;
 pub mod taint;
 
 pub use blueprint::{
-    Blueprint, ContextTransform, EdgeTransform, RepetitionDetectionConfig, Stage, StageResult,
-    ToolFilter, TransitionCondition, TransitionEdge,
+    Blueprint, ContextTransform, EdgeTransform, FileTrackingConfig, RepetitionDetectionConfig,
+    Stage, StageResult, ToolFilter, TransitionCondition, TransitionEdge,
 };
 pub use cache::{CacheBreakpoint, CacheHint};
 pub use error::{Error, Result, ValidationError};

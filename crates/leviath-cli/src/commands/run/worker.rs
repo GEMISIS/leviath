@@ -46,6 +46,11 @@ struct ToolDispatchState {
     stage_name: Arc<Mutex<String>>,
     tool_calls_counter: Arc<std::sync::atomic::AtomicUsize>,
     iteration_counter: Arc<std::sync::atomic::AtomicUsize>,
+    /// Shared context window for context_* tool dispatch. Updated by the
+    /// inference loop before/after each tool batch.
+    context_window: Arc<Mutex<Option<ContextWindow>>>,
+    /// File tracking configuration from the blueprint.
+    file_tracking: Option<leviath_core::blueprint::FileTrackingConfig>,
 }
 
 /// Resolve tool policy, handle approvals/dynamic interactions, and execute a
@@ -67,6 +72,18 @@ async fn dispatch_tool_calls(
     };
     let mut out: Vec<(String, String)> = Vec::new();
     for tc in calls {
+        // ── Context tools (context_write, context_read, etc.) ──────────
+        if tc.name.starts_with("context_") {
+            let result = handle_context_tool(&tc.name, &tc.arguments, &state.context_window).await;
+            record_stage_log(
+                &state.run_id,
+                stage_idx,
+                &format!("[tool] {} → {}", tc.name, &result[..result.len().min(120)]),
+            );
+            out.push((tc.id.clone(), result));
+            continue;
+        }
+
         // ── Dynamic interaction tools (present_for_review, ask_user_*) ──
         // Unlike `interaction_points` (declared statically in the
         // blueprint and always shown), these let the model itself
@@ -180,6 +197,21 @@ async fn dispatch_tool_calls(
                 result
             }
         };
+        // ── File tracking: sync read/write/edit results to HashMap region ──
+        let res = if let Some(ref ft) = state.file_tracking {
+            maybe_track_file(
+                &tc.name,
+                &tc.arguments,
+                res,
+                ft,
+                &state.context_window,
+                &state.builtins,
+            )
+            .await
+        } else {
+            res
+        };
+
         out.push((tc.id.clone(), res));
         state
             .tool_calls_counter
@@ -198,6 +230,330 @@ async fn dispatch_tool_calls(
         let _ = runstate::write_meta(&meta);
     }
     out
+}
+
+/// Handle a context_* tool call by operating on the shared ContextWindow.
+async fn handle_context_tool(
+    name: &str,
+    args: &serde_json::Value,
+    context_window: &Arc<Mutex<Option<ContextWindow>>>,
+) -> String {
+    let mut guard = context_window.lock().await;
+    let window = match guard.as_mut() {
+        Some(w) => w,
+        None => return "[error] No context window available".to_string(),
+    };
+
+    match name {
+        "context_write" => {
+            let region_name = match args.get("region").and_then(|v| v.as_str()) {
+                Some(r) => r,
+                None => return "[error] missing 'region' argument".to_string(),
+            };
+            let content = match args.get("content").and_then(|v| v.as_str()) {
+                Some(c) => c,
+                None => return "[error] missing 'content' argument".to_string(),
+            };
+            let key = args.get("key").and_then(|v| v.as_str());
+            let tokens = content.len() / 4 + 1;
+
+            let region = match window.get_region_mut(region_name) {
+                Some(r) => r,
+                None => return format!("[error] Region '{}' not found", region_name),
+            };
+
+            if matches!(region.kind, leviath_core::RegionKind::HashMap { .. }) {
+                let k = match key {
+                    Some(k) => k,
+                    None => return "[error] HashMap regions require a 'key' argument".to_string(),
+                };
+                match region.upsert_by_key(k, content.to_string(), tokens) {
+                    Ok(()) => format!("Wrote to region '{}' key '{}'", region_name, k),
+                    Err(e) => format!("[error] {}", e),
+                }
+            } else {
+                // For non-HashMap regions, replace all content
+                region.clear();
+                match region.add_entry(content.to_string(), tokens) {
+                    Ok(()) => format!("Wrote to region '{}'", region_name),
+                    Err(e) => format!("[error] {}", e),
+                }
+            }
+        }
+        "context_append" => {
+            let region_name = match args.get("region").and_then(|v| v.as_str()) {
+                Some(r) => r,
+                None => return "[error] missing 'region' argument".to_string(),
+            };
+            let content = match args.get("content").and_then(|v| v.as_str()) {
+                Some(c) => c,
+                None => return "[error] missing 'content' argument".to_string(),
+            };
+            let key = args.get("key").and_then(|v| v.as_str());
+            let tokens = content.len() / 4 + 1;
+
+            let region = match window.get_region_mut(region_name) {
+                Some(r) => r,
+                None => return format!("[error] Region '{}' not found", region_name),
+            };
+
+            if matches!(region.kind, leviath_core::RegionKind::HashMap { .. }) {
+                if let Some(k) = key {
+                    // Append to existing key content
+                    if let Some(existing) = region.get_by_key(k) {
+                        let new_content = format!("{}\n{}", existing.content, content);
+                        let new_tokens = new_content.len() / 4 + 1;
+                        match region.upsert_by_key(k, new_content, new_tokens) {
+                            Ok(()) => format!("Appended to region '{}' key '{}'", region_name, k),
+                            Err(e) => format!("[error] {}", e),
+                        }
+                    } else {
+                        match region.upsert_by_key(k, content.to_string(), tokens) {
+                            Ok(()) => {
+                                format!("Created entry in region '{}' key '{}'", region_name, k)
+                            }
+                            Err(e) => format!("[error] {}", e),
+                        }
+                    }
+                } else {
+                    "[error] HashMap regions require a 'key' argument for append".to_string()
+                }
+            } else {
+                match region.add_entry(content.to_string(), tokens) {
+                    Ok(()) => format!("Appended to region '{}'", region_name),
+                    Err(e) => format!("[error] {}", e),
+                }
+            }
+        }
+        "context_read" => {
+            let region_name = match args.get("region").and_then(|v| v.as_str()) {
+                Some(r) => r,
+                None => return "[error] missing 'region' argument".to_string(),
+            };
+            let key = args.get("key").and_then(|v| v.as_str());
+
+            let region = match window.get_region(region_name) {
+                Some(r) => r,
+                None => return format!("[error] Region '{}' not found", region_name),
+            };
+
+            if matches!(region.kind, leviath_core::RegionKind::HashMap { .. }) {
+                if let Some(k) = key {
+                    match region.get_by_key(k) {
+                        Some(entry) => entry.content.clone(),
+                        None => format!(
+                            "[not found] No entry with key '{}' in region '{}'",
+                            k, region_name
+                        ),
+                    }
+                } else {
+                    // List all keys and sizes
+                    let mut lines = Vec::new();
+                    for entry in &region.content {
+                        if let Some(k) = &entry.key {
+                            lines.push(format!("  {} ({} tokens)", k, entry.tokens));
+                        }
+                    }
+                    if lines.is_empty() {
+                        format!("Region '{}' is empty", region_name)
+                    } else {
+                        format!("Region '{}' keys:\n{}", region_name, lines.join("\n"))
+                    }
+                }
+            } else {
+                // Return all content
+                let text = region
+                    .content
+                    .iter()
+                    .map(|e| e.content.as_str())
+                    .collect::<Vec<_>>()
+                    .join("\n\n");
+                if text.is_empty() {
+                    format!("Region '{}' is empty", region_name)
+                } else {
+                    text
+                }
+            }
+        }
+        "context_delete" => {
+            let region_name = match args.get("region").and_then(|v| v.as_str()) {
+                Some(r) => r,
+                None => return "[error] missing 'region' argument".to_string(),
+            };
+            let key = match args.get("key").and_then(|v| v.as_str()) {
+                Some(k) => k,
+                None => return "[error] missing 'key' argument".to_string(),
+            };
+
+            let region = match window.get_region_mut(region_name) {
+                Some(r) => r,
+                None => return format!("[error] Region '{}' not found", region_name),
+            };
+
+            if region.remove_by_key(key) {
+                format!("Deleted key '{}' from region '{}'", key, region_name)
+            } else {
+                format!(
+                    "[not found] No entry with key '{}' in region '{}'",
+                    key, region_name
+                )
+            }
+        }
+        "context_list" => {
+            let region_name = args.get("region").and_then(|v| v.as_str());
+
+            if let Some(rname) = region_name {
+                let region = match window.get_region(rname) {
+                    Some(r) => r,
+                    None => return format!("[error] Region '{}' not found", rname),
+                };
+                let mut lines = Vec::new();
+                for entry in &region.content {
+                    if let Some(k) = &entry.key {
+                        lines.push(format!("  {} ({} tokens)", k, entry.tokens));
+                    } else {
+                        lines.push(format!("  (entry, {} tokens)", entry.tokens));
+                    }
+                }
+                if lines.is_empty() {
+                    format!("Region '{}' is empty", rname)
+                } else {
+                    format!(
+                        "Region '{}' ({} entries, {} tokens):\n{}",
+                        rname,
+                        region.content.len(),
+                        region.current_tokens,
+                        lines.join("\n")
+                    )
+                }
+            } else {
+                // List all regions
+                let mut lines = Vec::new();
+                for region in &window.regions {
+                    let kind_str = match &region.kind {
+                        leviath_core::RegionKind::Pinned => "pinned",
+                        leviath_core::RegionKind::SlidingWindow { .. } => "sliding_window",
+                        leviath_core::RegionKind::Temporary => "temporary",
+                        leviath_core::RegionKind::Compacting { .. } => "compacting",
+                        leviath_core::RegionKind::Clearable => "clearable",
+                        leviath_core::RegionKind::CompactHistory { .. } => "compact_history",
+                        leviath_core::RegionKind::HashMap { .. } => "hashmap",
+                    };
+                    lines.push(format!(
+                        "  {} ({}): {} entries, {}/{} tokens",
+                        region.name,
+                        kind_str,
+                        region.content.len(),
+                        region.current_tokens,
+                        region.max_tokens
+                    ));
+                }
+                if lines.is_empty() {
+                    "No regions configured".to_string()
+                } else {
+                    format!("Context regions:\n{}", lines.join("\n"))
+                }
+            }
+        }
+        _ => format!("[error] Unknown context tool: {}", name),
+    }
+}
+
+/// If the tool is read_file/write_file/edit_file and file tracking is configured,
+/// upsert the file content into the HashMap region and return a reference message
+/// instead of the full content.
+async fn maybe_track_file(
+    tool_name: &str,
+    args: &serde_json::Value,
+    result: String,
+    ft: &leviath_core::blueprint::FileTrackingConfig,
+    context_window: &Arc<Mutex<Option<ContextWindow>>>,
+    builtins: &leviath_tools::BuiltinTools,
+) -> String {
+    // Only track if not an error
+    if result.starts_with("[error]") || result.starts_with("[denied]") {
+        return result;
+    }
+
+    let path = match args.get("path").and_then(|v| v.as_str()) {
+        Some(p) => p.to_string(),
+        None => return result,
+    };
+
+    let (should_track, file_content, replacement_msg) = match tool_name {
+        "read_file" if ft.track_reads => {
+            let tokens = result.len() / 4 + 1;
+            let msg = format!(
+                "File '{}' ({} tokens) is available in the '{}' context region.",
+                path, tokens, ft.region
+            );
+            (true, result.clone(), msg)
+        }
+        "write_file" if ft.track_writes => {
+            // Re-read the file to get its content
+            let content = builtins
+                .execute("read_file", serde_json::json!({"path": path}))
+                .await;
+            if content.starts_with("[error]") {
+                return result;
+            }
+            let msg = format!(
+                "{}. File tracked in '{}' context region.",
+                result, ft.region
+            );
+            (true, content, msg)
+        }
+        "edit_file" if ft.track_writes => {
+            let content = builtins
+                .execute("read_file", serde_json::json!({"path": path}))
+                .await;
+            if content.starts_with("[error]") {
+                return result;
+            }
+            let msg = format!(
+                "{}. Updated content tracked in '{}' context region.",
+                result, ft.region
+            );
+            (true, content, msg)
+        }
+        _ => return result,
+    };
+
+    if !should_track {
+        return result;
+    }
+
+    // Truncate if configured
+    let file_content = if let Some(max_tokens) = ft.max_file_tokens {
+        let approx_chars = max_tokens * 4;
+        if file_content.len() > approx_chars {
+            let truncated: String = file_content.chars().take(approx_chars).collect();
+            format!(
+                "{}\n\n[... truncated at {} tokens ...]",
+                truncated, max_tokens
+            )
+        } else {
+            file_content
+        }
+    } else {
+        file_content
+    };
+
+    let tokens = file_content.len() / 4 + 1;
+
+    // Upsert into the HashMap region
+    let mut guard = context_window.lock().await;
+    if let Some(window) = guard.as_mut() {
+        if let Some(region) = window.get_region_mut(&ft.region) {
+            if matches!(region.kind, leviath_core::RegionKind::HashMap { .. }) {
+                let _ = region.upsert_by_key(&path, file_content, tokens);
+                return replacement_msg;
+            }
+        }
+    }
+
+    // Region not found or not HashMap — return original result
+    result
 }
 
 /// Background-worker taint [`GatePrompt`]: when the gate blocks an outbound
@@ -741,6 +1097,8 @@ async fn run_worker_inner(
 
     let tool_calls_counter = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let iteration_counter = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let shared_context_window: Arc<Mutex<Option<ContextWindow>>> = Arc::new(Mutex::new(None));
+    let file_tracking = blueprint.file_tracking.clone();
     let dispatch_state = Arc::new(ToolDispatchState {
         builtins: tool_registry.builtins.clone(),
         mcp: tool_registry.mcp.clone(),
@@ -755,6 +1113,8 @@ async fn run_worker_inner(
         stage_name: current_stage_name.clone(),
         tool_calls_counter: tool_calls_counter.clone(),
         iteration_counter: iteration_counter.clone(),
+        context_window: shared_context_window.clone(),
+        file_tracking,
     });
     let mut exec = move |calls: Vec<leviath_providers::ToolCall>| -> leviath_runtime::ToolResultsFuture<'static> {
         let dispatch_state = dispatch_state.clone();
@@ -2766,6 +3126,8 @@ mode = "autonomous"
             stage_name: Arc::new(Mutex::new("main".to_string())),
             tool_calls_counter: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             iteration_counter: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            context_window: Arc::new(Mutex::new(None)),
+            file_tracking: None,
         }
     }
 
@@ -2873,6 +3235,8 @@ mode = "autonomous"
             stage_name: Arc::new(Mutex::new("main".to_string())),
             tool_calls_counter: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             iteration_counter: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            context_window: Arc::new(Mutex::new(None)),
+            file_tracking: None,
         };
 
         let calls = vec![make_tool_call(
@@ -3079,6 +3443,8 @@ mode = "autonomous"
             stage_name: Arc::new(Mutex::new("main".to_string())),
             tool_calls_counter: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             iteration_counter: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            context_window: Arc::new(Mutex::new(None)),
+            file_tracking: None,
         };
 
         let tool_name = "read_file";
@@ -3336,6 +3702,8 @@ for line in sys.stdin:
             stage_name: Arc::new(Mutex::new("main".to_string())),
             tool_calls_counter: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             iteration_counter: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            context_window: Arc::new(Mutex::new(None)),
+            file_tracking: None,
         }
     }
 

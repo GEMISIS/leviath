@@ -360,7 +360,9 @@ pub async fn apply_edge_transform(
                 for region in &mut window.regions {
                     if !matches!(
                         region.kind,
-                        RegionKind::Pinned | RegionKind::CompactHistory { .. }
+                        RegionKind::Pinned
+                            | RegionKind::CompactHistory { .. }
+                            | RegionKind::HashMap { .. }
                     ) {
                         region.clear();
                     }
@@ -485,18 +487,11 @@ pub async fn apply_compact_transform(
         return;
     }
 
-    let messages = vec![
-        leviath_providers::Message {
-            role: "system".to_string(),
-            content: prompt.to_string().into(),
-            cache_breakpoint: false,
-        },
-        leviath_providers::Message {
-            role: "user".to_string(),
-            content: content_to_compact.into(),
-            cache_breakpoint: false,
-        },
-    ];
+    let messages = vec![leviath_providers::Message {
+        role: "user".to_string(),
+        content: content_to_compact.into(),
+        cache_breakpoint: false,
+    }];
 
     let max_summary_tokens = compaction_config
         .map(|cc| cc.max_summary_tokens)
@@ -508,7 +503,10 @@ pub async fn apply_compact_transform(
         max_tokens: max_summary_tokens,
         temperature: compaction_config.map(|cc| cc.temperature).unwrap_or(0.3),
         tools: Vec::new(),
-        system: vec![],
+        system: vec![leviath_providers::SystemBlock {
+            text: prompt.to_string(),
+            cache_hint: leviath_core::CacheHint::Never,
+        }],
         extra: serde_json::Value::Null,
     };
 

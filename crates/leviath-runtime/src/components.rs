@@ -515,6 +515,26 @@ impl ContextWindow {
                         cache_hint: CacheHint::Never,
                     });
                 }
+
+                // HashMap regions → system blocks with key headers
+                leviath_core::RegionKind::HashMap { .. } => {
+                    let text = region
+                        .content
+                        .iter()
+                        .map(|e| {
+                            if let Some(key) = &e.key {
+                                format!("### [{}]\n{}", key, e.content)
+                            } else {
+                                e.content.clone()
+                            }
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n\n");
+                    system_blocks.push(leviath_providers::SystemBlock {
+                        text: format!("[{}]:\n{}", region.name, text),
+                        cache_hint: CacheHint::UntilChanged,
+                    });
+                }
             }
         }
 
@@ -2957,5 +2977,52 @@ mod tests {
         // Empty pinned region should be skipped
         let assembled = window.assemble();
         assert!(assembled.system_blocks.is_empty());
+    }
+
+    #[test]
+    fn test_assemble_hashmap_region_with_keys() {
+        let mut window = ContextWindow::new(100_000);
+        let mut region = Region::new(
+            "files".to_string(),
+            RegionKind::HashMap { max_entries: None },
+            10_000,
+        );
+        region
+            .upsert_by_key("src/main.rs", "fn main() {}".to_string(), 10)
+            .unwrap();
+        region
+            .upsert_by_key("src/lib.rs", "pub mod foo;".to_string(), 8)
+            .unwrap();
+        window.add_region(region);
+
+        let assembled = window.assemble();
+        assert_eq!(assembled.system_blocks.len(), 1);
+        let block_text = &assembled.system_blocks[0].text;
+        assert!(block_text.contains("[files]:"));
+        assert!(block_text.contains("### [src/main.rs]"));
+        assert!(block_text.contains("fn main() {}"));
+        assert!(block_text.contains("### [src/lib.rs]"));
+        assert!(block_text.contains("pub mod foo;"));
+    }
+
+    #[test]
+    fn test_assemble_hashmap_region_cache_hint() {
+        let mut window = ContextWindow::new(100_000);
+        let mut region = Region::new(
+            "files".to_string(),
+            RegionKind::HashMap { max_entries: None },
+            10_000,
+        );
+        region
+            .upsert_by_key("a.rs", "content".to_string(), 5)
+            .unwrap();
+        window.add_region(region);
+
+        let assembled = window.assemble();
+        assert_eq!(assembled.system_blocks.len(), 1);
+        assert_eq!(
+            assembled.system_blocks[0].cache_hint,
+            leviath_core::CacheHint::UntilChanged
+        );
     }
 }

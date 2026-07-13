@@ -130,6 +130,14 @@ pub enum RegionKind {
         /// Name of the source Compacting region
         source_region: String,
     },
+
+    /// Key-value region where entries are indexed by string key.
+    /// Writing with an existing key replaces that entry (upsert semantics).
+    /// When over token budget, evicts least-recently-updated entries (LRU).
+    HashMap {
+        /// Optional maximum number of keys
+        max_entries: Option<usize>,
+    },
 }
 
 impl PartialEq for RegionKind {
@@ -161,6 +169,7 @@ impl PartialEq for RegionKind {
                 Self::CompactHistory { source_region: a },
                 Self::CompactHistory { source_region: b },
             ) => a == b,
+            (Self::HashMap { max_entries: a }, Self::HashMap { max_entries: b }) => a == b,
             _ => false,
         }
     }
@@ -178,6 +187,7 @@ impl RegionKind {
             RegionKind::SlidingWindow { .. } => crate::cache::CacheHint::SlidingPrefix {
                 stable_fraction: 0.75,
             },
+            RegionKind::HashMap { .. } => crate::cache::CacheHint::UntilChanged,
             RegionKind::Temporary | RegionKind::Clearable => crate::cache::CacheHint::Never,
         }
     }
@@ -278,6 +288,7 @@ impl Region {
             timestamp: chrono::Utc::now().timestamp(),
             metadata: None,
             kind: EntryKind::default(),
+            key: None,
         });
         self.current_tokens += tokens;
 
@@ -327,6 +338,7 @@ impl Region {
             timestamp: chrono::Utc::now().timestamp(),
             metadata: None,
             kind,
+            key: None,
         });
         self.current_tokens += tokens;
 
@@ -372,6 +384,7 @@ impl Region {
             timestamp: chrono::Utc::now().timestamp(),
             metadata: None,
             kind: EntryKind::default(),
+            key: None,
         });
         self.current_tokens += tokens;
 
@@ -413,6 +426,7 @@ impl Region {
             timestamp: chrono::Utc::now().timestamp(),
             metadata: Some(metadata),
             kind: EntryKind::default(),
+            key: None,
         });
         self.current_tokens += tokens;
 
@@ -458,6 +472,7 @@ impl Region {
             timestamp: chrono::Utc::now().timestamp(),
             metadata: None,
             kind,
+            key: None,
         });
         self.current_tokens += tokens;
 
@@ -470,6 +485,120 @@ impl Region {
         self.enforce_sliding_window();
 
         Ok(())
+    }
+
+    /// Upsert an entry by key. If key exists, replace content and update timestamp/tokens.
+    /// If key doesn't exist, add new entry. Enforces max_tokens and max_entries via LRU eviction.
+    pub fn upsert_by_key(
+        &mut self,
+        key: &str,
+        content: String,
+        tokens: usize,
+    ) -> Result<(), String> {
+        // If key exists, update in place
+        if let Some(pos) = self
+            .content
+            .iter()
+            .position(|e| e.key.as_deref() == Some(key))
+        {
+            let old_tokens = self.content[pos].tokens;
+            self.current_tokens -= old_tokens;
+            self.content[pos].content = content;
+            self.content[pos].tokens = tokens;
+            self.content[pos].timestamp = chrono::Utc::now().timestamp();
+            self.current_tokens += tokens;
+            return Ok(());
+        }
+
+        // Enforce max_entries via LRU eviction
+        let max_entries = if let RegionKind::HashMap {
+            max_entries: Some(max),
+        } = &self.kind
+        {
+            Some(*max)
+        } else {
+            None
+        };
+        if let Some(max) = max_entries {
+            while self.content.len() >= max {
+                self.evict_lru_entry();
+            }
+        }
+
+        // Enforce max_tokens via LRU eviction
+        while self.current_tokens + tokens > self.max_tokens && !self.content.is_empty() {
+            self.evict_lru_entry();
+        }
+
+        if self.current_tokens + tokens > self.max_tokens {
+            return Err(format!(
+                "Entry ({} tokens) exceeds region budget ({} max)",
+                tokens, self.max_tokens
+            ));
+        }
+
+        self.content.push(RegionEntry {
+            content,
+            tokens,
+            timestamp: chrono::Utc::now().timestamp(),
+            metadata: None,
+            kind: EntryKind::default(),
+            key: Some(key.to_string()),
+        });
+        self.current_tokens += tokens;
+        Ok(())
+    }
+
+    /// Get entry by key.
+    pub fn get_by_key(&self, key: &str) -> Option<&RegionEntry> {
+        self.content.iter().find(|e| e.key.as_deref() == Some(key))
+    }
+
+    /// Remove entry by key.
+    pub fn remove_by_key(&mut self, key: &str) -> bool {
+        if let Some(pos) = self
+            .content
+            .iter()
+            .position(|e| e.key.as_deref() == Some(key))
+        {
+            let tokens = self.content[pos].tokens;
+            self.content.remove(pos);
+            self.current_tokens -= tokens;
+            if let Some(taint) = &mut self.taint {
+                taint.remove_at(pos);
+            }
+            true
+        } else {
+            false
+        }
+    }
+
+    /// List all keys in this region.
+    pub fn keys(&self) -> Vec<&str> {
+        self.content
+            .iter()
+            .filter_map(|e| e.key.as_deref())
+            .collect()
+    }
+
+    /// Evict the least-recently-updated entry (LRU) for HashMap regions.
+    fn evict_lru_entry(&mut self) {
+        if self.content.is_empty() {
+            return;
+        }
+        let oldest_idx = self
+            .content
+            .iter()
+            .enumerate()
+            .min_by_key(|(_, e)| e.timestamp)
+            .map(|(i, _)| i)
+            .unwrap_or(0);
+        let tokens = self.content[oldest_idx].tokens;
+        self.content.remove(oldest_idx);
+        self.current_tokens -= tokens;
+        if let Some(taint) = &mut self.taint {
+            taint.remove_at(oldest_idx);
+        }
     }
 
     /// Enforce the SlidingWindow max_items limit by removing oldest entries.
@@ -655,6 +784,10 @@ pub struct RegionEntry {
     /// serialized data that predates the typed-entry system.
     #[serde(default)]
     pub kind: EntryKind,
+
+    /// Optional key for HashMap regions. When set, upsert semantics apply.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key: Option<String>,
 }
 
 /// Validation schema for a region's content.
@@ -2145,5 +2278,203 @@ mod tests {
         region.remove_entries_by_prefix("[Stage instructions:");
         assert_eq!(region.entry_count(), 2);
         assert_eq!(region.current_tokens, 30);
+    }
+
+    // ─── HashMap region tests ──────────────────────────────────────────────
+
+    #[test]
+    fn test_hashmap_region_upsert_and_get() {
+        let mut region = Region::new(
+            "files".to_string(),
+            RegionKind::HashMap { max_entries: None },
+            10000,
+        );
+        region
+            .upsert_by_key("src/main.rs", "fn main() {}".to_string(), 10)
+            .unwrap();
+        region
+            .upsert_by_key("src/lib.rs", "pub mod foo;".to_string(), 8)
+            .unwrap();
+
+        assert_eq!(region.entry_count(), 2);
+        assert_eq!(region.current_tokens, 18);
+
+        let entry = region.get_by_key("src/main.rs").unwrap();
+        assert_eq!(entry.content, "fn main() {}");
+        assert_eq!(entry.key.as_deref(), Some("src/main.rs"));
+    }
+
+    #[test]
+    fn test_hashmap_region_upsert_replaces_existing() {
+        let mut region = Region::new(
+            "files".to_string(),
+            RegionKind::HashMap { max_entries: None },
+            10000,
+        );
+        region
+            .upsert_by_key("file.rs", "version 1".to_string(), 10)
+            .unwrap();
+        assert_eq!(region.current_tokens, 10);
+
+        region
+            .upsert_by_key("file.rs", "version 2".to_string(), 15)
+            .unwrap();
+        assert_eq!(region.entry_count(), 1);
+        assert_eq!(region.current_tokens, 15);
+        assert_eq!(region.get_by_key("file.rs").unwrap().content, "version 2");
+    }
+
+    #[test]
+    fn test_hashmap_region_remove_by_key() {
+        let mut region = Region::new(
+            "files".to_string(),
+            RegionKind::HashMap { max_entries: None },
+            10000,
+        );
+        region.upsert_by_key("a.rs", "aaa".to_string(), 10).unwrap();
+        region.upsert_by_key("b.rs", "bbb".to_string(), 20).unwrap();
+
+        assert!(region.remove_by_key("a.rs"));
+        assert_eq!(region.entry_count(), 1);
+        assert_eq!(region.current_tokens, 20);
+        assert!(region.get_by_key("a.rs").is_none());
+        assert!(!region.remove_by_key("nonexistent"));
+    }
+
+    #[test]
+    fn test_hashmap_region_keys() {
+        let mut region = Region::new(
+            "files".to_string(),
+            RegionKind::HashMap { max_entries: None },
+            10000,
+        );
+        region.upsert_by_key("x.rs", "x".to_string(), 5).unwrap();
+        region.upsert_by_key("y.rs", "y".to_string(), 5).unwrap();
+
+        let keys = region.keys();
+        assert_eq!(keys.len(), 2);
+        assert!(keys.contains(&"x.rs"));
+        assert!(keys.contains(&"y.rs"));
+    }
+
+    #[test]
+    fn test_hashmap_region_lru_eviction_on_max_tokens() {
+        let mut region = Region::new(
+            "files".to_string(),
+            RegionKind::HashMap { max_entries: None },
+            30, // tight budget
+        );
+        region.upsert_by_key("a.rs", "aaa".to_string(), 10).unwrap();
+        // Make 'a' older by manually adjusting timestamp
+        region.content[0].timestamp -= 100;
+        region.upsert_by_key("b.rs", "bbb".to_string(), 10).unwrap();
+        region.upsert_by_key("c.rs", "ccc".to_string(), 10).unwrap();
+        assert_eq!(region.entry_count(), 3);
+        assert_eq!(region.current_tokens, 30);
+
+        // Adding d.rs should evict a.rs (oldest timestamp)
+        region.upsert_by_key("d.rs", "ddd".to_string(), 10).unwrap();
+        assert_eq!(region.entry_count(), 3);
+        assert!(region.get_by_key("a.rs").is_none());
+        assert!(region.get_by_key("d.rs").is_some());
+    }
+
+    #[test]
+    fn test_hashmap_region_max_entries_eviction() {
+        let mut region = Region::new(
+            "files".to_string(),
+            RegionKind::HashMap {
+                max_entries: Some(2),
+            },
+            10000,
+        );
+        region.upsert_by_key("a.rs", "aaa".to_string(), 10).unwrap();
+        region.content[0].timestamp -= 100; // make oldest
+        region.upsert_by_key("b.rs", "bbb".to_string(), 10).unwrap();
+        assert_eq!(region.entry_count(), 2);
+
+        // Adding c.rs should evict a.rs (oldest, max_entries=2)
+        region.upsert_by_key("c.rs", "ccc".to_string(), 10).unwrap();
+        assert_eq!(region.entry_count(), 2);
+        assert!(region.get_by_key("a.rs").is_none());
+        assert!(region.get_by_key("c.rs").is_some());
+    }
+
+    #[test]
+    fn test_hashmap_region_upsert_too_large_for_budget() {
+        let mut region = Region::new(
+            "files".to_string(),
+            RegionKind::HashMap { max_entries: None },
+            5, // very small
+        );
+        let result = region.upsert_by_key("big.rs", "huge content".to_string(), 100);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_hashmap_region_kind_equality() {
+        assert_eq!(
+            RegionKind::HashMap {
+                max_entries: Some(10)
+            },
+            RegionKind::HashMap {
+                max_entries: Some(10)
+            }
+        );
+        assert_ne!(
+            RegionKind::HashMap {
+                max_entries: Some(10)
+            },
+            RegionKind::HashMap {
+                max_entries: Some(20)
+            }
+        );
+        assert_ne!(
+            RegionKind::HashMap { max_entries: None },
+            RegionKind::Pinned
+        );
+    }
+
+    #[test]
+    fn test_hashmap_cache_hint() {
+        let kind = RegionKind::HashMap { max_entries: None };
+        assert_eq!(kind.cache_hint(), crate::cache::CacheHint::UntilChanged);
+    }
+
+    #[test]
+    fn test_region_entry_key_default_none() {
+        let mut region = Region::new("test".to_string(), RegionKind::Temporary, 1000);
+        region.add_entry("content".to_string(), 10).unwrap();
+        assert!(region.content[0].key.is_none());
+    }
+
+    #[test]
+    fn test_region_entry_key_serde_skip_when_none() {
+        let entry = RegionEntry {
+            content: "test".to_string(),
+            tokens: 5,
+            timestamp: 0,
+            metadata: None,
+            kind: EntryKind::default(),
+            key: None,
+        };
+        let json = serde_json::to_string(&entry).unwrap();
+        assert!(!json.contains("key"));
+    }
+
+    #[test]
+    fn test_region_entry_key_serde_roundtrip() {
+        let entry = RegionEntry {
+            content: "test".to_string(),
+            tokens: 5,
+            timestamp: 0,
+            metadata: None,
+            kind: EntryKind::default(),
+            key: Some("mykey".to_string()),
+        };
+        let json = serde_json::to_string(&entry).unwrap();
+        assert!(json.contains("mykey"));
+        let back: RegionEntry = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.key.as_deref(), Some("mykey"));
     }
 }

@@ -532,6 +532,13 @@ pub fn parse_manifest(content: &str) -> anyhow::Result<Blueprint> {
                         source_region: source,
                     }
                 }
+                "hashmap" | "hash_map" => {
+                    let max_entries = region_value
+                        .get("max_entries")
+                        .and_then(|v| v.as_integer())
+                        .map(|v| v as usize);
+                    RegionKind::HashMap { max_entries }
+                }
                 _ => RegionKind::Temporary,
             };
 
@@ -609,6 +616,39 @@ pub fn parse_manifest(content: &str) -> anyhow::Result<Blueprint> {
                     serde_json::Value::String(policy_str.to_string()),
                 );
             }
+        }
+    }
+
+    // Parse file tracking config: [context.file_tracking]
+    if let Some(context_table) = parsed.get("context").and_then(|v| v.as_table()) {
+        if let Some(ft_table) = context_table
+            .get("file_tracking")
+            .and_then(|v| v.as_table())
+        {
+            let region = ft_table
+                .get("region")
+                .and_then(|v| v.as_str())
+                .unwrap_or("files")
+                .to_string();
+            let track_reads = ft_table
+                .get("track_reads")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(true);
+            let track_writes = ft_table
+                .get("track_writes")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(true);
+            let max_file_tokens = ft_table
+                .get("max_file_tokens")
+                .and_then(|v| v.as_integer())
+                .map(|v| v as usize);
+
+            blueprint.file_tracking = Some(leviath_core::FileTrackingConfig {
+                region,
+                track_reads,
+                track_writes,
+                max_file_tokens,
+            });
         }
     }
 
@@ -2231,5 +2271,69 @@ max_output_tokens = 2048
                 .and_then(|v| v.as_u64()),
             Some(2048)
         );
+    }
+
+    #[test]
+    fn parse_manifest_with_hashmap_region() {
+        let toml = r#"
+[agent]
+name = "test"
+
+[context.regions]
+files = { kind = "hashmap", max_tokens = 40000 }
+files_limited = { kind = "hashmap", max_tokens = 20000, max_entries = 50 }
+"#;
+        let bp = parse_manifest(toml).unwrap();
+        let files_region = bp.context_layout.get_region("files").unwrap();
+        assert_eq!(files_region.kind, RegionKind::HashMap { max_entries: None });
+        assert_eq!(files_region.max_tokens, 40000);
+
+        let limited = bp.context_layout.get_region("files_limited").unwrap();
+        assert_eq!(
+            limited.kind,
+            RegionKind::HashMap {
+                max_entries: Some(50)
+            }
+        );
+    }
+
+    #[test]
+    fn parse_manifest_with_file_tracking() {
+        let toml = r#"
+[agent]
+name = "test"
+
+[context.regions]
+files = { kind = "hashmap", max_tokens = 40000 }
+
+[context.file_tracking]
+region = "files"
+track_reads = true
+track_writes = true
+max_file_tokens = 5000
+"#;
+        let bp = parse_manifest(toml).unwrap();
+        let ft = bp.file_tracking.unwrap();
+        assert_eq!(ft.region, "files");
+        assert!(ft.track_reads);
+        assert!(ft.track_writes);
+        assert_eq!(ft.max_file_tokens, Some(5000));
+    }
+
+    #[test]
+    fn parse_manifest_file_tracking_defaults() {
+        let toml = r#"
+[agent]
+name = "test"
+
+[context.file_tracking]
+region = "myfiles"
+"#;
+        let bp = parse_manifest(toml).unwrap();
+        let ft = bp.file_tracking.unwrap();
+        assert_eq!(ft.region, "myfiles");
+        assert!(ft.track_reads);
+        assert!(ft.track_writes);
+        assert!(ft.max_file_tokens.is_none());
     }
 }

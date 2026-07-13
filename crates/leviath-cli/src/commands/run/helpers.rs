@@ -247,6 +247,7 @@ pub fn build_context_snapshot(
                     RegionKind::SlidingWindow { .. } => "sliding",
                     RegionKind::Compacting { .. } => "compacting",
                     RegionKind::CompactHistory { .. } => "history",
+                    RegionKind::HashMap { .. } => "hashmap",
                 }
                 .to_string(),
                 current_tokens: r.current_tokens,

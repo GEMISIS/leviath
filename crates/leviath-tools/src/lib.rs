@@ -201,6 +201,100 @@ impl BuiltinTools {
                     "required": ["content"]
                 }),
             },
+            Tool {
+                name: "context_write".to_string(),
+                description: "Write or replace content in a named context region. For HashMap regions, upserts by key. For other regions, replaces entire content or appends a new entry.".to_string(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "region": {
+                            "type": "string",
+                            "description": "Name of the context region to write to"
+                        },
+                        "key": {
+                            "type": "string",
+                            "description": "Optional key for HashMap regions (upsert semantics)"
+                        },
+                        "content": {
+                            "type": "string",
+                            "description": "Content to write"
+                        }
+                    },
+                    "required": ["region", "content"]
+                }),
+            },
+            Tool {
+                name: "context_append".to_string(),
+                description: "Append content to a named context region. For HashMap regions, appends to existing key's content or creates a new entry. For other regions, adds a new entry.".to_string(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "region": {
+                            "type": "string",
+                            "description": "Name of the context region"
+                        },
+                        "key": {
+                            "type": "string",
+                            "description": "Optional key for HashMap regions"
+                        },
+                        "content": {
+                            "type": "string",
+                            "description": "Content to append"
+                        }
+                    },
+                    "required": ["region", "content"]
+                }),
+            },
+            Tool {
+                name: "context_read".to_string(),
+                description: "Read current content of a context region. For HashMap regions without a key, returns all keys and their sizes.".to_string(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "region": {
+                            "type": "string",
+                            "description": "Name of the context region to read"
+                        },
+                        "key": {
+                            "type": "string",
+                            "description": "Optional key for HashMap regions to read a specific entry"
+                        }
+                    },
+                    "required": ["region"]
+                }),
+            },
+            Tool {
+                name: "context_delete".to_string(),
+                description: "Remove an entry from a context region by key.".to_string(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "region": {
+                            "type": "string",
+                            "description": "Name of the context region"
+                        },
+                        "key": {
+                            "type": "string",
+                            "description": "Key of the entry to delete"
+                        }
+                    },
+                    "required": ["region", "key"]
+                }),
+            },
+            Tool {
+                name: "context_list".to_string(),
+                description: "List context regions and their contents. Without a region name, lists all regions with kind, token count, and entry count. With a region name, lists keys and sizes for that region.".to_string(),
+                parameters: json!({
+                    "type": "object",
+                    "properties": {
+                        "region": {
+                            "type": "string",
+                            "description": "Optional region name to list keys for"
+                        }
+                    },
+                    "required": []
+                }),
+            },
         ]
     }
 
@@ -333,6 +427,11 @@ impl BuiltinTools {
             "ask_user_choice".to_string(),
             "ask_user_confirm".to_string(),
             "edit_document".to_string(),
+            "context_write".to_string(),
+            "context_append".to_string(),
+            "context_read".to_string(),
+            "context_delete".to_string(),
+            "context_list".to_string(),
         ]
     }
 
@@ -344,6 +443,9 @@ impl BuiltinTools {
             "edit_file" => self.edit_file(&args).await,
             "list_dir" => self.list_dir(&args).await,
             "shell" | "bash" => self.shell(&args).await,
+            n if n.starts_with("context_") => {
+                "[error] context tools must be handled by the runtime".to_string()
+            }
             _ => format!("[error] Unknown built-in tool: {}", name),
         }
     }
@@ -627,11 +729,11 @@ mod tests {
     // ── Tool definitions ──────────────────────────────────────────────────
 
     #[test]
-    fn tool_defs_returns_ten_tools() {
+    fn tool_defs_returns_fifteen_tools() {
         let dir = std::env::temp_dir();
         let tools = make_tools(&dir);
         let defs = tools.tool_defs();
-        assert_eq!(defs.len(), 10);
+        assert_eq!(defs.len(), 15);
     }
 
     #[test]
@@ -649,6 +751,11 @@ mod tests {
         assert!(names.contains(&"ask_user_choice".to_string()));
         assert!(names.contains(&"ask_user_confirm".to_string()));
         assert!(names.contains(&"edit_document".to_string()));
+        assert!(names.contains(&"context_write".to_string()));
+        assert!(names.contains(&"context_append".to_string()));
+        assert!(names.contains(&"context_read".to_string()));
+        assert!(names.contains(&"context_delete".to_string()));
+        assert!(names.contains(&"context_list".to_string()));
     }
 
     #[test]
@@ -680,6 +787,22 @@ mod tests {
         assert!(required.iter().any(|v| v == "prompt"));
         assert!(required.iter().any(|v| v == "options"));
         assert_eq!(def.parameters["properties"]["options"]["type"], "array");
+    }
+
+    #[tokio::test]
+    async fn context_tools_return_runtime_error() {
+        let dir = std::env::temp_dir();
+        let tools = make_tools(&dir);
+        for name in [
+            "context_write",
+            "context_append",
+            "context_read",
+            "context_delete",
+            "context_list",
+        ] {
+            let result = tools.execute(name, serde_json::json!({})).await;
+            assert!(result.contains("context tools must be handled by the runtime"));
+        }
     }
 
     #[tokio::test]
@@ -753,10 +876,10 @@ mod tests {
     }
 
     #[test]
-    fn names_returns_eleven_entries() {
+    fn names_returns_sixteen_entries() {
         let dir = std::env::temp_dir();
         let tools = make_tools(&dir);
-        assert_eq!(tools.names().len(), 11);
+        assert_eq!(tools.names().len(), 16);
     }
 
     // ── Sub-agent tool definitions ────────────────────────────────────────
