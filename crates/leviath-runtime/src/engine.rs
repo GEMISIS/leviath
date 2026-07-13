@@ -902,15 +902,11 @@ impl AgentEngine {
                         .collect()
                 });
 
-            // If any context tools were called, sync external state back to the
-            // entity's ContextWindow before we add tool results.
-            let had_context_tools = tool_calls_snapshot
-                .iter()
-                .any(|tc| tc.name.starts_with("context_"));
-            if had_context_tools {
-                if let Some(sync) = post_tool_sync.as_mut() {
-                    sync(&mut self.world, entity);
-                }
+            // Sync external state (shared ContextWindow) back to the entity
+            // before we add tool results. This covers both context_* tools and
+            // file tracking (which writes to the shared CW via read_file/write_file).
+            if let Some(sync) = post_tool_sync.as_mut() {
+                sync(&mut self.world, entity);
             }
 
             // Add tool results to context window.
@@ -1075,11 +1071,10 @@ impl AgentEngine {
             }
 
             // After adding tool results and running eviction, sync entity→shared
-            // so context tools see the latest state on the next iteration.
-            if had_context_tools {
-                if let Some(sync) = post_tool_sync.as_mut() {
-                    sync(&mut self.world, entity);
-                }
+            // so context tools and file tracking see the latest state on the
+            // next iteration.
+            if let Some(sync) = post_tool_sync.as_mut() {
+                sync(&mut self.world, entity);
             }
 
             last_response = Some(response);
@@ -5100,8 +5095,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_with_sync_not_called_for_non_context_tools() {
-        // When no context_* tools are called, the sync callback should NOT fire.
+    async fn test_with_sync_called_for_all_tool_batches() {
+        // Sync callback fires for ALL tool batches (not just context_* tools)
+        // because file tracking also modifies the shared context window.
         let sync_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let sync_count_clone = sync_count.clone();
 
@@ -5193,8 +5189,8 @@ mod tests {
             .await;
 
         assert!(result.is_ok());
-        // No context tools → sync should never be called
-        assert_eq!(sync_count.load(std::sync::atomic::Ordering::SeqCst), 0);
+        // Sync fires for every tool batch (pre-results + post-eviction = 2 per batch)
+        assert_eq!(sync_count.load(std::sync::atomic::Ordering::SeqCst), 2);
     }
 
     #[tokio::test]
