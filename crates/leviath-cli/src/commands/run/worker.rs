@@ -4997,4 +4997,637 @@ for line in sys.stdin:
 
         let _ = std::fs::remove_dir_all(&tmp);
     }
+
+    #[tokio::test]
+    async fn maybe_track_file_region_not_found_returns_original() {
+        // The configured tracking region is absent from the window, so the
+        // `get_region_mut` lookup misses and the original result is returned.
+        let tmp = std::env::temp_dir().join("lev-test-track-region-absent");
+        let _ = std::fs::create_dir_all(&tmp);
+        std::fs::write(tmp.join("f.txt"), "body").unwrap();
+
+        let ctx = leviath_tools::ToolContext::new(tmp.clone());
+        let builtins = leviath_tools::BuiltinTools::new(ctx);
+        // Window has region "other", but tracking config points at "files".
+        let cw = make_context_window_with_hashmap("other");
+        let ft = make_file_tracking_config("files", true, false);
+
+        let args = serde_json::json!({ "path": "f.txt" });
+        let original = "body";
+        let result = maybe_track_file(
+            "read_file",
+            &args,
+            original.to_string(),
+            &ft,
+            &cw,
+            &builtins,
+        )
+        .await;
+        assert_eq!(result, original);
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[tokio::test]
+    async fn maybe_track_file_no_context_window_returns_original() {
+        // No context window at all → the upsert block is skipped and the
+        // original result is returned.
+        let tmp = std::env::temp_dir().join("lev-test-track-no-window");
+        let _ = std::fs::create_dir_all(&tmp);
+        std::fs::write(tmp.join("f.txt"), "body").unwrap();
+
+        let ctx = leviath_tools::ToolContext::new(tmp.clone());
+        let builtins = leviath_tools::BuiltinTools::new(ctx);
+        let cw: Arc<Mutex<Option<ContextWindow>>> = Arc::new(Mutex::new(None));
+        let ft = make_file_tracking_config("files", true, false);
+
+        let args = serde_json::json!({ "path": "f.txt" });
+        let original = "body";
+        let result = maybe_track_file(
+            "read_file",
+            &args,
+            original.to_string(),
+            &ft,
+            &cw,
+            &builtins,
+        )
+        .await;
+        assert_eq!(result, original);
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[tokio::test]
+    async fn maybe_track_file_edit_file_failed_read() {
+        // edit_file whose re-read errors (line 546): track_writes on, but the
+        // path doesn't exist so the re-read returns "[error] ..." → original
+        // result is returned unchanged.
+        let tmp = std::env::temp_dir().join("lev-test-track-edit-fail");
+        let _ = std::fs::create_dir_all(&tmp);
+
+        let ctx = leviath_tools::ToolContext::new(tmp.clone());
+        let builtins = leviath_tools::BuiltinTools::new(ctx);
+        let cw = make_context_window_with_hashmap("files");
+        let ft = make_file_tracking_config("files", false, true);
+
+        let args = serde_json::json!({ "path": "nonexistent.txt" });
+        let original = "File edited";
+        let result = maybe_track_file(
+            "edit_file",
+            &args,
+            original.to_string(),
+            &ft,
+            &cw,
+            &builtins,
+        )
+        .await;
+
+        assert_eq!(result, original);
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[tokio::test]
+    async fn maybe_track_file_truncation_under_limit_keeps_content() {
+        // max_file_tokens is set, but the file is under the limit, so the
+        // truncation `else` branch (line 573) is taken and the content is
+        // stored verbatim.
+        let tmp = std::env::temp_dir().join("lev-test-track-under-limit");
+        let _ = std::fs::create_dir_all(&tmp);
+
+        let ctx = leviath_tools::ToolContext::new(tmp.clone());
+        let builtins = leviath_tools::BuiltinTools::new(ctx);
+        let cw = make_context_window_with_hashmap("files");
+        let mut ft = make_file_tracking_config("files", true, false);
+        ft.max_file_tokens = Some(10_000); // generous — content stays untruncated
+
+        let args = serde_json::json!({ "path": "small.txt" });
+        let result =
+            maybe_track_file("read_file", &args, "tiny".to_string(), &ft, &cw, &builtins).await;
+
+        assert!(result.contains("[files]"));
+        let guard = cw.lock().await;
+        let entry = guard
+            .as_ref()
+            .unwrap()
+            .get_region("files")
+            .unwrap()
+            .get_by_key("small.txt")
+            .unwrap();
+        assert_eq!(entry.content, "tiny");
+        assert!(!entry.content.contains("truncated"));
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    // ─── maybe_track_batch_read (read_files) ─────────────────────────────────
+
+    #[tokio::test]
+    async fn maybe_track_batch_read_tracking_disabled_returns_original() {
+        let tmp = std::env::temp_dir().join("lev-test-batch-disabled");
+        let _ = std::fs::create_dir_all(&tmp);
+        let builtins =
+            leviath_tools::BuiltinTools::new(leviath_tools::ToolContext::new(tmp.clone()));
+        let cw = make_context_window_with_hashmap("files");
+        let ft = make_file_tracking_config("files", false, false); // track_reads = false
+
+        let args = serde_json::json!({ "paths": ["a.txt"] });
+        let original = "orig batch result";
+        let result = maybe_track_batch_read(&args, original.to_string(), &ft, &cw, &builtins).await;
+        assert_eq!(result, original);
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[tokio::test]
+    async fn maybe_track_batch_read_missing_paths_returns_original() {
+        let tmp = std::env::temp_dir().join("lev-test-batch-no-paths");
+        let _ = std::fs::create_dir_all(&tmp);
+        let builtins =
+            leviath_tools::BuiltinTools::new(leviath_tools::ToolContext::new(tmp.clone()));
+        let cw = make_context_window_with_hashmap("files");
+        let ft = make_file_tracking_config("files", true, false);
+
+        // No "paths" key at all.
+        let args = serde_json::json!({});
+        let original = "orig";
+        assert_eq!(
+            maybe_track_batch_read(&args, original.to_string(), &ft, &cw, &builtins).await,
+            original
+        );
+
+        // "paths" present but not an array.
+        let args2 = serde_json::json!({ "paths": "not-an-array" });
+        assert_eq!(
+            maybe_track_batch_read(&args2, original.to_string(), &ft, &cw, &builtins).await,
+            original
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[tokio::test]
+    async fn maybe_track_batch_read_no_context_window_returns_original() {
+        let tmp = std::env::temp_dir().join("lev-test-batch-no-cw");
+        let _ = std::fs::create_dir_all(&tmp);
+        let builtins =
+            leviath_tools::BuiltinTools::new(leviath_tools::ToolContext::new(tmp.clone()));
+        let cw: Arc<Mutex<Option<ContextWindow>>> = Arc::new(Mutex::new(None));
+        let ft = make_file_tracking_config("files", true, false);
+
+        let args = serde_json::json!({ "paths": ["a.txt"] });
+        let original = "orig";
+        assert_eq!(
+            maybe_track_batch_read(&args, original.to_string(), &ft, &cw, &builtins).await,
+            original
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[tokio::test]
+    async fn maybe_track_batch_read_region_not_found_or_not_hashmap_returns_original() {
+        let tmp = std::env::temp_dir().join("lev-test-batch-bad-region");
+        let _ = std::fs::create_dir_all(&tmp);
+        let builtins =
+            leviath_tools::BuiltinTools::new(leviath_tools::ToolContext::new(tmp.clone()));
+        let args = serde_json::json!({ "paths": ["a.txt"] });
+        let original = "orig";
+
+        // Region name doesn't exist in the window.
+        let cw = make_context_window_with_hashmap("files");
+        let ft_missing = make_file_tracking_config("missing", true, false);
+        assert_eq!(
+            maybe_track_batch_read(&args, original.to_string(), &ft_missing, &cw, &builtins).await,
+            original
+        );
+
+        // Region exists but is not a HashMap.
+        let mut window = ContextWindow::new(100000);
+        window.add_region(leviath_core::Region::new(
+            "files".to_string(),
+            leviath_core::RegionKind::SlidingWindow {
+                max_items: 10,
+                eviction_strategy: leviath_core::EvictionStrategy::PerItem,
+            },
+            50000,
+        ));
+        let cw2 = Arc::new(Mutex::new(Some(window)));
+        let ft = make_file_tracking_config("files", true, false);
+        assert_eq!(
+            maybe_track_batch_read(&args, original.to_string(), &ft, &cw2, &builtins).await,
+            original
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[tokio::test]
+    async fn maybe_track_batch_read_tracks_files_and_summarizes() {
+        // Happy path: a normal file (upserted + token count), a non-string
+        // path element (skipped), and a path whose read errors (tracked as
+        // "→ error"). max_file_tokens is None so the truncation `else`
+        // branch is taken.
+        let tmp = std::env::temp_dir().join("lev-test-batch-track");
+        let _ = std::fs::create_dir_all(&tmp);
+        std::fs::write(tmp.join("a.txt"), "content of a").unwrap();
+        std::fs::write(tmp.join("b.txt"), "content of b").unwrap();
+
+        let builtins =
+            leviath_tools::BuiltinTools::new(leviath_tools::ToolContext::new(tmp.clone()));
+        let cw = make_context_window_with_hashmap("files");
+        let ft = make_file_tracking_config("files", true, false);
+
+        // Mixed array: two real files, a non-string element (skipped), and a
+        // missing file (→ error).
+        let args = serde_json::json!({
+            "paths": ["a.txt", 42, "b.txt", "nonexistent.txt"]
+        });
+        let result = maybe_track_batch_read(&args, "orig".to_string(), &ft, &cw, &builtins).await;
+
+        assert!(result.contains("stored in your system prompt under [files]"));
+        assert!(result.contains("- a.txt ("));
+        assert!(result.contains("- b.txt ("));
+        assert!(result.contains("- nonexistent.txt → error"));
+        assert!(result.contains("do not re-read"));
+
+        // The two real files were upserted into the HashMap region.
+        let guard = cw.lock().await;
+        let region = guard.as_ref().unwrap().get_region("files").unwrap();
+        assert_eq!(region.get_by_key("a.txt").unwrap().content, "content of a");
+        assert_eq!(region.get_by_key("b.txt").unwrap().content, "content of b");
+        // The non-string element and the errored path were not stored.
+        assert!(region.get_by_key("nonexistent.txt").is_none());
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[tokio::test]
+    async fn maybe_track_batch_read_truncation_over_and_under_limit() {
+        // Covers both truncation branches: one file over the token limit
+        // (truncated) and one under the limit (kept verbatim).
+        let tmp = std::env::temp_dir().join("lev-test-batch-trunc");
+        let _ = std::fs::create_dir_all(&tmp);
+        std::fs::write(tmp.join("big.txt"), "x".repeat(500)).unwrap();
+        std::fs::write(tmp.join("small.txt"), "tiny").unwrap();
+
+        let builtins =
+            leviath_tools::BuiltinTools::new(leviath_tools::ToolContext::new(tmp.clone()));
+        let cw = make_context_window_with_hashmap("files");
+        let mut ft = make_file_tracking_config("files", true, false);
+        ft.max_file_tokens = Some(10); // approx 40 chars
+
+        let args = serde_json::json!({ "paths": ["big.txt", "small.txt"] });
+        let result = maybe_track_batch_read(&args, "orig".to_string(), &ft, &cw, &builtins).await;
+        assert!(result.contains("- big.txt ("));
+        assert!(result.contains("- small.txt ("));
+
+        let guard = cw.lock().await;
+        let region = guard.as_ref().unwrap().get_region("files").unwrap();
+        // big.txt was truncated; small.txt kept verbatim.
+        assert!(region
+            .get_by_key("big.txt")
+            .unwrap()
+            .content
+            .contains("truncated"));
+        assert_eq!(region.get_by_key("small.txt").unwrap().content, "tiny");
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    // ─── dispatch_tool_calls: context-tool and file-tracking branches ────────
+
+    #[tokio::test]
+    async fn dispatch_tool_calls_context_tool_routes_to_handler() {
+        // A `context_*` tool call is routed to handle_context_tool and logged,
+        // covering the `tc.name.starts_with("context_")` branch (lines 76-84).
+        let _guard = crate::runstate::isolate_runs_dir_for_test(
+            "dispatch_tool_calls_context_tool_routes_to_handler",
+        );
+        let run_id = "test-dispatch-context-tool";
+        let dir = crate::runstate::run_dir(run_id);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let mut state = make_dispatch_state(run_id).await;
+        state.context_window = make_context_window_with_hashmap("notes");
+
+        let calls = vec![make_tool_call(
+            "context_write",
+            serde_json::json!({ "region": "notes", "key": "k", "content": "v" }),
+        )];
+        let out = dispatch_tool_calls(&state, calls).await;
+
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].0, "call-context_write");
+        assert!(
+            out[0].1.contains("Stored in 'notes'"),
+            "unexpected result: {}",
+            out[0].1
+        );
+
+        let log = crate::runstate::tail_stage_log(run_id, 0, 65536);
+        assert!(log.contains("context_write"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn dispatch_tool_calls_file_tracking_read_and_batch() {
+        // With file tracking configured, `read_files` routes to
+        // maybe_track_batch_read and other read/write tools route to
+        // maybe_track_file, covering the file-tracking block (lines 201-221).
+        let _guard = crate::runstate::isolate_runs_dir_for_test(
+            "dispatch_tool_calls_file_tracking_read_and_batch",
+        );
+        let run_id = "test-dispatch-file-tracking";
+        let dir = crate::runstate::run_dir(run_id);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // Create real files under the dispatch state's workdir (temp_dir).
+        let workdir = std::env::temp_dir();
+        let pid = std::process::id();
+        let single = format!("lev-dispatch-ft-single-{pid}.txt");
+        let batch = format!("lev-dispatch-ft-batch-{pid}.txt");
+        std::fs::write(workdir.join(&single), "single file body").unwrap();
+        std::fs::write(workdir.join(&batch), "batch file body").unwrap();
+
+        let mut state = make_dispatch_state(run_id).await;
+        let mut launch = std::collections::HashMap::new();
+        launch.insert("*".to_string(), ToolPolicy::Allow);
+        state.launch_overrides = Arc::new(launch);
+        state.context_window = make_context_window_with_hashmap("files");
+        state.file_tracking = Some(make_file_tracking_config("files", true, true));
+
+        let calls = vec![
+            make_tool_call(
+                "read_files",
+                serde_json::json!({ "paths": [batch.clone()] }),
+            ),
+            make_tool_call("read_file", serde_json::json!({ "path": single.clone() })),
+        ];
+        let out = dispatch_tool_calls(&state, calls).await;
+
+        assert_eq!(out.len(), 2);
+        // read_files result was replaced with the batch summary.
+        assert!(
+            out[0]
+                .1
+                .contains("stored in your system prompt under [files]"),
+            "unexpected batch result: {}",
+            out[0].1
+        );
+        // read_file result was replaced with the single-file reference message.
+        assert!(
+            out[1].1.contains("[files]") && out[1].1.contains("### ["),
+            "unexpected single result: {}",
+            out[1].1
+        );
+
+        // Both files ended up in the HashMap region.
+        let guard = state.context_window.lock().await;
+        let region = guard.as_ref().unwrap().get_region("files").unwrap();
+        assert!(region.get_by_key(&batch).is_some());
+        assert!(region.get_by_key(&single).is_some());
+        drop(guard);
+
+        let _ = std::fs::remove_file(workdir.join(&single));
+        let _ = std::fs::remove_file(workdir.join(&batch));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ─── handle_context_tool: remaining error / branch coverage ──────────────
+
+    /// Build a ContextWindow with a single HashMap region with a tiny token
+    /// budget, so that writes/appends exceed the budget and surface an error.
+    fn make_tiny_hashmap_window(region_name: &str) -> Arc<Mutex<Option<ContextWindow>>> {
+        let mut window = ContextWindow::new(1000);
+        window.add_region(leviath_core::Region::new(
+            region_name.to_string(),
+            leviath_core::RegionKind::HashMap { max_entries: None },
+            2, // tiny budget
+        ));
+        Arc::new(Mutex::new(Some(window)))
+    }
+
+    /// Build a ContextWindow with a single SlidingWindow region with a tiny
+    /// token budget.
+    fn make_tiny_sliding_window(region_name: &str) -> Arc<Mutex<Option<ContextWindow>>> {
+        let mut window = ContextWindow::new(1000);
+        window.add_region(leviath_core::Region::new(
+            region_name.to_string(),
+            leviath_core::RegionKind::SlidingWindow {
+                max_items: 10,
+                eviction_strategy: leviath_core::EvictionStrategy::PerItem,
+            },
+            2, // tiny budget
+        ));
+        Arc::new(Mutex::new(Some(window)))
+    }
+
+    #[tokio::test]
+    async fn handle_context_tool_write_hashmap_over_budget_errors() {
+        let cw = make_tiny_hashmap_window("notes");
+        let args = serde_json::json!({
+            "region": "notes",
+            "key": "k",
+            "content": "this content is far too large for the budget"
+        });
+        let result = handle_context_tool("context_write", &args, &cw).await;
+        assert!(
+            result.starts_with("[error]"),
+            "unexpected result: {}",
+            result
+        );
+    }
+
+    #[tokio::test]
+    async fn handle_context_tool_write_non_hashmap_over_budget_errors() {
+        let cw = make_tiny_sliding_window("temp");
+        let args = serde_json::json!({
+            "region": "temp",
+            "content": "this content is far too large for the budget"
+        });
+        let result = handle_context_tool("context_write", &args, &cw).await;
+        assert!(
+            result.starts_with("[error]"),
+            "unexpected result: {}",
+            result
+        );
+    }
+
+    #[tokio::test]
+    async fn handle_context_tool_append_new_key_creates_entry() {
+        // Appending under a key that does not yet exist creates a new entry
+        // (the "Created entry" branch).
+        let cw = make_context_window_with_hashmap("notes");
+        let args = serde_json::json!({
+            "region": "notes",
+            "key": "fresh",
+            "content": "first line"
+        });
+        let result = handle_context_tool("context_append", &args, &cw).await;
+        assert!(
+            result.contains("Created entry in 'notes' section under key 'fresh'"),
+            "unexpected result: {}",
+            result
+        );
+    }
+
+    #[tokio::test]
+    async fn handle_context_tool_append_new_key_over_budget_errors() {
+        let cw = make_tiny_hashmap_window("notes");
+        let args = serde_json::json!({
+            "region": "notes",
+            "key": "fresh",
+            "content": "this content is far too large for the budget"
+        });
+        let result = handle_context_tool("context_append", &args, &cw).await;
+        assert!(
+            result.starts_with("[error]"),
+            "unexpected result: {}",
+            result
+        );
+    }
+
+    #[tokio::test]
+    async fn handle_context_tool_append_non_hashmap_over_budget_errors() {
+        let cw = make_tiny_sliding_window("temp");
+        let args = serde_json::json!({
+            "region": "temp",
+            "content": "this content is far too large for the budget"
+        });
+        let result = handle_context_tool("context_append", &args, &cw).await;
+        assert!(
+            result.starts_with("[error]"),
+            "unexpected result: {}",
+            result
+        );
+    }
+
+    #[tokio::test]
+    async fn handle_context_tool_read_hashmap_key_miss_returns_not_found() {
+        let cw = make_context_window_with_hashmap("notes");
+        let args = serde_json::json!({ "region": "notes", "key": "ghost" });
+        let result = handle_context_tool("context_read", &args, &cw).await;
+        assert!(
+            result.contains("[not found]") && result.contains("ghost"),
+            "unexpected result: {}",
+            result
+        );
+    }
+
+    #[tokio::test]
+    async fn handle_context_tool_list_region_not_found() {
+        let cw = make_context_window_with_hashmap("notes");
+        let args = serde_json::json!({ "region": "nonexistent" });
+        let result = handle_context_tool("context_list", &args, &cw).await;
+        assert!(
+            result.contains("Section 'nonexistent' not found"),
+            "unexpected result: {}",
+            result
+        );
+    }
+
+    #[tokio::test]
+    async fn handle_context_tool_list_specific_region_keyless_entries() {
+        // A non-HashMap region's entries have no key, so context_list renders
+        // them as "(entry, N tokens)".
+        let cw = make_context_window_with_sliding_window();
+        handle_context_tool(
+            "context_write",
+            &serde_json::json!({ "region": "temp", "content": "some data" }),
+            &cw,
+        )
+        .await;
+        let result = handle_context_tool(
+            "context_list",
+            &serde_json::json!({ "region": "temp" }),
+            &cw,
+        )
+        .await;
+        assert!(
+            result.contains("(entry,") && result.contains("tokens"),
+            "unexpected result: {}",
+            result
+        );
+    }
+
+    #[tokio::test]
+    async fn handle_context_tool_list_all_regions_covers_every_kind() {
+        // A window with one region of every kind, so the kind_str match in the
+        // "list all regions" branch exercises all its arms.
+        let mut window = ContextWindow::new(1_000_000);
+        window.add_region(leviath_core::Region::new(
+            "pin".to_string(),
+            leviath_core::RegionKind::Pinned,
+            1000,
+        ));
+        window.add_region(leviath_core::Region::new(
+            "conv".to_string(),
+            leviath_core::RegionKind::SlidingWindow {
+                max_items: 10,
+                eviction_strategy: leviath_core::EvictionStrategy::PerItem,
+            },
+            1000,
+        ));
+        window.add_region(leviath_core::Region::new(
+            "tmp".to_string(),
+            leviath_core::RegionKind::Temporary,
+            1000,
+        ));
+        window.add_region(leviath_core::Region::new(
+            "cmp".to_string(),
+            leviath_core::RegionKind::Compacting {
+                threshold_tokens: 500,
+            },
+            1000,
+        ));
+        window.add_region(leviath_core::Region::new(
+            "clr".to_string(),
+            leviath_core::RegionKind::Clearable,
+            1000,
+        ));
+        window.add_region(leviath_core::Region::new(
+            "hist".to_string(),
+            leviath_core::RegionKind::CompactHistory {
+                source_region: "conv".to_string(),
+            },
+            1000,
+        ));
+        window.add_region(leviath_core::Region::new(
+            "kv".to_string(),
+            leviath_core::RegionKind::HashMap { max_entries: None },
+            1000,
+        ));
+        let cw = Arc::new(Mutex::new(Some(window)));
+
+        let result = handle_context_tool("context_list", &serde_json::json!({}), &cw).await;
+        for label in [
+            "permanent",
+            "conversation",
+            "temporary",
+            "summarized when full",
+            "summary archive",
+            "key-value store",
+        ] {
+            assert!(
+                result.contains(label),
+                "expected '{}' in: {}",
+                label,
+                result
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn handle_context_tool_list_no_regions_configured() {
+        let cw: Arc<Mutex<Option<ContextWindow>>> =
+            Arc::new(Mutex::new(Some(ContextWindow::new(1000))));
+        let result = handle_context_tool("context_list", &serde_json::json!({}), &cw).await;
+        assert!(
+            result.contains("No context window sections configured"),
+            "unexpected result: {}",
+            result
+        );
+    }
 }
