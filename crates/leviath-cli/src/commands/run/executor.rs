@@ -510,12 +510,19 @@ pub async fn run_stage_loop(
                 match tool.name.as_str() {
                     "read_file" if ft.track_reads => {
                         tool.description = format!(
-                            "Read a file from the working directory. The file contents will be \
-                             stored in the [{}] section of your system prompt under the file \
-                             path as a key (e.g. \"### [path/to/file]\"). The tool result \
-                             confirms where the content was stored. You can then reference the \
-                             file contents directly from your system prompt without calling \
-                             read_file again.",
+                            "Read a single file. Contents stored in [{}] section of your \
+                             system prompt under ### [path]. Prefer read_files for multiple \
+                             files.",
+                            ft.region
+                        );
+                    }
+                    "read_files" if ft.track_reads => {
+                        tool.description = format!(
+                            "Read multiple files at once (preferred over repeated read_file \
+                             calls). All file contents will be stored in the [{}] section of \
+                             your system prompt under ### [path] for each file. The tool \
+                             result confirms where each file was stored. Reference them in \
+                             your system prompt — do not re-read.",
                             ft.region
                         );
                     }
