@@ -771,6 +771,25 @@ mod tests {
         assert!(kinds.contains(&"history"));
     }
 
+    #[test]
+    fn build_context_snapshot_hashmap_region_kind() {
+        // Covers the RegionKind::HashMap arm of the region-kind → label match.
+        let bp = make_blueprint_with_regions(vec![
+            RegionDefinition::new("system".to_string(), RegionKind::Pinned, 2000),
+            RegionDefinition::new(
+                "files".to_string(),
+                RegionKind::HashMap { max_entries: None },
+                1000,
+            ),
+        ]);
+        let (mut engine, entity) = make_engine_and_entity(&bp);
+        initialize_context_window(&mut engine, entity, &bp, "task");
+
+        let snap = build_context_snapshot(&engine, entity, "test").unwrap();
+        let kinds: Vec<&str> = snap.regions.iter().map(|r| r.kind.as_str()).collect();
+        assert!(kinds.contains(&"hashmap"));
+    }
+
     // ─── build_context_snapshot: returns None for invalid entity ────────
 
     #[test]

@@ -3819,4 +3819,104 @@ mod tests {
         // Empty abort list
         assert!(!super::is_abort_option(&[], "Abort"));
     }
+
+    #[tokio::test]
+    async fn foreground_edit_option_breaks_when_iteration_budget_exhausted() {
+        // An edit option selected once the per-point iteration budget is spent
+        // hits the `remaining_iterations == 0` guard in the edit branch and
+        // breaks out of the point loop.
+        use crate::interaction::{InteractionKind, InteractionResponse};
+
+        let bp = make_blueprint(vec![make_stage("main")]);
+        let (mut engine, _pool, entity) = make_engine_and_entity(&bp, "Agent response");
+        let mut io = MockIO::new();
+
+        let points = vec![make_multiple_choice_point_with_edit(
+            "plan_approval",
+            "Approve the plan?",
+            vec!["Approve".to_string(), "Edit".to_string()],
+            vec!["Edit".to_string()],
+        )];
+
+        // Always pick "Edit" (index 1) and always return non-empty edited text.
+        // max_iterations = 2 with one point (2 segments) gives 1 iteration per
+        // segment, so remaining hits 0 by the second round's guard check.
+        let ask_foreground = |req: &crate::interaction::InteractionRequest| match req.kind {
+            InteractionKind::EditText => InteractionResponse::text(&req.id, "edited text"),
+            _ => InteractionResponse::choice(&req.id, 1),
+        };
+
+        let outcome = run_interactive_points_stage_with(
+            &mut engine,
+            entity,
+            "mock",
+            "test-model",
+            2,
+            &[],
+            None,
+            &points,
+            None,
+            &mut io,
+            &mut noop_exec,
+            &ask_foreground,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(outcome, PointsOutcome::Completed);
+    }
+
+    #[tokio::test]
+    async fn foreground_edit_option_empty_edit_is_skipped_and_no_directive_completes() {
+        // Round 1: pick the edit option but submit an EMPTY edit → the
+        // `if !edited.is_empty()` block is skipped. Round 2: pick a plain option
+        // with no directive → the no-directive `else` branch completes the
+        // stage.
+        use crate::interaction::{InteractionKind, InteractionResponse};
+        use std::sync::Mutex;
+
+        let bp = make_blueprint(vec![make_stage("main")]);
+        let (mut engine, _pool, entity) = make_engine_and_entity(&bp, "Agent response");
+        let mut io = MockIO::new();
+
+        let points = vec![make_multiple_choice_point_with_edit(
+            "plan_approval",
+            "Approve the plan?",
+            vec!["Approve".to_string(), "Edit".to_string()],
+            vec!["Edit".to_string()],
+        )];
+
+        let choice_round = Mutex::new(0usize);
+        let ask_foreground = |req: &crate::interaction::InteractionRequest| match req.kind {
+            // Empty edit → the inject block is skipped.
+            InteractionKind::EditText => InteractionResponse::text(&req.id, ""),
+            _ => {
+                // Round 1: "Edit" (index 1). Round 2: "Approve" (index 0, no
+                // directive → completes).
+                let mut r = choice_round.lock().unwrap();
+                let idx = if *r == 0 { 1 } else { 0 };
+                *r += 1;
+                InteractionResponse::choice(&req.id, idx)
+            }
+        };
+
+        let outcome = run_interactive_points_stage_with(
+            &mut engine,
+            entity,
+            "mock",
+            "test-model",
+            8,
+            &[],
+            None,
+            &points,
+            None,
+            &mut io,
+            &mut noop_exec,
+            &ask_foreground,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(outcome, PointsOutcome::Completed);
+    }
 }

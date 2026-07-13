@@ -751,4 +751,38 @@ mod tests {
         assert!(result.is_ok());
         assert!(path.exists());
     }
+
+    #[test]
+    fn add_with_parent_that_is_a_file_errors() {
+        // When the target path's parent is an existing regular file,
+        // create_dir_all fails and the `?` propagates — covers the error arm.
+        let dir = tempfile::tempdir().unwrap();
+        let file_as_parent = dir.path().join("iamafile");
+        std::fs::write(&file_as_parent, "not a dir").unwrap();
+        let path = file_as_parent.join("policy.toml");
+        let config = leviath_core::PolicyConfig::default();
+        let args = PolicyAddArgs {
+            tool: "shell".to_string(),
+            target: None,
+            max_sensitivity: "public".to_string(),
+        };
+        let result = execute_add_with(args, &path, &config);
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn execute_dispatches_add_subcommand() {
+        // Route the top-level dispatcher through the Add arm. An invalid
+        // sensitivity makes execute_add fail before it writes anything to the
+        // real config path, so no filesystem side effects occur.
+        let result = execute(PolicyArgs {
+            command: PolicyCommand::Add(PolicyAddArgs {
+                tool: "shell".to_string(),
+                target: None,
+                max_sensitivity: "definitely-not-valid".to_string(),
+            }),
+        })
+        .await;
+        assert!(result.is_err());
+    }
 }

@@ -1944,4 +1944,17 @@ allowed = ["read_file"]
         });
         assert_eq!(r, leviath_runtime::taint::GateResolution::Deny);
     }
+
+    #[tokio::test]
+    async fn foreground_gate_prompt_resolve_allows_without_stdin() {
+        // A non-blocked decision short-circuits inside resolve_gate_with_asker
+        // to AllowOnce *without* invoking the real stdin asker, so the
+        // ForegroundGatePrompt::resolve method itself can be driven safely.
+        use leviath_runtime::taint::GatePrompt;
+        let prompt = ForegroundGatePrompt;
+        let r = prompt
+            .resolve(&leviath_core::taint::GateDecision::Allowed)
+            .await;
+        assert_eq!(r, leviath_runtime::taint::GateResolution::AllowOnce);
+    }
 }

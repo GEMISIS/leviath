@@ -2663,7 +2663,7 @@ mod tests {
         let mut policy = PolicyConfig::default();
         policy.mcp_overrides.insert(
             "srv.sender".to_string(),
-            leviath_core::policy::McpToolOverride {
+            leviath_core::McpToolOverride {
                 sensitivity: Some(leviath_core::TaintLevel::Public),
                 direction: Some("outbound".to_string()),
                 clearance: Some(leviath_core::TaintLevel::Public),
@@ -2908,5 +2908,246 @@ mod tests {
                 .map(|s| s.as_str()),
             Some("special_region")
         );
+    }
+
+    // ─── file-tracking tool-description patching ────────────────────────────
+
+    #[tokio::test]
+    async fn file_tracking_patches_file_tool_descriptions() {
+        // With `file_tracking` enabled and the four file tools available, the
+        // stage loop rewrites their descriptions to reference the tracked
+        // system-prompt region (the description-patching block). This exercises
+        // all four match arms (read_file / read_files / write_file / edit_file).
+        let mut stage = make_stage("main");
+        stage.available_tools = vec![
+            "read_file".to_string(),
+            "read_files".to_string(),
+            "write_file".to_string(),
+            "edit_file".to_string(),
+        ];
+        let mut bp = make_blueprint(vec![stage]);
+        bp.file_tracking = Some(leviath_core::blueprint::FileTrackingConfig {
+            region: "workspace_files".to_string(),
+            track_reads: true,
+            track_writes: true,
+            max_file_tokens: None,
+        });
+        let (mut engine, mut pool, entity) = make_engine_and_entity(&bp);
+        let tool_registry = make_tool_registry().await;
+        let mut cb = MockCallbacks::new();
+
+        let mut ctx = StageContext {
+            blueprint: &bp,
+            engine: &mut engine,
+            entity,
+            pool: &mut pool,
+            tool_registry: &tool_registry,
+            current_stage_name: Arc::new(Mutex::new(String::new())),
+            current_stage_perms: Arc::new(Mutex::new(HashMap::new())),
+            current_stage_idx: Arc::new(Mutex::new(0)),
+            model_override: None,
+            user_default_model: None,
+            compaction_ref: None,
+        };
+
+        run_stage_loop(
+            &mut ctx,
+            &mut cb,
+            "agent-1",
+            &mut MockIO::new(),
+            &mut noop_exec,
+        )
+        .await
+        .unwrap();
+
+        // The stage still completes normally after the tools are patched.
+        assert_eq!(cb.completed_at, Some(0));
+    }
+
+    #[tokio::test]
+    async fn file_tracking_reads_only_leaves_write_tools_untouched() {
+        // track_writes=false must skip the write_file/edit_file arms while
+        // still patching read_file/read_files (track_reads=true).
+        let mut stage = make_stage("main");
+        stage.available_tools = vec![
+            "read_file".to_string(),
+            "read_files".to_string(),
+            "write_file".to_string(),
+            "edit_file".to_string(),
+        ];
+        let mut bp = make_blueprint(vec![stage]);
+        bp.file_tracking = Some(leviath_core::blueprint::FileTrackingConfig {
+            region: "reads_region".to_string(),
+            track_reads: true,
+            track_writes: false,
+            max_file_tokens: None,
+        });
+        let (mut engine, mut pool, entity) = make_engine_and_entity(&bp);
+        let tool_registry = make_tool_registry().await;
+        let mut cb = MockCallbacks::new();
+
+        let mut ctx = StageContext {
+            blueprint: &bp,
+            engine: &mut engine,
+            entity,
+            pool: &mut pool,
+            tool_registry: &tool_registry,
+            current_stage_name: Arc::new(Mutex::new(String::new())),
+            current_stage_perms: Arc::new(Mutex::new(HashMap::new())),
+            current_stage_idx: Arc::new(Mutex::new(0)),
+            model_override: None,
+            user_default_model: None,
+            compaction_ref: None,
+        };
+
+        run_stage_loop(
+            &mut ctx,
+            &mut cb,
+            "agent-1",
+            &mut MockIO::new(),
+            &mut noop_exec,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(cb.completed_at, Some(0));
+    }
+
+    // ─── multi-model priority fallback + tracing field evaluation ───────────
+
+    #[tokio::test]
+    async fn multi_model_selects_lower_priority_available_provider() {
+        // models[0] is an unregistered provider, so the model-resolution loop
+        // skips it and selects the registered `anthropic` at index 1 (the
+        // "lower-priority model chosen" path).
+        let mut stage = make_stage("main");
+        stage.model.models.insert(
+            0,
+            ModelEntry::new("nonexistent".to_string(), "x".to_string()),
+        );
+        let bp = make_blueprint(vec![stage]);
+        let (mut engine, mut pool, entity) = make_engine_and_entity_with_provider(&bp);
+        let tool_registry = make_tool_registry().await;
+        let mut cb = MockCallbacks::new();
+
+        let mut ctx = StageContext {
+            blueprint: &bp,
+            engine: &mut engine,
+            entity,
+            pool: &mut pool,
+            tool_registry: &tool_registry,
+            current_stage_name: Arc::new(Mutex::new(String::new())),
+            current_stage_perms: Arc::new(Mutex::new(HashMap::new())),
+            current_stage_idx: Arc::new(Mutex::new(0)),
+            model_override: None,
+            user_default_model: None,
+            compaction_ref: None,
+        };
+
+        run_stage_loop(
+            &mut ctx,
+            &mut cb,
+            "agent-1",
+            &mut MockIO::new(),
+            &mut noop_exec,
+        )
+        .await
+        .unwrap();
+
+        // The registered lower-priority provider was chosen.
+        assert_eq!(cb.resolved_models[0].0, "anthropic");
+        assert_eq!(cb.completed_at, Some(0));
+    }
+
+    // ─── interactive-points abort cancels a live message reader ─────────────
+
+    #[tokio::test]
+    async fn interactive_points_abort_aborts_active_stdin_reader() {
+        let _guard = crate::runstate::isolate_runs_dir_for_test(
+            "interactive_points_abort_aborts_active_stdin_reader",
+        );
+        use crate::runstate::{self, RunMeta};
+        use leviath_core::blueprint::InteractionPoint;
+
+        // accepts_messages = true makes start_message_reader return Some, so the
+        // abort path's `handle.abort()` (stdin-reader cleanup) is exercised.
+        let mut stage = make_stage("plan");
+        stage.mode = StageMode::InteractivePoints {
+            points: vec![InteractionPoint {
+                name: "plan_approval".to_string(),
+                prompt: "Approve?".to_string(),
+                required: false,
+                style: leviath_core::blueprint::InteractionStyle::MultipleChoice,
+                options: vec!["Approve".to_string(), "Abort".to_string()],
+                directives: Default::default(),
+                abort_options: vec!["Abort".to_string()],
+                edit_options: Default::default(),
+            }],
+        };
+        stage.max_iterations = Some(2);
+        stage.accepts_messages = true;
+        let bp = make_blueprint(vec![stage]);
+        let (mut engine, mut pool, entity) = make_engine_and_entity_with_provider(&bp);
+        let tool_registry = make_tool_registry().await;
+
+        let run_id = "exec-abort-reader-run".to_string();
+        let meta = RunMeta::new(
+            run_id.clone(),
+            "test".into(),
+            "/p".into(),
+            "t".into(),
+            None,
+            "/tmp".into(),
+            1,
+        );
+        runstate::create_run(&meta).unwrap();
+
+        let mut cb = MockCallbacks::new();
+        cb.run_context = Some((run_id.clone(), meta));
+
+        let responder_run_id = run_id.clone();
+        let responder = tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+                if let Some(req) = crate::interaction::read_request(&responder_run_id) {
+                    let mut resp = crate::interaction::InteractionResponse::choice("", 1);
+                    resp.request_id = req.id.clone();
+                    crate::interaction::write_response(&responder_run_id, &resp).unwrap();
+                    break;
+                }
+            }
+        });
+
+        let mut ctx = StageContext {
+            blueprint: &bp,
+            engine: &mut engine,
+            entity,
+            pool: &mut pool,
+            tool_registry: &tool_registry,
+            current_stage_name: Arc::new(Mutex::new(String::new())),
+            current_stage_perms: Arc::new(Mutex::new(HashMap::new())),
+            current_stage_idx: Arc::new(Mutex::new(0)),
+            model_override: None,
+            user_default_model: None,
+            compaction_ref: None,
+        };
+
+        run_stage_loop(
+            &mut ctx,
+            &mut cb,
+            "agent-1",
+            &mut MockIO::new(),
+            &mut noop_exec,
+        )
+        .await
+        .unwrap();
+
+        let _ = responder.await;
+
+        assert_eq!(cb.cancelled_at, Some(0));
+        assert_eq!(cb.completed_at, None);
+        assert!(cb.transitions.is_empty());
+
+        let _ = std::fs::remove_dir_all(runstate::run_dir(&run_id));
     }
 }
