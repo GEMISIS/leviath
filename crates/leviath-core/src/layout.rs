@@ -342,4 +342,26 @@ mod tests {
             .with_description("holds architecture notes".to_string());
         assert_eq!(def.description.as_deref(), Some("holds architecture notes"));
     }
+
+    #[test]
+    fn test_validate_with_sliding_window_present() {
+        // A layout that DOES contain a SlidingWindow region exercises the
+        // has_sliding_window detection returning true, so the "no sliding
+        // window" warning branch is skipped.
+        let regions = vec![
+            RegionDefinition::new("pinned".to_string(), RegionKind::Pinned, 5000),
+            RegionDefinition::new(
+                "conv".to_string(),
+                RegionKind::SlidingWindow {
+                    max_items: 50,
+                    eviction_strategy: crate::region::EvictionStrategy::PerItem,
+                },
+                5000,
+            ),
+        ];
+        let layout = ContextLayout::new(regions, 20000);
+        with_tracing(|| {
+            assert!(layout.validate().is_ok());
+        });
+    }
 }

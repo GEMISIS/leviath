@@ -444,4 +444,30 @@ send_email = { sensitivity = "private", direction = "egress", clearance = "publi
         let back: McpToolOverride = serde_json::from_str(&json).unwrap();
         assert_eq!(o, back);
     }
+
+    #[test]
+    fn test_matches_false_when_only_channel_pattern_set_but_no_target() {
+        let rule = AllowlistRule {
+            tool: "post_message".to_string(),
+            to: vec![],
+            channel: vec!["#general".to_string()],
+            max_sensitivity: TaintLevel::Private,
+        };
+        // `to` is empty (first operand false), which forces evaluation of the
+        // `channel` operand in the "patterns set but no target" guard; with no
+        // target the rule must not match.
+        assert!(!rule.matches("post_message", None, TaintLevel::Public));
+    }
+
+    #[test]
+    fn test_from_toml_mcp_override_server_without_tools_table() {
+        // A server entry that has no `tools` sub-table exercises the
+        // `if let Some(tools_table)` None branch — nothing is inserted.
+        let toml = r#"
+[mcp_overrides.emptyserver]
+note = "no tools declared here"
+"#;
+        let config = PolicyConfig::from_toml(toml).unwrap();
+        assert!(config.mcp_overrides.is_empty());
+    }
 }

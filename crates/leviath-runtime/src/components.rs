@@ -3203,4 +3203,66 @@ mod tests {
             "SlidingWindow entries should appear as messages"
         );
     }
+
+    #[test]
+    fn test_add_tainted_to_region_propagates_budget_error() {
+        // Region is found, but the entry exceeds its token budget, so the
+        // inner `add_tainted_entry` error must propagate through the `?`.
+        let mut window = ContextWindow::new(10_000);
+        let mut region = Region::new("conv".to_string(), RegionKind::Temporary, 10);
+        region.enable_taint_tracking();
+        window.add_region(region);
+
+        let result = window.add_tainted_to_region(
+            "conv",
+            "far too many tokens".to_string(),
+            100,
+            leviath_core::TaintLevel::Private,
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_add_typed_tainted_to_region_propagates_budget_error() {
+        // Region is found, but the entry exceeds its token budget, so the
+        // inner `add_typed_tainted_entry` error must propagate through the `?`.
+        let mut window = ContextWindow::new(10_000);
+        let region = Region::new("conv".to_string(), RegionKind::Temporary, 10);
+        window.add_region(region);
+
+        let result = window.add_typed_tainted_to_region(
+            "conv",
+            leviath_core::EntryKind::Text,
+            "far too many tokens".to_string(),
+            100,
+            leviath_core::TaintLevel::Public,
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_assemble_hashmap_region_entry_without_key() {
+        // A HashMap-region entry with no key falls back to its raw content
+        // (rather than a "### [key]" header) when assembled.
+        let mut window = ContextWindow::new(10_000);
+        let region = Region::new(
+            "kv".to_string(),
+            RegionKind::HashMap { max_entries: None },
+            5000,
+        );
+        window.add_region(region);
+        // add_to_region stores the entry with key: None.
+        window
+            .add_to_region("kv", "keyless content".to_string(), 10)
+            .unwrap();
+
+        let assembled = window.assemble();
+        assert!(
+            assembled
+                .system_blocks
+                .iter()
+                .any(|b| b.text.contains("keyless content")),
+            "keyless HashMap entry should appear verbatim in a system block"
+        );
+    }
 }

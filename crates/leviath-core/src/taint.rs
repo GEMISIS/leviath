@@ -1335,4 +1335,53 @@ mod tests {
         // Stage present → wins over agent.
         assert!(resolve_security(false, Some(&sec(false)), Some(&sec(true))).taint_tracking);
     }
+
+    #[test]
+    fn test_region_taint_remove_at_recomputes_level() {
+        let mut rt = RegionTaint::new();
+        rt.add_entry(TaintLevel::Public);
+        rt.add_entry(TaintLevel::Private);
+        rt.add_entry(TaintLevel::Public);
+        assert_eq!(rt.level(), TaintLevel::Private);
+
+        // Removing the Private entry at index 1 recomputes the level down.
+        rt.remove_at(1);
+        assert_eq!(rt.entry_count(), 2);
+        assert_eq!(rt.level(), TaintLevel::Public);
+
+        // An out-of-range index is a no-op.
+        rt.remove_at(99);
+        assert_eq!(rt.entry_count(), 2);
+    }
+
+    #[test]
+    fn test_security_config_next_fallback() {
+        let config = SecurityConfig {
+            taint_tracking: true,
+            pointer_mode: true,
+            filter_mode: None,
+            degradation: vec![
+                InputMode::Pointer,
+                InputMode::Filter,
+                InputMode::Traditional,
+            ],
+        };
+        assert_eq!(
+            config.next_fallback(&InputMode::Pointer),
+            Some(&InputMode::Filter)
+        );
+        assert_eq!(
+            config.next_fallback(&InputMode::Filter),
+            Some(&InputMode::Traditional)
+        );
+        // The last mode in the path has no fallback.
+        assert_eq!(config.next_fallback(&InputMode::Traditional), None);
+
+        // A mode absent from the degradation path has no fallback.
+        let cfg2 = SecurityConfig {
+            degradation: vec![InputMode::Traditional],
+            ..SecurityConfig::default()
+        };
+        assert_eq!(cfg2.next_fallback(&InputMode::Pointer), None);
+    }
 }
