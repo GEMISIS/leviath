@@ -1265,6 +1265,98 @@ mod tests {
         assert!(result.contains("Failed to read"));
     }
 
+    // ── read_files (batch reads) ────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn read_files_multiple_valid_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let tools = make_tools(dir.path());
+        fs::write(dir.path().join("a.txt"), "alpha").unwrap();
+        fs::write(dir.path().join("b.txt"), "beta").unwrap();
+
+        let result = tools
+            .execute("read_files", json!({"paths": ["a.txt", "b.txt"]}))
+            .await;
+        assert!(result.contains("### [a.txt]"));
+        assert!(result.contains("alpha"));
+        assert!(result.contains("### [b.txt]"));
+        assert!(result.contains("beta"));
+        // Results are joined with a blank line between entries.
+        assert!(result.contains("\n\n"));
+    }
+
+    #[tokio::test]
+    async fn read_files_missing_paths_arg() {
+        let dir = tempfile::tempdir().unwrap();
+        let tools = make_tools(dir.path());
+        let result = tools.execute("read_files", json!({})).await;
+        assert!(result.contains("[error]"));
+        assert!(result.contains("missing 'paths'"));
+    }
+
+    #[tokio::test]
+    async fn read_files_non_array_paths_arg() {
+        let dir = tempfile::tempdir().unwrap();
+        let tools = make_tools(dir.path());
+        // A string (not an array) → as_array() returns None → same error path.
+        let result = tools.execute("read_files", json!({"paths": "a.txt"})).await;
+        assert!(result.contains("[error]"));
+        assert!(result.contains("missing 'paths'"));
+    }
+
+    #[tokio::test]
+    async fn read_files_empty_paths_array() {
+        let dir = tempfile::tempdir().unwrap();
+        let tools = make_tools(dir.path());
+        let result = tools.execute("read_files", json!({"paths": []})).await;
+        assert!(result.contains("[error]"));
+        assert!(result.contains("empty"));
+    }
+
+    #[tokio::test]
+    async fn read_files_missing_file_reports_per_file_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let tools = make_tools(dir.path());
+        fs::write(dir.path().join("present.txt"), "here").unwrap();
+
+        let result = tools
+            .execute(
+                "read_files",
+                json!({"paths": ["present.txt", "absent.txt"]}),
+            )
+            .await;
+        // Valid file still returned…
+        assert!(result.contains("### [present.txt]"));
+        assert!(result.contains("here"));
+        // …while the missing one produces a per-file error under its header.
+        assert!(result.contains("### [absent.txt]"));
+        assert!(result.contains("Failed to read"));
+    }
+
+    #[tokio::test]
+    async fn read_files_non_string_element_reports_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let tools = make_tools(dir.path());
+        fs::write(dir.path().join("ok.txt"), "content").unwrap();
+
+        let result = tools
+            .execute("read_files", json!({"paths": ["ok.txt", 42]}))
+            .await;
+        assert!(result.contains("content"));
+        assert!(result.contains("non-string path in array"));
+    }
+
+    #[tokio::test]
+    async fn read_files_path_escape_reported_per_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let tools = make_tools(dir.path());
+        let result = tools
+            .execute("read_files", json!({"paths": ["../../etc/passwd"]}))
+            .await;
+        assert!(result.contains("### [../../etc/passwd]"));
+        assert!(result.contains("escape"));
+    }
+
     // ── resolve() absolute paths ────────────────────────────────────────────
 
     #[test]

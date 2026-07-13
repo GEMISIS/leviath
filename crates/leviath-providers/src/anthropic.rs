@@ -1501,6 +1501,67 @@ mod tests {
         assert!(body.get("system").is_none());
     }
 
+    #[test]
+    fn test_build_request_body_system_block_never_hint_omits_cache_control() {
+        // A system block with CacheHint::Never exercises the false branch of
+        // the `cache_hint != Never` guard, so no cache_control is attached.
+        let provider = AnthropicProvider::new("key".to_string());
+        let request = InferenceRequest {
+            system: vec![crate::SystemBlock {
+                text: "No caching here.".to_string(),
+                cache_hint: leviath_core::CacheHint::Never,
+            }],
+            messages: vec![crate::provider::Message {
+                role: "user".to_string(),
+                content: "Hello".into(),
+                cache_breakpoint: false,
+            }],
+            model: "claude-sonnet-4-6".to_string(),
+            max_tokens: 1024,
+            temperature: 0.7,
+            tools: vec![],
+            extra: serde_json::Value::Null,
+        };
+
+        let body = provider.build_request_body(&request);
+        // Single system block → serialized as its plain text, never as a
+        // block carrying cache_control.
+        assert_eq!(body["system"], "No caching here.");
+    }
+
+    #[test]
+    fn test_build_request_body_cache_breakpoint_with_block_content() {
+        // A message with cache_breakpoint = true AND block (non-Text) content
+        // exercises the MessageContent::Blocks arm of the breakpoint handling,
+        // which serializes the content normally rather than wrapping it.
+        let provider = AnthropicProvider::new("key".to_string());
+        let request = InferenceRequest {
+            system: vec![],
+            messages: vec![crate::provider::Message {
+                role: "assistant".to_string(),
+                content: crate::MessageContent::Blocks(vec![crate::ContentBlock::Text {
+                    text: "block text".to_string(),
+                }]),
+                cache_breakpoint: true,
+            }],
+            model: "claude-sonnet-4-6".to_string(),
+            max_tokens: 1024,
+            temperature: 0.7,
+            tools: vec![],
+            extra: serde_json::Value::Null,
+        };
+
+        let body = provider.build_request_body(&request);
+        let messages = body["messages"].as_array().unwrap();
+        assert_eq!(messages.len(), 1);
+        // Block content is serialized normally (an array of content blocks),
+        // not wrapped in a synthetic cache_control text block.
+        assert_eq!(messages[0]["role"], "assistant");
+        assert!(messages[0]["content"].is_array());
+        assert_eq!(messages[0]["content"][0]["type"], "text");
+        assert_eq!(messages[0]["content"][0]["text"], "block text");
+    }
+
     // ── SSE parsing tests ──────────────────────────────────────────────────
 
     #[test]
