@@ -3025,4 +3025,172 @@ mod tests {
             leviath_core::CacheHint::UntilChanged
         );
     }
+
+    // ─── HashMap region assembly tests ──────────────────────────────────
+
+    #[test]
+    fn test_assemble_hashmap_single_keyed_entry() {
+        let mut window = ContextWindow::new(100_000);
+        let mut region = Region::new(
+            "context".to_string(),
+            RegionKind::HashMap { max_entries: None },
+            10_000,
+        );
+        region
+            .upsert_by_key("config.toml", "key = \"value\"".to_string(), 10)
+            .unwrap();
+        window.add_region(region);
+
+        let assembled = window.assemble();
+
+        assert_eq!(assembled.system_blocks.len(), 1);
+        let block_text = &assembled.system_blocks[0].text;
+        assert!(
+            block_text.starts_with("[context]:"),
+            "System block should start with [region_name]: prefix"
+        );
+        assert!(
+            block_text.contains("### [config.toml]"),
+            "Entry should have ### [key] header"
+        );
+        assert!(
+            block_text.contains("key = \"value\""),
+            "Entry content should be present"
+        );
+    }
+
+    #[test]
+    fn test_assemble_hashmap_multiple_keyed_entries() {
+        let mut window = ContextWindow::new(100_000);
+        let mut region = Region::new(
+            "tracked_files".to_string(),
+            RegionKind::HashMap { max_entries: None },
+            10_000,
+        );
+        region
+            .upsert_by_key("alpha.rs", "fn alpha() {}".to_string(), 10)
+            .unwrap();
+        region
+            .upsert_by_key("beta.rs", "fn beta() {}".to_string(), 10)
+            .unwrap();
+        region
+            .upsert_by_key("gamma.rs", "fn gamma() {}".to_string(), 10)
+            .unwrap();
+        window.add_region(region);
+
+        let assembled = window.assemble();
+
+        assert_eq!(assembled.system_blocks.len(), 1);
+        let block_text = &assembled.system_blocks[0].text;
+        assert!(block_text.starts_with("[tracked_files]:"));
+        assert!(block_text.contains("### [alpha.rs]"));
+        assert!(block_text.contains("fn alpha() {}"));
+        assert!(block_text.contains("### [beta.rs]"));
+        assert!(block_text.contains("fn beta() {}"));
+        assert!(block_text.contains("### [gamma.rs]"));
+        assert!(block_text.contains("fn gamma() {}"));
+    }
+
+    #[test]
+    fn test_assemble_hashmap_empty_region_skipped() {
+        let mut window = ContextWindow::new(100_000);
+        let region = Region::new(
+            "empty_map".to_string(),
+            RegionKind::HashMap { max_entries: None },
+            10_000,
+        );
+        // No entries added
+        window.add_region(region);
+
+        let assembled = window.assemble();
+
+        assert!(
+            assembled.system_blocks.is_empty(),
+            "Empty HashMap region should not produce a system block"
+        );
+    }
+
+    #[test]
+    fn test_assemble_mixed_pinned_hashmap_sliding_window() {
+        use leviath_core::CacheHint;
+
+        let mut window = ContextWindow::new(100_000);
+
+        // Pinned region
+        let mut pinned = Region::new("system".to_string(), RegionKind::Pinned, 10_000);
+        pinned
+            .add_entry("You are a helpful assistant.".to_string(), 20)
+            .unwrap();
+        window.add_region(pinned);
+
+        // HashMap region
+        let mut hashmap = Region::new(
+            "files".to_string(),
+            RegionKind::HashMap { max_entries: None },
+            10_000,
+        );
+        hashmap
+            .upsert_by_key("main.rs", "fn main() {}".to_string(), 10)
+            .unwrap();
+        window.add_region(hashmap);
+
+        // SlidingWindow region with user messages
+        let mut sliding = Region::new(
+            "conv".to_string(),
+            RegionKind::SlidingWindow {
+                max_items: 100,
+                eviction_strategy: EvictionStrategy::PerItem,
+            },
+            50_000,
+        );
+        sliding
+            .add_typed_entry(
+                "Hello there".to_string(),
+                10,
+                leviath_core::EntryKind::UserMessage,
+            )
+            .unwrap();
+        window.add_region(sliding);
+
+        let assembled = window.assemble();
+
+        // Pinned and HashMap should produce system blocks (2 total)
+        assert_eq!(assembled.system_blocks.len(), 2);
+
+        // System blocks sorted by cache hint: Pinned (Always) first, HashMap (UntilChanged) second
+        assert_eq!(
+            assembled.system_blocks[0].cache_hint,
+            CacheHint::Always,
+            "Pinned region should sort first (Always cache hint)"
+        );
+        assert!(
+            assembled.system_blocks[0]
+                .text
+                .contains("You are a helpful assistant."),
+            "First system block should be the pinned content"
+        );
+
+        assert_eq!(
+            assembled.system_blocks[1].cache_hint,
+            CacheHint::UntilChanged,
+            "HashMap region should sort second (UntilChanged cache hint)"
+        );
+        assert!(
+            assembled.system_blocks[1].text.starts_with("[files]:"),
+            "HashMap system block should have [region_name]: prefix"
+        );
+        assert!(
+            assembled.system_blocks[1].text.contains("### [main.rs]"),
+            "HashMap system block should contain ### [key] header"
+        );
+
+        // SlidingWindow should produce messages, not system blocks
+        assert!(
+            assembled
+                .messages
+                .iter()
+                .any(|m| m.role == "user" && m.content.as_text().contains("Hello there")),
+            "SlidingWindow entries should appear as messages"
+        );
+    }
 }

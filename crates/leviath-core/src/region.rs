@@ -2477,4 +2477,288 @@ mod tests {
         let back: RegionEntry = serde_json::from_str(&json).unwrap();
         assert_eq!(back.key.as_deref(), Some("mykey"));
     }
+
+    // ─── Additional HashMap region tests ──────────────────────────────────
+
+    #[test]
+    fn test_hashmap_region_creation_and_basic_properties() {
+        let region = Region::new(
+            "lookup".to_string(),
+            RegionKind::HashMap {
+                max_entries: Some(5),
+            },
+            2000,
+        );
+        assert_eq!(region.name, "lookup");
+        assert_eq!(
+            region.kind,
+            RegionKind::HashMap {
+                max_entries: Some(5)
+            }
+        );
+        assert_eq!(region.max_tokens, 2000);
+        assert_eq!(region.current_tokens, 0);
+        assert_eq!(region.entry_count(), 0);
+        assert!(region.content.is_empty());
+    }
+
+    #[test]
+    fn test_hashmap_upsert_insert_new_entry() {
+        let mut region = Region::new(
+            "store".to_string(),
+            RegionKind::HashMap {
+                max_entries: Some(5),
+            },
+            5000,
+        );
+        region
+            .upsert_by_key("config.toml", "[package]\nname = \"foo\"".to_string(), 12)
+            .unwrap();
+
+        assert_eq!(region.entry_count(), 1);
+        assert_eq!(region.current_tokens, 12);
+
+        let entry = region.get_by_key("config.toml").unwrap();
+        assert_eq!(entry.content, "[package]\nname = \"foo\"");
+        assert_eq!(entry.tokens, 12);
+        assert_eq!(entry.key.as_deref(), Some("config.toml"));
+    }
+
+    #[test]
+    fn test_hashmap_upsert_update_existing_entry() {
+        let mut region = Region::new(
+            "store".to_string(),
+            RegionKind::HashMap { max_entries: None },
+            5000,
+        );
+        region
+            .upsert_by_key("readme.md", "# Old".to_string(), 20)
+            .unwrap();
+        assert_eq!(region.current_tokens, 20);
+
+        region
+            .upsert_by_key("readme.md", "# New and improved".to_string(), 35)
+            .unwrap();
+        assert_eq!(region.entry_count(), 1);
+        assert_eq!(region.current_tokens, 35);
+
+        let entry = region.get_by_key("readme.md").unwrap();
+        assert_eq!(entry.content, "# New and improved");
+        assert_eq!(entry.tokens, 35);
+    }
+
+    #[test]
+    fn test_hashmap_upsert_lru_eviction_on_max_tokens() {
+        let mut region = Region::new(
+            "files".to_string(),
+            RegionKind::HashMap { max_entries: None },
+            100, // small token budget
+        );
+
+        // Insert entries that together fill the budget
+        region
+            .upsert_by_key("first.rs", "first content".to_string(), 40)
+            .unwrap();
+        region.content[0].timestamp -= 200; // oldest
+
+        region
+            .upsert_by_key("second.rs", "second content".to_string(), 40)
+            .unwrap();
+        region.content[1].timestamp -= 100; // middle age
+
+        region
+            .upsert_by_key("third.rs", "third content".to_string(), 20)
+            .unwrap();
+        // total = 100, at budget
+
+        // Inserting another entry that exceeds budget should evict oldest
+        region
+            .upsert_by_key("fourth.rs", "fourth content".to_string(), 30)
+            .unwrap();
+
+        // first.rs (oldest timestamp) should have been evicted
+        assert!(region.get_by_key("first.rs").is_none());
+        assert!(region.get_by_key("fourth.rs").is_some());
+        // total tokens should be within budget
+        assert!(region.current_tokens <= 100);
+    }
+
+    #[test]
+    fn test_hashmap_upsert_max_entries_enforcement() {
+        let mut region = Region::new(
+            "cache".to_string(),
+            RegionKind::HashMap {
+                max_entries: Some(2),
+            },
+            50000,
+        );
+
+        region
+            .upsert_by_key("alpha", "aaa".to_string(), 10)
+            .unwrap();
+        region.content[0].timestamp -= 200; // make oldest
+
+        region.upsert_by_key("beta", "bbb".to_string(), 10).unwrap();
+        region.content[1].timestamp -= 100;
+
+        region
+            .upsert_by_key("gamma", "ccc".to_string(), 10)
+            .unwrap();
+
+        // Only 2 entries should remain, oldest evicted
+        assert_eq!(region.entry_count(), 2);
+        assert!(region.get_by_key("alpha").is_none());
+        assert!(region.get_by_key("beta").is_some());
+        assert!(region.get_by_key("gamma").is_some());
+    }
+
+    #[test]
+    fn test_hashmap_get_by_key_found_and_not_found() {
+        let mut region = Region::new(
+            "data".to_string(),
+            RegionKind::HashMap { max_entries: None },
+            5000,
+        );
+        region
+            .upsert_by_key("exists", "hello".to_string(), 5)
+            .unwrap();
+
+        // Found
+        let found = region.get_by_key("exists");
+        assert!(found.is_some());
+        assert_eq!(found.unwrap().content, "hello");
+
+        // Not found
+        let missing = region.get_by_key("does_not_exist");
+        assert!(missing.is_none());
+    }
+
+    #[test]
+    fn test_hashmap_remove_by_key_exists() {
+        let mut region = Region::new(
+            "data".to_string(),
+            RegionKind::HashMap { max_entries: None },
+            5000,
+        );
+        region
+            .upsert_by_key("target", "remove me".to_string(), 25)
+            .unwrap();
+        assert_eq!(region.current_tokens, 25);
+
+        let removed = region.remove_by_key("target");
+        assert!(removed);
+        assert_eq!(region.entry_count(), 0);
+        assert_eq!(region.current_tokens, 0);
+        assert!(region.get_by_key("target").is_none());
+    }
+
+    #[test]
+    fn test_hashmap_remove_by_key_does_not_exist() {
+        let mut region = Region::new(
+            "data".to_string(),
+            RegionKind::HashMap { max_entries: None },
+            5000,
+        );
+        let removed = region.remove_by_key("ghost");
+        assert!(!removed);
+    }
+
+    #[test]
+    fn test_hashmap_keys_empty_populated_after_removal() {
+        let mut region = Region::new(
+            "data".to_string(),
+            RegionKind::HashMap { max_entries: None },
+            5000,
+        );
+
+        // Empty
+        assert!(region.keys().is_empty());
+
+        // Populated
+        region.upsert_by_key("one", "1".to_string(), 5).unwrap();
+        region.upsert_by_key("two", "2".to_string(), 5).unwrap();
+        region.upsert_by_key("three", "3".to_string(), 5).unwrap();
+
+        let keys = region.keys();
+        assert_eq!(keys.len(), 3);
+        assert!(keys.contains(&"one"));
+        assert!(keys.contains(&"two"));
+        assert!(keys.contains(&"three"));
+
+        // After removal
+        region.remove_by_key("two");
+        let keys = region.keys();
+        assert_eq!(keys.len(), 2);
+        assert!(keys.contains(&"one"));
+        assert!(!keys.contains(&"two"));
+        assert!(keys.contains(&"three"));
+    }
+
+    #[test]
+    fn test_region_entry_serialization_with_key_field() {
+        // Entry with key
+        let entry_with_key = RegionEntry {
+            content: "some data".to_string(),
+            tokens: 10,
+            timestamp: 1234567890,
+            metadata: None,
+            kind: EntryKind::default(),
+            key: Some("mykey".to_string()),
+        };
+        let json = serde_json::to_string(&entry_with_key).unwrap();
+        let deserialized: RegionEntry = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized.key.as_deref(), Some("mykey"));
+        assert_eq!(deserialized.content, "some data");
+        assert_eq!(deserialized.tokens, 10);
+
+        // Entry without key
+        let entry_no_key = RegionEntry {
+            content: "no key data".to_string(),
+            tokens: 7,
+            timestamp: 1234567890,
+            metadata: None,
+            kind: EntryKind::default(),
+            key: None,
+        };
+        let json = serde_json::to_string(&entry_no_key).unwrap();
+        assert!(!json.contains("\"key\""));
+        let deserialized: RegionEntry = serde_json::from_str(&json).unwrap();
+        assert!(deserialized.key.is_none());
+        assert_eq!(deserialized.content, "no key data");
+    }
+
+    #[test]
+    fn test_hashmap_partial_eq() {
+        let a = RegionKind::HashMap {
+            max_entries: Some(5),
+        };
+        let b = RegionKind::HashMap {
+            max_entries: Some(5),
+        };
+        let c = RegionKind::HashMap {
+            max_entries: Some(10),
+        };
+        let d = RegionKind::HashMap { max_entries: None };
+
+        assert_eq!(a, b);
+        assert_ne!(a, c);
+        assert_ne!(a, d);
+        assert_ne!(c, d);
+        assert_ne!(a, RegionKind::Pinned);
+        assert_ne!(a, RegionKind::Temporary);
+    }
+
+    #[test]
+    fn test_hashmap_cache_hint_returns_until_changed() {
+        let kind = RegionKind::HashMap { max_entries: None };
+        assert_eq!(kind.cache_hint(), crate::cache::CacheHint::UntilChanged);
+
+        let kind_with_max = RegionKind::HashMap {
+            max_entries: Some(10),
+        };
+        assert_eq!(
+            kind_with_max.cache_hint(),
+            crate::cache::CacheHint::UntilChanged
+        );
+    }
 }
