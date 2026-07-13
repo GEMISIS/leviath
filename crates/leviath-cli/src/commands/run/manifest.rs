@@ -2368,4 +2368,169 @@ region = "myfiles"
         assert!(ft.track_writes);
         assert!(ft.max_file_tokens.is_none());
     }
+
+    // ─── tool_routing ────────────────────────────────────────────────────────
+
+    #[test]
+    fn parse_stage_tool_routing_all_fields() {
+        let toml = r#"
+[agent]
+name = "routing-test"
+
+[stages.main]
+mode = "autonomous"
+
+[stages.main.tool_routing]
+default_region = "my_results"
+persist = true
+max_result_tokens = 4096
+
+[stages.main.tool_routing.overrides]
+bash = "bash_output"
+read_file = "file_contents"
+"#;
+        let bp = parse_manifest(toml).unwrap();
+        let main = bp.find_stage("main").unwrap();
+        let routing = main
+            .tool_result_routing
+            .as_ref()
+            .expect("tool_result_routing should be Some");
+        assert_eq!(routing.default_region, "my_results");
+        assert!(routing.persist);
+        assert_eq!(routing.max_result_tokens, Some(4096));
+        assert_eq!(routing.tool_overrides.len(), 2);
+        assert_eq!(routing.tool_overrides.get("bash").unwrap(), "bash_output");
+        assert_eq!(
+            routing.tool_overrides.get("read_file").unwrap(),
+            "file_contents"
+        );
+    }
+
+    #[test]
+    fn parse_stage_tool_routing_only_default_region() {
+        let toml = r#"
+[agent]
+name = "routing-partial"
+
+[stages.main]
+mode = "autonomous"
+
+[stages.main.tool_routing]
+default_region = "custom_region"
+"#;
+        let bp = parse_manifest(toml).unwrap();
+        let main = bp.find_stage("main").unwrap();
+        let routing = main
+            .tool_result_routing
+            .as_ref()
+            .expect("tool_result_routing should be Some");
+        assert_eq!(routing.default_region, "custom_region");
+        // defaults from ToolResultRouting::default()
+        assert!(routing.persist);
+        assert!(routing.max_result_tokens.is_none());
+        assert!(routing.tool_overrides.is_empty());
+    }
+
+    #[test]
+    fn parse_stage_without_tool_routing() {
+        let toml = r#"
+[agent]
+name = "no-routing"
+
+[stages.main]
+mode = "autonomous"
+"#;
+        let bp = parse_manifest(toml).unwrap();
+        let main = bp.find_stage("main").unwrap();
+        assert!(main.tool_result_routing.is_none());
+    }
+
+    #[test]
+    fn parse_stage_tool_routing_with_overrides_only() {
+        let toml = r#"
+[agent]
+name = "overrides-only"
+
+[stages.main]
+mode = "autonomous"
+
+[stages.main.tool_routing]
+
+[stages.main.tool_routing.overrides]
+search = "search_results"
+write_file = "written_files"
+compile = "build_output"
+"#;
+        let bp = parse_manifest(toml).unwrap();
+        let main = bp.find_stage("main").unwrap();
+        let routing = main
+            .tool_result_routing
+            .as_ref()
+            .expect("tool_result_routing should be Some");
+        // default_region keeps its default since we didn't set it
+        assert_eq!(routing.default_region, "tool_results");
+        assert_eq!(routing.tool_overrides.len(), 3);
+        assert_eq!(
+            routing.tool_overrides.get("search").unwrap(),
+            "search_results"
+        );
+        assert_eq!(
+            routing.tool_overrides.get("write_file").unwrap(),
+            "written_files"
+        );
+        assert_eq!(
+            routing.tool_overrides.get("compile").unwrap(),
+            "build_output"
+        );
+    }
+
+    #[test]
+    fn parse_stage_tool_routing_persist_false() {
+        let toml = r#"
+[agent]
+name = "persist-false"
+
+[stages.main]
+mode = "autonomous"
+
+[stages.main.tool_routing]
+persist = false
+"#;
+        let bp = parse_manifest(toml).unwrap();
+        let main = bp.find_stage("main").unwrap();
+        let routing = main
+            .tool_result_routing
+            .as_ref()
+            .expect("tool_result_routing should be Some");
+        assert!(!routing.persist);
+        // other fields keep defaults
+        assert_eq!(routing.default_region, "tool_results");
+        assert!(routing.max_result_tokens.is_none());
+        assert!(routing.tool_overrides.is_empty());
+    }
+
+    #[test]
+    fn parse_stage_tool_routing_max_result_tokens() {
+        let toml = r#"
+[agent]
+name = "max-tokens"
+
+[stages.main]
+mode = "autonomous"
+
+[stages.main.tool_routing]
+max_result_tokens = 8192
+"#;
+        let bp = parse_manifest(toml).unwrap();
+        let main = bp.find_stage("main").unwrap();
+        let routing = main
+            .tool_result_routing
+            .as_ref()
+            .expect("tool_result_routing should be Some");
+        assert_eq!(routing.max_result_tokens, Some(8192));
+        // other fields keep defaults
+        assert_eq!(routing.default_region, "tool_results");
+        assert!(routing.persist);
+        assert!(routing.tool_overrides.is_empty());
+    }
 }

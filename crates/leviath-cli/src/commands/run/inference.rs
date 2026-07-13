@@ -771,6 +771,200 @@ mod tests {
         assert_eq!(response.finish_reason, FinishReason::Complete);
     }
 
+    /// A provider that captures the tools field from the inference request,
+    /// allowing tests to verify tool filtering logic.
+    struct CapturingProvider {
+        captured_tools: std::sync::Mutex<Vec<leviath_providers::Tool>>,
+    }
+
+    impl CapturingProvider {
+        fn new() -> Self {
+            Self {
+                captured_tools: std::sync::Mutex::new(Vec::new()),
+            }
+        }
+
+        fn captured_tools(&self) -> Vec<leviath_providers::Tool> {
+            self.captured_tools.lock().unwrap().clone()
+        }
+    }
+
+    #[async_trait]
+    impl Provider for CapturingProvider {
+        async fn infer(
+            &self,
+            request: InferenceRequest,
+        ) -> Result<InferenceResponse, ProviderError> {
+            *self.captured_tools.lock().unwrap() = request.tools;
+            Ok(InferenceResponse {
+                content: "captured".to_string(),
+                tool_calls: vec![],
+                tokens_used: TokenUsage {
+                    prompt_tokens: 1,
+                    completion_tokens: 1,
+                    total_tokens: 2,
+                    cached_tokens: 0,
+                    cache_write_tokens: 0,
+                },
+                finish_reason: FinishReason::Complete,
+            })
+        }
+
+        fn count_tokens(&self, text: &str, _model: &str) -> usize {
+            text.len() / 4
+        }
+
+        fn max_context_tokens(&self, _model: &str) -> usize {
+            100_000
+        }
+
+        fn name(&self) -> &str {
+            "capturing"
+        }
+
+        fn capabilities(&self, _model: &str) -> ModelCapabilities {
+            ModelCapabilities::default()
+        }
+
+        async fn list_models(&self) -> Result<Vec<ModelInfo>, ProviderError> {
+            Ok(vec![])
+        }
+    }
+
+    fn make_test_tools() -> Vec<leviath_providers::Tool> {
+        vec![
+            leviath_providers::Tool {
+                name: "read_file".to_string(),
+                description: "Read a file".to_string(),
+                parameters: serde_json::json!({"type": "object"}),
+            },
+            leviath_providers::Tool {
+                name: "write_file".to_string(),
+                description: "Write a file".to_string(),
+                parameters: serde_json::json!({"type": "object"}),
+            },
+            leviath_providers::Tool {
+                name: "bash".to_string(),
+                description: "Run a command".to_string(),
+                parameters: serde_json::json!({"type": "object"}),
+            },
+        ]
+    }
+
+    #[tokio::test]
+    async fn stream_inference_nonempty_tools_no_filter_passes_all() {
+        let bp = make_blueprint();
+        let provider = Arc::new(CapturingProvider::new());
+        let (mut engine, _pool, entity) =
+            make_engine_and_entity_with_provider(&bp, "mock", provider.clone());
+        let mut io = MockIO::new();
+        let tools = make_test_tools();
+
+        let response = stream_inference(
+            &mut engine,
+            entity,
+            "mock",
+            "test-model",
+            None,
+            &tools,
+            &mut io,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(response.content, "captured");
+        let captured = provider.captured_tools();
+        assert_eq!(captured.len(), 3);
+        let names: Vec<&str> = captured.iter().map(|t| t.name.as_str()).collect();
+        assert!(names.contains(&"read_file"));
+        assert!(names.contains(&"write_file"));
+        assert!(names.contains(&"bash"));
+    }
+
+    #[tokio::test]
+    async fn stream_inference_nonempty_tools_with_filter_passes_only_matching() {
+        let bp = make_blueprint();
+        let provider = Arc::new(CapturingProvider::new());
+        let (mut engine, _pool, entity) =
+            make_engine_and_entity_with_provider(&bp, "mock", provider.clone());
+        let mut io = MockIO::new();
+        let tools = make_test_tools();
+        let filter = vec!["read_file".to_string(), "bash".to_string()];
+
+        let response = stream_inference(
+            &mut engine,
+            entity,
+            "mock",
+            "test-model",
+            Some(&filter),
+            &tools,
+            &mut io,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(response.content, "captured");
+        let captured = provider.captured_tools();
+        assert_eq!(captured.len(), 2);
+        let names: Vec<&str> = captured.iter().map(|t| t.name.as_str()).collect();
+        assert!(names.contains(&"read_file"));
+        assert!(names.contains(&"bash"));
+        assert!(!names.contains(&"write_file"));
+    }
+
+    #[tokio::test]
+    async fn stream_inference_nonempty_tools_with_empty_filter_passes_none() {
+        let bp = make_blueprint();
+        let provider = Arc::new(CapturingProvider::new());
+        let (mut engine, _pool, entity) =
+            make_engine_and_entity_with_provider(&bp, "mock", provider.clone());
+        let mut io = MockIO::new();
+        let tools = make_test_tools();
+        let filter: Vec<String> = vec![];
+
+        let response = stream_inference(
+            &mut engine,
+            entity,
+            "mock",
+            "test-model",
+            Some(&filter),
+            &tools,
+            &mut io,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(response.content, "captured");
+        let captured = provider.captured_tools();
+        assert!(captured.is_empty());
+    }
+
+    #[tokio::test]
+    async fn stream_inference_empty_tools_with_filter_stays_empty() {
+        let bp = make_blueprint();
+        let provider = Arc::new(CapturingProvider::new());
+        let (mut engine, _pool, entity) =
+            make_engine_and_entity_with_provider(&bp, "mock", provider.clone());
+        let mut io = MockIO::new();
+        let filter = vec!["read_file".to_string()];
+
+        let response = stream_inference(
+            &mut engine,
+            entity,
+            "mock",
+            "test-model",
+            Some(&filter),
+            &[],
+            &mut io,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(response.content, "captured");
+        let captured = provider.captured_tools();
+        assert!(captured.is_empty());
+    }
+
     /// The mock providers above only exist to drive `stream_inference`
     /// through specific code paths via `infer`/`infer_stream`; the engine
     /// never calls their other trivial `Provider` trait methods along those

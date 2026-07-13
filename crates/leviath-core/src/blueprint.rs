@@ -1594,4 +1594,69 @@ mod tests {
         assert_eq!(ft.region, "files");
         assert_eq!(ft.max_file_tokens, Some(3000));
     }
+
+    #[test]
+    fn test_tool_result_routing_default() {
+        let routing = ToolResultRouting::default();
+        assert_eq!(routing.default_region, "tool_results");
+        assert!(routing.persist);
+        assert!(routing.tool_overrides.is_empty());
+        assert!(routing.max_result_tokens.is_none());
+    }
+
+    #[test]
+    fn test_stage_new_has_no_tool_result_routing() {
+        let stage = Stage::new("plan".to_string(), make_model());
+        assert!(stage.tool_result_routing.is_none());
+    }
+
+    #[test]
+    fn test_tool_result_routing_serde_roundtrip() {
+        let mut routing = ToolResultRouting {
+            default_region: "custom_region".to_string(),
+            persist: false,
+            max_result_tokens: Some(4096),
+            ..Default::default()
+        };
+        routing
+            .tool_overrides
+            .insert("read_file".to_string(), "file_reads".to_string());
+
+        let json = serde_json::to_string(&routing).unwrap();
+        let back: ToolResultRouting = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(back.default_region, "custom_region");
+        assert!(!back.persist);
+        assert_eq!(back.max_result_tokens, Some(4096));
+        assert_eq!(
+            back.tool_overrides.get("read_file").map(String::as_str),
+            Some("file_reads")
+        );
+    }
+
+    #[test]
+    fn test_stage_with_tool_result_routing_serde_roundtrip() {
+        let stages = vec![{
+            let mut s = Stage::new("plan".to_string(), make_model());
+            s.tool_result_routing = Some(ToolResultRouting {
+                default_region: "results".to_string(),
+                tool_overrides: HashMap::new(),
+                persist: true,
+                max_result_tokens: Some(2048),
+            });
+            s
+        }];
+        let bp = Blueprint::new("t".into(), "d".into(), stages, make_layout());
+        let json = serde_json::to_string(&bp).unwrap();
+        let back: Blueprint = serde_json::from_str(&json).unwrap();
+
+        let routing = back.stages[0]
+            .tool_result_routing
+            .as_ref()
+            .expect("tool_result_routing should be Some");
+        assert_eq!(routing.default_region, "results");
+        assert!(routing.persist);
+        assert_eq!(routing.max_result_tokens, Some(2048));
+        assert!(routing.tool_overrides.is_empty());
+    }
 }

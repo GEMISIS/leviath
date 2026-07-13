@@ -2671,4 +2671,195 @@ mod tests {
         // (build_stage_taint_gate → configure_taint → enable_entity_taint_tracking).
         assert_eq!(cb.completed_at, Some(0));
     }
+
+    // ─── Tool result routing tests ─────────────────────────────────────────
+
+    #[tokio::test]
+    async fn tool_result_routing_inserted_when_stage_has_some() {
+        use leviath_core::blueprint::ToolResultRouting;
+
+        let mut stage = make_stage("main");
+        stage.tool_result_routing = Some(ToolResultRouting {
+            default_region: "my_results".to_string(),
+            tool_overrides: HashMap::new(),
+            persist: false,
+            max_result_tokens: Some(1024),
+        });
+        let bp = make_blueprint(vec![stage]);
+        let (mut engine, mut pool, entity) = make_engine_and_entity(&bp);
+        let tool_registry = make_tool_registry().await;
+        let mut cb = MockCallbacks::new();
+
+        let mut ctx = StageContext {
+            blueprint: &bp,
+            engine: &mut engine,
+            entity,
+            pool: &mut pool,
+            tool_registry: &tool_registry,
+            current_stage_name: Arc::new(Mutex::new(String::new())),
+            current_stage_perms: Arc::new(Mutex::new(HashMap::new())),
+            current_stage_idx: Arc::new(Mutex::new(0)),
+            model_override: None,
+            user_default_model: None,
+            compaction_ref: None,
+        };
+
+        run_stage_loop(
+            &mut ctx,
+            &mut cb,
+            "agent-1",
+            &mut MockIO::new(),
+            &mut noop_exec,
+        )
+        .await
+        .unwrap();
+
+        // The entity should have the ToolResultRoutingComponent with the
+        // configuration we specified on the stage.
+        let comp = ctx
+            .engine
+            .world_mut()
+            .get::<leviath_runtime::ToolResultRoutingComponent>(ctx.entity)
+            .expect("ToolResultRoutingComponent should be present");
+        assert_eq!(comp.routing.default_region, "my_results");
+        assert!(!comp.routing.persist);
+        assert_eq!(comp.routing.max_result_tokens, Some(1024));
+    }
+
+    #[tokio::test]
+    async fn tool_result_routing_removed_when_stage_has_none() {
+        use leviath_core::blueprint::ToolResultRouting;
+
+        let stage = make_stage("main"); // tool_result_routing defaults to None
+        let bp = make_blueprint(vec![stage]);
+        let (mut engine, mut pool, entity) = make_engine_and_entity(&bp);
+        let tool_registry = make_tool_registry().await;
+        let mut cb = MockCallbacks::new();
+
+        // Pre-insert the component so we can verify it gets removed.
+        engine
+            .world_mut()
+            .entity_mut(entity)
+            .insert(leviath_runtime::ToolResultRoutingComponent {
+                routing: ToolResultRouting::default(),
+            });
+
+        // Sanity: confirm it's there before the loop.
+        assert!(engine
+            .world_mut()
+            .get::<leviath_runtime::ToolResultRoutingComponent>(entity)
+            .is_some());
+
+        let mut ctx = StageContext {
+            blueprint: &bp,
+            engine: &mut engine,
+            entity,
+            pool: &mut pool,
+            tool_registry: &tool_registry,
+            current_stage_name: Arc::new(Mutex::new(String::new())),
+            current_stage_perms: Arc::new(Mutex::new(HashMap::new())),
+            current_stage_idx: Arc::new(Mutex::new(0)),
+            model_override: None,
+            user_default_model: None,
+            compaction_ref: None,
+        };
+
+        run_stage_loop(
+            &mut ctx,
+            &mut cb,
+            "agent-1",
+            &mut MockIO::new(),
+            &mut noop_exec,
+        )
+        .await
+        .unwrap();
+
+        // After running a stage with tool_result_routing = None, the
+        // component must have been removed.
+        assert!(ctx
+            .engine
+            .world_mut()
+            .get::<leviath_runtime::ToolResultRoutingComponent>(ctx.entity)
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn tool_result_routing_updated_across_stage_transitions() {
+        use leviath_core::blueprint::ToolResultRouting;
+
+        // Stage 1: has routing config
+        let mut stage_a = make_stage("with_routing");
+        stage_a.tool_result_routing = Some(ToolResultRouting {
+            default_region: "stage_a_results".to_string(),
+            tool_overrides: HashMap::new(),
+            persist: true,
+            max_result_tokens: None,
+        });
+
+        // Stage 2: no routing config (should remove the component)
+        let stage_b = make_stage("without_routing");
+
+        // Stage 3: different routing config (should re-insert)
+        let mut stage_c = make_stage("with_different_routing");
+        stage_c.tool_result_routing = Some(ToolResultRouting {
+            default_region: "stage_c_results".to_string(),
+            tool_overrides: {
+                let mut m = HashMap::new();
+                m.insert("special_tool".to_string(), "special_region".to_string());
+                m
+            },
+            persist: false,
+            max_result_tokens: Some(512),
+        });
+
+        let bp = make_blueprint(vec![stage_a, stage_b, stage_c]);
+        let (mut engine, mut pool, entity) = make_engine_and_entity(&bp);
+        let tool_registry = make_tool_registry().await;
+        let mut cb = MockCallbacks::new();
+
+        let mut ctx = StageContext {
+            blueprint: &bp,
+            engine: &mut engine,
+            entity,
+            pool: &mut pool,
+            tool_registry: &tool_registry,
+            current_stage_name: Arc::new(Mutex::new(String::new())),
+            current_stage_perms: Arc::new(Mutex::new(HashMap::new())),
+            current_stage_idx: Arc::new(Mutex::new(0)),
+            model_override: None,
+            user_default_model: None,
+            compaction_ref: None,
+        };
+
+        run_stage_loop(
+            &mut ctx,
+            &mut cb,
+            "agent-1",
+            &mut MockIO::new(),
+            &mut noop_exec,
+        )
+        .await
+        .unwrap();
+
+        // All 3 stages should have executed.
+        assert_eq!(cb.stage_entries.len(), 3);
+
+        // After the final stage (stage_c with routing), the entity should
+        // have the component with stage_c's configuration.
+        let comp = ctx
+            .engine
+            .world_mut()
+            .get::<leviath_runtime::ToolResultRoutingComponent>(ctx.entity)
+            .expect("ToolResultRoutingComponent should be present after stage_c");
+        assert_eq!(comp.routing.default_region, "stage_c_results");
+        assert!(!comp.routing.persist);
+        assert_eq!(comp.routing.max_result_tokens, Some(512));
+        assert_eq!(
+            comp.routing
+                .tool_overrides
+                .get("special_tool")
+                .map(|s| s.as_str()),
+            Some("special_region")
+        );
+    }
 }

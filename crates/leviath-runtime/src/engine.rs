@@ -5342,4 +5342,481 @@ mod tests {
         assert_eq!(dirs[0], "sync:has_cw=true");
         assert_eq!(dirs[1], "sync:has_cw=true");
     }
+
+    // ── Tool result routing tests ─────────────────────────────────────────
+
+    /// Helper: build a single-tool-call response followed by a final response.
+    fn tool_call_then_done(tool_id: &str, tool_name: &str) -> Vec<InferenceResponse> {
+        vec![
+            InferenceResponse {
+                content: format!("calling {}", tool_name),
+                tool_calls: vec![leviath_providers::ToolCall {
+                    id: tool_id.to_string(),
+                    name: tool_name.to_string(),
+                    arguments: serde_json::json!({}),
+                }],
+                tokens_used: leviath_providers::TokenUsage {
+                    prompt_tokens: 10,
+                    completion_tokens: 5,
+                    total_tokens: 15,
+                    cached_tokens: 0,
+                    cache_write_tokens: 0,
+                },
+                finish_reason: leviath_providers::FinishReason::ToolCall,
+            },
+            default_response(),
+        ]
+    }
+
+    /// Helper: create engine with mock provider from responses.
+    fn engine_with_mock(responses: Vec<InferenceResponse>) -> AgentEngine {
+        let mut registry = ProviderRegistry::new();
+        registry.register(
+            "mock".to_string(),
+            Arc::new(MockProvider::with_responses("mock", responses)),
+        );
+        AgentEngine::with_providers(registry)
+    }
+
+    /// Helper: spawn an entity with the given context window and optional routing component.
+    fn spawn_routing_entity(
+        engine: &mut AgentEngine,
+        agent_id: &str,
+        window: ContextWindow,
+        routing: Option<leviath_core::ToolResultRouting>,
+    ) -> Entity {
+        let mut builder = engine.world_mut().spawn((
+            AgentState {
+                agent_id: agent_id.to_string(),
+                current_stage: "main".to_string(),
+                iteration: 0,
+                status: AgentStatus::Active,
+                spawned_children_ids: Vec::new(),
+                pending_wait: None,
+                accepts_messages: true,
+            },
+            MessageInbox::new(),
+            CancellationToken::new(),
+            window,
+        ));
+        if let Some(r) = routing {
+            builder.insert(crate::ToolResultRoutingComponent { routing: r });
+        }
+        builder.id()
+    }
+
+    /// Helper: run the inference loop with a simple tool executor that returns
+    /// the given result for the given tool call id.
+    async fn run_with_result(
+        engine: &mut AgentEngine,
+        entity: Entity,
+        tool_call_id: &str,
+        result_text: &str,
+    ) -> Result<InferenceResponse, ProviderError> {
+        let id = tool_call_id.to_string();
+        let text = result_text.to_string();
+        engine
+            .run_inference_loop_filtered_dyn_with_sync(
+                entity,
+                "mock",
+                "test-model",
+                Vec::new(),
+                10,
+                None,
+                None,
+                &mut |_tool_calls| {
+                    let id = id.clone();
+                    let text = text.clone();
+                    Box::pin(async move { vec![(id, text)] })
+                },
+                None,
+                None,
+            )
+            .await
+    }
+
+    /// Helper: create a basic context window with a "conversation" region.
+    fn basic_window() -> ContextWindow {
+        let mut window = ContextWindow::new(10000);
+        window.add_region(leviath_core::Region::new(
+            "conversation".to_string(),
+            leviath_core::RegionKind::SlidingWindow {
+                max_items: 50,
+                eviction_strategy: leviath_core::EvictionStrategy::PerItem,
+            },
+            8000,
+        ));
+        let _ = window.add_to_region("conversation", "User: hi".to_string(), 2);
+        window
+    }
+
+    #[tokio::test]
+    async fn test_tool_result_routes_to_conversation_when_no_routing_component() {
+        with_tracing_async(async {
+            let responses = tool_call_then_done("call_1", "bash");
+            let mut engine = engine_with_mock(responses);
+
+            let window = basic_window();
+            let entity = spawn_routing_entity(&mut engine, "no-routing", window, None);
+
+            let result = run_with_result(&mut engine, entity, "call_1", "hello world").await;
+            assert!(result.is_ok());
+
+            let window = engine.world().get::<ContextWindow>(entity).unwrap();
+            let conv = window.get_region("conversation").unwrap();
+            // Should contain: initial user message, assistant turn, tool result
+            let tool_results: Vec<_> = conv
+                .content
+                .iter()
+                .filter(|e| matches!(e.kind, leviath_core::EntryKind::ToolResult { .. }))
+                .collect();
+            assert_eq!(
+                tool_results.len(),
+                1,
+                "tool result should be in conversation region"
+            );
+            assert!(tool_results[0].content.contains("hello world"));
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn test_tool_result_routes_to_default_region_from_routing_component() {
+        with_tracing_async(async {
+            let responses = tool_call_then_done("call_1", "bash");
+            let mut engine = engine_with_mock(responses);
+
+            let mut window = basic_window();
+            window.add_region(leviath_core::Region::new(
+                "tool_output".to_string(),
+                leviath_core::RegionKind::SlidingWindow {
+                    max_items: 50,
+                    eviction_strategy: leviath_core::EvictionStrategy::PerItem,
+                },
+                4000,
+            ));
+
+            let routing = leviath_core::ToolResultRouting {
+                default_region: "tool_output".to_string(),
+                tool_overrides: HashMap::new(),
+                persist: true,
+                max_result_tokens: None,
+            };
+            let entity = spawn_routing_entity(&mut engine, "default-region", window, Some(routing));
+
+            let result = run_with_result(&mut engine, entity, "call_1", "routed result").await;
+            assert!(result.is_ok());
+
+            let window = engine.world().get::<ContextWindow>(entity).unwrap();
+
+            // Tool result should be in tool_output, NOT in conversation
+            let tool_output = window.get_region("tool_output").unwrap();
+            let results_in_output: Vec<_> = tool_output
+                .content
+                .iter()
+                .filter(|e| matches!(e.kind, leviath_core::EntryKind::ToolResult { .. }))
+                .collect();
+            assert_eq!(
+                results_in_output.len(),
+                1,
+                "tool result should be in tool_output region"
+            );
+            assert!(results_in_output[0].content.contains("routed result"));
+
+            // Conversation should have the assistant turn but NOT the tool result
+            let conv = window.get_region("conversation").unwrap();
+            let results_in_conv: Vec<_> = conv
+                .content
+                .iter()
+                .filter(|e| matches!(e.kind, leviath_core::EntryKind::ToolResult { .. }))
+                .collect();
+            assert_eq!(
+                results_in_conv.len(),
+                0,
+                "tool result should NOT be in conversation"
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn test_tool_result_per_tool_override_routes_to_different_region() {
+        with_tracing_async(async {
+            // Two tool calls: "bash" should go to "bash_output", "read_file" to default "tool_output"
+            let responses = vec![
+                InferenceResponse {
+                    content: "calling tools".to_string(),
+                    tool_calls: vec![
+                        leviath_providers::ToolCall {
+                            id: "call_bash".to_string(),
+                            name: "bash".to_string(),
+                            arguments: serde_json::json!({}),
+                        },
+                        leviath_providers::ToolCall {
+                            id: "call_read".to_string(),
+                            name: "read_file".to_string(),
+                            arguments: serde_json::json!({}),
+                        },
+                    ],
+                    tokens_used: leviath_providers::TokenUsage {
+                        prompt_tokens: 10,
+                        completion_tokens: 5,
+                        total_tokens: 15,
+                        cached_tokens: 0,
+                        cache_write_tokens: 0,
+                    },
+                    finish_reason: leviath_providers::FinishReason::ToolCall,
+                },
+                default_response(),
+            ];
+            let mut engine = engine_with_mock(responses);
+
+            let mut window = basic_window();
+            window.add_region(leviath_core::Region::new(
+                "tool_output".to_string(),
+                leviath_core::RegionKind::SlidingWindow {
+                    max_items: 50,
+                    eviction_strategy: leviath_core::EvictionStrategy::PerItem,
+                },
+                4000,
+            ));
+            window.add_region(leviath_core::Region::new(
+                "bash_output".to_string(),
+                leviath_core::RegionKind::SlidingWindow {
+                    max_items: 50,
+                    eviction_strategy: leviath_core::EvictionStrategy::PerItem,
+                },
+                4000,
+            ));
+
+            let mut overrides = HashMap::new();
+            overrides.insert("bash".to_string(), "bash_output".to_string());
+
+            let routing = leviath_core::ToolResultRouting {
+                default_region: "tool_output".to_string(),
+                tool_overrides: overrides,
+                persist: true,
+                max_result_tokens: None,
+            };
+            let entity = spawn_routing_entity(&mut engine, "override-test", window, Some(routing));
+
+            let result = engine
+                .run_inference_loop_filtered_dyn_with_sync(
+                    entity,
+                    "mock",
+                    "test-model",
+                    Vec::new(),
+                    10,
+                    None,
+                    None,
+                    &mut |_tool_calls| {
+                        Box::pin(async {
+                            vec![
+                                ("call_bash".to_string(), "bash output".to_string()),
+                                ("call_read".to_string(), "file content".to_string()),
+                            ]
+                        })
+                    },
+                    None,
+                    None,
+                )
+                .await;
+            assert!(result.is_ok());
+
+            let window = engine.world().get::<ContextWindow>(entity).unwrap();
+
+            // bash tool result should be in bash_output (per override)
+            let bash_region = window.get_region("bash_output").unwrap();
+            let bash_results: Vec<_> = bash_region
+                .content
+                .iter()
+                .filter(|e| matches!(e.kind, leviath_core::EntryKind::ToolResult { .. }))
+                .collect();
+            assert_eq!(
+                bash_results.len(),
+                1,
+                "bash result should be in bash_output"
+            );
+            assert!(bash_results[0].content.contains("bash output"));
+
+            // read_file tool result should be in tool_output (default)
+            let tool_region = window.get_region("tool_output").unwrap();
+            let read_results: Vec<_> = tool_region
+                .content
+                .iter()
+                .filter(|e| matches!(e.kind, leviath_core::EntryKind::ToolResult { .. }))
+                .collect();
+            assert_eq!(
+                read_results.len(),
+                1,
+                "read_file result should be in tool_output"
+            );
+            assert!(read_results[0].content.contains("file content"));
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn test_tool_result_max_result_tokens_truncation() {
+        with_tracing_async(async {
+            let responses = tool_call_then_done("call_1", "bash");
+            let mut engine = engine_with_mock(responses);
+
+            let window = basic_window();
+
+            // max_result_tokens=5 means max_chars=20 (5*4)
+            let routing = leviath_core::ToolResultRouting {
+                default_region: "conversation".to_string(),
+                tool_overrides: HashMap::new(),
+                persist: true,
+                max_result_tokens: Some(5),
+            };
+            let entity = spawn_routing_entity(&mut engine, "truncate-test", window, Some(routing));
+
+            // Result text is 40 chars, limit is 20 chars
+            let long_result = "a]".repeat(20); // 40 chars
+            let result = run_with_result(&mut engine, entity, "call_1", &long_result).await;
+            assert!(result.is_ok());
+
+            let window = engine.world().get::<ContextWindow>(entity).unwrap();
+            let conv = window.get_region("conversation").unwrap();
+            let tool_results: Vec<_> = conv
+                .content
+                .iter()
+                .filter(|e| matches!(e.kind, leviath_core::EntryKind::ToolResult { .. }))
+                .collect();
+            assert_eq!(tool_results.len(), 1);
+            // Should be truncated to 20 chars + "[...truncated]" suffix
+            assert!(
+                tool_results[0].content.contains("[...truncated]"),
+                "result should contain truncation marker, got: {}",
+                tool_results[0].content
+            );
+            assert!(
+                tool_results[0].content.len() < long_result.len(),
+                "truncated result ({}) should be shorter than original ({})",
+                tool_results[0].content.len(),
+                long_result.len()
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn test_tool_result_persist_false_routes_to_scratch_when_available() {
+        with_tracing_async(async {
+            let responses = tool_call_then_done("call_1", "bash");
+            let mut engine = engine_with_mock(responses);
+
+            let mut window = basic_window();
+            window.add_region(leviath_core::Region::new(
+                "scratch".to_string(),
+                leviath_core::RegionKind::SlidingWindow {
+                    max_items: 50,
+                    eviction_strategy: leviath_core::EvictionStrategy::PerItem,
+                },
+                4000,
+            ));
+
+            let routing = leviath_core::ToolResultRouting {
+                default_region: "conversation".to_string(),
+                tool_overrides: HashMap::new(),
+                persist: false,
+                max_result_tokens: None,
+            };
+            let entity = spawn_routing_entity(&mut engine, "persist-false", window, Some(routing));
+
+            let result = run_with_result(&mut engine, entity, "call_1", "ephemeral data").await;
+            assert!(result.is_ok());
+
+            let window = engine.world().get::<ContextWindow>(entity).unwrap();
+
+            // Tool result should be in scratch, NOT in conversation
+            let scratch = window.get_region("scratch").unwrap();
+            let scratch_results: Vec<_> = scratch
+                .content
+                .iter()
+                .filter(|e| matches!(e.kind, leviath_core::EntryKind::ToolResult { .. }))
+                .collect();
+            assert_eq!(
+                scratch_results.len(),
+                1,
+                "tool result should be in scratch region"
+            );
+            assert!(scratch_results[0].content.contains("ephemeral data"));
+
+            let conv = window.get_region("conversation").unwrap();
+            let conv_results: Vec<_> = conv
+                .content
+                .iter()
+                .filter(|e| matches!(e.kind, leviath_core::EntryKind::ToolResult { .. }))
+                .collect();
+            assert_eq!(
+                conv_results.len(),
+                0,
+                "tool result should NOT be in conversation"
+            );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn test_tool_result_persist_false_falls_back_when_no_scratch_region() {
+        with_tracing_async(async {
+            let responses = tool_call_then_done("call_1", "bash");
+            let mut engine = engine_with_mock(responses);
+
+            let mut window = basic_window();
+            // Add target region but NO scratch region
+            window.add_region(leviath_core::Region::new(
+                "tool_output".to_string(),
+                leviath_core::RegionKind::SlidingWindow {
+                    max_items: 50,
+                    eviction_strategy: leviath_core::EvictionStrategy::PerItem,
+                },
+                4000,
+            ));
+
+            let routing = leviath_core::ToolResultRouting {
+                default_region: "tool_output".to_string(),
+                tool_overrides: HashMap::new(),
+                persist: false,
+                max_result_tokens: None,
+            };
+            let entity = spawn_routing_entity(&mut engine, "no-scratch", window, Some(routing));
+
+            let result = run_with_result(&mut engine, entity, "call_1", "fallback data").await;
+            assert!(result.is_ok());
+
+            let window = engine.world().get::<ContextWindow>(entity).unwrap();
+
+            // No scratch region exists, so should fall back to default_region (tool_output)
+            let tool_output = window.get_region("tool_output").unwrap();
+            let results: Vec<_> = tool_output
+                .content
+                .iter()
+                .filter(|e| matches!(e.kind, leviath_core::EntryKind::ToolResult { .. }))
+                .collect();
+            assert_eq!(
+                results.len(),
+                1,
+                "tool result should fall back to tool_output"
+            );
+            assert!(results[0].content.contains("fallback data"));
+
+            // Conversation should NOT have the tool result
+            let conv = window.get_region("conversation").unwrap();
+            let conv_results: Vec<_> = conv
+                .content
+                .iter()
+                .filter(|e| matches!(e.kind, leviath_core::EntryKind::ToolResult { .. }))
+                .collect();
+            assert_eq!(
+                conv_results.len(),
+                0,
+                "tool result should NOT be in conversation"
+            );
+        })
+        .await;
+    }
 }
