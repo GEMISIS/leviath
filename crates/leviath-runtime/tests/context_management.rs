@@ -552,3 +552,71 @@ fn test_stage_gating_with_requires_children() {
     }
     assert!(matches!(state.status, AgentStatus::Active));
 }
+
+#[tokio::test]
+async fn test_file_tracking_sync_assembly_integration() {
+    // Integration test: verify file tracking → sync → assemble → system blocks contain HashMap content
+    use leviath_core::{Region, RegionKind};
+    use std::sync::Arc;
+    use tokio::sync::Mutex;
+
+    // 1. Create a context window with a HashMap region (simulating initial setup)
+    let mut entity_cw = ContextWindow::new(200_000);
+    let files_region = Region::new(
+        "files".to_string(),
+        RegionKind::HashMap {
+            max_entries: Some(50),
+        },
+        40_000,
+    );
+    entity_cw.add_region(files_region);
+
+    // 2. Create shared context window and populate it with entity's state
+    let shared_cw: Arc<Mutex<Option<ContextWindow>>> =
+        Arc::new(Mutex::new(Some(entity_cw.clone())));
+
+    // 3. Simulate file tracking: upsert into shared CW's HashMap region
+    {
+        let mut guard = shared_cw.lock().await;
+        if let Some(window) = guard.as_mut() {
+            if let Some(region) = window.get_region_mut("files") {
+                region
+                    .upsert_by_key(
+                        "src/main.py",
+                        "def main():\n    print('hello')".to_string(),
+                        10,
+                    )
+                    .unwrap();
+                region
+                    .upsert_by_key(
+                        "src/utils.py",
+                        "def helper():\n    return 42".to_string(),
+                        8,
+                    )
+                    .unwrap();
+            }
+        }
+    }
+
+    // 4. Simulate sync: shared→entity
+    {
+        let guard = shared_cw.lock().await;
+        if let Some(shared) = guard.as_ref() {
+            entity_cw.regions = shared.regions.clone();
+            entity_cw.current_tokens = shared.current_tokens;
+        }
+    }
+
+    // 5. Assemble the entity CW into system blocks
+    let assembled = entity_cw.assemble();
+
+    // 6. Verify: system_blocks should contain the HashMap content with keys
+    assert_eq!(assembled.system_blocks.len(), 1);
+    let block_text = &assembled.system_blocks[0].text;
+
+    assert!(block_text.contains("[files]:"));
+    assert!(block_text.contains("### [src/main.py]"));
+    assert!(block_text.contains("def main()"));
+    assert!(block_text.contains("### [src/utils.py]"));
+    assert!(block_text.contains("def helper()"));
+}

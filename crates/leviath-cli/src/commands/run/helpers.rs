@@ -236,6 +236,7 @@ pub fn build_context_snapshot(
                     content: e.content.clone(),
                     tokens: e.tokens,
                     metadata: e.metadata.clone(),
+                    key: e.key.clone(),
                 })
                 .collect();
             runstate::RegionSnapshot {

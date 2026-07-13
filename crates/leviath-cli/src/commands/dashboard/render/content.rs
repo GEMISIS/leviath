@@ -1416,6 +1416,7 @@ mod tests {
                     content: "Hello world".to_string(),
                     tokens: 5,
                     metadata: None,
+                    key: None,
                 }],
             }],
         });
@@ -1711,6 +1712,7 @@ mod tests {
                     content: "hello token world".to_string(),
                     tokens: 5,
                     metadata: None,
+                    key: None,
                 }],
             }],
         });
@@ -1738,6 +1740,7 @@ mod tests {
                 content: format!("content line {}", i),
                 tokens: 10,
                 metadata: None,
+                key: None,
             })
             .collect();
         agent.context_snapshot = Some(runstate::ContextSnapshot {

@@ -144,6 +144,9 @@ pub struct RegionEntrySnapshot {
     pub tokens: usize,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub metadata: Option<serde_json::Value>,
+    /// Key for HashMap region entries (file paths, section names, etc.)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key: Option<String>,
 }
 
 /// Per-region token snapshot written by the background worker after each inference.
@@ -910,6 +913,7 @@ mod tests {
                 content: "You are helpful".into(),
                 tokens: 3,
                 metadata: None,
+                key: None,
             }],
         };
         let json = serde_json::to_string(&snap).unwrap();
@@ -1397,11 +1401,13 @@ mod tests {
                             content: "You are helpful".into(),
                             tokens: 3,
                             metadata: None,
+                            key: None,
                         },
                         RegionEntrySnapshot {
                             content: "Additional instruction".into(),
                             tokens: 5,
                             metadata: Some(serde_json::json!({"source": "user"})),
+                            key: None,
                         },
                     ],
                 },
@@ -1431,6 +1437,7 @@ mod tests {
             content: "test".into(),
             tokens: 1,
             metadata: None,
+            key: None,
         };
         let json = serde_json::to_value(&entry).unwrap();
         assert!(json.get("metadata").is_none());
