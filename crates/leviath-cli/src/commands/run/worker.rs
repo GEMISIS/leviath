@@ -505,8 +505,9 @@ async fn maybe_track_file(
         "read_file" if ft.track_reads => {
             let tokens = result.len() / 4 + 1;
             let msg = format!(
-                "read_file '{}' ({} tokens) → stored in '{}' section of your context window.",
-                path, tokens, ft.region
+                "File contents stored in your system prompt under [{}] → ### [{}] ({} tokens). \
+                 Reference it there — do not call read_file for this path again.",
+                ft.region, path, tokens
             );
             (true, result.clone(), msg)
         }
@@ -518,9 +519,11 @@ async fn maybe_track_file(
             if content.starts_with("[error]") {
                 return result;
             }
+            let tokens = content.len() / 4 + 1;
             let msg = format!(
-                "write_file '{}' → content tracked in '{}' section of your context window.",
-                path, ft.region
+                "File written successfully. Contents stored in your system prompt under \
+                 [{}] → ### [{}] ({} tokens).",
+                ft.region, path, tokens
             );
             (true, content, msg)
         }
@@ -531,9 +534,11 @@ async fn maybe_track_file(
             if content.starts_with("[error]") {
                 return result;
             }
+            let tokens = content.len() / 4 + 1;
             let msg = format!(
-                "edit_file '{}' → updated content tracked in '{}' section of your context window.",
-                path, ft.region
+                "File edited successfully. Updated contents stored in your system prompt under \
+                 [{}] → ### [{}] ({} tokens).",
+                ft.region, path, tokens
             );
             (true, content, msg)
         }
@@ -4412,8 +4417,8 @@ for line in sys.stdin:
         .await;
 
         assert!(
-            result.contains("stored in 'files' section"),
-            "expected reference message, got: {}",
+            result.contains("[files]") && result.contains("### [test.txt]"),
+            "expected structured reference message, got: {}",
             result
         );
 
@@ -4454,8 +4459,8 @@ for line in sys.stdin:
         .await;
 
         assert!(
-            result.contains("tracked in 'files' section"),
-            "expected tracking message, got: {}",
+            result.contains("[files]") && result.contains("### [out.txt]"),
+            "expected structured reference message, got: {}",
             result
         );
 

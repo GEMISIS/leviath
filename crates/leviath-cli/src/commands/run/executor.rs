@@ -491,7 +491,8 @@ pub async fn run_stage_loop(
 
         // Tool filtering
         let all_tools = ctx.tool_registry.all_tool_defs();
-        let effective_tools: Vec<leviath_providers::Tool> = if stage.available_tools.is_empty() {
+        let mut effective_tools: Vec<leviath_providers::Tool> = if stage.available_tools.is_empty()
+        {
             Vec::new()
         } else {
             all_tools
@@ -499,6 +500,45 @@ pub async fn run_stage_loop(
                 .filter(|t| stage.available_tools.iter().any(|f| f == &t.name))
                 .collect()
         };
+
+        // When file tracking is enabled, update tool descriptions so the model
+        // knows that file contents appear in the system prompt rather than in
+        // the tool result. This prevents the model from re-reading files it
+        // has already read.
+        if let Some(ref ft) = ctx.blueprint.file_tracking {
+            for tool in &mut effective_tools {
+                match tool.name.as_str() {
+                    "read_file" if ft.track_reads => {
+                        tool.description = format!(
+                            "Read a file from the working directory. The file contents will be \
+                             stored in the [{}] section of your system prompt under the file \
+                             path as a key (e.g. \"### [path/to/file]\"). The tool result \
+                             confirms where the content was stored. You can then reference the \
+                             file contents directly from your system prompt without calling \
+                             read_file again.",
+                            ft.region
+                        );
+                    }
+                    "write_file" if ft.track_writes => {
+                        tool.description = format!(
+                            "Write content to a file, creating it and parent directories if \
+                             needed. The written content will also be tracked in the [{}] \
+                             section of your system prompt so you can reference it later.",
+                            ft.region
+                        );
+                    }
+                    "edit_file" if ft.track_writes => {
+                        tool.description = format!(
+                            "Edit a file by replacing a specific string. The updated content \
+                             will also be tracked in the [{}] section of your system prompt \
+                             so you can reference it later.",
+                            ft.region
+                        );
+                    }
+                    _ => {}
+                }
+            }
+        }
 
         // Log effective tools for debugging
         let tool_names: Vec<&str> = effective_tools.iter().map(|t| t.name.as_str()).collect();
