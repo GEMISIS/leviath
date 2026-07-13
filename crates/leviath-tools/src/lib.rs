@@ -822,6 +822,46 @@ mod tests {
         }
     }
 
+    #[test]
+    fn context_tool_descriptions_mention_key_concepts() {
+        let dir = std::env::temp_dir();
+        let tools = make_tools(&dir);
+        let defs = tools.tool_defs();
+
+        let write_def = defs.iter().find(|t| t.name == "context_write").unwrap();
+        assert!(
+            write_def.description.contains("system prompt"),
+            "context_write should mention system prompt: {}",
+            write_def.description
+        );
+        assert!(
+            write_def.description.contains("replaced"),
+            "context_write should mention replacement: {}",
+            write_def.description
+        );
+
+        let read_def = defs.iter().find(|t| t.name == "context_read").unwrap();
+        assert!(
+            read_def.description.contains("summary"),
+            "context_read should mention summary: {}",
+            read_def.description
+        );
+
+        let list_def = defs.iter().find(|t| t.name == "context_list").unwrap();
+        assert!(
+            list_def.description.contains("token"),
+            "context_list should mention tokens: {}",
+            list_def.description
+        );
+
+        let append_def = defs.iter().find(|t| t.name == "context_append").unwrap();
+        assert!(
+            append_def.description.contains("without replacing"),
+            "context_append should mention 'without replacing': {}",
+            append_def.description
+        );
+    }
+
     fn assert_has_description(name: &str, description: &str) {
         assert!(
             !description.is_empty(),

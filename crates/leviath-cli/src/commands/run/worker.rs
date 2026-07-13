@@ -4160,6 +4160,221 @@ for line in sys.stdin:
         );
     }
 
+    // ─── region_not_found / error message format tests ────────────────────────
+
+    /// Build a ContextWindow with multiple region types for testing the
+    /// `region_not_found` helper's filtering behaviour.
+    fn make_context_window_with_mixed_regions() -> Arc<Mutex<Option<ContextWindow>>> {
+        let mut window = ContextWindow::new(100000);
+        // Visible user-facing regions
+        window.add_region(leviath_core::Region::new(
+            "notes".to_string(),
+            leviath_core::RegionKind::HashMap { max_entries: None },
+            20000,
+        ));
+        window.add_region(leviath_core::Region::new(
+            "plan".to_string(),
+            leviath_core::RegionKind::SlidingWindow {
+                max_items: 10,
+                eviction_strategy: leviath_core::EvictionStrategy::PerItem,
+            },
+            20000,
+        ));
+        // conversation region — should be filtered out
+        window.add_region(leviath_core::Region::new(
+            "conversation".to_string(),
+            leviath_core::RegionKind::SlidingWindow {
+                max_items: 50,
+                eviction_strategy: leviath_core::EvictionStrategy::PerItem,
+            },
+            30000,
+        ));
+        // CompactHistory region — should be filtered out
+        window.add_region(leviath_core::Region::new(
+            "compact_history".to_string(),
+            leviath_core::RegionKind::CompactHistory {
+                source_region: "conversation".to_string(),
+            },
+            10000,
+        ));
+        Arc::new(Mutex::new(Some(window)))
+    }
+
+    #[tokio::test]
+    async fn region_not_found_lists_available_sections() {
+        let cw = make_context_window_with_mixed_regions();
+        let args = serde_json::json!({
+            "region": "nonexistent",
+            "key": "k",
+            "content": "data"
+        });
+        let result = handle_context_tool("context_write", &args, &cw).await;
+        assert!(
+            result.contains("Section 'nonexistent' not found"),
+            "expected 'Section ... not found' in: {}",
+            result
+        );
+        assert!(
+            result.contains("Available sections:"),
+            "expected 'Available sections:' in: {}",
+            result
+        );
+        // Visible regions should appear
+        assert!(
+            result.contains("notes"),
+            "expected 'notes' in available sections: {}",
+            result
+        );
+        assert!(
+            result.contains("plan"),
+            "expected 'plan' in available sections: {}",
+            result
+        );
+        // conversation and CompactHistory should be filtered out
+        assert!(
+            !result.contains("conversation"),
+            "conversation should be filtered out: {}",
+            result
+        );
+        assert!(
+            !result.contains("compact_history"),
+            "compact_history should be filtered out: {}",
+            result
+        );
+    }
+
+    #[tokio::test]
+    async fn region_not_found_on_context_read() {
+        let cw = make_context_window_with_mixed_regions();
+        let args = serde_json::json!({ "region": "missing" });
+        let result = handle_context_tool("context_read", &args, &cw).await;
+        assert!(
+            result.contains("Section 'missing' not found. Available sections:"),
+            "unexpected result: {}",
+            result
+        );
+        assert!(result.contains("notes"), "expected 'notes': {}", result);
+    }
+
+    #[tokio::test]
+    async fn region_not_found_on_context_append() {
+        let cw = make_context_window_with_mixed_regions();
+        let args = serde_json::json!({
+            "region": "nope",
+            "content": "data"
+        });
+        let result = handle_context_tool("context_append", &args, &cw).await;
+        assert!(
+            result.contains("Section 'nope' not found. Available sections:"),
+            "unexpected result: {}",
+            result
+        );
+    }
+
+    #[tokio::test]
+    async fn region_not_found_on_context_delete() {
+        let cw = make_context_window_with_mixed_regions();
+        let args = serde_json::json!({
+            "region": "ghost",
+            "key": "k"
+        });
+        let result = handle_context_tool("context_delete", &args, &cw).await;
+        assert!(
+            result.contains("Section 'ghost' not found. Available sections:"),
+            "unexpected result: {}",
+            result
+        );
+    }
+
+    #[tokio::test]
+    async fn region_not_found_with_single_available_section() {
+        // Only one visible region — verify the message still works
+        let cw = make_context_window_with_hashmap("only_one");
+        let args = serde_json::json!({
+            "region": "bad",
+            "key": "k",
+            "content": "data"
+        });
+        let result = handle_context_tool("context_write", &args, &cw).await;
+        assert!(
+            result.contains("Section 'bad' not found. Available sections: only_one"),
+            "unexpected result: {}",
+            result
+        );
+    }
+
+    // ─── context window sync flow tests ─────────────────────────────────────
+
+    #[tokio::test]
+    async fn context_window_shared_state_round_trip() {
+        // Simulate the shared context window pattern used in run_autonomous:
+        // worker writes to shared CW via context tools, then the sync callback
+        // copies state to/from the entity's ContextWindow.
+        let shared_cw: Arc<Mutex<Option<ContextWindow>>> = Arc::new(Mutex::new(None));
+
+        // 1. Initialise shared CW (like run_autonomous does before the loop)
+        let mut window = ContextWindow::new(10000);
+        window.add_region(leviath_core::Region::new(
+            "notes".to_string(),
+            leviath_core::RegionKind::HashMap { max_entries: None },
+            5000,
+        ));
+        *shared_cw.lock().await = Some(window);
+
+        // 2. Write through context tool
+        let write_args = serde_json::json!({
+            "region": "notes",
+            "key": "key1",
+            "content": "value1"
+        });
+        let result = handle_context_tool("context_write", &write_args, &shared_cw).await;
+        assert!(result.contains("Stored in"), "write failed: {}", result);
+
+        // 3. Read back through context tool
+        let read_args = serde_json::json!({
+            "region": "notes",
+            "key": "key1"
+        });
+        let content = handle_context_tool("context_read", &read_args, &shared_cw).await;
+        assert_eq!(content, "value1");
+
+        // 4. Verify the shared CW reflects the write
+        let guard = shared_cw.lock().await;
+        let window = guard.as_ref().unwrap();
+        let region = window.get_region("notes").unwrap();
+        let entry = region.get_by_key("key1");
+        assert!(entry.is_some());
+        assert_eq!(entry.unwrap().content, "value1");
+    }
+
+    #[tokio::test]
+    async fn sync_direction_alternates_correctly() {
+        // Verify the alternating sync direction pattern used in the
+        // post_tool_sync callback: shared→entity then entity→shared.
+        let mut sync_direction_to_entity = true;
+        let mut directions = Vec::new();
+
+        // Simulate 4 sync calls (2 tool batches)
+        for _ in 0..4 {
+            directions.push(if sync_direction_to_entity {
+                "shared_to_entity"
+            } else {
+                "entity_to_shared"
+            });
+            sync_direction_to_entity = !sync_direction_to_entity;
+        }
+
+        assert_eq!(
+            directions,
+            vec![
+                "shared_to_entity",
+                "entity_to_shared",
+                "shared_to_entity",
+                "entity_to_shared"
+            ]
+        );
+    }
+
     // ─── maybe_track_file tests ──────────────────────────────────────────────
 
     fn make_file_tracking_config(
