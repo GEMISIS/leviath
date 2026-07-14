@@ -1173,6 +1173,9 @@ async fn run_worker_inner(
     let manifest_content = std::fs::read_to_string(&manifest_path)
         .map_err(|e| anyhow::anyhow!("Failed to read manifest: {}", e))?;
     let blueprint = parse_manifest(&manifest_content)?;
+    blueprint
+        .validate()
+        .map_err(|e| anyhow::anyhow!("blueprint validation failed: {e}"))?;
 
     println!("Agent: {} v{}", blueprint.name, blueprint.version);
     println!("Task: {}", args.task);

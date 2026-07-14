@@ -503,6 +503,9 @@ async fn run_foreground_with_registry(
     let manifest_content = std::fs::read_to_string(&manifest_path)
         .map_err(|e| anyhow::anyhow!("Failed to read manifest: {}", e))?;
     let blueprint = parse_manifest(&manifest_content)?;
+    blueprint
+        .validate()
+        .map_err(|e| anyhow::anyhow!("blueprint validation failed: {e}"))?;
 
     let description = Some(blueprint.description.as_str());
     let task = resolve_task(&args.task, &blueprint.name, description)?;

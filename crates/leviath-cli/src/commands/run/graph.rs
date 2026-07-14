@@ -392,15 +392,16 @@ pub async fn apply_edge_transform(
             .await;
         }
         EdgeTransform::Custom {
-            carry: _,
+            carry,
             compact,
             clear,
             compact_prompt,
         } => {
             if let Some(mut window) = engine.world_mut().get_mut::<ContextWindow>(entity) {
-                // Clear specified regions
+                // Clear the regions named in `clear` — but never a region also
+                // listed in `carry` (carry wins; core regions are never removed).
                 for region in &mut window.regions {
-                    if clear.contains(&region.name) {
+                    if clear.contains(&region.name) && !carry.contains(&region.name) {
                         region.clear();
                     }
                 }
@@ -409,7 +410,10 @@ pub async fn apply_edge_transform(
                 // No ContextWindow on this entity; nothing to clear.
             }
 
-            // Compact specified regions
+            // Summarize + clear ONLY the regions named in `compact`, protecting
+            // anything in `carry`. Regions in neither list are left untouched —
+            // this is the fix for carried regions being wiped by the old
+            // kind-based blanket clear.
             if !compact.is_empty() {
                 let prompt = compact_prompt.clone().unwrap_or_else(|| {
                     format!(
@@ -418,23 +422,53 @@ pub async fn apply_edge_transform(
                         edge.target
                     )
                 });
-                apply_compact_transform(
+                compact_transform_impl(
                     engine,
                     entity,
                     provider_name,
                     model_name,
                     &prompt,
                     compaction_config,
+                    Some(compact.as_slice()),
+                    carry.as_slice(),
                 )
                 .await;
             }
 
-            // carry regions are left untouched (they carry forward as-is)
+            // carry + unlisted regions are left untouched (they carry forward as-is)
         }
     }
 }
 
-/// Run LLM compaction on the conversation/compacting regions.
+/// Whether `region` should be summarized/cleared by a compact transform.
+///
+/// `only` scopes the transform to a specific set of region NAMES (used by
+/// `EdgeTransform::Custom`'s `compact` list); `None` falls back to "every
+/// compactable-kind region" (used by the blanket `EdgeTransform::Compact`).
+/// A region named in `protect` (a transform's `carry` list) is NEVER a target,
+/// so carried "core" regions are never summarized-away or cleared.
+fn region_is_compact_target(
+    region: &leviath_core::Region,
+    only: Option<&[String]>,
+    protect: &[String],
+) -> bool {
+    if protect.iter().any(|n| n == &region.name) {
+        return false;
+    }
+    match only {
+        Some(names) => names.iter().any(|n| n == &region.name),
+        None => matches!(
+            region.kind,
+            RegionKind::SlidingWindow { .. }
+                | RegionKind::Compacting { .. }
+                | RegionKind::Temporary
+                | RegionKind::Clearable
+        ),
+    }
+}
+
+/// Run LLM compaction, summarizing+clearing **every compactable-kind** region.
+/// Used by the blanket `EdgeTransform::Compact`.
 pub async fn apply_compact_transform(
     engine: &mut AgentEngine,
     entity: bevy_ecs::prelude::Entity,
@@ -442,6 +476,33 @@ pub async fn apply_compact_transform(
     model_name: &str,
     prompt: &str,
     compaction_config: Option<&CompactionConfig>,
+) {
+    compact_transform_impl(
+        engine,
+        entity,
+        provider_name,
+        model_name,
+        prompt,
+        compaction_config,
+        None,
+        &[],
+    )
+    .await;
+}
+
+/// Core compaction. `only_regions` scopes which regions are summarized+cleared
+/// by NAME (`None` = all compactable-kind); `protect` names regions that must
+/// never be touched (a transform's `carry` list — the "core" regions).
+#[allow(clippy::too_many_arguments)]
+async fn compact_transform_impl(
+    engine: &mut AgentEngine,
+    entity: bevy_ecs::prelude::Entity,
+    provider_name: &str,
+    model_name: &str,
+    prompt: &str,
+    compaction_config: Option<&CompactionConfig>,
+    only_regions: Option<&[String]>,
+    protect: &[String],
 ) {
     // Use the compaction provider/model if configured, otherwise fall back to the stage's
     let (compact_provider, compact_model) = if let Some(cc) = compaction_config {
@@ -463,13 +524,7 @@ pub async fn apply_compact_transform(
         };
         let mut parts = Vec::new();
         for region in &window.regions {
-            if matches!(
-                region.kind,
-                RegionKind::SlidingWindow { .. }
-                    | RegionKind::Compacting { .. }
-                    | RegionKind::Temporary
-                    | RegionKind::Clearable
-            ) && !region.content.is_empty()
+            if region_is_compact_target(region, only_regions, protect) && !region.content.is_empty()
             {
                 let region_content: String = region
                     .content
@@ -515,15 +570,11 @@ pub async fn apply_compact_transform(
             // ContextWindow was confirmed present above; it cannot be removed while
             // infer() holds only a provider reference, so this unwrap is safe.
             let mut window = engine.world_mut().get_mut::<ContextWindow>(entity).unwrap();
-            // Clear compactable regions
+            // Clear the regions that were summarized. When only_regions is set
+            // (EdgeTransform::Custom) this is name-scoped; carried/protected
+            // regions are never cleared.
             for region in &mut window.regions {
-                if matches!(
-                    region.kind,
-                    RegionKind::SlidingWindow { .. }
-                        | RegionKind::Compacting { .. }
-                        | RegionKind::Temporary
-                        | RegionKind::Clearable
-                ) {
+                if region_is_compact_target(region, only_regions, protect) {
                     region.clear();
                 }
             }
@@ -554,6 +605,36 @@ mod tests {
     use leviath_runtime::{AgentPool, ProviderRegistry};
 
     use crate::test_support::with_tracing;
+
+    #[test]
+    fn region_is_compact_target_respects_names_and_carry() {
+        use leviath_core::{Region, RegionKind};
+        let conv = Region::new(
+            "conversation".to_string(),
+            RegionKind::SlidingWindow {
+                max_items: 10,
+                eviction_strategy: EvictionStrategy::default(),
+            },
+            1000,
+        );
+        let files = Region::new("files".to_string(), RegionKind::Pinned, 1000);
+
+        // Blanket (None): compactable kinds are targets, pinned is not.
+        assert!(region_is_compact_target(&conv, None, &[]));
+        assert!(!region_is_compact_target(&files, None, &[]));
+
+        // Name-scoped: only regions named in `only` are targets.
+        let only_conv = vec!["conversation".to_string()];
+        let only_other = vec!["scratch".to_string()];
+        assert!(region_is_compact_target(&conv, Some(&only_conv), &[]));
+        assert!(!region_is_compact_target(&conv, Some(&only_other), &[]));
+
+        // `protect` (carry) wins over both the blanket and the name list — a
+        // carried region is never a compact target.
+        let protect = vec!["conversation".to_string()];
+        assert!(!region_is_compact_target(&conv, None, &protect));
+        assert!(!region_is_compact_target(&conv, Some(&only_conv), &protect));
+    }
 
     /// Shared `assert!`-with-dynamic-message helper: several `apply_compact_transform`
     /// tests assert a condition on `all_content` while formatting `all_content`
@@ -2538,6 +2619,77 @@ mod tests {
             all_content.contains("Custom compact result"),
             "Expected custom compact result",
             &all_content,
+        );
+    }
+
+    #[tokio::test]
+    async fn apply_edge_transform_custom_carry_preserves_compactable_region() {
+        // Regression for the carry bug: a carried region of a COMPACTABLE kind
+        // must survive a Custom transform that compacts another region. The old
+        // kind-based blanket clear wiped it regardless of `carry`.
+        let bp = make_blueprint(vec![make_stage("a"), make_stage("b")]);
+        let (mut engine, entity) =
+            make_engine_with_mock_provider(&bp, "summary of the conversation");
+
+        {
+            let mut window = engine.world_mut().get_mut::<ContextWindow>(entity).unwrap();
+            // A carried "core" region of a clearable (compactable) kind, populated.
+            window.add_region(leviath_core::Region::new(
+                "files".to_string(),
+                leviath_core::RegionKind::Clearable,
+                5000,
+            ));
+            let _ = window.add_to_region("files", "IMPORTANT tracked file contents".to_string(), 5);
+            let _ = window.add_to_region("conversation", "chatter to compact".to_string(), 5);
+        }
+
+        let edge = TransitionEdge {
+            target: "b".to_string(),
+            condition: TransitionCondition::Always,
+            hint: None,
+            transform: EdgeTransform::Custom {
+                carry: vec!["files".to_string()],
+                compact: vec!["conversation".to_string()],
+                clear: vec![],
+                compact_prompt: None,
+            },
+        };
+
+        apply_edge_transform(
+            &edge,
+            &HashMap::new(),
+            &mut engine,
+            entity,
+            "mock",
+            "test",
+            None,
+        )
+        .await;
+
+        let window = engine.world().get::<ContextWindow>(entity).unwrap();
+        let files = window
+            .get_region("files")
+            .expect("carried region must still exist");
+        let files_text: String = files.content.iter().map(|e| e.content.as_str()).collect();
+        assert!(
+            files_text.contains("IMPORTANT tracked file contents"),
+            "carried region content must be preserved, got: {files_text:?}"
+        );
+        // conversation was compacted: original chatter replaced by the summary.
+        let conv_text: String = window
+            .get_region("conversation")
+            .unwrap()
+            .content
+            .iter()
+            .map(|e| e.content.as_str())
+            .collect();
+        assert!(
+            !conv_text.contains("chatter to compact"),
+            "compacted region should be cleared: {conv_text:?}"
+        );
+        assert!(
+            conv_text.contains("summary of the conversation"),
+            "summary should be present: {conv_text:?}"
         );
     }
 

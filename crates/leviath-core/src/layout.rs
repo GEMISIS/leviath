@@ -105,8 +105,56 @@ impl ContextLayout {
             );
         }
 
+        // Ensure the layout leaves a minimum working budget once the fixed,
+        // non-evictable regions are full. Pinned / HashMap / CompactHistory
+        // regions persist for the whole run and consume budget; if they leave
+        // too little room, the conversation/tool-result (evictable) regions have
+        // almost no space and the agent operates "blind". Fail loudly at load
+        // instead of degrading silently at runtime.
+        let fixed_tokens: usize = self
+            .regions
+            .iter()
+            .filter(|r| {
+                matches!(
+                    r.kind,
+                    RegionKind::Pinned
+                        | RegionKind::HashMap { .. }
+                        | RegionKind::CompactHistory { .. }
+                )
+            })
+            .map(|r| r.max_tokens)
+            .sum();
+        // Only enforce the absolute working-budget floor on realistically-sized
+        // layouts. Tiny illustrative layouts (toy examples, unit-test fixtures)
+        // have small budgets by design and are not real agent runs; applying an
+        // absolute floor to them would be nonsensical.
+        let working_tokens = self.total_budget_tokens.saturating_sub(fixed_tokens);
+        if self.total_budget_tokens >= Self::BUDGET_CHECK_MIN_TOTAL
+            && working_tokens < Self::MIN_WORKING_TOKENS
+        {
+            return Err(ValidationError::Layout(format!(
+                "context layout leaves only {working_tokens} working tokens after fixed \
+                 regions (pinned/hashmap/compact_history) consume {fixed_tokens} of the {} \
+                 total budget; at least {} are needed for the agent to operate. Reduce the \
+                 fixed regions' max_tokens or increase the total budget.",
+                self.total_budget_tokens,
+                Self::MIN_WORKING_TOKENS
+            )));
+        }
+
         Ok(())
     }
+
+    /// Minimum token budget that must remain for evictable/working regions
+    /// (conversation, tool results, scratch) after the fixed regions are full,
+    /// so the agent has room to hold recent context and generate. Below this a
+    /// run would operate with almost no working space.
+    const MIN_WORKING_TOKENS: usize = 8000;
+
+    /// The working-budget floor is only enforced when the layout's total budget
+    /// is at least this large — i.e. it's a realistically-sized agent, not a
+    /// toy/illustrative layout where an absolute floor wouldn't make sense.
+    const BUDGET_CHECK_MIN_TOTAL: usize = 20_000;
 
     /// Get a region definition by name.
     pub fn get_region(&self, name: &str) -> Option<&RegionDefinition> {
@@ -296,6 +344,36 @@ mod tests {
             RegionDefinition::new("b".to_string(), RegionKind::Temporary, 10000),
         ];
         let layout = ContextLayout::new(regions, 10000);
+        with_tracing(|| {
+            assert!(layout.validate().is_ok());
+        });
+    }
+
+    #[test]
+    fn validate_errors_when_fixed_regions_starve_working_budget() {
+        // Realistically-sized layout (>= 20k) where a huge fixed (pinned) region
+        // leaves < 8000 working tokens for conversation/tool-results → hard error.
+        let regions = vec![
+            RegionDefinition::new("big_pinned".to_string(), RegionKind::Pinned, 95_000),
+            RegionDefinition::new("work".to_string(), RegionKind::Temporary, 5_000),
+        ];
+        let layout = ContextLayout::new(regions, 100_000);
+        with_tracing(|| {
+            let err = layout.validate().unwrap_err();
+            assert!(
+                err.to_string().contains("working tokens"),
+                "actionable budget error: {err}"
+            );
+        });
+    }
+
+    #[test]
+    fn validate_ok_for_realistic_layout_with_working_room() {
+        let regions = vec![
+            RegionDefinition::new("task".to_string(), RegionKind::Pinned, 4_000),
+            RegionDefinition::new("conversation".to_string(), RegionKind::Temporary, 40_000),
+        ];
+        let layout = ContextLayout::new(regions, 44_000);
         with_tracing(|| {
             assert!(layout.validate().is_ok());
         });

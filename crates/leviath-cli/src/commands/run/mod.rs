@@ -188,6 +188,9 @@ async fn execute_background_with(
     let manifest_content = std::fs::read_to_string(&manifest_path)
         .map_err(|e| anyhow::anyhow!("Failed to read manifest: {}", e))?;
     let blueprint = manifest::parse_manifest(&manifest_content)?;
+    blueprint
+        .validate()
+        .map_err(|e| anyhow::anyhow!("blueprint validation failed: {e}"))?;
 
     // Resolve the task once (may launch an interactive editor) before spawning workers.
     let description = Some(blueprint.description.as_str());
