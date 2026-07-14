@@ -1084,6 +1084,42 @@ google_api_key = "AIza-existing"
         with_tracing(|| set_dir_permissions(dir.path())); // must not panic
     }
 
+    // Portable failure injection for the `set_permissions` error arms of
+    // `set_file_permissions`/`set_dir_permissions`. Unlike `check_permissions_at`
+    // (which `metadata()`-guards and early-returns on a missing path), these two
+    // call `std::fs::set_permissions` directly with no existence check, so a
+    // non-existent path makes that call fail with `ENOENT` on *every* Unix
+    // platform -- no `chflags uchg` needed. That covers the error-logging branch
+    // on Linux CI too, where the immutability trick above is unavailable
+    // (`chattr +i` needs CAP_LINUX_IMMUTABLE / root). The macOS-only tests above
+    // additionally prove the file-still-exists variant of the failure; these
+    // guarantee the same branches are exercised regardless of platform.
+    #[cfg(unix)]
+    #[test]
+    fn set_file_permissions_error_branch_logs_not_panics_on_missing_path() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("does-not-exist.toml");
+        assert!(
+            std::fs::set_permissions(&missing, std::fs::Permissions::from_mode(0o600)).is_err(),
+            "precondition: set_permissions on a missing path must fail with ENOENT"
+        );
+        with_tracing(|| set_file_permissions(&missing)); // hits the Err arm, must not panic
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn set_dir_permissions_error_branch_logs_not_panics_on_missing_path() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("does-not-exist-subdir");
+        assert!(
+            std::fs::set_permissions(&missing, std::fs::Permissions::from_mode(0o700)).is_err(),
+            "precondition: set_permissions on a missing path must fail with ENOENT"
+        );
+        with_tracing(|| set_dir_permissions(&missing)); // hits the Err arm, must not panic
+    }
+
     // ─── create_config_dir / set_file_permissions / set_dir_permissions ───
     // (already path-parameterized — directly testable without touching the
     // real ~/.leviath/config.toml)
