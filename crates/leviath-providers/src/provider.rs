@@ -357,18 +357,24 @@ pub struct RateLimitConfig {
 /// successful read resets it, so a legitimately slow streaming response (which
 /// keeps sending bytes) is never cut off, while a connection where the server
 /// accepted the request but produces no response bytes fails instead of hanging
-/// forever. That indefinite hang was observed on the large request that follows
-/// a `read_files` batch (file contents injected into the system prompt push the
-/// body over the HTTP/2 flow-control window).
+/// forever. It remains a backstop even with HTTP/1.1 forced (see
+/// [`build_http_client`]): if a connection ever goes silent mid-request, this
+/// bounds the wait instead of hanging indefinitely.
 const READ_STALL_TIMEOUT_SECS: u64 = 300;
 
-/// Build a `reqwest::Client` with stall/keep-alive protection and an optional
-/// total-request timeout.
+/// Build a `reqwest::Client` for talking to an LLM HTTP API.
 ///
-/// All providers should use this instead of `Client::new()`. It always applies:
-/// - a `read_timeout` (idle/stall timeout — see [`READ_STALL_TIMEOUT_SECS`]) so
-///   a stalled connection can never hang the process indefinitely;
-/// - HTTP/2 keep-alive pings, so a dead connection is detected proactively;
+/// All providers should use this instead of `Client::new()`. It applies:
+/// - **`http1_only()`** — forces HTTP/1.1. Large requests over HTTP/2 (e.g. the
+///   inflated system prompt after a `read_files` batch with file-tracking)
+///   intermittently and *reproducibly* stall against `api.anthropic.com`: the
+///   server ACKs the request body with h2 `WindowUpdate` frames and then never
+///   sends a response. HTTP/1.1 has no per-stream flow control and sidesteps the
+///   interaction entirely. Multiplexing gives no benefit here — these are
+///   sequential request/response calls to a single host — and SSE streaming
+///   works fine over 1.1.
+/// - a `read_timeout` (idle/stall timeout — see [`READ_STALL_TIMEOUT_SECS`]) as
+///   a backstop so a stalled connection can never hang the process forever;
 /// - TCP keep-alive and idle-connection eviction, so a stale pooled connection
 ///   (`reuse idle connection`) is not silently reused after the peer has gone
 ///   away.
@@ -379,10 +385,8 @@ const READ_STALL_TIMEOUT_SECS: u64 = 300;
 /// long streaming responses).
 pub fn build_http_client(timeout_secs: Option<u64>) -> reqwest::Client {
     let mut builder = reqwest::Client::builder()
+        .http1_only()
         .read_timeout(std::time::Duration::from_secs(READ_STALL_TIMEOUT_SECS))
-        .http2_keep_alive_interval(std::time::Duration::from_secs(30))
-        .http2_keep_alive_timeout(std::time::Duration::from_secs(20))
-        .http2_keep_alive_while_idle(true)
         .tcp_keepalive(std::time::Duration::from_secs(60))
         .pool_idle_timeout(std::time::Duration::from_secs(90));
 
