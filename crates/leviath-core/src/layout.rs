@@ -182,6 +182,19 @@ pub struct RegionDefinition {
 
     /// Human-readable description of this region's purpose
     pub description: Option<String>,
+
+    /// When true, this region must be non-empty before a stage that can write
+    /// to it is allowed to complete. Guards against an agent skipping a
+    /// context-population step (e.g. never writing the `plan` region). Enforced
+    /// in the run loop, which re-runs the stage with [`Self::required_message`]
+    /// until the region is populated.
+    #[serde(default)]
+    pub required: bool,
+
+    /// Optional custom message shown to the agent when this region is required
+    /// but empty. Falls back to a generated default when `None`.
+    #[serde(default)]
+    pub required_message: Option<String>,
 }
 
 impl RegionDefinition {
@@ -193,7 +206,16 @@ impl RegionDefinition {
             max_tokens,
             schema: None,
             description: None,
+            required: false,
+            required_message: None,
         }
+    }
+
+    /// Mark this region as required, with an optional custom nudge message.
+    pub fn with_required(mut self, required: bool, message: Option<String>) -> Self {
+        self.required = required;
+        self.required_message = message;
+        self
     }
 
     /// Add a schema to this region definition.

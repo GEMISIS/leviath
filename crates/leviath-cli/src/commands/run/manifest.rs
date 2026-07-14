@@ -592,8 +592,20 @@ pub fn parse_manifest(content: &str) -> anyhow::Result<Blueprint> {
                 _ => RegionKind::Temporary,
             };
 
+            let required = region_value
+                .get("required")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            let required_message = region_value
+                .get("required_message")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+
             total_tokens += max_tokens;
-            regions.push(RegionDefinition::new(region_name.clone(), kind, max_tokens));
+            regions.push(
+                RegionDefinition::new(region_name.clone(), kind, max_tokens)
+                    .with_required(required, required_message),
+            );
         }
     }
 
@@ -1058,6 +1070,32 @@ system_prompt = "these instructions are misplaced under [model]"
             !stage.config.contains_key("system_prompt"),
             "a system_prompt nested under [model] must not become the stage prompt"
         );
+    }
+
+    #[test]
+    fn parse_manifest_reads_region_required_and_message() {
+        let toml = r#"
+[agent]
+name = "req-test"
+
+[stages.main]
+mode = "autonomous"
+
+[stages.main.model]
+provider = "anthropic"
+model = "claude-sonnet-5"
+
+[context.regions]
+plan = { kind = "pinned", max_tokens = 4000, required = true, required_message = "write the plan" }
+conversation = { kind = "sliding_window", max_items = 20, max_tokens = 10000 }
+"#;
+        let bp = parse_manifest(toml).unwrap();
+        let plan = bp.context_layout.get_region("plan").unwrap();
+        assert!(plan.required, "required flag parsed");
+        assert_eq!(plan.required_message.as_deref(), Some("write the plan"));
+        let conv = bp.context_layout.get_region("conversation").unwrap();
+        assert!(!conv.required, "unmarked region defaults to not required");
+        assert!(conv.required_message.is_none());
     }
 
     #[test]

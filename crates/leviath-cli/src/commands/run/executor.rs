@@ -56,6 +56,73 @@ fn inject_stage_system_prompt(
         })
 }
 
+/// Max times a stage is re-run to populate its `required` context regions
+/// before the run proceeds anyway (with a warning). Overridable per stage via
+/// `max_revisits`.
+const DEFAULT_REQUIRED_REENTRY_CAP: usize = 3;
+
+/// A stage can populate context regions only if it has a context-writing tool.
+/// (context_write can target any region, so this is per-stage, not per-region.)
+fn stage_can_write_context(tools: &[String]) -> bool {
+    tools
+        .iter()
+        .any(|t| t == "context_write" || t == "context_append")
+}
+
+/// Required regions (from the stage's effective layout) that are still empty.
+/// Returns `(name, optional custom message)` for each. Empty when the stage
+/// can't write context (gating a stage that can't populate the region would
+/// just loop pointlessly).
+fn unmet_required_regions(
+    blueprint: &leviath_core::Blueprint,
+    stage: &leviath_core::Stage,
+    window: &ContextWindow,
+) -> Vec<(String, Option<String>)> {
+    if !stage_can_write_context(&stage.available_tools) {
+        return Vec::new();
+    }
+    let layout = stage
+        .context_layout
+        .as_ref()
+        .unwrap_or(&blueprint.context_layout);
+    layout
+        .regions
+        .iter()
+        .filter(|r| r.required)
+        .filter(|r| {
+            window
+                .get_region(&r.name)
+                .map(|reg| reg.content.is_empty())
+                .unwrap_or(true)
+        })
+        .map(|r| (r.name.clone(), r.required_message.clone()))
+        .collect()
+}
+
+/// Inject a nudge into the conversation region for each unmet required region,
+/// so the re-run of the stage tells the agent exactly what to populate.
+fn inject_required_region_nudges(
+    engine: &mut AgentEngine,
+    entity: bevy_ecs::prelude::Entity,
+    unmet: &[(String, Option<String>)],
+) {
+    let Some(mut window) = engine.world_mut().get_mut::<ContextWindow>(entity) else {
+        return;
+    };
+    for (name, msg) in unmet {
+        let text = msg.clone().unwrap_or_else(|| {
+            format!(
+                "Required context region '{name}' is still empty. You must populate it \
+                 (e.g. via context_write with region=\"{name}\") before this stage can complete."
+            )
+        });
+        let content = format!("[System] {text}");
+        let tokens = content.len() / 4 + 1;
+        let _ = window.add_to_region("conversation", content, tokens);
+    }
+    window.current_tokens = window.calculate_tokens();
+}
+
 /// Build the taint gate for a stage, cascading global → agent → stage. Returns
 /// `None` when taint tracking resolves to disabled for this stage. Applies any
 /// per-tool classification overrides from the policy's `mcp_overrides`.
@@ -680,48 +747,79 @@ pub async fn run_stage_loop(
                 }
             }
             StageMode::Autonomous => {
-                match cb
-                    .run_autonomous(
-                        ctx.engine,
-                        ctx.entity,
-                        provider_name,
-                        model_name,
-                        max_iterations,
-                        effective_tools,
-                        ctx.compaction_ref,
-                        io,
-                        exec,
-                    )
-                    .await
-                {
-                    Ok((result, response)) => {
-                        cb.on_stage_result(
-                            &stage_name_owned,
-                            stage_idx,
-                            &result,
-                            response.as_ref(),
+                // Required-region gate: if the stage can write context and a
+                // `required` region is still empty when it finishes, feed the
+                // stage back in with a nudge (before any transition/user
+                // feedback) rather than completing with missing context.
+                // Bounded by max_revisits (or DEFAULT_REQUIRED_REENTRY_CAP);
+                // proceeds with a warning if still unmet after that.
+                let reentry_cap = stage.max_revisits.unwrap_or(DEFAULT_REQUIRED_REENTRY_CAP);
+                let mut round: usize = 0;
+                loop {
+                    match cb
+                        .run_autonomous(
                             ctx.engine,
                             ctx.entity,
+                            provider_name,
+                            model_name,
+                            max_iterations,
+                            effective_tools.clone(),
+                            ctx.compaction_ref,
+                            io,
+                            exec,
                         )
-                        .await;
-                        stage_result_val = result;
-                    }
-                    Err(e) => {
-                        let graph = is_graph_mode(ctx.blueprint);
-                        match cb
-                            .on_stage_error(&stage_name_owned, stage_idx, &e, graph)
-                            .await
-                        {
-                            Some(result) => {
-                                stage_result_val = result;
+                        .await
+                    {
+                        Ok((result, response)) => {
+                            let unmet = match ctx.engine.world().get::<ContextWindow>(ctx.entity) {
+                                Some(w) => unmet_required_regions(ctx.blueprint, stage, w),
+                                None => Vec::new(),
+                            };
+                            if !unmet.is_empty() && round < reentry_cap {
+                                round += 1;
+                                inject_required_region_nudges(ctx.engine, ctx.entity, &unmet);
+                                continue;
                             }
-                            None => {
-                                // Propagate the error (linear mode)
-                                // Cancel stdin reader first
-                                if let Some(handle) = stdin_handle {
-                                    handle.abort();
+                            if !unmet.is_empty() {
+                                let names: Vec<&str> =
+                                    unmet.iter().map(|(n, _)| n.as_str()).collect();
+                                tracing::warn!(
+                                    stage = %stage_name_owned,
+                                    regions = ?names,
+                                    attempts = reentry_cap,
+                                    "required context regions still empty after re-run attempts; proceeding"
+                                );
+                            }
+                            cb.on_stage_result(
+                                &stage_name_owned,
+                                stage_idx,
+                                &result,
+                                response.as_ref(),
+                                ctx.engine,
+                                ctx.entity,
+                            )
+                            .await;
+                            stage_result_val = result;
+                            break;
+                        }
+                        Err(e) => {
+                            let graph = is_graph_mode(ctx.blueprint);
+                            match cb
+                                .on_stage_error(&stage_name_owned, stage_idx, &e, graph)
+                                .await
+                            {
+                                Some(result) => {
+                                    stage_result_val = result;
+                                    break;
                                 }
-                                return Err(e);
+                                None => {
+                                    // Propagate the error (linear mode)
+                                    // Cancel stdin reader first
+                                    if let Some(handle) = &stdin_handle {
+                                        handle.abort();
+                                    }
+                                    return Err(e);
+                                }
                             }
                         }
                     }
@@ -871,6 +969,109 @@ mod tests {
         assert!(inject_stage_system_prompt(&mut window, "nope", "hi").is_err());
     }
 
+    // ─── required-region gate ───────────────────────────────────────────────
+
+    #[test]
+    fn stage_can_write_context_detects_context_tools() {
+        assert!(stage_can_write_context(&["context_write".to_string()]));
+        assert!(stage_can_write_context(&[
+            "read_file".to_string(),
+            "context_append".to_string()
+        ]));
+        assert!(!stage_can_write_context(&[
+            "read_file".to_string(),
+            "list_dir".to_string()
+        ]));
+    }
+
+    /// Build a blueprint whose layout has a required `plan` region (empty), plus
+    /// a `task` pinned region (so the seeded task doesn't land in `plan`).
+    fn required_region_fixture() -> (leviath_core::Blueprint, leviath_core::Stage) {
+        let layout = ContextLayout::new(
+            vec![
+                RegionDefinition::new("task".to_string(), RegionKind::Pinned, 2000),
+                RegionDefinition::new("plan".to_string(), RegionKind::Pinned, 4000)
+                    .with_required(true, Some("Write the plan.".to_string())),
+                RegionDefinition::new(
+                    "conversation".to_string(),
+                    RegionKind::SlidingWindow {
+                        max_items: 50,
+                        eviction_strategy: EvictionStrategy::PerItem,
+                    },
+                    10000,
+                ),
+            ],
+            16000,
+        );
+        let mut stage = make_stage("analyze");
+        stage.available_tools = vec!["context_write".to_string()];
+        let bp = Blueprint::new(
+            "t".to_string(),
+            "d".to_string(),
+            vec![stage.clone()],
+            layout,
+        );
+        (bp, stage)
+    }
+
+    #[test]
+    fn unmet_required_regions_flags_empty_and_clears_when_filled() {
+        let (bp, stage) = required_region_fixture();
+        let (mut engine, _pool, entity) = make_engine_and_entity(&bp);
+
+        // plan is empty → flagged, with its custom message.
+        let window = engine.world().get::<ContextWindow>(entity).unwrap();
+        let unmet = unmet_required_regions(&bp, &stage, window);
+        assert_eq!(unmet.len(), 1);
+        assert_eq!(unmet[0].0, "plan");
+        assert_eq!(unmet[0].1.as_deref(), Some("Write the plan."));
+
+        // A stage without a context-writing tool is not gated (can't fill it).
+        let mut no_write = stage.clone();
+        no_write.available_tools = vec!["read_file".to_string()];
+        assert!(unmet_required_regions(&bp, &no_write, window).is_empty());
+
+        // Fill plan → no longer unmet.
+        engine
+            .world_mut()
+            .get_mut::<ContextWindow>(entity)
+            .unwrap()
+            .add_to_region("plan", "the plan".to_string(), 3)
+            .unwrap();
+        let window = engine.world().get::<ContextWindow>(entity).unwrap();
+        assert!(unmet_required_regions(&bp, &stage, window).is_empty());
+    }
+
+    #[test]
+    fn inject_required_region_nudges_writes_custom_and_default_messages() {
+        let (bp, _stage) = required_region_fixture();
+        let (mut engine, _pool, entity) = make_engine_and_entity(&bp);
+
+        inject_required_region_nudges(
+            &mut engine,
+            entity,
+            &[
+                ("plan".to_string(), Some("Write the plan.".to_string())),
+                ("architecture".to_string(), None),
+            ],
+        );
+
+        let window = engine.world().get::<ContextWindow>(entity).unwrap();
+        let conv: String = window
+            .get_region("conversation")
+            .unwrap()
+            .content
+            .iter()
+            .map(|e| e.content.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(conv.contains("Write the plan."), "custom message: {conv}");
+        assert!(
+            conv.contains("Required context region 'architecture' is still empty"),
+            "default message: {conv}"
+        );
+    }
+
     // ─── MockCallbacks ──────────────────────────────────────────────────────
 
     /// Mock callbacks that track all calls for assertions.
@@ -900,6 +1101,9 @@ mod tests {
         taint_global: bool,
         /// Stage indexes for which on_taint_audit fired.
         taint_audits: Vec<usize>,
+        /// Number of times run_autonomous was invoked (for the required-region
+        /// re-run gate test).
+        run_autonomous_calls: usize,
     }
 
     impl MockCallbacks {
@@ -921,6 +1125,7 @@ mod tests {
                 cancelled_at: None,
                 taint_global: false,
                 taint_audits: Vec::new(),
+                run_autonomous_calls: 0,
             }
         }
     }
@@ -983,10 +1188,12 @@ mod tests {
             _io: &mut dyn RunIO,
             _executor: &mut ToolExecutorDyn<'_>,
         ) -> anyhow::Result<(StageResult, Option<InferenceResponse>)> {
+            self.run_autonomous_calls += 1;
             if self.run_autonomous_should_error {
                 return Err(anyhow::anyhow!("simulated autonomous failure"));
             }
-            // Simulate successful autonomous completion
+            // Simulate successful autonomous completion (never populates any
+            // region — so a required-region gate keeps re-running).
             Ok((StageResult::Success, None))
         }
 
@@ -1200,6 +1407,65 @@ mod tests {
         assert_eq!(cb.stage_results.len(), 1);
         assert_eq!(cb.stage_results[0].0, "main");
         assert_eq!(cb.post_stages, vec!["main"]);
+        assert_eq!(cb.completed_at, Some(0));
+    }
+
+    #[tokio::test]
+    async fn required_region_gate_reruns_stage_then_proceeds() {
+        // A stage that can write context but never populates a `required` region
+        // is re-run up to the cap (mock never fills it), then the run proceeds
+        // with a warning (not a hard fail).
+        let layout = ContextLayout::new(
+            vec![
+                RegionDefinition::new("task".to_string(), RegionKind::Pinned, 2000),
+                RegionDefinition::new("plan".to_string(), RegionKind::Pinned, 4000)
+                    .with_required(true, None),
+                RegionDefinition::new(
+                    "conversation".to_string(),
+                    RegionKind::SlidingWindow {
+                        max_items: 50,
+                        eviction_strategy: EvictionStrategy::PerItem,
+                    },
+                    10000,
+                ),
+            ],
+            16000,
+        );
+        let mut stage = make_stage("main");
+        stage.available_tools = vec!["context_write".to_string()];
+        let bp = Blueprint::new("t".to_string(), "d".to_string(), vec![stage], layout);
+
+        let (mut engine, mut pool, entity) = make_engine_and_entity(&bp);
+        let tool_registry = make_tool_registry().await;
+        let mut cb = MockCallbacks::new();
+
+        let mut ctx = StageContext {
+            blueprint: &bp,
+            engine: &mut engine,
+            entity,
+            pool: &mut pool,
+            tool_registry: &tool_registry,
+            current_stage_name: Arc::new(Mutex::new(String::new())),
+            current_stage_perms: Arc::new(Mutex::new(HashMap::new())),
+            current_stage_idx: Arc::new(Mutex::new(0)),
+            model_override: None,
+            user_default_model: None,
+            compaction_ref: None,
+        };
+
+        run_stage_loop(
+            &mut ctx,
+            &mut cb,
+            "agent-1",
+            &mut MockIO::new(),
+            &mut noop_exec,
+        )
+        .await
+        .unwrap();
+
+        // 1 initial run + DEFAULT_REQUIRED_REENTRY_CAP re-runs.
+        assert_eq!(cb.run_autonomous_calls, 1 + DEFAULT_REQUIRED_REENTRY_CAP);
+        // Still proceeds to completion (warn-and-proceed, not hard-fail).
         assert_eq!(cb.completed_at, Some(0));
     }
 
