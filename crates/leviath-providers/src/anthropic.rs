@@ -10,6 +10,44 @@ use futures_core::Stream;
 use std::collections::HashMap;
 use std::pin::Pin;
 
+/// Read the dump directory from the environment and delegate to
+/// [`dump_request`]. See that function for the rationale.
+fn maybe_dump_request(body: &serde_json::Value) {
+    dump_request(
+        body,
+        std::env::var("LEVIATH_DUMP_REQUEST_DIR").ok().as_deref(),
+    );
+}
+
+/// Always log the serialized request size at debug, and — when `dir` is
+/// `Some` — write the full JSON body to `<dir>/anthropic-req-<unix_nanos>.json`.
+///
+/// Diagnostic for the `read_files` stall: it lets us see exactly how the
+/// request that stalls (the one after a batch read, with file-tracked content
+/// injected into the system prompt) differs from the small requests that
+/// succeed — size, structure, and content — without a special build. Enable by
+/// setting `LEVIATH_DUMP_REQUEST_DIR`.
+fn dump_request(body: &serde_json::Value, dir: Option<&str>) {
+    let bytes = serde_json::to_vec(body).map(|v| v.len()).unwrap_or(0);
+    tracing::debug!(request_bytes = bytes, "anthropic request body");
+
+    let Some(dir) = dir else { return };
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let path = std::path::Path::new(dir).join(format!("anthropic-req-{nanos}.json"));
+    let _ = std::fs::create_dir_all(dir);
+    match serde_json::to_string_pretty(body) {
+        Ok(pretty) => {
+            if std::fs::write(&path, &pretty).is_ok() {
+                tracing::info!(request_bytes = bytes, path = %path.display(), "dumped anthropic request body");
+            }
+        }
+        Err(e) => tracing::warn!(error = %e, "failed to serialize request body for dump"),
+    }
+}
+
 /// Anthropic Claude provider.
 pub struct AnthropicProvider {
     /// HTTP client
@@ -353,6 +391,7 @@ impl Provider for AnthropicProvider {
         }
 
         let body = self.build_request_body(&request);
+        maybe_dump_request(&body);
         let url = format!("{}/messages", self.base_url);
 
         #[cfg(feature = "debug-http")]
@@ -448,6 +487,7 @@ impl Provider for AnthropicProvider {
 
         let mut body = self.build_request_body(&request);
         body["stream"] = serde_json::Value::Bool(true);
+        maybe_dump_request(&body);
         let url = format!("{}/messages", self.base_url);
 
         #[cfg(feature = "debug-http")]
@@ -827,6 +867,45 @@ mod tests {
     fn test_provider_creation() {
         let provider = AnthropicProvider::new("test-key".to_string());
         assert_eq!(provider.name(), "anthropic");
+    }
+
+    #[test]
+    fn dump_request_none_is_noop() {
+        // No dir → only the debug size log runs; must not panic or write.
+        dump_request(&serde_json::json!({"model": "x", "messages": []}), None);
+    }
+
+    #[test]
+    fn dump_request_writes_body_when_dir_set() {
+        let dir = std::env::temp_dir().join(format!(
+            "leviath-dumptest-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        let body = serde_json::json!({"model": "claude-sonnet-5", "marker": "unique-body-42"});
+        dump_request(&body, Some(dir.to_str().unwrap()));
+
+        let files: Vec<_> = std::fs::read_dir(&dir)
+            .expect("dump dir should exist")
+            .filter_map(|e| e.ok())
+            .collect();
+        assert_eq!(files.len(), 1, "exactly one dump file expected");
+        let contents = std::fs::read_to_string(files[0].path()).unwrap();
+        assert!(
+            contents.contains("unique-body-42"),
+            "dump must contain the body"
+        );
+        assert!(contents.contains("claude-sonnet-5"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn maybe_dump_request_reads_env_without_panicking() {
+        // Exercises the env-reading wrapper (dir unset in the test env → noop).
+        maybe_dump_request(&serde_json::json!({"model": "x", "messages": []}));
     }
 
     #[test]
