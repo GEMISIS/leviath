@@ -38,13 +38,14 @@ fn dump_request(body: &serde_json::Value, dir: Option<&str>) {
         .unwrap_or(0);
     let path = std::path::Path::new(dir).join(format!("anthropic-req-{nanos}.json"));
     let _ = std::fs::create_dir_all(dir);
-    match serde_json::to_string_pretty(body) {
-        Ok(pretty) => {
-            if std::fs::write(&path, &pretty).is_ok() {
-                tracing::info!(request_bytes = bytes, path = %path.display(), "dumped anthropic request body");
-            }
+    // `body` is an already-built `serde_json::Value`, which is infallibly
+    // serializable (no NaN/Inf numbers, keys always strings), so there is no
+    // reachable error arm to handle here — `to_string_pretty` only fails on a
+    // custom `Serialize` impl that errors, which a `Value` never has.
+    if let Ok(pretty) = serde_json::to_string_pretty(body) {
+        if std::fs::write(&path, &pretty).is_ok() {
+            tracing::info!(request_bytes = bytes, path = %path.display(), "dumped anthropic request body");
         }
-        Err(e) => tracing::warn!(error = %e, "failed to serialize request body for dump"),
     }
 }
 
@@ -877,6 +878,10 @@ mod tests {
 
     #[test]
     fn dump_request_writes_body_when_dir_set() {
+        // Active subscriber so the `info!` on the successful-write path fully
+        // evaluates its argument expressions (otherwise the disabled macro
+        // short-circuits and llvm-cov reads that line's arg region as uncovered).
+        let _guard = always_on_tracing_guard();
         let dir = std::env::temp_dir().join(format!(
             "leviath-dumptest-{}",
             std::time::SystemTime::now()
