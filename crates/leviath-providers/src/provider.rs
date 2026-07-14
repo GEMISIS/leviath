@@ -357,27 +357,27 @@ pub struct RateLimitConfig {
 /// successful read resets it, so a legitimately slow streaming response (which
 /// keeps sending bytes) is never cut off, while a connection where the server
 /// accepted the request but produces no response bytes fails instead of hanging
-/// forever. It remains a backstop even with HTTP/1.1 forced (see
-/// [`build_http_client`]): if a connection ever goes silent mid-request, this
+/// forever. It is the backstop behind the connection-reuse fix in
+/// [`build_http_client`]: if a connection ever goes silent mid-request, this
 /// bounds the wait instead of hanging indefinitely.
 const READ_STALL_TIMEOUT_SECS: u64 = 300;
 
 /// Build a `reqwest::Client` for talking to an LLM HTTP API.
 ///
 /// All providers should use this instead of `Client::new()`. It applies:
-/// - **`http1_only()`** — forces HTTP/1.1. Large requests over HTTP/2 (e.g. the
-///   inflated system prompt after a `read_files` batch with file-tracking)
-///   intermittently and *reproducibly* stall against `api.anthropic.com`: the
-///   server ACKs the request body with h2 `WindowUpdate` frames and then never
-///   sends a response. HTTP/1.1 has no per-stream flow control and sidesteps the
-///   interaction entirely. Multiplexing gives no benefit here — these are
-///   sequential request/response calls to a single host — and SSE streaming
-///   works fine over 1.1.
+/// - **`pool_max_idle_per_host(0)`** — never reuse an idle connection. A large
+///   request sent over a *reused* pooled connection to `api.anthropic.com`
+///   stalls indefinitely (the server never responds), 100% reproducibly on some
+///   setups, while the *same* large request over a *fresh* connection succeeds
+///   (confirmed via `curl`: a 40KB POST on a fresh connection returns HTTP 200,
+///   and small requests, which don't trigger the stall, share the pool fine).
+///   It is transport-independent — it reproduces over both HTTP/2 and HTTP/1.1 —
+///   so forcing a fresh connection per request, not the protocol, is the fix.
+///   The cost is a TLS handshake per request, negligible for the sequential
+///   request/response calls these providers make.
 /// - a `read_timeout` (idle/stall timeout — see [`READ_STALL_TIMEOUT_SECS`]) as
 ///   a backstop so a stalled connection can never hang the process forever;
-/// - TCP keep-alive and idle-connection eviction, so a stale pooled connection
-///   (`reuse idle connection`) is not silently reused after the peer has gone
-///   away.
+/// - TCP keep-alive.
 ///
 /// `timeout_secs` (`ProviderConfig::request_timeout_secs`) adds an optional
 /// hard cap on total request duration; when `None`, no total cap is applied and
@@ -385,10 +385,9 @@ const READ_STALL_TIMEOUT_SECS: u64 = 300;
 /// long streaming responses).
 pub fn build_http_client(timeout_secs: Option<u64>) -> reqwest::Client {
     let mut builder = reqwest::Client::builder()
-        .http1_only()
+        .pool_max_idle_per_host(0)
         .read_timeout(std::time::Duration::from_secs(READ_STALL_TIMEOUT_SECS))
-        .tcp_keepalive(std::time::Duration::from_secs(60))
-        .pool_idle_timeout(std::time::Duration::from_secs(90));
+        .tcp_keepalive(std::time::Duration::from_secs(60));
 
     if let Some(secs) = timeout_secs {
         builder = builder.timeout(std::time::Duration::from_secs(secs));
