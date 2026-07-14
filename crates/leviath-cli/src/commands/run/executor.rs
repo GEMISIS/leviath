@@ -26,6 +26,40 @@ use leviath_core::taint::{
 use leviath_core::PolicyConfig;
 use leviath_runtime::taint::TaintGate;
 
+/// Inject a stage's `system_prompt` into `target_region` as pinned
+/// `[Stage instructions: ...]` context.
+///
+/// The stage system prompt is essential, must-include instruction context. If
+/// it (plus whatever is already in the region — e.g. the task text preloaded at
+/// spawn) would exceed the region's token budget, the region's cap is grown to
+/// fit rather than letting `add_to_region` reject it. Previously the rejection
+/// (`TokenBudgetExceeded`) was swallowed by `let _ =`, so a system prompt larger
+/// than the pinned region's budget (2000 tokens by default) was silently dropped
+/// and the model ran with no instructions at all. Pinned content is never
+/// evicted, so growing the cap is safe; any residual error is now logged.
+fn inject_stage_system_prompt(
+    window: &mut ContextWindow,
+    target_region: &str,
+    system_prompt: &str,
+) {
+    let content = format!("[Stage instructions: {}]", system_prompt);
+    let tokens = content.len() / 4 + 1;
+    if let Some(region) = window.regions.iter_mut().find(|r| r.name == target_region) {
+        let needed = region.current_tokens + tokens;
+        if needed > region.max_tokens {
+            region.max_tokens = needed;
+        }
+    }
+    if let Err(e) = window.add_to_region(target_region, content, tokens) {
+        tracing::warn!(
+            region = %target_region,
+            prompt_tokens = tokens,
+            error = %e,
+            "failed to inject stage system prompt into context"
+        );
+    }
+}
+
 /// Build the taint gate for a stage, cascading global → agent → stage. Returns
 /// `None` when taint tracking resolves to disabled for this stage. Applies any
 /// per-tool classification overrides from the policy's `mcp_overrides`.
@@ -480,12 +514,7 @@ pub async fn run_stage_loop(
             }
 
             if let Some(sp) = stage.config.get("system_prompt").and_then(|v| v.as_str()) {
-                let tokens = sp.len() / 4 + 1;
-                let _ = window.add_to_region(
-                    &target_region,
-                    format!("[Stage instructions: {}]", sp),
-                    tokens,
-                );
+                inject_stage_system_prompt(&mut window, &target_region, sp);
             }
         }
 
@@ -795,6 +824,68 @@ mod tests {
     use leviath_runtime::ProviderRegistry;
 
     use super::super::helpers::initialize_context_window;
+
+    use leviath_core::Region;
+    use leviath_runtime::ContextWindow;
+
+    fn region_text(window: &ContextWindow, name: &str) -> String {
+        window
+            .get_region(name)
+            .expect("region present")
+            .content
+            .iter()
+            .map(|e| e.content.as_str())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn inject_stage_system_prompt_grows_pinned_region_and_keeps_full_prompt() {
+        // Regression: a system prompt larger than the pinned region's budget used
+        // to be silently dropped (swallowed TokenBudgetExceeded), leaving the
+        // model with only the tiny task text as its system field.
+        let mut window = ContextWindow::new(1_000_000);
+        window.add_region(Region::new("task".to_string(), RegionKind::Pinned, 2000));
+        window
+            .add_to_region("task", "do the thing".to_string(), 5)
+            .unwrap();
+
+        let big = "sys ".repeat(15_000); // ~60KB, ~15000 tokens >> 2000 budget
+        inject_stage_system_prompt(&mut window, "task", &big);
+
+        let region = window.get_region("task").expect("task region");
+        assert!(
+            region.max_tokens > 2000,
+            "pinned region should grow to fit the essential system prompt"
+        );
+        let text = region_text(&window, "task");
+        assert!(text.contains("[Stage instructions:"), "prompt injected");
+        assert!(
+            text.contains(&big),
+            "the FULL prompt is present, not dropped"
+        );
+        assert!(text.contains("do the thing"), "preloaded task preserved");
+    }
+
+    #[test]
+    fn inject_stage_system_prompt_small_fits_without_growing() {
+        let mut window = ContextWindow::new(1_000_000);
+        window.add_region(Region::new("sys".to_string(), RegionKind::Pinned, 2000));
+        inject_stage_system_prompt(&mut window, "sys", "be concise and correct");
+        let region = window.get_region("sys").expect("sys region");
+        assert_eq!(
+            region.max_tokens, 2000,
+            "a small prompt must not grow the region"
+        );
+        assert!(region_text(&window, "sys").contains("be concise and correct"));
+    }
+
+    #[test]
+    fn inject_stage_system_prompt_missing_region_does_not_panic() {
+        let mut window = ContextWindow::new(1000);
+        // No region named "nope" → add_to_region errors → logged, no panic.
+        inject_stage_system_prompt(&mut window, "nope", "hi");
+    }
 
     // ─── MockCallbacks ──────────────────────────────────────────────────────
 
