@@ -29,35 +29,31 @@ use leviath_runtime::taint::TaintGate;
 /// Inject a stage's `system_prompt` into `target_region` as pinned
 /// `[Stage instructions: ...]` context.
 ///
-/// The stage system prompt is essential, must-include instruction context. If
-/// it (plus whatever is already in the region — e.g. the task text preloaded at
-/// spawn) would exceed the region's token budget, the region's cap is grown to
-/// fit rather than letting `add_to_region` reject it. Previously the rejection
-/// (`TokenBudgetExceeded`) was swallowed by `let _ =`, so a system prompt larger
-/// than the pinned region's budget (2000 tokens by default) was silently dropped
-/// and the model ran with no instructions at all. Pinned content is never
-/// evicted, so growing the cap is safe; any residual error is now logged.
+/// The stage system prompt is essential, must-include instruction context, so a
+/// prompt that doesn't fit its region is a **hard error**, not something to
+/// silently drop. Previously the `add_to_region` rejection (`TokenBudgetExceeded`
+/// when the prompt plus the preloaded task exceeded the region's `max_tokens`,
+/// 2000 by default) was swallowed by `let _ =`, leaving the model running with
+/// no instructions at all and no signal to the operator. Now the failure
+/// propagates as a clear, actionable error telling the author to size the
+/// region (or shorten the prompt); the shipped default agents are all sized to
+/// fit comfortably.
 fn inject_stage_system_prompt(
     window: &mut ContextWindow,
     target_region: &str,
     system_prompt: &str,
-) {
+) -> anyhow::Result<()> {
     let content = format!("[Stage instructions: {}]", system_prompt);
     let tokens = content.len() / 4 + 1;
-    if let Some(region) = window.regions.iter_mut().find(|r| r.name == target_region) {
-        let needed = region.current_tokens + tokens;
-        if needed > region.max_tokens {
-            region.max_tokens = needed;
-        }
-    }
-    if let Err(e) = window.add_to_region(target_region, content, tokens) {
-        tracing::warn!(
-            region = %target_region,
-            prompt_tokens = tokens,
-            error = %e,
-            "failed to inject stage system prompt into context"
-        );
-    }
+    window
+        .add_to_region(target_region, content, tokens)
+        .map_err(|e| {
+            anyhow::anyhow!(
+                "stage system prompt (~{tokens} tokens) does not fit context region \
+                 '{target_region}': {e}. Increase that region's `max_tokens` under \
+                 [context.regions] (or shorten the system_prompt)."
+            )
+        })
 }
 
 /// Build the taint gate for a stage, cascading global → agent → stage. Returns
@@ -514,7 +510,7 @@ pub async fn run_stage_loop(
             }
 
             if let Some(sp) = stage.config.get("system_prompt").and_then(|v| v.as_str()) {
-                inject_stage_system_prompt(&mut window, &target_region, sp);
+                inject_stage_system_prompt(&mut window, &target_region, sp)?;
             }
         }
 
@@ -840,10 +836,11 @@ mod tests {
     }
 
     #[test]
-    fn inject_stage_system_prompt_grows_pinned_region_and_keeps_full_prompt() {
+    fn inject_stage_system_prompt_errors_actionably_when_it_exceeds_budget() {
         // Regression: a system prompt larger than the pinned region's budget used
         // to be silently dropped (swallowed TokenBudgetExceeded), leaving the
-        // model with only the tiny task text as its system field.
+        // model with only the tiny task text as its system field. It must now be
+        // a clear, actionable error instead.
         let mut window = ContextWindow::new(1_000_000);
         window.add_region(Region::new("task".to_string(), RegionKind::Pinned, 2000));
         window
@@ -851,40 +848,27 @@ mod tests {
             .unwrap();
 
         let big = "sys ".repeat(15_000); // ~60KB, ~15000 tokens >> 2000 budget
-        inject_stage_system_prompt(&mut window, "task", &big);
-
-        let region = window.get_region("task").expect("task region");
-        assert!(
-            region.max_tokens > 2000,
-            "pinned region should grow to fit the essential system prompt"
-        );
-        let text = region_text(&window, "task");
-        assert!(text.contains("[Stage instructions:"), "prompt injected");
-        assert!(
-            text.contains(&big),
-            "the FULL prompt is present, not dropped"
-        );
-        assert!(text.contains("do the thing"), "preloaded task preserved");
+        let err = inject_stage_system_prompt(&mut window, "task", &big)
+            .expect_err("oversized system prompt must error, not be dropped");
+        let msg = err.to_string();
+        assert!(msg.contains("does not fit"), "states the problem: {msg}");
+        assert!(msg.contains("'task'"), "names the region: {msg}");
+        assert!(msg.contains("max_tokens"), "says how to fix it: {msg}");
     }
 
     #[test]
-    fn inject_stage_system_prompt_small_fits_without_growing() {
+    fn inject_stage_system_prompt_ok_when_it_fits() {
         let mut window = ContextWindow::new(1_000_000);
         window.add_region(Region::new("sys".to_string(), RegionKind::Pinned, 2000));
-        inject_stage_system_prompt(&mut window, "sys", "be concise and correct");
-        let region = window.get_region("sys").expect("sys region");
-        assert_eq!(
-            region.max_tokens, 2000,
-            "a small prompt must not grow the region"
-        );
+        inject_stage_system_prompt(&mut window, "sys", "be concise and correct").unwrap();
         assert!(region_text(&window, "sys").contains("be concise and correct"));
     }
 
     #[test]
-    fn inject_stage_system_prompt_missing_region_does_not_panic() {
+    fn inject_stage_system_prompt_errors_on_missing_region() {
         let mut window = ContextWindow::new(1000);
-        // No region named "nope" → add_to_region errors → logged, no panic.
-        inject_stage_system_prompt(&mut window, "nope", "hi");
+        // No region named "nope" → add_to_region errors → propagated, not swallowed.
+        assert!(inject_stage_system_prompt(&mut window, "nope", "hi").is_err());
     }
 
     // ─── MockCallbacks ──────────────────────────────────────────────────────

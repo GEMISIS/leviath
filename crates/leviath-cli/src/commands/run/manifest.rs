@@ -308,6 +308,24 @@ pub fn parse_manifest(content: &str) -> anyhow::Result<Blueprint> {
                 );
             }
 
+            // Warn on a common authoring mistake: a `system_prompt` written
+            // *after* the `[stages.X.model]` sub-table lands under
+            // `stages.X.model` (TOML nesting rules) and is silently ignored, so
+            // the stage runs with no instructions. Point the author at the fix.
+            let model_has_system_prompt = stage_value
+                .get("model")
+                .and_then(|v| v.as_table())
+                .map(|t| t.contains_key("system_prompt"))
+                .unwrap_or(false);
+            if model_has_system_prompt {
+                tracing::warn!(
+                    "stage '{stage_name}': `system_prompt` is nested under \
+                     [stages.{stage_name}.model] and will be IGNORED — move the \
+                     `system_prompt = \"\"\"...\"\"\"` line ABOVE the \
+                     [stages.{stage_name}.model] table so it belongs to the stage"
+                );
+            }
+
             // Parse tool_routing configuration
             if let Some(routing_table) = stage_value.get("tool_routing").and_then(|v| v.as_table())
             {
@@ -580,10 +598,14 @@ pub fn parse_manifest(content: &str) -> anyhow::Result<Blueprint> {
     }
 
     if regions.is_empty() {
+        // 8000 tokens (~32K chars) for the pinned system region so a substantial
+        // stage system_prompt fits in the fallback layout without erroring
+        // (see inject_stage_system_prompt); blueprints that need more should
+        // declare their own [context.regions].
         regions.push(RegionDefinition::new(
             "system".to_string(),
             RegionKind::Pinned,
-            2000,
+            8000,
         ));
         regions.push(RegionDefinition::new(
             "conversation".to_string(),
@@ -593,7 +615,7 @@ pub fn parse_manifest(content: &str) -> anyhow::Result<Blueprint> {
             },
             10000,
         ));
-        total_tokens = 12000;
+        total_tokens = 18000;
     }
 
     let layout = ContextLayout::new(regions, total_tokens);
@@ -1011,6 +1033,31 @@ model = { provider = "google", model = "gemini-3.5-pro" }
         let stage = bp.find_stage("main").unwrap();
         assert_eq!(stage.model.provider(), "google");
         assert_eq!(stage.model.model(), "gemini-3.5-pro");
+    }
+
+    #[test]
+    fn system_prompt_nested_under_model_is_ignored_and_warned() {
+        // A `system_prompt` written after the `[stages.main.model]` table nests
+        // under the model table (TOML rules), so the stage never receives it.
+        // parse_manifest emits a warning; the stage config must NOT contain it.
+        let toml = r#"
+[agent]
+name = "misplaced-sp"
+
+[stages.main]
+mode = "autonomous"
+
+[stages.main.model]
+provider = "anthropic"
+model = "claude-sonnet-5"
+system_prompt = "these instructions are misplaced under [model]"
+"#;
+        let bp = parse_manifest(toml).unwrap();
+        let stage = bp.find_stage("main").unwrap();
+        assert!(
+            !stage.config.contains_key("system_prompt"),
+            "a system_prompt nested under [model] must not become the stage prompt"
+        );
     }
 
     #[test]
