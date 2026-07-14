@@ -27,6 +27,47 @@ fn maybe_dump_request(body: &serde_json::Value) {
 /// injected into the system prompt) differs from the small requests that
 /// succeed — size, structure, and content — without a special build. Enable by
 /// setting `LEVIATH_DUMP_REQUEST_DIR`.
+/// Choose which system-block indices carry a `cache_control` breakpoint.
+///
+/// Anthropic allows at most 4 `cache_control` blocks per request, counted
+/// across BOTH system blocks and message content (issue #12). Emitting one per
+/// cacheable region overruns that the moment a blueprint has 5+ pinned/cached
+/// regions — a hard `400 "A maximum of 4 blocks with cache_control may be
+/// provided"`.
+///
+/// Because a breakpoint caches the entire prefix up to and including its block,
+/// we don't need one per block: a single `cache_control` on the LAST block of a
+/// contiguous run of same-hint cacheable blocks caches every block in that run.
+/// System blocks are assembled most-stable-first (see [`leviath_core::CacheHint`]),
+/// so keeping a boundary between tiers (e.g. `Always` pinned content vs.
+/// `UntilChanged` hashmap content that changes as files are read) preserves the
+/// stable prefix's cache when a later, more-volatile tier changes.
+///
+/// `budget` caps the number returned. If there are more tier-runs than the
+/// budget, the last `budget` are kept — the final run always ends on the last
+/// cacheable block, so its breakpoint spans the full cacheable prefix and
+/// nothing cacheable is left entirely uncached.
+fn system_cache_breakpoints(hints: &[leviath_core::CacheHint], budget: usize) -> Vec<usize> {
+    if budget == 0 {
+        return Vec::new();
+    }
+    let mut ends = Vec::new();
+    for (i, hint) in hints.iter().enumerate() {
+        if *hint == leviath_core::CacheHint::Never {
+            continue;
+        }
+        // End of a contiguous same-hint run: the next block is absent or a
+        // different hint (a `Never` block also breaks the run).
+        if hints.get(i + 1) != Some(hint) {
+            ends.push(i);
+        }
+    }
+    if ends.len() > budget {
+        ends.drain(..ends.len() - budget);
+    }
+    ends
+}
+
 fn dump_request(body: &serde_json::Value, dir: Option<&str>) {
     let bytes = serde_json::to_vec(body).map(|v| v.len()).unwrap_or(0);
     tracing::debug!(request_bytes = bytes, "anthropic request body");
@@ -196,16 +237,35 @@ impl AnthropicProvider {
 
     /// Build the request body for the Anthropic API.
     fn build_request_body(&self, request: &InferenceRequest) -> serde_json::Value {
-        // Build system blocks from request.system
+        // Anthropic allows at most 4 `cache_control` blocks per request, counted
+        // across BOTH system blocks and message content. System blocks get first
+        // claim on that budget (they're the most stable, most valuable prefix to
+        // cache); messages get whatever remains.
+        const MAX_BREAKPOINTS: usize = 4;
+
+        // Consolidate system-block cache breakpoints so a blueprint with many
+        // pinned/cached regions stays within the limit (issue #12): one
+        // `cache_control` per contiguous run of same-hint cacheable blocks,
+        // capped at the total budget.
+        let system_hints: Vec<leviath_core::CacheHint> =
+            request.system.iter().map(|b| b.cache_hint).collect();
+        let system_breakpoints: std::collections::HashSet<usize> =
+            system_cache_breakpoints(&system_hints, MAX_BREAKPOINTS)
+                .into_iter()
+                .collect();
+
+        // Build system blocks from request.system, annotating only the chosen
+        // breakpoint indices with cache_control.
         let system_parts: Vec<serde_json::Value> = request
             .system
             .iter()
-            .map(|block| {
+            .enumerate()
+            .map(|(i, block)| {
                 let mut obj = serde_json::json!({
                     "type": "text",
                     "text": block.text,
                 });
-                if block.cache_hint != leviath_core::CacheHint::Never {
+                if system_breakpoints.contains(&i) {
                     obj["cache_control"] = serde_json::json!({ "type": "ephemeral" });
                 }
                 obj
@@ -215,12 +275,12 @@ impl AnthropicProvider {
         // Build conversation messages
         let mut messages: Vec<serde_json::Value> = Vec::new();
 
-        // Track cache breakpoints — Anthropic allows max 4.
+        // Messages get whatever cache breakpoints the system blocks didn't claim.
         let mut breakpoint_count = 0;
-        const MAX_BREAKPOINTS: usize = 4;
+        let message_breakpoint_budget = MAX_BREAKPOINTS - system_breakpoints.len();
 
         for msg in &request.messages {
-            if msg.cache_breakpoint && breakpoint_count < MAX_BREAKPOINTS {
+            if msg.cache_breakpoint && breakpoint_count < message_breakpoint_budget {
                 breakpoint_count += 1;
                 // Wrap content with cache_control
                 match &msg.content {
@@ -267,10 +327,12 @@ impl AnthropicProvider {
             })
         };
 
-        // Add system blocks as top-level field.
-        if system_parts.len() == 1 {
+        // Add system blocks as top-level field. Use the plain-string form only
+        // for a single *uncached* block; anything carrying cache_control must
+        // stay in the array form or the annotation would be dropped.
+        if system_parts.len() == 1 && system_breakpoints.is_empty() {
             body["system"] = system_parts[0]["text"].clone();
-        } else if system_parts.len() > 1 {
+        } else if !system_parts.is_empty() {
             body["system"] = serde_json::Value::Array(system_parts);
         }
 
@@ -941,7 +1003,15 @@ mod tests {
 
         let body = provider.build_request_body(&request);
         assert_eq!(body["model"], "claude-sonnet-4-6");
-        assert_eq!(body["system"], "You are helpful.");
+        // A single *cacheable* system block is emitted in array form so its
+        // cache_control annotation survives (issue #12 fix); the plain-string
+        // form is reserved for a single uncached block.
+        let system = body["system"]
+            .as_array()
+            .expect("cached system → array form");
+        assert_eq!(system.len(), 1);
+        assert_eq!(system[0]["text"], "You are helpful.");
+        assert!(system[0].get("cache_control").is_some());
         assert_eq!(body["messages"].as_array().unwrap().len(), 1);
     }
 
@@ -1167,6 +1237,233 @@ mod tests {
             })
             .count();
         assert_eq!(bp_count, 4);
+    }
+
+    // ── issue #12: system-block cache_control budget ──────────────────────────
+
+    #[test]
+    fn system_cache_breakpoints_collapses_same_hint_run_to_one() {
+        use leviath_core::CacheHint;
+        // 5 consecutive pinned (Always) blocks → a single breakpoint, on the last.
+        assert_eq!(
+            system_cache_breakpoints(&[CacheHint::Always; 5], 4),
+            vec![4]
+        );
+    }
+
+    #[test]
+    fn system_cache_breakpoints_keeps_one_per_tier_boundary() {
+        use leviath_core::CacheHint;
+        // 4 pinned + 1 hashmap (the structured-coder v5 layout) → 2 breakpoints:
+        // end of the Always run (idx 3) and end of the UntilChanged run (idx 4).
+        let mut hints = vec![CacheHint::Always; 4];
+        hints.push(CacheHint::UntilChanged);
+        assert_eq!(system_cache_breakpoints(&hints, 4), vec![3, 4]);
+    }
+
+    #[test]
+    fn system_cache_breakpoints_skips_never_and_splits_runs() {
+        use leviath_core::CacheHint;
+        // A `Never` block is uncacheable AND breaks the contiguous run, so the
+        // two `Always` blocks are separate runs → two breakpoints.
+        let hints = [CacheHint::Always, CacheHint::Never, CacheHint::Always];
+        assert_eq!(system_cache_breakpoints(&hints, 4), vec![0, 2]);
+    }
+
+    #[test]
+    fn system_cache_breakpoints_all_never_is_empty() {
+        use leviath_core::CacheHint;
+        assert!(system_cache_breakpoints(&[CacheHint::Never; 3], 4).is_empty());
+    }
+
+    #[test]
+    fn system_cache_breakpoints_respects_budget_keeping_last_runs() {
+        use leviath_core::CacheHint;
+        // Alternating tiers → 4 runs; budget 2 keeps the last two (which still
+        // include the final, full-prefix breakpoint at idx 3).
+        let hints = [
+            CacheHint::Always,
+            CacheHint::UntilChanged,
+            CacheHint::Always,
+            CacheHint::UntilChanged,
+        ];
+        assert_eq!(system_cache_breakpoints(&hints, 2), vec![2, 3]);
+    }
+
+    #[test]
+    fn system_cache_breakpoints_zero_budget_is_empty() {
+        use leviath_core::CacheHint;
+        assert!(system_cache_breakpoints(&[CacheHint::Always], 0).is_empty());
+    }
+
+    /// Total `cache_control` annotations across system blocks + message content.
+    fn count_cache_control(body: &serde_json::Value) -> usize {
+        let mut n = 0;
+        if let Some(arr) = body.get("system").and_then(|s| s.as_array()) {
+            n += arr
+                .iter()
+                .filter(|b| b.get("cache_control").is_some())
+                .count();
+        }
+        if let Some(msgs) = body.get("messages").and_then(|m| m.as_array()) {
+            for m in msgs {
+                if let Some(blocks) = m.get("content").and_then(|c| c.as_array()) {
+                    n += blocks
+                        .iter()
+                        .filter(|b| b.get("cache_control").is_some())
+                        .count();
+                }
+            }
+        }
+        n
+    }
+
+    #[test]
+    fn build_request_body_caps_total_cache_control_at_4_with_many_system_regions() {
+        use leviath_core::CacheHint;
+        // issue #12 regression: 5 cacheable system regions (architecture/
+        // program_flows/plan/task pinned + files hashmap) previously emitted 5
+        // `cache_control` blocks → hard Anthropic 400. They must now consolidate
+        // within the 4-block total budget.
+        let provider = AnthropicProvider::new("test-key".to_string());
+        let system = vec![
+            crate::SystemBlock {
+                text: "architecture".into(),
+                cache_hint: CacheHint::Always,
+            },
+            crate::SystemBlock {
+                text: "program_flows".into(),
+                cache_hint: CacheHint::Always,
+            },
+            crate::SystemBlock {
+                text: "plan".into(),
+                cache_hint: CacheHint::Always,
+            },
+            crate::SystemBlock {
+                text: "task".into(),
+                cache_hint: CacheHint::Always,
+            },
+            crate::SystemBlock {
+                text: "files".into(),
+                cache_hint: CacheHint::UntilChanged,
+            },
+        ];
+        let request = InferenceRequest {
+            system,
+            messages: vec![crate::provider::Message {
+                role: "user".to_string(),
+                content: "go".into(),
+                cache_breakpoint: true,
+            }],
+            model: "claude-sonnet-4-6".to_string(),
+            max_tokens: 1024,
+            temperature: 0.7,
+            tools: vec![],
+            extra: serde_json::Value::Null,
+        };
+
+        let body = provider.build_request_body(&request);
+        let total = count_cache_control(&body);
+        assert!(
+            total <= 4,
+            "must stay within Anthropic's 4-block cache_control limit; got {total}"
+        );
+        // The 4 pinned blocks collapse to one breakpoint (on `task`), the hashmap
+        // to another (on `files`) → 2 system breakpoints.
+        let sys_bp = body["system"]
+            .as_array()
+            .expect("system must be array form")
+            .iter()
+            .filter(|b| b.get("cache_control").is_some())
+            .count();
+        assert_eq!(sys_bp, 2);
+    }
+
+    #[test]
+    fn build_request_body_system_blocks_take_priority_over_message_breakpoints() {
+        use leviath_core::CacheHint;
+        // 3 distinct system tiers claim 3 of the 4 breakpoints; the lone message
+        // that requests one gets the last slot — and never more than 4 total.
+        let provider = AnthropicProvider::new("test-key".to_string());
+        let system = vec![
+            crate::SystemBlock {
+                text: "a".into(),
+                cache_hint: CacheHint::Always,
+            },
+            crate::SystemBlock {
+                text: "b".into(),
+                cache_hint: CacheHint::UntilChanged,
+            },
+            crate::SystemBlock {
+                text: "c".into(),
+                cache_hint: CacheHint::Always,
+            },
+        ];
+        let messages: Vec<crate::provider::Message> = (0..3)
+            .map(|i| crate::provider::Message {
+                role: "user".to_string(),
+                content: format!("m{i}").into(),
+                cache_breakpoint: true,
+            })
+            .collect();
+        let request = InferenceRequest {
+            system,
+            messages,
+            model: "claude-sonnet-4-6".to_string(),
+            max_tokens: 1024,
+            temperature: 0.7,
+            tools: vec![],
+            extra: serde_json::Value::Null,
+        };
+
+        let body = provider.build_request_body(&request);
+        assert!(count_cache_control(&body) <= 4);
+        let sys_bp = body["system"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|b| b.get("cache_control").is_some())
+            .count();
+        assert_eq!(sys_bp, 3, "3 system tiers claim 3 breakpoints");
+        let msg_bp = body["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|m| {
+                m.get("content")
+                    .and_then(|c| c.as_array())
+                    .and_then(|a| a.first())
+                    .and_then(|b| b.get("cache_control"))
+                    .is_some()
+            })
+            .count();
+        assert_eq!(msg_bp, 1, "messages get the single remaining breakpoint");
+    }
+
+    #[test]
+    fn build_request_body_single_uncached_system_block_uses_string_form() {
+        use leviath_core::CacheHint;
+        // A lone Never block carries no cache_control, so the compact plain-string
+        // system form is still used (back-compat).
+        let provider = AnthropicProvider::new("test-key".to_string());
+        let request = InferenceRequest {
+            system: vec![crate::SystemBlock {
+                text: "ephemeral".into(),
+                cache_hint: CacheHint::Never,
+            }],
+            messages: vec![crate::provider::Message {
+                role: "user".to_string(),
+                content: "hi".into(),
+                cache_breakpoint: false,
+            }],
+            model: "claude-sonnet-4-6".to_string(),
+            max_tokens: 1024,
+            temperature: 0.7,
+            tools: vec![],
+            extra: serde_json::Value::Null,
+        };
+        let body = provider.build_request_body(&request);
+        assert_eq!(body["system"], "ephemeral");
     }
 
     #[test]
