@@ -106,9 +106,10 @@ fn inject_required_region_nudges(
     entity: bevy_ecs::prelude::Entity,
     unmet: &[(String, Option<String>)],
 ) {
-    let Some(mut window) = engine.world_mut().get_mut::<ContextWindow>(entity) else {
-        return;
-    };
+    let mut window = engine
+        .world_mut()
+        .get_mut::<ContextWindow>(entity)
+        .expect("ContextWindow always present after spawn_agent");
     for (name, msg) in unmet {
         let text = msg.clone().unwrap_or_else(|| {
             format!(
@@ -771,9 +772,13 @@ pub async fn run_stage_loop(
                         .await
                     {
                         Ok((result, response)) => {
-                            let unmet = match ctx.engine.world().get::<ContextWindow>(ctx.entity) {
-                                Some(w) => unmet_required_regions(ctx.blueprint, stage, w),
-                                None => Vec::new(),
+                            let unmet = {
+                                let w = ctx
+                                    .engine
+                                    .world()
+                                    .get::<ContextWindow>(ctx.entity)
+                                    .expect("ContextWindow always present after spawn_agent");
+                                unmet_required_regions(ctx.blueprint, stage, w)
                             };
                             if !unmet.is_empty() && round < reentry_cap {
                                 round += 1;
@@ -1069,6 +1074,20 @@ mod tests {
         assert!(
             conv.contains("Required context region 'architecture' is still empty"),
             "default message: {conv}"
+        );
+    }
+
+    #[test]
+    fn unmet_required_regions_flags_region_absent_from_window() {
+        // A required region not present in the window at all is treated as
+        // unmet (covers the get_region-None path).
+        let (bp, stage) = required_region_fixture();
+        let window = ContextWindow::new(20_000); // bare — no "plan" region
+        assert!(
+            unmet_required_regions(&bp, &stage, &window)
+                .iter()
+                .any(|(n, _)| n == "plan"),
+            "an absent required region must be flagged as unmet"
         );
     }
 
