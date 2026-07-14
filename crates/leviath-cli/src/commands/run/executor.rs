@@ -1431,6 +1431,10 @@ mod tests {
 
     #[tokio::test]
     async fn required_region_gate_reruns_stage_then_proceeds() {
+        // Install the always-on tracing subscriber so the gate's warn! (hit on
+        // the proceed-after-cap path) has its macro-argument lines evaluated —
+        // otherwise llvm-cov marks them uncovered on CI.
+        crate::test_support::with_tracing(|| {});
         // A stage that can write context but never populates a `required` region
         // is re-run up to the cap (mock never fills it), then the run proceeds
         // with a warning (not a hard fail).
