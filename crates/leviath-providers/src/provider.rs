@@ -1021,6 +1021,64 @@ mod tests {
         drop(client);
     }
 
+    /// Regression for the read_files hang: a connection where the server
+    /// accepts the request but never sends a response must ERROR (via the
+    /// stall/read timeout), not block forever. This is the exact shape of the
+    /// hang the user hit — a large request accepted by Anthropic (h2
+    /// WindowUpdate seen) with no response ever returned. Uses a 2s read
+    /// timeout so the test is fast; the production default is 300s.
+    #[tokio::test]
+    async fn read_timeout_aborts_a_connection_that_never_responds() {
+        use std::time::{Duration, Instant};
+        use tokio::io::AsyncReadExt;
+
+        // Server: accept one connection, drain the request, then hold the
+        // socket open forever without writing any response.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            if let Ok((mut sock, _)) = listener.accept().await {
+                let mut buf = [0u8; 4096];
+                // Read until the peer goes away; never respond.
+                while let Ok(n) = sock.read(&mut buf).await {
+                    if n == 0 {
+                        break;
+                    }
+                }
+            }
+        });
+
+        // Mirror build_http_client's stall protection but with a short read
+        // timeout. If read_timeout were defeated (e.g. by keep-alive) this
+        // send would hang and the test would time out instead of asserting.
+        let client = reqwest::Client::builder()
+            .read_timeout(Duration::from_secs(2))
+            .http2_keep_alive_interval(Duration::from_secs(30))
+            .http2_keep_alive_timeout(Duration::from_secs(20))
+            .http2_keep_alive_while_idle(true)
+            .tcp_keepalive(Duration::from_secs(60))
+            .pool_idle_timeout(Duration::from_secs(90))
+            .build()
+            .unwrap();
+
+        let start = Instant::now();
+        let result = client
+            .post(format!("http://{addr}/"))
+            .body("request body that never gets a response")
+            .send()
+            .await;
+        let elapsed = start.elapsed();
+
+        assert!(
+            result.is_err(),
+            "a silent server must yield an error, not a response"
+        );
+        assert!(
+            elapsed < Duration::from_secs(10),
+            "read_timeout should abort at ~2s; took {elapsed:?} (it did not fire)"
+        );
+    }
+
     // ─── MessageContent::as_text for Blocks variant ────────────────────────
 
     #[test]
