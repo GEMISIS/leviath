@@ -101,7 +101,7 @@ pub enum CacheTtl {
 
 impl Default for CacheTtl {
     fn default() -> Self {
-        Self::Ephemeral1h
+        Self::Ephemeral5m
     }
 }
 
@@ -1218,7 +1218,7 @@ mod tests {
         let first_msg = &messages[0];
         assert!(first_msg.get("content").unwrap().is_array());
         let content_block = &first_msg["content"][0];
-        assert_eq!(content_block["cache_control"]["type"], "ephemeral"); assert_eq!(content_block["cache_control"]["ttl"], "1h");
+        assert_eq!(content_block["cache_control"]["type"], "ephemeral");
 
         // Second non-system message has no cache_breakpoint
         let second_msg = &messages[1];

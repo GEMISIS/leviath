@@ -386,8 +386,9 @@ const READ_STALL_TIMEOUT_SECS: u64 = 900;
 pub fn build_http_client(timeout_secs: Option<u64>) -> reqwest::Client {
     let mut builder = reqwest::Client::builder()
         .pool_max_idle_per_host(0)
+        .connect_timeout(std::time::Duration::from_secs(30))
         .read_timeout(std::time::Duration::from_secs(READ_STALL_TIMEOUT_SECS))
-        .tcp_keepalive(std::time::Duration::from_secs(60));
+        .tcp_keepalive(std::time::Duration::from_secs(30));
 
     if let Some(secs) = timeout_secs {
         builder = builder.timeout(std::time::Duration::from_secs(secs));
