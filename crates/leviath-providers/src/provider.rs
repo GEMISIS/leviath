@@ -360,7 +360,7 @@ pub struct RateLimitConfig {
 /// forever. It is the backstop behind the connection-reuse fix in
 /// [`build_http_client`]: if a connection ever goes silent mid-request, this
 /// bounds the wait instead of hanging indefinitely.
-const READ_STALL_TIMEOUT_SECS: u64 = 600;
+const READ_STALL_TIMEOUT_SECS: u64 = 900;
 
 /// Build a `reqwest::Client` for talking to an LLM HTTP API.
 ///

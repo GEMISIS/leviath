@@ -90,6 +90,21 @@ fn dump_request(body: &serde_json::Value, dir: Option<&str>) {
     }
 }
 
+/// Cache TTL for Anthropic prompt caching.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CacheTtl {
+    /// 5-minute ephemeral cache (default, no extra cost).
+    Ephemeral5m,
+    /// 1-hour extended cache (requires beta header, higher write cost).
+    Ephemeral1h,
+}
+
+impl Default for CacheTtl {
+    fn default() -> Self {
+        Self::Ephemeral1h
+    }
+}
+
 /// Anthropic Claude provider.
 pub struct AnthropicProvider {
     /// HTTP client
@@ -106,6 +121,9 @@ pub struct AnthropicProvider {
 
     /// Per-model capability overrides
     capability_overrides: HashMap<String, ModelCapabilities>,
+
+    /// Cache TTL for prompt caching breakpoints.
+    cache_ttl: CacheTtl,
 }
 
 impl AnthropicProvider {
@@ -117,6 +135,7 @@ impl AnthropicProvider {
             base_url: "https://api.anthropic.com/v1".to_string(),
             rate_limiter: None,
             capability_overrides: HashMap::new(),
+            cache_ttl: CacheTtl::default(),
         }
     }
 
@@ -132,6 +151,7 @@ impl AnthropicProvider {
                 .unwrap_or_else(|| "https://api.anthropic.com/v1".to_string()),
             rate_limiter,
             capability_overrides: HashMap::new(),
+            cache_ttl: CacheTtl::default(),
         }
     }
 
@@ -147,6 +167,7 @@ impl AnthropicProvider {
             base_url: "https://api.anthropic.com/v1".to_string(),
             rate_limiter: None,
             capability_overrides: overrides,
+            cache_ttl: CacheTtl::default(),
         }
     }
 
@@ -235,6 +256,27 @@ impl AnthropicProvider {
         ModelCapabilities::default()
     }
 
+    /// Return the `cache_control` JSON value for the configured TTL.
+    fn cache_control_value(&self) -> serde_json::Value {
+        match self.cache_ttl {
+            CacheTtl::Ephemeral5m => serde_json::json!({ "type": "ephemeral" }),
+            CacheTtl::Ephemeral1h => serde_json::json!({ "type": "ephemeral_1h" }),
+        }
+    }
+
+    /// Apply common Anthropic headers to a request builder.
+    fn apply_headers(&self, builder: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        let builder = builder
+            .header("x-api-key", &self.api_key)
+            .header("anthropic-version", "2023-06-01")
+            .header("content-type", "application/json");
+        if self.cache_ttl == CacheTtl::Ephemeral1h {
+            builder.header("anthropic-beta", "extended-cache-ttl-2025-04-11")
+        } else {
+            builder
+        }
+    }
+
     /// Build the request body for the Anthropic API.
     fn build_request_body(&self, request: &InferenceRequest) -> serde_json::Value {
         // Anthropic allows at most 4 `cache_control` blocks per request, counted
@@ -266,7 +308,7 @@ impl AnthropicProvider {
                     "text": block.text,
                 });
                 if system_breakpoints.contains(&i) {
-                    obj["cache_control"] = serde_json::json!({ "type": "ephemeral" });
+                    obj["cache_control"] = self.cache_control_value();
                 }
                 obj
             })
@@ -285,13 +327,14 @@ impl AnthropicProvider {
                 // Wrap content with cache_control
                 match &msg.content {
                     crate::MessageContent::Text(text) => {
+                        let mut block = serde_json::json!({
+                            "type": "text",
+                            "text": text,
+                        });
+                        block["cache_control"] = self.cache_control_value();
                         messages.push(serde_json::json!({
                             "role": msg.role,
-                            "content": [{
-                                "type": "text",
-                                "text": text,
-                                "cache_control": { "type": "ephemeral" }
-                            }],
+                            "content": [block],
                         }));
                     }
                     crate::MessageContent::Blocks(_) => {
@@ -470,12 +513,7 @@ impl Provider for AnthropicProvider {
         #[cfg(feature = "debug-http")]
         let start = std::time::Instant::now();
 
-        let response = self
-            .client
-            .post(&url)
-            .header("x-api-key", &self.api_key)
-            .header("anthropic-version", "2023-06-01")
-            .header("content-type", "application/json")
+        let response = self.apply_headers(self.client.post(&url))
             .json(&body)
             .send()
             .await
@@ -566,12 +604,7 @@ impl Provider for AnthropicProvider {
         #[cfg(feature = "debug-http")]
         let start = std::time::Instant::now();
 
-        let response = self
-            .client
-            .post(&url)
-            .header("x-api-key", &self.api_key)
-            .header("anthropic-version", "2023-06-01")
-            .header("content-type", "application/json")
+        let response = self.apply_headers(self.client.post(&url))
             .json(&body)
             .send()
             .await
@@ -1185,7 +1218,7 @@ mod tests {
         let first_msg = &messages[0];
         assert!(first_msg.get("content").unwrap().is_array());
         let content_block = &first_msg["content"][0];
-        assert_eq!(content_block["cache_control"]["type"], "ephemeral");
+        assert_eq!(content_block["cache_control"]["type"], "ephemeral_1h");
 
         // Second non-system message has no cache_breakpoint
         let second_msg = &messages[1];
@@ -2108,6 +2141,7 @@ mod tests {
             base_url: "http://127.0.0.1:19997".to_string(),
             rate_limiter: None,
             capability_overrides: HashMap::new(),
+            cache_ttl: CacheTtl::default(),
         };
         let request = InferenceRequest {
             system: vec![],
@@ -2138,6 +2172,7 @@ mod tests {
             base_url: "http://127.0.0.1:19997".to_string(),
             rate_limiter: None,
             capability_overrides: HashMap::new(),
+            cache_ttl: CacheTtl::default(),
         };
         let request = InferenceRequest {
             system: vec![],
@@ -2163,6 +2198,7 @@ mod tests {
             base_url: "http://127.0.0.1:19997".to_string(),
             rate_limiter: None,
             capability_overrides: HashMap::new(),
+            cache_ttl: CacheTtl::default(),
         };
         let result = provider.list_models().await;
         assert!(result.is_err());
