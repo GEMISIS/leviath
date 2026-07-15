@@ -260,7 +260,7 @@ impl AnthropicProvider {
     fn cache_control_value(&self) -> serde_json::Value {
         match self.cache_ttl {
             CacheTtl::Ephemeral5m => serde_json::json!({ "type": "ephemeral" }),
-            CacheTtl::Ephemeral1h => serde_json::json!({ "type": "ephemeral_1h" }),
+            CacheTtl::Ephemeral1h => serde_json::json!({ "type": "ephemeral", "ttl": "1h" }),
         }
     }
 
@@ -1218,7 +1218,7 @@ mod tests {
         let first_msg = &messages[0];
         assert!(first_msg.get("content").unwrap().is_array());
         let content_block = &first_msg["content"][0];
-        assert_eq!(content_block["cache_control"]["type"], "ephemeral_1h");
+        assert_eq!(content_block["cache_control"]["type"], "ephemeral"); assert_eq!(content_block["cache_control"]["ttl"], "1h");
 
         // Second non-system message has no cache_breakpoint
         let second_msg = &messages[1];
