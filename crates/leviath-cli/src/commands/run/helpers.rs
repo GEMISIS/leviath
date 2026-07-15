@@ -160,14 +160,23 @@ pub fn initialize_context_window(
             window.add_region(conv_region);
         }
 
-        let system_region_name = blueprint
+        // Seed the task text into a pinned region.
+        // Prefer a region explicitly named "task"; fall back to the first pinned region.
+        let task_region_name = blueprint
             .context_layout
             .regions
             .iter()
-            .find(|r| matches!(r.kind, RegionKind::Pinned))
+            .find(|r| r.name == "task" && matches!(r.kind, RegionKind::Pinned))
+            .or_else(|| {
+                blueprint
+                    .context_layout
+                    .regions
+                    .iter()
+                    .find(|r| matches!(r.kind, RegionKind::Pinned))
+            })
             .map(|r| r.name.clone());
 
-        if let Some(region_name) = system_region_name {
+        if let Some(region_name) = task_region_name {
             let task_tokens = task.len() / 4 + 1;
             let _ = window.add_to_region(&region_name, task.to_string(), task_tokens);
         }
@@ -816,6 +825,38 @@ mod tests {
     }
 
     // ─── initialize_context_window: empty task ──────────────────────────
+
+    #[test]
+    fn initialize_context_window_prefers_task_region_over_first_pinned() {
+        // When a region named "task" exists, the task text should go there
+        // instead of into the first pinned region (e.g. "architecture").
+        let bp = make_blueprint_with_regions(vec![
+            RegionDefinition::new("architecture".to_string(), RegionKind::Pinned, 6000),
+            RegionDefinition::new("plan".to_string(), RegionKind::Pinned, 4000),
+            RegionDefinition::new("task".to_string(), RegionKind::Pinned, 4000),
+            RegionDefinition::new(
+                "conversation".to_string(),
+                RegionKind::SlidingWindow {
+                    max_items: 10,
+                    eviction_strategy: EvictionStrategy::PerItem,
+                },
+                10000,
+            ),
+        ]);
+        let (mut engine, entity) = make_engine_and_entity(&bp);
+
+        initialize_context_window(&mut engine, entity, &bp, "build the thing");
+
+        let window = engine.world().get::<ContextWindow>(entity).unwrap();
+
+        // Task should be in the "task" region, NOT "architecture"
+        let task_region = window.get_region("task").unwrap();
+        assert_eq!(task_region.content.len(), 1);
+        assert!(task_region.content[0].content.contains("build the thing"));
+
+        let arch_region = window.get_region("architecture").unwrap();
+        assert_eq!(arch_region.content.len(), 0, "architecture should be empty");
+    }
 
     #[test]
     fn initialize_context_window_empty_task() {
