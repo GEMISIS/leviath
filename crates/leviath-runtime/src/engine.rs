@@ -92,17 +92,20 @@ pub struct AgentEngine {
     /// Receiver side of the message channel
     message_rx: mpsc::UnboundedReceiver<AgentMessage>,
 
-    /// Taint gate for the current stage, when taint tracking is active. `None`
-    /// means no enforcement (the common/default case). Reconfigured per stage
-    /// by the CLI via [`AgentEngine::configure_taint`].
-    taint_gate: Option<crate::taint::TaintGate>,
+    /// Per-entity taint enforcement state, keyed by agent entity. An entity
+    /// absent from the map has no enforcement (the common/default case).
+    /// Keyed per-entity (rather than a single engine-wide gate) so concurrently
+    /// running agents — e.g. fan-out sub-agent workers — each enforce their own
+    /// stage's taint policy without racing on shared gate state. Configured per
+    /// stage per entity by the CLI via [`AgentEngine::configure_taint`].
+    taint_gates: HashMap<Entity, TaintGateEntry>,
+}
 
-    /// Policy (allowlists / MCP overrides) consulted when the gate blocks.
-    taint_policy: leviath_core::PolicyConfig,
-
-    /// Injected resolver used to interactively decide a blocked outbound call.
-    /// `None` → blocked calls are denied outright.
-    gate_prompt: Option<Box<dyn crate::taint::GatePrompt>>,
+/// A single entity's taint-enforcement configuration (gate + policy + prompt).
+struct TaintGateEntry {
+    gate: crate::taint::TaintGate,
+    policy: leviath_core::PolicyConfig,
+    prompt: Option<Box<dyn crate::taint::GatePrompt>>,
 }
 
 /// Boxed future returned by a type-erased tool executor. See
@@ -360,9 +363,7 @@ impl AgentEngine {
             provider_registry: ProviderRegistry::new(),
             message_tx,
             message_rx,
-            taint_gate: None,
-            taint_policy: leviath_core::PolicyConfig::default(),
-            gate_prompt: None,
+            taint_gates: HashMap::new(),
         }
     }
 
@@ -391,9 +392,7 @@ impl AgentEngine {
             provider_registry,
             message_tx,
             message_rx,
-            taint_gate: None,
-            taint_policy: leviath_core::PolicyConfig::default(),
-            gate_prompt: None,
+            taint_gates: HashMap::new(),
         }
     }
 
@@ -420,19 +419,24 @@ impl AgentEngine {
     /// prompting via `prompt` (or denying outright when `prompt` is `None`).
     pub fn configure_taint(
         &mut self,
+        entity: Entity,
         gate: crate::taint::TaintGate,
         policy: leviath_core::PolicyConfig,
         prompt: Option<Box<dyn crate::taint::GatePrompt>>,
     ) {
-        self.taint_gate = Some(gate);
-        self.taint_policy = policy;
-        self.gate_prompt = prompt;
+        self.taint_gates.insert(
+            entity,
+            TaintGateEntry {
+                gate,
+                policy,
+                prompt,
+            },
+        );
     }
 
-    /// Disable taint enforcement (no tagging, no gating).
-    pub fn clear_taint(&mut self) {
-        self.taint_gate = None;
-        self.gate_prompt = None;
+    /// Disable taint enforcement for an entity (no tagging, no gating).
+    pub fn clear_taint(&mut self, entity: Entity) {
+        self.taint_gates.remove(&entity);
     }
 
     /// Turn on taint tracking for the given entity's context window (idempotent).
@@ -442,11 +446,11 @@ impl AgentEngine {
         }
     }
 
-    /// The current stage's taint audit log (empty when taint is inactive).
-    pub fn taint_audit_log(&self) -> &[leviath_core::taint::GateEvent] {
-        self.taint_gate
-            .as_ref()
-            .map(|g| g.audit_log())
+    /// An entity's current-stage taint audit log (empty when taint is inactive).
+    pub fn taint_audit_log(&self, entity: Entity) -> &[leviath_core::taint::GateEvent] {
+        self.taint_gates
+            .get(&entity)
+            .map(|e| e.gate.audit_log())
             .unwrap_or(&[])
     }
 
@@ -471,7 +475,7 @@ impl AgentEngine {
         leviath_core::taint::GateDecision,
     )> {
         let window = self.world.get::<ContextWindow>(entity).unwrap();
-        let gate = self.taint_gate.as_mut().unwrap();
+        let gate = &mut self.taint_gates.get_mut(&entity).unwrap().gate;
         calls
             .iter()
             .map(|tc| {
@@ -489,9 +493,9 @@ impl AgentEngine {
         use crate::taint::GateResolution;
 
         if !self
-            .taint_gate
-            .as_ref()
-            .map(|g| g.is_enabled())
+            .taint_gates
+            .get(&entity)
+            .map(|e| e.gate.is_enabled())
             .unwrap_or(false)
         {
             return (calls.to_vec(), Vec::new());
@@ -502,7 +506,8 @@ impl AgentEngine {
             .get::<AgentState>(entity)
             .map(|s| s.agent_id.clone())
             .unwrap_or_default();
-        let policy = self.taint_policy.clone();
+        // The entry exists (the enabled check above returned true).
+        let policy = self.taint_gates.get(&entity).unwrap().policy.clone();
         let decisions = self.gate_decisions(entity, &agent_id, &policy, calls);
 
         // Resolve blocks (the only async step) and partition. All non-async
@@ -514,14 +519,19 @@ impl AgentEngine {
                 to_execute.push(tc);
                 continue;
             };
-            let resolution = match self.gate_prompt.as_ref() {
+            let resolution = match self
+                .taint_gates
+                .get(&entity)
+                .and_then(|e| e.prompt.as_ref())
+            {
                 Some(prompt) => prompt.resolve(&decision).await,
                 None => GateResolution::Deny,
             };
             let outcome = self
-                .taint_gate
-                .as_mut()
+                .taint_gates
+                .get_mut(&entity)
                 .unwrap()
+                .gate
                 .apply_resolution(&agent_id, &tc.name, &tc.id, taint, clearance, resolution);
             match outcome {
                 Some(blocked) => denied.push(blocked),
@@ -932,8 +942,9 @@ impl AgentEngine {
         // output sensitivity (before borrowing the window) so results are
         // tagged as they are routed into regions.
         let tool_sensitivities: Option<HashMap<String, leviath_core::TaintLevel>> = self
-            .taint_gate
-            .as_ref()
+            .taint_gates
+            .get(&entity)
+            .map(|e| &e.gate)
             .filter(|g| g.is_enabled())
             .map(|g| {
                 tool_calls_snapshot
@@ -4819,7 +4830,7 @@ mod tests {
             taint_tracking: true,
             ..leviath_core::SecurityConfig::default()
         });
-        engine.configure_taint(gate, policy, prompt);
+        engine.configure_taint(entity, gate, policy, prompt);
         (engine, entity)
     }
 
@@ -4886,7 +4897,7 @@ mod tests {
         // A [blocked] result was substituted into context.
         assert!(tool_results_text(&engine, entity).contains("[blocked]"));
         // A denied event was audited.
-        assert!(engine.taint_audit_log().iter().any(|e| !e.allowed));
+        assert!(engine.taint_audit_log(entity).iter().any(|e| !e.allowed));
     }
 
     #[tokio::test]
@@ -4897,7 +4908,7 @@ mod tests {
         assert!(executed.lock().unwrap().contains(&"shell".to_string()));
         assert!(!tool_results_text(&engine, entity).contains("[blocked]"));
         // The allow was audited.
-        assert!(engine.taint_audit_log().iter().any(|e| e.allowed
+        assert!(engine.taint_audit_log(entity).iter().any(|e| e.allowed
             && matches!(
                 e.decision_source,
                 leviath_core::taint::GateDecisionSource::UserAllowOnce
@@ -4911,15 +4922,16 @@ mod tests {
         // Executed after the user chose "always allow".
         assert!(executed.lock().unwrap().contains(&"shell".to_string()));
         // Audited as an always-allow decision.
-        assert!(engine.taint_audit_log().iter().any(|e| e.allowed
+        assert!(engine.taint_audit_log(entity).iter().any(|e| e.allowed
             && matches!(
                 e.decision_source,
                 leviath_core::taint::GateDecisionSource::UserAlwaysAllow
             )));
         // The tool's clearance was raised to Private for the rest of the run.
         let cls = engine
-            .taint_gate
-            .as_ref()
+            .taint_gates
+            .get(&entity)
+            .map(|e| &e.gate)
             .unwrap()
             .tool_classification("shell");
         assert_eq!(cls.clearance, leviath_core::TaintLevel::Private);
@@ -4954,7 +4966,7 @@ mod tests {
             .id();
         let executed = run_and_record_executed(&mut engine, entity).await;
         assert!(executed.lock().unwrap().contains(&"shell".to_string()));
-        assert!(engine.taint_audit_log().is_empty());
+        assert!(engine.taint_audit_log(entity).is_empty());
     }
 
     #[tokio::test]
@@ -4966,7 +4978,7 @@ mod tests {
         let executed = run_and_record_executed(&mut engine, entity).await;
         assert!(!executed.lock().unwrap().contains(&"shell".to_string()));
         assert!(tool_results_text(&engine, entity).contains("[blocked]"));
-        assert!(engine.taint_audit_log().iter().any(|e| !e.allowed));
+        assert!(engine.taint_audit_log(entity).iter().any(|e| !e.allowed));
     }
 
     #[tokio::test]
@@ -4997,7 +5009,7 @@ mod tests {
         let (mut engine, entity) = tainted_engine_with("shell", None, policy);
         let executed = run_and_record_executed(&mut engine, entity).await;
         assert!(executed.lock().unwrap().contains(&"shell".to_string()));
-        assert!(engine.taint_audit_log().iter().any(|e| e.allowed
+        assert!(engine.taint_audit_log(entity).iter().any(|e| e.allowed
             && matches!(
                 e.decision_source,
                 leviath_core::taint::GateDecisionSource::AllowlistRule { .. }
@@ -5007,11 +5019,12 @@ mod tests {
     #[test]
     fn configure_and_clear_taint() {
         let mut engine = AgentEngine::new();
-        assert!(engine.taint_audit_log().is_empty());
+        let entity = engine.world_mut().spawn(()).id();
+        assert!(engine.taint_audit_log(entity).is_empty());
         let gate = crate::taint::TaintGate::new(leviath_core::SecurityConfig::default());
-        engine.configure_taint(gate, leviath_core::PolicyConfig::default(), None);
-        engine.clear_taint();
-        assert!(engine.taint_audit_log().is_empty());
+        engine.configure_taint(entity, gate, leviath_core::PolicyConfig::default(), None);
+        engine.clear_taint(entity);
+        assert!(engine.taint_audit_log(entity).is_empty());
     }
 
     #[test]
@@ -5457,42 +5470,45 @@ mod tests {
     #[test]
     fn configure_taint_sets_gate_and_policy() {
         let mut engine = AgentEngine::new();
+        let entity = engine.world_mut().spawn(()).id();
         let gate = crate::taint::TaintGate::new(leviath_core::SecurityConfig {
             taint_tracking: true,
             ..leviath_core::SecurityConfig::default()
         });
         let policy = leviath_core::PolicyConfig::default();
-        engine.configure_taint(gate, policy, None);
+        engine.configure_taint(entity, gate, policy, None);
         // Gate is active so audit log slice should be available (empty but not
         // the None-fallback).
-        assert!(engine.taint_gate.is_some());
-        assert!(engine.taint_audit_log().is_empty());
+        assert!(engine.taint_gates.contains_key(&entity));
+        assert!(engine.taint_audit_log(entity).is_empty());
     }
 
     #[test]
     fn taint_audit_log_returns_empty_slice_when_no_gate() {
-        let engine = AgentEngine::new();
+        let mut engine = AgentEngine::new();
+        let entity = engine.world_mut().spawn(()).id();
         // No gate configured → returns the static empty fallback.
-        assert!(engine.taint_audit_log().is_empty());
+        assert!(engine.taint_audit_log(entity).is_empty());
     }
 
     #[test]
     fn clear_taint_removes_gate_and_prompt() {
         let mut engine = AgentEngine::new();
+        let entity = engine.world_mut().spawn(()).id();
         let gate = crate::taint::TaintGate::new(leviath_core::SecurityConfig {
             taint_tracking: true,
             ..leviath_core::SecurityConfig::default()
         });
         engine.configure_taint(
+            entity,
             gate,
             leviath_core::PolicyConfig::default(),
             Some(Box::new(FixedPrompt(crate::taint::GateResolution::Deny))),
         );
-        assert!(engine.taint_gate.is_some());
-        assert!(engine.gate_prompt.is_some());
-        engine.clear_taint();
-        assert!(engine.taint_gate.is_none());
-        assert!(engine.gate_prompt.is_none());
+        assert!(engine.taint_gates.contains_key(&entity));
+        assert!(engine.taint_gates[&entity].prompt.is_some());
+        engine.clear_taint(entity);
+        assert!(!engine.taint_gates.contains_key(&entity));
     }
 
     #[test]
