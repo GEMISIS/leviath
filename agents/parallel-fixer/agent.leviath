@@ -1,0 +1,119 @@
+[agent]
+name = "parallel-fixer"
+version = "0.1.0"
+description = "Fixes failing tests in parallel: validate → fan out one worker per failure → merge"
+entry_stage = "validate"
+
+[tool_permissions]
+read_file = "allow"
+list_dir = "allow"
+read_files = "allow"
+write_file = "ask"
+edit_file = "ask"
+bash = "ask"
+
+# ─── Stage 1: Validate ───────────────────────────────────────────────────────
+# Run the test suite and record the set of failing tests + their diagnoses.
+
+[stages.validate]
+mode = "autonomous"
+model = { models = [{ provider = "anthropic", model = "claude-sonnet-4-6" }, { provider = "openai", model = "gpt-5.4-mini" }, { provider = "ollama", model = "qwen3.5:9b" }] }
+description = "Run the tests and diagnose each failure"
+available_tools = ["read_file", "read_files", "list_dir", "shell"]
+max_iterations = 20
+system_prompt = """
+Run the project's test suite and, for each failing test, record:
+- the test name
+- the source file most likely responsible
+- a one-line diagnosis of the failure
+
+Write the collected failures into the `diagnosis` context region as a summary
+the next stage can split into per-test work items.
+"""
+
+[stages.validate.transitions.parallel_fix]
+hint = "Tests were run and failures diagnosed"
+transform = "direct"
+
+# ─── Stage 2: Parallel fix (fan-out) ─────────────────────────────────────────
+# Split the diagnosis into one work item per failing test and fix each in a
+# parallel in-process sub-agent worker. Workers share the workdir; file-level
+# locking prevents concurrent writes to the same file from clobbering.
+
+[stages.parallel_fix]
+mode = "fan_out"
+model = { models = [{ provider = "anthropic", model = "claude-sonnet-4-6" }] }
+description = "Fix each failing test in parallel"
+# Run each work item as this same blueprint entered at the `fix_worker` stage.
+# (Alternatively, point at a separate installed agent type:
+#   worker_agent = "test-fixer"
+#  or discover one by capability:
+#   worker_query = "test fixing")
+worker_stage = "fix_worker"
+merge_stage = "merge_fixes"
+max_workers = 5
+on_worker_failure = "continue"
+split_prompt = """
+Read the `diagnosis` region and output ONLY a JSON array of work items — no prose.
+Each item: {"id": "<test_name>", "context": {"test": "...", "source_file": "...", "diagnosis": "..."}}
+Group failures that touch the SAME source file into a single work item so two
+workers never edit the same file.
+"""
+
+# ─── Worker stage: fix one failing test ──────────────────────────────────────
+# `allow_as_worker = true` opts this stage in to being a fan-out worker entry.
+# Each worker receives its work item (test + source_file + diagnosis) seeded
+# into its pinned context.
+
+[stages.fix_worker]
+mode = "autonomous"
+model = { models = [{ provider = "anthropic", model = "claude-sonnet-4-6" }, { provider = "openai", model = "gpt-5.4-mini" }] }
+description = "Fix a single failing test"
+available_tools = ["read_file", "read_files", "edit_file", "shell"]
+max_iterations = 50
+allow_as_worker = true
+system_prompt = """
+You are fixing ONE failing test. Your work item (test name, source file, and
+diagnosis) is in your pinned context.
+
+1. Read the test and the implicated source file.
+2. Make the minimal edit that fixes the failure.
+3. Re-run just this test to confirm it passes.
+
+Only touch the source file for your work item — other workers are fixing other
+files in parallel.
+"""
+
+# ─── Stage 3: Merge ──────────────────────────────────────────────────────────
+# Reconcile the workers' fixes, resolve any conflicts, and re-validate.
+
+[stages.merge_fixes]
+mode = "autonomous"
+model = { models = [{ provider = "anthropic", model = "claude-sonnet-4-6" }, { provider = "openai", model = "gpt-5.4-mini" }, { provider = "ollama", model = "qwen3.5:9b" }] }
+description = "Verify all fixes are compatible and the full suite passes"
+available_tools = ["read_file", "read_files", "edit_file", "shell"]
+max_iterations = 30
+system_prompt = """
+The parallel workers' results are in your conversation context. Your job:
+1. Run the full test suite again.
+2. If any test still fails (including new failures from interacting fixes),
+   resolve the conflict.
+3. Report the final state.
+"""
+
+# Terminal: no outgoing transitions — the run completes after merge.
+[stages.merge_fixes.transitions]
+
+# ─── Compaction ──────────────────────────────────────────────────────────────
+
+[compaction]
+provider = "anthropic"
+model = "claude-sonnet-4-6"
+
+# ─── Context layout ──────────────────────────────────────────────────────────
+
+[context.regions]
+task = { kind = "pinned", max_tokens = 4000 }
+diagnosis = { kind = "pinned", max_tokens = 8000 }
+conversation = { kind = "sliding_window", max_items = 40, max_tokens = 20000, strategy = "bulk", overflow = 20 }
+scratch = { kind = "clearable", max_tokens = 8000 }
