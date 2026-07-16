@@ -12,6 +12,7 @@
 
 mod dynamic_interaction;
 pub mod executor;
+mod fanout;
 mod foreground;
 mod graph;
 mod helpers;
