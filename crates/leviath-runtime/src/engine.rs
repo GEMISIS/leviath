@@ -128,18 +128,43 @@ pub type PostToolSync = dyn FnMut(&mut bevy_ecs::prelude::World, bevy_ecs::prelu
 /// Drive an agent through it with [`run_inference_loop_shared`].
 pub type EngineHandle = Arc<tokio::sync::RwLock<AgentEngine>>;
 
+/// Outcome of [`AgentEngine::loop_handle_empty_tool_calls`] — the inference
+/// loop either finishes or injects a nudge and keeps looping.
+enum EmptyToolCallsOutcome {
+    /// The agent finished (did real work earlier, or exhausted nudge attempts).
+    Finish,
+    /// The agent produced text only; a nudge was injected — keep looping.
+    Nudged,
+}
+
+/// Accumulate one inference call's token usage into a running total.
+fn accumulate_tokens(
+    cumulative: &mut leviath_providers::TokenUsage,
+    used: &leviath_providers::TokenUsage,
+) {
+    cumulative.prompt_tokens += used.prompt_tokens;
+    cumulative.completion_tokens += used.completion_tokens;
+    cumulative.total_tokens += used.total_tokens;
+    cumulative.cached_tokens += used.cached_tokens;
+    cumulative.cache_write_tokens += used.cache_write_tokens;
+}
+
 /// Drive an agent's inference loop through a shared [`EngineHandle`].
 ///
 /// This is the unified entry point used by both the root agent and in-process
-/// sub-agents. It exists so multiple agents can be driven concurrently over one
-/// shared engine: rather than borrowing `&mut AgentEngine` for the whole loop,
-/// callers pass the shared handle and the loop acquires it only in short
-/// critical sections around the (lock-free) network call.
+/// sub-agents. It runs the same per-iteration critical sections as
+/// [`AgentEngine::run_inference_loop_filtered_dyn_with_sync`], but acquires the
+/// engine lock only in short bursts and **releases it across every network
+/// await** — the main `provider.infer` call and the tool-executor call — so
+/// multiple agents' loops overlap their (slow) network work.
 ///
-/// This initial version delegates to the existing `&mut self` loop under a
-/// single write guard — behaviorally identical to calling the method directly,
-/// with no added concurrency yet. A follow-up decomposes the body into short
-/// critical sections so concurrent workers' network calls actually overlap.
+/// Lock discipline: the guard is never held across `provider.infer` or
+/// `tool_executor`. Two awaits are (for now) still run under a guard —
+/// `taint_gate_partition`'s interactive prompt (only reached when taint is
+/// enabled and a call is blocked) and `evict_and_compact`'s compaction inference
+/// (only when compaction triggers). Both are conditional/rare; splitting them
+/// out is a follow-up. Neither re-acquires the engine lock, so there is no
+/// deadlock.
 #[allow(clippy::too_many_arguments)]
 pub async fn run_inference_loop_shared<'e>(
     engine: &EngineHandle,
@@ -152,23 +177,161 @@ pub async fn run_inference_loop_shared<'e>(
     compaction_config: Option<&leviath_core::CompactionConfig>,
     tool_executor: &mut ToolExecutorDyn<'e>,
     repetition_config: Option<&leviath_core::RepetitionDetectionConfig>,
-    post_tool_sync: Option<&mut PostToolSync>,
+    mut post_tool_sync: Option<&mut PostToolSync>,
 ) -> std::result::Result<InferenceResponse, ProviderError> {
-    let mut guard = engine.write().await;
-    guard
-        .run_inference_loop_filtered_dyn_with_sync(
-            entity,
-            provider_name,
-            model,
-            tools,
-            max_iterations,
-            tool_filter,
-            compaction_config,
-            tool_executor,
-            repetition_config,
-            post_tool_sync,
-        )
-        .await
+    let mut last_response: Option<InferenceResponse> = None;
+    let mut total_tool_calls: usize = 0;
+    let mut text_only_nudges: usize = 0;
+
+    let rep_config = {
+        let enabled = repetition_config.and_then(|c| c.enabled).unwrap_or(true);
+        let max_repeat = repetition_config
+            .and_then(|c| c.max_repeat_calls)
+            .unwrap_or(3);
+        let max_streak = repetition_config
+            .and_then(|c| c.max_readonly_streak)
+            .unwrap_or(10);
+        crate::repetition::RepetitionConfig {
+            max_repeat_calls: max_repeat,
+            max_readonly_streak: max_streak,
+            enabled,
+        }
+    };
+    let mut repetition_detector = crate::repetition::RepetitionDetector::new(rep_config);
+    let mut cumulative_tokens = leviath_providers::TokenUsage {
+        prompt_tokens: 0,
+        completion_tokens: 0,
+        total_tokens: 0,
+        cached_tokens: 0,
+        cache_write_tokens: 0,
+    };
+
+    for iteration in 0..max_iterations {
+        // CS: cancellation + message intake (write guard, no await).
+        {
+            let mut g = engine.write().await;
+            if g.loop_check_cancelled(entity, iteration) {
+                return last_response
+                    .map(|r| InferenceResponse {
+                        tokens_used: cumulative_tokens.clone(),
+                        ..r
+                    })
+                    .ok_or_else(|| {
+                        ProviderError::Other(
+                            "Agent cancelled before producing a response".to_string(),
+                        )
+                    });
+            }
+            g.process_messages();
+        }
+
+        // CS: assemble the request + clone the provider handle (read guard, no await).
+        let (provider, request) = {
+            let g = engine.read().await;
+            g.build_inference_request(entity, provider_name, model, tools.clone(), tool_filter)?
+        };
+
+        // Network call — NO engine lock held. This is what lets workers overlap.
+        let response = provider.infer(request).await?;
+        accumulate_tokens(&mut cumulative_tokens, &response.tokens_used);
+
+        // CS: store the response on the entity (write guard, no await).
+        {
+            let mut g = engine.write().await;
+            g.apply_inference_response(entity, &response);
+        }
+
+        // Handle a response that made no tool calls: finish or nudge.
+        if response.tool_calls.is_empty() {
+            let outcome = {
+                let mut g = engine.write().await;
+                g.loop_handle_empty_tool_calls(
+                    entity,
+                    &response,
+                    total_tool_calls,
+                    &mut text_only_nudges,
+                    iteration,
+                    &cumulative_tokens,
+                )
+            };
+            match outcome {
+                EmptyToolCallsOutcome::Finish => {
+                    return Ok(InferenceResponse {
+                        tokens_used: cumulative_tokens,
+                        ..response
+                    });
+                }
+                EmptyToolCallsOutcome::Nudged => {
+                    last_response = Some(response);
+                    continue;
+                }
+            }
+        }
+
+        let tool_calls_snapshot = response.tool_calls.clone();
+        total_tool_calls += tool_calls_snapshot.len();
+
+        // CS: taint gate. The guard is held across the (conditional) prompt await
+        // — see the lock-discipline note above.
+        let (calls_to_execute, mut denied_results) = {
+            let mut g = engine.write().await;
+            g.taint_gate_partition(entity, &tool_calls_snapshot).await
+        };
+
+        // Tool execution — NO engine lock held (executors do I/O, MCP, and may
+        // re-enter the engine to spawn/manage sub-agents).
+        let mut tool_results = tool_executor(calls_to_execute).await;
+        tool_results.append(&mut denied_results);
+
+        // CS: append assistant turn + tool results, repetition nudges, messages.
+        {
+            let mut g = engine.write().await;
+            g.loop_apply_tool_results(
+                entity,
+                &response,
+                &tool_calls_snapshot,
+                tool_results,
+                post_tool_sync.as_deref_mut(),
+                &mut repetition_detector,
+                iteration,
+            );
+        }
+
+        // CS: eviction + compaction. The guard is held across the (conditional)
+        // compaction inference — see the lock-discipline note above.
+        if let Some(cc) = compaction_config {
+            let mut g = engine.write().await;
+            match g.evict_and_compact(entity, cc).await {
+                Ok(freed) if freed > 0 => {
+                    tracing::info!(
+                        iteration,
+                        tokens_freed = freed,
+                        "Auto-eviction during inference loop"
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(iteration, error = %e, "Auto-eviction/compaction failed during inference loop");
+                }
+                _ => {}
+            }
+        }
+
+        // CS: post-tool sync (write guard, no await).
+        {
+            let mut g = engine.write().await;
+            g.loop_post_sync(entity, post_tool_sync.as_deref_mut());
+        }
+
+        last_response = Some(response);
+    }
+
+    tracing::warn!(max_iterations, "Inference loop hit max iterations");
+    last_response
+        .map(|r| InferenceResponse {
+            tokens_used: cumulative_tokens,
+            ..r
+        })
+        .ok_or_else(|| ProviderError::Other("No response generated".to_string()))
 }
 
 impl AgentEngine {
@@ -546,6 +709,13 @@ impl AgentEngine {
     }
 
     /// Run inference with an optional tool name filter.
+    ///
+    /// This is the sequential (`&mut self`) form: it builds the request, awaits
+    /// the network call, and applies the response, all while holding `&mut self`.
+    /// The concurrent driver ([`run_inference_loop_shared`]) instead calls
+    /// [`Self::build_inference_request`] / [`Self::apply_inference_response`]
+    /// around the network call so it can release the engine lock across the
+    /// (lock-free) `provider.infer` await.
     pub async fn run_inference_filtered(
         &mut self,
         entity: Entity,
@@ -554,6 +724,27 @@ impl AgentEngine {
         tools: Vec<Tool>,
         tool_filter: Option<&[String]>,
     ) -> std::result::Result<InferenceResponse, ProviderError> {
+        let (provider, request) =
+            self.build_inference_request(entity, provider_name, model, tools, tool_filter)?;
+        let response = provider.infer(request).await?;
+        self.apply_inference_response(entity, &response);
+        Ok(response)
+    }
+
+    /// Build the [`InferenceRequest`] for an agent and clone its provider handle.
+    ///
+    /// Pure read of the ECS world (`ContextWindow` + `InferenceConfig`) plus a
+    /// provider-registry lookup; performs no `.await`. Splitting this out lets
+    /// the concurrent driver assemble the request under a short read/borrow and
+    /// then drop the engine lock before the network call.
+    pub fn build_inference_request(
+        &self,
+        entity: Entity,
+        provider_name: &str,
+        model: &str,
+        tools: Vec<Tool>,
+        tool_filter: Option<&[String]>,
+    ) -> std::result::Result<(Arc<dyn Provider>, InferenceRequest), ProviderError> {
         let provider = self
             .provider_registry
             .get(provider_name)
@@ -615,9 +806,15 @@ impl AgentEngine {
             extra: serde_json::Value::Null,
         };
 
-        let response = provider.infer(request).await?;
+        Ok((provider, request))
+    }
 
-        // Store the inference result on the entity
+    /// Store an inference response on the entity and bump its iteration counter.
+    ///
+    /// The write-side counterpart to [`Self::build_inference_request`]; performs
+    /// no `.await`, so the concurrent driver can run it under a short write lock
+    /// after the network call has completed.
+    pub fn apply_inference_response(&mut self, entity: Entity, response: &InferenceResponse) {
         let result = InferenceResult {
             response: response.content.clone(),
             tool_calls: response
@@ -639,8 +836,311 @@ impl AgentEngine {
         if let Some(mut state) = self.world.get_mut::<AgentState>(entity) {
             state.iteration += 1;
         }
+    }
 
-        Ok(response)
+    /// Inference-loop critical section: check the agent's cancellation token.
+    ///
+    /// Returns `true` (and marks the agent `Cancelled`) if the loop should stop.
+    /// Extracted so both the sequential loop and the concurrent shared driver
+    /// run identical logic under their respective borrows/guards.
+    fn loop_check_cancelled(&mut self, entity: Entity, iteration: usize) -> bool {
+        if let Some(token) = self.world.get::<CancellationToken>(entity) {
+            if token.is_cancelled() {
+                tracing::info!(iteration, "Inference loop cancelled");
+                if let Some(mut state) = self.world.get_mut::<AgentState>(entity) {
+                    state.status = AgentStatus::Cancelled;
+                }
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Inference-loop critical section: handle a response that carried no tool
+    /// calls — either finish, or inject a "use your tools" nudge and continue.
+    fn loop_handle_empty_tool_calls(
+        &mut self,
+        entity: Entity,
+        response: &InferenceResponse,
+        total_tool_calls: usize,
+        text_only_nudges: &mut usize,
+        iteration: usize,
+        cumulative: &leviath_providers::TokenUsage,
+    ) -> EmptyToolCallsOutcome {
+        const MAX_TEXT_ONLY_NUDGES: usize = 3;
+        if total_tool_calls > 0 || *text_only_nudges >= MAX_TEXT_ONLY_NUDGES {
+            // Agent has done real work and is finishing, or we've
+            // exhausted nudge attempts — accept the text response.
+            tracing::info!(
+                iteration,
+                total_tool_calls,
+                text_only_nudges = *text_only_nudges,
+                cumulative_prompt_tokens = cumulative.prompt_tokens,
+                cumulative_completion_tokens = cumulative.completion_tokens,
+                finish_reason = ?response.finish_reason,
+                "Inference loop complete"
+            );
+            return EmptyToolCallsOutcome::Finish;
+        }
+
+        // No tool calls yet — model responded with text only (e.g.
+        // asking a clarifying question or explaining its plan).
+        // Add the text to conversation and nudge it to use tools.
+        *text_only_nudges += 1;
+        tracing::warn!(
+            iteration,
+            text_only_nudges = *text_only_nudges,
+            content_len = response.content.len(),
+            "Model responded with text only before making any tool calls, nudging to use tools ({}/{})",
+            *text_only_nudges,
+            MAX_TEXT_ONLY_NUDGES,
+        );
+        let mut window = self.world.get_mut::<ContextWindow>(entity).unwrap();
+        let response_tokens = response.content.len() / 4 + 1;
+        let _ = window.add_typed_entry(
+            "conversation",
+            leviath_core::EntryKind::AssistantTurn { tool_calls: vec![] },
+            response.content.clone(),
+            response_tokens,
+        );
+        let nudge = "You have tools available. Please use them to complete the task. Start by reading the relevant files in the working directory.";
+        let nudge_tokens = nudge.len() / 4 + 1;
+        let _ = window.add_typed_entry(
+            "conversation",
+            leviath_core::EntryKind::UserMessage,
+            nudge.to_string(),
+            nudge_tokens,
+        );
+        EmptyToolCallsOutcome::Nudged
+    }
+
+    /// Inference-loop critical section: append the assistant turn and all tool
+    /// results to the agent's context window (with routing, truncation, taint
+    /// tagging), feed the repetition detector, and drain pending messages.
+    #[allow(clippy::too_many_arguments)]
+    fn loop_apply_tool_results(
+        &mut self,
+        entity: Entity,
+        response: &InferenceResponse,
+        tool_calls_snapshot: &[leviath_providers::ToolCall],
+        tool_results: Vec<(String, String)>,
+        mut post_tool_sync: Option<&mut PostToolSync>,
+        repetition_detector: &mut crate::repetition::RepetitionDetector,
+        iteration: usize,
+    ) {
+        // When taint tracking is active, precompute each tool's declared
+        // output sensitivity (before borrowing the window) so results are
+        // tagged as they are routed into regions.
+        let tool_sensitivities: Option<HashMap<String, leviath_core::TaintLevel>> = self
+            .taint_gate
+            .as_ref()
+            .filter(|g| g.is_enabled())
+            .map(|g| {
+                tool_calls_snapshot
+                    .iter()
+                    .map(|tc| (tc.name.clone(), g.tool_classification(&tc.name).sensitivity))
+                    .collect()
+            });
+
+        // Sync external state (shared ContextWindow) back to the entity
+        // before we add tool results. This covers both context_* tools and
+        // file tracking (which writes to the shared CW via read_file/write_file).
+        if let Some(sync) = post_tool_sync.as_mut() {
+            sync(&mut self.world, entity);
+        }
+
+        // Read tool result routing config from entity (if present).
+        let tool_result_routing = self
+            .world
+            .get::<crate::ToolResultRoutingComponent>(entity)
+            .map(|c| c.routing.clone());
+
+        // Add tool results to context window.
+        // Safety: `run_inference_filtered` already confirmed the entity has
+        // a ContextWindow; it cannot be removed between that call and here.
+        let mut window = self.world.get_mut::<ContextWindow>(entity).unwrap();
+
+        // Add assistant response with tool calls as a typed entry
+        let response_tokens = response.content.len() / 4;
+        let serialized_tool_calls: Vec<leviath_core::SerializedToolCall> = tool_calls_snapshot
+            .iter()
+            .map(|tc| leviath_core::SerializedToolCall {
+                id: tc.id.clone(),
+                name: tc.name.clone(),
+                arguments: tc.arguments.clone(),
+            })
+            .collect();
+        let _ = window.add_typed_entry(
+            "conversation",
+            leviath_core::EntryKind::AssistantTurn {
+                tool_calls: serialized_tool_calls,
+            },
+            response.content.clone(),
+            response_tokens,
+        );
+
+        // Add tool results as typed entries in the messages region.
+        // These MUST succeed — an AssistantTurn with tool_calls was just
+        // added above, and Anthropic requires every tool_use to have a
+        // matching tool_result. If the region is at its token budget,
+        // truncate the result content rather than silently dropping it.
+        for (tool_call_id, result) in &tool_results {
+            let mut result_text = result.clone();
+            let tool_name = tool_calls_snapshot
+                .iter()
+                .find(|tc| tc.id == *tool_call_id)
+                .map(|tc| tc.name.clone())
+                .unwrap_or_default();
+
+            // Apply max_result_tokens truncation from routing config
+            if let Some(routing) = tool_result_routing.as_ref() {
+                if let Some(max_tokens) = routing.max_result_tokens {
+                    let max_chars = max_tokens * 4;
+                    if result_text.len() > max_chars {
+                        result_text = truncate_on_char_boundary(&result_text, max_chars);
+                        result_text.push_str("\n[...truncated]");
+                    }
+                }
+            }
+
+            let result_tokens = result_text.len() / 4 + 1;
+
+            // Determine target region from routing config
+            let target_region = if let Some(routing) = tool_result_routing.as_ref() {
+                if let Some(override_region) = routing.tool_overrides.get(&tool_name) {
+                    override_region.as_str()
+                } else {
+                    routing.default_region.as_str()
+                }
+            } else {
+                "conversation"
+            };
+
+            // Handle persist=false: route to scratch if available
+            let target_region = if let Some(routing) = tool_result_routing.as_ref() {
+                if !routing.persist {
+                    if window.get_region("scratch").is_some() {
+                        "scratch"
+                    } else {
+                        target_region
+                    }
+                } else {
+                    target_region
+                }
+            } else {
+                target_region
+            };
+
+            let kind = leviath_core::EntryKind::ToolResult {
+                tool_call_id: tool_call_id.clone(),
+                tool_name: tool_name.clone(),
+                is_error: false,
+            };
+
+            // When taint tracking is enabled, a tool result carries the
+            // tool's configured sensitivity level so the taint gate sees
+            // sensitive output flow into context; otherwise it's added as a
+            // plain typed entry (tracked as Public). Either way it keeps its
+            // ToolResult kind so turn-group eviction stays intact.
+            let taint_level = tool_sensitivities.as_ref().map(|sens| {
+                sens.get(&tool_name)
+                    .copied()
+                    .unwrap_or(leviath_core::TaintLevel::Public)
+            });
+            let add_tool_result = |window: &mut ContextWindow,
+                                   region: &str,
+                                   kind: leviath_core::EntryKind,
+                                   content: String,
+                                   tokens: usize| {
+                match taint_level {
+                    Some(level) => {
+                        window.add_typed_tainted_to_region(region, kind, content, tokens, level)
+                    }
+                    None => window.add_typed_entry(region, kind, content, tokens),
+                }
+            };
+
+            // Try adding the full result first. These MUST succeed — an
+            // AssistantTurn with tool_calls was just added above, and
+            // Anthropic requires every tool_use to have a matching
+            // tool_result. If the region is at its token budget, truncate
+            // rather than dropping (which would orphan the tool_use block).
+            if add_tool_result(
+                &mut window,
+                target_region,
+                kind.clone(),
+                result_text.clone(),
+                result_tokens,
+            )
+            .is_err()
+            {
+                let available = window
+                    .get_region(target_region)
+                    .map(|r| r.max_tokens.saturating_sub(r.current_tokens))
+                    .unwrap_or(0);
+
+                let truncated = if available > 100 {
+                    let char_budget = (available - 10) * 4; // rough tokens→chars
+                    let prefix = truncate_on_char_boundary(&result_text, char_budget);
+                    let omitted = result_text.len().saturating_sub(prefix.len());
+                    format!("{}... [truncated, {} chars omitted]", prefix, omitted)
+                } else {
+                    "[tool result truncated — context window full]".to_string()
+                };
+                let trunc_tokens = truncated.len() / 4 + 1;
+
+                if add_tool_result(&mut window, target_region, kind, truncated, trunc_tokens)
+                    .is_err()
+                {
+                    // Last resort: add a minimal placeholder
+                    let placeholder = "[result omitted]".to_string();
+                    let _ = add_tool_result(
+                        &mut window,
+                        target_region,
+                        leviath_core::EntryKind::ToolResult {
+                            tool_call_id: tool_call_id.clone(),
+                            tool_name: tool_name.clone(),
+                            is_error: false,
+                        },
+                        placeholder,
+                        5,
+                    );
+                }
+            }
+        }
+        let _ = window; // release borrow before process_messages
+
+        // Feed tool calls into the repetition detector and inject nudges
+        for tc in tool_calls_snapshot {
+            let args_str = tc.arguments.to_string();
+            if let Some(nudge) = repetition_detector.record_call(&tc.name, &args_str) {
+                tracing::warn!(
+                    tool_name = %tc.name,
+                    iteration,
+                    "Repetition detected, injecting nudge"
+                );
+                let mut window = self.world.get_mut::<ContextWindow>(entity).unwrap();
+                let nudge_tokens = nudge.len() / 4 + 1;
+                let _ = window.add_typed_entry(
+                    "conversation",
+                    leviath_core::EntryKind::UserMessage,
+                    nudge,
+                    nudge_tokens,
+                );
+            }
+        }
+
+        // Check for any user messages that arrived during tool execution
+        self.process_messages();
+    }
+
+    /// Inference-loop critical section: sync entity→shared context after tool
+    /// results and eviction, so context tools / file tracking see the latest
+    /// state on the next iteration.
+    fn loop_post_sync(&mut self, entity: Entity, mut post_tool_sync: Option<&mut PostToolSync>) {
+        if let Some(sync) = post_tool_sync.as_mut() {
+            sync(&mut self.world, entity);
+        }
     }
 
     /// Run the full inference loop for an agent until completion.
@@ -821,7 +1321,6 @@ impl AgentEngine {
         let mut last_response = None;
         let mut total_tool_calls: usize = 0;
         let mut text_only_nudges: usize = 0;
-        const MAX_TEXT_ONLY_NUDGES: usize = 3;
 
         // Set up repetition detector from config
         let rep_config = {
@@ -849,23 +1348,17 @@ impl AgentEngine {
 
         for iteration in 0..max_iterations {
             // Check cancellation token before each iteration
-            if let Some(token) = self.world.get::<CancellationToken>(entity) {
-                if token.is_cancelled() {
-                    tracing::info!(iteration, "Inference loop cancelled");
-                    if let Some(mut state) = self.world.get_mut::<AgentState>(entity) {
-                        state.status = AgentStatus::Cancelled;
-                    }
-                    return last_response
-                        .map(|r| InferenceResponse {
-                            tokens_used: cumulative_tokens.clone(),
-                            ..r
-                        })
-                        .ok_or_else(|| {
-                            ProviderError::Other(
-                                "Agent cancelled before producing a response".to_string(),
-                            )
-                        });
-                }
+            if self.loop_check_cancelled(entity, iteration) {
+                return last_response
+                    .map(|r| InferenceResponse {
+                        tokens_used: cumulative_tokens.clone(),
+                        ..r
+                    })
+                    .ok_or_else(|| {
+                        ProviderError::Other(
+                            "Agent cancelled before producing a response".to_string(),
+                        )
+                    });
             }
 
             // Process any pending messages before inference
@@ -878,62 +1371,29 @@ impl AgentEngine {
                 .await?;
 
             // Accumulate token usage across all iterations
-            cumulative_tokens.prompt_tokens += response.tokens_used.prompt_tokens;
-            cumulative_tokens.completion_tokens += response.tokens_used.completion_tokens;
-            cumulative_tokens.total_tokens += response.tokens_used.total_tokens;
-            cumulative_tokens.cached_tokens += response.tokens_used.cached_tokens;
-            cumulative_tokens.cache_write_tokens += response.tokens_used.cache_write_tokens;
+            accumulate_tokens(&mut cumulative_tokens, &response.tokens_used);
 
             // Check if we're done (no tool calls)
             if response.tool_calls.is_empty() {
-                if total_tool_calls > 0 || text_only_nudges >= MAX_TEXT_ONLY_NUDGES {
-                    // Agent has done real work and is finishing, or we've
-                    // exhausted nudge attempts — accept the text response.
-                    tracing::info!(
-                        iteration,
-                        total_tool_calls,
-                        text_only_nudges,
-                        cumulative_prompt_tokens = cumulative_tokens.prompt_tokens,
-                        cumulative_completion_tokens = cumulative_tokens.completion_tokens,
-                        finish_reason = ?response.finish_reason,
-                        "Inference loop complete"
-                    );
-                    return Ok(InferenceResponse {
-                        tokens_used: cumulative_tokens,
-                        ..response
-                    });
-                }
-
-                // No tool calls yet — model responded with text only (e.g.
-                // asking a clarifying question or explaining its plan).
-                // Add the text to conversation and nudge it to use tools.
-                text_only_nudges += 1;
-                tracing::warn!(
+                match self.loop_handle_empty_tool_calls(
+                    entity,
+                    &response,
+                    total_tool_calls,
+                    &mut text_only_nudges,
                     iteration,
-                    text_only_nudges,
-                    content_len = response.content.len(),
-                    "Model responded with text only before making any tool calls, nudging to use tools ({}/{})",
-                    text_only_nudges,
-                    MAX_TEXT_ONLY_NUDGES,
-                );
-                let mut window = self.world.get_mut::<ContextWindow>(entity).unwrap();
-                let response_tokens = response.content.len() / 4 + 1;
-                let _ = window.add_typed_entry(
-                    "conversation",
-                    leviath_core::EntryKind::AssistantTurn { tool_calls: vec![] },
-                    response.content.clone(),
-                    response_tokens,
-                );
-                let nudge = "You have tools available. Please use them to complete the task. Start by reading the relevant files in the working directory.";
-                let nudge_tokens = nudge.len() / 4 + 1;
-                let _ = window.add_typed_entry(
-                    "conversation",
-                    leviath_core::EntryKind::UserMessage,
-                    nudge.to_string(),
-                    nudge_tokens,
-                );
-                last_response = Some(response);
-                continue;
+                    &cumulative_tokens,
+                ) {
+                    EmptyToolCallsOutcome::Finish => {
+                        return Ok(InferenceResponse {
+                            tokens_used: cumulative_tokens,
+                            ..response
+                        });
+                    }
+                    EmptyToolCallsOutcome::Nudged => {
+                        last_response = Some(response);
+                        continue;
+                    }
+                }
             }
 
             // Execute tool calls
@@ -951,210 +1411,15 @@ impl AgentEngine {
             let mut tool_results = tool_executor(calls_to_execute).await;
             tool_results.append(&mut denied_results);
 
-            // When taint tracking is active, precompute each tool's declared
-            // output sensitivity (before borrowing the window) so results are
-            // tagged as they are routed into regions.
-            let tool_sensitivities: Option<HashMap<String, leviath_core::TaintLevel>> = self
-                .taint_gate
-                .as_ref()
-                .filter(|g| g.is_enabled())
-                .map(|g| {
-                    tool_calls_snapshot
-                        .iter()
-                        .map(|tc| (tc.name.clone(), g.tool_classification(&tc.name).sensitivity))
-                        .collect()
-                });
-
-            // Sync external state (shared ContextWindow) back to the entity
-            // before we add tool results. This covers both context_* tools and
-            // file tracking (which writes to the shared CW via read_file/write_file).
-            if let Some(sync) = post_tool_sync.as_mut() {
-                sync(&mut self.world, entity);
-            }
-
-            // Read tool result routing config from entity (if present).
-            let tool_result_routing = self
-                .world
-                .get::<crate::ToolResultRoutingComponent>(entity)
-                .map(|c| c.routing.clone());
-
-            // Add tool results to context window.
-            // Safety: `run_inference_filtered` already confirmed the entity has
-            // a ContextWindow; it cannot be removed between that call and here.
-            let mut window = self.world.get_mut::<ContextWindow>(entity).unwrap();
-
-            // Add assistant response with tool calls as a typed entry
-            let response_tokens = response.content.len() / 4;
-            let serialized_tool_calls: Vec<leviath_core::SerializedToolCall> = tool_calls_snapshot
-                .iter()
-                .map(|tc| leviath_core::SerializedToolCall {
-                    id: tc.id.clone(),
-                    name: tc.name.clone(),
-                    arguments: tc.arguments.clone(),
-                })
-                .collect();
-            let _ = window.add_typed_entry(
-                "conversation",
-                leviath_core::EntryKind::AssistantTurn {
-                    tool_calls: serialized_tool_calls,
-                },
-                response.content.clone(),
-                response_tokens,
+            self.loop_apply_tool_results(
+                entity,
+                &response,
+                &tool_calls_snapshot,
+                tool_results,
+                post_tool_sync.as_deref_mut(),
+                &mut repetition_detector,
+                iteration,
             );
-
-            // Add tool results as typed entries in the messages region.
-            // These MUST succeed — an AssistantTurn with tool_calls was just
-            // added above, and Anthropic requires every tool_use to have a
-            // matching tool_result. If the region is at its token budget,
-            // truncate the result content rather than silently dropping it.
-            for (tool_call_id, result) in &tool_results {
-                let mut result_text = result.clone();
-                let tool_name = tool_calls_snapshot
-                    .iter()
-                    .find(|tc| tc.id == *tool_call_id)
-                    .map(|tc| tc.name.clone())
-                    .unwrap_or_default();
-
-                // Apply max_result_tokens truncation from routing config
-                if let Some(routing) = tool_result_routing.as_ref() {
-                    if let Some(max_tokens) = routing.max_result_tokens {
-                        let max_chars = max_tokens * 4;
-                        if result_text.len() > max_chars {
-                            result_text = truncate_on_char_boundary(&result_text, max_chars);
-                            result_text.push_str("\n[...truncated]");
-                        }
-                    }
-                }
-
-                let result_tokens = result_text.len() / 4 + 1;
-
-                // Determine target region from routing config
-                let target_region = if let Some(routing) = tool_result_routing.as_ref() {
-                    if let Some(override_region) = routing.tool_overrides.get(&tool_name) {
-                        override_region.as_str()
-                    } else {
-                        routing.default_region.as_str()
-                    }
-                } else {
-                    "conversation"
-                };
-
-                // Handle persist=false: route to scratch if available
-                let target_region = if let Some(routing) = tool_result_routing.as_ref() {
-                    if !routing.persist {
-                        if window.get_region("scratch").is_some() {
-                            "scratch"
-                        } else {
-                            target_region
-                        }
-                    } else {
-                        target_region
-                    }
-                } else {
-                    target_region
-                };
-
-                let kind = leviath_core::EntryKind::ToolResult {
-                    tool_call_id: tool_call_id.clone(),
-                    tool_name: tool_name.clone(),
-                    is_error: false,
-                };
-
-                // When taint tracking is enabled, a tool result carries the
-                // tool's configured sensitivity level so the taint gate sees
-                // sensitive output flow into context; otherwise it's added as a
-                // plain typed entry (tracked as Public). Either way it keeps its
-                // ToolResult kind so turn-group eviction stays intact.
-                let taint_level = tool_sensitivities.as_ref().map(|sens| {
-                    sens.get(&tool_name)
-                        .copied()
-                        .unwrap_or(leviath_core::TaintLevel::Public)
-                });
-                let add_tool_result = |window: &mut ContextWindow,
-                                       region: &str,
-                                       kind: leviath_core::EntryKind,
-                                       content: String,
-                                       tokens: usize| {
-                    match taint_level {
-                        Some(level) => {
-                            window.add_typed_tainted_to_region(region, kind, content, tokens, level)
-                        }
-                        None => window.add_typed_entry(region, kind, content, tokens),
-                    }
-                };
-
-                // Try adding the full result first. These MUST succeed — an
-                // AssistantTurn with tool_calls was just added above, and
-                // Anthropic requires every tool_use to have a matching
-                // tool_result. If the region is at its token budget, truncate
-                // rather than dropping (which would orphan the tool_use block).
-                if add_tool_result(
-                    &mut window,
-                    target_region,
-                    kind.clone(),
-                    result_text.clone(),
-                    result_tokens,
-                )
-                .is_err()
-                {
-                    let available = window
-                        .get_region(target_region)
-                        .map(|r| r.max_tokens.saturating_sub(r.current_tokens))
-                        .unwrap_or(0);
-
-                    let truncated = if available > 100 {
-                        let char_budget = (available - 10) * 4; // rough tokens→chars
-                        let prefix = truncate_on_char_boundary(&result_text, char_budget);
-                        let omitted = result_text.len().saturating_sub(prefix.len());
-                        format!("{}... [truncated, {} chars omitted]", prefix, omitted)
-                    } else {
-                        "[tool result truncated — context window full]".to_string()
-                    };
-                    let trunc_tokens = truncated.len() / 4 + 1;
-
-                    if add_tool_result(&mut window, target_region, kind, truncated, trunc_tokens)
-                        .is_err()
-                    {
-                        // Last resort: add a minimal placeholder
-                        let placeholder = "[result omitted]".to_string();
-                        let _ = add_tool_result(
-                            &mut window,
-                            target_region,
-                            leviath_core::EntryKind::ToolResult {
-                                tool_call_id: tool_call_id.clone(),
-                                tool_name: tool_name.clone(),
-                                is_error: false,
-                            },
-                            placeholder,
-                            5,
-                        );
-                    }
-                }
-            }
-            let _ = window; // release borrow before process_messages
-
-            // Feed tool calls into the repetition detector and inject nudges
-            for tc in &tool_calls_snapshot {
-                let args_str = tc.arguments.to_string();
-                if let Some(nudge) = repetition_detector.record_call(&tc.name, &args_str) {
-                    tracing::warn!(
-                        tool_name = %tc.name,
-                        iteration,
-                        "Repetition detected, injecting nudge"
-                    );
-                    let mut window = self.world.get_mut::<ContextWindow>(entity).unwrap();
-                    let nudge_tokens = nudge.len() / 4 + 1;
-                    let _ = window.add_typed_entry(
-                        "conversation",
-                        leviath_core::EntryKind::UserMessage,
-                        nudge,
-                        nudge_tokens,
-                    );
-                }
-            }
-
-            // Check for any user messages that arrived during tool execution
-            self.process_messages();
 
             // After adding tool results, check if context needs eviction + compaction
             if let Some(cc) = compaction_config {
@@ -1173,12 +1438,10 @@ impl AgentEngine {
                 }
             }
 
-            // After adding tool results and running eviction, sync entity→shared
+            // After adding tool results and running eviction, sync entity->shared
             // so context tools and file tracking see the latest state on the
             // next iteration.
-            if let Some(sync) = post_tool_sync.as_mut() {
-                sync(&mut self.world, entity);
-            }
+            self.loop_post_sync(entity, post_tool_sync.as_deref_mut());
 
             last_response = Some(response);
         }
@@ -2604,6 +2867,281 @@ mod tests {
             .world()
             .get::<AgentState>(entity)
             .is_some());
+    }
+
+    /// A provider whose `infer` blocks on a shared barrier until *both* agents'
+    /// inference calls are in flight. If [`run_inference_loop_shared`] held the
+    /// engine lock across `provider.infer`, the second agent could never reach
+    /// its `infer` (it would block acquiring the lock), the barrier would never
+    /// release, and the test would deadlock. Completing proves the lock is
+    /// released across the network call — the whole point of the decomposition.
+    struct BarrierProvider {
+        name: String,
+        barrier: Arc<tokio::sync::Barrier>,
+        content: String,
+    }
+
+    #[async_trait::async_trait]
+    impl leviath_providers::Provider for BarrierProvider {
+        async fn infer(
+            &self,
+            _req: InferenceRequest,
+        ) -> leviath_providers::Result<InferenceResponse> {
+            self.barrier.wait().await;
+            Ok(InferenceResponse {
+                content: self.content.clone(),
+                tool_calls: vec![],
+                tokens_used: leviath_providers::TokenUsage {
+                    prompt_tokens: 1,
+                    completion_tokens: 1,
+                    total_tokens: 2,
+                    cached_tokens: 0,
+                    cache_write_tokens: 0,
+                },
+                finish_reason: leviath_providers::FinishReason::Complete,
+            })
+        }
+        fn count_tokens(&self, _text: &str, _model: &str) -> usize {
+            4
+        }
+        fn max_context_tokens(&self, _model: &str) -> usize {
+            100_000
+        }
+        fn name(&self) -> &str {
+            &self.name
+        }
+        fn capabilities(&self, _model: &str) -> leviath_providers::ModelCapabilities {
+            leviath_providers::ModelCapabilities::default()
+        }
+    }
+
+    /// Spawn a minimal agent (state + inbox + cancel token + a small context
+    /// window) into an existing engine, for multi-agent tests.
+    fn spawn_mock_agent(engine: &mut AgentEngine, agent_id: &str) -> Entity {
+        let mut window = ContextWindow::new(10000);
+        window.add_region(leviath_core::Region::new(
+            "system".to_string(),
+            leviath_core::RegionKind::Pinned,
+            2000,
+        ));
+        window.add_region(leviath_core::Region::new(
+            "conversation".to_string(),
+            leviath_core::RegionKind::SlidingWindow {
+                max_items: 50,
+                eviction_strategy: leviath_core::EvictionStrategy::PerItem,
+            },
+            6000,
+        ));
+        window.add_region(leviath_core::Region::new(
+            "tool_results".to_string(),
+            leviath_core::RegionKind::SlidingWindow {
+                max_items: 50,
+                eviction_strategy: leviath_core::EvictionStrategy::PerItem,
+            },
+            2000,
+        ));
+        let _ = window.add_to_region("system", "You are a helpful assistant.".to_string(), 6);
+        engine
+            .world_mut()
+            .spawn((
+                AgentState {
+                    agent_id: agent_id.to_string(),
+                    current_stage: "main".to_string(),
+                    iteration: 0,
+                    status: AgentStatus::Active,
+                    spawned_children_ids: Vec::new(),
+                    pending_wait: None,
+                    accepts_messages: true,
+                },
+                MessageInbox::new(),
+                CancellationToken::new(),
+                window,
+            ))
+            .id()
+    }
+
+    #[tokio::test]
+    async fn test_run_inference_loop_shared_two_agents_overlap_network() {
+        // Two agents share one engine handle. A barrier forces both
+        // `provider.infer` calls to be in flight at once, so this only completes
+        // if the shared driver releases the engine lock across the network call.
+        let barrier = Arc::new(tokio::sync::Barrier::new(2));
+        let mut registry = ProviderRegistry::new();
+        registry.register(
+            "mock-a".to_string(),
+            Arc::new(BarrierProvider {
+                name: "mock-a".to_string(),
+                barrier: barrier.clone(),
+                content: "response-A".to_string(),
+            }),
+        );
+        registry.register(
+            "mock-b".to_string(),
+            Arc::new(BarrierProvider {
+                name: "mock-b".to_string(),
+                barrier: barrier.clone(),
+                content: "response-B".to_string(),
+            }),
+        );
+        let mut engine = AgentEngine::with_providers(registry);
+        let a = spawn_mock_agent(&mut engine, "agent-a");
+        let b = spawn_mock_agent(&mut engine, "agent-b");
+        let handle: EngineHandle = Arc::new(tokio::sync::RwLock::new(engine));
+
+        let mut exec_a = |_: Vec<leviath_providers::ToolCall>| -> ToolResultsFuture<'static> {
+            Box::pin(async { Vec::new() })
+        };
+        let mut exec_b = |_: Vec<leviath_providers::ToolCall>| -> ToolResultsFuture<'static> {
+            Box::pin(async { Vec::new() })
+        };
+
+        let fa = run_inference_loop_shared(
+            &handle,
+            a,
+            "mock-a",
+            "m",
+            Vec::new(),
+            5,
+            None,
+            None,
+            &mut exec_a,
+            None,
+            None,
+        );
+        let fb = run_inference_loop_shared(
+            &handle,
+            b,
+            "mock-b",
+            "m",
+            Vec::new(),
+            5,
+            None,
+            None,
+            &mut exec_b,
+            None,
+            None,
+        );
+
+        let (ra, rb) = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            tokio::join!(fa, fb)
+        })
+        .await
+        .expect("must not deadlock — the engine lock must be released across provider.infer");
+
+        // Each agent got its own response, with no cross-contamination.
+        assert_eq!(ra.unwrap().content, "response-A");
+        assert_eq!(rb.unwrap().content, "response-B");
+        // Both agents made progress and advanced in lockstep (the barrier keeps
+        // their per-iteration inference calls paired), confirming isolated,
+        // interleaved per-entity state with no lost updates.
+        let g = handle.read().await;
+        let iter_a = g.world().get::<AgentState>(a).unwrap().iteration;
+        let iter_b = g.world().get::<AgentState>(b).unwrap().iteration;
+        assert!(iter_a >= 1 && iter_b >= 1);
+        assert_eq!(iter_a, iter_b);
+    }
+
+    #[tokio::test]
+    async fn test_run_inference_loop_shared_cancellation() {
+        let (engine, entity) = make_engine_with_mock();
+        {
+            let token = engine.world().get::<CancellationToken>(entity).unwrap();
+            token.cancel();
+        }
+        let handle: EngineHandle = Arc::new(tokio::sync::RwLock::new(engine));
+        let mut exec = |_: Vec<leviath_providers::ToolCall>| -> ToolResultsFuture<'static> {
+            Box::pin(async { Vec::new() })
+        };
+        let result = run_inference_loop_shared(
+            &handle,
+            entity,
+            "mock",
+            "m",
+            Vec::new(),
+            10,
+            None,
+            None,
+            &mut exec,
+            None,
+            None,
+        )
+        .await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("cancelled"));
+        assert_eq!(
+            handle
+                .read()
+                .await
+                .world()
+                .get::<AgentState>(entity)
+                .unwrap()
+                .status,
+            AgentStatus::Cancelled
+        );
+    }
+
+    #[tokio::test]
+    async fn test_run_inference_loop_shared_with_tool_calls_then_completion() {
+        // First response requests a tool; second completes. Exercises the
+        // tool-execution + result-append critical sections of the shared driver.
+        let responses = vec![
+            InferenceResponse {
+                content: "let me run a tool".to_string(),
+                tool_calls: vec![leviath_providers::ToolCall {
+                    id: "call_1".to_string(),
+                    name: "bash".to_string(),
+                    arguments: serde_json::json!({"cmd": "ls"}),
+                }],
+                tokens_used: leviath_providers::TokenUsage {
+                    prompt_tokens: 10,
+                    completion_tokens: 5,
+                    total_tokens: 15,
+                    cached_tokens: 0,
+                    cache_write_tokens: 0,
+                },
+                finish_reason: leviath_providers::FinishReason::ToolCall,
+            },
+            default_response(),
+        ];
+        let mut registry = ProviderRegistry::new();
+        registry.register(
+            "mock".to_string(),
+            Arc::new(MockProvider::with_responses("mock", responses)),
+        );
+        let mut engine = AgentEngine::with_providers(registry);
+        let entity = spawn_mock_agent(&mut engine, "agent-tools");
+        let handle: EngineHandle = Arc::new(tokio::sync::RwLock::new(engine));
+
+        let mut exec = |calls: Vec<leviath_providers::ToolCall>| -> ToolResultsFuture<'static> {
+            Box::pin(async move {
+                calls
+                    .into_iter()
+                    .map(|c| (c.id, "tool ok".to_string()))
+                    .collect()
+            })
+        };
+        let result = run_inference_loop_shared(
+            &handle,
+            entity,
+            "mock",
+            "m",
+            Vec::new(),
+            10,
+            None,
+            None,
+            &mut exec,
+            None,
+            None,
+        )
+        .await;
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().content, "mock response");
+        // The tool result was appended to the agent's context window.
+        let g = handle.read().await;
+        let window = g.world().get::<ContextWindow>(entity).unwrap();
+        let assembled = window.assemble();
+        let text = format!("{:?}", assembled.messages);
+        assert!(text.contains("tool ok"), "tool result should be in context");
     }
 
     #[tokio::test]
