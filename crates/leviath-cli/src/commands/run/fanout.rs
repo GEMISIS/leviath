@@ -374,19 +374,63 @@ pub async fn run_fan_out_stage(
         let (wp, wm) = (wp.clone(), wm.clone());
         set.spawn(async move {
             let _permit = sem.acquire().await.expect("semaphore is never closed");
+
+            // Shared context-window copy so context_* tools operate on the
+            // worker's own regions; mirrors the root worker's setup. Seed it
+            // from the worker entity's current window.
+            let shared_cw: Arc<tokio::sync::Mutex<Option<ContextWindow>>> =
+                Arc::new(tokio::sync::Mutex::new(
+                    engine
+                        .read()
+                        .await
+                        .world()
+                        .get::<ContextWindow>(ce)
+                        .cloned(),
+                ));
+
             let tr = tool_registry.clone();
+            let exec_cw = shared_cw.clone();
             let mut exec =
                 move |calls: Vec<leviath_providers::ToolCall>| -> ToolResultsFuture<'static> {
                     let tr = tr.clone();
+                    let exec_cw = exec_cw.clone();
                     Box::pin(async move {
                         let mut out = Vec::new();
                         for c in calls {
-                            let r = tr.call(&c.name, c.arguments.clone()).await;
+                            let r = if c.name.starts_with("context_") {
+                                super::worker::handle_context_tool(&c.name, &c.arguments, &exec_cw)
+                                    .await
+                            } else {
+                                tr.call(&c.name, c.arguments.clone()).await
+                            };
                             out.push((c.id, r));
                         }
                         out
                     })
                 };
+
+            // Alternating shared<->entity sync so context_* writes reach the
+            // entity and the engine's appends reach the shared copy (same
+            // protocol the root worker uses).
+            let sync_cw = shared_cw.clone();
+            let mut to_entity = true;
+            let mut post_tool_sync =
+                move |world: &mut bevy_ecs::prelude::World, ent: bevy_ecs::prelude::Entity| {
+                    if let Ok(mut guard) = sync_cw.try_lock() {
+                        if to_entity {
+                            if let Some(shared) = guard.as_ref() {
+                                if let Some(mut ecw) = world.get_mut::<ContextWindow>(ent) {
+                                    ecw.regions = shared.regions.clone();
+                                    ecw.current_tokens = shared.current_tokens;
+                                }
+                            }
+                        } else if let Some(ecw) = world.get::<ContextWindow>(ent) {
+                            *guard = Some(ecw.clone());
+                        }
+                        to_entity = !to_entity;
+                    }
+                };
+
             let res = run_inference_loop_shared(
                 &engine,
                 ce,
@@ -398,7 +442,7 @@ pub async fn run_fan_out_stage(
                 None,
                 &mut exec,
                 None,
-                None,
+                Some(&mut post_tool_sync),
             )
             .await;
             (cid, ce, res)
@@ -904,6 +948,126 @@ model = { models = [{ provider = "mock", model = "m" }] }
                 .status,
             AgentStatus::Error { .. }
         ));
+    }
+
+    /// Provider: call 0 = split (1 item); call 1 = worker issues a context_write;
+    /// later calls = done. Exercises worker context_* tool support.
+    struct ContextWorkerProvider {
+        n: std::sync::Mutex<usize>,
+    }
+    #[async_trait::async_trait]
+    impl leviath_providers::Provider for ContextWorkerProvider {
+        async fn infer(
+            &self,
+            _req: leviath_providers::InferenceRequest,
+        ) -> leviath_providers::Result<leviath_providers::InferenceResponse> {
+            let mut n = self.n.lock().unwrap();
+            let call = *n;
+            *n += 1;
+            let tokens = leviath_providers::TokenUsage {
+                prompt_tokens: 1,
+                completion_tokens: 1,
+                total_tokens: 2,
+                cached_tokens: 0,
+                cache_write_tokens: 0,
+            };
+            let (content, tool_calls) = match call {
+                0 => (r#"[{"id":"a","context":{}}]"#.to_string(), vec![]),
+                1 => (
+                    "writing".to_string(),
+                    vec![leviath_providers::ToolCall {
+                        id: "c1".to_string(),
+                        name: "context_write".to_string(),
+                        arguments: serde_json::json!({"region":"sys","content":"WORKER WROTE THIS"}),
+                    }],
+                ),
+                _ => ("done".to_string(), vec![]),
+            };
+            Ok(leviath_providers::InferenceResponse {
+                content,
+                tool_calls,
+                tokens_used: tokens,
+                finish_reason: leviath_providers::FinishReason::Complete,
+            })
+        }
+        fn count_tokens(&self, _t: &str, _m: &str) -> usize {
+            4
+        }
+        fn max_context_tokens(&self, _m: &str) -> usize {
+            100_000
+        }
+        fn name(&self) -> &str {
+            "mock"
+        }
+        fn capabilities(&self, _m: &str) -> leviath_providers::ModelCapabilities {
+            leviath_providers::ModelCapabilities::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn run_fan_out_worker_can_use_context_tools() {
+        let mut registry = ProviderRegistry::new();
+        registry.register(
+            "mock".into(),
+            Arc::new(ContextWorkerProvider {
+                n: std::sync::Mutex::new(0),
+            }),
+        );
+        let mut engine = AgentEngine::with_providers(registry);
+        let mut pool = AgentPool::new(fanout_blueprint(base_config()));
+        let pid = pool.spawn_agent(engine.world_mut());
+        let parent = pool.get_agent(&pid).unwrap();
+        {
+            let mut w = engine.world_mut().get_mut::<ContextWindow>(parent).unwrap();
+            w.add_region(Region::new(
+                "conversation".into(),
+                leviath_core::RegionKind::SlidingWindow {
+                    max_items: 100,
+                    eviction_strategy: leviath_core::EvictionStrategy::PerItem,
+                },
+                10000,
+            ));
+        }
+        let engine: EngineHandle = Arc::new(tokio::sync::RwLock::new(engine));
+        let config = crate::config::Config::default();
+        let tools = Arc::new(ToolRegistry::build(std::env::current_dir().unwrap(), &config).await);
+
+        // Worker stage allows context_write.
+        let mut fo = base_config();
+        fo.max_workers = 1;
+        let mut bp = fanout_blueprint(fo.clone());
+        if let Some(w) = bp.stages.iter_mut().find(|s| s.name == "worker") {
+            w.available_tools = vec!["context_write".to_string()];
+        }
+        let mut reg = HashMap::new();
+        reg.insert(bp.name.clone(), bp.clone());
+        let mut io = super::super::io::mock::MockIO::new();
+
+        run_fan_out_stage(
+            &engine, parent, &bp, &fo, &reg, &tools, "mock", "m", &mut io,
+        )
+        .await
+        .unwrap();
+
+        // The worker's context_write landed on its own entity's "sys" region.
+        let eng = engine.read().await;
+        let child = eng
+            .world()
+            .get::<SubAgentChildren>(parent)
+            .unwrap()
+            .children[0];
+        let sys = eng
+            .world()
+            .get::<ContextWindow>(child)
+            .unwrap()
+            .get_region("sys")
+            .unwrap()
+            .content
+            .iter()
+            .map(|e| e.content.clone())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(sys.contains("WORKER WROTE THIS"), "sys region: {sys}");
     }
 
     #[tokio::test]
