@@ -677,10 +677,10 @@ pub async fn run_stage_loop(
             if let Some(gate) =
                 build_stage_taint_gate(global, agent_sec, stage_sec, &cb.taint_policy())
             {
-                eng.configure_taint(gate, cb.taint_policy(), cb.make_gate_prompt());
+                eng.configure_taint(ctx.entity, gate, cb.taint_policy(), cb.make_gate_prompt());
                 eng.enable_entity_taint_tracking(ctx.entity);
             } else {
-                eng.clear_taint();
+                eng.clear_taint(ctx.entity);
             }
         }
 
@@ -841,7 +841,7 @@ pub async fn run_stage_loop(
         }
 
         // Persist this stage's taint audit events (if any) before moving on.
-        let taint_audit = eng.taint_audit_log().to_vec();
+        let taint_audit = eng.taint_audit_log(ctx.entity).to_vec();
         if !taint_audit.is_empty() {
             cb.on_taint_audit(stage_idx, &taint_audit).await;
         }
