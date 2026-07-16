@@ -1067,6 +1067,73 @@ mod subagent_tests {
     }
 
     #[tokio::test]
+    async fn spawned_worker_receives_messages_by_agent_id() {
+        // A spawned worker is message-accepting, so a message addressed to its
+        // agent_id is routed to *its* context (interruptible like any agent).
+        let mut engine = AgentEngine::with_providers(ProviderRegistry::new());
+        let mut root_pool = AgentPool::new(make_blueprint("root"));
+        let root_id = root_pool.spawn_agent(engine.world_mut());
+        let root_entity = root_pool.get_agent(&root_id).unwrap();
+        let engine: EngineHandle = Arc::new(RwLock::new(engine));
+
+        let worker_bp = make_blueprint("worker-bp");
+        let mut worker_pool = AgentPool::new(worker_bp.clone());
+        let (child_id, child_entity) = super::spawn_child_agent(
+            &engine,
+            &mut worker_pool,
+            root_entity,
+            &root_id,
+            &worker_bp,
+            "main",
+            1,
+            3,
+            None,
+        )
+        .await;
+
+        // Send a message addressed to the worker, then let the engine route it.
+        {
+            let eng = engine.read().await;
+            eng.send_message(leviath_runtime::AgentMessage {
+                agent_id: child_id.clone(),
+                content: "stop and reconsider".to_string(),
+                target_region: Some("conversation".to_string()),
+                priority: 0,
+            })
+            .unwrap();
+        }
+        engine.write().await.process_messages();
+
+        let eng = engine.read().await;
+        let window = eng.world().get::<ContextWindow>(child_entity).unwrap();
+        let conv = window
+            .get_region("conversation")
+            .unwrap()
+            .content
+            .iter()
+            .map(|e| e.content.clone())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            conv.contains("stop and reconsider"),
+            "worker should receive a message addressed to its agent_id"
+        );
+        // The message did not leak into the parent's context.
+        let root_window = eng.world().get::<ContextWindow>(root_entity).unwrap();
+        let root_conv = root_window
+            .get_region("conversation")
+            .map(|r| {
+                r.content
+                    .iter()
+                    .map(|e| e.content.clone())
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            })
+            .unwrap_or_default();
+        assert!(!root_conv.contains("stop and reconsider"));
+    }
+
+    #[tokio::test]
     async fn execute_unknown_tool_returns_error() {
         let (exec, root_entity, _engine) = make_executor_with_root();
         let out = exec
