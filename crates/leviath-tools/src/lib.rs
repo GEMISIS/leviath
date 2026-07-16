@@ -4,7 +4,9 @@
 
 use leviath_providers::Tool;
 use serde_json::{json, Value};
+use std::collections::HashMap;
 use std::path::{Component, Path, PathBuf};
+use std::sync::{Arc, Mutex};
 use tokio::process::Command;
 use tokio::time::{timeout, Duration};
 
@@ -12,13 +14,33 @@ use tokio::time::{timeout, Duration};
 pub struct ToolContext {
     /// Absolute working directory. All file operations are confined here.
     pub workdir: PathBuf,
+    /// Per-path advisory locks serializing concurrent mutating file operations
+    /// (`write_file`/`edit_file`) on the *same* file. Fan-out sub-agent workers
+    /// share one process and one workdir, so an in-process lock map keyed by
+    /// canonical path is sufficient (no OS `flock` needed) to prevent lost
+    /// updates when two workers touch the same file. Different files never
+    /// contend.
+    file_locks: Arc<Mutex<HashMap<PathBuf, Arc<tokio::sync::Mutex<()>>>>>,
 }
 
 impl ToolContext {
     /// Create a new context. Attempts to canonicalize the working directory.
     pub fn new(workdir: PathBuf) -> Self {
         let workdir = std::fs::canonicalize(&workdir).unwrap_or(workdir);
-        Self { workdir }
+        Self {
+            workdir,
+            file_locks: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+
+    /// Get (or create) the advisory lock for `path`. The map mutex is held only
+    /// briefly to look up / insert; the returned per-file lock is what callers
+    /// `.await` on across their read-modify-write.
+    fn lock_for(&self, path: &Path) -> Arc<tokio::sync::Mutex<()>> {
+        let mut map = self.file_locks.lock().unwrap();
+        map.entry(path.to_path_buf())
+            .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+            .clone()
     }
 }
 
@@ -570,6 +592,10 @@ impl BuiltinTools {
             Err(e) => return format!("[error] {}", e),
         };
 
+        // Serialize concurrent writes to the same file (fan-out workers).
+        let lock = self.ctx.lock_for(&path);
+        let _guard = lock.lock().await;
+
         let parent = {
             let mut p = path.clone();
             p.pop();
@@ -610,6 +636,11 @@ impl BuiltinTools {
             Ok(p) => p,
             Err(e) => return format!("[error] {}", e),
         };
+
+        // Serialize the read-modify-write against concurrent edits/writes to the
+        // same file (fan-out workers), preventing lost updates.
+        let lock = self.ctx.lock_for(&path);
+        let _guard = lock.lock().await;
 
         let content = match std::fs::read_to_string(&path) {
             Ok(c) => c,
@@ -1739,5 +1770,78 @@ mod tests {
         let (shell, flag) = BuiltinTools::detect_shell_impl(None, &|_| false);
         assert_eq!(shell, "sh");
         assert_eq!(flag, "-c");
+    }
+
+    #[tokio::test]
+    async fn concurrent_edits_same_file_serialize_no_lost_update() {
+        // Two workers edit different unique strings in the SAME file at once.
+        // The per-path lock serializes the read-modify-write, so both edits
+        // land; without it, the second write would clobber the first.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("f.txt"), "A\nB\n").unwrap();
+        let tools = std::sync::Arc::new(make_tools(dir.path()));
+
+        let t1 = {
+            let t = tools.clone();
+            tokio::spawn(async move {
+                t.execute(
+                    "edit_file",
+                    json!({"path": "f.txt", "old_str": "A", "new_str": "A1"}),
+                )
+                .await
+            })
+        };
+        let t2 = {
+            let t = tools.clone();
+            tokio::spawn(async move {
+                t.execute(
+                    "edit_file",
+                    json!({"path": "f.txt", "old_str": "B", "new_str": "B2"}),
+                )
+                .await
+            })
+        };
+        let (r1, r2) = tokio::join!(t1, t2);
+        assert!(!r1.unwrap().starts_with("[error]"));
+        assert!(!r2.unwrap().starts_with("[error]"));
+
+        let final_content = std::fs::read_to_string(dir.path().join("f.txt")).unwrap();
+        assert_eq!(
+            final_content, "A1\nB2\n",
+            "both concurrent edits must apply (no lost update)"
+        );
+    }
+
+    #[tokio::test]
+    async fn concurrent_writes_different_files_both_succeed() {
+        // Different files never contend on the per-path lock.
+        let dir = tempfile::tempdir().unwrap();
+        let tools = std::sync::Arc::new(make_tools(dir.path()));
+
+        let a = {
+            let t = tools.clone();
+            tokio::spawn(async move {
+                t.execute("write_file", json!({"path": "a.txt", "content": "AAA"}))
+                    .await
+            })
+        };
+        let b = {
+            let t = tools.clone();
+            tokio::spawn(async move {
+                t.execute("write_file", json!({"path": "b.txt", "content": "BBB"}))
+                    .await
+            })
+        };
+        let (ra, rb) = tokio::join!(a, b);
+        assert!(!ra.unwrap().starts_with("[error]"));
+        assert!(!rb.unwrap().starts_with("[error]"));
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("a.txt")).unwrap(),
+            "AAA"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("b.txt")).unwrap(),
+            "BBB"
+        );
     }
 }
