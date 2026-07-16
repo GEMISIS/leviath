@@ -1214,6 +1214,12 @@ async fn run_worker_inner(
         .unwrap_or(std::path::PathBuf::from("."));
     initialize_context_window(&mut engine, entity, &blueprint, &args.task);
 
+    // Move the engine behind a shared handle so in-process sub-agents (fan-out
+    // workers) can be driven concurrently; the root stage loop takes a write
+    // guard per iteration.
+    let engine: leviath_runtime::EngineHandle =
+        std::sync::Arc::new(tokio::sync::RwLock::new(engine));
+
     let tool_registry = Arc::new(ToolRegistry::build(workdir, &config).await);
 
     // Global tool policy + session-level allows
@@ -1319,7 +1325,7 @@ async fn run_worker_inner(
 
     let mut ctx = StageContext {
         blueprint: &blueprint,
-        engine: &mut engine,
+        engine: engine.clone(),
         entity,
         pool: &mut pool,
         tool_registry: &tool_registry,

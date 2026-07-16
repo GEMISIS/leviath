@@ -622,6 +622,11 @@ async fn run_foreground_with_registry(
         .unwrap_or(std::path::PathBuf::from("."));
     initialize_context_window(&mut engine, entity, &blueprint, &task);
 
+    // Move the engine behind a shared handle so it can be driven concurrently by
+    // in-process sub-agents (fan-out workers). The root agent's stage loop
+    // acquires a write guard per iteration.
+    let engine: leviath_runtime::EngineHandle = Arc::new(tokio::sync::RwLock::new(engine));
+
     let tool_registry = Arc::new(ToolRegistry::build(workdir, &config).await);
 
     // Build launch-level tool policy overrides from CLI flags
@@ -712,7 +717,7 @@ async fn run_foreground_with_registry(
 
     let mut ctx = StageContext {
         blueprint: &blueprint,
-        engine: &mut engine,
+        engine: engine.clone(),
         entity,
         pool: &mut pool,
         tool_registry: &tool_registry,

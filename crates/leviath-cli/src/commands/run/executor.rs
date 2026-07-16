@@ -9,7 +9,9 @@ use leviath_core::blueprint::{StageMode, StageResult};
 use leviath_core::lifecycle::CompactionConfig;
 use leviath_core::Blueprint;
 use leviath_providers::InferenceResponse;
-use leviath_runtime::{AgentEngine, AgentPool, AgentState, ContextWindow, InferenceConfig};
+use leviath_runtime::{
+    AgentEngine, AgentPool, AgentState, ContextWindow, EngineHandle, InferenceConfig,
+};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -171,8 +173,13 @@ pub use leviath_runtime::{ToolExecutorDyn, ToolResultsFuture};
 pub struct StageContext<'a> {
     /// The agent blueprint defining stages, transitions, and configuration.
     pub blueprint: &'a Blueprint,
-    /// The agent engine providing inference and ECS world access.
-    pub engine: &'a mut AgentEngine,
+    /// Shared handle to the agent engine (inference + ECS world access).
+    ///
+    /// Held as a shared `Arc<RwLock<..>>` rather than `&mut` so the same engine
+    /// can be driven concurrently by in-process sub-agents (fan-out workers).
+    /// `run_stage_loop` acquires a write guard per iteration for the sequential
+    /// root-agent work; the fan-out path clones this handle to drive workers.
+    pub engine: EngineHandle,
     /// The ECS entity representing the running agent.
     pub entity: bevy_ecs::prelude::Entity,
     /// The agent pool managing agent lifecycle.
@@ -359,6 +366,12 @@ pub async fn run_stage_loop(
 
         let stage_idx = current_stage_idx_val;
 
+        // Acquire the engine for this iteration's sequential (root-agent)
+        // work. Held across the iteration; the fan-out path is the only
+        // place that releases it to drive concurrent workers.
+        let engine_handle = ctx.engine.clone();
+        let mut eng = engine_handle.write().await;
+
         // Resolve provider + model, supporting:
         //   1. --model provider/model   (override both)
         //   2. --model model-name       (override model only, keep stage provider)
@@ -385,7 +398,7 @@ pub async fn run_stage_loop(
                 // model name (if any) but pair it with that available provider.
                 let mut found = None;
                 for (i, entry) in stage.model.models.iter().enumerate() {
-                    if ctx.engine.providers().has(&entry.provider) {
+                    if eng.providers().has(&entry.provider) {
                         if i > 0 {
                             tracing::info!(
                                 preferred_provider = %stage.model.models[0].provider,
@@ -420,7 +433,7 @@ pub async fn run_stage_loop(
                         (provider, om.clone())
                     } else if let Some((ref dp, ref dm)) = ctx.user_default_model {
                         // Config default_provider + default_model as last resort
-                        if ctx.engine.providers().has(dp) {
+                        if eng.providers().has(dp) {
                             tracing::info!(
                                 provider = %dp,
                                 model = %dm,
@@ -475,7 +488,7 @@ pub async fn run_stage_loop(
         }
 
         // Provider check (after fallback resolution)
-        if !ctx.engine.providers().has(provider_name)
+        if !eng.providers().has(provider_name)
             && cb.on_provider_missing(provider_name, stage_idx).await
         {
             return Ok(());
@@ -504,8 +517,7 @@ pub async fn run_stage_loop(
         }
 
         // Update accepts_messages (AgentState is always present after spawn_agent)
-        ctx.engine
-            .world_mut()
+        eng.world_mut()
             .get_mut::<AgentState>(ctx.entity)
             .expect("AgentState always present after spawn_agent")
             .accepts_messages = stage.accepts_messages;
@@ -516,7 +528,7 @@ pub async fn run_stage_loop(
 
         // Stage layout swap
         if let Some(ref stage_layout) = stage.context_layout {
-            swap_context_layout(ctx.engine, ctx.entity, stage_layout);
+            swap_context_layout(&mut eng, ctx.entity, stage_layout);
         }
 
         // Set per-stage inference config from ModelConfig.parameters
@@ -533,8 +545,7 @@ pub async fn run_stage_loop(
                 .get("max_output_tokens")
                 .and_then(|v| v.as_u64())
                 .map(|t| t as usize);
-            ctx.engine
-                .world_mut()
+            eng.world_mut()
                 .entity_mut(ctx.entity)
                 .insert(InferenceConfig {
                     temperature,
@@ -544,7 +555,7 @@ pub async fn run_stage_loop(
 
         // Set per-stage tool result routing config
         {
-            let mut entity_mut = ctx.engine.world_mut().entity_mut(ctx.entity);
+            let mut entity_mut = eng.world_mut().entity_mut(ctx.entity);
             if let Some(ref routing) = stage.tool_result_routing {
                 entity_mut.insert(leviath_runtime::ToolResultRoutingComponent {
                     routing: routing.clone(),
@@ -558,8 +569,7 @@ pub async fn run_stage_loop(
         // the instructions stay in the cacheable system block rather than
         // getting evicted from the SlidingWindow conversation region.
         {
-            let mut window = ctx
-                .engine
+            let mut window = eng
                 .world_mut()
                 .get_mut::<ContextWindow>(ctx.entity)
                 .expect("ContextWindow always present after spawn_agent");
@@ -652,7 +662,7 @@ pub async fn run_stage_loop(
         let max_iterations = stage.max_iterations.unwrap_or(20);
 
         // Mid-run message reader
-        let stdin_handle = cb.start_message_reader(ctx.engine, agent_id, stage.accepts_messages);
+        let stdin_handle = cb.start_message_reader(&eng, agent_id, stage.accepts_messages);
 
         // Clone values needed after the match (stage is borrowed from blueprint)
         let stage_name_owned = stage.name.clone();
@@ -667,11 +677,10 @@ pub async fn run_stage_loop(
             if let Some(gate) =
                 build_stage_taint_gate(global, agent_sec, stage_sec, &cb.taint_policy())
             {
-                ctx.engine
-                    .configure_taint(gate, cb.taint_policy(), cb.make_gate_prompt());
-                ctx.engine.enable_entity_taint_tracking(ctx.entity);
+                eng.configure_taint(gate, cb.taint_policy(), cb.make_gate_prompt());
+                eng.enable_entity_taint_tracking(ctx.entity);
             } else {
-                ctx.engine.clear_taint();
+                eng.clear_taint();
             }
         }
 
@@ -682,7 +691,7 @@ pub async fn run_stage_loop(
             StageMode::Interactive => {
                 let run_context = cb.get_run_context();
                 run_interactive_stage(
-                    ctx.engine,
+                    &mut eng,
                     ctx.entity,
                     provider_name,
                     model_name,
@@ -700,7 +709,7 @@ pub async fn run_stage_loop(
                     stage_idx,
                     &stage_result_val,
                     None,
-                    ctx.engine,
+                    &mut eng,
                     ctx.entity,
                 )
                 .await;
@@ -709,7 +718,7 @@ pub async fn run_stage_loop(
                 let pts = points.clone();
                 let run_context = cb.get_run_context();
                 let outcome = run_interactive_points_stage(
-                    ctx.engine,
+                    &mut eng,
                     ctx.entity,
                     provider_name,
                     model_name,
@@ -740,7 +749,7 @@ pub async fn run_stage_loop(
                             stage_idx,
                             &stage_result_val,
                             None,
-                            ctx.engine,
+                            &mut eng,
                             ctx.entity,
                         )
                         .await;
@@ -759,7 +768,7 @@ pub async fn run_stage_loop(
                 loop {
                     match cb
                         .run_autonomous(
-                            ctx.engine,
+                            &mut eng,
                             ctx.entity,
                             provider_name,
                             model_name,
@@ -773,8 +782,7 @@ pub async fn run_stage_loop(
                     {
                         Ok((result, response)) => {
                             let unmet = {
-                                let w = ctx
-                                    .engine
+                                let w = eng
                                     .world()
                                     .get::<ContextWindow>(ctx.entity)
                                     .expect("ContextWindow always present after spawn_agent");
@@ -782,7 +790,7 @@ pub async fn run_stage_loop(
                             };
                             if !unmet.is_empty() && round < reentry_cap {
                                 round += 1;
-                                inject_required_region_nudges(ctx.engine, ctx.entity, &unmet);
+                                inject_required_region_nudges(&mut eng, ctx.entity, &unmet);
                                 continue;
                             }
                             if !unmet.is_empty() {
@@ -800,7 +808,7 @@ pub async fn run_stage_loop(
                                 stage_idx,
                                 &result,
                                 response.as_ref(),
-                                ctx.engine,
+                                &mut eng,
                                 ctx.entity,
                             )
                             .await;
@@ -833,7 +841,7 @@ pub async fn run_stage_loop(
         }
 
         // Persist this stage's taint audit events (if any) before moving on.
-        let taint_audit = ctx.engine.taint_audit_log().to_vec();
+        let taint_audit = eng.taint_audit_log().to_vec();
         if !taint_audit.is_empty() {
             cb.on_taint_audit(stage_idx, &taint_audit).await;
         }
@@ -845,13 +853,12 @@ pub async fn run_stage_loop(
 
         // Drain any undelivered messages at stage boundary so they don't
         // silently accumulate and leak into the next stage's context.
-        ctx.engine.drain_pending_messages(ctx.entity);
+        eng.drain_pending_messages(ctx.entity);
 
         *visit_counts.entry(stage_name_owned.clone()).or_default() += 1;
 
         // Post-stage callback
-        cb.on_post_stage(ctx.engine, ctx.entity, &stage_name_owned)
-            .await;
+        cb.on_post_stage(&eng, ctx.entity, &stage_name_owned).await;
 
         // Resolve the next transition
         let stage_ref = ctx.blueprint.find_stage(&stage_name_owned).unwrap();
@@ -861,7 +868,7 @@ pub async fn run_stage_loop(
             ctx.blueprint,
             &visit_counts,
             &stage_result_val,
-            ctx.engine,
+            &mut eng,
             ctx.entity,
             provider_name,
             model_name,
@@ -880,8 +887,7 @@ pub async fn run_stage_loop(
                     stage_name_owned, next_name
                 );
                 let tokens = marker.len() / 4 + 1;
-                let _ = ctx
-                    .engine
+                let _ = eng
                     .world_mut()
                     .get_mut::<ContextWindow>(ctx.entity)
                     .expect("ContextWindow always present after spawn_agent")
@@ -891,7 +897,7 @@ pub async fn run_stage_loop(
                 apply_edge_transform(
                     &edge,
                     &visit_counts,
-                    ctx.engine,
+                    &mut eng,
                     ctx.entity,
                     provider_name,
                     model_name,
@@ -1022,38 +1028,44 @@ mod tests {
     #[test]
     fn unmet_required_regions_flags_empty_and_clears_when_filled() {
         let (bp, stage) = required_region_fixture();
-        let (mut engine, _pool, entity) = make_engine_and_entity(&bp);
+        let (engine, _pool, entity) = make_engine_and_entity(&bp);
 
         // plan is empty → flagged, with its custom message.
-        let window = engine.world().get::<ContextWindow>(entity).unwrap();
-        let unmet = unmet_required_regions(&bp, &stage, window);
-        assert_eq!(unmet.len(), 1);
-        assert_eq!(unmet[0].0, "plan");
-        assert_eq!(unmet[0].1.as_deref(), Some("Write the plan."));
+        {
+            let guard = engine.try_read().unwrap();
+            let window = guard.world().get::<ContextWindow>(entity).unwrap();
+            let unmet = unmet_required_regions(&bp, &stage, window);
+            assert_eq!(unmet.len(), 1);
+            assert_eq!(unmet[0].0, "plan");
+            assert_eq!(unmet[0].1.as_deref(), Some("Write the plan."));
 
-        // A stage without a context-writing tool is not gated (can't fill it).
-        let mut no_write = stage.clone();
-        no_write.available_tools = vec!["read_file".to_string()];
-        assert!(unmet_required_regions(&bp, &no_write, window).is_empty());
+            // A stage without a context-writing tool is not gated (can't fill it).
+            let mut no_write = stage.clone();
+            no_write.available_tools = vec!["read_file".to_string()];
+            assert!(unmet_required_regions(&bp, &no_write, window).is_empty());
+        }
 
         // Fill plan → no longer unmet.
         engine
+            .try_write()
+            .unwrap()
             .world_mut()
             .get_mut::<ContextWindow>(entity)
             .unwrap()
             .add_to_region("plan", "the plan".to_string(), 3)
             .unwrap();
-        let window = engine.world().get::<ContextWindow>(entity).unwrap();
+        let guard = engine.try_read().unwrap();
+        let window = guard.world().get::<ContextWindow>(entity).unwrap();
         assert!(unmet_required_regions(&bp, &stage, window).is_empty());
     }
 
     #[test]
     fn inject_required_region_nudges_writes_custom_and_default_messages() {
         let (bp, _stage) = required_region_fixture();
-        let (mut engine, _pool, entity) = make_engine_and_entity(&bp);
+        let (engine, _pool, entity) = make_engine_and_entity(&bp);
 
         inject_required_region_nudges(
-            &mut engine,
+            &mut engine.try_write().unwrap(),
             entity,
             &[
                 ("plan".to_string(), Some("Write the plan.".to_string())),
@@ -1061,7 +1073,8 @@ mod tests {
             ],
         );
 
-        let window = engine.world().get::<ContextWindow>(entity).unwrap();
+        let guard = engine.try_read().unwrap();
+        let window = guard.world().get::<ContextWindow>(entity).unwrap();
         let conv: String = window
             .get_region("conversation")
             .unwrap()
@@ -1311,13 +1324,18 @@ mod tests {
 
     fn make_engine_and_entity(
         blueprint: &Blueprint,
-    ) -> (AgentEngine, AgentPool, bevy_ecs::prelude::Entity) {
+    ) -> (
+        leviath_runtime::EngineHandle,
+        AgentPool,
+        bevy_ecs::prelude::Entity,
+    ) {
         let registry = ProviderRegistry::new();
         let mut engine = AgentEngine::with_providers(registry);
         let mut pool = AgentPool::new(blueprint.clone());
         let agent_id = pool.spawn_agent(engine.world_mut());
         let entity = pool.get_agent(&agent_id).unwrap();
         initialize_context_window(&mut engine, entity, blueprint, "test task");
+        let engine = std::sync::Arc::new(tokio::sync::RwLock::new(engine));
         (engine, pool, entity)
     }
 
@@ -1372,7 +1390,11 @@ mod tests {
 
     fn make_engine_and_entity_with_provider(
         blueprint: &Blueprint,
-    ) -> (AgentEngine, AgentPool, bevy_ecs::prelude::Entity) {
+    ) -> (
+        leviath_runtime::EngineHandle,
+        AgentPool,
+        bevy_ecs::prelude::Entity,
+    ) {
         let mut registry = ProviderRegistry::new();
         registry.register("anthropic".to_string(), Arc::new(CannedProvider));
         let mut engine = AgentEngine::with_providers(registry);
@@ -1380,6 +1402,7 @@ mod tests {
         let agent_id = pool.spawn_agent(engine.world_mut());
         let entity = pool.get_agent(&agent_id).unwrap();
         initialize_context_window(&mut engine, entity, blueprint, "test task");
+        let engine = std::sync::Arc::new(tokio::sync::RwLock::new(engine));
         (engine, pool, entity)
     }
 
@@ -1392,13 +1415,13 @@ mod tests {
     #[tokio::test]
     async fn single_stage_fires_enter_result_complete() {
         let bp = make_blueprint(vec![make_stage("main")]);
-        let (mut engine, mut pool, entity) = make_engine_and_entity(&bp);
+        let (engine, mut pool, entity) = make_engine_and_entity(&bp);
         let tool_registry = make_tool_registry().await;
         let mut cb = MockCallbacks::new();
 
         let mut ctx = StageContext {
             blueprint: &bp,
-            engine: &mut engine,
+            engine: engine.clone(),
             entity,
             pool: &mut pool,
             tool_registry: &tool_registry,
@@ -1458,13 +1481,13 @@ mod tests {
         stage.available_tools = vec!["context_write".to_string()];
         let bp = Blueprint::new("t".to_string(), "d".to_string(), vec![stage], layout);
 
-        let (mut engine, mut pool, entity) = make_engine_and_entity(&bp);
+        let (engine, mut pool, entity) = make_engine_and_entity(&bp);
         let tool_registry = make_tool_registry().await;
         let mut cb = MockCallbacks::new();
 
         let mut ctx = StageContext {
             blueprint: &bp,
-            engine: &mut engine,
+            engine: engine.clone(),
             entity,
             pool: &mut pool,
             tool_registry: &tool_registry,
@@ -1499,13 +1522,13 @@ mod tests {
             make_stage("code"),
             make_stage("review"),
         ]);
-        let (mut engine, mut pool, entity) = make_engine_and_entity(&bp);
+        let (engine, mut pool, entity) = make_engine_and_entity(&bp);
         let tool_registry = make_tool_registry().await;
         let mut cb = MockCallbacks::new();
 
         let mut ctx = StageContext {
             blueprint: &bp,
-            engine: &mut engine,
+            engine: engine.clone(),
             entity,
             pool: &mut pool,
             tool_registry: &tool_registry,
@@ -1554,14 +1577,14 @@ mod tests {
         let mut stage = make_stage("main");
         stage.model = ModelConfig::new("nonexistent".to_string(), "some-model".to_string());
         let bp = make_blueprint(vec![stage]);
-        let (mut engine, mut pool, entity) = make_engine_and_entity(&bp);
+        let (engine, mut pool, entity) = make_engine_and_entity(&bp);
         let tool_registry = make_tool_registry().await;
         let mut cb = MockCallbacks::new();
         cb.abort_on_provider_missing = true; // provider_missing test: abort run
 
         let mut ctx = StageContext {
             blueprint: &bp,
-            engine: &mut engine,
+            engine: engine.clone(),
             entity,
             pool: &mut pool,
             tool_registry: &tool_registry,
@@ -1594,7 +1617,7 @@ mod tests {
         let mut stage = make_stage("main");
         stage.model = ModelConfig::new("claude-code".to_string(), "test".to_string());
         let bp = make_blueprint(vec![stage]);
-        let (mut engine, mut pool, entity) = make_engine_and_entity(&bp);
+        let (engine, mut pool, entity) = make_engine_and_entity(&bp);
         let tool_registry = make_tool_registry().await;
         let mut cb = MockCallbacks::new();
 
@@ -1604,7 +1627,7 @@ mod tests {
 
         let mut ctx = StageContext {
             blueprint: &bp,
-            engine: &mut engine,
+            engine: engine.clone(),
             entity,
             pool: &mut pool,
             tool_registry: &tool_registry,
@@ -1639,14 +1662,14 @@ mod tests {
         stage.transitions = Some(HashMap::new());
         stage.accepts_messages = true; // exercise the stdin-reader Some(handle) path too
         let bp = make_blueprint(vec![stage]);
-        let (mut engine, mut pool, entity) = make_engine_and_entity(&bp);
+        let (engine, mut pool, entity) = make_engine_and_entity(&bp);
         let tool_registry = make_tool_registry().await;
         let mut cb = MockCallbacks::new();
         cb.run_autonomous_should_error = true;
 
         let mut ctx = StageContext {
             blueprint: &bp,
-            engine: &mut engine,
+            engine: engine.clone(),
             entity,
             pool: &mut pool,
             tool_registry: &tool_registry,
@@ -1683,14 +1706,14 @@ mod tests {
         let mut stage = make_stage("main");
         stage.accepts_messages = true; // exercise the stdin-reader abort-before-return path
         let bp = make_blueprint(vec![stage]);
-        let (mut engine, mut pool, entity) = make_engine_and_entity(&bp);
+        let (engine, mut pool, entity) = make_engine_and_entity(&bp);
         let tool_registry = make_tool_registry().await;
         let mut cb = MockCallbacks::new();
         cb.run_autonomous_should_error = true;
 
         let mut ctx = StageContext {
             blueprint: &bp,
-            engine: &mut engine,
+            engine: engine.clone(),
             entity,
             pool: &mut pool,
             tool_registry: &tool_registry,
@@ -1747,13 +1770,13 @@ mod tests {
         stage.available_tools = vec!["read_file".to_string()];
 
         let bp = make_blueprint(vec![stage]);
-        let (mut engine, mut pool, entity) = make_engine_and_entity(&bp);
+        let (engine, mut pool, entity) = make_engine_and_entity(&bp);
         let tool_registry = make_tool_registry().await;
         let mut cb = MockCallbacks::new();
 
         let mut ctx = StageContext {
             blueprint: &bp,
-            engine: &mut engine,
+            engine: engine.clone(),
             entity,
             pool: &mut pool,
             tool_registry: &tool_registry,
@@ -1806,13 +1829,13 @@ mod tests {
             .insert("system_prompt".to_string(), serde_json::json!("Be terse."));
 
         let bp = make_blueprint(vec![stage]);
-        let (mut engine, mut pool, entity) = make_engine_and_entity(&bp);
+        let (engine, mut pool, entity) = make_engine_and_entity(&bp);
         let tool_registry = make_tool_registry().await;
         let mut cb = MockCallbacks::new();
 
         let mut ctx = StageContext {
             blueprint: &bp,
-            engine: &mut engine,
+            engine: engine.clone(),
             entity,
             pool: &mut pool,
             tool_registry: &tool_registry,
@@ -1835,11 +1858,8 @@ mod tests {
         .unwrap();
 
         // Verify system_prompt landed in the "system" (Pinned) region
-        let window = ctx
-            .engine
-            .world_mut()
-            .get::<ContextWindow>(ctx.entity)
-            .unwrap();
+        let __g = ctx.engine.read().await;
+        let window = __g.world().get::<ContextWindow>(ctx.entity).unwrap();
         let system_region = window.get_region("system").unwrap();
         let has_stage_instruction = system_region
             .content
@@ -1884,14 +1904,14 @@ mod tests {
     #[tokio::test]
     async fn stage_idx_lock_updated_per_stage() {
         let bp = make_blueprint(vec![make_stage("a"), make_stage("b")]);
-        let (mut engine, mut pool, entity) = make_engine_and_entity(&bp);
+        let (engine, mut pool, entity) = make_engine_and_entity(&bp);
         let tool_registry = make_tool_registry().await;
         let mut cb = MockCallbacks::new();
         let stage_idx = Arc::new(Mutex::new(99usize));
 
         let mut ctx = StageContext {
             blueprint: &bp,
-            engine: &mut engine,
+            engine: engine.clone(),
             entity,
             pool: &mut pool,
             tool_registry: &tool_registry,
@@ -1921,14 +1941,14 @@ mod tests {
     #[tokio::test]
     async fn stage_name_lock_updated_per_stage() {
         let bp = make_blueprint(vec![make_stage("alpha"), make_stage("beta")]);
-        let (mut engine, mut pool, entity) = make_engine_and_entity(&bp);
+        let (engine, mut pool, entity) = make_engine_and_entity(&bp);
         let tool_registry = make_tool_registry().await;
         let mut cb = MockCallbacks::new();
         let stage_name = Arc::new(Mutex::new(String::new()));
 
         let mut ctx = StageContext {
             blueprint: &bp,
-            engine: &mut engine,
+            engine: engine.clone(),
             entity,
             pool: &mut pool,
             tool_registry: &tool_registry,
@@ -1957,7 +1977,7 @@ mod tests {
     #[tokio::test]
     async fn model_override_is_used() {
         let bp = make_blueprint(vec![make_stage("main")]);
-        let (mut engine, mut pool, entity) = make_engine_and_entity(&bp);
+        let (engine, mut pool, entity) = make_engine_and_entity(&bp);
         let tool_registry = make_tool_registry().await;
 
         // Custom callbacks that capture model name
@@ -2040,7 +2060,7 @@ mod tests {
 
         let mut ctx = StageContext {
             blueprint: &bp,
-            engine: &mut engine,
+            engine: engine.clone(),
             entity,
             pool: &mut pool,
             tool_registry: &tool_registry,
@@ -2069,7 +2089,9 @@ mod tests {
         // reaches on its own -- the same production behavior for each is
         // already covered via `MockCallbacks` elsewhere in this file.
         cb.on_claude_code_warning(0).await;
-        assert!(cb.start_message_reader(&engine, "agent-1", false).is_none());
+        assert!(cb
+            .start_message_reader(&*engine.read().await, "agent-1", false)
+            .is_none());
         assert!(cb.get_run_context().is_none());
         assert!(cb
             .on_stage_error("main", 0, &anyhow::anyhow!("e"), false)
@@ -2077,7 +2099,8 @@ mod tests {
             .is_none());
         cb.on_transition("a", "b", 0).await;
         cb.on_complete(0).await;
-        cb.on_post_stage(&engine, entity, "main").await;
+        cb.on_post_stage(&*engine.read().await, entity, "main")
+            .await;
         // Default (non-overridden) taint/cancel trait-method bodies.
         cb.on_cancel(0).await;
         assert!(!cb.taint_global_enabled());
@@ -2120,7 +2143,7 @@ mod tests {
         stage_b.transitions = Some(b_transitions);
 
         let bp = make_blueprint(vec![stage_a, stage_b]);
-        let (mut engine, mut pool, entity) = make_engine_and_entity(&bp);
+        let (engine, mut pool, entity) = make_engine_and_entity(&bp);
         let tool_registry = make_tool_registry().await;
 
         // Capture visit labels
@@ -2203,7 +2226,7 @@ mod tests {
 
         let mut ctx = StageContext {
             blueprint: &bp,
-            engine: &mut engine,
+            engine: engine.clone(),
             entity,
             pool: &mut pool,
             tool_registry: &tool_registry,
@@ -2238,7 +2261,9 @@ mod tests {
         // its own -- the same production behavior for each is already
         // covered via `MockCallbacks` elsewhere in this file.
         cb.on_claude_code_warning(0).await;
-        assert!(cb.start_message_reader(&engine, "agent-1", false).is_none());
+        assert!(cb
+            .start_message_reader(&*engine.read().await, "agent-1", false)
+            .is_none());
         assert!(cb.get_run_context().is_none());
         assert_eq!(
             cb.on_stage_error("a", 0, &anyhow::anyhow!("e"), true).await,
@@ -2246,7 +2271,7 @@ mod tests {
         );
         cb.on_transition("a", "b", 0).await;
         cb.on_complete(0).await;
-        cb.on_post_stage(&engine, entity, "a").await;
+        cb.on_post_stage(&*engine.read().await, entity, "a").await;
     }
 
     // ─── on_stage_result must fire for Interactive/InteractivePoints too ────
@@ -2266,13 +2291,13 @@ mod tests {
         stage.mode = StageMode::Interactive;
         stage.max_iterations = Some(1);
         let bp = make_blueprint(vec![stage]);
-        let (mut engine, mut pool, entity) = make_engine_and_entity_with_provider(&bp);
+        let (engine, mut pool, entity) = make_engine_and_entity_with_provider(&bp);
         let tool_registry = make_tool_registry().await;
         let mut cb = MockCallbacks::new();
 
         let mut ctx = StageContext {
             blueprint: &bp,
-            engine: &mut engine,
+            engine: engine.clone(),
             entity,
             pool: &mut pool,
             tool_registry: &tool_registry,
@@ -2310,13 +2335,13 @@ mod tests {
         stage.mode = StageMode::InteractivePoints { points: vec![] };
         stage.max_iterations = Some(1);
         let bp = make_blueprint(vec![stage]);
-        let (mut engine, mut pool, entity) = make_engine_and_entity_with_provider(&bp);
+        let (engine, mut pool, entity) = make_engine_and_entity_with_provider(&bp);
         let tool_registry = make_tool_registry().await;
         let mut cb = MockCallbacks::new();
 
         let mut ctx = StageContext {
             blueprint: &bp,
-            engine: &mut engine,
+            engine: engine.clone(),
             entity,
             pool: &mut pool,
             tool_registry: &tool_registry,
@@ -2373,7 +2398,7 @@ mod tests {
         stage.max_iterations = Some(2);
         stage.accepts_messages = false;
         let bp = make_blueprint(vec![stage]);
-        let (mut engine, mut pool, entity) = make_engine_and_entity_with_provider(&bp);
+        let (engine, mut pool, entity) = make_engine_and_entity_with_provider(&bp);
         let tool_registry = make_tool_registry().await;
 
         let run_id = "exec-abort-run".to_string();
@@ -2407,7 +2432,7 @@ mod tests {
 
         let mut ctx = StageContext {
             blueprint: &bp,
-            engine: &mut engine,
+            engine: engine.clone(),
             entity,
             pool: &mut pool,
             tool_registry: &tool_registry,
@@ -2451,14 +2476,14 @@ mod tests {
         stage.mode = StageMode::Interactive;
         stage.accepts_messages = false; // stdin_handle = None (avoids leaked handle)
         let bp = make_blueprint(vec![stage]);
-        let (mut engine, mut pool, entity) = make_engine_and_entity(&bp);
+        let (engine, mut pool, entity) = make_engine_and_entity(&bp);
         let tool_registry = make_tool_registry().await;
         let mut cb = MockCallbacks::new();
         // abort_on_provider_missing defaults to false → execution reaches run_interactive_stage
 
         let mut ctx = StageContext {
             blueprint: &bp,
-            engine: &mut engine,
+            engine: engine.clone(),
             entity,
             pool: &mut pool,
             tool_registry: &tool_registry,
@@ -2509,7 +2534,7 @@ mod tests {
         };
         stage.accepts_messages = false;
         let bp = make_blueprint(vec![stage]);
-        let (mut engine, mut pool, entity) = make_engine_and_entity(&bp);
+        let (engine, mut pool, entity) = make_engine_and_entity(&bp);
         let tool_registry = make_tool_registry().await;
         let _ = std::fs::remove_dir_all(crate::runstate::run_dir("executor-test-no-dir-ipc"));
 
@@ -2529,7 +2554,7 @@ mod tests {
 
         let mut ctx = StageContext {
             blueprint: &bp,
-            engine: &mut engine,
+            engine: engine.clone(),
             entity,
             pool: &mut pool,
             tool_registry: &tool_registry,
@@ -2573,13 +2598,13 @@ mod tests {
         };
         let bp = make_blueprint(vec![stage]);
         // make_engine_and_entity_with_provider registers "anthropic"
-        let (mut engine, mut pool, entity) = make_engine_and_entity_with_provider(&bp);
+        let (engine, mut pool, entity) = make_engine_and_entity_with_provider(&bp);
         let tool_registry = make_tool_registry().await;
 
         let mut cb = MockCallbacks::new();
         let mut ctx = StageContext {
             blueprint: &bp,
-            engine: &mut engine,
+            engine: engine.clone(),
             entity,
             pool: &mut pool,
             tool_registry: &tool_registry,
@@ -2611,13 +2636,13 @@ mod tests {
     #[tokio::test]
     async fn model_override_with_provider_slash_syntax() {
         let bp = make_blueprint(vec![make_stage("main")]);
-        let (mut engine, mut pool, entity) = make_engine_and_entity_with_provider(&bp);
+        let (engine, mut pool, entity) = make_engine_and_entity_with_provider(&bp);
         let tool_registry = make_tool_registry().await;
 
         let mut cb = MockCallbacks::new();
         let mut ctx = StageContext {
             blueprint: &bp,
-            engine: &mut engine,
+            engine: engine.clone(),
             entity,
             pool: &mut pool,
             tool_registry: &tool_registry,
@@ -2663,13 +2688,13 @@ mod tests {
             parameters: std::collections::HashMap::new(),
         };
         let bp = make_blueprint(vec![stage]);
-        let (mut engine, mut pool, entity) = make_engine_and_entity_with_provider(&bp);
+        let (engine, mut pool, entity) = make_engine_and_entity_with_provider(&bp);
         let tool_registry = make_tool_registry().await;
         let mut cb = MockCallbacks::new();
 
         let mut ctx = StageContext {
             blueprint: &bp,
-            engine: &mut engine,
+            engine: engine.clone(),
             entity,
             pool: &mut pool,
             tool_registry: &tool_registry,
@@ -2710,13 +2735,13 @@ mod tests {
             parameters: std::collections::HashMap::new(),
         };
         let bp = make_blueprint(vec![stage]);
-        let (mut engine, mut pool, entity) = make_engine_and_entity_with_provider(&bp);
+        let (engine, mut pool, entity) = make_engine_and_entity_with_provider(&bp);
         let tool_registry = make_tool_registry().await;
         let mut cb = MockCallbacks::new();
 
         let mut ctx = StageContext {
             blueprint: &bp,
-            engine: &mut engine,
+            engine: engine.clone(),
             entity,
             pool: &mut pool,
             tool_registry: &tool_registry,
@@ -2755,13 +2780,13 @@ mod tests {
             parameters: std::collections::HashMap::new(),
         };
         let bp = make_blueprint(vec![stage]);
-        let (mut engine, mut pool, entity) = make_engine_and_entity_with_provider(&bp);
+        let (engine, mut pool, entity) = make_engine_and_entity_with_provider(&bp);
         let tool_registry = make_tool_registry().await;
         let mut cb = MockCallbacks::new();
 
         let mut ctx = StageContext {
             blueprint: &bp,
-            engine: &mut engine,
+            engine: engine.clone(),
             entity,
             pool: &mut pool,
             tool_registry: &tool_registry,
@@ -2801,13 +2826,13 @@ mod tests {
             parameters: std::collections::HashMap::new(),
         };
         let bp = make_blueprint(vec![stage]);
-        let (mut engine, mut pool, entity) = make_engine_and_entity_with_provider(&bp);
+        let (engine, mut pool, entity) = make_engine_and_entity_with_provider(&bp);
         let tool_registry = make_tool_registry().await;
         let mut cb = MockCallbacks::new();
 
         let mut ctx = StageContext {
             blueprint: &bp,
-            engine: &mut engine,
+            engine: engine.clone(),
             entity,
             pool: &mut pool,
             tool_registry: &tool_registry,
@@ -2850,13 +2875,13 @@ mod tests {
         };
         let bp = make_blueprint(vec![stage]);
         // registers "anthropic"
-        let (mut engine, mut pool, entity) = make_engine_and_entity_with_provider(&bp);
+        let (engine, mut pool, entity) = make_engine_and_entity_with_provider(&bp);
         let tool_registry = make_tool_registry().await;
         let mut cb = MockCallbacks::new();
 
         let mut ctx = StageContext {
             blueprint: &bp,
-            engine: &mut engine,
+            engine: engine.clone(),
             entity,
             pool: &mut pool,
             tool_registry: &tool_registry,
@@ -2902,13 +2927,13 @@ mod tests {
             parameters: std::collections::HashMap::new(),
         };
         let bp = make_blueprint(vec![stage]);
-        let (mut engine, mut pool, entity) = make_engine_and_entity_with_provider(&bp);
+        let (engine, mut pool, entity) = make_engine_and_entity_with_provider(&bp);
         let tool_registry = make_tool_registry().await;
         let mut cb = MockCallbacks::new();
 
         let mut ctx = StageContext {
             blueprint: &bp,
-            engine: &mut engine,
+            engine: engine.clone(),
             entity,
             pool: &mut pool,
             tool_registry: &tool_registry,
@@ -2958,13 +2983,13 @@ mod tests {
         };
         let bp = make_blueprint(vec![stage]);
         // registers "anthropic" so the stage resolves and runs
-        let (mut engine, mut pool, entity) = make_engine_and_entity_with_provider(&bp);
+        let (engine, mut pool, entity) = make_engine_and_entity_with_provider(&bp);
         let tool_registry = make_tool_registry().await;
         let mut cb = MockCallbacks::new();
 
         let mut ctx = StageContext {
             blueprint: &bp,
-            engine: &mut engine,
+            engine: engine.clone(),
             entity,
             pool: &mut pool,
             tool_registry: &tool_registry,
@@ -2986,8 +3011,8 @@ mod tests {
         .await
         .unwrap();
 
-        let cfg = ctx
-            .engine
+        let __g = ctx.engine.read().await;
+        let cfg = __g
             .world()
             .get::<InferenceConfig>(entity)
             .expect("InferenceConfig should be set from stage parameters");
@@ -3049,14 +3074,14 @@ mod tests {
         let mut stage = make_stage("main");
         stage.max_iterations = Some(1);
         let bp = make_blueprint(vec![stage]);
-        let (mut engine, mut pool, entity) = make_engine_and_entity_with_provider(&bp);
+        let (engine, mut pool, entity) = make_engine_and_entity_with_provider(&bp);
         let tool_registry = make_tool_registry().await;
         let mut cb = MockCallbacks::new();
         cb.taint_global = true;
 
         let mut ctx = StageContext {
             blueprint: &bp,
-            engine: &mut engine,
+            engine: engine.clone(),
             entity,
             pool: &mut pool,
             tool_registry: &tool_registry,
@@ -3097,13 +3122,13 @@ mod tests {
             max_result_tokens: Some(1024),
         });
         let bp = make_blueprint(vec![stage]);
-        let (mut engine, mut pool, entity) = make_engine_and_entity(&bp);
+        let (engine, mut pool, entity) = make_engine_and_entity(&bp);
         let tool_registry = make_tool_registry().await;
         let mut cb = MockCallbacks::new();
 
         let mut ctx = StageContext {
             blueprint: &bp,
-            engine: &mut engine,
+            engine: engine.clone(),
             entity,
             pool: &mut pool,
             tool_registry: &tool_registry,
@@ -3127,9 +3152,9 @@ mod tests {
 
         // The entity should have the ToolResultRoutingComponent with the
         // configuration we specified on the stage.
-        let comp = ctx
-            .engine
-            .world_mut()
+        let __g = ctx.engine.read().await;
+        let comp = __g
+            .world()
             .get::<leviath_runtime::ToolResultRoutingComponent>(ctx.entity)
             .expect("ToolResultRoutingComponent should be present");
         assert_eq!(comp.routing.default_region, "my_results");
@@ -3143,27 +3168,28 @@ mod tests {
 
         let stage = make_stage("main"); // tool_result_routing defaults to None
         let bp = make_blueprint(vec![stage]);
-        let (mut engine, mut pool, entity) = make_engine_and_entity(&bp);
+        let (engine, mut pool, entity) = make_engine_and_entity(&bp);
         let tool_registry = make_tool_registry().await;
         let mut cb = MockCallbacks::new();
 
         // Pre-insert the component so we can verify it gets removed.
-        engine
-            .world_mut()
-            .entity_mut(entity)
-            .insert(leviath_runtime::ToolResultRoutingComponent {
+        engine.write().await.world_mut().entity_mut(entity).insert(
+            leviath_runtime::ToolResultRoutingComponent {
                 routing: ToolResultRouting::default(),
-            });
+            },
+        );
 
         // Sanity: confirm it's there before the loop.
         assert!(engine
-            .world_mut()
+            .read()
+            .await
+            .world()
             .get::<leviath_runtime::ToolResultRoutingComponent>(entity)
             .is_some());
 
         let mut ctx = StageContext {
             blueprint: &bp,
-            engine: &mut engine,
+            engine: engine.clone(),
             entity,
             pool: &mut pool,
             tool_registry: &tool_registry,
@@ -3189,7 +3215,9 @@ mod tests {
         // component must have been removed.
         assert!(ctx
             .engine
-            .world_mut()
+            .read()
+            .await
+            .world()
             .get::<leviath_runtime::ToolResultRoutingComponent>(ctx.entity)
             .is_none());
     }
@@ -3224,13 +3252,13 @@ mod tests {
         });
 
         let bp = make_blueprint(vec![stage_a, stage_b, stage_c]);
-        let (mut engine, mut pool, entity) = make_engine_and_entity(&bp);
+        let (engine, mut pool, entity) = make_engine_and_entity(&bp);
         let tool_registry = make_tool_registry().await;
         let mut cb = MockCallbacks::new();
 
         let mut ctx = StageContext {
             blueprint: &bp,
-            engine: &mut engine,
+            engine: engine.clone(),
             entity,
             pool: &mut pool,
             tool_registry: &tool_registry,
@@ -3257,9 +3285,9 @@ mod tests {
 
         // After the final stage (stage_c with routing), the entity should
         // have the component with stage_c's configuration.
-        let comp = ctx
-            .engine
-            .world_mut()
+        let __g = ctx.engine.read().await;
+        let comp = __g
+            .world()
             .get::<leviath_runtime::ToolResultRoutingComponent>(ctx.entity)
             .expect("ToolResultRoutingComponent should be present after stage_c");
         assert_eq!(comp.routing.default_region, "stage_c_results");
@@ -3296,13 +3324,13 @@ mod tests {
             track_writes: true,
             max_file_tokens: None,
         });
-        let (mut engine, mut pool, entity) = make_engine_and_entity(&bp);
+        let (engine, mut pool, entity) = make_engine_and_entity(&bp);
         let tool_registry = make_tool_registry().await;
         let mut cb = MockCallbacks::new();
 
         let mut ctx = StageContext {
             blueprint: &bp,
-            engine: &mut engine,
+            engine: engine.clone(),
             entity,
             pool: &mut pool,
             tool_registry: &tool_registry,
@@ -3346,13 +3374,13 @@ mod tests {
             track_writes: false,
             max_file_tokens: None,
         });
-        let (mut engine, mut pool, entity) = make_engine_and_entity(&bp);
+        let (engine, mut pool, entity) = make_engine_and_entity(&bp);
         let tool_registry = make_tool_registry().await;
         let mut cb = MockCallbacks::new();
 
         let mut ctx = StageContext {
             blueprint: &bp,
-            engine: &mut engine,
+            engine: engine.clone(),
             entity,
             pool: &mut pool,
             tool_registry: &tool_registry,
@@ -3390,13 +3418,13 @@ mod tests {
             ModelEntry::new("nonexistent".to_string(), "x".to_string()),
         );
         let bp = make_blueprint(vec![stage]);
-        let (mut engine, mut pool, entity) = make_engine_and_entity_with_provider(&bp);
+        let (engine, mut pool, entity) = make_engine_and_entity_with_provider(&bp);
         let tool_registry = make_tool_registry().await;
         let mut cb = MockCallbacks::new();
 
         let mut ctx = StageContext {
             blueprint: &bp,
-            engine: &mut engine,
+            engine: engine.clone(),
             entity,
             pool: &mut pool,
             tool_registry: &tool_registry,
@@ -3451,7 +3479,7 @@ mod tests {
         stage.max_iterations = Some(2);
         stage.accepts_messages = true;
         let bp = make_blueprint(vec![stage]);
-        let (mut engine, mut pool, entity) = make_engine_and_entity_with_provider(&bp);
+        let (engine, mut pool, entity) = make_engine_and_entity_with_provider(&bp);
         let tool_registry = make_tool_registry().await;
 
         let run_id = "exec-abort-reader-run".to_string();
@@ -3484,7 +3512,7 @@ mod tests {
 
         let mut ctx = StageContext {
             blueprint: &bp,
-            engine: &mut engine,
+            engine: engine.clone(),
             entity,
             pool: &mut pool,
             tool_registry: &tool_registry,
