@@ -121,6 +121,56 @@ pub type ToolExecutorDyn<'a> =
 /// external state (e.g. a shared ContextWindow copy) back to the entity.
 pub type PostToolSync = dyn FnMut(&mut bevy_ecs::prelude::World, bevy_ecs::prelude::Entity) + Send;
 
+/// Shared, concurrently-drivable handle to an [`AgentEngine`].
+///
+/// The stage loop and all in-process sub-agents share one of these so multiple
+/// agents' inference loops can run concurrently over a single ECS `World`.
+/// Drive an agent through it with [`run_inference_loop_shared`].
+pub type EngineHandle = Arc<tokio::sync::RwLock<AgentEngine>>;
+
+/// Drive an agent's inference loop through a shared [`EngineHandle`].
+///
+/// This is the unified entry point used by both the root agent and in-process
+/// sub-agents. It exists so multiple agents can be driven concurrently over one
+/// shared engine: rather than borrowing `&mut AgentEngine` for the whole loop,
+/// callers pass the shared handle and the loop acquires it only in short
+/// critical sections around the (lock-free) network call.
+///
+/// This initial version delegates to the existing `&mut self` loop under a
+/// single write guard — behaviorally identical to calling the method directly,
+/// with no added concurrency yet. A follow-up decomposes the body into short
+/// critical sections so concurrent workers' network calls actually overlap.
+#[allow(clippy::too_many_arguments)]
+pub async fn run_inference_loop_shared<'e>(
+    engine: &EngineHandle,
+    entity: Entity,
+    provider_name: &str,
+    model: &str,
+    tools: Vec<Tool>,
+    max_iterations: usize,
+    tool_filter: Option<&[String]>,
+    compaction_config: Option<&leviath_core::CompactionConfig>,
+    tool_executor: &mut ToolExecutorDyn<'e>,
+    repetition_config: Option<&leviath_core::RepetitionDetectionConfig>,
+    post_tool_sync: Option<&mut PostToolSync>,
+) -> std::result::Result<InferenceResponse, ProviderError> {
+    let mut guard = engine.write().await;
+    guard
+        .run_inference_loop_filtered_dyn_with_sync(
+            entity,
+            provider_name,
+            model,
+            tools,
+            max_iterations,
+            tool_filter,
+            compaction_config,
+            tool_executor,
+            repetition_config,
+            post_tool_sync,
+        )
+        .await
+}
+
 impl AgentEngine {
     /// Create a new agent engine.
     pub fn new() -> Self {
@@ -2517,6 +2567,43 @@ mod tests {
         assert!(result.is_ok());
         let resp = result.unwrap();
         assert_eq!(resp.content, "mock response");
+    }
+
+    #[tokio::test]
+    async fn test_run_inference_loop_shared_drives_via_handle() {
+        // The unified shared-handle entry point drives an agent through an
+        // `EngineHandle` and returns the same result as the `&mut self` loop.
+        let (engine, entity) = make_engine_with_mock();
+        let handle: EngineHandle = Arc::new(tokio::sync::RwLock::new(engine));
+
+        let mut exec = |_calls: Vec<leviath_providers::ToolCall>| -> ToolResultsFuture<'static> {
+            Box::pin(async { Vec::new() })
+        };
+
+        let result = run_inference_loop_shared(
+            &handle,
+            entity,
+            "mock",
+            "test-model",
+            Vec::new(),
+            10,
+            None,
+            None,
+            &mut exec,
+            None,
+            None,
+        )
+        .await;
+
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().content, "mock response");
+        // The handle is still usable after the loop (guard was released).
+        assert!(handle
+            .read()
+            .await
+            .world()
+            .get::<AgentState>(entity)
+            .is_some());
     }
 
     #[tokio::test]

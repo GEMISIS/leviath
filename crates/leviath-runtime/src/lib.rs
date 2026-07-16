@@ -23,7 +23,10 @@ pub use components::{
     InferenceConfig, InferenceResult, MessageInbox, NeedsCompaction, ParentRef, SubAgentChildren,
     TaskAssignment, ToolResultRoutingComponent,
 };
-pub use engine::{AgentEngine, ProviderRegistry, ToolExecutorDyn, ToolResultsFuture};
+pub use engine::{
+    run_inference_loop_shared, AgentEngine, EngineHandle, ProviderRegistry, ToolExecutorDyn,
+    ToolResultsFuture,
+};
 pub use pool::AgentPool;
 pub use scheduler::TaskScheduler;
 pub use taint::TaintGate;
