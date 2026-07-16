@@ -144,6 +144,60 @@ impl Blueprint {
             }
         }
 
+        // Fan-out stages reference a worker source + optional merge stage. These
+        // are checked even for otherwise-linear blueprints (before the early
+        // return below), since `worker_stage`/`merge_stage` name local stages.
+        // `worker_agent`/`worker_query` are environment-dependent (resolved
+        // against installed agents at run time), so they are not checked here.
+        for stage in &self.stages {
+            if let StageMode::FanOut { config } = &stage.mode {
+                let sources = [
+                    config.worker_agent.is_some(),
+                    config.worker_stage.is_some(),
+                    config.worker_query.is_some(),
+                ]
+                .iter()
+                .filter(|&&set| set)
+                .count();
+                if sources != 1 {
+                    return Err(ValidationError::Stage {
+                        stage: stage.name.clone(),
+                        message: "fan_out stage must set exactly one of worker_agent, \
+                                  worker_stage, or worker_query"
+                            .to_string(),
+                    });
+                }
+                if let Some(ws) = &config.worker_stage {
+                    match self.stages.iter().find(|s| &s.name == ws) {
+                        None => {
+                            return Err(ValidationError::Stage {
+                                stage: stage.name.clone(),
+                                message: format!("fan_out worker_stage '{}' does not exist", ws),
+                            })
+                        }
+                        Some(target) if !target.allow_as_worker => {
+                            return Err(ValidationError::Stage {
+                                stage: stage.name.clone(),
+                                message: format!(
+                                    "fan_out worker_stage '{}' must set allow_as_worker = true",
+                                    ws
+                                ),
+                            })
+                        }
+                        Some(_) => {}
+                    }
+                }
+                if let Some(ms) = &config.merge_stage {
+                    if !stage_names.contains(ms.as_str()) {
+                        return Err(ValidationError::Stage {
+                            stage: stage.name.clone(),
+                            message: format!("fan_out merge_stage '{}' does not exist", ms),
+                        });
+                    }
+                }
+            }
+        }
+
         let has_any_transitions = self.stages.iter().any(|s| s.transitions.is_some());
         if !has_any_transitions {
             // Pure linear mode — no graph validation needed
@@ -217,6 +271,19 @@ impl Blueprint {
             // an unvalidated stage name.
             None => return false,
         };
+
+        // A fan-out stage with a merge stage hands off to it after workers
+        // complete, so its terminal path runs through the merge stage.
+        if let StageMode::FanOut {
+            config:
+                FanOutConfig {
+                    merge_stage: Some(ms),
+                    ..
+                },
+        } = &stage.mode
+        {
+            return self.has_terminal_path(ms, visited);
+        }
 
         match &stage.transitions {
             None => {
@@ -338,6 +405,13 @@ pub enum StageMode {
         /// Points where user input can be requested
         points: Vec<InteractionPoint>,
     },
+
+    /// Splits work into JSON items and runs them across parallel in-process
+    /// sub-agent workers, then optionally merges before transitioning.
+    FanOut {
+        /// Fan-out configuration (worker source, concurrency, failure policy).
+        config: FanOutConfig,
+    },
 }
 
 impl PartialEq for StageMode {
@@ -348,11 +422,59 @@ impl PartialEq for StageMode {
             (Self::InteractivePoints { points: a }, Self::InteractivePoints { points: b }) => {
                 a == b
             }
+            (Self::FanOut { config: a }, Self::FanOut { config: b }) => a == b,
             _ => false,
         }
     }
 }
 impl Eq for StageMode {}
+
+/// How a fan-out stage handles worker failures.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkerFailurePolicy {
+    /// Run the merge/next stage with the successful workers; failures are
+    /// reported into the consolidated results.
+    #[default]
+    Continue,
+    /// Any worker failure routes the fan-out stage down its `error` edge.
+    FailAll,
+}
+
+/// Configuration for a [`StageMode::FanOut`] stage.
+///
+/// Exactly one of `worker_agent` / `worker_stage` / `worker_query` selects the
+/// worker's agent type (validated in [`Blueprint::validate_graph`]).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct FanOutConfig {
+    /// A separate registered/installed blueprint run as the worker agent type.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worker_agent: Option<String>,
+    /// A stage in *this* blueprint (self-as-agent-type); must be marked
+    /// `allow_as_worker = true`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worker_stage: Option<String>,
+    /// Discovery hint matched against installed agent types.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worker_query: Option<String>,
+    /// Optional stage that reconciles worker results before transitioning.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub merge_stage: Option<String>,
+    /// Maximum number of workers running concurrently.
+    #[serde(default = "default_max_workers")]
+    pub max_workers: usize,
+    /// How to handle worker failures.
+    #[serde(default)]
+    pub on_worker_failure: WorkerFailurePolicy,
+    /// Prompt that produces the JSON array of work items (one per worker).
+    #[serde(default)]
+    pub split_prompt: String,
+}
+
+/// Default `max_workers` when unspecified.
+fn default_max_workers() -> usize {
+    4
+}
 
 /// Style of interaction at an interaction point.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -498,6 +620,13 @@ pub struct Stage {
     #[serde(default)]
     pub allow_complete: bool,
 
+    /// Whether this stage may be used as a fan-out `worker_stage` — i.e. run as
+    /// an in-process sub-agent worker entered at this stage. Off by default so a
+    /// blueprint author must explicitly opt a stage in to being fanned into
+    /// (you can only fan out into a stage designed for it).
+    #[serde(default)]
+    pub allow_as_worker: bool,
+
     /// Per-stage taint/security override. `None` inherits the agent-level
     /// `Blueprint.security` (which in turn inherits the global config toggle).
     /// Set `taint_tracking = false` here to opt a single stage out, or `true`
@@ -536,6 +665,7 @@ impl Stage {
             transition_prompt: None,
             accepts_messages: true,
             allow_complete: false,
+            allow_as_worker: false,
             security: None,
             tool_result_routing: None,
         }
@@ -1658,5 +1788,120 @@ mod tests {
         assert!(routing.persist);
         assert_eq!(routing.max_result_tokens, Some(2048));
         assert!(routing.tool_overrides.is_empty());
+    }
+
+    // ─── fan_out (StageMode::FanOut) ─────────────────────────────────────────
+
+    fn fanout_config() -> FanOutConfig {
+        FanOutConfig {
+            worker_agent: None,
+            worker_stage: Some("fix_worker".to_string()),
+            worker_query: None,
+            merge_stage: Some("merge".to_string()),
+            max_workers: 3,
+            on_worker_failure: WorkerFailurePolicy::Continue,
+            split_prompt: "split".to_string(),
+        }
+    }
+
+    /// Blueprint: fan_out stage (worker_stage=fix_worker) → merge → terminal.
+    fn fanout_blueprint(worker_allowed: bool, config: FanOutConfig) -> Blueprint {
+        let mut fan = Stage::new("parallel".to_string(), make_model());
+        fan.mode = StageMode::FanOut { config };
+        let mut worker = Stage::new("fix_worker".to_string(), make_model());
+        worker.allow_as_worker = worker_allowed;
+        let merge = Stage::new("merge".to_string(), make_model());
+        Blueprint::new(
+            "t".into(),
+            "d".into(),
+            vec![fan, worker, merge],
+            make_layout(),
+        )
+    }
+
+    #[test]
+    fn fanout_stagemode_partial_eq_and_default_policy() {
+        let a = StageMode::FanOut {
+            config: fanout_config(),
+        };
+        let b = StageMode::FanOut {
+            config: fanout_config(),
+        };
+        assert_eq!(a, b);
+        let mut other = fanout_config();
+        other.max_workers = 99;
+        assert_ne!(a, StageMode::FanOut { config: other });
+        assert_ne!(a, StageMode::Autonomous);
+        assert_eq!(
+            WorkerFailurePolicy::default(),
+            WorkerFailurePolicy::Continue
+        );
+    }
+
+    #[test]
+    fn fanout_config_serde_roundtrip_and_max_workers_default() {
+        let toml = r#"
+worker_agent = "fixer"
+split_prompt = "go"
+on_worker_failure = "fail_all"
+"#;
+        let cfg: FanOutConfig = toml::from_str(toml).unwrap();
+        assert_eq!(cfg.worker_agent.as_deref(), Some("fixer"));
+        assert_eq!(cfg.max_workers, 4); // default
+        assert_eq!(cfg.on_worker_failure, WorkerFailurePolicy::FailAll);
+        // JSON round-trip preserves everything.
+        let json = serde_json::to_string(&fanout_config()).unwrap();
+        let back: FanOutConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, fanout_config());
+    }
+
+    #[test]
+    fn fanout_validate_ok_with_allowed_worker_stage() {
+        assert!(fanout_blueprint(true, fanout_config()).validate().is_ok());
+    }
+
+    #[test]
+    fn fanout_validate_rejects_worker_stage_not_opted_in() {
+        let err = fanout_blueprint(false, fanout_config())
+            .validate()
+            .unwrap_err();
+        assert!(err.to_string().contains("allow_as_worker"));
+    }
+
+    #[test]
+    fn fanout_validate_rejects_missing_worker_stage() {
+        let mut cfg = fanout_config();
+        cfg.worker_stage = Some("nope".to_string());
+        let err = fanout_blueprint(true, cfg).validate().unwrap_err();
+        assert!(err.to_string().contains("does not exist"));
+    }
+
+    #[test]
+    fn fanout_validate_rejects_missing_merge_stage() {
+        let mut cfg = fanout_config();
+        cfg.merge_stage = Some("nomerge".to_string());
+        let err = fanout_blueprint(true, cfg).validate().unwrap_err();
+        assert!(err.to_string().contains("merge_stage"));
+    }
+
+    #[test]
+    fn fanout_validate_rejects_wrong_worker_source_count() {
+        // zero sources
+        let mut cfg = fanout_config();
+        cfg.worker_stage = None;
+        assert!(fanout_blueprint(true, cfg).validate().is_err());
+        // two sources
+        let mut cfg2 = fanout_config();
+        cfg2.worker_agent = Some("x".to_string()); // plus worker_stage
+        assert!(fanout_blueprint(true, cfg2).validate().is_err());
+    }
+
+    #[test]
+    fn fanout_terminal_path_runs_through_merge_stage() {
+        // worker_agent form (no local worker_stage), merge → terminal.
+        let mut cfg = fanout_config();
+        cfg.worker_stage = None;
+        cfg.worker_agent = Some("external".to_string());
+        assert!(fanout_blueprint(false, cfg).validate().is_ok());
     }
 }

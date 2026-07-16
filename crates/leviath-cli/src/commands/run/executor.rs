@@ -688,6 +688,15 @@ pub async fn run_stage_loop(
         let stage_result_val: StageResult;
 
         match &stage_mode {
+            // Wired in a later commit (run_fan_out_stage). No blueprint can
+            // reach this yet — the parser doesn't emit `FanOut` until the same
+            // commit that implements the arm.
+            StageMode::FanOut { .. } => {
+                if let Some(handle) = &stdin_handle {
+                    handle.abort();
+                }
+                return Err(anyhow::anyhow!("fan_out stage mode is not yet implemented"));
+            }
             StageMode::Interactive => {
                 let run_context = cb.get_run_context();
                 run_interactive_stage(
