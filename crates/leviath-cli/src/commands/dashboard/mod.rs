@@ -24,7 +24,7 @@ use ratatui::{Terminal, TerminalOptions, Viewport};
 use std::io::stdout;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::mpsc;
 
 use super::run::build_provider_registry;
 use crate::config::Config;
@@ -34,14 +34,14 @@ use types::EngineCommand;
 
 /// Background task that processes engine commands (cancel/input) for in-process agent state.
 async fn engine_background_loop(
-    engine: Arc<Mutex<AgentEngine>>,
+    engine: leviath_runtime::EngineHandle,
     mut cmd_rx: mpsc::UnboundedReceiver<EngineCommand>,
     event_tx: mpsc::UnboundedSender<AgentEvent>,
 ) {
     while let Some(cmd) = cmd_rx.recv().await {
         match cmd {
             EngineCommand::CancelAgent { agent_id } => {
-                let mut eng = engine.lock().await;
+                let mut eng = engine.write().await;
                 let _ = eng.cancel_agent(&agent_id);
                 let _ = event_tx.send(AgentEvent::StatusChanged {
                     agent_id,
@@ -49,7 +49,7 @@ async fn engine_background_loop(
                 });
             }
             EngineCommand::SendInput { agent_id, input } => {
-                let eng = engine.lock().await;
+                let eng = engine.read().await;
                 let msg = leviath_runtime::AgentMessage {
                     agent_id,
                     content: input,
@@ -216,7 +216,7 @@ impl TerminalSetup for CrosstermSetup {
 /// measurement artifacts, not untested branches.
 async fn execute_core<S: TerminalSetup, E: EventSource>(
     dashboard: &mut Dashboard,
-    engine: &Arc<Mutex<AgentEngine>>,
+    engine: &leviath_runtime::EngineHandle,
     setup: &mut S,
     events: &mut E,
 ) -> anyhow::Result<()> {
@@ -246,7 +246,7 @@ async fn execute_core<S: TerminalSetup, E: EventSource>(
 /// but-undercounted outcome.
 async fn run_dashboard_loop<B: ratatui::backend::Backend>(
     dashboard: &mut Dashboard,
-    engine: &Arc<Mutex<AgentEngine>>,
+    engine: &leviath_runtime::EngineHandle,
     terminal: &mut Terminal<B>,
     events: &mut impl EventSource,
     tick_rate: Duration,
@@ -262,7 +262,7 @@ async fn run_dashboard_loop<B: ratatui::backend::Backend>(
         dashboard.sync_from_run_state();
 
         // Sync state from ECS world (try_lock to avoid blocking the UI)
-        if let Ok(eng) = engine.try_lock() {
+        if let Ok(eng) = engine.try_read() {
             dashboard.sync_agent_state_from_world(&eng);
         }
 
@@ -292,9 +292,11 @@ async fn run_dashboard_loop<B: ratatui::backend::Backend>(
 /// engine background loop, and seeds the startup log line. Split out of
 /// [`execute`] purely so this (entirely terminal-independent) setup is
 /// unit-testable on its own, separate from the real-terminal I/O sliver.
-async fn init_dashboard(config: &Config) -> (Dashboard, Arc<Mutex<AgentEngine>>) {
+async fn init_dashboard(config: &Config) -> (Dashboard, leviath_runtime::EngineHandle) {
     let registry = build_provider_registry(config);
-    let engine = Arc::new(Mutex::new(AgentEngine::with_providers(registry)));
+    let engine = Arc::new(tokio::sync::RwLock::new(AgentEngine::with_providers(
+        registry,
+    )));
 
     let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
     let mut dashboard = Dashboard::new(cmd_tx);
@@ -474,14 +476,14 @@ mod tests {
             })
             .unwrap();
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        let _ = engine.try_lock();
+        let _ = engine.try_read();
     }
 
     // ─── engine_background_loop: CancelAgent command ─────────────────────
 
     #[tokio::test]
     async fn engine_background_loop_cancel_agent() {
-        let engine = Arc::new(Mutex::new(AgentEngine::new()));
+        let engine = Arc::new(tokio::sync::RwLock::new(AgentEngine::new()));
         let (cmd_tx, cmd_rx) = mpsc::unbounded_channel::<EngineCommand>();
         let (event_tx, mut event_rx) = mpsc::unbounded_channel::<AgentEvent>();
 
@@ -510,7 +512,7 @@ mod tests {
 
     #[tokio::test]
     async fn engine_background_loop_send_input_command() {
-        let engine = Arc::new(Mutex::new(AgentEngine::new()));
+        let engine = Arc::new(tokio::sync::RwLock::new(AgentEngine::new()));
         let (cmd_tx, cmd_rx) = mpsc::unbounded_channel::<EngineCommand>();
         let (event_tx, _event_rx) = mpsc::unbounded_channel::<AgentEvent>();
 
@@ -531,7 +533,7 @@ mod tests {
 
     #[tokio::test]
     async fn engine_background_loop_exits_when_channel_dropped() {
-        let engine = Arc::new(Mutex::new(AgentEngine::new()));
+        let engine = Arc::new(tokio::sync::RwLock::new(AgentEngine::new()));
         let (cmd_tx, cmd_rx) = mpsc::unbounded_channel::<EngineCommand>();
         let (event_tx, _event_rx) = mpsc::unbounded_channel::<AgentEvent>();
 
@@ -666,7 +668,7 @@ mod tests {
     #[tokio::test]
     async fn run_dashboard_loop_quits_on_esc_from_main_list() {
         let mut dashboard = make_test_dashboard();
-        let engine = Arc::new(Mutex::new(AgentEngine::new()));
+        let engine = Arc::new(tokio::sync::RwLock::new(AgentEngine::new()));
         let mut terminal = test_terminal();
         // A no-op Resize tick first, then the Esc that triggers quit --
         // covers both the `Event::Resize` and `Event::Key` match arms.
@@ -691,7 +693,7 @@ mod tests {
         // pending); tick 2: Esc quits.  The `None` entry exercises the
         // `if let Some(event)` fallthrough path (line 127 in mod.rs).
         let mut dashboard = make_test_dashboard();
-        let engine = Arc::new(Mutex::new(AgentEngine::new()));
+        let engine = Arc::new(tokio::sync::RwLock::new(AgentEngine::new()));
         let mut terminal = test_terminal();
         // `None` entry → poll returns Ok(None) on tick 1 (no-event path);
         // `Some(Esc)` → poll returns Ok(Some(Esc)) on tick 2 → quit.
@@ -715,7 +717,7 @@ mod tests {
         // A key release (not Press) and a mouse-like "other" event are both
         // ignored by the `_ => {}` arm; only the trailing Esc actually quits.
         let mut dashboard = make_test_dashboard();
-        let engine = Arc::new(Mutex::new(AgentEngine::new()));
+        let engine = Arc::new(tokio::sync::RwLock::new(AgentEngine::new()));
         let mut terminal = test_terminal();
         let release = Event::Key(crossterm::event::KeyEvent::new_with_kind(
             KeyCode::Char('x'),
@@ -741,7 +743,7 @@ mod tests {
     #[tokio::test]
     async fn run_dashboard_loop_propagates_event_source_error() {
         let mut dashboard = make_test_dashboard();
-        let engine = Arc::new(Mutex::new(AgentEngine::new()));
+        let engine = Arc::new(tokio::sync::RwLock::new(AgentEngine::new()));
         let mut terminal = test_terminal();
         let mut events = FailingEventSource;
 
@@ -764,7 +766,7 @@ mod tests {
         // cover since they never contend for it either -- both arms of the
         // `if let Ok(...)` are trivial, but this makes the intent explicit).
         let mut dashboard = make_test_dashboard();
-        let engine = Arc::new(Mutex::new(AgentEngine::new()));
+        let engine = Arc::new(tokio::sync::RwLock::new(AgentEngine::new()));
         let mut terminal = test_terminal();
         let mut events = ScriptedEventSource::new(vec![key(KeyCode::Esc)]);
 
@@ -850,7 +852,7 @@ mod tests {
     async fn run_dashboard_loop_propagates_draw_error() {
         // Exercises the `terminal.draw(…)?` error-propagation path (line 114).
         let mut dashboard = make_test_dashboard();
-        let engine = Arc::new(Mutex::new(AgentEngine::new()));
+        let engine = Arc::new(tokio::sync::RwLock::new(AgentEngine::new()));
         let mut terminal = Terminal::new(FailingDrawBackend).unwrap();
         let mut events = ScriptedEventSource::new(vec![]); // never reached
 
@@ -873,14 +875,15 @@ mod tests {
         // When the lock is contended, `sync_agent_state_from_world` is
         // skipped and the loop continues normally to the draw + event steps.
         //
-        // We acquire the engine lock in the current task BEFORE starting the
-        // loop.  Because Tokio's Mutex is NOT reentrant, `try_lock()` inside
-        // `run_dashboard_loop` will return `Err` while `_guard` is live.
-        // We use ScriptedEventSource (dequeues instantly without `.await`-ing)
-        // so Tokio never yields to another task that could release the lock.
+        // We acquire a WRITE lock on the engine in the current task BEFORE
+        // starting the loop.  A held write lock blocks the loop's `try_read()`
+        // (readers can't proceed while a writer holds the lock), so the sync is
+        // skipped. We use ScriptedEventSource (dequeues instantly without
+        // `.await`-ing) so Tokio never yields to another task that could release
+        // the lock.
         let mut dashboard = make_test_dashboard();
-        let engine = Arc::new(Mutex::new(AgentEngine::new()));
-        let _guard = engine.try_lock().expect("should be unlocked");
+        let engine = Arc::new(tokio::sync::RwLock::new(AgentEngine::new()));
+        let _guard = engine.try_write().expect("should be unlocked");
 
         let mut terminal = test_terminal();
         // With `_guard` held, `try_lock()` fails on the first tick (sync is
