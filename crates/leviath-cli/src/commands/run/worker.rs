@@ -1335,6 +1335,7 @@ async fn run_worker_inner(
         model_override: args.model.clone(),
         user_default_model: super::helpers::resolve_user_default_model(&config),
         compaction_ref,
+        agent_registry: std::sync::Arc::new(super::fanout::load_agent_registry(&blueprint)),
     };
 
     run_stage_loop(&mut ctx, &mut callbacks, &agent_id, &mut io, &mut exec).await?;

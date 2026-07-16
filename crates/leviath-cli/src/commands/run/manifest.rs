@@ -280,6 +280,38 @@ pub fn parse_manifest(content: &str) -> anyhow::Result<Blueprint> {
                         }
                         stage.with_mode(StageMode::InteractivePoints { points })
                     }
+                    "fan_out" => {
+                        let str_field = |key: &str| {
+                            stage_value
+                                .get(key)
+                                .and_then(|v| v.as_str())
+                                .map(|s| s.to_string())
+                        };
+                        let on_worker_failure = match stage_value
+                            .get("on_worker_failure")
+                            .and_then(|v| v.as_str())
+                        {
+                            Some("fail_all") => {
+                                leviath_core::blueprint::WorkerFailurePolicy::FailAll
+                            }
+                            // "continue" / missing / unknown all mean continue.
+                            _ => leviath_core::blueprint::WorkerFailurePolicy::Continue,
+                        };
+                        let config = leviath_core::blueprint::FanOutConfig {
+                            worker_agent: str_field("worker_agent"),
+                            worker_stage: str_field("worker_stage"),
+                            worker_query: str_field("worker_query"),
+                            merge_stage: str_field("merge_stage"),
+                            max_workers: stage_value
+                                .get("max_workers")
+                                .and_then(|v| v.as_integer())
+                                .map(|n| n as usize)
+                                .unwrap_or(4),
+                            on_worker_failure,
+                            split_prompt: str_field("split_prompt").unwrap_or_default(),
+                        };
+                        stage.with_mode(StageMode::FanOut { config })
+                    }
                     _ => stage.with_mode(StageMode::Autonomous),
                 };
             }
@@ -371,6 +403,12 @@ pub fn parse_manifest(content: &str) -> anyhow::Result<Blueprint> {
             // its only/first transition edge.
             if let Some(ac) = stage_value.get("allow_complete").and_then(|v| v.as_bool()) {
                 stage.allow_complete = ac;
+            }
+
+            // Parse allow_as_worker flag: opts this stage in to being used as a
+            // fan-out `worker_stage` target.
+            if let Some(aw) = stage_value.get("allow_as_worker").and_then(|v| v.as_bool()) {
+                stage.allow_as_worker = aw;
             }
 
             // Parse per-stage security override: [stages.<name>.security]
@@ -1489,6 +1527,73 @@ allow_complete = true
         let bp = parse_manifest(toml).unwrap();
         let stage = bp.find_stage("review").unwrap();
         assert!(stage.allow_complete);
+    }
+
+    #[test]
+    fn parse_manifest_fan_out_stage() {
+        let toml = r#"
+[agent]
+name = "fanout-test"
+
+[stages.parallel]
+mode = "fan_out"
+worker_stage = "worker"
+merge_stage = "merge"
+max_workers = 7
+on_worker_failure = "fail_all"
+split_prompt = "split the work"
+
+[stages.worker]
+mode = "autonomous"
+allow_as_worker = true
+
+[stages.merge]
+mode = "autonomous"
+"#;
+        let bp = parse_manifest(toml).unwrap();
+        let stage = bp.find_stage("parallel").unwrap();
+        match &stage.mode {
+            leviath_core::blueprint::StageMode::FanOut { config } => {
+                assert_eq!(config.worker_stage.as_deref(), Some("worker"));
+                assert_eq!(config.merge_stage.as_deref(), Some("merge"));
+                assert_eq!(config.max_workers, 7);
+                assert_eq!(
+                    config.on_worker_failure,
+                    leviath_core::blueprint::WorkerFailurePolicy::FailAll
+                );
+                assert_eq!(config.split_prompt, "split the work");
+            }
+            other => panic!("expected FanOut, got {other:?}"),
+        }
+        assert!(bp.find_stage("worker").unwrap().allow_as_worker);
+        // Defaults: unspecified fan_out fields.
+        assert!(!bp.find_stage("merge").unwrap().allow_as_worker);
+    }
+
+    #[test]
+    fn parse_manifest_fan_out_defaults() {
+        let toml = r#"
+[agent]
+name = "fanout-defaults"
+
+[stages.parallel]
+mode = "fan_out"
+worker_agent = "external-worker"
+split_prompt = "go"
+"#;
+        let bp = parse_manifest(toml).unwrap();
+        match &bp.find_stage("parallel").unwrap().mode {
+            leviath_core::blueprint::StageMode::FanOut { config } => {
+                assert_eq!(config.worker_agent.as_deref(), Some("external-worker"));
+                assert_eq!(config.max_workers, 4); // default
+                assert_eq!(
+                    config.on_worker_failure,
+                    leviath_core::blueprint::WorkerFailurePolicy::Continue
+                );
+                assert!(config.merge_stage.is_none());
+            }
+            other => panic!("expected FanOut, got {other:?}"),
+        }
     }
 
     #[test]
