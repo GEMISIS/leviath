@@ -244,7 +244,7 @@ async fn dispatch_tool_calls(
 }
 
 /// Handle a context_* tool call by operating on the shared ContextWindow.
-async fn handle_context_tool(
+pub(super) async fn handle_context_tool(
     name: &str,
     args: &serde_json::Value,
     context_window: &Arc<Mutex<Option<ContextWindow>>>,

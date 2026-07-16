@@ -19,7 +19,6 @@ use super::helpers::initialize_context_window;
 use super::io::{ConsoleIO, RunIO};
 use super::manifest::{find_manifest, parse_manifest};
 use super::session::{build_provider_registry, resolve_task};
-use super::stages::run_autonomous_stage;
 use super::RunArgs;
 
 /// Foreground [`InteractionBackend`](super::dynamic_interaction::InteractionBackend):
@@ -102,6 +101,9 @@ struct ForegroundToolDispatchState {
     stage_name: Arc<Mutex<String>>,
     agent_perms: Arc<HashMap<String, String>>,
     global_perms: Arc<HashMap<String, ToolPolicy>>,
+    /// Shared context window for context_* tool dispatch. Updated by the
+    /// sync callback before/after each tool batch.
+    context_window: Arc<Mutex<Option<leviath_runtime::ContextWindow>>>,
 }
 
 /// Resolve tool policy, handle approvals/dynamic interactions, and execute a
@@ -123,6 +125,15 @@ async fn dispatch_tool_calls_foreground(
     let stage_name = state.stage_name.lock().await.clone();
     let mut out: Vec<(String, String)> = Vec::new();
     for tc in calls {
+        // ── Context tools (context_write, context_read, etc.) ──────────
+        if tc.name.starts_with("context_") {
+            let result =
+                super::worker::handle_context_tool(&tc.name, &tc.arguments, &state.context_window)
+                    .await;
+            out.push((tc.id.clone(), result));
+            continue;
+        }
+
         // ── Dynamic interaction tools (present_for_review, ask_user_*) ──
         // Unlike `interaction_points` (declared statically in the
         // blueprint and always shown), these let the model itself
@@ -257,7 +268,10 @@ where
 }
 
 /// Foreground-specific callbacks for the unified stage loop.
-struct ForegroundCallbacks {}
+struct ForegroundCallbacks {
+    /// Shared context window for context_* tool dispatch (synced with entity CW).
+    context_window: Arc<Mutex<Option<leviath_runtime::ContextWindow>>>,
+}
 
 #[async_trait]
 impl StageCallbacks for ForegroundCallbacks {
@@ -346,18 +360,74 @@ impl StageCallbacks for ForegroundCallbacks {
         io: &mut dyn RunIO,
         executor: &mut leviath_runtime::ToolExecutorDyn<'_>,
     ) -> anyhow::Result<(StageResult, Option<InferenceResponse>)> {
-        run_autonomous_stage(
-            engine,
-            entity,
-            provider,
-            model,
-            max_iterations,
-            &tools,
-            compaction,
-            io,
-            executor,
-        )
-        .await?;
+        // Sync the ECS ContextWindow to the shared ref so context tools can access it.
+        if let Some(cw) = engine.world().get::<leviath_runtime::ContextWindow>(entity) {
+            *self.context_window.lock().await = Some(cw.clone());
+        }
+
+        // Post-tool sync callback: copies regions modified by context tools
+        // from the shared ContextWindow back to the entity's ContextWindow.
+        let shared_cw_for_sync = self.context_window.clone();
+        let mut sync_direction_to_entity = true;
+        let mut post_tool_sync =
+            move |world: &mut bevy_ecs::prelude::World, ent: bevy_ecs::prelude::Entity| {
+                if let Ok(mut guard) = shared_cw_for_sync.try_lock() {
+                    if sync_direction_to_entity {
+                        // shared→entity: merge context tool writes into entity CW
+                        if let Some(shared) = guard.as_ref() {
+                            if let Some(mut entity_cw) =
+                                world.get_mut::<leviath_runtime::ContextWindow>(ent)
+                            {
+                                entity_cw.regions = shared.regions.clone();
+                                entity_cw.current_tokens = shared.current_tokens;
+                            }
+                        }
+                    } else {
+                        // entity→shared: update shared copy with engine's changes
+                        if let Some(entity_cw) = world.get::<leviath_runtime::ContextWindow>(ent) {
+                            *guard = Some(entity_cw.clone());
+                        }
+                    }
+                    sync_direction_to_entity = !sync_direction_to_entity;
+                }
+            };
+
+        let response = engine
+            .run_inference_loop_filtered_dyn_with_sync(
+                entity,
+                provider,
+                model,
+                tools,
+                max_iterations,
+                None,
+                compaction,
+                executor,
+                None,
+                Some(&mut post_tool_sync),
+            )
+            .await;
+
+        // Final sync: entity→shared for any changes the engine made
+        if let Some(cw) = engine.world().get::<leviath_runtime::ContextWindow>(entity) {
+            *self.context_window.lock().await = Some(cw.clone());
+        }
+
+        match &response {
+            Ok(resp) => {
+                io.on_output(&resp.content).await;
+                io.on_tokens(
+                    resp.tokens_used.prompt_tokens,
+                    resp.tokens_used.completion_tokens,
+                    resp.tokens_used.cached_tokens,
+                )
+                .await;
+            }
+            Err(e) => {
+                io.on_error(&format!("Inference error: {}", e)).await;
+            }
+        }
+
+        let resp = response.map_err(|e| anyhow::anyhow!("{}", e))?;
 
         // Determine stage result
         let result = if let Some(state) = engine.world().get::<AgentState>(entity) {
@@ -370,7 +440,7 @@ impl StageCallbacks for ForegroundCallbacks {
             StageResult::Success
         };
 
-        Ok((result, None))
+        Ok((result, Some(resp)))
     }
 
     async fn on_stage_result(
@@ -603,6 +673,10 @@ async fn run_foreground_with_registry(
     let exec_stage_name = current_stage_name.clone();
     let exec_agent_perms = agent_perms_arc.clone();
     let exec_global_perms = Arc::new(global_perms);
+    // Shared context window for context_* tool dispatch (mirrors worker.rs).
+    let shared_context_window: Arc<Mutex<Option<leviath_runtime::ContextWindow>>> =
+        Arc::new(Mutex::new(None));
+    let exec_context_window = shared_context_window.clone();
     let mut exec = move |calls: Vec<leviath_providers::ToolCall>| -> leviath_runtime::ToolResultsFuture<'static> {
         let state = ForegroundToolDispatchState {
             builtins: builtins.clone(),
@@ -614,6 +688,7 @@ async fn run_foreground_with_registry(
             stage_name: exec_stage_name.clone(),
             agent_perms: exec_agent_perms.clone(),
             global_perms: exec_global_perms.clone(),
+            context_window: exec_context_window.clone(),
         };
         Box::pin(async move {
             let interaction_backend = ForegroundInteractionBackend;
@@ -630,7 +705,9 @@ async fn run_foreground_with_registry(
     let compaction_config = blueprint.compaction_config.clone();
     let compaction_ref = compaction_config.as_ref();
 
-    let mut callbacks = ForegroundCallbacks {};
+    let mut callbacks = ForegroundCallbacks {
+        context_window: shared_context_window.clone(),
+    };
     let mut io = ConsoleIO::new();
 
     let mut ctx = StageContext {
@@ -678,19 +755,25 @@ mod tests {
 
     #[test]
     fn foreground_callbacks_construction() {
-        let _cb = ForegroundCallbacks {};
+        let _cb = ForegroundCallbacks {
+            context_window: Arc::new(Mutex::new(None)),
+        };
     }
 
     #[tokio::test]
     async fn foreground_on_provider_missing_returns_true() {
-        let mut cb = ForegroundCallbacks {};
+        let mut cb = ForegroundCallbacks {
+            context_window: Arc::new(Mutex::new(None)),
+        };
         let result = cb.on_provider_missing("nonexistent", 0).await;
         assert!(result);
     }
 
     #[tokio::test]
     async fn foreground_on_stage_enter_does_not_panic() {
-        let mut cb = ForegroundCallbacks {};
+        let mut cb = ForegroundCallbacks {
+            context_window: Arc::new(Mutex::new(None)),
+        };
         cb.on_stage_enter("plan", 0, "anthropic", "claude-sonnet-4-6", "")
             .await;
         cb.on_stage_enter("code", 1, "openai", "gpt-5", " (visit 2)")
@@ -699,19 +782,25 @@ mod tests {
 
     #[tokio::test]
     async fn foreground_on_claude_code_warning_does_not_panic() {
-        let mut cb = ForegroundCallbacks {};
+        let mut cb = ForegroundCallbacks {
+            context_window: Arc::new(Mutex::new(None)),
+        };
         cb.on_claude_code_warning(0).await;
     }
 
     #[test]
     fn foreground_get_run_context_returns_none() {
-        let mut cb = ForegroundCallbacks {};
+        let mut cb = ForegroundCallbacks {
+            context_window: Arc::new(Mutex::new(None)),
+        };
         assert!(cb.get_run_context().is_none());
     }
 
     #[tokio::test]
     async fn foreground_on_stage_result_is_noop() {
-        let mut cb = ForegroundCallbacks {};
+        let mut cb = ForegroundCallbacks {
+            context_window: Arc::new(Mutex::new(None)),
+        };
         let registry = leviath_runtime::ProviderRegistry::new();
         let mut engine = leviath_runtime::AgentEngine::with_providers(registry);
         let mut pool = AgentPool::new(leviath_core::Blueprint::new(
@@ -728,7 +817,9 @@ mod tests {
 
     #[tokio::test]
     async fn foreground_on_stage_error_graph_mode() {
-        let mut cb = ForegroundCallbacks {};
+        let mut cb = ForegroundCallbacks {
+            context_window: Arc::new(Mutex::new(None)),
+        };
         let err = anyhow::anyhow!("test error");
         let result = cb.on_stage_error("main", 0, &err, true).await;
         assert_eq!(result, Some(StageResult::Error));
@@ -736,7 +827,9 @@ mod tests {
 
     #[tokio::test]
     async fn foreground_on_stage_error_linear_mode() {
-        let mut cb = ForegroundCallbacks {};
+        let mut cb = ForegroundCallbacks {
+            context_window: Arc::new(Mutex::new(None)),
+        };
         let err = anyhow::anyhow!("test error");
         let result = cb.on_stage_error("main", 0, &err, false).await;
         assert!(result.is_none());
@@ -744,19 +837,25 @@ mod tests {
 
     #[tokio::test]
     async fn foreground_on_transition_is_noop() {
-        let mut cb = ForegroundCallbacks {};
+        let mut cb = ForegroundCallbacks {
+            context_window: Arc::new(Mutex::new(None)),
+        };
         cb.on_transition("plan", "code", 0).await;
     }
 
     #[tokio::test]
     async fn foreground_on_complete_does_not_panic() {
-        let mut cb = ForegroundCallbacks {};
+        let mut cb = ForegroundCallbacks {
+            context_window: Arc::new(Mutex::new(None)),
+        };
         cb.on_complete(2).await;
     }
 
     #[tokio::test]
     async fn foreground_on_post_stage_is_noop() {
-        let mut cb = ForegroundCallbacks {};
+        let mut cb = ForegroundCallbacks {
+            context_window: Arc::new(Mutex::new(None)),
+        };
         let registry = leviath_runtime::ProviderRegistry::new();
         let engine = leviath_runtime::AgentEngine::with_providers(registry);
         let entity = bevy_ecs::prelude::Entity::from_raw(0);
@@ -765,7 +864,9 @@ mod tests {
 
     #[test]
     fn foreground_start_message_reader_returns_none_when_not_accepts() {
-        let mut cb = ForegroundCallbacks {};
+        let mut cb = ForegroundCallbacks {
+            context_window: Arc::new(Mutex::new(None)),
+        };
         let registry = leviath_runtime::ProviderRegistry::new();
         let engine = leviath_runtime::AgentEngine::with_providers(registry);
         let handle = cb.start_message_reader(&engine, "agent-1", false);
@@ -784,7 +885,9 @@ mod tests {
     /// monomorphization's spawned task body actually runs to completion.
     #[tokio::test]
     async fn foreground_start_message_reader_returns_handle_when_accepts_via_trait() {
-        let mut cb = ForegroundCallbacks {};
+        let mut cb = ForegroundCallbacks {
+            context_window: Arc::new(Mutex::new(None)),
+        };
         let registry = leviath_runtime::ProviderRegistry::new();
         let engine = leviath_runtime::AgentEngine::with_providers(registry);
         let handle = cb.start_message_reader(&engine, "agent-1", true);
@@ -794,7 +897,9 @@ mod tests {
 
     #[tokio::test]
     async fn foreground_on_stage_enter_with_visit_label() {
-        let mut cb = ForegroundCallbacks {};
+        let mut cb = ForegroundCallbacks {
+            context_window: Arc::new(Mutex::new(None)),
+        };
         // Should not panic
         cb.on_stage_enter("review", 2, "openai", "gpt-5", " (visit 3)")
             .await;
@@ -802,20 +907,26 @@ mod tests {
 
     #[tokio::test]
     async fn foreground_on_complete_multiple_stages() {
-        let mut cb = ForegroundCallbacks {};
+        let mut cb = ForegroundCallbacks {
+            context_window: Arc::new(Mutex::new(None)),
+        };
         cb.on_complete(5).await;
     }
 
     #[tokio::test]
     async fn foreground_on_transition_is_noop_different_stages() {
-        let mut cb = ForegroundCallbacks {};
+        let mut cb = ForegroundCallbacks {
+            context_window: Arc::new(Mutex::new(None)),
+        };
         cb.on_transition("plan", "implement", 0).await;
         cb.on_transition("implement", "review", 1).await;
     }
 
     #[tokio::test]
     async fn foreground_on_stage_result_no_response_is_noop() {
-        let mut cb = ForegroundCallbacks {};
+        let mut cb = ForegroundCallbacks {
+            context_window: Arc::new(Mutex::new(None)),
+        };
         let registry = leviath_runtime::ProviderRegistry::new();
         let mut engine = leviath_runtime::AgentEngine::with_providers(registry);
         let mut pool = AgentPool::new(leviath_core::Blueprint::new(
@@ -862,7 +973,9 @@ mod tests {
 
     #[tokio::test]
     async fn foreground_on_stage_error_various_stages() {
-        let mut cb = ForegroundCallbacks {};
+        let mut cb = ForegroundCallbacks {
+            context_window: Arc::new(Mutex::new(None)),
+        };
         // Linear mode: returns None
         let err = anyhow::anyhow!("stage failed");
         assert!(cb.on_stage_error("plan", 0, &err, false).await.is_none());
@@ -876,7 +989,9 @@ mod tests {
 
     #[tokio::test]
     async fn foreground_callbacks_complete_sequence() {
-        let mut cb = ForegroundCallbacks {};
+        let mut cb = ForegroundCallbacks {
+            context_window: Arc::new(Mutex::new(None)),
+        };
 
         // Simulate a complete stage lifecycle
         cb.on_stage_enter("plan", 0, "anthropic", "claude-sonnet-4-6", "")
@@ -909,7 +1024,9 @@ mod tests {
     fn foreground_callbacks_all_provider_missing_messages() {
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
-            let mut cb = ForegroundCallbacks {};
+            let mut cb = ForegroundCallbacks {
+                context_window: Arc::new(Mutex::new(None)),
+            };
             // Test with various provider names
             for provider in ["anthropic", "openai", "google", "openrouter", "ollama"] {
                 let result = cb.on_provider_missing(provider, 0).await;
@@ -967,6 +1084,7 @@ mod tests {
             stage_name: Arc::new(Mutex::new("main".to_string())),
             agent_perms: Arc::new(HashMap::new()),
             global_perms: Arc::new(HashMap::new()),
+            context_window: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -1921,7 +2039,9 @@ allowed = ["read_file"]
     async fn foreground_taint_trait_methods_callable() {
         // Exercises the foreground taint overrides + default hooks (Config/policy
         // load are read-only real IO; we assert shape, not specific values).
-        let mut cb = ForegroundCallbacks {};
+        let mut cb = ForegroundCallbacks {
+            context_window: Arc::new(Mutex::new(None)),
+        };
         let _enabled: bool = cb.taint_global_enabled();
         let _policy = cb.taint_policy();
         assert!(cb.make_gate_prompt().is_some());

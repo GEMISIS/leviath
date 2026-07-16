@@ -91,18 +91,13 @@ fn dump_request(body: &serde_json::Value, dir: Option<&str>) {
 }
 
 /// Cache TTL for Anthropic prompt caching.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum CacheTtl {
     /// 5-minute ephemeral cache (default, no extra cost).
+    #[default]
     Ephemeral5m,
     /// 1-hour extended cache (requires beta header, higher write cost).
     Ephemeral1h,
-}
-
-impl Default for CacheTtl {
-    fn default() -> Self {
-        Self::Ephemeral5m
-    }
 }
 
 /// Anthropic Claude provider.
@@ -236,7 +231,7 @@ impl AnthropicProvider {
                 supports_tools: true,
                 supports_system_prompt: true,
                 max_context_tokens: 200_000,
-                max_output_tokens: 65_536,
+                max_output_tokens: 64_000,
             };
         }
         // Generic Claude 4.x fallback (e.g. older 4.5 snapshots)
@@ -513,7 +508,8 @@ impl Provider for AnthropicProvider {
         #[cfg(feature = "debug-http")]
         let start = std::time::Instant::now();
 
-        let response = self.apply_headers(self.client.post(&url))
+        let response = self
+            .apply_headers(self.client.post(&url))
             .json(&body)
             .send()
             .await
@@ -604,7 +600,8 @@ impl Provider for AnthropicProvider {
         #[cfg(feature = "debug-http")]
         let start = std::time::Instant::now();
 
-        let response = self.apply_headers(self.client.post(&url))
+        let response = self
+            .apply_headers(self.client.post(&url))
             .json(&body)
             .send()
             .await
@@ -1142,7 +1139,7 @@ mod tests {
         let caps = provider.builtin_capabilities("claude-haiku-4-5-20251001");
         assert!(caps.supports_temperature);
         assert_eq!(caps.max_context_tokens, 200_000);
-        assert_eq!(caps.max_output_tokens, 65_536);
+        assert_eq!(caps.max_output_tokens, 64_000);
     }
 
     #[test]
