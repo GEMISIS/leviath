@@ -200,6 +200,9 @@ pub struct StageContext<'a> {
     pub user_default_model: Option<(String, String)>,
     /// Optional compaction configuration for context management.
     pub compaction_ref: Option<&'a CompactionConfig>,
+    /// Available agent types (local blueprint + installed agents), keyed by
+    /// name. Used to resolve fan-out `worker_agent` / `worker_query`.
+    pub agent_registry: Arc<HashMap<String, Blueprint>>,
 }
 
 /// Trait for mode-specific behavior in the stage loop.
@@ -357,6 +360,8 @@ pub async fn run_stage_loop(
         .unwrap_or(0);
     let mut visit_counts: HashMap<String, usize> = HashMap::new();
     let mut aborted = false;
+    // Set by a fan-out stage to force a deterministic jump into its merge stage.
+    let mut forced_transition: Option<String> = None;
 
     loop {
         let stage = ctx
@@ -688,14 +693,40 @@ pub async fn run_stage_loop(
         let stage_result_val: StageResult;
 
         match &stage_mode {
-            // Wired in a later commit (run_fan_out_stage). No blueprint can
-            // reach this yet — the parser doesn't emit `FanOut` until the same
-            // commit that implements the arm.
-            StageMode::FanOut { .. } => {
-                if let Some(handle) = &stdin_handle {
-                    handle.abort();
-                }
-                return Err(anyhow::anyhow!("fan_out stage mode is not yet implemented"));
+            StageMode::FanOut { config } => {
+                // Release the engine lock so workers can be driven concurrently,
+                // then run the fan-out stage, then re-acquire for post-stage work.
+                drop(eng);
+                let outcome = super::fanout::run_fan_out_stage(
+                    &engine_handle,
+                    ctx.entity,
+                    ctx.blueprint,
+                    config,
+                    &ctx.agent_registry,
+                    ctx.tool_registry,
+                    provider_name,
+                    model_name,
+                    io,
+                )
+                .await?;
+                eng = engine_handle.write().await;
+                stage_result_val = match outcome {
+                    super::fanout::FanOutOutcome::Merge(target) => {
+                        forced_transition = Some(target);
+                        StageResult::Success
+                    }
+                    super::fanout::FanOutOutcome::Proceed => StageResult::Success,
+                    super::fanout::FanOutOutcome::FailAll => StageResult::Error,
+                };
+                cb.on_stage_result(
+                    &stage_name_owned,
+                    stage_idx,
+                    &stage_result_val,
+                    None,
+                    &mut eng,
+                    ctx.entity,
+                )
+                .await;
             }
             StageMode::Interactive => {
                 let run_context = cb.get_run_context();
@@ -868,6 +899,24 @@ pub async fn run_stage_loop(
 
         // Post-stage callback
         cb.on_post_stage(&eng, ctx.entity, &stage_name_owned).await;
+
+        // A fan-out stage with a merge stage forces a deterministic jump into
+        // it (bypassing LLM transition resolution). Release the engine lock
+        // held for this iteration before looping.
+        if let Some(target) = forced_transition.take() {
+            let next_idx = ctx
+                .blueprint
+                .stages
+                .iter()
+                .position(|s| s.name == target)
+                .expect("merge_stage existence is validated at load time");
+            cb.on_transition(&stage_name_owned, &target, stage_idx)
+                .await;
+            drop(eng);
+            current_stage_name_val = target;
+            current_stage_idx_val = next_idx;
+            continue;
+        }
 
         // Resolve the next transition
         let stage_ref = ctx.blueprint.find_stage(&stage_name_owned).unwrap();
@@ -1357,6 +1406,134 @@ mod tests {
     /// A mock provider that returns a canned response — used to exercise the
     /// Interactive/InteractivePoints stage paths, which call real engine
     /// inference (unlike MockCallbacks::run_autonomous, which fakes it).
+    /// Provider whose first `infer` (a fan-out split) returns a JSON work-item
+    /// array; later calls (workers) return no-tool "done".
+    struct FanOutProvider {
+        split: std::sync::Mutex<Option<String>>,
+    }
+
+    #[async_trait]
+    impl leviath_providers::Provider for FanOutProvider {
+        async fn infer(
+            &self,
+            _request: leviath_providers::InferenceRequest,
+        ) -> Result<leviath_providers::InferenceResponse, leviath_providers::ProviderError>
+        {
+            let content = self
+                .split
+                .lock()
+                .unwrap()
+                .take()
+                .unwrap_or_else(|| "done".to_string());
+            Ok(leviath_providers::InferenceResponse {
+                content,
+                tool_calls: vec![],
+                tokens_used: leviath_providers::TokenUsage {
+                    prompt_tokens: 1,
+                    completion_tokens: 1,
+                    total_tokens: 2,
+                    cached_tokens: 0,
+                    cache_write_tokens: 0,
+                },
+                finish_reason: leviath_providers::FinishReason::Complete,
+            })
+        }
+        fn count_tokens(&self, t: &str, _m: &str) -> usize {
+            t.len() / 4
+        }
+        fn max_context_tokens(&self, _m: &str) -> usize {
+            100_000
+        }
+        fn name(&self) -> &str {
+            "anthropic"
+        }
+        fn capabilities(&self, _m: &str) -> leviath_providers::ModelCapabilities {
+            leviath_providers::ModelCapabilities::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn run_stage_loop_fan_out_stage_merges_then_completes() {
+        // A fan_out stage splits into 2 workers, then jumps into its merge stage.
+        let mut fan = make_stage("parallel");
+        fan.mode = StageMode::FanOut {
+            config: leviath_core::blueprint::FanOutConfig {
+                worker_agent: None,
+                worker_stage: Some("worker".to_string()),
+                worker_query: None,
+                merge_stage: Some("merge".to_string()),
+                max_workers: 2,
+                on_worker_failure: leviath_core::blueprint::WorkerFailurePolicy::Continue,
+                split_prompt: "split it".to_string(),
+            },
+        };
+        let mut worker = make_stage("worker");
+        worker.allow_as_worker = true;
+        let merge = make_stage("merge"); // terminal (last stage, linear)
+        let bp = make_blueprint(vec![fan, worker, merge]);
+
+        // Engine with a provider that returns the split array first.
+        let mut registry = ProviderRegistry::new();
+        registry.register(
+            "anthropic".to_string(),
+            Arc::new(FanOutProvider {
+                split: std::sync::Mutex::new(Some(
+                    r#"[{"id":"a","context":{}},{"id":"b","context":{}}]"#.to_string(),
+                )),
+            }),
+        );
+        let mut engine = AgentEngine::with_providers(registry);
+        let mut pool = AgentPool::new(bp.clone());
+        let agent_id = pool.spawn_agent(engine.world_mut());
+        let entity = pool.get_agent(&agent_id).unwrap();
+        initialize_context_window(&mut engine, entity, &bp, "task");
+        let engine: leviath_runtime::EngineHandle =
+            std::sync::Arc::new(tokio::sync::RwLock::new(engine));
+
+        let tool_registry = make_tool_registry().await;
+        let mut cb = MockCallbacks::new();
+        let mut reg = std::collections::HashMap::new();
+        reg.insert(bp.name.clone(), bp.clone());
+
+        let mut ctx = StageContext {
+            blueprint: &bp,
+            engine: engine.clone(),
+            entity,
+            pool: &mut pool,
+            tool_registry: &tool_registry,
+            current_stage_name: Arc::new(Mutex::new(String::new())),
+            current_stage_perms: Arc::new(Mutex::new(HashMap::new())),
+            current_stage_idx: Arc::new(Mutex::new(0)),
+            model_override: None,
+            user_default_model: None,
+            compaction_ref: None,
+            agent_registry: Arc::new(reg),
+        };
+
+        run_stage_loop(
+            &mut ctx,
+            &mut cb,
+            "agent-1",
+            &mut MockIO::new(),
+            &mut noop_exec,
+        )
+        .await
+        .unwrap();
+
+        // The loop visited the fan_out stage then jumped to the merge stage.
+        assert!(cb
+            .transitions
+            .iter()
+            .any(|(f, t)| f == "parallel" && t == "merge"));
+        // Two workers were spawned as children of the root.
+        let eng = engine.read().await;
+        let children = eng
+            .world()
+            .get::<leviath_runtime::SubAgentChildren>(entity)
+            .unwrap();
+        assert_eq!(children.children.len(), 2);
+    }
+
     struct CannedProvider;
 
     #[async_trait]
@@ -1440,6 +1617,7 @@ mod tests {
             model_override: None,
             user_default_model: None,
             compaction_ref: None,
+            agent_registry: std::sync::Arc::new(std::collections::HashMap::new()),
         };
 
         run_stage_loop(
@@ -1506,6 +1684,7 @@ mod tests {
             model_override: None,
             user_default_model: None,
             compaction_ref: None,
+            agent_registry: std::sync::Arc::new(std::collections::HashMap::new()),
         };
 
         run_stage_loop(
@@ -1547,6 +1726,7 @@ mod tests {
             model_override: None,
             user_default_model: None,
             compaction_ref: None,
+            agent_registry: std::sync::Arc::new(std::collections::HashMap::new()),
         };
 
         run_stage_loop(
@@ -1603,6 +1783,7 @@ mod tests {
             model_override: None,
             user_default_model: None,
             compaction_ref: None,
+            agent_registry: std::sync::Arc::new(std::collections::HashMap::new()),
         };
 
         run_stage_loop(
@@ -1646,6 +1827,7 @@ mod tests {
             model_override: None,
             user_default_model: None,
             compaction_ref: None,
+            agent_registry: std::sync::Arc::new(std::collections::HashMap::new()),
         };
 
         run_stage_loop(
@@ -1688,6 +1870,7 @@ mod tests {
             model_override: None,
             user_default_model: None,
             compaction_ref: None,
+            agent_registry: std::sync::Arc::new(std::collections::HashMap::new()),
         };
 
         let result = run_stage_loop(
@@ -1732,6 +1915,7 @@ mod tests {
             model_override: None,
             user_default_model: None,
             compaction_ref: None,
+            agent_registry: std::sync::Arc::new(std::collections::HashMap::new()),
         };
 
         let result = run_stage_loop(
@@ -1795,6 +1979,7 @@ mod tests {
             model_override: None,
             user_default_model: None,
             compaction_ref: None,
+            agent_registry: std::sync::Arc::new(std::collections::HashMap::new()),
         };
 
         run_stage_loop(
@@ -1854,6 +2039,7 @@ mod tests {
             model_override: None,
             user_default_model: None,
             compaction_ref: None,
+            agent_registry: std::sync::Arc::new(std::collections::HashMap::new()),
         };
 
         run_stage_loop(
@@ -1930,6 +2116,7 @@ mod tests {
             model_override: None,
             user_default_model: None,
             compaction_ref: None,
+            agent_registry: std::sync::Arc::new(std::collections::HashMap::new()),
         };
 
         run_stage_loop(
@@ -1967,6 +2154,7 @@ mod tests {
             model_override: None,
             user_default_model: None,
             compaction_ref: None,
+            agent_registry: std::sync::Arc::new(std::collections::HashMap::new()),
         };
 
         run_stage_loop(
@@ -2079,6 +2267,7 @@ mod tests {
             model_override: Some("my-custom-model".to_string()),
             user_default_model: None,
             compaction_ref: None,
+            agent_registry: std::sync::Arc::new(std::collections::HashMap::new()),
         };
 
         run_stage_loop(
@@ -2245,6 +2434,7 @@ mod tests {
             model_override: None,
             user_default_model: None,
             compaction_ref: None,
+            agent_registry: std::sync::Arc::new(std::collections::HashMap::new()),
         };
 
         run_stage_loop(
@@ -2316,6 +2506,7 @@ mod tests {
             model_override: None,
             user_default_model: None,
             compaction_ref: None,
+            agent_registry: std::sync::Arc::new(std::collections::HashMap::new()),
         };
 
         // No stdin input queued — `get_user_input` returns None, which the
@@ -2360,6 +2551,7 @@ mod tests {
             model_override: None,
             user_default_model: None,
             compaction_ref: None,
+            agent_registry: std::sync::Arc::new(std::collections::HashMap::new()),
         };
 
         run_stage_loop(
@@ -2451,6 +2643,7 @@ mod tests {
             model_override: None,
             user_default_model: None,
             compaction_ref: None,
+            agent_registry: std::sync::Arc::new(std::collections::HashMap::new()),
         };
 
         run_stage_loop(
@@ -2502,6 +2695,7 @@ mod tests {
             model_override: None,
             user_default_model: None,
             compaction_ref: None,
+            agent_registry: std::sync::Arc::new(std::collections::HashMap::new()),
         };
 
         let result = run_stage_loop(
@@ -2573,6 +2767,7 @@ mod tests {
             model_override: None,
             user_default_model: None,
             compaction_ref: None,
+            agent_registry: std::sync::Arc::new(std::collections::HashMap::new()),
         };
 
         let result = run_stage_loop(
@@ -2623,6 +2818,7 @@ mod tests {
             model_override: None,
             user_default_model: None,
             compaction_ref: None,
+            agent_registry: std::sync::Arc::new(std::collections::HashMap::new()),
         };
 
         run_stage_loop(
@@ -2661,6 +2857,7 @@ mod tests {
             model_override: Some("anthropic/gpt-custom".to_string()),
             user_default_model: None,
             compaction_ref: None,
+            agent_registry: std::sync::Arc::new(std::collections::HashMap::new()),
         };
 
         run_stage_loop(
@@ -2713,6 +2910,7 @@ mod tests {
             model_override: None,
             user_default_model: Some(("anthropic".to_string(), "claude-haiku".to_string())),
             compaction_ref: None,
+            agent_registry: std::sync::Arc::new(std::collections::HashMap::new()),
         };
 
         run_stage_loop(
@@ -2760,6 +2958,7 @@ mod tests {
             model_override: None,
             user_default_model: Some(("anthropic".to_string(), "claude-haiku".to_string())),
             compaction_ref: None,
+            agent_registry: std::sync::Arc::new(std::collections::HashMap::new()),
         };
 
         run_stage_loop(
@@ -2805,6 +3004,7 @@ mod tests {
             model_override: None,
             user_default_model: None,
             compaction_ref: None,
+            agent_registry: std::sync::Arc::new(std::collections::HashMap::new()),
         };
 
         run_stage_loop(
@@ -2851,6 +3051,7 @@ mod tests {
             model_override: None,
             user_default_model: Some(("also_nonexistent".to_string(), "model-x".to_string())),
             compaction_ref: None,
+            agent_registry: std::sync::Arc::new(std::collections::HashMap::new()),
         };
 
         run_stage_loop(
@@ -2900,6 +3101,7 @@ mod tests {
             model_override: Some("my-override-model".to_string()),
             user_default_model: Some(("anthropic".to_string(), "claude-haiku".to_string())),
             compaction_ref: None,
+            agent_registry: std::sync::Arc::new(std::collections::HashMap::new()),
         };
 
         run_stage_loop(
@@ -2952,6 +3154,7 @@ mod tests {
             model_override: Some("my-override-model".to_string()),
             user_default_model: None,
             compaction_ref: None,
+            agent_registry: std::sync::Arc::new(std::collections::HashMap::new()),
         };
 
         run_stage_loop(
@@ -3008,6 +3211,7 @@ mod tests {
             model_override: None,
             user_default_model: None,
             compaction_ref: None,
+            agent_registry: std::sync::Arc::new(std::collections::HashMap::new()),
         };
 
         run_stage_loop(
@@ -3100,6 +3304,7 @@ mod tests {
             model_override: None,
             user_default_model: None,
             compaction_ref: None,
+            agent_registry: std::sync::Arc::new(std::collections::HashMap::new()),
         };
 
         run_stage_loop(
@@ -3147,6 +3352,7 @@ mod tests {
             model_override: None,
             user_default_model: None,
             compaction_ref: None,
+            agent_registry: std::sync::Arc::new(std::collections::HashMap::new()),
         };
 
         run_stage_loop(
@@ -3208,6 +3414,7 @@ mod tests {
             model_override: None,
             user_default_model: None,
             compaction_ref: None,
+            agent_registry: std::sync::Arc::new(std::collections::HashMap::new()),
         };
 
         run_stage_loop(
@@ -3277,6 +3484,7 @@ mod tests {
             model_override: None,
             user_default_model: None,
             compaction_ref: None,
+            agent_registry: std::sync::Arc::new(std::collections::HashMap::new()),
         };
 
         run_stage_loop(
@@ -3349,6 +3557,7 @@ mod tests {
             model_override: None,
             user_default_model: None,
             compaction_ref: None,
+            agent_registry: std::sync::Arc::new(std::collections::HashMap::new()),
         };
 
         run_stage_loop(
@@ -3399,6 +3608,7 @@ mod tests {
             model_override: None,
             user_default_model: None,
             compaction_ref: None,
+            agent_registry: std::sync::Arc::new(std::collections::HashMap::new()),
         };
 
         run_stage_loop(
@@ -3443,6 +3653,7 @@ mod tests {
             model_override: None,
             user_default_model: None,
             compaction_ref: None,
+            agent_registry: std::sync::Arc::new(std::collections::HashMap::new()),
         };
 
         run_stage_loop(
@@ -3531,6 +3742,7 @@ mod tests {
             model_override: None,
             user_default_model: None,
             compaction_ref: None,
+            agent_registry: std::sync::Arc::new(std::collections::HashMap::new()),
         };
 
         run_stage_loop(
