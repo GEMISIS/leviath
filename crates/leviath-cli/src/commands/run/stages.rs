@@ -1935,6 +1935,91 @@ mod tests {
         let _ = std::fs::remove_dir_all(runstate::run_dir(&run_id));
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn interactive_points_edit_ipc_request_write_error() {
+        // Covers the `request_interaction_async(...).await?` error arm in the
+        // IPC edit path: the responder answers the choice, then makes the run
+        // directory read-only. Reading the (already-written) choice response
+        // still works, but the subsequent edit request's write_request fails,
+        // so the `?` propagates and the stage returns Err.
+        use crate::interaction::InteractionResponse;
+        use std::os::unix::fs::PermissionsExt;
+
+        let _guard = crate::runstate::isolate_runs_dir_for_test(
+            "interactive_points_edit_ipc_request_write_error",
+        );
+        let bp = make_blueprint(vec![make_stage("main")]);
+        let (mut engine, _pool, entity) = make_engine_and_entity(&bp, "Agent response");
+        let mut io = MockIO::new();
+
+        let run_id = format!(
+            "test-ip-edit-werr-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .subsec_nanos()
+        );
+        let mut meta = RunMeta::new(
+            run_id.clone(),
+            "test".into(),
+            "/p".into(),
+            "t".into(),
+            None,
+            "/tmp".into(),
+            1,
+        );
+        runstate::create_run(&meta).unwrap();
+
+        let points = vec![make_multiple_choice_point_with_edit(
+            "plan_approval",
+            "Approve the plan?",
+            vec!["Approve".to_string(), "Add detail".to_string()],
+            vec!["Add detail".to_string()],
+        )];
+
+        let rid = run_id.clone();
+        let responder = tokio::spawn(async move {
+            // The stage posts its (choice) request before awaiting a response,
+            // so it is present once this task is scheduled.
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            let req = crate::interaction::read_request(&rid)
+                .expect("stage posts its interaction request before awaiting a response");
+            let mut resp = InteractionResponse::choice("", 1); // "Add detail" (edit)
+            resp.request_id = req.id.clone();
+            crate::interaction::write_response(&rid, &resp).unwrap();
+            // Make the run dir read-only: the choice response above is still
+            // readable, but the edit request's write will fail.
+            let dir = runstate::run_dir(&rid);
+            let mut perms = std::fs::metadata(&dir).unwrap().permissions();
+            perms.set_mode(0o555);
+            std::fs::set_permissions(&dir, perms).unwrap();
+        });
+
+        let result = run_interactive_points_stage(
+            &mut engine,
+            entity,
+            "mock",
+            "test-model",
+            8,
+            &[],
+            None,
+            &points,
+            Some((&run_id, &mut meta)),
+            &mut io,
+            &mut noop_exec,
+        )
+        .await;
+
+        let _ = responder.await;
+        // Restore permissions so cleanup can remove the directory.
+        let dir = runstate::run_dir(&run_id);
+        let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755));
+        assert!(result.is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[tokio::test]
     async fn interactive_points_edit_option_ipc_path() {
         // Edit option over the background file-IPC path: the engine issues an

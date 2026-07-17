@@ -620,6 +620,19 @@ mod tests {
     }
 
     #[test]
+    fn resolve_worker_query_no_match_propagates_discover_error() {
+        // A worker_query that matches nothing makes discover_worker return Err,
+        // which resolve_worker propagates via `?` (covers that `?` arm).
+        let current = bp("root");
+        let mut registry = HashMap::new();
+        registry.insert("coder".to_string(), bp("coder"));
+        let mut c = cfg();
+        c.worker_query = Some("zzz-no-such-agent".into());
+        let err = resolve_worker(&c, &current, &registry).unwrap_err();
+        assert!(err.to_string().contains("matched no"));
+    }
+
+    #[test]
     fn resolve_worker_no_source_errors() {
         // Defensive: validate_graph normally guarantees one source, but a caller
         // that bypasses validation gets a clear error.
@@ -1018,6 +1031,68 @@ model = { models = [{ provider = "mock", model = "m" }] }
     }
 
     #[tokio::test]
+    async fn run_fan_out_split_inference_error_propagates() {
+        // A provider name that isn't registered makes the split inference fail,
+        // propagating through `run_inference_loop_shared(...).await?`.
+        let (engine, parent, tools) = setup("[]").await;
+        let config = base_config();
+        let bp = fanout_blueprint(config.clone());
+        let mut reg = HashMap::new();
+        reg.insert(bp.name.clone(), bp.clone());
+        let mut io = super::super::io::mock::MockIO::new();
+        let result = run_fan_out_stage(
+            &engine,
+            parent,
+            &bp,
+            &config,
+            &reg,
+            tools.as_ref(),
+            "nonexistent-provider",
+            "m",
+            &mut io,
+        )
+        .await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn run_fan_out_resolve_worker_error_propagates() {
+        // The split succeeds, but the worker source (a query) matches nothing,
+        // so resolve_worker returns Err — propagated via its `?`.
+        let (engine, parent, tools) = setup(r#"[{"id":"a","context":{}}]"#).await;
+        let mut config = base_config();
+        config.worker_stage = None;
+        config.worker_query = Some("no-such-worker-agent".into());
+        let bp = fanout_blueprint(config.clone());
+        // Empty registry → the query matches nothing.
+        let reg = HashMap::new();
+        let mut io = super::super::io::mock::MockIO::new();
+        let result = run_fan_out_stage(
+            &engine,
+            parent,
+            &bp,
+            &config,
+            &reg,
+            tools.as_ref(),
+            "mock",
+            "m",
+            &mut io,
+        )
+        .await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn inject_results_no_context_window_is_noop() {
+        // A parent entity with no ContextWindow exercises the None arm of
+        // inject_results' `if let Some(mut w)` (nothing injected, no panic).
+        let mut engine = AgentEngine::with_providers(ProviderRegistry::new());
+        let entity = engine.world_mut().spawn(()).id();
+        let engine: EngineHandle = Arc::new(tokio::sync::RwLock::new(engine));
+        inject_results(&engine, entity, "orphan text").await;
+    }
+
+    #[tokio::test]
     async fn run_fan_out_worker_uses_builtin_tool() {
         // A worker that calls a normal builtin tool routes through ToolRegistry.
         let (engine, parent, tools) = setup_with(ScriptedProvider::scripted(vec![
@@ -1031,9 +1106,11 @@ model = { models = [{ provider = "mock", model = "m" }] }
         let mut fo = base_config();
         fo.max_workers = 1;
         let mut bp = fanout_blueprint(fo.clone());
-        if let Some(w) = bp.stages.iter_mut().find(|s| s.name == "worker") {
-            w.available_tools = vec!["list_dir".to_string()];
-        }
+        bp.stages
+            .iter_mut()
+            .find(|s| s.name == "worker")
+            .expect("fanout_blueprint always defines a worker stage")
+            .available_tools = vec!["list_dir".to_string()];
         let mut reg = HashMap::new();
         reg.insert(bp.name.clone(), bp.clone());
         let mut io = super::super::io::mock::MockIO::new();
@@ -1186,13 +1263,18 @@ model = { models = [{ provider = "mock", model = "m" }] }
         // The worker was marked Error.
         let eng = engine.read().await;
         let children = eng.world().get::<SubAgentChildren>(parent).unwrap();
-        assert!(matches!(
-            eng.world()
-                .get::<AgentState>(children.children[0])
-                .unwrap()
-                .status,
-            AgentStatus::Error { .. }
-        ));
+        let status = &eng
+            .world()
+            .get::<AgentState>(children.children[0])
+            .unwrap()
+            .status;
+        assert_eq!(
+            std::mem::discriminant(status),
+            std::mem::discriminant(&AgentStatus::Error {
+                message: String::new()
+            }),
+            "worker should be in the Error state, got {status:?}"
+        );
     }
 
     #[tokio::test]
@@ -1234,9 +1316,11 @@ model = { models = [{ provider = "mock", model = "m" }] }
         let mut fo = base_config();
         fo.max_workers = 1;
         let mut bp = fanout_blueprint(fo.clone());
-        if let Some(w) = bp.stages.iter_mut().find(|s| s.name == "worker") {
-            w.available_tools = vec!["context_write".to_string()];
-        }
+        bp.stages
+            .iter_mut()
+            .find(|s| s.name == "worker")
+            .expect("fanout_blueprint always defines a worker stage")
+            .available_tools = vec!["context_write".to_string()];
         let mut reg = HashMap::new();
         reg.insert(bp.name.clone(), bp.clone());
         let mut io = super::super::io::mock::MockIO::new();
@@ -1316,9 +1400,11 @@ model = { models = [{ provider = "mock", model = "m" }] }
         let mut fo = base_config();
         fo.max_workers = 1;
         let mut bp = fanout_blueprint(fo.clone());
-        if let Some(w) = bp.stages.iter_mut().find(|s| s.name == "worker") {
-            w.available_tools = vec!["ask_user_text".to_string()];
-        }
+        bp.stages
+            .iter_mut()
+            .find(|s| s.name == "worker")
+            .expect("fanout_blueprint always defines a worker stage")
+            .available_tools = vec!["ask_user_text".to_string()];
         let mut reg = HashMap::new();
         reg.insert(bp.name.clone(), bp.clone());
         let mut io = super::super::io::mock::MockIO::new();
