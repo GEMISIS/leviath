@@ -27,3 +27,30 @@ pub fn configure_detached(cmd: &mut Command) {
 pub fn terminate(pid: u32) -> bool {
     crate::platform::terminate(pid)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn configure_detached_public_wrapper_registers_without_spawning() {
+        // Exercises the public `process::configure_detached` shim (distinct
+        // from the platform impl its own tests cover); registering the hook
+        // must not fork/exec or panic.
+        let mut cmd = Command::new("true");
+        configure_detached(&mut cmd);
+    }
+
+    #[test]
+    fn terminate_public_wrapper_rejects_pid_zero() {
+        assert!(!terminate(0));
+    }
+
+    #[test]
+    fn terminate_public_wrapper_dispatches_to_nonexistent_pid() {
+        // A pid far beyond any real PID_MAX: on Unix `kill` returns ESRCH
+        // (ignored → true); on non-Unix the platform no-op returns false.
+        let dispatched = terminate(2_000_000_000);
+        assert_eq!(dispatched, cfg!(unix));
+    }
+}

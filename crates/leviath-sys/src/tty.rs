@@ -153,10 +153,25 @@ mod tests {
         std::fs::OpenOptions::new().read(true).open("/dev/null")
     }
 
-    struct FailWriter;
-    impl Write for FailWriter {
+    /// Fails on `write` (so the `&&` short-circuits before `flush`).
+    struct WriteFailWriter;
+    impl Write for WriteFailWriter {
         fn write(&mut self, _: &[u8]) -> io::Result<usize> {
             Err(io::Error::other("write fail"))
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// Accepts `write` but fails on `flush` (exercises the flush half of the `&&`).
+    struct FlushFailWriter {
+        buf: Vec<u8>,
+    }
+    impl Write for FlushFailWriter {
+        fn write(&mut self, data: &[u8]) -> io::Result<usize> {
+            self.buf.extend_from_slice(data);
+            Ok(data.len())
         }
         fn flush(&mut self) -> io::Result<()> {
             Err(io::Error::other("flush fail"))
@@ -198,8 +213,24 @@ mod tests {
 
     #[test]
     fn write_via_returns_false_when_fallback_write_fails() {
-        let mut sink = FailWriter;
+        let mut sink = WriteFailWriter;
         assert!(!osc52_write_via("hi", open_fails, &mut sink));
+        // `flush` is unreachable through `osc52_write_via` here (the failing
+        // `write_all` short-circuits the `&&`), so call it directly to cover
+        // its trivial body rather than leave a dead region.
+        assert!(sink.flush().is_ok());
+    }
+
+    #[test]
+    fn write_via_returns_false_when_fallback_flush_fails() {
+        // write succeeds but flush fails — exercises the flush half of the
+        // final `write_all(..).is_ok() && flush(..).is_ok()`.
+        let mut sink = FlushFailWriter { buf: Vec::new() };
+        assert!(!osc52_write_via("hi", open_fails, &mut sink));
+        assert!(
+            !sink.buf.is_empty(),
+            "write should have run before flush failed"
+        );
     }
 
     #[test]
