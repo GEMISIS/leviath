@@ -312,17 +312,12 @@ impl TaintGate {
             return decision;
         }
 
-        // Extract taint level from the blocked decision
-        let (taint, clearance) = if let GateDecision::Blocked {
-            taint_level,
-            clearance,
-            ..
-        } = &decision
-        {
-            (*taint_level, *clearance)
-        } else {
-            return decision;
-        };
+        // Extract taint level from the blocked decision. `decision` is
+        // necessarily `Blocked` here: `GateDecision` has only two variants and
+        // the `Allowed` case already returned above.
+        let (taint, clearance) = decision
+            .blocked_levels()
+            .expect("infallible: a non-Allowed GateDecision is always Blocked");
 
         // Check static allowlist rules
         if let Some(rule_idx) = policy.check_allowlist(tool_name, target, taint) {
@@ -833,19 +828,15 @@ mod tests {
         let window = make_window_with_taint(TaintLevel::Private);
         let decision = gate.check_traditional("agent-1", "shell", &window);
         assert!(!decision.is_allowed());
-        if let GateDecision::Blocked {
-            taint_level,
-            clearance,
-            tool_name,
-            ..
-        } = &decision
-        {
-            assert_eq!(*taint_level, TaintLevel::Private);
-            assert_eq!(*clearance, TaintLevel::Public);
-            assert_eq!(tool_name, "shell");
-        } else {
-            panic!("Expected Blocked");
-        }
+        assert_eq!(
+            decision,
+            GateDecision::Blocked {
+                taint_level: TaintLevel::Private,
+                clearance: TaintLevel::Public,
+                source_regions: vec!["conv".to_string()],
+                tool_name: "shell".to_string(),
+            }
+        );
     }
 
     #[test]
@@ -883,12 +874,17 @@ mod tests {
             .unwrap();
 
         let decision = gate.check_traditional("agent-1", "shell", &window);
-        if let GateDecision::Blocked { source_regions, .. } = &decision {
-            assert!(source_regions.contains(&"dirty".to_string()));
-            assert!(!source_regions.contains(&"clean".to_string()));
-        } else {
-            panic!("Expected Blocked");
-        }
+        // Only the Private "dirty" region exceeds shell's Public clearance;
+        // the Public "clean" region is not reported.
+        assert_eq!(
+            decision,
+            GateDecision::Blocked {
+                taint_level: TaintLevel::Private,
+                clearance: TaintLevel::Public,
+                source_regions: vec!["dirty".to_string()],
+                tool_name: "shell".to_string(),
+            }
+        );
     }
 
     #[test]
@@ -924,9 +920,15 @@ mod tests {
         let mut gate = TaintGate::new(SecurityConfig::default());
         let decision = gate.check_filter("agent-1", "shell", TaintLevel::Private, "conversation");
         assert!(!decision.is_allowed());
-        if let GateDecision::Blocked { source_regions, .. } = &decision {
-            assert!(source_regions.contains(&"conversation".to_string()));
-        }
+        assert_eq!(
+            decision,
+            GateDecision::Blocked {
+                taint_level: TaintLevel::Private,
+                clearance: TaintLevel::Public,
+                source_regions: vec!["conversation".to_string()],
+                tool_name: "shell".to_string(),
+            }
+        );
     }
 
     #[test]
@@ -1041,14 +1043,16 @@ mod tests {
             )
             .unwrap();
 
-        // Override taint for second entry
-        if let Some(taint) = &mut region.taint {
-            // First entry is Public (default from add_entry_with_metadata)
-            // Remove both Public entries and re-add with correct taints
-            taint.clear();
-            taint.add_entry(TaintLevel::Public);
-            taint.add_entry(TaintLevel::Private);
-        }
+        // Override taint for second entry.
+        // First entry is Public (default from add_entry_with_metadata); remove
+        // both Public entries and re-add with correct taints.
+        let taint = region
+            .taint
+            .as_mut()
+            .expect("region was created with taint tracking");
+        taint.clear();
+        taint.add_entry(TaintLevel::Public);
+        taint.add_entry(TaintLevel::Private);
 
         window.add_region(region);
         window
@@ -1436,10 +1440,11 @@ mod tests {
         // Should have logged an allowlist allow
         let last = gate.audit_log().last().unwrap();
         assert!(last.allowed);
-        assert!(matches!(
+        // The single allowlist rule (index 0) matched.
+        assert_eq!(
             last.decision_source,
-            GateDecisionSource::AllowlistRule { .. }
-        ));
+            GateDecisionSource::AllowlistRule { rule_index: 0 }
+        );
     }
 
     #[test]
@@ -1449,11 +1454,7 @@ mod tests {
         let policy = leviath_core::PolicyConfig::default(); // empty allowlist
 
         let checker = |tool: &str, _target: Option<&str>, _taint: TaintLevel| -> Option<String> {
-            if tool == "shell" {
-                Some("company_rule.rhai".to_string())
-            } else {
-                None
-            }
+            (tool == "shell").then(|| "company_rule.rhai".to_string())
         };
 
         let decision =
@@ -1461,10 +1462,12 @@ mod tests {
         assert!(decision.is_allowed());
 
         let last = gate.audit_log().last().unwrap();
-        assert!(matches!(
+        assert_eq!(
             last.decision_source,
-            GateDecisionSource::ScriptedRule { .. }
-        ));
+            GateDecisionSource::ScriptedRule {
+                script_name: "company_rule.rhai".to_string()
+            }
+        );
     }
 
     #[test]
@@ -1791,17 +1794,15 @@ mod tests {
         let decision = gate.check_traditional("agent-1", "shell", &window);
         // Internal > Public clearance for shell, so should be blocked
         assert!(!decision.is_allowed());
-        if let GateDecision::Blocked {
-            taint_level,
-            clearance,
-            ..
-        } = &decision
-        {
-            assert_eq!(*taint_level, TaintLevel::Internal);
-            assert_eq!(*clearance, TaintLevel::Public);
-        } else {
-            panic!("Expected Blocked");
-        }
+        assert_eq!(
+            decision,
+            GateDecision::Blocked {
+                taint_level: TaintLevel::Internal,
+                clearance: TaintLevel::Public,
+                source_regions: vec!["conv".to_string()],
+                tool_name: "shell".to_string(),
+            }
+        );
     }
 
     #[test]
@@ -1809,20 +1810,16 @@ mod tests {
         let mut gate = TaintGate::new(SecurityConfig::default());
         let decision = gate.check_pointer("agent-1", "shell", TaintLevel::Private);
         assert!(!decision.is_allowed());
-        if let GateDecision::Blocked {
-            taint_level,
-            clearance,
-            source_regions,
-            tool_name,
-        } = &decision
-        {
-            assert_eq!(*taint_level, TaintLevel::Private);
-            assert_eq!(*clearance, TaintLevel::Public);
-            assert!(source_regions.is_empty()); // pointer mode has empty source regions
-            assert_eq!(tool_name, "shell");
-        } else {
-            panic!("Expected Blocked");
-        }
+        // Pointer mode reports empty source regions.
+        assert_eq!(
+            decision,
+            GateDecision::Blocked {
+                taint_level: TaintLevel::Private,
+                clearance: TaintLevel::Public,
+                source_regions: vec![],
+                tool_name: "shell".to_string(),
+            }
+        );
     }
 
     #[test]
@@ -1851,17 +1848,15 @@ mod tests {
         let mut gate = TaintGate::new(SecurityConfig::default());
         let decision = gate.check_filter("agent-1", "shell", TaintLevel::Internal, "emails");
         assert!(!decision.is_allowed());
-        if let GateDecision::Blocked {
-            source_regions,
-            taint_level,
-            ..
-        } = &decision
-        {
-            assert_eq!(source_regions, &vec!["emails".to_string()]);
-            assert_eq!(*taint_level, TaintLevel::Internal);
-        } else {
-            panic!("Expected Blocked");
-        }
+        assert_eq!(
+            decision,
+            GateDecision::Blocked {
+                taint_level: TaintLevel::Internal,
+                clearance: TaintLevel::Public,
+                source_regions: vec!["emails".to_string()],
+                tool_name: "shell".to_string(),
+            }
+        );
     }
 
     #[test]
@@ -1935,10 +1930,12 @@ mod tests {
             GateResolution::AllowOnce,
         );
         assert!(out.is_none()); // execute
-        assert!(gate
+        let allow = gate
             .audit_log()
             .iter()
-            .any(|e| e.allowed && matches!(e.decision_source, GateDecisionSource::UserAllowOnce)));
+            .find(|e| e.allowed)
+            .expect("an allowed event should be logged");
+        assert_eq!(allow.decision_source, GateDecisionSource::UserAllowOnce);
     }
 
     #[test]
@@ -1958,12 +1955,12 @@ mod tests {
             gate.tool_classification("shell").clearance,
             TaintLevel::Private
         );
-        assert!(
-            gate.audit_log()
-                .iter()
-                .any(|e| e.allowed
-                    && matches!(e.decision_source, GateDecisionSource::UserAlwaysAllow))
-        );
+        let allow = gate
+            .audit_log()
+            .iter()
+            .find(|e| e.allowed)
+            .expect("an allowed event should be logged");
+        assert_eq!(allow.decision_source, GateDecisionSource::UserAlwaysAllow);
     }
 
     #[test]
@@ -1980,9 +1977,11 @@ mod tests {
         let (id, msg) = out.expect("deny yields a blocked result");
         assert_eq!(id, "call1");
         assert!(msg.contains("[blocked]") && msg.contains("shell"));
-        assert!(gate
+        let deny = gate
             .audit_log()
             .iter()
-            .any(|e| !e.allowed && matches!(e.decision_source, GateDecisionSource::UserDenied)));
+            .find(|e| !e.allowed)
+            .expect("a denied event should be logged");
+        assert_eq!(deny.decision_source, GateDecisionSource::UserDenied);
     }
 }

@@ -2888,6 +2888,121 @@ mod tests {
             .is_some());
     }
 
+    /// A provider whose `infer` always fails — used to drive the loop's network
+    /// error-propagation path.
+    struct ErrorProvider;
+
+    #[async_trait::async_trait]
+    impl leviath_providers::Provider for ErrorProvider {
+        async fn infer(
+            &self,
+            _req: InferenceRequest,
+        ) -> leviath_providers::Result<InferenceResponse> {
+            Err(ProviderError::Other("infer boom".to_string()))
+        }
+        fn count_tokens(&self, _text: &str, _model: &str) -> usize {
+            4
+        }
+        fn max_context_tokens(&self, _model: &str) -> usize {
+            100_000
+        }
+        fn name(&self) -> &str {
+            "error"
+        }
+        fn capabilities(&self, _model: &str) -> leviath_providers::ModelCapabilities {
+            leviath_providers::ModelCapabilities::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn test_run_inference_loop_shared_zero_iterations_yields_no_response() {
+        // With zero iterations the loop body never runs, so no response is
+        // produced and the loop reports the exhaustion error.
+        let (engine, entity) = make_engine_with_mock();
+        let handle: EngineHandle = Arc::new(tokio::sync::RwLock::new(engine));
+        let mut exec = ok_exec();
+        let result = run_inference_loop_shared(
+            &handle,
+            entity,
+            "mock",
+            "test-model",
+            Vec::new(),
+            0,
+            None,
+            None,
+            &mut exec,
+            None,
+            None,
+        )
+        .await;
+        let err = result.expect_err("zero iterations must not yield a response");
+        assert!(err.to_string().contains("No response generated"));
+    }
+
+    #[tokio::test]
+    async fn test_run_inference_loop_shared_build_request_error_propagates() {
+        // An unregistered provider makes build_inference_request fail; the loop
+        // propagates that error rather than hanging.
+        let (engine, entity) = make_engine_with_mock();
+        let handle: EngineHandle = Arc::new(tokio::sync::RwLock::new(engine));
+        let mut exec = ok_exec();
+        let result = run_inference_loop_shared(
+            &handle,
+            entity,
+            "does-not-exist",
+            "test-model",
+            Vec::new(),
+            5,
+            None,
+            None,
+            &mut exec,
+            None,
+            None,
+        )
+        .await;
+        let err = result.expect_err("unregistered provider must error");
+        assert!(err.to_string().contains("not registered"));
+    }
+
+    #[tokio::test]
+    async fn test_run_inference_loop_shared_infer_error_propagates() {
+        // A provider whose infer() errors propagates through the loop's `?`.
+        let (mut engine, entity) = make_engine_with_mock();
+        engine
+            .providers_mut()
+            .register("error".to_string(), Arc::new(ErrorProvider));
+        let handle: EngineHandle = Arc::new(tokio::sync::RwLock::new(engine));
+        let mut exec = ok_exec();
+        let result = run_inference_loop_shared(
+            &handle,
+            entity,
+            "error",
+            "test-model",
+            Vec::new(),
+            5,
+            None,
+            None,
+            &mut exec,
+            None,
+            None,
+        )
+        .await;
+        let err = result.expect_err("infer error must propagate");
+        assert!(err.to_string().contains("infer boom"));
+
+        // Exercise the provider's descriptive methods (not hit on the error path).
+        let probe = ErrorProvider;
+        assert_eq!(
+            leviath_providers::Provider::count_tokens(&probe, "x", "m"),
+            4
+        );
+        assert_eq!(
+            leviath_providers::Provider::max_context_tokens(&probe, "m"),
+            100_000
+        );
+        assert_eq!(leviath_providers::Provider::name(&probe), "error");
+    }
+
     /// A provider whose `infer` blocks on a shared barrier until *both* agents'
     /// inference calls are in flight. If [`run_inference_loop_shared`] held the
     /// engine lock across `provider.infer`, the second agent could never reach
@@ -5229,32 +5344,43 @@ mod tests {
         let mut engine = AgentEngine::with_providers(registry);
         let entity = engine
             .world_mut()
-            .spawn({
-                let mut window = ContextWindow::new(1000);
-                window.add_region(leviath_core::Region::new(
-                    "notes".to_string(),
-                    leviath_core::RegionKind::Pinned,
-                    500,
-                ));
-                window.add_region(leviath_core::Region::new(
-                    "conversation".to_string(),
-                    leviath_core::RegionKind::SlidingWindow {
-                        max_items: 50,
-                        eviction_strategy: leviath_core::EvictionStrategy::PerItem,
-                    },
-                    200,
-                ));
-                window.enable_taint_tracking();
-                window
-                    .add_tainted_to_region(
-                        "notes",
-                        "secret data".to_string(),
-                        10,
-                        leviath_core::TaintLevel::Private,
-                    )
-                    .unwrap();
-                window
-            })
+            .spawn((
+                AgentState {
+                    agent_id: "taint-test".to_string(),
+                    current_stage: "main".to_string(),
+                    iteration: 0,
+                    status: AgentStatus::Active,
+                    spawned_children_ids: Vec::new(),
+                    pending_wait: None,
+                    accepts_messages: true,
+                },
+                {
+                    let mut window = ContextWindow::new(1000);
+                    window.add_region(leviath_core::Region::new(
+                        "notes".to_string(),
+                        leviath_core::RegionKind::Pinned,
+                        500,
+                    ));
+                    window.add_region(leviath_core::Region::new(
+                        "conversation".to_string(),
+                        leviath_core::RegionKind::SlidingWindow {
+                            max_items: 50,
+                            eviction_strategy: leviath_core::EvictionStrategy::PerItem,
+                        },
+                        200,
+                    ));
+                    window.enable_taint_tracking();
+                    window
+                        .add_tainted_to_region(
+                            "notes",
+                            "secret data".to_string(),
+                            10,
+                            leviath_core::TaintLevel::Private,
+                        )
+                        .unwrap();
+                    window
+                },
+            ))
             .id();
         let gate = crate::taint::TaintGate::new(leviath_core::SecurityConfig {
             taint_tracking: true,
@@ -5338,11 +5464,11 @@ mod tests {
         assert!(executed.lock().unwrap().contains(&"shell".to_string()));
         assert!(!tool_results_text(&engine, entity).contains("[blocked]"));
         // The allow was audited.
-        assert!(engine.taint_audit_log(entity).iter().any(|e| e.allowed
-            && matches!(
-                e.decision_source,
-                leviath_core::taint::GateDecisionSource::UserAllowOnce
-            )));
+        let allow_once = leviath_core::taint::GateDecisionSource::UserAllowOnce;
+        assert!(engine
+            .taint_audit_log(entity)
+            .iter()
+            .any(|e| e.allowed && e.decision_source == allow_once));
     }
 
     #[tokio::test]
@@ -5352,11 +5478,11 @@ mod tests {
         // Executed after the user chose "always allow".
         assert!(executed.lock().unwrap().contains(&"shell".to_string()));
         // Audited as an always-allow decision.
-        assert!(engine.taint_audit_log(entity).iter().any(|e| e.allowed
-            && matches!(
-                e.decision_source,
-                leviath_core::taint::GateDecisionSource::UserAlwaysAllow
-            )));
+        let always_allow = leviath_core::taint::GateDecisionSource::UserAlwaysAllow;
+        assert!(engine
+            .taint_audit_log(entity)
+            .iter()
+            .any(|e| e.allowed && e.decision_source == always_allow));
         // The tool's clearance was raised to Private for the rest of the run.
         let cls = engine
             .taint_gates
@@ -5439,11 +5565,12 @@ mod tests {
         let (mut engine, entity) = tainted_engine_with("shell", None, policy);
         let executed = run_and_record_executed(&mut engine, entity).await;
         assert!(executed.lock().unwrap().contains(&"shell".to_string()));
-        assert!(engine.taint_audit_log(entity).iter().any(|e| e.allowed
-            && matches!(
-                e.decision_source,
-                leviath_core::taint::GateDecisionSource::AllowlistRule { .. }
-            )));
+        let allowlist_rule =
+            leviath_core::taint::GateDecisionSource::AllowlistRule { rule_index: 0 };
+        assert!(engine
+            .taint_audit_log(entity)
+            .iter()
+            .any(|e| e.allowed && e.decision_source == allowlist_rule));
     }
 
     #[test]
@@ -5583,10 +5710,12 @@ mod tests {
         let w = engine.world().get::<ContextWindow>(entity).unwrap();
         let conv = w.get_region("conversation").unwrap();
         let has_nudge = conv.content.iter().any(|e| {
-            e.kind == leviath_core::EntryKind::UserMessage
-                && (e.content.contains("times")
-                    || e.content.contains("read-only")
-                    || e.content.contains("read_file"))
+            // Evaluate the substring check unconditionally (bitwise `&`, not
+            // `&&`) so it is exercised even for non-user entries.
+            let mentions_nudge = ["times", "read-only", "read_file"]
+                .iter()
+                .any(|needle| e.content.contains(needle));
+            (e.kind == leviath_core::EntryKind::UserMessage) & mentions_nudge
         });
         assert!(
             has_nudge,
@@ -5858,10 +5987,12 @@ mod tests {
         let w = engine.world().get::<ContextWindow>(entity).unwrap();
         let conv = w.get_region("conversation").unwrap();
         let has_nudge = conv.content.iter().any(|e| {
-            e.kind == leviath_core::EntryKind::UserMessage
-                && (e.content.contains("times")
-                    || e.content.contains("read-only")
-                    || e.content.contains("read_file"))
+            // Evaluate the substring check unconditionally (bitwise `&`, not
+            // `&&`) so it is exercised even for non-user entries.
+            let mentions_nudge = ["times", "read-only", "read_file"]
+                .iter()
+                .any(|needle| e.content.contains(needle));
+            (e.kind == leviath_core::EntryKind::UserMessage) & mentions_nudge
         });
         assert!(
             !has_nudge,
@@ -6817,18 +6948,59 @@ mod tests {
                 .filter(|e| matches!(e.kind, leviath_core::EntryKind::ToolResult { .. }))
                 .collect();
             assert_eq!(tool_results.len(), 1);
-            // Should be truncated to 20 chars + "[...truncated]" suffix
+            // Should be truncated to 20 chars + "[...truncated]" suffix.
+            // Bind values first so the assert message args are not lazily
+            // evaluated (which would leave uncovered regions on the pass path).
+            let content = &tool_results[0].content;
+            let truncated_len = content.len();
+            let original_len = long_result.len();
             assert!(
-                tool_results[0].content.contains("[...truncated]"),
-                "result should contain truncation marker, got: {}",
-                tool_results[0].content
+                content.contains("[...truncated]"),
+                "result should contain truncation marker, got: {content}"
             );
             assert!(
-                tool_results[0].content.len() < long_result.len(),
-                "truncated result ({}) should be shorter than original ({})",
-                tool_results[0].content.len(),
-                long_result.len()
+                truncated_len < original_len,
+                "truncated result ({truncated_len}) should be shorter than original ({original_len})"
             );
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    async fn test_tool_result_max_result_tokens_no_truncation_when_short() {
+        with_tracing_async(async {
+            let responses = tool_call_then_done("call_1", "bash");
+            let mut engine = engine_with_mock(responses);
+            let window = basic_window();
+
+            // max_result_tokens=50 means max_chars=200; the result is well under.
+            let routing = leviath_core::ToolResultRouting {
+                default_region: "conversation".to_string(),
+                tool_overrides: HashMap::new(),
+                persist: true,
+                max_result_tokens: Some(50),
+            };
+            let entity =
+                spawn_routing_entity(&mut engine, "no-truncate-test", window, Some(routing));
+
+            let short_result = "ok"; // 2 chars, far below the 200-char limit
+            let result = run_with_result(&mut engine, entity, "call_1", short_result).await;
+            assert!(result.is_ok());
+
+            let window = engine.world().get::<ContextWindow>(entity).unwrap();
+            let conv = window.get_region("conversation").unwrap();
+            let tool_results: Vec<_> = conv
+                .content
+                .iter()
+                .filter(|e| matches!(e.kind, leviath_core::EntryKind::ToolResult { .. }))
+                .collect();
+            assert_eq!(tool_results.len(), 1);
+            let content = &tool_results[0].content;
+            assert!(
+                !content.contains("[...truncated]"),
+                "a short result must not be truncated: {content}"
+            );
+            assert!(content.contains("ok"));
         })
         .await;
     }
