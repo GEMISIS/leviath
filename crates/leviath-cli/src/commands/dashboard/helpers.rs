@@ -136,19 +136,34 @@ fn osc52_fallback(_text: &str) -> bool {
     true
 }
 
+/// The native clipboard tools tried, in order, before falling back to OSC52.
+const NATIVE_CLIPBOARD_CMDS: &[(&str, &[&str])] = &[
+    ("pbcopy", &[]),
+    ("xclip", &["-selection", "clipboard"]),
+    ("wl-copy", &[]),
+];
+
 /// Core `yank_to_clipboard` logic, parameterized over the OSC52 fallback so
 /// tests that force this path (e.g. by starving `PATH`) can inject a fake
 /// that never touches the real TTY.
 fn yank_to_clipboard_via(text: &str, osc52_fallback: fn(&str) -> bool) -> bool {
+    yank_to_clipboard_with(text, NATIVE_CLIPBOARD_CMDS, osc52_fallback)
+}
+
+/// [`yank_to_clipboard_via`] with the native-tool command list injected, so a
+/// test can drive the spawn-success and non-zero-exit branches with a program
+/// guaranteed present on the host (the real `pbcopy`/`xclip`/`wl-copy` names
+/// don't exist on Windows, so a fake `#!/bin/sh` script on `PATH` -- the prior
+/// approach -- couldn't exercise these branches there).
+fn yank_to_clipboard_with(
+    text: &str,
+    clipboard_cmds: &[(&str, &[&str])],
+    osc52_fallback: fn(&str) -> bool,
+) -> bool {
     use std::io::Write as IoWrite;
     use std::process::{Command, Stdio};
 
     // Try native clipboard tools first — most reliable
-    let clipboard_cmds: &[(&str, &[&str])] = &[
-        ("pbcopy", &[]),
-        ("xclip", &["-selection", "clipboard"]),
-        ("wl-copy", &[]),
-    ];
     for (cmd, args) in clipboard_cmds {
         if let Ok(mut child) = Command::new(cmd)
             .args(*args)
@@ -549,83 +564,62 @@ mod tests {
         unreachable_osc52_fallback("anything");
     }
 
-    #[cfg(unix)]
+    /// A native-tool command that spawns and exits with the given status on the
+    /// host, injected in place of `pbcopy`/`xclip`/`wl-copy` so the spawn-loop
+    /// branches are exercised cross-platform. `true`/`false` exist on
+    /// macOS/Linux; `cmd /C exit N` is the Windows equivalent (both drain/ignore
+    /// stdin and exit deterministically), replacing the prior Unix-only
+    /// `#!/bin/sh` fake scripts.
+    #[cfg(not(windows))]
+    fn exit_cmd(success: bool) -> (&'static str, &'static [&'static str]) {
+        if success {
+            ("true", &[])
+        } else {
+            ("false", &[])
+        }
+    }
+    #[cfg(windows)]
+    fn exit_cmd(success: bool) -> (&'static str, &'static [&'static str]) {
+        if success {
+            ("cmd", &["/C", "exit 0"])
+        } else {
+            ("cmd", &["/C", "exit 1"])
+        }
+    }
+
     #[test]
-    fn test_yank_to_clipboard_via_native_tool_success_returns_true_without_fallback() {
-        // Shadows `pbcopy` with a fake, harmless script on `PATH` so the
-        // native-tool success path (the `return true` from inside the spawn
-        // loop) is exercised deterministically -- without this, whether that
-        // specific branch runs depends on whether a real `pbcopy`/`xclip`/
-        // `wl-copy` happens to be installed and reachable in the environment
-        // `cargo test` runs in. The fake script never touches the real
-        // clipboard or a terminal; it just drains stdin and exits 0.
+    fn test_yank_to_clipboard_native_tool_success_returns_true_without_fallback() {
+        // A guaranteed-present command that exits 0 exercises the native-tool
+        // success path (the `return true` inside the spawn loop) on every
+        // platform, without depending on a real clipboard tool being installed.
+        // Holds PATH_ENV_LOCK because this depends on an intact `PATH` (to
+        // resolve `true`/`cmd`) and must not race a PATH-starving test.
         let _lock = crate::config::PATH_ENV_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-
-        let dir = std::env::temp_dir().join("lev_test_fake_pbcopy_bin");
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let script_path = dir.join("pbcopy");
-        std::fs::write(&script_path, "#!/bin/sh\ncat > /dev/null\nexit 0\n").unwrap();
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mut perms = std::fs::metadata(&script_path).unwrap().permissions();
-            perms.set_mode(0o755);
-            std::fs::set_permissions(&script_path, perms).unwrap();
-        }
-
-        let original_path = std::env::var_os("PATH");
-        unsafe {
-            std::env::set_var("PATH", &dir);
-        }
-        let result = yank_to_clipboard_via("native tool success test", unreachable_osc52_fallback);
-        restore_path(original_path);
-        let _ = std::fs::remove_dir_all(&dir);
-
+        let (cmd, args) = exit_cmd(true);
+        let result = yank_to_clipboard_with(
+            "native tool success test",
+            &[(cmd, args)],
+            unreachable_osc52_fallback,
+        );
         assert!(result);
     }
 
-    #[cfg(unix)]
     #[test]
-    fn test_yank_to_clipboard_via_native_tool_nonzero_exit_falls_through_to_fallback() {
-        // Shadows `pbcopy`/`xclip`/`wl-copy` with fake scripts that spawn
-        // successfully but exit non-zero, so `child.wait().map(|s|
-        // s.success()).unwrap_or(false)` is `false` and the loop falls
-        // through to the OSC52 fallback instead of returning `true` early --
-        // the one branch `test_yank_to_clipboard_via_native_tool_success_*`
-        // above doesn't reach. The fake scripts never touch the real
-        // clipboard or a terminal; they just drain stdin and exit 1.
+    fn test_yank_to_clipboard_native_tool_nonzero_exit_falls_through_to_fallback() {
+        // A guaranteed-present command that exits non-zero makes
+        // `child.wait().map(|s| s.success())` false, so the loop falls through
+        // to the OSC52 fallback -- the branch the success test doesn't reach.
         let _lock = crate::config::PATH_ENV_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-
-        let dir = std::env::temp_dir().join("lev_test_fake_failing_clipboard_bins");
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        for name in ["pbcopy", "xclip", "wl-copy"] {
-            let script_path = dir.join(name);
-            std::fs::write(&script_path, "#!/bin/sh\ncat > /dev/null\nexit 1\n").unwrap();
-            use std::os::unix::fs::PermissionsExt;
-            let mut perms = std::fs::metadata(&script_path).unwrap().permissions();
-            perms.set_mode(0o755);
-            std::fs::set_permissions(&script_path, perms).unwrap();
-        }
-
         fn fallback_reached(_text: &str) -> bool {
             true
         }
-
-        let original_path = std::env::var_os("PATH");
-        unsafe {
-            std::env::set_var("PATH", &dir);
-        }
-        let result = yank_to_clipboard_via("nonzero exit test", fallback_reached);
-        restore_path(original_path);
-        let _ = std::fs::remove_dir_all(&dir);
-
-        // All three native tools "ran" but failed, so control must have
-        // reached the injected fallback for the result to be true.
+        let (cmd, args) = exit_cmd(false);
+        let result = yank_to_clipboard_with("nonzero exit test", &[(cmd, args)], fallback_reached);
+        // The native tool "ran" but failed, so control reached the fallback.
         assert!(result);
     }
 

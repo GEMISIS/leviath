@@ -14,6 +14,20 @@ use crate::commands::dashboard::theme::*;
 use crate::commands::dashboard::types::*;
 use crate::runstate;
 
+/// Replace a leading `home` prefix in `raw` with `~`. Split out so both the
+/// shortened and the raw (path-is-outside-home) branches are unit-testable on
+/// every platform: reaching the raw branch through the real render path needs a
+/// runs dir outside `$HOME`, which isn't portable (`std::env::temp_dir()` lives
+/// *under* the home directory on Windows, so it only ever hits the shortened
+/// branch there).
+fn shorten_home_path(raw: String, home: &str) -> String {
+    if !home.is_empty() && raw.starts_with(home) {
+        format!("~{}", &raw[home.len()..])
+    } else {
+        raw
+    }
+}
+
 impl Dashboard {
     pub(in crate::commands::dashboard) fn render_context_bar(
         &self,
@@ -332,11 +346,7 @@ impl Dashboard {
             let home = dirs::home_dir()
                 .map(|h| h.to_string_lossy().to_string())
                 .unwrap_or_default();
-            let shortened = if !home.is_empty() && raw.starts_with(&home) {
-                format!("~{}", &raw[home.len()..])
-            } else {
-                raw
-            };
+            let shortened = shorten_home_path(raw, &home);
             format!(" {} ", shortened)
         } else {
             String::new()
@@ -1108,74 +1118,35 @@ mod tests {
         let _ = std::fs::remove_dir_all(runstate::run_dir(run_id));
     }
 
-    #[cfg(unix)]
+    // The file-path hint's home-shortening logic is exercised directly against
+    // `shorten_home_path` rather than through a full render. Reaching the raw
+    // (path-outside-home) branch through the render path requires a runs dir
+    // outside `$HOME`, which isn't portable: `std::env::temp_dir()` lives *under*
+    // the home directory on Windows, and hard-coding `/tmp` is Unix-only.
     #[test]
-    fn render_content_pane_file_path_hint_shows_raw_path_when_outside_home() {
-        // `isolate_runs_dir_for_test` deliberately roots its temp runs dir
-        // under the real home directory (see its own doc comment), so every
-        // other test using it can only ever exercise the `~`-shortened
-        // branch of the file-path hint below. Point `LEVIATH_RUNS_DIR` at
-        // `/tmp` directly instead (outside `$HOME` on macOS/Linux, and much
-        // shorter than `std::env::temp_dir()`'s real path so the hint can't
-        // get clipped by the render width) to cover the other branch: the
-        // raw, non-shortened path.
-        let _lock = crate::runstate::RUNS_DIR_ENV_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let original_runs_dir = std::env::var_os("LEVIATH_RUNS_DIR");
-        let original_log_path = std::env::var_os("LEVIATH_DASHBOARD_LOG_PATH");
-
-        let home = dirs::home_dir().unwrap_or_default();
-        let base = std::path::PathBuf::from("/tmp/lvroh");
-        assert!(!base.starts_with(&home));
-        let _ = std::fs::remove_dir_all(&base);
-        let runs_dir = base.join("runs");
-        std::fs::create_dir_all(&runs_dir).unwrap();
-        unsafe {
-            std::env::set_var("LEVIATH_RUNS_DIR", &runs_dir);
-            std::env::set_var("LEVIATH_DASHBOARD_LOG_PATH", base.join("dashboard.log"));
-        }
-
-        let run_id = "t-oh";
-        let meta = runstate::RunMeta::new(
-            run_id.to_string(),
-            "agent".to_string(),
-            "/p".to_string(),
-            "task".to_string(),
-            None,
-            "/tmp".to_string(),
-            1,
+    fn shorten_home_path_replaces_home_prefix_with_tilde() {
+        assert_eq!(
+            shorten_home_path("/home/u/.leviath/runs/x".to_string(), "/home/u"),
+            "~/.leviath/runs/x"
         );
-        runstate::create_run(&meta).unwrap();
-        runstate::append_stage_output(run_id, 0, "hello output");
+    }
 
-        let mut agent = make_test_agent(run_id, AgentDisplayStatus::Active);
-        agent.is_run_state = true;
+    #[test]
+    fn shorten_home_path_keeps_raw_path_when_outside_home() {
+        // Path does not start with home -> raw branch.
+        assert_eq!(
+            shorten_home_path("/var/other/x".to_string(), "/home/u"),
+            "/var/other/x"
+        );
+    }
 
-        let backend = TestBackend::new(120, 40);
-        let mut terminal = Terminal::new(backend).unwrap();
-        let mut dash = make_test_dashboard();
-        dash.stage_content_mode = StageContentMode::Output;
-        terminal
-            .draw(|f| {
-                let area = Rect::new(0, 0, 100, 20);
-                dash.render_content_pane(f, area, &agent, 100);
-            })
-            .unwrap();
-
-        let content: String = terminal
-            .backend()
-            .buffer()
-            .content()
-            .iter()
-            .map(|c| c.symbol())
-            .collect();
-        assert!(content.contains("output.log"));
-        assert!(!content.contains('~'));
-
-        let _ = std::fs::remove_dir_all(&base);
-        runstate::restore_env_var("LEVIATH_RUNS_DIR", original_runs_dir);
-        runstate::restore_env_var("LEVIATH_DASHBOARD_LOG_PATH", original_log_path);
+    #[test]
+    fn shorten_home_path_keeps_raw_path_when_home_empty() {
+        // Empty home (dirs::home_dir() returned None) -> raw branch.
+        assert_eq!(
+            shorten_home_path("/anything/x".to_string(), ""),
+            "/anything/x"
+        );
     }
 
     #[test]
