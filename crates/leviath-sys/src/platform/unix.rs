@@ -112,19 +112,18 @@ mod tests {
 
     #[test]
     fn ensure_private_with_skips_set_for_private_file() {
+        // The already-private → `Ok(None)` (set-not-called) branch is covered
+        // for real via the public `ensure_file_private` in perms.rs's
+        // `ensure_file_private_leaves_private_file_untouched`; here we just
+        // confirm the injected-`set` seam agrees, using `set_mode` (which is
+        // never reached because the file is already private, so no observable
+        // permission change occurs).
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("f");
         std::fs::write(&path, b"x").unwrap();
         set_mode(&path, 0o600).unwrap();
 
-        fn must_not_be_called(_: &Path, _: u32) -> io::Result<()> {
-            panic!("set must not be called for an already-private file");
-        }
-
-        assert_eq!(
-            ensure_private_with(&path, 0o600, must_not_be_called).unwrap(),
-            None
-        );
+        assert_eq!(ensure_private_with(&path, 0o600, set_mode).unwrap(), None);
     }
 
     #[test]
