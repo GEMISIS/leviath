@@ -1,11 +1,13 @@
 //! Google Gemini provider implementation (via OpenAI-compatible endpoint).
 
-use crate::openai_compat::{build_openai_request_body, parse_openai_response, OpenAiSseStream};
+use crate::openai_compat::{
+    build_openai_request_body, parse_openai_response, send_chat_request, OpenAiSseStream,
+};
 #[cfg(test)]
 use crate::provider::FinishReason;
 use crate::provider::{
-    check_http_response, InferenceRequest, InferenceResponse, ModelCapabilities, ModelInfo,
-    Provider, ProviderConfig, ProviderError, Result, StreamChunk,
+    InferenceRequest, InferenceResponse, ModelCapabilities, ModelInfo, Provider, ProviderConfig,
+    ProviderError, Result, StreamChunk,
 };
 use crate::rate_limit::RateLimiter;
 use async_trait::async_trait;
@@ -109,49 +111,18 @@ impl Provider for GeminiProvider {
         let body = build_openai_request_body(&request);
         let url = format!("{}/chat/completions", self.base_url);
 
-        #[cfg(feature = "debug-http")]
-        {
-            let mut headers = reqwest::header::HeaderMap::new();
-            headers.insert(
-                "authorization",
-                format!("Bearer {}", self.api_key).parse().unwrap(),
-            );
-            headers.insert("content-type", "application/json".parse().unwrap());
-            let body_size = serde_json::to_vec(&body).map(|b| b.len()).unwrap_or(0);
-            crate::debug_http::log_request("gemini", "POST", &url, &headers, body_size);
-        }
-        #[cfg(feature = "debug-http")]
-        let start = std::time::Instant::now();
-
-        let response = self
-            .client
-            .post(&url)
-            .header("Authorization", format!("Bearer {}", self.api_key))
-            .header("Content-Type", "application/json")
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| {
-                #[cfg(feature = "debug-http")]
-                crate::debug_http::log_error("gemini", &url, &e.to_string());
-                ProviderError::RequestFailed(e.to_string())
-            })?;
-
-        #[cfg(feature = "debug-http")]
-        crate::debug_http::log_response(
+        let response = send_chat_request(
+            &self.client,
             "gemini",
             &url,
-            response.status().as_u16(),
-            response.headers(),
-            response.content_length(),
-            start.elapsed(),
-        );
-
-        let response = check_http_response(response, self.rate_limiter.as_ref()).await?;
-
-        if let Some(limiter) = &self.rate_limiter {
-            limiter.reset_backoff().await;
-        }
+            &[
+                ("Authorization", format!("Bearer {}", self.api_key)),
+                ("Content-Type", "application/json".to_string()),
+            ],
+            &body,
+            self.rate_limiter.as_ref(),
+        )
+        .await?;
 
         let response_body: serde_json::Value = response
             .json()
@@ -182,49 +153,18 @@ impl Provider for GeminiProvider {
         body["stream_options"] = serde_json::json!({ "include_usage": true });
         let url = format!("{}/chat/completions", self.base_url);
 
-        #[cfg(feature = "debug-http")]
-        {
-            let mut headers = reqwest::header::HeaderMap::new();
-            headers.insert(
-                "authorization",
-                format!("Bearer {}", self.api_key).parse().unwrap(),
-            );
-            headers.insert("content-type", "application/json".parse().unwrap());
-            let body_size = serde_json::to_vec(&body).map(|b| b.len()).unwrap_or(0);
-            crate::debug_http::log_request("gemini", "POST", &url, &headers, body_size);
-        }
-        #[cfg(feature = "debug-http")]
-        let start = std::time::Instant::now();
-
-        let response = self
-            .client
-            .post(&url)
-            .header("Authorization", format!("Bearer {}", self.api_key))
-            .header("Content-Type", "application/json")
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| {
-                #[cfg(feature = "debug-http")]
-                crate::debug_http::log_error("gemini", &url, &e.to_string());
-                ProviderError::RequestFailed(e.to_string())
-            })?;
-
-        #[cfg(feature = "debug-http")]
-        crate::debug_http::log_response(
+        let response = send_chat_request(
+            &self.client,
             "gemini",
             &url,
-            response.status().as_u16(),
-            response.headers(),
-            response.content_length(),
-            start.elapsed(),
-        );
-
-        let response = check_http_response(response, self.rate_limiter.as_ref()).await?;
-
-        if let Some(limiter) = &self.rate_limiter {
-            limiter.reset_backoff().await;
-        }
+            &[
+                ("Authorization", format!("Bearer {}", self.api_key)),
+                ("Content-Type", "application/json".to_string()),
+            ],
+            &body,
+            self.rate_limiter.as_ref(),
+        )
+        .await?;
 
         let byte_stream = response.bytes_stream();
         let stream = OpenAiSseStream::new(byte_stream);
