@@ -183,7 +183,10 @@ async fn execute_with_shutdown(
     if let Some(ready) = ready {
         // A test-only observer failing to receive (e.g. it already gave up
         // after a timeout) shouldn't stop the server from starting for real.
-        let _ = ready.send(listener.local_addr()?);
+        let local_addr = listener
+            .local_addr()
+            .expect("infallible: a freshly bound TcpListener always has a local address");
+        let _ = ready.send(local_addr);
     }
     // axum::serve with graceful shutdown always returns Ok(()) — discard the
     // infallible Result so LLVM-cov does not instrument an unreachable Err branch.
@@ -982,10 +985,10 @@ prompt = "Run"
             Box::pin(shutdown_fut),
             Some(ready_tx),
         ));
-        let connected = match ready_rx.await {
-            Ok(addr) => tokio::net::TcpStream::connect(addr).await.is_ok(),
-            Err(_) => false,
-        };
+        let addr = ready_rx
+            .await
+            .expect("server should report its bound address");
+        let connected = tokio::net::TcpStream::connect(addr).await.is_ok();
         drop(guard);
         assert_connected_with_bad_api_key(connected);
 
@@ -1043,6 +1046,36 @@ prompt = "Run"
             .expect("server should report its bound address");
 
         // Send shutdown signal and wait for execute to return Ok.
+        let _ = shutdown_tx.send(());
+        let result = tokio::time::timeout(std::time::Duration::from_secs(5), handle)
+            .await
+            .expect("timed out waiting for execute_with_shutdown to return")
+            .expect("task panicked");
+        assert_execute_with_shutdown_returned_ok(&result);
+    }
+
+    /// Covers the `ready: None` fall-through of the `if let Some(ready)` block
+    /// (line 190): a successful bind with no ready-observer, shut down
+    /// gracefully. Every other binding test passes `Some(ready)`, and every
+    /// `None` caller (`execute()`) in other tests fails before binding, so this
+    /// is the only path that reaches the block's None continuation.
+    #[tokio::test]
+    async fn execute_with_shutdown_no_ready_observer_returns_ok() {
+        let _guard = crate::config::isolate_config_path_for_test("serve-mod-no-ready");
+        let args = ServeArgs {
+            port: 0,
+            host: "127.0.0.1".to_string(),
+            cors: "*".to_string(),
+        };
+
+        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+        let shutdown_fut = async move {
+            let _ = shutdown_rx.await;
+        };
+
+        let handle = tokio::spawn(execute_with_shutdown(args, Box::pin(shutdown_fut), None));
+        // Give the server a moment to bind before shutting down.
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         let _ = shutdown_tx.send(());
         let result = tokio::time::timeout(std::time::Duration::from_secs(5), handle)
             .await

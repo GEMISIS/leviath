@@ -506,6 +506,15 @@ prompt = "Plan the work"
         assert_open_log_files_fails(&result);
     }
 
+    /// Exercises the `?` error path in `RealSpawnAgentIo::parse_manifest`
+    /// (the `parse_manifest(content)?` propagation) by feeding it invalid TOML.
+    #[test]
+    fn real_spawn_agent_io_parse_manifest_propagates_error() {
+        let io = RealSpawnAgentIo;
+        let result = io.parse_manifest("this is not = = = valid toml [[[");
+        assert!(result.is_err());
+    }
+
     #[test]
     #[should_panic(expected = "opening a log file under a missing directory should fail")]
     fn assert_open_log_files_fails_panics_when_ok() {
@@ -965,6 +974,18 @@ prompt = "Plan the work"
         // Give the spawned child a moment to exit cleanly.
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         let _ = std::fs::remove_dir_all(runstate::run_dir(&run_id));
+    }
+
+    /// Exercises the `?` error propagation in `MockSpawnAgentIo::parse_manifest`
+    /// (fail_on is not `ParseManifest`, so the real parser runs and errors on
+    /// invalid TOML instead of the canned mock failure).
+    #[test]
+    fn mock_spawn_agent_io_parse_manifest_propagates_error() {
+        let io = MockSpawnAgentIo {
+            fail_on: FailOn::None,
+        };
+        let result = io.parse_manifest("this is not = = = valid toml [[[");
+        assert!(result.is_err());
     }
 
     // ─── list_agents ──────────────────────────────────────────────────────────
