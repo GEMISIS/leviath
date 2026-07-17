@@ -1452,6 +1452,18 @@ mod tests {
         }
     }
 
+    #[test]
+    fn fan_out_provider_trait_surface() {
+        use leviath_providers::Provider;
+        let p = FanOutProvider {
+            split: std::sync::Mutex::new(None),
+        };
+        assert_eq!(p.count_tokens("abcd", "m"), 1);
+        assert_eq!(p.max_context_tokens("m"), 100_000);
+        assert_eq!(p.name(), "anthropic");
+        let _ = p.capabilities("m");
+    }
+
     #[tokio::test]
     async fn run_stage_loop_fan_out_stage_merges_then_completes() {
         // A fan_out stage splits into 2 workers, then jumps into its merge stage.
