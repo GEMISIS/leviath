@@ -119,6 +119,48 @@ impl ToolRegistry {
     /// Execute a tool by name, dispatching to built-ins or MCP.
     #[allow(dead_code)]
     pub async fn call(&self, name: &str, arguments: serde_json::Value) -> String {
+        RegistryToolCaller::from_registry(self)
+            .dispatch(name, arguments)
+            .await
+    }
+
+    /// Shut down all MCP connections.
+    pub async fn shutdown(&self) {
+        let mut mcp = self.mcp.lock().await;
+        // `shutdown_all` always returns `Ok(())` in the current `leviath_mcp`
+        // implementation (errors inside each client are silently discarded).
+        // We discard the result here rather than branch on a gap that can
+        // never be exercised without modifying `leviath-mcp` itself.
+        let _ = mcp.shutdown_all().await;
+    }
+}
+
+// ─── StageToolSource seam (Phase 3 decoupling) ───────────────────────────────
+
+use crate::commands::run::tool_source::{StageToolSource, ToolCaller};
+
+/// Concrete [`ToolCaller`] backed by a [`ToolRegistry`]'s executors.
+///
+/// Holds only the (Arc-backed) state a single dispatch needs, so it is cheap to
+/// construct and clone and is `'static + Send + Sync` — fan-out workers move it
+/// into detached tasks. The dispatch logic lives here so that
+/// [`ToolRegistry::call`] and the [`ToolCaller`] impl share one implementation.
+struct RegistryToolCaller {
+    builtins: Arc<BuiltinTools>,
+    mcp: Arc<Mutex<ToolExecutor>>,
+    builtin_names: HashSet<String>,
+}
+
+impl RegistryToolCaller {
+    fn from_registry(reg: &ToolRegistry) -> Self {
+        Self {
+            builtins: reg.builtins.clone(),
+            mcp: reg.mcp.clone(),
+            builtin_names: reg.builtin_names.clone(),
+        }
+    }
+
+    async fn dispatch(&self, name: &str, arguments: serde_json::Value) -> String {
         if self.builtin_names.contains(name) {
             self.builtins.execute(name, arguments).await
         } else {
@@ -130,15 +172,22 @@ impl ToolRegistry {
             }
         }
     }
+}
 
-    /// Shut down all MCP connections.
-    pub async fn shutdown(&self) {
-        let mut mcp = self.mcp.lock().await;
-        // `shutdown_all` always returns `Ok(())` in the current `leviath_mcp`
-        // implementation (errors inside each client are silently discarded).
-        // We discard the result here rather than branch on a gap that can
-        // never be exercised without modifying `leviath-mcp` itself.
-        let _ = mcp.shutdown_all().await;
+#[async_trait::async_trait]
+impl ToolCaller for RegistryToolCaller {
+    async fn call(&self, name: &str, arguments: serde_json::Value) -> String {
+        self.dispatch(name, arguments).await
+    }
+}
+
+impl StageToolSource for ToolRegistry {
+    fn all_tool_defs(&self) -> Vec<Tool> {
+        ToolRegistry::all_tool_defs(self)
+    }
+
+    fn tool_caller(&self) -> Arc<dyn ToolCaller> {
+        Arc::new(RegistryToolCaller::from_registry(self))
     }
 }
 

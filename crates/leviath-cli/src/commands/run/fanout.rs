@@ -22,7 +22,8 @@ use leviath_runtime::{
 
 use super::io::RunIO;
 use super::manifest::parse_manifest;
-use crate::tools::{spawn_child_agent, ToolRegistry};
+use super::tool_source::StageToolSource;
+use crate::tools::spawn_child_agent;
 
 /// A resolved fan-out worker: the blueprint to run and the stage to enter at.
 #[derive(Debug, Clone)]
@@ -215,11 +216,12 @@ fn is_interaction_tool(name: &str) -> bool {
 }
 
 /// Filter the full tool set down to a stage's `available_tools` allowlist.
-fn filter_tools(tr: &ToolRegistry, filter: &[String]) -> Vec<leviath_providers::Tool> {
+fn filter_tools(source: &dyn StageToolSource, filter: &[String]) -> Vec<leviath_providers::Tool> {
     if filter.is_empty() {
         return Vec::new();
     }
-    tr.all_tool_defs()
+    source
+        .all_tool_defs()
         .into_iter()
         .filter(|t| filter.iter().any(|f| f == &t.name))
         .collect()
@@ -267,7 +269,7 @@ pub async fn run_fan_out_stage(
     blueprint: &Blueprint,
     config: &FanOutConfig,
     registry: &HashMap<String, Blueprint>,
-    tool_registry: &Arc<ToolRegistry>,
+    tool_source: &dyn StageToolSource,
     provider_name: &str,
     model_name: &str,
     io: &mut dyn RunIO,
@@ -333,7 +335,9 @@ pub async fn run_fan_out_stage(
         .find_stage(&worker.entry_stage)
         .ok_or_else(|| anyhow::anyhow!("worker entry stage '{}' not found", worker.entry_stage))?;
     let worker_max_iter = worker_stage.max_iterations.unwrap_or(20);
-    let worker_tools = filter_tools(tool_registry, &worker_stage.available_tools);
+    let worker_tools = filter_tools(tool_source, &worker_stage.available_tools);
+    // Owned, 'static tool executor cloned into each detached worker task.
+    let tool_caller = tool_source.tool_caller();
     let (wp, wm) =
         resolve_worker_model(engine, &worker_stage.model, (provider_name, model_name)).await;
 
@@ -380,7 +384,7 @@ pub async fn run_fan_out_stage(
     for (cid, ce) in children {
         let engine = engine.clone();
         let sem = sem.clone();
-        let tool_registry = tool_registry.clone();
+        let tool_caller = tool_caller.clone();
         let worker_tools = worker_tools.clone();
         let (wp, wm) = (wp.clone(), wm.clone());
         set.spawn(async move {
@@ -399,11 +403,11 @@ pub async fn run_fan_out_stage(
                         .cloned(),
                 ));
 
-            let tr = tool_registry.clone();
+            let tool_caller = tool_caller.clone();
             let exec_cw = shared_cw.clone();
             let mut exec =
                 move |calls: Vec<leviath_providers::ToolCall>| -> ToolResultsFuture<'static> {
-                    let tr = tr.clone();
+                    let tool_caller = tool_caller.clone();
                     let exec_cw = exec_cw.clone();
                     Box::pin(async move {
                         let mut out = Vec::new();
@@ -421,7 +425,7 @@ pub async fn run_fan_out_stage(
                                  output for the merge stage to resolve."
                                     .to_string()
                             } else {
-                                tr.call(&c.name, c.arguments.clone()).await
+                                tool_caller.call(&c.name, c.arguments.clone()).await
                             };
                             out.push((c.id, r));
                         }
@@ -539,6 +543,7 @@ pub async fn run_fan_out_stage(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tools::ToolRegistry;
     use leviath_core::blueprint::{ModelConfig, Stage, WorkerFailurePolicy};
     use leviath_core::layout::{ContextLayout, RegionDefinition};
     use leviath_core::RegionKind;
@@ -927,7 +932,7 @@ model = { models = [{ provider = "mock", model = "m" }] }
             &bp,
             &base_config(),
             &reg,
-            &tools,
+            tools.as_ref(),
             "mock",
             "m",
             &mut io,
@@ -971,7 +976,15 @@ model = { models = [{ provider = "mock", model = "m" }] }
         reg.insert(bp.name.clone(), bp.clone());
         let mut io = super::super::io::mock::MockIO::new();
         let outcome = run_fan_out_stage(
-            &engine, parent, &bp, &config, &reg, &tools, "mock", "m", &mut io,
+            &engine,
+            parent,
+            &bp,
+            &config,
+            &reg,
+            tools.as_ref(),
+            "mock",
+            "m",
+            &mut io,
         )
         .await
         .unwrap();
@@ -989,7 +1002,15 @@ model = { models = [{ provider = "mock", model = "m" }] }
         reg.insert(bp.name.clone(), bp.clone());
         let mut io = super::super::io::mock::MockIO::new();
         let outcome = run_fan_out_stage(
-            &engine, parent, &bp, &config, &reg, &tools, "mock", "m", &mut io,
+            &engine,
+            parent,
+            &bp,
+            &config,
+            &reg,
+            tools.as_ref(),
+            "mock",
+            "m",
+            &mut io,
         )
         .await
         .unwrap();
@@ -1017,7 +1038,15 @@ model = { models = [{ provider = "mock", model = "m" }] }
         reg.insert(bp.name.clone(), bp.clone());
         let mut io = super::super::io::mock::MockIO::new();
         let outcome = run_fan_out_stage(
-            &engine, parent, &bp, &fo, &reg, &tools, "mock", "m", &mut io,
+            &engine,
+            parent,
+            &bp,
+            &fo,
+            &reg,
+            tools.as_ref(),
+            "mock",
+            "m",
+            &mut io,
         )
         .await
         .unwrap();
@@ -1050,7 +1079,15 @@ model = { models = [{ provider = "mock", model = "m" }] }
         reg.insert(bp.name.clone(), bp.clone());
         let mut io = super::super::io::mock::MockIO::new();
         let outcome = run_fan_out_stage(
-            &engine, parent, &bp, &fo, &reg, &tools, "mock", "m", &mut io,
+            &engine,
+            parent,
+            &bp,
+            &fo,
+            &reg,
+            tools.as_ref(),
+            "mock",
+            "m",
+            &mut io,
         )
         .await
         .unwrap();
@@ -1086,7 +1123,7 @@ model = { models = [{ provider = "mock", model = "m" }] }
             &bp,
             &base_config(),
             &reg,
-            &tools,
+            tools.as_ref(),
             "mock",
             "m",
             &mut io,
@@ -1133,7 +1170,15 @@ model = { models = [{ provider = "mock", model = "m" }] }
         let mut io = super::super::io::mock::MockIO::new();
 
         let outcome = run_fan_out_stage(
-            &engine, parent, &bp, &fo, &reg, &tools, "mock", "m", &mut io,
+            &engine,
+            parent,
+            &bp,
+            &fo,
+            &reg,
+            tools.as_ref(),
+            "mock",
+            "m",
+            &mut io,
         )
         .await
         .unwrap();
@@ -1197,7 +1242,15 @@ model = { models = [{ provider = "mock", model = "m" }] }
         let mut io = super::super::io::mock::MockIO::new();
 
         run_fan_out_stage(
-            &engine, parent, &bp, &fo, &reg, &tools, "mock", "m", &mut io,
+            &engine,
+            parent,
+            &bp,
+            &fo,
+            &reg,
+            tools.as_ref(),
+            "mock",
+            "m",
+            &mut io,
         )
         .await
         .unwrap();
@@ -1271,7 +1324,15 @@ model = { models = [{ provider = "mock", model = "m" }] }
         let mut io = super::super::io::mock::MockIO::new();
 
         let outcome = run_fan_out_stage(
-            &engine, parent, &bp, &fo, &reg, &tools, "mock", "m", &mut io,
+            &engine,
+            parent,
+            &bp,
+            &fo,
+            &reg,
+            tools.as_ref(),
+            "mock",
+            "m",
+            &mut io,
         )
         .await
         .unwrap();
@@ -1311,7 +1372,7 @@ model = { models = [{ provider = "mock", model = "m" }] }
             &bp,
             &base_config(),
             &reg,
-            &tools,
+            tools.as_ref(),
             "mock",
             "m",
             &mut io,
@@ -1347,7 +1408,7 @@ model = { models = [{ provider = "mock", model = "m" }] }
             &bp,
             &base_config(),
             &reg,
-            &tools,
+            tools.as_ref(),
             "mock",
             "m",
             &mut io,

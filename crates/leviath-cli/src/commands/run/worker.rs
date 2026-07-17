@@ -18,7 +18,7 @@ use super::helpers::{
 };
 use super::io::{ConsoleIO, RunIO};
 use super::manifest::{find_manifest, parse_manifest};
-use super::session::build_provider_registry;
+use super::session::build_provider_registry_from_config;
 use super::WorkerArgs;
 
 /// Tracks the current stage index for tool-activity logging from the executor closure.
@@ -1127,7 +1127,7 @@ pub async fn execute_worker(args: WorkerArgs) -> anyhow::Result<()> {
     meta.touch();
     let _ = runstate::write_meta(&meta);
 
-    let result = run_worker_inner(&args, &mut meta, build_provider_registry).await;
+    let result = run_worker_inner(&args, &mut meta, build_provider_registry_from_config).await;
 
     match &result {
         // A user abort sets `Cancelled` mid-run (via on_cancel); don't clobber
@@ -1328,7 +1328,7 @@ async fn run_worker_inner(
         engine: engine.clone(),
         entity,
         pool: &mut pool,
-        tool_registry: &tool_registry,
+        tool_source: tool_registry.as_ref(),
         current_stage_name: current_stage_name.clone(),
         current_stage_perms: current_stage_perms.clone(),
         current_stage_idx: current_stage_idx.clone(),

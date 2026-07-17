@@ -21,6 +21,7 @@ pub mod io;
 mod manifest;
 mod session;
 mod stages;
+pub mod tool_source;
 mod worker;
 
 use clap::Args;
@@ -30,7 +31,10 @@ use crate::runstate;
 
 // Re-export public API used by other commands
 pub use manifest::parse_manifest_public;
-pub use session::build_provider_registry;
+pub use session::{
+    build_provider_registry, build_provider_registry_from_config, provider_creds_from_config,
+    ProviderCreds,
+};
 
 #[derive(Args)]
 pub struct RunArgs {

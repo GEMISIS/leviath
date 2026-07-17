@@ -3,7 +3,7 @@
 use clap::{Args, Subcommand};
 use leviath_providers::{ModelCapabilities, ModelInfo};
 
-use super::run::build_provider_registry;
+use super::run::build_provider_registry_from_config;
 use crate::config::Config;
 
 // ─── CLI types ────────────────────────────────────────────────────────────────
@@ -48,8 +48,8 @@ pub struct ShowArgs {
 
 pub async fn execute(args: ModelsArgs) -> anyhow::Result<()> {
     match args.command {
-        ModelsCommand::List(a) => list_with_registry(a, &build_provider_registry).await,
-        ModelsCommand::Show(a) => show_with_registry(a, &build_provider_registry).await,
+        ModelsCommand::List(a) => list_with_registry(a, &build_provider_registry_from_config).await,
+        ModelsCommand::Show(a) => show_with_registry(a, &build_provider_registry_from_config).await,
     }
 }
 
@@ -1160,7 +1160,7 @@ mod tests {
             remote: false,
             provider: None,
         };
-        let result = list_with_registry(args, &build_provider_registry).await;
+        let result = list_with_registry(args, &build_provider_registry_from_config).await;
         assert!(result.is_ok());
     }
 
@@ -1173,7 +1173,7 @@ mod tests {
             remote: false,
             provider: Some("anthropic".to_string()),
         };
-        let result = list_with_registry(args, &build_provider_registry).await;
+        let result = list_with_registry(args, &build_provider_registry_from_config).await;
         assert!(result.is_ok());
     }
 
@@ -1187,7 +1187,7 @@ mod tests {
             provider: Some("no-such-provider".to_string()),
         };
         // Should print "No models found." and still succeed, not error.
-        let result = list_with_registry(args, &build_provider_registry).await;
+        let result = list_with_registry(args, &build_provider_registry_from_config).await;
         assert!(result.is_ok());
     }
 
@@ -1202,7 +1202,7 @@ mod tests {
             remote: false,
             provider: None,
         };
-        let result = show_with_registry(args, &build_provider_registry).await;
+        let result = show_with_registry(args, &build_provider_registry_from_config).await;
         assert!(result.is_ok());
     }
 
@@ -1217,7 +1217,7 @@ mod tests {
             provider: None,
         };
         // Falls through all lookup tiers; must not error even when not found.
-        let result = show_with_registry(args, &build_provider_registry).await;
+        let result = show_with_registry(args, &build_provider_registry_from_config).await;
         assert!(result.is_ok());
     }
 
@@ -1233,7 +1233,7 @@ mod tests {
             remote: true,
             provider: None,
         };
-        let result = show_with_registry(args, &build_provider_registry).await;
+        let result = show_with_registry(args, &build_provider_registry_from_config).await;
         assert!(result.is_ok());
     }
 
