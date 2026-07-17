@@ -3,10 +3,10 @@
 //! OpenRouter provides access to multiple models through a unified API.
 //! Uses OpenAI-compatible format with additional headers.
 
-use crate::openai_compat::{parse_openai_response, OpenAiSseStream};
+use crate::openai_compat::{parse_openai_response, send_chat_request, OpenAiSseStream};
 use crate::provider::{
-    check_http_response, InferenceRequest, InferenceResponse, ModelCapabilities, ModelInfo,
-    Provider, ProviderConfig, ProviderError, Result, StreamChunk,
+    InferenceRequest, InferenceResponse, ModelCapabilities, ModelInfo, Provider, ProviderConfig,
+    ProviderError, Result, StreamChunk,
 };
 use crate::rate_limit::RateLimiter;
 use async_trait::async_trait;
@@ -155,51 +155,19 @@ impl Provider for OpenRouterProvider {
         let body = self.build_request_body(&request);
         let url = format!("{}/chat/completions", self.base_url);
 
-        #[cfg(feature = "debug-http")]
-        {
-            let mut headers = reqwest::header::HeaderMap::new();
-            headers.insert(
-                "authorization",
-                format!("Bearer {}", self.api_key).parse().unwrap(),
-            );
-            headers.insert("http-referer", "https://leviath.dev".parse().unwrap());
-            headers.insert("content-type", "application/json".parse().unwrap());
-            let body_size = serde_json::to_vec(&body).map(|b| b.len()).unwrap_or(0);
-            crate::debug_http::log_request("openrouter", "POST", &url, &headers, body_size);
-        }
-        #[cfg(feature = "debug-http")]
-        let start = std::time::Instant::now();
-
-        let response = self
-            .client
-            .post(&url)
-            .header("Authorization", format!("Bearer {}", self.api_key))
-            .header("HTTP-Referer", "https://leviath.dev")
-            .header("Content-Type", "application/json")
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| {
-                #[cfg(feature = "debug-http")]
-                crate::debug_http::log_error("openrouter", &url, &e.to_string());
-                ProviderError::RequestFailed(e.to_string())
-            })?;
-
-        #[cfg(feature = "debug-http")]
-        crate::debug_http::log_response(
+        let response = send_chat_request(
+            &self.client,
             "openrouter",
             &url,
-            response.status().as_u16(),
-            response.headers(),
-            response.content_length(),
-            start.elapsed(),
-        );
-
-        let response = check_http_response(response, self.rate_limiter.as_ref()).await?;
-
-        if let Some(limiter) = &self.rate_limiter {
-            limiter.reset_backoff().await;
-        }
+            &[
+                ("Authorization", format!("Bearer {}", self.api_key)),
+                ("HTTP-Referer", "https://leviath.dev".to_string()),
+                ("Content-Type", "application/json".to_string()),
+            ],
+            &body,
+            self.rate_limiter.as_ref(),
+        )
+        .await?;
 
         let response_body: serde_json::Value = response
             .json()
@@ -229,51 +197,19 @@ impl Provider for OpenRouterProvider {
         body["stream"] = serde_json::Value::Bool(true);
         let url = format!("{}/chat/completions", self.base_url);
 
-        #[cfg(feature = "debug-http")]
-        {
-            let mut headers = reqwest::header::HeaderMap::new();
-            headers.insert(
-                "authorization",
-                format!("Bearer {}", self.api_key).parse().unwrap(),
-            );
-            headers.insert("http-referer", "https://leviath.dev".parse().unwrap());
-            headers.insert("content-type", "application/json".parse().unwrap());
-            let body_size = serde_json::to_vec(&body).map(|b| b.len()).unwrap_or(0);
-            crate::debug_http::log_request("openrouter", "POST", &url, &headers, body_size);
-        }
-        #[cfg(feature = "debug-http")]
-        let start = std::time::Instant::now();
-
-        let response = self
-            .client
-            .post(&url)
-            .header("Authorization", format!("Bearer {}", self.api_key))
-            .header("HTTP-Referer", "https://leviath.dev")
-            .header("Content-Type", "application/json")
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| {
-                #[cfg(feature = "debug-http")]
-                crate::debug_http::log_error("openrouter", &url, &e.to_string());
-                ProviderError::RequestFailed(e.to_string())
-            })?;
-
-        #[cfg(feature = "debug-http")]
-        crate::debug_http::log_response(
+        let response = send_chat_request(
+            &self.client,
             "openrouter",
             &url,
-            response.status().as_u16(),
-            response.headers(),
-            response.content_length(),
-            start.elapsed(),
-        );
-
-        let response = check_http_response(response, self.rate_limiter.as_ref()).await?;
-
-        if let Some(limiter) = &self.rate_limiter {
-            limiter.reset_backoff().await;
-        }
+            &[
+                ("Authorization", format!("Bearer {}", self.api_key)),
+                ("HTTP-Referer", "https://leviath.dev".to_string()),
+                ("Content-Type", "application/json".to_string()),
+            ],
+            &body,
+            self.rate_limiter.as_ref(),
+        )
+        .await?;
 
         // Reuse OpenAI SSE parser since the format is identical
         let byte_stream = response.bytes_stream();

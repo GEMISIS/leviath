@@ -4,11 +4,83 @@
 //! OpenAI Chat Completions format.
 
 use crate::provider::{
-    parse_openai_finish_reason, ContentBlock, InferenceRequest, InferenceResponse, MessageContent,
-    ProviderError, Result, StreamChunk, TokenUsage, ToolCall, ToolCallDelta,
+    check_http_response, parse_openai_finish_reason, ContentBlock, InferenceRequest,
+    InferenceResponse, MessageContent, ProviderError, Result, StreamChunk, TokenUsage, ToolCall,
+    ToolCallDelta,
 };
+use crate::rate_limit::RateLimiter;
 use futures_core::Stream;
 use std::pin::Pin;
+
+/// Send an OpenAI-compatible chat request and return the checked response.
+///
+/// Consolidates the send-and-handle lifecycle shared by every
+/// OpenAI-compatible provider: optional `debug-http` request logging,
+/// the `POST` with the given headers and JSON body, transport-error
+/// mapping (with `debug-http` error logging), `debug-http` response
+/// logging, `check_http_response`, and rate-limiter backoff reset on
+/// success. Callers remain responsible for `limiter.acquire()` up front
+/// and for consuming the returned `reqwest::Response` (parsing JSON and
+/// recording tokens for `infer`, or `bytes_stream()` for `infer_stream`).
+///
+/// `headers` are applied both to the outgoing request and (feature-gated)
+/// to the logged header map, so the wire request and the debug log stay
+/// in sync.
+#[cfg_attr(not(feature = "debug-http"), allow(unused_variables))]
+pub async fn send_chat_request(
+    client: &reqwest::Client,
+    provider_name: &str,
+    url: &str,
+    headers: &[(&str, String)],
+    body: &serde_json::Value,
+    limiter: Option<&RateLimiter>,
+) -> Result<reqwest::Response> {
+    #[cfg(feature = "debug-http")]
+    {
+        let mut header_map = reqwest::header::HeaderMap::new();
+        for (name, value) in headers {
+            if let (Ok(header_name), Ok(header_value)) = (
+                reqwest::header::HeaderName::from_bytes(name.as_bytes()),
+                value.parse::<reqwest::header::HeaderValue>(),
+            ) {
+                header_map.insert(header_name, header_value);
+            }
+        }
+        let body_size = serde_json::to_vec(body).map(|b| b.len()).unwrap_or(0);
+        crate::debug_http::log_request(provider_name, "POST", url, &header_map, body_size);
+    }
+    #[cfg(feature = "debug-http")]
+    let start = std::time::Instant::now();
+
+    let mut builder = client.post(url);
+    for (name, value) in headers {
+        builder = builder.header(*name, value);
+    }
+
+    let response = builder.json(body).send().await.map_err(|e| {
+        #[cfg(feature = "debug-http")]
+        crate::debug_http::log_error(provider_name, url, &e.to_string());
+        ProviderError::RequestFailed(e.to_string())
+    })?;
+
+    #[cfg(feature = "debug-http")]
+    crate::debug_http::log_response(
+        provider_name,
+        url,
+        response.status().as_u16(),
+        response.headers(),
+        response.content_length(),
+        start.elapsed(),
+    );
+
+    let response = check_http_response(response, limiter).await?;
+
+    if let Some(limiter) = limiter {
+        limiter.reset_backoff().await;
+    }
+
+    Ok(response)
+}
 
 /// Build the JSON request body for the OpenAI Chat Completions API.
 pub fn build_openai_request_body(request: &InferenceRequest) -> serde_json::Value {
