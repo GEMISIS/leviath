@@ -503,12 +503,7 @@ impl Dashboard {
             return;
         }
         // Kill the worker process first if it is still running
-        #[cfg(unix)]
-        if _pid > 0 {
-            unsafe {
-                libc::kill(_pid as libc::pid_t, libc::SIGTERM);
-            }
-        }
+        leviath_sys::terminate(_pid);
         // Remove run directory
         let run_dir = runstate::run_dir(&id);
         if let Err(e) = std::fs::remove_dir_all(&run_dir) {

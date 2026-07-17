@@ -29,4 +29,4 @@ pub mod perms;
 pub mod process;
 
 pub use perms::{ensure_file_private, secure_dir_perms, secure_file_perms};
-pub use process::configure_detached;
+pub use process::{configure_detached, terminate};

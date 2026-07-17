@@ -361,12 +361,7 @@ pub(super) async fn kill_agent(
     })?;
 
     // Kill the process
-    #[cfg(unix)]
-    {
-        unsafe {
-            libc::kill(meta.pid as i32, libc::SIGTERM);
-        }
-    }
+    leviath_sys::terminate(meta.pid);
 
     // Update status
     let mut meta = meta;
@@ -378,12 +373,7 @@ pub(super) async fn kill_agent(
     let runs = runstate::list_runs();
     for child in runs {
         if child.parent_run_id.as_deref() == Some(&id) {
-            #[cfg(unix)]
-            {
-                unsafe {
-                    libc::kill(child.pid as i32, libc::SIGTERM);
-                }
-            }
+            leviath_sys::terminate(child.pid);
             let mut child = child;
             child.status = RunStatus::Cancelled;
             child.touch();

@@ -385,12 +385,7 @@ impl Dashboard {
                 let is_run_state = agent.is_run_state;
                 let was_waiting = matches!(agent.status, AgentDisplayStatus::Waiting);
                 if is_run_state {
-                    #[cfg(unix)]
-                    if _pid > 0 {
-                        unsafe {
-                            libc::kill(_pid as libc::pid_t, libc::SIGTERM);
-                        }
-                    }
+                    leviath_sys::terminate(_pid);
                     kill_write_cancelled(&agent_id);
                     if was_waiting {
                         interaction::clear_interaction(&agent_id);
@@ -503,12 +498,7 @@ impl Dashboard {
             ) {
                 let agent_id = agent.id.clone();
                 if agent.is_run_state {
-                    #[cfg(unix)]
-                    if agent.pid > 0 {
-                        unsafe {
-                            libc::kill(agent.pid as libc::pid_t, libc::SIGTERM);
-                        }
-                    }
+                    leviath_sys::terminate(agent.pid);
                     kill_write_cancelled(&agent_id);
                     if matches!(agent.status, AgentDisplayStatus::Waiting) {
                         interaction::clear_interaction(&agent_id);
@@ -544,12 +534,7 @@ impl Dashboard {
             ) {
                 let agent_id = agent.id.clone();
                 if agent.is_run_state {
-                    #[cfg(unix)]
-                    if agent.pid > 0 {
-                        unsafe {
-                            libc::kill(agent.pid as libc::pid_t, libc::SIGTERM);
-                        }
-                    }
+                    leviath_sys::terminate(agent.pid);
                     kill_write_cancelled(&agent_id);
                     if matches!(agent.status, AgentDisplayStatus::Waiting) {
                         interaction::clear_interaction(&agent_id);
