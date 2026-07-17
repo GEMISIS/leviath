@@ -1870,7 +1870,7 @@ mode = "autonomous"
                 .options
                 .iter()
                 .find(|o| o.starts_with(prefix))
-                .unwrap_or_else(|| panic!("a {} option must exist", prefix))
+                .expect("interaction-point option with the requested prefix must exist")
                 .clone()
         };
         let approve = opt("Approve");
@@ -2566,6 +2566,112 @@ compact_count = { kind = "sliding_window", max_items = 20, max_tokens = 3000, st
                 max_items: 20,
                 eviction_strategy: EvictionStrategy::Compact { compact_count: 7 },
             }
+        );
+    }
+
+    #[test]
+    fn parse_manifest_tool_routing_override_non_string_value_is_skipped() {
+        // A non-string override value fails `region_val.as_str()` and is
+        // skipped, exercising the `if let Some(region_name)` false path; the
+        // string-valued override is still inserted.
+        let toml = r#"
+[agent]
+name = "routing-nonstring"
+
+[stages.main]
+mode = "autonomous"
+
+[stages.main.tool_routing]
+default_region = "temp"
+
+[stages.main.tool_routing.overrides]
+read_file = "files"
+write_file = 123
+"#;
+        let bp = parse_manifest(toml).unwrap();
+        let stage = bp.find_stage("main").unwrap();
+        let routing = stage.tool_result_routing.as_ref().unwrap();
+        assert_eq!(
+            routing.tool_overrides.get("read_file").map(|s| s.as_str()),
+            Some("files")
+        );
+        assert!(!routing.tool_overrides.contains_key("write_file"));
+    }
+
+    #[test]
+    fn parse_manifest_security_all_branches() {
+        // Agent-level [security]: pointer_mode, filter_mode = false (→ None),
+        // and a non-empty degradation list. Stage-level [security]: a string
+        // filter_mode. Together these exercise every branch of
+        // parse_security_config.
+        let toml = r#"
+[agent]
+name = "sec-all-branches"
+
+[security]
+taint_tracking = false
+pointer_mode = true
+filter_mode = false
+degradation = ["pointer", "filter", "not-a-real-mode"]
+
+[stages.a]
+mode = "autonomous"
+
+[stages.a.security]
+filter_mode = "structured"
+
+[stages.b]
+mode = "autonomous"
+
+[stages.c]
+mode = "autonomous"
+
+[stages.c.security]
+filter_mode = true
+"#;
+        let bp = parse_manifest(toml).unwrap();
+        let agent_sec = bp.security.as_ref().unwrap();
+        assert!(!agent_sec.taint_tracking);
+        assert!(agent_sec.pointer_mode);
+        // filter_mode = false → explicitly disabled.
+        assert!(agent_sec.filter_mode.is_none());
+        // Only the two recognized degradation modes survive.
+        assert_eq!(
+            agent_sec.degradation,
+            vec![crate::InputMode::Pointer, crate::InputMode::Filter]
+        );
+
+        let stage_a = bp.find_stage("a").unwrap();
+        let a_sec = stage_a.security.as_ref().unwrap();
+        assert_eq!(a_sec.filter_mode, Some(crate::FilterMode::Structured));
+
+        // Stage c: filter_mode = true (a non-`false` bool) matches neither the
+        // string arm nor the `Some(false)` arm, leaving filter_mode untouched.
+        let stage_c = bp.find_stage("c").unwrap();
+        let c_sec = stage_c.security.as_ref().unwrap();
+        assert_eq!(
+            c_sec.filter_mode,
+            crate::SecurityConfig::default().filter_mode
+        );
+    }
+
+    #[test]
+    fn parse_manifest_security_empty_degradation_keeps_default() {
+        // A degradation list with no recognized modes leaves `modes` empty, so
+        // the `if !modes.is_empty()` assignment is skipped and the default is
+        // retained.
+        let toml = r#"
+[agent]
+name = "sec-empty-deg"
+
+[security]
+degradation = ["nonsense", "also-bad"]
+"#;
+        let bp = parse_manifest(toml).unwrap();
+        let sec = bp.security.as_ref().unwrap();
+        assert_eq!(
+            sec.degradation,
+            crate::SecurityConfig::default().degradation
         );
     }
 }
