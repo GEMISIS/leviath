@@ -135,6 +135,20 @@ pub struct AssembledContext {
     pub messages: Vec<leviath_providers::Message>,
 }
 
+/// Sort priority for a system block's cache hint.
+///
+/// Anthropic caches system content by prefix matching, so the most stable
+/// blocks must sort first to form the cacheable prefix. Lower value = earlier.
+fn cache_hint_sort_priority(hint: leviath_core::CacheHint) -> u8 {
+    use leviath_core::CacheHint;
+    match hint {
+        CacheHint::Always => 0,               // Pinned, CompactHistory — most stable
+        CacheHint::SlidingPrefix { .. } => 1, // Partially stable
+        CacheHint::UntilChanged => 2,         // Compacting — changes on compaction
+        CacheHint::Never => 3,                // Temporary, Clearable — changes every iteration
+    }
+}
+
 /// Context window component storing the agent's memory regions.
 #[derive(Component, Debug, Clone)]
 pub struct ContextWindow {
@@ -554,12 +568,7 @@ impl ContextWindow {
         // Stable blocks (Pinned, CompactHistory) should come first so
         // they form the cacheable prefix, with volatile blocks
         // (Compacting, Temporary, Clearable) after.
-        system_blocks.sort_by_key(|block| match block.cache_hint {
-            CacheHint::Always => 0,               // Pinned, CompactHistory — most stable
-            CacheHint::SlidingPrefix { .. } => 1, // Partially stable
-            CacheHint::UntilChanged => 2,         // Compacting — changes on compaction
-            CacheHint::Never => 3,                // Temporary, Clearable — changes every iteration
-        });
+        system_blocks.sort_by_key(|block| cache_hint_sort_priority(block.cache_hint));
 
         // ── Sanitize orphaned tool_use / tool_result blocks ──────────────
         //
@@ -1766,17 +1775,14 @@ mod tests {
 
         let assembled = with_tracing(|| window.assemble());
 
-        // The orphaned tool_result should be stripped
-        for msg in &assembled.messages {
-            if let leviath_providers::MessageContent::Blocks(blocks) = &msg.content {
-                for block in blocks {
-                    assert!(
-                        !matches!(block, leviath_providers::ContentBlock::ToolResult { .. }),
-                        "Orphaned tool_result should have been stripped"
-                    );
-                }
-            }
-        }
+        // The orphaned tool_result message is stripped to empty and dropped;
+        // only the plain user message survives (as Text, carrying no blocks).
+        assert_eq!(assembled.messages.len(), 1);
+        assert_eq!(assembled.messages[0].role, "user");
+        assert_eq!(
+            assembled.messages[0].content,
+            leviath_providers::MessageContent::Text("Hello".to_string())
+        );
     }
 
     #[test]
@@ -2038,29 +2044,29 @@ mod tests {
 
         let assembled = with_tracing(|| window.assemble());
 
-        // tc_valid tool_use should remain
-        let has_valid = assembled.messages.iter().any(|m| {
-            if let leviath_providers::MessageContent::Blocks(blocks) = &m.content {
-                blocks.iter().any(|b| {
-                    matches!(b, leviath_providers::ContentBlock::ToolUse { id, .. } if id == "tc_valid")
-                })
-            } else {
-                false
-            }
-        });
-        assert!(has_valid, "Valid tool_use should remain");
-
-        // tc_orphan tool_use should be stripped
-        let has_orphan = assembled.messages.iter().any(|m| {
-            if let leviath_providers::MessageContent::Blocks(blocks) = &m.content {
-                blocks.iter().any(|b| {
-                    matches!(b, leviath_providers::ContentBlock::ToolUse { id, .. } if id == "tc_orphan")
-                })
-            } else {
-                false
-            }
-        });
-        assert!(!has_orphan, "Orphaned tool_use should be stripped");
+        // Collect the tool_use ids that survived assembly.
+        let tool_use_ids: Vec<&str> = assembled
+            .messages
+            .iter()
+            .filter_map(|m| match &m.content {
+                leviath_providers::MessageContent::Blocks(blocks) => Some(blocks),
+                _ => None,
+            })
+            .flatten()
+            .filter_map(|b| match b {
+                leviath_providers::ContentBlock::ToolUse { id, .. } => Some(id.as_str()),
+                _ => None,
+            })
+            .collect();
+        // tc_valid's tool_use remains; the orphaned tc_orphan is stripped.
+        assert!(
+            tool_use_ids.contains(&"tc_valid"),
+            "Valid tool_use should remain"
+        );
+        assert!(
+            !tool_use_ids.contains(&"tc_orphan"),
+            "Orphaned tool_use should be stripped"
+        );
 
         // tc_valid tool_result should remain
         let has_result = assembled.messages.iter().any(|m| {
@@ -2332,21 +2338,21 @@ mod tests {
             .find(|m| m.role == "assistant")
             .expect("should have assistant message");
 
-        if let leviath_providers::MessageContent::Blocks(blocks) = &assistant_msg.content {
-            // First block should be Text
-            assert!(
-                matches!(&blocks[0], leviath_providers::ContentBlock::Text { text } if text == "Sure, let me read it."),
-                "First block should be Text with the assistant's message"
-            );
-            // Second block should be ToolUse
-            assert!(
-                matches!(&blocks[1], leviath_providers::ContentBlock::ToolUse { id, name, .. } if id == "tc_a" && name == "read_file"),
-                "Second block should be ToolUse"
-            );
-            assert_eq!(blocks.len(), 2);
-        } else {
-            panic!("Expected Blocks content for assistant turn with tool calls");
-        }
+        // Assistant turn with text + a tool call assembles to a Text block
+        // followed by the ToolUse block.
+        assert_eq!(
+            assistant_msg.content,
+            leviath_providers::MessageContent::Blocks(vec![
+                leviath_providers::ContentBlock::Text {
+                    text: "Sure, let me read it.".to_string(),
+                },
+                leviath_providers::ContentBlock::ToolUse {
+                    id: "tc_a".to_string(),
+                    name: "read_file".to_string(),
+                    input: serde_json::json!({"path": "foo.rs"}),
+                },
+            ])
+        );
     }
 
     #[test]
@@ -2410,16 +2416,17 @@ mod tests {
             .find(|m| m.role == "assistant")
             .expect("should have assistant message");
 
-        if let leviath_providers::MessageContent::Blocks(blocks) = &assistant_msg.content {
-            // Should only have ToolUse, no Text block
-            assert_eq!(blocks.len(), 1);
-            assert!(
-                matches!(&blocks[0], leviath_providers::ContentBlock::ToolUse { id, .. } if id == "tc_b"),
-                "Should have only ToolUse block, no Text block for empty content"
-            );
-        } else {
-            panic!("Expected Blocks content");
-        }
+        // Empty assistant text produces a single ToolUse block, no Text block.
+        assert_eq!(
+            assistant_msg.content,
+            leviath_providers::MessageContent::Blocks(vec![
+                leviath_providers::ContentBlock::ToolUse {
+                    id: "tc_b".to_string(),
+                    name: "bash".to_string(),
+                    input: serde_json::json!({"cmd": "ls"}),
+                },
+            ])
+        );
     }
 
     // ─── assemble() consecutive ToolResults flushed ───────────────────────
@@ -2515,19 +2522,23 @@ mod tests {
         // The third message should be a user message with two ToolResult blocks
         let tool_result_msg = &assembled.messages[2];
         assert_eq!(tool_result_msg.role, "user");
-        if let leviath_providers::MessageContent::Blocks(blocks) = &tool_result_msg.content {
-            assert_eq!(blocks.len(), 2);
-            assert!(matches!(
-                &blocks[0],
-                leviath_providers::ContentBlock::ToolResult { tool_use_id, .. } if tool_use_id == "tc_1"
-            ));
-            assert!(matches!(
-                &blocks[1],
-                leviath_providers::ContentBlock::ToolResult { tool_use_id, .. } if tool_use_id == "tc_2"
-            ));
-        } else {
-            panic!("Expected Blocks content for merged tool results");
-        }
+        // The two consecutive tool results merge into one user message with two
+        // ToolResult blocks, in order.
+        assert_eq!(
+            tool_result_msg.content,
+            leviath_providers::MessageContent::Blocks(vec![
+                leviath_providers::ContentBlock::ToolResult {
+                    tool_use_id: "tc_1".to_string(),
+                    content: "content of a.rs".to_string(),
+                    is_error: false,
+                },
+                leviath_providers::ContentBlock::ToolResult {
+                    tool_use_id: "tc_2".to_string(),
+                    content: "content of b.rs".to_string(),
+                    is_error: false,
+                },
+            ])
+        );
 
         // The fourth message should be the user follow-up
         assert_eq!(assembled.messages[3].role, "user");
@@ -2621,19 +2632,14 @@ mod tests {
 
         let assembled = with_tracing(|| window.assemble());
 
-        // The orphaned tool_result should be stripped
-        for msg in &assembled.messages {
-            if let leviath_providers::MessageContent::Blocks(blocks) = &msg.content {
-                for block in blocks {
-                    assert!(
-                        !matches!(block, leviath_providers::ContentBlock::ToolResult { .. }),
-                        "Orphaned tool_result should have been stripped"
-                    );
-                }
-            }
-        }
-        // Should still have a fallback user message ("Begin.")
-        assert!(assembled.messages.iter().any(|m| m.role == "user"));
+        // The orphaned tool_result message is stripped to empty and dropped,
+        // leaving no messages — so the "Begin." user fallback is synthesized.
+        assert_eq!(assembled.messages.len(), 1);
+        assert_eq!(assembled.messages[0].role, "user");
+        assert_eq!(
+            assembled.messages[0].content,
+            leviath_providers::MessageContent::Text("Begin.".to_string())
+        );
     }
 
     // ─── Prompt caching tests ────────────────────────────────────────────
@@ -2937,15 +2943,17 @@ mod tests {
         // user msg + assistant (with tool_use blocks) + user (with tool_result blocks)
         assert_eq!(assembled.messages.len(), 3);
         assert_eq!(assembled.messages[2].role, "user");
-        // The last message should be a Blocks message with ToolResult
-        if let leviath_providers::MessageContent::Blocks(blocks) = &assembled.messages[2].content {
-            assert!(matches!(
-                blocks[0],
-                leviath_providers::ContentBlock::ToolResult { .. }
-            ));
-        } else {
-            panic!("Expected Blocks content for tool result message");
-        }
+        // The last message is a Blocks message carrying the single ToolResult.
+        assert_eq!(
+            assembled.messages[2].content,
+            leviath_providers::MessageContent::Blocks(vec![
+                leviath_providers::ContentBlock::ToolResult {
+                    tool_use_id: "tc_1".to_string(),
+                    content: "fn main() {}".to_string(),
+                    is_error: false,
+                },
+            ])
+        );
     }
 
     #[test]
@@ -2974,6 +2982,28 @@ mod tests {
         // CompactHistory (Always) should come before Temporary (Never)
         assert_eq!(assembled.system_blocks[0].cache_hint, CacheHint::Always);
         assert_eq!(assembled.system_blocks[1].cache_hint, CacheHint::Never);
+    }
+
+    #[test]
+    fn cache_hint_sort_priority_orders_by_stability() {
+        use leviath_core::CacheHint;
+        // Most stable first (lowest priority), volatile last.
+        assert_eq!(cache_hint_sort_priority(CacheHint::Always), 0);
+        assert_eq!(
+            cache_hint_sort_priority(CacheHint::SlidingPrefix {
+                stable_fraction: 0.75
+            }),
+            1
+        );
+        assert_eq!(cache_hint_sort_priority(CacheHint::UntilChanged), 2);
+        assert_eq!(cache_hint_sort_priority(CacheHint::Never), 3);
+        // The four priorities are strictly increasing by volatility.
+        assert!(
+            cache_hint_sort_priority(CacheHint::Always)
+                < cache_hint_sort_priority(CacheHint::SlidingPrefix {
+                    stable_fraction: 0.5
+                })
+        );
     }
 
     #[test]

@@ -66,9 +66,10 @@ pub async fn spawn_child_agent(
     }
 
     // Enter the worker at the requested stage.
-    if let Some(mut state) = eng.world_mut().get_mut::<AgentState>(child_entity) {
-        state.current_stage = entry_stage.to_string();
-    }
+    eng.world_mut()
+        .get_mut::<AgentState>(child_entity)
+        .expect("spawn_agent always creates AgentState")
+        .current_stage = entry_stage.to_string();
 
     // Link parent ↔ child so the dashboard tree shows the sub-agent.
     eng.world_mut().entity_mut(child_entity).insert(ParentRef {
@@ -112,10 +113,12 @@ pub async fn spawn_child_agent(
     }
 
     // Activate and allow mid-run messages (interruptible like any agent).
-    if let Some(mut state) = eng.world_mut().get_mut::<AgentState>(child_entity) {
-        state.status = AgentStatus::Active;
-        state.accepts_messages = true;
-    }
+    let mut state = eng
+        .world_mut()
+        .get_mut::<AgentState>(child_entity)
+        .expect("spawn_agent always creates AgentState");
+    state.status = AgentStatus::Active;
+    state.accepts_messages = true;
 
     (child_agent_id, child_entity)
 }
