@@ -22,46 +22,11 @@ pub enum ToolPolicy {
     Deny,
 }
 
-/// Configuration for auto-generating a short title from the task prompt.
-///
-/// The title is generated once, at worker startup, by a cheap/fast model.
-/// Set `enabled = false` in `[title]` to disable title generation entirely.
-///
-/// Example config:
-/// ```toml
-/// [title]
-/// enabled = true
-/// provider = "anthropic"
-/// model = "claude-haiku-4-5-20251001"
-/// ```
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TitleConfig {
-    /// Whether to generate titles at all (default: true).
-    #[serde(default = "default_true")]
-    pub enabled: bool,
-
-    /// Provider to use for title generation.
-    /// Defaults to the global `default_provider` when absent.
-    pub provider: Option<String>,
-
-    /// Model to use for title generation.
-    /// Defaults to a cheap fast model for the resolved provider when absent.
-    pub model: Option<String>,
-}
-
-fn default_true() -> bool {
-    true
-}
-
-impl Default for TitleConfig {
-    fn default() -> Self {
-        Self {
-            enabled: true,
-            provider: None,
-            model: None,
-        }
-    }
-}
+// `TitleConfig` (plain data used by the engine's title generation) now lives in
+// `leviath_core::config` so `leviath-runtime` can reference it without a CLI
+// dependency. Re-exported here so existing `crate::config::TitleConfig` paths
+// continue to resolve unchanged.
+pub use leviath_core::config::TitleConfig;
 
 /// CLI configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
