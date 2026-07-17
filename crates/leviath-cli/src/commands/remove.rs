@@ -17,6 +17,22 @@ pub async fn execute(args: RemoveArgs) -> anyhow::Result<()> {
 /// Core removal logic, parameterized by installer so it can be tested
 /// against a tempdir instead of the real `~/.leviath/agents`.
 fn remove_agent(installer: &leviath_package::AgentInstaller, name: &str) -> anyhow::Result<()> {
+    remove_agent_with(installer, name, &|n| installer.uninstall(n))
+}
+
+/// [`remove_agent`] with an injectable uninstall operation.
+///
+/// The `uninstall` closure is a trait object so its failure arm can be
+/// exercised on every platform: a genuinely installed agent (which
+/// `get_installed` requires -- an `agent.leviath` under the agent dir) is an
+/// ordinary removable directory, so `remove_dir_all` only fails on it via a
+/// Unix-only `chmod` on the parent. Production always passes the real
+/// `installer.uninstall`.
+fn remove_agent_with(
+    installer: &leviath_package::AgentInstaller,
+    name: &str,
+    uninstall: &dyn Fn(&str) -> anyhow::Result<()>,
+) -> anyhow::Result<()> {
     // Verify it's actually installed first
     let installed = installer.get_installed(name).unwrap();
     if installed.is_none() {
@@ -26,7 +42,7 @@ fn remove_agent(installer: &leviath_package::AgentInstaller, name: &str) -> anyh
         );
     }
 
-    installer.uninstall(name)?;
+    uninstall(name)?;
     println!("Removed agent '{}'.", name);
     Ok(())
 }
@@ -116,22 +132,18 @@ mod tests {
         assert!(err.to_string().contains("is not installed"));
     }
 
-    #[cfg(unix)]
     #[test]
-    fn remove_agent_uninstall_fs_error_propagates() {
-        use std::os::unix::fs::PermissionsExt;
+    fn remove_agent_uninstall_error_propagates() {
         let dir = tempfile::tempdir().unwrap();
         let installer = leviath_package::AgentInstaller::with_install_dir(dir.path().to_path_buf());
-        install_test_agent(&installer, "chmod-test-agent");
+        install_test_agent(&installer, "err-agent");
 
-        // Make install_dir non-writable so remove_dir_all on the agent subdir fails.
-        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o555)).unwrap();
-
-        let result = remove_agent(&installer, "chmod-test-agent");
-
-        // Restore write permission before tempdir cleanup.
-        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
-
+        // An injected uninstall that fails exercises the `uninstall(name)?`
+        // error arm deterministically on every platform. The prior version
+        // dropped write permission on the parent dir, which only fails on Unix.
+        let result = remove_agent_with(&installer, "err-agent", &|_| {
+            Err(anyhow::anyhow!("simulated uninstall failure"))
+        });
         assert!(result.is_err());
     }
 }
