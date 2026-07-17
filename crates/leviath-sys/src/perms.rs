@@ -24,57 +24,86 @@ pub fn ensure_file_private(path: &Path) -> io::Result<Option<u32>> {
     crate::platform::ensure_private(path, 0o600)
 }
 
-#[cfg(all(test, unix))]
+// Cross-platform tests: they run on every OS so the public API (and, on
+// non-Unix, the `fallback` no-op impls) is covered everywhere. Only the
+// Unix-specific *assertions* about concrete mode bits are gated behind
+// `#[cfg(unix)]`; on non-Unix the same public calls exercise the no-op
+// fallback, which succeeds and leaves permissions untouched.
+#[cfg(test)]
 mod tests {
     use super::*;
-    use std::os::unix::fs::PermissionsExt;
 
+    #[cfg(unix)]
     fn mode_of(path: &Path) -> u32 {
+        use std::os::unix::fs::PermissionsExt;
         std::fs::metadata(path).unwrap().permissions().mode() & 0o777
     }
 
+    #[cfg(unix)]
+    fn set_mode(path: &Path, mode: u32) {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
+    }
+
     #[test]
-    fn secure_file_perms_sets_600() {
+    fn secure_file_perms_restricts_on_unix_and_succeeds_everywhere() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("secret");
         std::fs::write(&path, b"x").unwrap();
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        #[cfg(unix)]
+        set_mode(&path, 0o644);
 
         secure_file_perms(&path).unwrap();
 
+        #[cfg(unix)]
         assert_eq!(mode_of(&path), 0o600);
     }
 
     #[test]
-    fn secure_dir_perms_sets_700() {
+    fn secure_dir_perms_restricts_on_unix_and_succeeds_everywhere() {
         let dir = tempfile::tempdir().unwrap();
         let sub = dir.path().join("d");
         std::fs::create_dir(&sub).unwrap();
-        std::fs::set_permissions(&sub, std::fs::Permissions::from_mode(0o755)).unwrap();
+        #[cfg(unix)]
+        set_mode(&sub, 0o755);
 
         secure_dir_perms(&sub).unwrap();
 
+        #[cfg(unix)]
         assert_eq!(mode_of(&sub), 0o700);
     }
 
     #[test]
-    fn secure_file_perms_errors_on_missing_path() {
+    fn secure_file_perms_missing_path_behavior() {
+        // Unix `chmod` errors on a missing path (ENOENT); the non-Unix no-op
+        // ignores the path and succeeds.
         let dir = tempfile::tempdir().unwrap();
         let missing = dir.path().join("nope");
-        assert!(secure_file_perms(&missing).is_err());
+        let result = secure_file_perms(&missing);
+        #[cfg(unix)]
+        assert!(result.is_err());
+        #[cfg(not(unix))]
+        assert!(result.is_ok());
     }
 
     #[test]
-    fn ensure_file_private_tightens_permissive_file() {
+    fn ensure_file_private_tightens_permissive_file_on_unix() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("cfg");
         std::fs::write(&path, b"x").unwrap();
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        #[cfg(unix)]
+        set_mode(&path, 0o644);
 
         let previous = ensure_file_private(&path).unwrap();
 
-        assert_eq!(previous, Some(0o100644));
-        assert_eq!(mode_of(&path), 0o600);
+        #[cfg(unix)]
+        {
+            assert_eq!(previous, Some(0o100644));
+            assert_eq!(mode_of(&path), 0o600);
+        }
+        // Non-Unix always reports "already private / nothing to do".
+        #[cfg(not(unix))]
+        assert_eq!(previous, None);
     }
 
     #[test]
@@ -82,9 +111,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("cfg");
         std::fs::write(&path, b"x").unwrap();
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        #[cfg(unix)]
+        set_mode(&path, 0o600);
 
         assert_eq!(ensure_file_private(&path).unwrap(), None);
+
+        #[cfg(unix)]
         assert_eq!(mode_of(&path), 0o600);
     }
 

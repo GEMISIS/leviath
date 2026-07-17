@@ -143,14 +143,23 @@ mod tests {
         Err(io::Error::other("no tty"))
     }
 
-    #[cfg(unix)]
-    fn open_devnull_writable() -> io::Result<File> {
-        std::fs::OpenOptions::new().write(true).open("/dev/null")
+    // Cross-platform stand-ins for a real TTY: a writable temp file (accepts
+    // writes) and a read-only temp file (writes to it fail). Using a temp file
+    // rather than `/dev/null` keeps these tests — and thus `osc52_write_via`'s
+    // tty-success and tty-write-fails branches — covered on every OS, not just
+    // Unix.
+    fn open_temp_writable() -> io::Result<File> {
+        std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(std::env::temp_dir().join("lev_sys_osc52_fake_tty_w"))
     }
 
-    #[cfg(unix)]
-    fn open_devnull_readonly() -> io::Result<File> {
-        std::fs::OpenOptions::new().read(true).open("/dev/null")
+    fn open_temp_readonly() -> io::Result<File> {
+        let path = std::env::temp_dir().join("lev_sys_osc52_fake_tty_ro");
+        let _ = std::fs::write(&path, b"");
+        std::fs::OpenOptions::new().read(true).open(&path)
     }
 
     /// Fails on `write` (so the `&&` short-circuits before `flush`).
@@ -178,26 +187,24 @@ mod tests {
         }
     }
 
-    #[cfg(unix)]
     #[test]
     fn write_via_returns_true_when_tty_write_succeeds() {
-        // /dev/null accepts and discards writes: exercises the "tty write
+        // The writable temp file accepts the write: exercises the "tty write
         // succeeded, return early" branch with no real terminal involved.
         let mut sink = Vec::new();
-        assert!(osc52_write_via("hi", open_devnull_writable, &mut sink));
+        assert!(osc52_write_via("hi", open_temp_writable, &mut sink));
         assert!(
             sink.is_empty(),
             "fallback must not run when the tty write succeeds"
         );
     }
 
-    #[cfg(unix)]
     #[test]
     fn write_via_falls_back_when_tty_opens_but_write_fails() {
-        // /dev/null opened read-only: write_all fails (EBADF), so control
+        // The temp file opened read-only makes write_all fail, so control
         // falls through to the stdout fallback.
         let mut sink = Vec::new();
-        assert!(osc52_write_via("hi", open_devnull_readonly, &mut sink));
+        assert!(osc52_write_via("hi", open_temp_readonly, &mut sink));
         assert!(
             !sink.is_empty(),
             "fallback should have written the sequence"
