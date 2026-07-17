@@ -97,9 +97,35 @@ impl serde::Serialize for PoisonSerialize {
     }
 }
 
+/// Write an `agent.leviath` manifest into `dir` and return its path.
+///
+/// Consolidates the `std::fs::write(dir.join("agent.leviath"), ...).unwrap()`
+/// idiom repeated across the CLI command test modules. `contents` accepts
+/// anything byte-like (`&str`, `String`, byte slices) so both manifest text
+/// and deliberately-malformed byte payloads route through the same helper.
+pub(crate) fn write_test_agent(
+    dir: impl AsRef<std::path::Path>,
+    contents: impl AsRef<[u8]>,
+) -> std::path::PathBuf {
+    let path = dir.as_ref().join("agent.leviath");
+    std::fs::write(&path, contents).unwrap();
+    path
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn write_test_agent_creates_manifest_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_test_agent(dir.path(), "version = \"1.0\"\n");
+        assert!(path.exists());
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "version = \"1.0\"\n"
+        );
+    }
 
     #[test]
     fn poison_serialize_always_errs() {

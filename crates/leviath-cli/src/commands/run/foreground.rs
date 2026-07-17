@@ -739,7 +739,7 @@ async fn run_foreground_with_registry(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::with_tracing;
+    use crate::test_support::{with_tracing, write_test_agent};
     use leviath_providers::Provider;
 
     /// Shared `assert!`-with-dynamic-message helper: several `run_foreground*`
@@ -1416,7 +1416,7 @@ model = "claude-sonnet-4-6"
 [tool_permissions]
 bash = "ask"
 "#;
-        std::fs::write(temp_dir.join("agent.leviath"), manifest_content).unwrap();
+        write_test_agent(&temp_dir, manifest_content);
 
         let args = RunArgs {
             path: Some(temp_dir.to_string_lossy().to_string()),
@@ -1549,7 +1549,7 @@ max_iterations = 2
 provider = "mock"
 model = "mock-model"
 "#;
-        std::fs::write(temp_dir.join("agent.leviath"), manifest_content).unwrap();
+        write_test_agent(&temp_dir, manifest_content);
 
         let args = RunArgs {
             path: Some(temp_dir.to_string_lossy().to_string()),
@@ -1909,7 +1909,7 @@ max_iterations = 1
 provider = "anthropic"
 model = "claude-sonnet-4-6"
 "#;
-        std::fs::write(temp_dir.join("agent.leviath"), manifest_content).unwrap();
+        write_test_agent(&temp_dir, manifest_content);
 
         let args = RunArgs {
             path: Some(temp_dir.to_string_lossy().to_string()),
@@ -1963,7 +1963,7 @@ model = "error-model"
 [stages.main.tools]
 allowed = ["read_file"]
 "#;
-        std::fs::write(temp_dir.join("agent.leviath"), manifest_content).unwrap();
+        write_test_agent(&temp_dir, manifest_content);
 
         struct ErrorProvider;
 

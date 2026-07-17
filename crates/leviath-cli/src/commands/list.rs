@@ -243,6 +243,7 @@ fn get_agents_dir() -> anyhow::Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::write_test_agent;
 
     fn write_manifest(dir: &Path, name: &str) {
         write_manifest_with_description(dir, name, "Test agent");
@@ -266,7 +267,7 @@ system = {{ kind = "pinned", max_tokens = 1000 }}
 "#,
             name, description
         );
-        fs::write(dir.join("agent.leviath"), content).unwrap();
+        write_test_agent(dir, content);
     }
 
     #[test]
@@ -465,7 +466,7 @@ max_iterations = 5
 [context.regions]
 system = { kind = "pinned", max_tokens = 1000 }
 "#;
-        fs::write(dir.path().join("agent.leviath"), content).unwrap();
+        write_test_agent(dir.path(), content);
         let info = read_agent_info(&dir.path().join("agent.leviath")).unwrap();
         assert_eq!(info.name, "minimal");
         assert_eq!(info.description, "");
@@ -735,7 +736,7 @@ max_iterations = 5
 [context.regions]
 system = { kind = "pinned", max_tokens = 1000 }
 "#;
-        fs::write(sub.join("agent.leviath"), content).unwrap();
+        write_test_agent(sub, content);
 
         let agents = scan_directory_for_agents(dir.path());
         assert_eq!(agents.len(), 1);
