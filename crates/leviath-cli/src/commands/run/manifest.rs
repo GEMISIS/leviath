@@ -1551,20 +1551,19 @@ allow_as_worker = true
 mode = "autonomous"
 "#;
         let bp = parse_manifest(toml).unwrap();
-        let stage = bp.find_stage("parallel").unwrap();
-        match &stage.mode {
-            leviath_core::blueprint::StageMode::FanOut { config } => {
-                assert_eq!(config.worker_stage.as_deref(), Some("worker"));
-                assert_eq!(config.merge_stage.as_deref(), Some("merge"));
-                assert_eq!(config.max_workers, 7);
-                assert_eq!(
-                    config.on_worker_failure,
-                    leviath_core::blueprint::WorkerFailurePolicy::FailAll
-                );
-                assert_eq!(config.split_prompt, "split the work");
-            }
-            other => panic!("expected FanOut, got {other:?}"),
-        }
+        // Compare the whole mode (no never-taken fallback arm to leave uncovered).
+        let expected = leviath_core::blueprint::StageMode::FanOut {
+            config: leviath_core::blueprint::FanOutConfig {
+                worker_agent: None,
+                worker_stage: Some("worker".to_string()),
+                worker_query: None,
+                merge_stage: Some("merge".to_string()),
+                max_workers: 7,
+                on_worker_failure: leviath_core::blueprint::WorkerFailurePolicy::FailAll,
+                split_prompt: "split the work".to_string(),
+            },
+        };
+        assert_eq!(bp.find_stage("parallel").unwrap().mode, expected);
         assert!(bp.find_stage("worker").unwrap().allow_as_worker);
         // Defaults: unspecified fan_out fields.
         assert!(!bp.find_stage("merge").unwrap().allow_as_worker);
@@ -1582,18 +1581,18 @@ worker_agent = "external-worker"
 split_prompt = "go"
 "#;
         let bp = parse_manifest(toml).unwrap();
-        match &bp.find_stage("parallel").unwrap().mode {
-            leviath_core::blueprint::StageMode::FanOut { config } => {
-                assert_eq!(config.worker_agent.as_deref(), Some("external-worker"));
-                assert_eq!(config.max_workers, 4); // default
-                assert_eq!(
-                    config.on_worker_failure,
-                    leviath_core::blueprint::WorkerFailurePolicy::Continue
-                );
-                assert!(config.merge_stage.is_none());
-            }
-            other => panic!("expected FanOut, got {other:?}"),
-        }
+        let expected = leviath_core::blueprint::StageMode::FanOut {
+            config: leviath_core::blueprint::FanOutConfig {
+                worker_agent: Some("external-worker".to_string()),
+                worker_stage: None,
+                worker_query: None,
+                merge_stage: None,
+                max_workers: 4, // default
+                on_worker_failure: leviath_core::blueprint::WorkerFailurePolicy::Continue,
+                split_prompt: "go".to_string(),
+            },
+        };
+        assert_eq!(bp.find_stage("parallel").unwrap().mode, expected);
     }
 
     #[test]

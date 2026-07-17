@@ -881,13 +881,19 @@ impl AgentEngine {
         if total_tool_calls > 0 || *text_only_nudges >= MAX_TEXT_ONLY_NUDGES {
             // Agent has done real work and is finishing, or we've
             // exhausted nudge attempts — accept the text response.
+            // Hoist field expressions so llvm-cov credits them (tracing-macro
+            // argument regions otherwise read as uncovered).
+            let nudges = *text_only_nudges;
+            let prompt_tokens = cumulative.prompt_tokens;
+            let completion_tokens = cumulative.completion_tokens;
+            let finish_reason = &response.finish_reason;
             tracing::info!(
                 iteration,
                 total_tool_calls,
-                text_only_nudges = *text_only_nudges,
-                cumulative_prompt_tokens = cumulative.prompt_tokens,
-                cumulative_completion_tokens = cumulative.completion_tokens,
-                finish_reason = ?response.finish_reason,
+                text_only_nudges = nudges,
+                cumulative_prompt_tokens = prompt_tokens,
+                cumulative_completion_tokens = completion_tokens,
+                finish_reason = ?finish_reason,
                 "Inference loop complete"
             );
             return EmptyToolCallsOutcome::Finish;
@@ -897,12 +903,16 @@ impl AgentEngine {
         // asking a clarifying question or explaining its plan).
         // Add the text to conversation and nudge it to use tools.
         *text_only_nudges += 1;
+        // Hoist the field expressions out of the macro so llvm-cov credits them
+        // (a tracing-macro-argument region otherwise reads as uncovered).
+        let nudges = *text_only_nudges;
+        let content_len = response.content.len();
         tracing::warn!(
             iteration,
-            text_only_nudges = *text_only_nudges,
-            content_len = response.content.len(),
+            text_only_nudges = nudges,
+            content_len,
             "Model responded with text only before making any tool calls, nudging to use tools ({}/{})",
-            *text_only_nudges,
+            nudges,
             MAX_TEXT_ONLY_NUDGES,
         );
         let mut window = self.world.get_mut::<ContextWindow>(entity).unwrap();
