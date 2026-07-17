@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, BufWriter};
+use tokio::io::{AsyncBufReadExt, AsyncWrite, AsyncWriteExt, BufReader, BufWriter};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 
 use crate::discovery::ToolMetadata;
@@ -237,14 +237,13 @@ impl MCPClient {
         tracing::trace!(method = %method, id = id, "Sending JSON-RPC request");
 
         // Write request line (newline already appended)
-        self.writer
-            .write_all(request_json.as_bytes())
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to write to MCP server stdin: {}", e))?;
-        self.writer
-            .flush()
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to flush MCP server stdin: {}", e))?;
+        Self::write_line(
+            &mut self.writer,
+            &request_json,
+            "Failed to write to MCP server stdin",
+            "Failed to flush MCP server stdin",
+        )
+        .await?;
 
         // Read response line
         let mut line = String::new();
@@ -306,15 +305,44 @@ impl MCPClient {
 
         tracing::trace!(method = %method, "Sending JSON-RPC notification");
 
-        self.writer
-            .write_all(request_json.as_bytes())
+        Self::write_line(
+            &mut self.writer,
+            &request_json,
+            "Failed to write notification",
+            "Failed to flush notification",
+        )
+        .await?;
+
+        Ok(())
+    }
+
+    /// Write `line` to `writer` and flush it, mapping I/O errors to context-
+    /// tagged `anyhow` errors.
+    ///
+    /// Split out (behavior-preserving) from [`Self::send_request`] and
+    /// [`Self::send_notification`] so the write / flush error arms can be
+    /// exercised against an injectable writer on every platform. The real
+    /// `BufWriter<ChildStdin>` path buffers differently per OS (a >8KB write
+    /// to a broken pipe surfaces the error in `write_all` on Unix but is
+    /// absorbed by the OS pipe buffer on Windows, deferring it to `flush`), so
+    /// a broken-pipe integration test can't deterministically hit the
+    /// `write_all` error arm on Windows. `writer` is a trait object rather
+    /// than `impl AsyncWrite` so production and each test share one
+    /// monomorphization (avoids the generic coverage-attribution artifact).
+    async fn write_line(
+        writer: &mut (dyn AsyncWrite + Unpin + Send),
+        line: &str,
+        write_err: &str,
+        flush_err: &str,
+    ) -> anyhow::Result<()> {
+        writer
+            .write_all(line.as_bytes())
             .await
-            .map_err(|e| anyhow::anyhow!("Failed to write notification: {}", e))?;
-        self.writer
+            .map_err(|e| anyhow::anyhow!("{}: {}", write_err, e))?;
+        writer
             .flush()
             .await
-            .map_err(|e| anyhow::anyhow!("Failed to flush notification: {}", e))?;
-
+            .map_err(|e| anyhow::anyhow!("{}: {}", flush_err, e))?;
         Ok(())
     }
 }
@@ -323,6 +351,88 @@ impl MCPClient {
 mod tests {
     use super::*;
     use crate::test_support::always_on_tracing_guard;
+    use std::pin::Pin;
+    use std::task::{Context, Poll};
+
+    /// Configurable in-memory writer used to exercise `write_line`'s
+    /// write/flush error arms deterministically on every platform (the real
+    /// broken-pipe path can't reliably hit the write_all arm on Windows).
+    struct FakeWriter {
+        fail_write: bool,
+        fail_flush: bool,
+    }
+
+    impl AsyncWrite for FakeWriter {
+        fn poll_write(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            buf: &[u8],
+        ) -> Poll<std::io::Result<usize>> {
+            if self.fail_write {
+                Poll::Ready(Err(std::io::Error::new(
+                    std::io::ErrorKind::BrokenPipe,
+                    "write boom",
+                )))
+            } else {
+                Poll::Ready(Ok(buf.len()))
+            }
+        }
+        fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+            if self.fail_flush {
+                Poll::Ready(Err(std::io::Error::new(
+                    std::io::ErrorKind::BrokenPipe,
+                    "flush boom",
+                )))
+            } else {
+                Poll::Ready(Ok(()))
+            }
+        }
+        fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    #[tokio::test]
+    async fn write_line_maps_write_error() {
+        let mut writer = FakeWriter {
+            fail_write: true,
+            fail_flush: false,
+        };
+        let err = MCPClient::write_line(&mut writer, "payload\n", "WCTX", "FCTX")
+            .await
+            .expect_err("write should fail");
+        let msg = err.to_string();
+        assert!(msg.contains("WCTX"), "got: {msg}");
+        assert!(msg.contains("write boom"), "got: {msg}");
+    }
+
+    #[tokio::test]
+    async fn write_line_maps_flush_error() {
+        let mut writer = FakeWriter {
+            fail_write: false,
+            fail_flush: true,
+        };
+        let err = MCPClient::write_line(&mut writer, "payload\n", "WCTX", "FCTX")
+            .await
+            .expect_err("flush should fail");
+        let msg = err.to_string();
+        assert!(msg.contains("FCTX"), "got: {msg}");
+        assert!(msg.contains("flush boom"), "got: {msg}");
+    }
+
+    #[tokio::test]
+    async fn write_line_success_then_shutdown() {
+        let mut writer = FakeWriter {
+            fail_write: false,
+            fail_flush: false,
+        };
+        // Exercises the write-OK + flush-OK arms; the trailing shutdown covers
+        // poll_shutdown.
+        MCPClient::write_line(&mut writer, "payload\n", "WCTX", "FCTX")
+            .await
+            .expect("write should succeed");
+        writer.shutdown().await.expect("shutdown should succeed");
+    }
 
     #[test]
     fn test_filter_env_strips_api_keys() {
