@@ -148,9 +148,9 @@ Agents run as entities in a [bevy_ecs](https://bevyengine.org/) world. Dozens sh
 <tr>
 <td width="33%" valign="top">
 
-**🧬 Sub-Agents**
+**🧬 Sub-Agents & Fan-Out**
 
-Agents spawn children with different blueprints. Any sub-agent, at any depth, can ask the user questions directly — no fire-and-forget, no routing through the parent.
+Agents spawn children with different blueprints. A **fan-out** stage splits a task into work items and runs one sub-agent worker per item concurrently (bounded by `max_workers`), then merges their results back into the parent — all in the same process, over one shared lock-free inference driver. Any sub-agent, at any depth, can ask the user questions directly — no fire-and-forget, no routing through the parent.
 
 [Learn more →](https://leviath.dev/docs/sub-agents)
 
@@ -305,23 +305,33 @@ Covers agent lifecycle, human-in-the-loop interaction, blueprint management, per
 
 ```mermaid
 graph TD
-    CLI["leviath-cli<br/><i>CLI binary (lev)</i>"]
-    RT["leviath-runtime<br/><i>ECS engine (bevy_ecs)</i>"]
-    CORE["leviath-core<br/><i>Regions, layouts, blueprints</i>"]
+    CLI["leviath-cli<br/><i>CLI binary (lev): args, TUI, serve, run adapters</i>"]
+    RT["leviath-runtime<br/><i>ECS engine (bevy_ecs) + stage-run orchestration seams</i>"]
+    CORE["leviath-core<br/><i>Regions, layouts, blueprints, manifest, run metadata</i>"]
     PROV["leviath-providers<br/><i>Anthropic · OpenAI · Google<br/>OpenRouter · Ollama · Claude Code</i>"]
     MCP["leviath-mcp<br/><i>MCP tool integration (JSON-RPC)</i>"]
     SCRIPT["leviath-scripting<br/><i>Rhai sandbox</i>"]
     PKG["leviath-package<br/><i>Bundling & registry</i>"]
     TOOLS["leviath-tools<br/><i>Built-in tool implementations</i>"]
+    SYS["leviath-sys<br/><i>All OS-specific syscalls (perms, signals, TTY)</i>"]
 
     CLI --> RT
     CLI --> SCRIPT
     CLI --> PKG
     CLI --> TOOLS
+    CLI --> SYS
     RT --> CORE
     RT --> PROV
     RT --> MCP
+    PROV --> SYS
+    PKG --> SYS
 ```
+
+Every platform-specific system call (Unix file permissions, `setsid` process
+detaching, `SIGTERM`, the OSC52 `/dev/tty` clipboard write) lives in one place —
+**`leviath-sys`** — behind a cross-platform API, so the rest of the workspace is
+free of scattered `#[cfg(unix)]`/`#[cfg(windows)]` branches and per-OS test
+coverage stays correct by construction.
 
 ## 🤝 Contributing
 
