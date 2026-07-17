@@ -206,6 +206,14 @@ fn parse_work_items(content: &str) -> anyhow::Result<Vec<WorkItem>> {
         .map_err(|e| anyhow::anyhow!("split output is not a valid JSON array of work items: {e}"))
 }
 
+/// Whether a tool is an interactive prompt (unavailable inside a fan-out worker).
+fn is_interaction_tool(name: &str) -> bool {
+    matches!(
+        name,
+        "present_for_review" | "ask_user_text" | "ask_user_choice" | "ask_user_confirm"
+    )
+}
+
 /// Filter the full tool set down to a stage's `available_tools` allowlist.
 fn filter_tools(tr: &ToolRegistry, filter: &[String]) -> Vec<leviath_providers::Tool> {
     if filter.is_empty() {
@@ -400,6 +408,15 @@ pub async fn run_fan_out_stage(
                             let r = if c.name.starts_with("context_") {
                                 super::worker::handle_context_tool(&c.name, &c.arguments, &exec_cw)
                                     .await
+                            } else if is_interaction_tool(&c.name) {
+                                // Fan-out workers run autonomously — they can't
+                                // block on a user prompt. Direct the worker to
+                                // proceed; questions surface to the merge/parent
+                                // stage (which is interactive).
+                                "[note] Interactive prompts are unavailable inside a fan-out \
+                                 worker. Proceed autonomously and note any question in your final \
+                                 output for the merge stage to resolve."
+                                    .to_string()
                             } else {
                                 tr.call(&c.name, c.arguments.clone()).await
                             };
@@ -1068,6 +1085,16 @@ model = { models = [{ provider = "mock", model = "m" }] }
             .collect::<Vec<_>>()
             .join("\n");
         assert!(sys.contains("WORKER WROTE THIS"), "sys region: {sys}");
+    }
+
+    #[test]
+    fn interaction_tools_are_recognized() {
+        assert!(is_interaction_tool("ask_user_text"));
+        assert!(is_interaction_tool("ask_user_choice"));
+        assert!(is_interaction_tool("ask_user_confirm"));
+        assert!(is_interaction_tool("present_for_review"));
+        assert!(!is_interaction_tool("read_file"));
+        assert!(!is_interaction_tool("context_write"));
     }
 
     #[tokio::test]
