@@ -22,10 +22,27 @@ pub fn resolve_task(
     agent_name: &str,
     description: Option<&str>,
 ) -> anyhow::Result<String> {
+    resolve_task_with(arg, agent_name, description, &stdin_is_terminal)
+}
+
+/// COVERAGE-EXCLUDED: probes the real process stdin via `IsTerminal`. Under
+/// `cargo test` the result is environment-dependent (a real TTY when a human
+/// runs `cargo test` vs. a pipe in CI) and, when true, would drive
+/// `resolve_task` into launching a real editor. The `#[cfg(test)]` twin returns
+/// a fixed value so the wrapper is exercised cross-platform; both the TTY and
+/// non-TTY branches of the resolution logic itself are covered via
+/// `resolve_task_with` with an injected probe.
+#[cfg(not(test))]
+fn stdin_is_terminal() -> bool {
     use std::io::IsTerminal;
-    resolve_task_with(arg, agent_name, description, &|| {
-        std::io::stdin().is_terminal()
-    })
+    std::io::stdin().is_terminal()
+}
+
+#[cfg(test)]
+fn stdin_is_terminal() -> bool {
+    // Deterministic: never a TTY, so `resolve_task(&None, ..)` takes the
+    // "no task provided" error path without spawning an editor.
+    false
 }
 
 /// Same as [`resolve_task`], but with the stdin-is-a-TTY check injected
@@ -180,8 +197,40 @@ fn platform_default_editors() -> Vec<String> {
 ///
 /// Editor resolution order: $VISUAL → $EDITOR → platform default.
 /// Platform defaults: Unix tries `vim` then `nano`; Windows uses `notepad`.
+/// Outcome of running one editor candidate, abstracting over the raw
+/// `ExitStatus`. This exists so the "ran but ended with no exit code" case (a
+/// signal kill on Unix) is injectable in tests on *every* platform: on Windows
+/// an `ExitStatus` always carries a code (even via `ExitStatusExt::from_raw`),
+/// so that case cannot be fabricated from a status directly. The injected `run`
+/// seam of [`launch_editor_with`] therefore yields this enum rather than an
+/// `ExitStatus`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EditorRunOutcome {
+    /// Process finished (success, or any explicit exit code) — treat as the
+    /// user having closed the editor.
+    Completed,
+    /// Process ended with no exit code (e.g. killed by a signal) — try the next
+    /// candidate.
+    Aborted,
+}
+
+/// Classify an editor subprocess's exit. `code == None` means it ended without
+/// an exit code (a signal kill). A pure function so both arms are unit-testable
+/// on every platform, independent of whether a real process can produce a
+/// code-less status there.
+fn classify_editor_exit(success: bool, code: Option<i32>) -> EditorRunOutcome {
+    if success || code.is_some() {
+        EditorRunOutcome::Completed
+    } else {
+        EditorRunOutcome::Aborted
+    }
+}
+
 fn launch_editor(path: &std::path::Path) -> anyhow::Result<()> {
-    launch_editor_with(path, &mut |cmd| cmd.status())
+    launch_editor_with(path, &mut |cmd| {
+        cmd.status()
+            .map(|s| classify_editor_exit(s.success(), s.code()))
+    })
 }
 
 /// Core of [`launch_editor`], with the actual "run this candidate and get its
@@ -208,7 +257,7 @@ fn launch_editor(path: &std::path::Path) -> anyhow::Result<()> {
 /// instantiation.
 fn launch_editor_with(
     path: &std::path::Path,
-    run: &mut dyn FnMut(&mut std::process::Command) -> std::io::Result<std::process::ExitStatus>,
+    run: &mut dyn FnMut(&mut std::process::Command) -> std::io::Result<EditorRunOutcome>,
 ) -> anyhow::Result<()> {
     use std::process::Command;
 
@@ -243,22 +292,12 @@ fn launch_editor_with(
 
         match run(&mut cmd) {
             // Exited (even non-zero means the user closed it — treat as OK).
-            // Written as a match guard (rather than a nested
-            // `if { return Ok(()); }` block) so the arm is a single
-            // expression: with the nested-block form, llvm-cov's coverage
-            // mapping attributes a region to the block's closing brace that
-            // represents "control fell through the if without returning" —
-            // which is unreachable given the block's only statement is an
-            // unconditional `return` — so that line reads as permanently
-            // uncovered no matter how thoroughly the success path is
-            // tested. A guard-arm has no such trailing block to fall
-            // through.
-            Ok(status) if status.success() || status.code().is_some() => {
+            Ok(EditorRunOutcome::Completed) => {
                 return Ok(());
             }
-            Ok(_) => {
-                // Terminated with neither a success status nor an exit code
-                // (e.g. killed by signal on Unix) — try the next candidate.
+            Ok(EditorRunOutcome::Aborted) => {
+                // Ended with no exit code (e.g. killed by signal on Unix) —
+                // try the next candidate.
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
                 // Try next candidate
@@ -772,24 +811,14 @@ mod tests {
         assert_eq!(result.unwrap(), "literal task");
     }
 
-    #[cfg(unix)]
     #[test]
-    fn resolve_task_none_arg_exercises_real_stdin_is_terminal_check() {
-        // Unlike reading from stdin, `IsTerminal::is_terminal()` is a
-        // non-blocking fd check -- safe to call for real. This drives
-        // `resolve_task`'s actual (non-injected) closure at least once. The
-        // outcome depends on whether *this test process's* stdin happens to
-        // be a TTY, so VISUAL is set to a no-op editor to keep both possible
-        // branches fast and deterministic: TTY-false hits the "no task
-        // provided" error immediately; TTY-true opens the (untouched)
-        // template through `/usr/bin/true` and then errors on the resulting
-        // empty task -- neither path blocks or spawns a real interactive
-        // editor.
-        let _lock = ENV_LOCK.lock().unwrap();
-        let _guard = EnvGuard;
-        unsafe {
-            std::env::set_var("VISUAL", "/usr/bin/true");
-        }
+    fn resolve_task_none_arg_uses_stdin_is_terminal_twin() {
+        // Drives `resolve_task`'s real (non-injected) path, which delegates to
+        // the `#[cfg(test)]` `stdin_is_terminal` twin (always false). No task +
+        // not-a-TTY hits the "no task provided" error, cross-platform, without
+        // touching real stdin or launching an editor. (The prior version was
+        // `#[cfg(unix)]` and set VISUAL=/usr/bin/true to guard the TTY-true
+        // branch that a real stdin probe could hit.)
         let result = resolve_task(&None, "test-agent", None);
         assert!(result.is_err());
     }
@@ -871,36 +900,56 @@ mod tests {
 
     // ─── launch_editor: terminated by signal (no exit code) tries next ───
 
-    #[cfg(unix)]
     #[test]
-    fn launch_editor_signal_killed_falls_through_to_next() {
+    fn classify_editor_exit_success_is_completed() {
+        assert_eq!(
+            classify_editor_exit(true, Some(0)),
+            EditorRunOutcome::Completed
+        );
+    }
+
+    #[test]
+    fn classify_editor_exit_nonzero_code_is_completed() {
+        // Non-zero but present exit code = user closed the editor = done.
+        assert_eq!(
+            classify_editor_exit(false, Some(1)),
+            EditorRunOutcome::Completed
+        );
+    }
+
+    #[test]
+    fn classify_editor_exit_no_code_is_aborted() {
+        // No exit code (e.g. killed by a Unix signal) = try the next candidate.
+        // Exercised here as a pure function so it's covered on every platform,
+        // including Windows where a real `ExitStatus` always carries a code.
+        assert_eq!(classify_editor_exit(false, None), EditorRunOutcome::Aborted);
+    }
+
+    #[test]
+    fn launch_editor_with_aborted_candidate_falls_through_to_next() {
+        // An injected `run` reporting `Aborted` exercises the `Ok(Aborted) => {}`
+        // arm (try the next candidate) on every platform, without needing a real
+        // signal-killed subprocess (which can't be fabricated on Windows). With
+        // every candidate aborting, the loop exhausts them and bails.
         let _lock = ENV_LOCK.lock().unwrap();
         let _guard = EnvGuard;
-        use std::os::unix::fs::PermissionsExt;
-
-        let dir = std::env::temp_dir().join("lev-test-launch-editor-signal-killed");
-        let _ = std::fs::create_dir_all(&dir);
-
-        // A script that kills itself with SIGKILL: `Command::status()` then
-        // reports an `ExitStatus` with `success() == false` *and*
-        // `code() == None` (terminated by signal, not a normal exit) --
-        // the one outcome that falls into the `Ok(_) => {}` arm (neither
-        // the success guard nor an `Err(...)` variant), which should try
-        // the next candidate rather than returning.
-        let self_kill_script = dir.join("self-kill.sh");
-        std::fs::write(&self_kill_script, "#!/bin/sh\nkill -9 $$\n").unwrap();
-        std::fs::set_permissions(&self_kill_script, std::fs::Permissions::from_mode(0o700))
-            .unwrap();
-
         unsafe {
-            std::env::set_var("VISUAL", &self_kill_script);
-            std::env::set_var("EDITOR", "/usr/bin/true");
+            std::env::set_var("VISUAL", "editor-a");
+            std::env::set_var("EDITOR", "editor-b");
         }
+        let dir = std::env::temp_dir().join("lev-test-launch-editor-aborted");
+        let _ = std::fs::create_dir_all(&dir);
         let file = dir.join("edit.txt");
         std::fs::write(&file, "content").unwrap();
 
-        let result = launch_editor(&file);
-        assert_launch_ok(&result);
+        let mut calls = 0;
+        let result = launch_editor_with(&file, &mut |_cmd| {
+            calls += 1;
+            Ok(EditorRunOutcome::Aborted)
+        });
+        // Every candidate "ran" but aborted, so it tried them all then bailed.
+        assert!(result.is_err());
+        assert!(calls >= 2, "expected multiple candidates to be tried");
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -992,12 +1041,12 @@ mod tests {
             // Ignores the actual candidate `launch_editor_with` resolved to
             // (the platform default, since VISUAL/EDITOR are both empty) and
             // spawns the current test binary instead -- any exit status it
-            // produces (even a nonzero "unrecognized option" error) is
-            // treated as a successful editor session by the guard on the
-            // `Ok(status) if ...` arm.
+            // produces (even a nonzero "unrecognized option" error) classifies
+            // as `Completed`.
             std::process::Command::new(std::env::current_exe().unwrap())
                 .arg("--this-flag-does-not-exist")
                 .status()
+                .map(|s| classify_editor_exit(s.success(), s.code()))
         });
         assert_launch_ok(&result);
 
@@ -1210,18 +1259,17 @@ mod tests {
     // executable via `Command::new(path)` on Windows, exit instantly, and
     // never touch a real interactive editor.
     //
-    // One of the Unix tests has NO safe Windows equivalent and is
-    // intentionally not mirrored here:
-    //   - `launch_editor_signal_killed_falls_through_to_next`: the `Ok(_) =>
-    //     {}` arm exists for processes terminated with no exit code (e.g.
-    //     killed by a Unix signal). On Windows, `ExitStatus::code()` is
-    //     populated from `GetExitCodeProcess` and is effectively always
-    //     `Some(_)`, so this arm is unreachable there -- a genuine permanent
-    //     gap, not a missing test. (There's no portable way to fabricate an
-    //     `ExitStatus` with no code either, even via dependency injection --
-    //     `ExitStatusExt::from_raw` on Windows always yields `Some(_)` from
-    //     `code()`, so injecting the `run` step the way
-    //     `launch_editor_with` does elsewhere doesn't help here.)
+    // The "editor ended with no exit code" case (killed by a Unix signal) was
+    // previously believed to be a permanent Windows gap: on Windows
+    // `ExitStatus::code()` is always `Some(_)` (even via
+    // `ExitStatusExt::from_raw`), so no real or fabricated status reaches the
+    // "try next candidate" arm there. That was solved by narrowing the injected
+    // `run` seam's return type from `ExitStatus` to `EditorRunOutcome`: the
+    // status-to-outcome decision now lives in the pure `classify_editor_exit`
+    // (unit-tested for the code-less case on every platform), and the
+    // "outcome == Aborted, try next" arm is driven directly via injection in
+    // `launch_editor_with_aborted_candidate_falls_through_to_next` -- both
+    // cross-platform, no code-less `ExitStatus` required.
     //
     // Three other Unix tests that rely on PATH-starvation --
     // `launch_editor_empty_visual_and_editor_are_skipped`,

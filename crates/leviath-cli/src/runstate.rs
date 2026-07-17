@@ -1324,6 +1324,30 @@ mod tests {
         assert!(result.is_empty());
     }
 
+    #[test]
+    fn append_stage_output_open_failure_is_silently_skipped() {
+        // When `output.log` already exists as a *directory*, `OpenOptions::open`
+        // fails and the write is silently skipped (the `if let Ok(file)` false
+        // path). Making the target a directory fails the open on every platform;
+        // this branch was previously only reached incidentally via a
+        // `chmod 0o555` read-only run dir (Unix-only).
+        let _guard = crate::runstate::isolate_runs_dir_for_test("append_stage_output_open_failure");
+        let run_id = "append-out-openfail";
+        ensure_stage_dir(run_id, 0);
+        std::fs::create_dir_all(stage_dir(run_id, 0).join("output.log")).unwrap();
+        append_stage_output(run_id, 0, "ignored"); // must not panic
+    }
+
+    #[test]
+    fn append_stage_log_open_failure_is_silently_skipped() {
+        // Same as above for `logs.log` in `append_stage_log`.
+        let _guard = crate::runstate::isolate_runs_dir_for_test("append_stage_log_open_failure");
+        let run_id = "append-log-openfail";
+        ensure_stage_dir(run_id, 0);
+        std::fs::create_dir_all(stage_dir(run_id, 0).join("logs.log")).unwrap();
+        append_stage_log(run_id, 0, "ignored"); // must not panic
+    }
+
     // ─── runs_dir / list_runs edge cases ────────────────────────────────────
 
     #[test]
