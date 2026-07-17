@@ -3298,6 +3298,227 @@ mod tests {
         assert!(result.is_ok());
     }
 
+    /// Helper: a tool executor that returns "ok" for every call.
+    fn ok_exec() -> impl FnMut(Vec<leviath_providers::ToolCall>) -> ToolResultsFuture<'static> {
+        |calls: Vec<leviath_providers::ToolCall>| -> ToolResultsFuture<'static> {
+            Box::pin(async move {
+                calls
+                    .into_iter()
+                    .map(|c| (c.id, "ok".to_string()))
+                    .collect()
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn test_run_inference_loop_shared_eviction_frees_tokens() {
+        // A Temporary region over the eviction threshold → evict_and_compact
+        // returns Ok(freed>0): the shared driver's auto-eviction info-log arm.
+        let responses = vec![
+            InferenceResponse {
+                content: "tool".to_string(),
+                tool_calls: vec![leviath_providers::ToolCall {
+                    id: "call_1".to_string(),
+                    name: "noop".to_string(),
+                    arguments: serde_json::json!({}),
+                }],
+                tokens_used: leviath_providers::TokenUsage {
+                    prompt_tokens: 1,
+                    completion_tokens: 1,
+                    total_tokens: 2,
+                    cached_tokens: 0,
+                    cache_write_tokens: 0,
+                },
+                finish_reason: leviath_providers::FinishReason::ToolCall,
+            },
+            default_response(),
+        ];
+        let mut registry = ProviderRegistry::new();
+        registry.register(
+            "mock".to_string(),
+            Arc::new(MockProvider::with_responses("mock", responses)),
+        );
+        let mut engine = AgentEngine::with_providers(registry);
+        let entity = engine
+            .world_mut()
+            .spawn({
+                let mut window = ContextWindow::new(1000);
+                let mut temp = leviath_core::Region::new(
+                    "scratch".to_string(),
+                    leviath_core::RegionKind::Temporary,
+                    1000,
+                );
+                temp.add_entry("disposable".to_string(), 920).unwrap();
+                window.add_region(temp);
+                window.add_region(leviath_core::Region::new(
+                    "tool_results".to_string(),
+                    leviath_core::RegionKind::SlidingWindow {
+                        max_items: 50,
+                        eviction_strategy: leviath_core::EvictionStrategy::PerItem,
+                    },
+                    50,
+                ));
+                window.current_tokens = 920;
+                window
+            })
+            .id();
+        let handle: EngineHandle = Arc::new(tokio::sync::RwLock::new(engine));
+        let cc = leviath_core::CompactionConfig {
+            provider: "unused".to_string(),
+            model: "test".to_string(),
+            max_summary_tokens: 200,
+            temperature: 0.3,
+            system_prompt: None,
+            user_prompt_template: None,
+        };
+        let mut exec = ok_exec();
+        let result = with_tracing_async(run_inference_loop_shared(
+            &handle,
+            entity,
+            "mock",
+            "m",
+            Vec::new(),
+            5,
+            None,
+            Some(&cc),
+            &mut exec,
+            None,
+            None,
+        ))
+        .await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_run_inference_loop_shared_eviction_error_is_swallowed() {
+        // An over-budget Pinned region → evict_and_compact returns Err, which
+        // the shared driver logs and swallows (loop continues to completion).
+        let responses = vec![
+            InferenceResponse {
+                content: "tool".to_string(),
+                tool_calls: vec![leviath_providers::ToolCall {
+                    id: "call_1".to_string(),
+                    name: "noop".to_string(),
+                    arguments: serde_json::json!({}),
+                }],
+                tokens_used: leviath_providers::TokenUsage {
+                    prompt_tokens: 1,
+                    completion_tokens: 1,
+                    total_tokens: 2,
+                    cached_tokens: 0,
+                    cache_write_tokens: 0,
+                },
+                finish_reason: leviath_providers::FinishReason::ToolCall,
+            },
+            default_response(),
+        ];
+        let mut registry = ProviderRegistry::new();
+        registry.register(
+            "mock".to_string(),
+            Arc::new(MockProvider::with_responses("mock", responses)),
+        );
+        let mut engine = AgentEngine::with_providers(registry);
+        let entity = engine
+            .world_mut()
+            .spawn({
+                let mut window = ContextWindow::new(1000);
+                let mut pinned = leviath_core::Region::new(
+                    "architecture".to_string(),
+                    leviath_core::RegionKind::Pinned,
+                    2000,
+                );
+                pinned.add_entry("huge".to_string(), 1500).unwrap();
+                window.add_region(pinned);
+                window.add_region(leviath_core::Region::new(
+                    "tool_results".to_string(),
+                    leviath_core::RegionKind::SlidingWindow {
+                        max_items: 50,
+                        eviction_strategy: leviath_core::EvictionStrategy::PerItem,
+                    },
+                    50,
+                ));
+                window.current_tokens = 1500;
+                window
+            })
+            .id();
+        let handle: EngineHandle = Arc::new(tokio::sync::RwLock::new(engine));
+        let cc = leviath_core::CompactionConfig {
+            provider: "unused".to_string(),
+            model: "test".to_string(),
+            max_summary_tokens: 200,
+            temperature: 0.3,
+            system_prompt: None,
+            user_prompt_template: None,
+        };
+        let mut exec = ok_exec();
+        let result = with_tracing_async(run_inference_loop_shared(
+            &handle,
+            entity,
+            "mock",
+            "m",
+            Vec::new(),
+            5,
+            None,
+            Some(&cc),
+            &mut exec,
+            None,
+            None,
+        ))
+        .await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_run_inference_loop_shared_hits_max_iterations() {
+        // The model never stops calling tools; with max_iterations = 2 the loop
+        // exhausts its budget and returns the last response (max-iter tail).
+        let tool_resp = || InferenceResponse {
+            content: "again".to_string(),
+            tool_calls: vec![leviath_providers::ToolCall {
+                id: "c".to_string(),
+                name: "noop".to_string(),
+                arguments: serde_json::json!({}),
+            }],
+            tokens_used: leviath_providers::TokenUsage {
+                prompt_tokens: 1,
+                completion_tokens: 1,
+                total_tokens: 2,
+                cached_tokens: 0,
+                cache_write_tokens: 0,
+            },
+            finish_reason: leviath_providers::FinishReason::ToolCall,
+        };
+        let mut registry = ProviderRegistry::new();
+        registry.register(
+            "mock".to_string(),
+            Arc::new(MockProvider::with_responses(
+                "mock",
+                vec![tool_resp(), tool_resp()],
+            )),
+        );
+        let mut engine = AgentEngine::with_providers(registry);
+        let entity = spawn_mock_agent(&mut engine, "agent-maxiter");
+        let handle: EngineHandle = Arc::new(tokio::sync::RwLock::new(engine));
+        let mut exec = ok_exec();
+        let result = with_tracing_async(run_inference_loop_shared(
+            &handle,
+            entity,
+            "mock",
+            "m",
+            Vec::new(),
+            2,
+            None,
+            None,
+            &mut exec,
+            None,
+            None,
+        ))
+        .await;
+        // Returns the last response (not an error) after hitting max_iterations.
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().content, "again");
+    }
+
     #[tokio::test]
     async fn test_run_inference_loop_with_cancellation() {
         let (mut engine, entity) = make_engine_with_mock();

@@ -46,19 +46,19 @@ pub fn load_agent_registry_with(
     installer: &AgentInstaller,
 ) -> HashMap<String, Blueprint> {
     let mut registry = HashMap::new();
-    if let Ok(installed) = installer.list_installed() {
-        for agent in installed {
-            let manifest = agent.path.join("agent.leviath");
-            match std::fs::read_to_string(&manifest)
-                .ok()
-                .and_then(|c| parse_manifest(&c).ok())
-            {
-                Some(bp) => {
-                    registry.insert(bp.name.clone(), bp);
-                }
-                None => {
-                    tracing::warn!(agent = %agent.name, "skipping installed agent that failed to parse");
-                }
+    // `list_installed` only errors on a filesystem race; treat that as "no
+    // installed agents" (the same as an empty/absent install dir).
+    for agent in installer.list_installed().unwrap_or_default() {
+        let manifest = agent.path.join("agent.leviath");
+        match std::fs::read_to_string(&manifest)
+            .ok()
+            .and_then(|c| parse_manifest(&c).ok())
+        {
+            Some(bp) => {
+                registry.insert(bp.name.clone(), bp);
+            }
+            None => {
+                tracing::warn!(agent = %agent.name, "skipping installed agent that failed to parse");
             }
         }
     }
@@ -433,19 +433,29 @@ pub async fn run_fan_out_stage(
             let mut to_entity = true;
             let mut post_tool_sync =
                 move |world: &mut bevy_ecs::prelude::World, ent: bevy_ecs::prelude::Entity| {
-                    if let Ok(mut guard) = sync_cw.try_lock() {
-                        if to_entity {
-                            if let Some(shared) = guard.as_ref() {
-                                if let Some(mut ecw) = world.get_mut::<ContextWindow>(ent) {
-                                    ecw.regions = shared.regions.clone();
-                                    ecw.current_tokens = shared.current_tokens;
-                                }
-                            }
-                        } else if let Some(ecw) = world.get::<ContextWindow>(ent) {
-                            *guard = Some(ecw.clone());
-                        }
-                        to_entity = !to_entity;
+                    // The per-worker lock is only ever taken here and in this
+                    // worker's tool executor, which never run concurrently, so
+                    // try_lock always succeeds; the window is seeded before the
+                    // loop and the worker entity always has a ContextWindow.
+                    let mut guard = sync_cw
+                        .try_lock()
+                        .expect("per-worker sync lock is uncontended");
+                    if to_entity {
+                        let shared = guard
+                            .as_ref()
+                            .expect("shared window seeded before the loop");
+                        let mut ecw = world
+                            .get_mut::<ContextWindow>(ent)
+                            .expect("worker entity always has a ContextWindow");
+                        ecw.regions = shared.regions.clone();
+                        ecw.current_tokens = shared.current_tokens;
+                    } else {
+                        let ecw = world
+                            .get::<ContextWindow>(ent)
+                            .expect("worker entity always has a ContextWindow");
+                        *guard = Some(ecw.clone());
                     }
+                    to_entity = !to_entity;
                 };
 
             let res = run_inference_loop_shared(
@@ -470,26 +480,26 @@ pub async fn run_fan_out_stage(
     let mut summaries: Vec<(String, String)> = Vec::new();
     let mut failures: Vec<(String, String)> = Vec::new();
     while let Some(joined) = set.join_next().await {
-        match joined {
-            Ok((cid, ce, Ok(resp))) => {
-                let mut eng = engine.write().await;
-                if let Some(mut s) = eng.world_mut().get_mut::<AgentState>(ce) {
-                    s.status = AgentStatus::Complete;
-                }
+        // A worker task only fails to join if it panicked — that's a bug, so
+        // surface it rather than silently swallowing it.
+        let (cid, ce, res) = joined.expect("fan-out worker task panicked");
+        let mut eng = engine.write().await;
+        let mut state = eng
+            .world_mut()
+            .get_mut::<AgentState>(ce)
+            .expect("spawned worker always has AgentState");
+        match res {
+            Ok(resp) => {
+                state.status = AgentStatus::Complete;
                 summaries.push((cid, resp.content));
             }
-            Ok((cid, ce, Err(e))) => {
+            Err(e) => {
                 let msg = e.to_string();
-                let mut eng = engine.write().await;
-                if let Some(mut s) = eng.world_mut().get_mut::<AgentState>(ce) {
-                    s.status = AgentStatus::Error {
-                        message: msg.clone(),
-                    };
-                }
+                state.status = AgentStatus::Error {
+                    message: msg.clone(),
+                };
                 failures.push((cid, msg));
             }
-            // A JoinError only occurs if a worker task panicked.
-            Err(join_err) => failures.push(("<worker>".to_string(), join_err.to_string())),
         }
     }
 
@@ -1313,5 +1323,59 @@ model = { models = [{ provider = "mock", model = "m" }] }
             .world()
             .get::<SubAgentChildren>(parent)
             .is_none());
+    }
+
+    #[tokio::test]
+    async fn run_fan_out_split_response_with_tool_call_runs_executor() {
+        // The split inference returns a tool call alongside the JSON array,
+        // exercising the split's (otherwise-unused) no-op tool executor.
+        let (engine, parent, tools) = setup_with(ScriptedProvider::scripted(vec![(
+            r#"[{"id":"a","context":{}}]"#.to_string(),
+            vec![tool_call("noop", serde_json::json!({}))],
+        )]))
+        .await;
+        let bp = fanout_blueprint(base_config());
+        let mut reg = HashMap::new();
+        reg.insert(bp.name.clone(), bp.clone());
+        let mut io = super::super::io::mock::MockIO::new();
+        let outcome = run_fan_out_stage(
+            &engine,
+            parent,
+            &bp,
+            &base_config(),
+            &reg,
+            &tools,
+            "mock",
+            "m",
+            &mut io,
+        )
+        .await
+        .unwrap();
+        assert_eq!(outcome, FanOutOutcome::Merge("merge".to_string()));
+    }
+
+    #[test]
+    fn scripted_provider_trait_surface() {
+        // Exercise the Provider trait methods the inference path doesn't call.
+        use leviath_providers::Provider;
+        let p = ScriptedProvider::split("[]");
+        assert_eq!(p.count_tokens("abcd", "m"), 4);
+        assert_eq!(p.max_context_tokens("m"), 100_000);
+        assert_eq!(p.name(), "mock");
+        let _ = p.capabilities("m");
+    }
+
+    #[test]
+    fn load_agent_registry_uses_default_installer() {
+        // Exercise the default-installer wrapper by pointing LEVIATH_HOME at an
+        // empty temp dir (no installed agents), so only the local blueprint
+        // registers.
+        let tmp = std::env::temp_dir().join(format!("lev-fanout-home-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        std::env::set_var("LEVIATH_HOME", &tmp);
+        let registry = load_agent_registry(&bp("solo-agent"));
+        std::env::remove_var("LEVIATH_HOME");
+        assert!(registry.contains_key("solo-agent"));
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 }
