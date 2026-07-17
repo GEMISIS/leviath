@@ -2763,4 +2763,49 @@ mod tests {
         let chunk = sse.next().await.unwrap().unwrap();
         assert_eq!(chunk.delta, "ok");
     }
+
+    #[test]
+    fn cache_ttl_ephemeral_1h_value_and_beta_header() {
+        // A provider configured for a 1-hour cache TTL emits the extended-TTL
+        // cache_control value and the extended-cache beta header.
+        let provider = AnthropicProvider {
+            client: reqwest::Client::new(),
+            api_key: "k".to_string(),
+            base_url: "http://localhost".to_string(),
+            rate_limiter: None,
+            capability_overrides: HashMap::new(),
+            cache_ttl: CacheTtl::Ephemeral1h,
+        };
+        assert_eq!(
+            provider.cache_control_value(),
+            serde_json::json!({ "type": "ephemeral", "ttl": "1h" })
+        );
+        let req = provider
+            .apply_headers(provider.client.post("http://localhost/"))
+            .build()
+            .unwrap();
+        assert_eq!(
+            req.headers().get("anthropic-beta").unwrap(),
+            "extended-cache-ttl-2025-04-11"
+        );
+    }
+
+    #[test]
+    fn count_cache_control_handles_body_without_system_or_messages() {
+        // Exercises both `if let Some(..)` false paths (no "system"/"messages"
+        // arrays present).
+        assert_eq!(count_cache_control(&serde_json::json!({})), 0);
+    }
+
+    #[test]
+    fn dump_request_ignores_write_failure_when_dir_is_a_file() {
+        // Point `dir` at an existing regular file so `create_dir_all` and the
+        // subsequent `fs::write` both fail, exercising the write-failure
+        // (skip) branch of dump_request.
+        let file =
+            std::env::temp_dir().join(format!("lev-dump-not-a-dir-{}.tmp", std::process::id()));
+        std::fs::write(&file, b"x").unwrap();
+        dump_request(&serde_json::json!({ "a": 1 }), Some(file.to_str().unwrap()));
+        let _ = std::fs::remove_file(&file);
+    }
 }

@@ -1315,4 +1315,43 @@ mod tests {
         let err = item.unwrap_err();
         assert!(err.to_string().contains("Request failed:"));
     }
+
+    async fn spawn_ok_server() -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.expect("accept");
+            let mut buf = [0u8; 8192];
+            let _ = socket.read(&mut buf).await;
+            let resp =
+                b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}";
+            let _ = socket.write_all(resp).await;
+            let _ = socket.flush().await;
+            let _ = socket.shutdown().await;
+        });
+        format!("http://{}", addr)
+    }
+
+    #[tokio::test]
+    async fn send_chat_request_success_with_limiter_resets_backoff() {
+        // A 200 response on the limiter-carrying path drives the success
+        // branch, including the `if let Some(limiter)` reset_backoff call.
+        let url = spawn_ok_server().await;
+        let client = reqwest::Client::new();
+        let limiter = crate::rate_limit::RateLimiter::with_defaults();
+        let body = serde_json::json!({ "model": "x" });
+        let resp = send_chat_request(
+            &client,
+            "test",
+            &url,
+            &[("content-type", "application/json".to_string())],
+            &body,
+            Some(&limiter),
+        )
+        .await;
+        assert!(resp.is_ok());
+    }
 }
