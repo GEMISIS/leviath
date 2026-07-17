@@ -1114,10 +1114,7 @@ mod tests {
     #[test]
     fn message_content_from_str_ref() {
         let content: MessageContent = "hi there".into();
-        match &content {
-            MessageContent::Text(s) => assert_eq!(s, "hi there"),
-            _ => panic!("expected Text variant"),
-        }
+        assert!(matches!(&content, MessageContent::Text(s) if s == "hi there"));
     }
 
     // ─── FinishReason equality ─────────────────────────────────────────────
