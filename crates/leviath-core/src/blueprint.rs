@@ -1805,12 +1805,16 @@ mod tests {
     }
 
     /// Blueprint: fan_out stage (worker_stage=fix_worker) → merge → terminal.
+    /// The merge stage carries an (empty) transitions table so the blueprint is
+    /// in graph mode — this makes `validate_graph` run `has_terminal_path`,
+    /// which walks the fan-out stage's merge hand-off.
     fn fanout_blueprint(worker_allowed: bool, config: FanOutConfig) -> Blueprint {
         let mut fan = Stage::new("parallel".to_string(), make_model());
         fan.mode = StageMode::FanOut { config };
         let mut worker = Stage::new("fix_worker".to_string(), make_model());
         worker.allow_as_worker = worker_allowed;
-        let merge = Stage::new("merge".to_string(), make_model());
+        let mut merge = Stage::new("merge".to_string(), make_model());
+        merge.transitions = Some(HashMap::new()); // terminal, graph mode
         Blueprint::new(
             "t".into(),
             "d".into(),
@@ -1903,5 +1907,14 @@ on_worker_failure = "fail_all"
         cfg.worker_stage = None;
         cfg.worker_agent = Some("external".to_string());
         assert!(fanout_blueprint(false, cfg).validate().is_ok());
+    }
+
+    #[test]
+    fn fanout_validate_ok_without_merge_stage() {
+        // No merge stage: valid, and the fan-out stage falls through to the
+        // linear next stage for its terminal path.
+        let mut cfg = fanout_config();
+        cfg.merge_stage = None;
+        assert!(fanout_blueprint(true, cfg).validate().is_ok());
     }
 }
