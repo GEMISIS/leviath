@@ -59,10 +59,10 @@ pub trait RunIO: Send {
 /// Reads a single line from `reader` and returns it trimmed, or `None` on a
 /// read error (note: EOF is `Ok(0)`, not an error, so it yields
 /// `Some(String::new())` -- preserved as-is from the original inline
-/// implementation). Generic over `R` (rather than hardcoding real stdin)
-/// purely so tests can drive it with an in-memory reader instead of blocking
-/// on real process stdin.
-fn get_user_input_from_reader<R: std::io::BufRead + ?Sized>(reader: &mut R) -> Option<String> {
+/// implementation). Takes `&mut dyn BufRead` (rather than a generic `R` or
+/// real stdin) so it has a single coverage-mapping instance and tests can
+/// drive it with an in-memory reader instead of blocking on real stdin.
+fn get_user_input_from_reader(reader: &mut dyn std::io::BufRead) -> Option<String> {
     let mut buf = String::new();
     reader.read_line(&mut buf).ok()?;
     Some(buf.trim().to_string())

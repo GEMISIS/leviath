@@ -621,9 +621,9 @@ pub fn request_interaction_stdin(req: &InteractionRequest) -> InteractionRespons
 /// — e.g. stdin is closed/piped from `/dev/null` — returns a safe default
 /// instead of looping forever: the first option for `MultipleChoice`, and
 /// a denial for `Confirm`/`ToolApproval`.
-pub fn request_interaction_from_reader<R: std::io::BufRead>(
+pub fn request_interaction_from_reader(
     req: &InteractionRequest,
-    reader: &mut R,
+    reader: &mut dyn std::io::BufRead,
 ) -> InteractionResponse {
     use std::io::Write;
 
