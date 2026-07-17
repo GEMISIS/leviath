@@ -527,55 +527,25 @@ description = "{}"
         assert!(err.to_string().contains("Failed to extract package"));
     }
 
-    /// Assert that an uninstall result either failed with the expected error
-    /// message OR succeeded (which happens when running as root, since root
-    /// ignores Unix permission bits).  Extracted so both paths are covered by
-    /// distinct tests.
-    #[cfg(unix)]
-    fn assert_failed_or_root(result: anyhow::Result<()>) {
-        if result.is_ok() {
-            return; // running as root — permission lock had no effect
-        }
+    #[test]
+    fn uninstall_remove_dir_all_failure_returns_error() {
+        // The installed "agent" entry is a regular file rather than a
+        // directory: `exists()` passes the guard, but `remove_dir_all`
+        // requires a directory and fails on every platform (NotADirectory),
+        // exercising the "Failed to remove agent" error arm. The prior version
+        // removed write permission from the parent directory, which only fails
+        // on Unix (and not when running as root).
+        let dir = tempfile::tempdir().unwrap();
+        let installer = AgentInstaller::with_install_dir(dir.path().to_path_buf());
+        let agent_path = dir.path().join("not-a-dir");
+        fs::write(&agent_path, b"i am a file, not a directory").unwrap();
+
+        let result = installer.uninstall("not-a-dir");
+
+        assert!(result.is_err());
         assert!(result
             .unwrap_err()
             .to_string()
             .contains("Failed to remove agent"));
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn uninstall_remove_dir_all_failure_returns_error() {
-        // Removing write permission on the *parent* directory (not the
-        // agent directory itself) means `remove_dir_all` can't unlink the
-        // agent directory's entry from it, even though the agent
-        // directory's own contents are otherwise removable — exercising
-        // the "Failed to remove agent" error arm no other test reaches.
-        use std::os::unix::fs::PermissionsExt;
-
-        let dir = tempfile::tempdir().unwrap();
-        let installer = AgentInstaller::with_install_dir(dir.path().to_path_buf());
-        let agent_dir = dir.path().join("locked-agent");
-        fs::create_dir_all(&agent_dir).unwrap();
-
-        let mut locked = fs::metadata(dir.path()).unwrap().permissions();
-        locked.set_mode(0o555);
-        fs::set_permissions(dir.path(), locked).unwrap();
-
-        let result = installer.uninstall("locked-agent");
-
-        // Restore permissions unconditionally so tempdir cleanup succeeds.
-        let mut restored = fs::metadata(dir.path()).unwrap().permissions();
-        restored.set_mode(0o755);
-        fs::set_permissions(dir.path(), restored).unwrap();
-
-        assert_failed_or_root(result);
-    }
-
-    /// Exercises the `if result.is_ok() { return; }` path in
-    /// `assert_failed_or_root` by passing a successful result.
-    #[cfg(unix)]
-    #[test]
-    fn assert_failed_or_root_ok_path_returns_immediately() {
-        assert_failed_or_root(Ok(()));
     }
 }
