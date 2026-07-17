@@ -850,8 +850,13 @@ model = { models = [{ provider = "mock", model = "m" }] }
     /// Build an engine (with the scripted provider) + a parent entity that has a
     /// conversation region, returned as a shared handle.
     async fn setup(split: &str) -> (EngineHandle, Entity, Arc<ToolRegistry>) {
+        setup_with(ScriptedProvider::split(split)).await
+    }
+
+    /// Like [`setup`] but with a caller-provided scripted provider.
+    async fn setup_with(provider: ScriptedProvider) -> (EngineHandle, Entity, Arc<ToolRegistry>) {
         let mut registry = ProviderRegistry::new();
-        registry.register("mock".into(), Arc::new(ScriptedProvider::split(split)));
+        registry.register("mock".into(), Arc::new(provider));
         let mut engine = AgentEngine::with_providers(registry);
         let mut pool = AgentPool::new(fanout_blueprint(base_config()));
         let pid = pool.spawn_agent(engine.world_mut());
@@ -958,6 +963,102 @@ model = { models = [{ provider = "mock", model = "m" }] }
         .await
         .unwrap();
         assert_eq!(outcome, FanOutOutcome::Proceed);
+    }
+
+    #[tokio::test]
+    async fn run_fan_out_empty_split_no_merge_proceeds() {
+        // Empty split + no merge stage → Proceed (covers the None arm).
+        let (engine, parent, tools) = setup("[]").await;
+        let mut config = base_config();
+        config.merge_stage = None;
+        let bp = fanout_blueprint(config.clone());
+        let mut reg = HashMap::new();
+        reg.insert(bp.name.clone(), bp.clone());
+        let mut io = super::super::io::mock::MockIO::new();
+        let outcome = run_fan_out_stage(
+            &engine, parent, &bp, &config, &reg, &tools, "mock", "m", &mut io,
+        )
+        .await
+        .unwrap();
+        assert_eq!(outcome, FanOutOutcome::Proceed);
+    }
+
+    #[tokio::test]
+    async fn run_fan_out_worker_uses_builtin_tool() {
+        // A worker that calls a normal builtin tool routes through ToolRegistry.
+        let (engine, parent, tools) = setup_with(ScriptedProvider::scripted(vec![
+            (r#"[{"id":"a","context":{}}]"#.to_string(), vec![]),
+            (
+                "listing".to_string(),
+                vec![tool_call("list_dir", serde_json::json!({"path":"."}))],
+            ),
+        ]))
+        .await;
+        let mut fo = base_config();
+        fo.max_workers = 1;
+        let mut bp = fanout_blueprint(fo.clone());
+        if let Some(w) = bp.stages.iter_mut().find(|s| s.name == "worker") {
+            w.available_tools = vec!["list_dir".to_string()];
+        }
+        let mut reg = HashMap::new();
+        reg.insert(bp.name.clone(), bp.clone());
+        let mut io = super::super::io::mock::MockIO::new();
+        let outcome = run_fan_out_stage(
+            &engine, parent, &bp, &fo, &reg, &tools, "mock", "m", &mut io,
+        )
+        .await
+        .unwrap();
+        assert_eq!(outcome, FanOutOutcome::Merge("merge".to_string()));
+        let eng = engine.read().await;
+        let child = eng
+            .world()
+            .get::<SubAgentChildren>(parent)
+            .unwrap()
+            .children[0];
+        assert_eq!(
+            eng.world().get::<AgentState>(child).unwrap().status,
+            AgentStatus::Complete
+        );
+    }
+
+    #[tokio::test]
+    async fn run_fan_out_continue_reports_worker_failures() {
+        // Worker fails, but on_worker_failure = continue → merge runs and the
+        // consolidated report includes the failure (covers the failures loop).
+        let (engine, parent, tools) = setup_with(ScriptedProvider::split_then_error(
+            r#"[{"id":"a","context":{}}]"#,
+        ))
+        .await;
+        let mut fo = base_config();
+        fo.max_workers = 1;
+        fo.on_worker_failure = WorkerFailurePolicy::Continue;
+        let bp = fanout_blueprint(fo.clone());
+        let mut reg = HashMap::new();
+        reg.insert(bp.name.clone(), bp.clone());
+        let mut io = super::super::io::mock::MockIO::new();
+        let outcome = run_fan_out_stage(
+            &engine, parent, &bp, &fo, &reg, &tools, "mock", "m", &mut io,
+        )
+        .await
+        .unwrap();
+        assert_eq!(outcome, FanOutOutcome::Merge("merge".to_string()));
+        // The consolidated report (in the parent conversation) notes the failure.
+        let eng = engine.read().await;
+        let conv = eng
+            .world()
+            .get::<ContextWindow>(parent)
+            .unwrap()
+            .get_region("conversation")
+            .unwrap()
+            .content
+            .iter()
+            .map(|e| e.content.clone())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            conv.contains("FAILED"),
+            "report should note the failure: {conv}"
+        );
     }
 
     #[tokio::test]
