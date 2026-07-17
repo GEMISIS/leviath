@@ -358,9 +358,8 @@ The hook enforces, before every commit:
 - **clippy** with warnings-as-errors
 - the **full test suite**
 - the **coverage-suppression-marker lint** (`cargo xtask check-exclusions`)
-- that the **coverage ceiling** in `xtask/src/coverage.rs` wasn't silently raised (`cargo xtask check-ceiling`)
 
-It does **not** run the full `cargo xtask coverage` check — that's several minutes, too slow for a local commit gate. CI runs it on every push instead, enforcing the same ceiling for real.
+It does **not** run the full `cargo xtask coverage` check — that's several minutes, too slow for a local commit gate. CI runs it on every push instead, enforcing 100% for real.
 
 If the hook script itself changes (e.g. a commit edits `.cargo-husky/hooks/pre-commit`), `cargo-husky` only reinstalls it on a *fresh* compile of its crate, not on incremental builds. Force it with:
 
@@ -372,7 +371,7 @@ cargo clean -p cargo-husky && cargo test -p xtask
 
 ### Running coverage locally
 
-`cargo xtask coverage` runs `cargo-llvm-cov` across the workspace and reports region/line/function percentages, written to the gitignored `coverage/` folder.
+`cargo xtask coverage` runs `cargo-llvm-cov` across the workspace and reports region/line/function percentages, written to the gitignored `coverage/` folder. CI enforces a hard **100%** on all three metrics — any file below 100% fails the build. Region coverage is measured *merged-by-source-position* (each source span counted once, covered if any monomorphization executes it), so per-monomorphization measurement jitter can't produce spurious gaps and the 100% gate is stable across OSes.
 
 ```bash
 cargo xtask coverage                                   # full workspace
