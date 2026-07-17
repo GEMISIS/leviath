@@ -27,7 +27,7 @@ pub(super) struct GraphEdge {
 pub(super) fn load_graph_info(agent_path: &str) -> Option<GraphTransitionInfo> {
     let manifest_path = std::path::Path::new(agent_path).join("agent.leviath");
     let content = std::fs::read_to_string(&manifest_path).ok()?;
-    let blueprint = crate::commands::run::parse_manifest_public(&content).ok()?;
+    let blueprint = leviath_core::manifest::parse_manifest(&content).ok()?;
 
     // Check if any stage has transitions (graph mode)
     let is_graph = blueprint.stages.iter().any(|s| s.transitions.is_some());

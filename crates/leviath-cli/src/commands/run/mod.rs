@@ -30,7 +30,6 @@ use std::path::Path;
 use crate::runstate;
 
 // Re-export public API used by other commands
-pub use manifest::parse_manifest_public;
 pub use session::{
     build_provider_registry, build_provider_registry_from_config, provider_creds_from_config,
     ProviderCreds,
@@ -359,7 +358,7 @@ description = "A test agent"
 mode = "autonomous"
 prompt = "Plan the work"
 "#;
-        let bp = parse_manifest_public(manifest).unwrap();
+        let bp = leviath_core::manifest::parse_manifest(manifest).unwrap();
         assert_eq!(bp.name, "test-agent");
         assert_eq!(bp.version, "1.0.0");
         assert_eq!(bp.description, "A test agent");
@@ -368,13 +367,13 @@ prompt = "Plan the work"
 
     #[test]
     fn parse_manifest_public_with_invalid_toml() {
-        let result = parse_manifest_public("not valid toml [[[");
+        let result = leviath_core::manifest::parse_manifest("not valid toml [[[");
         assert!(result.is_err());
     }
 
     #[test]
     fn parse_manifest_public_missing_agent_section() {
-        let result = parse_manifest_public("[stages.plan]\nprompt = \"x\"\n");
+        let result = leviath_core::manifest::parse_manifest("[stages.plan]\nprompt = \"x\"\n");
         assert!(result.is_err());
     }
 
@@ -387,7 +386,7 @@ name = "minimal"
 [stages.default]
 prompt = "do something"
 "#;
-        let bp = parse_manifest_public(manifest).unwrap();
+        let bp = leviath_core::manifest::parse_manifest(manifest).unwrap();
         assert_eq!(bp.name, "minimal");
     }
 
@@ -407,7 +406,7 @@ prompt = "Plan"
 mode = "autonomous"
 prompt = "Implement"
 "#;
-        let bp = parse_manifest_public(manifest).unwrap();
+        let bp = leviath_core::manifest::parse_manifest(manifest).unwrap();
         assert_eq!(bp.stages.len(), 2);
     }
 

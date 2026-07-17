@@ -4,7 +4,7 @@ use clap::Args;
 use leviath_package::AgentBundler;
 use std::path::{Path, PathBuf};
 
-use super::run::parse_manifest_public;
+use leviath_core::manifest::parse_manifest;
 
 #[derive(Args)]
 pub struct PackArgs {
@@ -41,7 +41,7 @@ pub async fn execute(args: PackArgs) -> anyhow::Result<()> {
     let manifest_path = find_manifest(project_path)?;
     let manifest_content = std::fs::read_to_string(&manifest_path)
         .map_err(|e| anyhow::anyhow!("Failed to read manifest: {}", e))?;
-    let blueprint = parse_manifest_public(&manifest_content)?;
+    let blueprint = parse_manifest(&manifest_content)?;
 
     println!("Packing agent: {} v{}", blueprint.name, blueprint.version);
 
@@ -495,7 +495,7 @@ mod tests {
 
     #[tokio::test]
     async fn execute_invalid_manifest_toml_errors() {
-        // Manifest exists but is invalid TOML — covers parse_manifest_public ? on line 30.
+        // Manifest exists but is invalid TOML — covers parse_manifest ? on line 30.
         with_tracing(|| {});
         let project = tempfile::tempdir().unwrap();
         std::fs::write(project.path().join("agent.leviath"), "not valid toml ][").unwrap();

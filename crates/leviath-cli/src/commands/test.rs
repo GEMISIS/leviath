@@ -8,8 +8,8 @@ use std::fs;
 use std::path::Path;
 use std::sync::Arc;
 
-use super::run::parse_manifest_public;
 use crate::config::Config;
+use leviath_core::manifest::parse_manifest;
 
 #[derive(Args)]
 pub struct TestArgs {
@@ -159,7 +159,7 @@ async fn execute_with_registry(
 
     // Parse blueprint and set up providers (only if not dry_run)
     let manifest_content = fs::read_to_string(&manifest_path)?;
-    let blueprint = parse_manifest_public(&manifest_content)?;
+    let blueprint = parse_manifest(&manifest_content)?;
 
     let registry = if !args.dry_run {
         let config = Config::load()?;
@@ -1266,7 +1266,7 @@ description = "test"
 [stages.main]
 model = { provider = "anthropic", model = "claude-sonnet-4-6" }
 "#;
-        parse_manifest_public(manifest).unwrap()
+        parse_manifest(manifest).unwrap()
     }
 
     /// Blueprint with an explicit `tool_results` region, so the
@@ -1285,7 +1285,7 @@ model = { provider = "anthropic", model = "claude-sonnet-4-6" }
 kind = "temporary"
 max_tokens = 5000
 "#;
-        parse_manifest_public(manifest).unwrap()
+        parse_manifest(manifest).unwrap()
     }
 
     // ── new coverage tests ────────────────────────────────────────────────────
@@ -1421,7 +1421,7 @@ model = { provider = "anthropic", model = "claude-sonnet-4-6" }
         assert!(result.is_err());
     }
 
-    /// Covers the `parse_manifest_public(&manifest_content)?` error path
+    /// Covers the `parse_manifest(&manifest_content)?` error path
     /// in `execute_with_registry` (invalid TOML in agent.leviath).
     #[tokio::test]
     async fn execute_with_registry_manifest_invalid_toml_errors() {

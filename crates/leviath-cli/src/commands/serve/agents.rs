@@ -8,7 +8,6 @@ use axum::response::Json;
 
 use super::blueprints::discover_blueprints;
 use super::types::*;
-use crate::commands::run::parse_manifest_public;
 use crate::runstate::{self, ContextSnapshot, RunMeta, RunStatus};
 
 /// Every fallible external effect `spawn_agent` performs beyond the pure
@@ -43,7 +42,7 @@ impl SpawnAgentIo for RealSpawnAgentIo {
     }
 
     fn parse_manifest(&self, content: &str) -> anyhow::Result<leviath_core::Blueprint> {
-        parse_manifest_public(content)
+        Ok(leviath_core::manifest::parse_manifest(content)?)
     }
 
     fn create_run(&self, meta: &RunMeta) -> anyhow::Result<()> {
@@ -767,7 +766,7 @@ prompt = "Plan the work"
             if self.fail_on == FailOn::ParseManifest {
                 anyhow::bail!("mock parse_manifest failure");
             }
-            parse_manifest_public(content)
+            Ok(leviath_core::manifest::parse_manifest(content)?)
         }
 
         fn create_run(&self, meta: &RunMeta) -> anyhow::Result<()> {
