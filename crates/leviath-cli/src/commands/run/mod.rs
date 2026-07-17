@@ -137,19 +137,6 @@ fn open_log_file(log_path: &std::path::Path) -> (std::fs::File, std::fs::File) {
     (log_file, log_file2)
 }
 
-/// Called in the forked child process (via `CommandExt::pre_exec`) to start a
-/// new session, detaching the worker from the spawning terminal.
-///
-/// `setsid()` may fail if this process is already a process-group leader; that
-/// is silently ignored — the worker still runs, just without a new session.
-#[cfg(unix)]
-fn new_session_pre_exec() -> std::io::Result<()> {
-    // SAFETY: setsid() is async-signal-safe and has no preconditions beyond the
-    // usual POSIX constraints.  We ignore the return value intentionally.
-    unsafe { libc::setsid() };
-    Ok(())
-}
-
 pub async fn execute(args: RunArgs) -> anyhow::Result<()> {
     if args.foreground {
         if args.count > 1 {
@@ -256,15 +243,9 @@ async fn execute_background_with(
             .stdout(std::process::Stdio::from(log_file))
             .stderr(std::process::Stdio::from(log_file2));
 
-        // On Unix: setsid() detaches the worker into its own session so it
-        // survives the spawning terminal being closed.
-        #[cfg(unix)]
-        {
-            use std::os::unix::process::CommandExt;
-            unsafe {
-                cmd.pre_exec(new_session_pre_exec);
-            }
-        }
+        // Detach the worker into its own session so it survives the spawning
+        // terminal being closed (no-op on non-Unix).
+        leviath_sys::configure_detached(&mut cmd);
 
         cmd.spawn()
             .map_err(|e| anyhow::anyhow!("Failed to spawn worker process: {}", e))?;
@@ -973,23 +954,6 @@ prompt = "Do the thing"
         let err_msg = result.unwrap_err().to_string();
         assert!(err_msg.contains("is empty"));
         let _ = std::fs::remove_dir_all(&temp_dir);
-    }
-
-    // ─── new_session_pre_exec: lines 208-211 ─────────────────────────────────
-
-    /// On Unix, `new_session_pre_exec` is the function passed to `pre_exec`.
-    /// Calling it directly exercises the body (lines 209-210) that LLVM
-    /// instruments inside the closure/function.
-    ///
-    /// `setsid()` may return EPERM if we are already a process-group leader,
-    /// but we always return Ok(()) regardless — so the test always passes.
-    #[cfg(unix)]
-    #[test]
-    fn new_session_pre_exec_returns_ok() {
-        // Directly invoke the pre_exec function body so LLVM marks lines
-        // 209-210 as covered.  The setsid() call is a no-op or EPERM here.
-        let result = new_session_pre_exec();
-        assert!(result.is_ok());
     }
 
     // ─── cleanup_runs_with_prefix_in_dir: read_dir failure ───────────────────

@@ -74,26 +74,6 @@ impl SpawnAgentIo for RealSpawnAgentIo {
     }
 }
 
-/// Configures the command to run in its own process group on Unix non-test builds.
-///
-/// `setsid()` only ever executes inside the forked child immediately before `exec`,
-/// so it can never be observed by the parent test process's coverage instrumentation.
-/// Placing the cfg boundary here (at the function level) rather than inside
-/// `spawn_agent_with` keeps LLVM from generating unreachable coverage regions.
-#[cfg(all(unix, not(test)))]
-fn set_process_group(cmd: &mut std::process::Command) {
-    use std::os::unix::process::CommandExt;
-    unsafe {
-        cmd.pre_exec(|| {
-            libc::setsid();
-            Ok(())
-        });
-    }
-}
-
-#[cfg(not(all(unix, not(test))))]
-fn set_process_group(_cmd: &mut std::process::Command) {}
-
 /// COVERAGE-EXCLUDED: llvm-cov's tracing-macro message-literal region is
 /// permanently uncovered regardless of restructuring (event!/pre-formatted
 /// let/inline(never)/crate-version were all tried and ruled out this
@@ -231,11 +211,8 @@ async fn spawn_agent_with(
         .stdout(std::process::Stdio::from(log_file))
         .stderr(std::process::Stdio::from(log_file2));
 
-    // `setsid()` only ever runs inside the forked child right before `exec`,
-    // so it can never be observed by the parent test process's coverage
-    // instrumentation. Delegated to an out-of-line function so the cfg boundary
-    // is at the function level rather than a block, keeping LLVM gap-free.
-    set_process_group(&mut cmd);
+    // Detach the worker into its own session (no-op on non-Unix).
+    leviath_sys::configure_detached(&mut cmd);
 
     io.spawn(cmd).map_err(|e| {
         (

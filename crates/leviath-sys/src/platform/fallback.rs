@@ -15,3 +15,5 @@ pub(crate) fn set_mode(_path: &Path, _mode: u32) -> io::Result<()> {
 pub(crate) fn ensure_private(_path: &Path, _mode: u32) -> io::Result<Option<u32>> {
     Ok(None)
 }
+
+pub(crate) fn configure_detached(_cmd: &mut std::process::Command) {}

@@ -3,6 +3,34 @@
 use std::io;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
+use std::process::Command;
+
+/// The `pre_exec` hook installed by [`configure_detached`]: start a new session
+/// so the child is detached from the controlling terminal.
+///
+/// `setsid()` fails harmlessly if the caller is already a process-group leader;
+/// its return value is intentionally ignored. This is a free function (rather
+/// than an inline closure) precisely so it can be called directly in a unit
+/// test — covering the real `setsid` call in-process — while ALSO being usable
+/// as a `pre_exec` hook in production, where it runs in the forked child.
+pub(crate) fn new_session() -> io::Result<()> {
+    // SAFETY: `setsid()` is async-signal-safe and has no preconditions beyond
+    // the usual POSIX constraints.
+    unsafe {
+        libc::setsid();
+    }
+    Ok(())
+}
+
+/// Install [`new_session`] as `cmd`'s `pre_exec` hook.
+pub(crate) fn configure_detached(cmd: &mut Command) {
+    use std::os::unix::process::CommandExt;
+    // SAFETY: `new_session` only calls the async-signal-safe `setsid()`, which
+    // is valid to run in the pre_exec child between fork and exec.
+    unsafe {
+        cmd.pre_exec(new_session);
+    }
+}
 
 /// Set the exact permission bits on `path`.
 pub(crate) fn set_mode(path: &Path, mode: u32) -> io::Result<()> {
@@ -84,5 +112,20 @@ mod tests {
             ensure_private_with(&path, 0o600, must_not_be_called).unwrap(),
             None
         );
+    }
+
+    #[test]
+    fn new_session_returns_ok() {
+        // Runs the real setsid() in-process; it may fail harmlessly if we are
+        // already a process-group leader, but always returns Ok.
+        assert!(new_session().is_ok());
+    }
+
+    #[test]
+    fn configure_detached_installs_hook_without_spawning() {
+        // Registering the pre_exec hook must not fork/exec or panic; the hook
+        // only runs on a later spawn(), which this test deliberately omits.
+        let mut cmd = Command::new("true");
+        configure_detached(&mut cmd);
     }
 }
