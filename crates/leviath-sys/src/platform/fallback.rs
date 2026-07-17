@@ -17,3 +17,7 @@ pub(crate) fn ensure_private(_path: &Path, _mode: u32) -> io::Result<Option<u32>
 }
 
 pub(crate) fn configure_detached(_cmd: &mut std::process::Command) {}
+
+pub(crate) fn terminate(_pid: u32) -> bool {
+    false
+}
