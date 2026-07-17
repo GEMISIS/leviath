@@ -42,8 +42,9 @@ tokio-stream = { workspace = true }
 futures = { workspace = true }
 dotenvy = { workspace = true }
 leviath-tools = { workspace = true }
+leviath-sys = { workspace = true }
 async-trait = { workspace = true }
-libc = "0.2"
+libc = { workspace = true }
 pulldown-cmark = { workspace = true }
 tui-textarea = { workspace = true }
 axum = { workspace = true }

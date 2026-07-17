@@ -364,53 +364,24 @@ fn create_config_dir(dir: &std::path::Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Check permissions on the config file and auto-fix if too permissive (Unix only).
-#[cfg(unix)]
+/// Check permissions on the config file and auto-fix if too permissive.
+///
+/// A no-op on non-Unix platforms — see [`leviath_sys::ensure_file_private`].
 fn check_permissions() {
     check_permissions_at(&Config::config_path());
 }
 
-/// Core of `check_permissions()`, parameterized by path so it can be
-/// exercised in tests against a tempfile instead of the real config path.
-#[cfg(unix)]
+/// Core of [`check_permissions`], parameterized by path so it can be exercised
+/// in tests against a tempfile instead of the real config path.
+///
+/// The permission mechanism (metadata probe + `chmod`) lives in `leviath_sys`;
+/// this function owns only the policy of what to log for each outcome.
 fn check_permissions_at(path: &std::path::Path) {
-    use std::os::unix::fs::PermissionsExt;
-
-    // A single `metadata()` call serves both as the "does this exist"
-    // check and the source of the mode bits below -- previously this was
-    // `path.exists()` (itself just `fs::metadata(path).is_ok()`) followed
-    // by a *second*, redundant `fs::metadata(path)` call. That redundancy
-    // left a permanently-uncovered branch: the only way the second call
-    // could fail differently from the first is a TOCTOU race (the file
-    // vanishing in the gap between the two calls), which isn't something
-    // any test can trigger deterministically. Calling `metadata()` exactly
-    // once removes that race window (and the unreachable branch) entirely.
-    let metadata = match std::fs::metadata(path) {
-        Ok(metadata) => metadata,
-        Err(_) => return,
-    };
-
-    let mode = metadata.permissions().mode();
-    if mode & 0o077 != 0 {
-        let span = tracing::warn_span!(
-            "permissive_config_perms",
-            path = tracing::field::Empty,
-            mode = tracing::field::Empty
-        );
-        let _enter = span.enter();
-        span.record("path", tracing::field::display(path.display()));
-        span.record("mode", format!("{:o}", mode));
-        log_permissive_perms_warning();
-        let perms = std::fs::Permissions::from_mode(0o600);
-        if let Err(e) = std::fs::set_permissions(path, perms) {
-            log_fix_config_file_permissions_failed(&e);
-        }
+    match leviath_sys::ensure_file_private(path) {
+        Ok(Some(old_mode)) => log_permissive_perms_warning(old_mode),
+        Ok(None) => {}
+        Err(e) => log_fix_config_file_permissions_failed(&e),
     }
-}
-
-#[cfg(not(unix))]
-fn check_permissions() {
-    // No-op on non-Unix platforms
 }
 
 /// COVERAGE-EXCLUDED: llvm-cov's tracing-macro message-literal region is
@@ -419,76 +390,55 @@ fn check_permissions() {
 /// session) -- isolating the bare macro call behind a twin removes the
 /// unfixable region from what's measured without touching the surrounding,
 /// fully-testable control flow that decides WHETHER to call it.
-#[cfg(unix)]
 #[cfg(not(test))]
-fn log_permissive_perms_warning() {
-    tracing::warn!("Config file has overly permissive permissions, fixing to 600");
+fn log_permissive_perms_warning(old_mode: u32) {
+    tracing::warn!(
+        "Config file has overly permissive permissions ({:o}), fixing to 600",
+        old_mode & 0o777
+    );
 }
 
-#[cfg(unix)]
 #[cfg(test)]
-fn log_permissive_perms_warning() {}
+fn log_permissive_perms_warning(_old_mode: u32) {}
 
 /// COVERAGE-EXCLUDED: see [`log_permissive_perms_warning`].
-#[cfg(unix)]
 #[cfg(not(test))]
 fn log_fix_config_file_permissions_failed(e: &std::io::Error) {
     tracing::warn!("Failed to fix config file permissions: {}", e);
 }
 
-#[cfg(unix)]
 #[cfg(test)]
 fn log_fix_config_file_permissions_failed(_e: &std::io::Error) {}
 
-/// Set restrictive permissions on the config file (Unix only).
-#[cfg(unix)]
+/// Set restrictive permissions on the config file.
 fn set_file_permissions(path: &std::path::Path) {
-    use std::os::unix::fs::PermissionsExt;
-    let perms = std::fs::Permissions::from_mode(0o600);
-    if let Err(e) = std::fs::set_permissions(path, perms) {
+    if let Err(e) = leviath_sys::secure_file_perms(path) {
         log_set_file_permissions_failed(&e);
     }
 }
 
-#[cfg(not(unix))]
-fn set_file_permissions(_path: &std::path::Path) {
-    // No-op on non-Unix platforms
-}
-
 /// COVERAGE-EXCLUDED: see [`log_permissive_perms_warning`].
-#[cfg(unix)]
 #[cfg(not(test))]
 fn log_set_file_permissions_failed(e: &std::io::Error) {
     tracing::warn!("Failed to set config file permissions: {}", e);
 }
 
-#[cfg(unix)]
 #[cfg(test)]
 fn log_set_file_permissions_failed(_e: &std::io::Error) {}
 
-/// Set restrictive permissions on the config directory (Unix only).
-#[cfg(unix)]
+/// Set restrictive permissions on the config directory.
 fn set_dir_permissions(path: &std::path::Path) {
-    use std::os::unix::fs::PermissionsExt;
-    let perms = std::fs::Permissions::from_mode(0o700);
-    if let Err(e) = std::fs::set_permissions(path, perms) {
+    if let Err(e) = leviath_sys::secure_dir_perms(path) {
         log_set_dir_permissions_failed(&e);
     }
 }
 
-#[cfg(not(unix))]
-fn set_dir_permissions(_path: &std::path::Path) {
-    // No-op on non-Unix platforms
-}
-
 /// COVERAGE-EXCLUDED: see [`log_permissive_perms_warning`].
-#[cfg(unix)]
 #[cfg(not(test))]
 fn log_set_dir_permissions_failed(e: &std::io::Error) {
     tracing::warn!("Failed to set config directory permissions: {}", e);
 }
 
-#[cfg(unix)]
 #[cfg(test)]
 fn log_set_dir_permissions_failed(_e: &std::io::Error) {}
 
