@@ -516,17 +516,12 @@ impl Dashboard {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::commands::dashboard::test_support::make_test_dashboard;
     use crate::runstate::{StageRecord, StageRunStatus};
     use ratatui::backend::TestBackend;
     use ratatui::layout::Rect;
     use ratatui::Terminal;
     use std::collections::HashMap;
-    use tokio::sync::mpsc;
-
-    fn make_test_dashboard() -> Dashboard {
-        let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
-        Dashboard::new(cmd_tx)
-    }
 
     fn make_test_agent(id: &str, status: AgentDisplayStatus) -> DashboardAgent {
         DashboardAgent {
