@@ -1534,6 +1534,161 @@ mod tests {
         assert_eq!(children.children.len(), 2);
     }
 
+    #[tokio::test]
+    async fn run_stage_loop_fan_out_no_merge_proceeds() {
+        use leviath_core::blueprint::{EdgeTransform, TransitionCondition, TransitionEdge};
+        // fan_out with no merge stage → Proceed → follow the Always edge to done.
+        let mut fan = make_stage("parallel");
+        fan.mode = StageMode::FanOut {
+            config: leviath_core::blueprint::FanOutConfig {
+                worker_agent: None,
+                worker_stage: Some("worker".to_string()),
+                worker_query: None,
+                merge_stage: None,
+                max_workers: 2,
+                on_worker_failure: leviath_core::blueprint::WorkerFailurePolicy::Continue,
+                split_prompt: "split".to_string(),
+            },
+        };
+        let mut fan_tr = HashMap::new();
+        fan_tr.insert(
+            "done".to_string(),
+            TransitionEdge {
+                target: "done".to_string(),
+                condition: TransitionCondition::Always,
+                hint: None,
+                transform: EdgeTransform::Direct,
+            },
+        );
+        fan.transitions = Some(fan_tr);
+        let mut worker = make_stage("worker");
+        worker.allow_as_worker = true;
+        let done = make_stage("done");
+        let bp = make_blueprint(vec![fan, worker, done]);
+
+        let mut registry = ProviderRegistry::new();
+        registry.register(
+            "anthropic".to_string(),
+            Arc::new(FanOutProvider {
+                split: std::sync::Mutex::new(Some(r#"[{"id":"a","context":{}}]"#.to_string())),
+            }),
+        );
+        let mut engine = AgentEngine::with_providers(registry);
+        let mut pool = AgentPool::new(bp.clone());
+        let agent_id = pool.spawn_agent(engine.world_mut());
+        let entity = pool.get_agent(&agent_id).unwrap();
+        initialize_context_window(&mut engine, entity, &bp, "task");
+        let engine: leviath_runtime::EngineHandle =
+            std::sync::Arc::new(tokio::sync::RwLock::new(engine));
+        let tool_registry = make_tool_registry().await;
+        let mut cb = MockCallbacks::new();
+        let mut reg = std::collections::HashMap::new();
+        reg.insert(bp.name.clone(), bp.clone());
+        let mut ctx = StageContext {
+            blueprint: &bp,
+            engine: engine.clone(),
+            entity,
+            pool: &mut pool,
+            tool_registry: &tool_registry,
+            current_stage_name: Arc::new(Mutex::new(String::new())),
+            current_stage_perms: Arc::new(Mutex::new(HashMap::new())),
+            current_stage_idx: Arc::new(Mutex::new(0)),
+            model_override: None,
+            user_default_model: None,
+            compaction_ref: None,
+            agent_registry: Arc::new(reg),
+        };
+        run_stage_loop(
+            &mut ctx,
+            &mut cb,
+            "agent-1",
+            &mut MockIO::new(),
+            &mut noop_exec,
+        )
+        .await
+        .unwrap();
+        assert!(cb
+            .transitions
+            .iter()
+            .any(|(f, t)| f == "parallel" && t == "done"));
+    }
+
+    #[tokio::test]
+    async fn run_stage_loop_fan_out_fail_all_takes_error_edge() {
+        use leviath_core::blueprint::{EdgeTransform, TransitionCondition, TransitionEdge};
+        // A non-JSON split → FailAll → StageResult::Error → the error edge fires.
+        let mut fan = make_stage("parallel");
+        fan.mode = StageMode::FanOut {
+            config: leviath_core::blueprint::FanOutConfig {
+                worker_agent: None,
+                worker_stage: Some("worker".to_string()),
+                worker_query: None,
+                merge_stage: None,
+                max_workers: 2,
+                on_worker_failure: leviath_core::blueprint::WorkerFailurePolicy::Continue,
+                split_prompt: "split".to_string(),
+            },
+        };
+        let mut fan_tr = HashMap::new();
+        fan_tr.insert(
+            "recover".to_string(),
+            TransitionEdge {
+                target: "recover".to_string(),
+                condition: TransitionCondition::Error,
+                hint: None,
+                transform: EdgeTransform::Direct,
+            },
+        );
+        fan.transitions = Some(fan_tr);
+        let mut worker = make_stage("worker");
+        worker.allow_as_worker = true;
+        let recover = make_stage("recover");
+        let bp = make_blueprint(vec![fan, worker, recover]);
+
+        // CannedProvider returns "canned response" (not a JSON array) → split fails.
+        let mut registry = ProviderRegistry::new();
+        registry.register("anthropic".to_string(), Arc::new(CannedProvider));
+        let mut engine = AgentEngine::with_providers(registry);
+        let mut pool = AgentPool::new(bp.clone());
+        let agent_id = pool.spawn_agent(engine.world_mut());
+        let entity = pool.get_agent(&agent_id).unwrap();
+        initialize_context_window(&mut engine, entity, &bp, "task");
+        let engine: leviath_runtime::EngineHandle =
+            std::sync::Arc::new(tokio::sync::RwLock::new(engine));
+        let tool_registry = make_tool_registry().await;
+        let mut cb = MockCallbacks::new();
+        let mut reg = std::collections::HashMap::new();
+        reg.insert(bp.name.clone(), bp.clone());
+        let mut ctx = StageContext {
+            blueprint: &bp,
+            engine: engine.clone(),
+            entity,
+            pool: &mut pool,
+            tool_registry: &tool_registry,
+            current_stage_name: Arc::new(Mutex::new(String::new())),
+            current_stage_perms: Arc::new(Mutex::new(HashMap::new())),
+            current_stage_idx: Arc::new(Mutex::new(0)),
+            model_override: None,
+            user_default_model: None,
+            compaction_ref: None,
+            agent_registry: Arc::new(reg),
+        };
+        run_stage_loop(
+            &mut ctx,
+            &mut cb,
+            "agent-1",
+            &mut MockIO::new(),
+            &mut noop_exec,
+        )
+        .await
+        .unwrap();
+        // No workers spawned (split failed), and the error edge was taken.
+        assert!(cb
+            .transitions
+            .iter()
+            .any(|(f, t)| f == "parallel" && t == "recover"));
+    }
+
     struct CannedProvider;
 
     #[async_trait]

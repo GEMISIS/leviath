@@ -602,6 +602,15 @@ mod tests {
     }
 
     #[test]
+    fn resolve_worker_no_source_errors() {
+        // Defensive: validate_graph normally guarantees one source, but a caller
+        // that bypasses validation gets a clear error.
+        let current = bp("root");
+        let err = resolve_worker(&cfg(), &current, &HashMap::new()).unwrap_err();
+        assert!(err.to_string().contains("no worker source"));
+    }
+
+    #[test]
     fn discover_worker_zero_and_ambiguous() {
         let mut registry = HashMap::new();
         registry.insert("alpha".to_string(), bp("alpha"));
@@ -615,6 +624,55 @@ mod tests {
         let err = discover_worker("al", &registry).unwrap_err().to_string();
         assert!(err.contains("ambiguous"));
         assert!(err.contains("alpha, alto"));
+    }
+
+    #[test]
+    fn parse_work_items_handles_prose_and_rejects_bad_json() {
+        // No array at all.
+        assert!(parse_work_items("just prose, no array").is_err());
+        // Brackets present but invalid JSON inside.
+        assert!(parse_work_items("[this is not json]").is_err());
+        // Prose around a valid array is tolerated.
+        let items =
+            parse_work_items("Here you go:\n[{\"id\":\"x\",\"context\":{\"k\":1}}]\nThanks")
+                .unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].id, "x");
+    }
+
+    #[test]
+    fn discover_matches_capabilities_and_ignores_nonstring_metadata() {
+        let mut agent = bp("cap-agent");
+        agent
+            .metadata
+            .insert("capabilities".to_string(), serde_json::json!(["refactor"]));
+        // Non-string/array metadata is ignored, not matched.
+        agent
+            .metadata
+            .insert("tags".to_string(), serde_json::json!(42));
+        let mut registry = HashMap::new();
+        registry.insert("cap-agent".to_string(), agent);
+        assert_eq!(
+            discover_worker("refactor", &registry).unwrap().name,
+            "cap-agent"
+        );
+        assert!(discover_worker("42", &registry).is_err());
+    }
+
+    #[test]
+    fn load_agent_registry_skips_malformed_installed_agent() {
+        let tmp = std::env::temp_dir().join(format!("lev-fanout-bad-{}", std::process::id()));
+        let bad = tmp.join("broken");
+        std::fs::create_dir_all(&bad).unwrap();
+        std::fs::write(bad.join("agent.leviath"), "= = = not valid toml {{{").unwrap();
+        let installer = AgentInstaller::with_install_dir(tmp.clone());
+        let registry = load_agent_registry_with(&bp("root"), &installer);
+        assert!(registry.contains_key("root"));
+        assert!(
+            !registry.contains_key("broken"),
+            "malformed agent is skipped"
+        );
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     #[test]
@@ -780,6 +838,26 @@ model = { models = [{ provider = "mock", model = "m" }] }
         let workdir = std::env::current_dir().unwrap();
         let tools = Arc::new(ToolRegistry::build(workdir, &config).await);
         (engine, parent, tools)
+    }
+
+    #[tokio::test]
+    async fn resolve_worker_model_uses_registered_else_fallback() {
+        // Unregistered provider → fallback.
+        let engine: EngineHandle = Arc::new(tokio::sync::RwLock::new(AgentEngine::with_providers(
+            ProviderRegistry::new(),
+        )));
+        let model = ModelConfig::new("nonexistent".into(), "x".into());
+        let (p, m) = resolve_worker_model(&engine, &model, ("fb-p", "fb-m")).await;
+        assert_eq!((p.as_str(), m.as_str()), ("fb-p", "fb-m"));
+
+        // Registered provider → used.
+        let mut reg = ProviderRegistry::new();
+        reg.register("mock".into(), Arc::new(ScriptProvider::new("[]")));
+        let engine2: EngineHandle =
+            Arc::new(tokio::sync::RwLock::new(AgentEngine::with_providers(reg)));
+        let model2 = ModelConfig::new("mock".into(), "the-model".into());
+        let (p2, m2) = resolve_worker_model(&engine2, &model2, ("fb", "fb")).await;
+        assert_eq!((p2.as_str(), m2.as_str()), ("mock", "the-model"));
     }
 
     #[tokio::test]
@@ -1085,6 +1163,118 @@ model = { models = [{ provider = "mock", model = "m" }] }
             .collect::<Vec<_>>()
             .join("\n");
         assert!(sys.contains("WORKER WROTE THIS"), "sys region: {sys}");
+    }
+
+    #[tokio::test]
+    async fn run_fan_out_worker_interaction_tool_gets_directive() {
+        // A worker that calls ask_user_text receives the autonomous directive as
+        // the tool result (rather than blocking), then proceeds to completion.
+        let mut registry = ProviderRegistry::new();
+        registry.register(
+            "mock".into(),
+            Arc::new(InteractionWorkerProvider {
+                n: std::sync::Mutex::new(0),
+            }),
+        );
+        let mut engine = AgentEngine::with_providers(registry);
+        let mut pool = AgentPool::new(fanout_blueprint(base_config()));
+        let pid = pool.spawn_agent(engine.world_mut());
+        let parent = pool.get_agent(&pid).unwrap();
+        {
+            let mut w = engine.world_mut().get_mut::<ContextWindow>(parent).unwrap();
+            w.add_region(Region::new(
+                "conversation".into(),
+                leviath_core::RegionKind::SlidingWindow {
+                    max_items: 100,
+                    eviction_strategy: leviath_core::EvictionStrategy::PerItem,
+                },
+                10000,
+            ));
+        }
+        let engine: EngineHandle = Arc::new(tokio::sync::RwLock::new(engine));
+        let config = crate::config::Config::default();
+        let tools = Arc::new(ToolRegistry::build(std::env::current_dir().unwrap(), &config).await);
+
+        let mut fo = base_config();
+        fo.max_workers = 1;
+        let mut bp = fanout_blueprint(fo.clone());
+        if let Some(w) = bp.stages.iter_mut().find(|s| s.name == "worker") {
+            w.available_tools = vec!["ask_user_text".to_string()];
+        }
+        let mut reg = HashMap::new();
+        reg.insert(bp.name.clone(), bp.clone());
+        let mut io = super::super::io::mock::MockIO::new();
+
+        let outcome = run_fan_out_stage(
+            &engine, parent, &bp, &fo, &reg, &tools, "mock", "m", &mut io,
+        )
+        .await
+        .unwrap();
+        // Worker didn't block; the stage completed to its merge outcome.
+        assert_eq!(outcome, FanOutOutcome::Merge("merge".to_string()));
+        let eng = engine.read().await;
+        let child = eng
+            .world()
+            .get::<SubAgentChildren>(parent)
+            .unwrap()
+            .children[0];
+        assert_eq!(
+            eng.world().get::<AgentState>(child).unwrap().status,
+            AgentStatus::Complete
+        );
+    }
+
+    /// Provider: call 0 = split (1 item); call 1 = worker calls ask_user_text;
+    /// later = done.
+    struct InteractionWorkerProvider {
+        n: std::sync::Mutex<usize>,
+    }
+    #[async_trait::async_trait]
+    impl leviath_providers::Provider for InteractionWorkerProvider {
+        async fn infer(
+            &self,
+            _req: leviath_providers::InferenceRequest,
+        ) -> leviath_providers::Result<leviath_providers::InferenceResponse> {
+            let mut n = self.n.lock().unwrap();
+            let call = *n;
+            *n += 1;
+            let (content, tool_calls) = match call {
+                0 => (r#"[{"id":"a","context":{}}]"#.to_string(), vec![]),
+                1 => (
+                    "asking".to_string(),
+                    vec![leviath_providers::ToolCall {
+                        id: "c1".to_string(),
+                        name: "ask_user_text".to_string(),
+                        arguments: serde_json::json!({"prompt":"which approach?"}),
+                    }],
+                ),
+                _ => ("done".to_string(), vec![]),
+            };
+            Ok(leviath_providers::InferenceResponse {
+                content,
+                tool_calls,
+                tokens_used: leviath_providers::TokenUsage {
+                    prompt_tokens: 1,
+                    completion_tokens: 1,
+                    total_tokens: 2,
+                    cached_tokens: 0,
+                    cache_write_tokens: 0,
+                },
+                finish_reason: leviath_providers::FinishReason::Complete,
+            })
+        }
+        fn count_tokens(&self, _t: &str, _m: &str) -> usize {
+            4
+        }
+        fn max_context_tokens(&self, _m: &str) -> usize {
+            100_000
+        }
+        fn name(&self) -> &str {
+            "mock"
+        }
+        fn capabilities(&self, _m: &str) -> leviath_providers::ModelCapabilities {
+            leviath_providers::ModelCapabilities::default()
+        }
     }
 
     #[test]
