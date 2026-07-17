@@ -133,34 +133,71 @@ pub fn run_with(runner: &dyn Runner) -> Result<()> {
     report_result
 }
 
-/// Generate a browsable HTML coverage report for the whole workspace via
-/// `cargo llvm-cov --html`, for visual inspection only.
+/// Generate browsable per-package HTML coverage reports — one
+/// `cargo llvm-cov --package <pkg> --lib --html` per workspace crate — plus a
+/// top-level `coverage/html/index.html` linking them.
 ///
-/// This is NOT used for the authoritative region/line/function counts
-/// that `run_report`'s 100% gate enforces -- those come from
-/// `run_coverage`'s per-package, per-target-scoped runs (see this file's top
-/// doc comment for why a single `--workspace` invocation's counts can read
-/// inflated relative to that). A human browsing source-highlighted HTML
-/// tolerates that occasional inaccuracy (a handful of lines that are
-/// actually covered by another test target showing red) far better than an
-/// automated 100% gate would, and running one combined `--workspace`
-/// pass here (rather than replicating `run_coverage`'s per-package/per-scope
-/// splitting a second time) keeps this a single, simple, cheap-to-reason-about
-/// addition instead of doubling that function's complexity for a
-/// browsing-only convenience feature.
+/// Per-package `--lib` deliberately mirrors how [`run_coverage`]'s
+/// authoritative gate measures, so the browsable report agrees with the 100%
+/// gate. A single `cargo llvm-cov --workspace --html` pass (the previous
+/// approach) disagreed on two counts: (a) it sums regions per-monomorphization
+/// across the whole workspace, inflating "missed" counts on generic-heavy
+/// files; and (b) `--workspace` instruments the `[[bin]]` targets, whose
+/// `#[cfg(not(test))]` code is compiled but never executed under `cargo test`,
+/// so their real bodies (e.g. `dispatch.rs`'s process-spawning wrappers)
+/// rendered as uncovered red even though the gate correctly never counts them.
+/// `--lib` scoping excludes bins, and per-package runs avoid the cross-package
+/// summation, so the HTML now matches the gate. `xtask` itself is not in
+/// [`parse_workspace_packages`] (it has no lib and is the coverage tool), so
+/// it's absent here too — consistent with the gate.
 fn generate_html_report(runner: &dyn Runner) -> Result<()> {
-    println!("[coverage] Generating HTML report…");
-    if !runner.cargo(&[
-        "llvm-cov",
-        "--all-features",
-        "--workspace",
-        "--html",
-        "--output-dir",
-        "coverage/html",
-    ])? {
-        anyhow::bail!("cargo llvm-cov exited non-zero while generating the HTML report");
+    println!("[coverage] Generating per-package HTML reports…");
+    // Clear any previous report (e.g. a stale whole-workspace one) so the
+    // directory only ever holds the current per-package layout.
+    runner.remove_dir("coverage/html");
+    let meta = runner.cargo_metadata()?;
+    let packages = parse_workspace_packages(&meta);
+    for pkg in &packages {
+        // Clean slate between packages (same reason as `run_coverage`).
+        runner.remove_dir("target/llvm-cov-target");
+        let out_dir = format!("coverage/html/{pkg}");
+        if !runner.cargo(&[
+            "llvm-cov",
+            "--all-features",
+            "--package",
+            pkg,
+            "--lib",
+            "--html",
+            "--output-dir",
+            &out_dir,
+        ])? {
+            anyhow::bail!(
+                "cargo llvm-cov exited non-zero while generating the HTML report for {pkg}"
+            );
+        }
     }
+    write_html_index(&packages)?;
     println!("[coverage] HTML report: coverage/html/index.html");
+    Ok(())
+}
+
+/// Write a small top-level `coverage/html/index.html` linking to each
+/// per-package report at `coverage/html/<pkg>/html/index.html`.
+fn write_html_index(packages: &[String]) -> Result<()> {
+    std::fs::create_dir_all("coverage/html").context("creating coverage/html directory")?;
+    let mut html = String::from(
+        "<!doctype html>\n<meta charset=\"utf-8\">\n<title>Leviath coverage</title>\n\
+         <h1>Leviath coverage — per-package reports</h1>\n\
+         <p>Each link is a source-highlighted <code>cargo llvm-cov --lib</code> report, \
+         measured the same way the 100% gate is.</p>\n<ul>\n",
+    );
+    for pkg in packages {
+        html.push_str(&format!(
+            "  <li><a href=\"{pkg}/html/index.html\">{pkg}</a></li>\n"
+        ));
+    }
+    html.push_str("</ul>\n");
+    std::fs::write("coverage/html/index.html", html).context("writing coverage/html/index.html")?;
     Ok(())
 }
 
@@ -764,15 +801,18 @@ mod tests {
             if self.fail_cargo_err {
                 anyhow::bail!("simulated cargo spawn failure");
             }
+            // HTML generation is now per-package (`--package X --lib --html`),
+            // so the fail-html simulation must trigger regardless of whether a
+            // `--package` arg is present.
+            if self.fail_html && args.contains(&"--html") {
+                return Ok(false);
+            }
             let output_path = args
                 .windows(2)
                 .find(|w| w[0] == "--output-path")
                 .and_then(|w| w.get(1).copied());
 
             let Some(pkg_idx) = args.iter().position(|a| *a == "--package") else {
-                if self.fail_html && args.contains(&"--html") {
-                    return Ok(false);
-                }
                 // Any other non-package cargo invocation (e.g. plain `cargo help`) — no-op success.
                 return Ok(true);
             };
