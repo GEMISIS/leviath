@@ -3156,6 +3156,149 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_run_inference_loop_shared_cancel_after_response_returns_last() {
+        // A tool executor cancels the agent mid-loop; the next iteration sees the
+        // cancellation and returns the *prior* response (the `last_response.map`
+        // path) rather than erroring.
+        let responses = vec![
+            InferenceResponse {
+                content: "first turn".to_string(),
+                tool_calls: vec![leviath_providers::ToolCall {
+                    id: "call_1".to_string(),
+                    name: "bash".to_string(),
+                    arguments: serde_json::json!({"cmd": "ls"}),
+                }],
+                tokens_used: leviath_providers::TokenUsage {
+                    prompt_tokens: 3,
+                    completion_tokens: 2,
+                    total_tokens: 5,
+                    cached_tokens: 0,
+                    cache_write_tokens: 0,
+                },
+                finish_reason: leviath_providers::FinishReason::ToolCall,
+            },
+            default_response(),
+        ];
+        let mut registry = ProviderRegistry::new();
+        registry.register(
+            "mock".to_string(),
+            Arc::new(MockProvider::with_responses("mock", responses)),
+        );
+        let mut engine = AgentEngine::with_providers(registry);
+        let entity = spawn_mock_agent(&mut engine, "agent-cancel");
+        let token = engine
+            .world()
+            .get::<CancellationToken>(entity)
+            .unwrap()
+            .clone();
+        let handle: EngineHandle = Arc::new(tokio::sync::RwLock::new(engine));
+
+        let mut exec =
+            move |calls: Vec<leviath_providers::ToolCall>| -> ToolResultsFuture<'static> {
+                // Cancel so the *next* iteration's cancel-check fires after a response.
+                token.cancel();
+                Box::pin(async move {
+                    calls
+                        .into_iter()
+                        .map(|c| (c.id, "ok".to_string()))
+                        .collect()
+                })
+            };
+        let result = run_inference_loop_shared(
+            &handle,
+            entity,
+            "mock",
+            "m",
+            Vec::new(),
+            10,
+            None,
+            None,
+            &mut exec,
+            None,
+            None,
+        )
+        .await;
+        // Returns the prior (first-turn) response with accumulated tokens.
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().content, "first turn");
+        assert_eq!(
+            handle
+                .read()
+                .await
+                .world()
+                .get::<AgentState>(entity)
+                .unwrap()
+                .status,
+            AgentStatus::Cancelled
+        );
+    }
+
+    #[tokio::test]
+    async fn test_run_inference_loop_shared_with_compaction() {
+        // Drive the shared loop with a compaction config so the eviction/
+        // compaction critical section runs.
+        let responses = vec![
+            InferenceResponse {
+                content: "turn".to_string(),
+                tool_calls: vec![leviath_providers::ToolCall {
+                    id: "c".to_string(),
+                    name: "bash".to_string(),
+                    arguments: serde_json::json!({}),
+                }],
+                tokens_used: leviath_providers::TokenUsage {
+                    prompt_tokens: 1,
+                    completion_tokens: 1,
+                    total_tokens: 2,
+                    cached_tokens: 0,
+                    cache_write_tokens: 0,
+                },
+                finish_reason: leviath_providers::FinishReason::ToolCall,
+            },
+            default_response(),
+        ];
+        let mut registry = ProviderRegistry::new();
+        registry.register(
+            "mock".to_string(),
+            Arc::new(MockProvider::with_responses("mock", responses)),
+        );
+        let mut engine = AgentEngine::with_providers(registry);
+        let entity = spawn_mock_agent(&mut engine, "agent-compact");
+        let handle: EngineHandle = Arc::new(tokio::sync::RwLock::new(engine));
+
+        let cc = leviath_core::CompactionConfig {
+            provider: "unused".to_string(),
+            model: "test".to_string(),
+            max_summary_tokens: 200,
+            temperature: 0.3,
+            system_prompt: None,
+            user_prompt_template: None,
+        };
+        let mut exec = |calls: Vec<leviath_providers::ToolCall>| -> ToolResultsFuture<'static> {
+            Box::pin(async move {
+                calls
+                    .into_iter()
+                    .map(|c| (c.id, "ok".to_string()))
+                    .collect()
+            })
+        };
+        let result = run_inference_loop_shared(
+            &handle,
+            entity,
+            "mock",
+            "m",
+            Vec::new(),
+            5,
+            None,
+            Some(&cc),
+            &mut exec,
+            None,
+            None,
+        )
+        .await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
     async fn test_run_inference_loop_with_cancellation() {
         let (mut engine, entity) = make_engine_with_mock();
 
