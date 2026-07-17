@@ -2812,4 +2812,22 @@ mod tests {
         assert!(region.get_by_key("second").is_some());
         assert!(region.get_by_key("first").is_none());
     }
+
+    #[test]
+    fn test_evict_lru_entry_on_empty_region_is_noop() {
+        // Directly exercise the early-return guard in `evict_lru_entry` when
+        // there is nothing to evict — a defensive branch not reachable through
+        // the public upsert path (which only evicts non-empty regions).
+        let mut region = Region::new(
+            "kv".to_string(),
+            RegionKind::HashMap {
+                max_entries: Some(4),
+            },
+            1000,
+        );
+        assert_eq!(region.entry_count(), 0);
+        region.evict_lru_entry();
+        assert_eq!(region.entry_count(), 0);
+        assert_eq!(region.current_tokens, 0);
+    }
 }
