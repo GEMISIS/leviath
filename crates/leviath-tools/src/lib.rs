@@ -780,28 +780,46 @@ impl BuiltinTools {
         match timeout(timeout_duration, run).await {
             Err(_) => format!("[timed out] Command exceeded 60s: {}", command),
             Ok(Err(e)) => format!("[error] Failed to spawn shell '{}': {}", shell, e),
-            Ok(Ok(output)) => {
-                let stdout = String::from_utf8_lossy(&output.stdout);
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                let exit_code = output.status.code().unwrap_or(-1);
+            Ok(Ok(output)) => Self::format_command_output(
+                &output.stdout,
+                &output.stderr,
+                output.status.success(),
+                output.status.code().unwrap_or(-1),
+            ),
+        }
+    }
 
-                if output.status.success() {
-                    if stdout.trim().is_empty() {
-                        "(command succeeded with no output)".to_string()
-                    } else {
-                        stdout.to_string()
-                    }
-                } else {
-                    let mut result = format!("[exit code {}]\n", exit_code);
-                    if !stdout.trim().is_empty() {
-                        result.push_str(&format!("stdout:\n{}\n", stdout));
-                    }
-                    if !stderr.trim().is_empty() {
-                        result.push_str(&format!("stderr:\n{}", stderr));
-                    }
-                    result
-                }
+    /// Format captured command output. Split out (behavior-preserving) from
+    /// [`Self::shell_with_timeout`] so the success / non-zero-exit
+    /// stdout+stderr formatting arms can be exercised deterministically on
+    /// every platform, independent of the host shell's command-chaining and
+    /// redirection syntax (`cmd.exe` and `sh` differ, so an integration test
+    /// that produces stdout+stderr+non-zero-exit in one command is not
+    /// portable).
+    fn format_command_output(
+        stdout: &[u8],
+        stderr: &[u8],
+        success: bool,
+        exit_code: i32,
+    ) -> String {
+        let stdout = String::from_utf8_lossy(stdout);
+        let stderr = String::from_utf8_lossy(stderr);
+
+        if success {
+            if stdout.trim().is_empty() {
+                "(command succeeded with no output)".to_string()
+            } else {
+                stdout.to_string()
             }
+        } else {
+            let mut result = format!("[exit code {}]\n", exit_code);
+            if !stdout.trim().is_empty() {
+                result.push_str(&format!("stdout:\n{}\n", stdout));
+            }
+            if !stderr.trim().is_empty() {
+                result.push_str(&format!("stderr:\n{}", stderr));
+            }
+            result
         }
     }
 }
@@ -1141,22 +1159,22 @@ mod tests {
 
     #[test]
     fn resolve_rejects_excessive_parent_dir_traversal() {
-        // More ".." segments than the workdir itself has components, so
-        // `normalized.pop()` fails on an already-empty path (distinct from
-        // the "popped below workdir root" case covered by
-        // resolve_rejects_path_escape). Which of the two bail messages
-        // fires ("escapes the working directory" vs "would escape the
-        // working directory") can depend on how many path components the
-        // platform's own temp-dir path decomposes into (e.g. Windows'
-        // drive-prefix + UNC handling), so this only asserts the common
-        // "escape" substring both share, not the exact message -- either
-        // is an equally correct rejection.
-        let dir = tempfile::tempdir().unwrap();
-        let tools = make_tools(dir.path());
-        let deep_traversal = "../".repeat(64) + "etc/passwd";
-        let result = tools.resolve(&deep_traversal);
+        // An empty workdir (canonicalize("") fails, so the raw "" is kept)
+        // means the very first component of a "../"-prefixed request is a
+        // ParentDir with an empty accumulator, so `normalized.pop()` fails
+        // immediately -- hitting the "escapes the working directory" bail.
+        // Using "" avoids consuming a platform-specific leading root/drive
+        // prefix first, so this branch fires deterministically on every OS
+        // (a real temp-dir path decomposes into a platform-varying number of
+        // components, which is why a fixed count of ".." segments would land
+        // on the other "would escape" bail on some platforms).
+        let tools = BuiltinTools::new(ToolContext::new(PathBuf::from("")));
+        let result = tools.resolve("../etc/passwd");
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("escape"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("escapes the working directory"));
     }
 
     #[tokio::test]
@@ -1516,19 +1534,23 @@ mod tests {
         assert!(result.contains("Failed to read directory"));
     }
 
-    #[cfg(unix)]
+    // `set_readonly(false)` widens Unix perms beyond the original, but here it
+    // only re-enables cleanup of a throwaway tempdir file, which is exactly
+    // what we want.
+    #[allow(clippy::permissions_set_readonly_false)]
     #[tokio::test]
     async fn edit_file_write_failure_after_successful_match() {
-        use std::os::unix::fs::PermissionsExt;
-
         let dir = tempfile::tempdir().unwrap();
         let tools = make_tools(dir.path());
         let file_path = dir.path().join("ro.txt");
         fs::write(&file_path, "hello world").unwrap();
 
-        // Make the file read-only so the read succeeds but the write-back fails.
+        // Make the file read-only so the read succeeds but the write-back
+        // fails. `set_readonly(true)` is cross-platform (clears the write bits
+        // on Unix; sets the read-only attribute on Windows), so the write
+        // error arm is exercised on every OS.
         let mut perms = fs::metadata(&file_path).unwrap().permissions();
-        perms.set_mode(0o444);
+        perms.set_readonly(true);
         fs::set_permissions(&file_path, perms).unwrap();
 
         let result = tools
@@ -1540,7 +1562,7 @@ mod tests {
 
         // Restore permissions so tempdir cleanup can remove the file.
         let mut perms = fs::metadata(&file_path).unwrap().permissions();
-        perms.set_mode(0o644);
+        perms.set_readonly(false);
         fs::set_permissions(&file_path, perms).unwrap();
 
         assert!(result.contains("[error]"));
@@ -1591,32 +1613,40 @@ mod tests {
         assert_eq!(result, "(command succeeded with no output)");
     }
 
-    // `detect_shell()` resolves to `cmd.exe /C` on Windows, which doesn't
-    // understand Unix shell syntax (`;` as a command separator, `1>&2`
-    // redirection the way `sh`/`bash` do) -- `cmd.exe` treats the whole
-    // string as one literal `echo` argument instead, so the command
-    // "succeeds" with no [exit code 1] at all. Gated `#[cfg(unix)]` rather
-    // than attempting an unverified `cmd.exe`-syntax equivalent (this
-    // session already hit multiple real Windows CI failures from
-    // insufficiently-verified platform-specific test code; not worth
-    // risking a new one here without access to a real Windows run to
-    // confirm the exact `cmd.exe` redirection/chaining syntax first).
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn shell_failing_command_reports_stdout_and_stderr() {
-        let dir = tempfile::tempdir().unwrap();
-        let tools = make_tools(dir.path());
-        let result = tools
-            .execute(
-                "shell",
-                json!({"command": "echo out-line; echo err-line 1>&2; exit 1"}),
-            )
-            .await;
+    // The stdout+stderr non-zero-exit formatting is asserted directly against
+    // `format_command_output` (below) rather than via a real shell command:
+    // producing stdout, stderr, and a non-zero exit in a single command needs
+    // shell-specific syntax (`;`/`1>&2` on `sh`, `&`/redirection on `cmd.exe`)
+    // that isn't portable, and this session already hit real Windows CI
+    // failures from insufficiently-verified platform-specific test commands.
+    #[test]
+    fn format_command_output_non_zero_exit_reports_stdout_and_stderr() {
+        let result = BuiltinTools::format_command_output(b"out-line\n", b"err-line\n", false, 1);
         assert!(result.contains("[exit code 1]"));
         assert!(result.contains("stdout:"));
         assert!(result.contains("out-line"));
         assert!(result.contains("stderr:"));
         assert!(result.contains("err-line"));
+    }
+
+    #[test]
+    fn format_command_output_non_zero_exit_omits_empty_streams() {
+        // Whitespace-only streams are treated as empty and neither the
+        // stdout: nor stderr: block is emitted.
+        let result = BuiltinTools::format_command_output(b"   \n", b"", false, 2);
+        assert_eq!(result, "[exit code 2]\n");
+    }
+
+    #[test]
+    fn format_command_output_success_with_output_returns_stdout() {
+        let result = BuiltinTools::format_command_output(b"hello\n", b"", true, 0);
+        assert_eq!(result, "hello\n");
+    }
+
+    #[test]
+    fn format_command_output_success_no_output() {
+        let result = BuiltinTools::format_command_output(b"   ", b"noise", true, 0);
+        assert_eq!(result, "(command succeeded with no output)");
     }
 
     #[tokio::test]
