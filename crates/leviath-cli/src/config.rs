@@ -391,7 +391,20 @@ fn log_fix_config_file_permissions_failed(_e: &std::io::Error) {}
 
 /// Set restrictive permissions on the config file.
 fn set_file_permissions(path: &std::path::Path) {
-    if let Err(e) = leviath_sys::secure_file_perms(path) {
+    set_file_permissions_with(path, leviath_sys::secure_file_perms);
+}
+
+/// Core of [`set_file_permissions`] with the hardening operation injected, so
+/// the "failed" arm is coverable on every OS. `leviath_sys`'s Windows fallback
+/// is infallible (always `Ok`), so that `Err` arm is otherwise unreachable
+/// there -- and even a missing path fails only on Unix. A `fn` pointer (not
+/// `impl Fn`) keeps this to a single monomorphization, mirroring
+/// [`check_permissions_at_with`].
+fn set_file_permissions_with(
+    path: &std::path::Path,
+    secure: fn(&std::path::Path) -> std::io::Result<()>,
+) {
+    if let Err(e) = secure(path) {
         log_set_file_permissions_failed(&e);
     }
 }
@@ -407,7 +420,16 @@ fn log_set_file_permissions_failed(_e: &std::io::Error) {}
 
 /// Set restrictive permissions on the config directory.
 fn set_dir_permissions(path: &std::path::Path) {
-    if let Err(e) = leviath_sys::secure_dir_perms(path) {
+    set_dir_permissions_with(path, leviath_sys::secure_dir_perms);
+}
+
+/// Core of [`set_dir_permissions`] with the hardening operation injected; see
+/// [`set_file_permissions_with`] for why.
+fn set_dir_permissions_with(
+    path: &std::path::Path,
+    secure: fn(&std::path::Path) -> std::io::Result<()>,
+) {
+    if let Err(e) = secure(path) {
         log_set_dir_permissions_failed(&e);
     }
 }
@@ -1011,40 +1033,35 @@ google_api_key = "AIza-existing"
         });
     }
 
-    // Portable failure injection for the `set_permissions` error arms of
-    // `set_file_permissions`/`set_dir_permissions`. Unlike `check_permissions_at`
-    // (which `metadata()`-guards and early-returns on a missing path), these two
-    // call `std::fs::set_permissions` directly with no existence check, so a
-    // non-existent path makes that call fail with `ENOENT` on *every* Unix
-    // platform -- no `chflags uchg` needed. That covers the error-logging branch
-    // on Linux CI too, where the immutability trick above is unavailable
-    // (`chattr +i` needs CAP_LINUX_IMMUTABLE / root). The macOS-only tests above
-    // additionally prove the file-still-exists variant of the failure; these
-    // guarantee the same branches are exercised regardless of platform.
-    #[cfg(unix)]
-    #[test]
-    fn set_file_permissions_error_branch_logs_not_panics_on_missing_path() {
-        use std::os::unix::fs::PermissionsExt;
-        let dir = tempfile::tempdir().unwrap();
-        let missing = dir.path().join("does-not-exist.toml");
-        assert!(
-            std::fs::set_permissions(&missing, std::fs::Permissions::from_mode(0o600)).is_err(),
-            "precondition: set_permissions on a missing path must fail with ENOENT"
-        );
-        with_tracing(|| set_file_permissions(&missing)); // hits the Err arm, must not panic
+    // Portable failure injection for the hardening error arms of
+    // `set_file_permissions`/`set_dir_permissions`. `leviath_sys`'s Windows
+    // fallback is infallible (always `Ok`) -- and even a missing path fails only
+    // on Unix -- so the only cross-platform way to reach the `Err` arm is to
+    // inject a hardening op that fails (mirroring `check_permissions_at_with`).
+    fn always_failing_secure(_path: &std::path::Path) -> std::io::Result<()> {
+        Err(std::io::Error::other(
+            "simulated permission-hardening failure",
+        ))
     }
 
-    #[cfg(unix)]
     #[test]
-    fn set_dir_permissions_error_branch_logs_not_panics_on_missing_path() {
-        use std::os::unix::fs::PermissionsExt;
-        let dir = tempfile::tempdir().unwrap();
-        let missing = dir.path().join("does-not-exist-subdir");
-        assert!(
-            std::fs::set_permissions(&missing, std::fs::Permissions::from_mode(0o700)).is_err(),
-            "precondition: set_permissions on a missing path must fail with ENOENT"
-        );
-        with_tracing(|| set_dir_permissions(&missing)); // hits the Err arm, must not panic
+    fn set_file_permissions_error_branch_logs_not_panics() {
+        with_tracing(|| {
+            set_file_permissions_with(
+                std::path::Path::new("/does/not/matter"),
+                always_failing_secure,
+            )
+        }); // hits the Err arm, must not panic
+    }
+
+    #[test]
+    fn set_dir_permissions_error_branch_logs_not_panics() {
+        with_tracing(|| {
+            set_dir_permissions_with(
+                std::path::Path::new("/does/not/matter"),
+                always_failing_secure,
+            )
+        }); // hits the Err arm, must not panic
     }
 
     // ─── create_config_dir / set_file_permissions / set_dir_permissions ───
