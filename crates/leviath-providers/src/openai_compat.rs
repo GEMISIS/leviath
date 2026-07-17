@@ -1356,4 +1356,28 @@ mod tests {
         .await;
         assert!(resp.is_ok());
     }
+
+    #[tokio::test]
+    async fn send_chat_request_tolerates_unparseable_debug_header() {
+        // Under the `debug-http` feature (which the coverage build enables),
+        // building the debug header map skips any header whose name/value
+        // won't parse (the `if let (Ok, Ok)` false arm) rather than panicking.
+        // The request send itself fails (unroutable address, and reqwest also
+        // rejects the bad header), which is fine — the debug-http block runs
+        // first, before the send.
+        let client = reqwest::Client::new();
+        let body = serde_json::json!({ "model": "x" });
+        let _ = send_chat_request(
+            &client,
+            "test",
+            "http://127.0.0.1:1/v1/chat/completions",
+            &[
+                ("bad header name", "v".to_string()),
+                ("content-type", "application/json".to_string()),
+            ],
+            &body,
+            None,
+        )
+        .await;
+    }
 }
