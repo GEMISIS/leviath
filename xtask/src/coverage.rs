@@ -39,24 +39,32 @@
 //! `target/`, never committed. A browsable HTML report (source-highlighted,
 //! click-through per file) also lands at `coverage/html/index.html` on every
 //! run, for visual inspection -- see [`generate_html_report`]'s doc comment
-//! for why its numbers aren't the authoritative ones `run_report`'s ceiling
-//! check uses.
+//! for why its numbers aren't the authoritative ones `run_report`'s 100% gate
+//! uses.
 //!
-//! **A residual class of "missed regions" is a confirmed, permanent
-//! limitation, not a real gap.** Generic functions instantiated over many
-//! type parameters or closure types (e.g. `leviath-runtime/src/engine.rs`'s
-//! `run_inference_loop`, `leviath-providers`'s `*SseStream<S>::poll_next`,
-//! `leviath-package/src/bundler.rs`'s `write_bundle<W: Write>`) produce one
-//! coverage-mapping instance per monomorphization; llvm-cov sometimes reports
-//! a region as uncovered for one instantiation even though every source
-//! position is covered by the union of all instantiations. Empirically
-//! tested and ruled out: building with `codegen-units=1` has zero measurable
-//! effect on these counts (verified via clean rebuilds with before/after JSON
-//! region diffs identical to the byte) while costing ~60-70% more wall-clock
-//! time per crate — `codegen-units` only affects how already-monomorphized
-//! code is partitioned for backend codegen, not how many monomorphizations
-//! exist. There is no known workaround; this is inherent to source-based
-//! coverage of generic code.
+//! **Region coverage is measured merged-by-source-position, not summed
+//! per-monomorphization.** llvm-cov's per-file `summary.regions` *sums* regions
+//! across every monomorphization of a generic function: a generic fn with N
+//! instantiations contributes its regions N times, and a source position that
+//! one instantiation exercises but another doesn't is counted as missed. That
+//! per-instantiation jitter (its size and even *which* files it lands on vary
+//! by OS/toolchain — the same `getInstantiationGroups` family of quirks behind
+//! the `--branch` crash and the `--workspace` inaccuracy above) is why this
+//! project historically enforced a tolerance ceiling on missed regions rather
+//! than a hard 100%. Instead of tolerating that noise, we eliminate it: we read
+//! llvm-cov's per-function `regions` arrays directly and key each **code**
+//! region (`Kind == 0`) by `(filename, line/col start, line/col end)`, counting
+//! a position as covered if *any* instantiation executed it (see
+//! [`merge_regions_by_position`]). For a file with no multi-instantiation
+//! generics this yields the identical count to `summary.regions`; for
+//! multi-instantiation generics it is strictly lower (the dedup) and never
+//! spuriously counts a covered source position as missed. `lines` and
+//! `functions` are already stable across instantiations and are used as
+//! llvm-cov reports them.
+//!
+//! **The gate enforces a hard 100%.** With region jitter removed, any file
+//! below 100% on regions/lines/functions is a real, closeable gap and fails
+//! the build (see [`run_report`]).
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -115,7 +123,7 @@ pub fn run_with(runner: &dyn Runner) -> Result<()> {
     std::fs::create_dir_all("coverage")
         .expect("failed to create coverage/ directory — check filesystem permissions");
     let report_result = run_report(runner, "coverage/llvm-cov.json", github_output.as_deref());
-    // Always attempt the HTML report, even if the ceiling check above failed
+    // Always attempt the HTML report, even if the 100% gate above failed
     // -- browsing exactly which lines are (un)covered is often the fastest
     // way to understand *why* a coverage regression happened. A failure
     // generating it (e.g. a real cargo/IO problem) is still surfaced, but
@@ -128,14 +136,14 @@ pub fn run_with(runner: &dyn Runner) -> Result<()> {
 /// Generate a browsable HTML coverage report for the whole workspace via
 /// `cargo llvm-cov --html`, for visual inspection only.
 ///
-/// This is NOT used for the authoritative missed-region/line/function counts
-/// that `run_report`'s ceiling check enforces -- those come from
+/// This is NOT used for the authoritative region/line/function counts
+/// that `run_report`'s 100% gate enforces -- those come from
 /// `run_coverage`'s per-package, per-target-scoped runs (see this file's top
 /// doc comment for why a single `--workspace` invocation's counts can read
 /// inflated relative to that). A human browsing source-highlighted HTML
 /// tolerates that occasional inaccuracy (a handful of lines that are
 /// actually covered by another test target showing red) far better than an
-/// automated ceiling check would, and running one combined `--workspace`
+/// automated 100% gate would, and running one combined `--workspace`
 /// pass here (rather than replicating `run_coverage`'s per-package/per-scope
 /// splitting a second time) keeps this a single, simple, cheap-to-reason-about
 /// addition instead of doubling that function's complexity for a
@@ -156,69 +164,12 @@ fn generate_html_report(runner: &dyn Runner) -> Result<()> {
     Ok(())
 }
 
-/// Locked-in ceiling on total missed regions/lines/functions, workspace-wide.
-///
-/// **This project tried per-file exact-match enforcement (a
-/// `CONFIRMED_ARTIFACT_ALLOWANCE` list keyed to specific
-/// `COVERAGE-CONFIRMED-ARTIFACT`-marked functions) and reverted it after real
-/// CI evidence proved it unworkable**: the SAME commit, unchanged, measured
-/// `config.rs` at 0 missed regions locally, 8 on a GitHub Actions
-/// `macos-latest` runner, and 20 on `ubuntu-latest` -- and also newly hit
-/// `leviath-mcp/src/discovery.rs` (2 regions), a file with no
-/// `COVERAGE-CONFIRMED-ARTIFACT` marker at all and no history of gaps. This
-/// is run-to-run/environment-to-environment measurement jitter from the same
-/// upstream `getInstantiationGroups` LLVM bug documented at the top of this
-/// file, not a stable, individually-markable set of functions -- there is no
-/// finite list of "the artifact files" to allowlist, because which files it
-/// hits varies per build. A global ceiling is the only enforcement shape
-/// that can absorb jitter of unpredictable *location* while still catching a
-/// jitter of unpredictable *size* (a real, large new gap).
-///
-/// This is a *ratchet*, not a suppression mechanism: this ceiling is set from
-/// real, fresh evidence gathered right after the vast majority of this
-/// project's real, testable coverage gaps were closed (generic-function
-/// monomorphization de-genericized to `dyn Trait`/`dyn Fn` wherever the
-/// instantiation count could be reduced to one, dependency-injection seams
-/// added for real fault-injection testing, `#[cfg(not(test))]`/`#[cfg(test)]`
-/// twins for genuinely-untestable real-IO, and `COVERAGE-CONFIRMED-ARTIFACT`
-/// markers for the residual, individually-investigated monomorphization
-/// artifacts that couldn't be collapsed further) -- three real CI runs on the
-/// identical commit measured 18/3/0 (macOS), 33/11/3 (ubuntu), and 117/61/11
-/// (windows -- confirming this platform's historical pattern of measuring
-/// meaningfully worse, same as this project's prior ceiling's own evidence).
-/// This ceiling is set with real headroom above the worst of those
-/// (windows's 117/61/11) to comfortably absorb further jitter while still
-/// being roughly 70% smaller than this project's prior ceiling (660/380/46)
-/// -- large enough to not be spuriously flaky, small enough that a real,
-/// untested new feature would still trip it.
-///
-/// If future evidence shows this ceiling is still too tight (spurious CI
-/// failures with no corresponding code change) or too loose (a real
-/// regression slips through unnoticed), gather 2-3 fresh real CI
-/// measurements the same way this one was set and adjust -- never raise it
-/// on a hunch, and never lower it below what real, repeated CI evidence
-/// supports.
-///
-/// 2026-07-17 re-baseline (fresh ubuntu CI evidence): the coverage gate runs
-/// on ubuntu-latest only, which had drifted well past the prior 200/90/20 --
-/// `main` itself measured 187/98/14 (already failing on lines, 98 > 90),
-/// having accumulated genuinely-untestable real-IO (the foreground stdin
-/// reader, dashboard alt-screen, serve handlers) over many non-required-check
-/// merges since the prior ceiling was set (when ubuntu measured just 11 missed
-/// lines). The fan-out sub-agent feature (issue #16) then measured 206/100/16
-/// on ubuntu; every *added* line is covered (verified line-by-line against the
-/// CI report), so the +19-region/+2-line delta is confirmed async/generic
-/// monomorphization artifacts, not untested logic. Raised to headroom above
-/// that real measurement so the gate reflects the true floor again.
-const MAX_MISSED_REGIONS: u64 = 216;
-const MAX_MISSED_LINES: u64 = 108;
-const MAX_MISSED_FUNCTIONS: u64 = 20;
-
 /// Core reporting logic extracted from `run_with` for unit-testability.
 ///
 /// Runs coverage via `runner`, prints a summary, reports any gaps, and writes
-/// CI output variables. All paths (including error paths) are reachable from
-/// tests through the `MockRunner` abstraction.
+/// CI output variables. Enforces a hard 100% on regions/lines/functions: any
+/// file below 100% fails the build. All paths (including the failure path) are
+/// reachable from tests through the `MockRunner` abstraction.
 pub fn run_report(
     runner: &dyn Runner,
     output_path: &str,
@@ -242,33 +193,17 @@ pub fn run_report(
 
     print_gaps(&gaps);
 
-    let regions_missed = data.totals.regions.missed();
-    let lines_missed = data.totals.lines.missed();
-    let functions_missed = data.totals.functions.missed();
-
-    if regions_missed > MAX_MISSED_REGIONS
-        || lines_missed > MAX_MISSED_LINES
-        || functions_missed > MAX_MISSED_FUNCTIONS
-    {
-        anyhow::bail!(
-            "[coverage] Coverage regressed below the locked-in floor -- missed \
-             regions {regions_missed} (max {MAX_MISSED_REGIONS}), missed lines \
-             {lines_missed} (max {MAX_MISSED_LINES}), missed functions \
-             {functions_missed} (max {MAX_MISSED_FUNCTIONS}). Fix the gaps above. \
-             If a gap is a confirmed permanent tooling limitation (generic-function \
-             monomorphization, an llvm-cov tracing-macro-argument artifact, or \
-             deliberately-untested real-IO), investigate with `cargo llvm-cov \
-             show`/`--html` before assuming so, then gather fresh real CI evidence \
-             and adjust the ceiling constants in xtask/src/coverage.rs to match."
-        );
-    }
-
-    println!(
-        "\n[coverage] Below 100% but within the confirmed-permanent-gap ceiling \
-         (regions {regions_missed}/{MAX_MISSED_REGIONS}, lines {lines_missed}/{MAX_MISSED_LINES}, \
-         functions {functions_missed}/{MAX_MISSED_FUNCTIONS}) — not failing the build."
+    anyhow::bail!(
+        "[coverage] Coverage must be 100% on regions, lines, and functions, but \
+         {} file(s) have gaps (listed above). Region coverage is measured \
+         merged-by-source-position, so per-monomorphization jitter is already \
+         removed -- every gap above is a real, closeable one. Cover it with a \
+         test; if a line is genuinely unreachable real-IO, split it behind a \
+         `#[cfg(not(test))]`/`#[cfg(test)]` seam. Investigate exactly which \
+         lines/regions are uncovered with `cargo llvm-cov show` or the browsable \
+         `coverage/html/index.html` report.",
+        gaps.len()
     );
-    Ok(())
 }
 
 // ── Gap detection (pure, testable) ───────────────────────────────────────────
@@ -439,8 +374,117 @@ fn run_single_target(
         );
     }
 
-    parse_json(output_path)
-        .with_context(|| format!("parsing coverage JSON for {pkg} ({})", scope.join(" ")))
+    let mut report = parse_json(output_path)
+        .with_context(|| format!("parsing coverage JSON for {pkg} ({})", scope.join(" ")))?;
+
+    // Re-parse the same raw JSON to recompute each file's region metric
+    // merged-by-source-position (deduplicating llvm-cov's per-monomorphization
+    // double-counting -- see this file's top doc comment). `lines`/`functions`
+    // are left as llvm-cov reports them.
+    let raw = std::fs::read_to_string(output_path)
+        .with_context(|| format!("re-reading coverage JSON for {pkg} ({})", scope.join(" ")))?;
+    let raw: serde_json::Value = serde_json::from_str(&raw)
+        .with_context(|| format!("re-parsing coverage JSON for {pkg} ({})", scope.join(" ")))?;
+    apply_merged_regions(&mut report, &raw);
+
+    Ok(report)
+}
+
+/// Overwrite each file's `summary.regions` in `report` with the
+/// merged-by-source-position count/covered derived from the raw JSON's
+/// per-function `regions` arrays, recomputing the percentage.
+///
+/// Only files present in the merged map are updated; `lines` and `functions`
+/// are never touched. `report`'s own per-target `totals` are intentionally not
+/// recomputed here — `merge_target_reports` rebuilds package totals from the
+/// (now-corrected) file summaries, and per-target totals are never read before
+/// that merge.
+fn apply_merged_regions(report: &mut LlvmCovReport, raw: &serde_json::Value) {
+    let Some(data_arr) = raw["data"].as_array() else {
+        return;
+    };
+    for (i, data) in data_arr.iter().enumerate() {
+        let per_file = merge_regions_by_position(&data["functions"]);
+        let Some(cov_data) = report.data.get_mut(i) else {
+            continue;
+        };
+        for file in &mut cov_data.files {
+            if let Some(&(count, covered)) = per_file.get(&file.filename) {
+                file.summary.regions.count = count;
+                file.summary.regions.covered = covered;
+                file.summary.regions.recompute_percent();
+            }
+        }
+    }
+}
+
+/// Compute per-file region coverage merged by source position across ALL
+/// function instantiations, keyed on `(filename, LineStart, ColStart, LineEnd,
+/// ColEnd)`.
+///
+/// `functions` is llvm-cov's per-`data`-element `functions` array. Each element
+/// has `filenames: [String]` and `regions: [[LineStart, ColStart, LineEnd,
+/// ColEnd, ExecutionCount, FileID, ExpandedFileID, Kind]]`. Only code regions
+/// (`Kind == 0`) are counted; a position is "covered" if ANY instantiation
+/// executed it (`ExecutionCount > 0`). Returns a map from filename to
+/// `(distinct-region-count, covered-count)`.
+fn merge_regions_by_position(
+    functions: &serde_json::Value,
+) -> std::collections::HashMap<String, (u64, u64)> {
+    // (filename, l_start, c_start, l_end, c_end) -> covered by any instantiation
+    let mut positions: std::collections::HashMap<(String, u64, u64, u64, u64), bool> =
+        std::collections::HashMap::new();
+
+    let Some(funcs) = functions.as_array() else {
+        return std::collections::HashMap::new();
+    };
+
+    for func in funcs {
+        let (Some(filenames), Some(regions)) =
+            (func["filenames"].as_array(), func["regions"].as_array())
+        else {
+            continue;
+        };
+        for region in regions {
+            let Some(arr) = region.as_array() else {
+                continue;
+            };
+            // [LineStart, ColStart, LineEnd, ColEnd, ExecutionCount, FileID,
+            //  ExpandedFileID, Kind]
+            if arr.len() < 8 {
+                continue;
+            }
+            // Code regions only (Kind == 0); skip expansion/gap/skipped kinds.
+            if arr[7].as_u64() != Some(0) {
+                continue;
+            }
+            let file_id = arr[5].as_u64().unwrap_or(0) as usize;
+            let Some(filename) = filenames.get(file_id).and_then(|v| v.as_str()) else {
+                continue;
+            };
+            let key = (
+                filename.to_owned(),
+                arr[0].as_u64().unwrap_or(0),
+                arr[1].as_u64().unwrap_or(0),
+                arr[2].as_u64().unwrap_or(0),
+                arr[3].as_u64().unwrap_or(0),
+            );
+            let executed = arr[4].as_u64().unwrap_or(0) > 0;
+            let covered = positions.entry(key).or_insert(false);
+            *covered |= executed;
+        }
+    }
+
+    let mut per_file: std::collections::HashMap<String, (u64, u64)> =
+        std::collections::HashMap::new();
+    for ((filename, ..), covered) in positions {
+        let entry = per_file.entry(filename).or_insert((0, 0));
+        entry.0 += 1;
+        if covered {
+            entry.1 += 1;
+        }
+    }
+    per_file
 }
 
 /// Parse workspace package names from `cargo metadata` JSON.
@@ -1189,6 +1233,146 @@ mod tests {
         assert_eq!(merged.totals.regions.covered, 8);
     }
 
+    // ── merge_regions_by_position ────────────────────────────────────────────
+
+    #[test]
+    fn merge_regions_by_position_dedups_across_instantiations() {
+        // Two "functions" = two instantiations of the same generic over the
+        // same source spans:
+        //   span A (1,1)-(1,10): count 0 in inst-1, count 3 in inst-2 → COVERED
+        //   span B (5,1)-(5,10): count 0 in both instantiations       → UNCOVERED
+        //   span C (8,1)-(8,10): Kind != 0 (an expansion region)      → IGNORED
+        // Region tuple: [LineStart, ColStart, LineEnd, ColEnd,
+        //                ExecutionCount, FileID, ExpandedFileID, Kind]
+        let functions = serde_json::json!([
+            {
+                "filenames": ["/src/a.rs"],
+                "regions": [
+                    [1, 1, 1, 10, 0, 0, 0, 0],
+                    [5, 1, 5, 10, 0, 0, 0, 0],
+                    [8, 1, 8, 10, 7, 0, 0, 2]
+                ]
+            },
+            {
+                "filenames": ["/src/a.rs"],
+                "regions": [
+                    [1, 1, 1, 10, 3, 0, 0, 0],
+                    [5, 1, 5, 10, 0, 0, 0, 0],
+                    [8, 1, 8, 10, 9, 0, 0, 2]
+                ]
+            }
+        ]);
+        let per_file = merge_regions_by_position(&functions);
+        // Only spans A and B are code regions (Kind == 0); C is ignored.
+        // A is covered (any instantiation executed it), B is not.
+        assert_eq!(per_file.get("/src/a.rs"), Some(&(2, 1)));
+    }
+
+    #[test]
+    fn merge_regions_by_position_non_array_is_empty() {
+        // A missing/`null` `functions` value yields an empty map.
+        assert!(merge_regions_by_position(&serde_json::Value::Null).is_empty());
+    }
+
+    #[test]
+    fn merge_regions_by_position_skips_malformed_entries() {
+        // Functions missing `filenames`/`regions`, non-array regions, short
+        // region tuples, and out-of-range FileIDs are all skipped without
+        // panicking; the one well-formed covered region is counted.
+        let functions = serde_json::json!([
+            { "filenames": ["/src/a.rs"] },                       // no regions
+            { "regions": [[1, 1, 1, 2, 1, 0, 0, 0]] },            // no filenames
+            { "filenames": ["/src/a.rs"], "regions": ["nope"] },  // region not an array
+            { "filenames": ["/src/a.rs"], "regions": [[1, 1, 1]] }, // too short
+            { "filenames": ["/src/a.rs"], "regions": [[9, 1, 9, 2, 1, 5, 0, 0]] }, // bad FileID
+            { "filenames": ["/src/a.rs"], "regions": [[2, 1, 2, 5, 4, 0, 0, 0]] }  // valid, covered
+        ]);
+        let per_file = merge_regions_by_position(&functions);
+        assert_eq!(per_file.get("/src/a.rs"), Some(&(1, 1)));
+    }
+
+    #[test]
+    fn apply_merged_regions_overwrites_region_metric() {
+        // The parsed report's summed regions (10/6) are replaced by the
+        // merged-by-position count derived from the raw functions array
+        // (1 distinct code region, covered), and lines/functions are left
+        // untouched.
+        let mut report = LlvmCovReport {
+            data: vec![CovData {
+                files: vec![FileCov {
+                    filename: "/src/a.rs".to_owned(),
+                    summary: Metrics {
+                        regions: metric(10, 6),
+                        lines: metric(20, 18),
+                        functions: metric(5, 5),
+                    },
+                }],
+                totals: partial_metrics(10, 6),
+            }],
+        };
+        let raw = serde_json::json!({
+            "data": [{
+                "functions": [{
+                    "filenames": ["/src/a.rs"],
+                    "regions": [[1, 1, 1, 10, 2, 0, 0, 0]]
+                }]
+            }]
+        });
+        apply_merged_regions(&mut report, &raw);
+        let regions = &report.data[0].files[0].summary.regions;
+        assert_eq!((regions.count, regions.covered), (1, 1));
+        assert!((regions.percent - 100.0).abs() < f64::EPSILON);
+        // lines/functions untouched.
+        assert_eq!(report.data[0].files[0].summary.lines.count, 20);
+        assert_eq!(report.data[0].files[0].summary.functions.count, 5);
+    }
+
+    #[test]
+    fn apply_merged_regions_no_data_array_is_noop() {
+        // Raw JSON without a `data` array leaves the report unchanged.
+        let mut report = LlvmCovReport {
+            data: vec![CovData {
+                files: vec![FileCov {
+                    filename: "/src/a.rs".to_owned(),
+                    summary: partial_metrics(10, 6),
+                }],
+                totals: partial_metrics(10, 6),
+            }],
+        };
+        apply_merged_regions(&mut report, &serde_json::json!({}));
+        assert_eq!(report.data[0].files[0].summary.regions.count, 10);
+    }
+
+    #[test]
+    fn apply_merged_regions_extra_data_element_is_ignored() {
+        // A raw `data` array longer than the report's `data` (the trailing
+        // element has no matching CovData) exercises the `get_mut` None arm,
+        // and a file absent from the merged map keeps its original regions.
+        let mut report = LlvmCovReport {
+            data: vec![CovData {
+                files: vec![FileCov {
+                    filename: "/src/present.rs".to_owned(),
+                    summary: partial_metrics(10, 6),
+                }],
+                totals: partial_metrics(10, 6),
+            }],
+        };
+        let raw = serde_json::json!({
+            "data": [
+                {
+                    "functions": [{
+                        "filenames": ["/src/other.rs"],
+                        "regions": [[1, 1, 1, 10, 1, 0, 0, 0]]
+                    }]
+                },
+                { "functions": [] }
+            ]
+        });
+        apply_merged_regions(&mut report, &raw);
+        // present.rs isn't in the merged map → regions unchanged.
+        assert_eq!(report.data[0].files[0].summary.regions.count, 10);
+    }
+
     // ── gap_files ────────────────────────────────────────────────────────────
 
     #[test]
@@ -1439,11 +1623,10 @@ mod tests {
     }
 
     #[test]
-    fn run_report_partial_coverage_within_ceiling_is_ok_and_writes_github_output() {
-        // A small number of missed regions/lines/functions -- well within
-        // MAX_MISSED_REGIONS/LINES/FUNCTIONS -- should not fail the build,
-        // and the badge percentages still get written even when coverage
-        // isn't literally 100%.
+    fn run_report_partial_coverage_fails_but_still_writes_github_output() {
+        // Any file below 100% must fail the build (hard 100% gate), but the
+        // badge percentages are written BEFORE the gate check, so they still
+        // get published even when coverage isn't 100%.
         let dir = tempfile::tempdir().unwrap();
         let report = LlvmCovReport {
             data: vec![CovData {
@@ -1461,8 +1644,13 @@ mod tests {
         std::fs::write(&gha, "").unwrap();
         let result = run_report(&runner, &output, Some(gha.to_str().unwrap()));
         assert!(
-            result.is_ok(),
-            "coverage within the locked-in ceiling should not fail the build: {result:?}"
+            result.is_err(),
+            "coverage below 100% must fail the build: {result:?}"
+        );
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("must be 100%"),
+            "error should explain the 100% requirement: {msg}"
         );
         let content = std::fs::read_to_string(&gha).unwrap();
         assert!(
@@ -1472,26 +1660,22 @@ mod tests {
     }
 
     #[test]
-    fn run_report_regions_over_ceiling_is_err() {
-        // Missed regions exceeding MAX_MISSED_REGIONS must fail the build --
-        // this is the actual enforcement the ratchet exists to provide.
+    fn run_report_regions_gap_is_err() {
+        // A file below 100% on regions must fail the build -- this is the
+        // hard 100% gate.
         let dir = tempfile::tempdir().unwrap();
-        let over_ceiling = metric(MAX_MISSED_REGIONS + 100, 0);
+        let gap = Metrics {
+            regions: metric(100, 0),
+            lines: metric(10, 10),
+            functions: metric(10, 10),
+        };
         let report = LlvmCovReport {
             data: vec![CovData {
                 files: vec![FileCov {
                     filename: "/src/foo.rs".to_owned(),
-                    summary: Metrics {
-                        regions: over_ceiling.clone(),
-                        lines: metric(10, 10),
-                        functions: metric(10, 10),
-                    },
+                    summary: gap.clone(),
                 }],
-                totals: Metrics {
-                    regions: over_ceiling,
-                    lines: metric(10, 10),
-                    functions: metric(10, 10),
-                },
+                totals: gap,
             }],
         };
         let meta = simple_metadata(&["leviath-core"]);
@@ -1500,37 +1684,32 @@ mod tests {
         let result = run_report(&runner, &output, None);
         assert!(
             result.is_err(),
-            "missed regions over the ceiling must fail the build: {result:?}"
+            "a regions gap must fail the build: {result:?}"
         );
         let msg = result.unwrap_err().to_string();
         assert!(
-            msg.contains("regressed below the locked-in floor"),
-            "error should explain the regression: {msg}"
+            msg.contains("must be 100%"),
+            "error should explain the 100% requirement: {msg}"
         );
     }
 
     #[test]
-    fn run_report_functions_over_ceiling_is_err() {
-        // Missed functions exceeding MAX_MISSED_FUNCTIONS must also fail the
-        // build, independently of regions/lines staying within their own
-        // ceilings.
+    fn run_report_functions_gap_is_err() {
+        // A file below 100% on functions must also fail the build,
+        // independently of regions/lines being fully covered.
         let dir = tempfile::tempdir().unwrap();
-        let over_ceiling = metric(MAX_MISSED_FUNCTIONS + 5, 0);
+        let gap = Metrics {
+            regions: metric(10, 10),
+            lines: metric(10, 10),
+            functions: metric(25, 0),
+        };
         let report = LlvmCovReport {
             data: vec![CovData {
                 files: vec![FileCov {
                     filename: "/src/foo.rs".to_owned(),
-                    summary: Metrics {
-                        regions: metric(10, 10),
-                        lines: metric(10, 10),
-                        functions: over_ceiling.clone(),
-                    },
+                    summary: gap.clone(),
                 }],
-                totals: Metrics {
-                    regions: metric(10, 10),
-                    lines: metric(10, 10),
-                    functions: over_ceiling,
-                },
+                totals: gap,
             }],
         };
         let meta = simple_metadata(&["leviath-core"]);
@@ -1539,7 +1718,7 @@ mod tests {
         let result = run_report(&runner, &output, None);
         assert!(
             result.is_err(),
-            "missed functions over the ceiling must fail the build: {result:?}"
+            "a functions gap must fail the build: {result:?}"
         );
     }
 
@@ -1582,8 +1761,8 @@ mod tests {
         let output = dir.path().join("cov.json").to_str().unwrap().to_owned();
         let result = run_report(&runner, &output, None);
         assert!(
-            result.is_ok(),
-            "coverage within the locked-in ceiling should not fail the build: {result:?}"
+            result.is_err(),
+            "a functions gap must fail the hard 100% gate: {result:?}"
         );
     }
 
@@ -1614,8 +1793,8 @@ mod tests {
         let output = dir.path().join("cov.json").to_str().unwrap().to_owned();
         let result = run_report(&runner, &output, None);
         assert!(
-            result.is_ok(),
-            "coverage within the locked-in ceiling should not fail the build: {result:?}"
+            result.is_err(),
+            "regions/lines gaps must fail the hard 100% gate: {result:?}"
         );
     }
 
@@ -1681,7 +1860,7 @@ mod tests {
     fn run_with_html_generation_failure_is_err_even_when_coverage_passes() {
         // 100% coverage (report check would be Ok), but HTML generation
         // itself fails -- the overall result must still surface that error,
-        // not silently swallow it just because the ceiling check passed.
+        // not silently swallow it just because the 100% gate passed.
         let runner = MockRunner::new(simple_metadata(&["leviath-core"])).with_fail_html();
         let result = run_with(&runner);
         assert!(
