@@ -270,76 +270,170 @@ fn launch_editor_with(
     anyhow::bail!("No editor found. Set $VISUAL or $EDITOR, or install vim/nano/notepad.")
 }
 
-/// Build a ProviderRegistry from Config.
-pub fn build_provider_registry(config: &Config) -> ProviderRegistry {
+/// Plain-data provider credentials, decoupled from [`Config`].
+///
+/// This is the first of the two Phase-3 decoupling seams: it lets
+/// [`build_provider_registry`] instantiate providers without depending on the
+/// CLI's `Config`/`ProviderConfig` types, so a later phase can relocate the run
+/// engine into `leviath-runtime` without a `runtime -> cli` dependency. Build
+/// one per provider that should be registered via
+/// [`provider_creds_from_config`].
+#[derive(Clone, Debug)]
+pub struct ProviderCreds {
+    /// Provider identifier: `anthropic` | `openai` | `google` | `openrouter` |
+    /// `ollama` | `claude-code`. Selects which provider is instantiated.
+    pub name: String,
+    /// API key, when the provider needs one (`None` for `ollama`/`claude-code`).
+    pub api_key: Option<String>,
+    /// Base URL override (used by `ollama`; `None` uses the built-in default).
+    pub base_url: Option<String>,
+    /// Per-model capability overrides forwarded to the provider.
+    pub model_capabilities: std::collections::HashMap<String, leviath_providers::ModelCapabilities>,
+    /// HTTP request timeout in seconds (`None` uses the provider default).
+    pub request_timeout_secs: Option<u64>,
+}
+
+/// Build the list of [`ProviderCreds`] a [`Config`] implies. `ollama` and
+/// `claude-code` are always present (they need no key); the API-key providers
+/// are included only when their key is configured. This is the sole point that
+/// reads provider settings out of `Config`.
+pub fn provider_creds_from_config(config: &Config) -> Vec<ProviderCreds> {
+    let caps = &config.model_capabilities;
+    let timeout = config.request_timeout_secs;
+    let mut creds = Vec::new();
+
+    let keyed = [
+        ("anthropic", config.providers.anthropic_api_key.as_ref()),
+        ("openai", config.providers.openai_api_key.as_ref()),
+        ("google", config.providers.google_api_key.as_ref()),
+        ("openrouter", config.openrouter_api_key.as_ref()),
+    ];
+    for (name, key) in keyed {
+        if let Some(key) = key {
+            creds.push(ProviderCreds {
+                name: name.to_string(),
+                api_key: Some(key.clone()),
+                base_url: None,
+                model_capabilities: caps.clone(),
+                request_timeout_secs: timeout,
+            });
+        }
+    }
+
+    // Ollama is always available (no key); carry any configured base URL.
+    creds.push(ProviderCreds {
+        name: "ollama".to_string(),
+        api_key: None,
+        base_url: Some(
+            config
+                .ollama_base_url
+                .as_deref()
+                .unwrap_or("http://localhost:11434")
+                .to_string(),
+        ),
+        model_capabilities: caps.clone(),
+        request_timeout_secs: timeout,
+    });
+
+    // Claude Code provider (no API key needed - uses claude CLI subscription).
+    creds.push(ProviderCreds {
+        name: "claude-code".to_string(),
+        api_key: None,
+        base_url: None,
+        model_capabilities: std::collections::HashMap::new(),
+        request_timeout_secs: None,
+    });
+
+    creds
+}
+
+/// Build a [`ProviderRegistry`] from decoupled [`ProviderCreds`].
+pub fn build_provider_registry(creds: &[ProviderCreds]) -> ProviderRegistry {
     let mut registry = ProviderRegistry::new();
 
-    let timeout = config.request_timeout_secs;
-
-    if let Some(ref key) = config.providers.anthropic_api_key {
-        registry.register(
-            "anthropic".to_string(),
-            Arc::new(leviath_providers::AnthropicProvider::with_overrides(
-                key.clone(),
-                config.model_capabilities.clone(),
-                timeout,
-            )),
-        );
+    for c in creds {
+        let caps = c.model_capabilities.clone();
+        let timeout = c.request_timeout_secs;
+        match c.name.as_str() {
+            "anthropic" => {
+                if let Some(ref key) = c.api_key {
+                    registry.register(
+                        "anthropic".to_string(),
+                        Arc::new(leviath_providers::AnthropicProvider::with_overrides(
+                            key.clone(),
+                            caps,
+                            timeout,
+                        )),
+                    );
+                }
+            }
+            "openai" => {
+                if let Some(ref key) = c.api_key {
+                    registry.register(
+                        "openai".to_string(),
+                        Arc::new(leviath_providers::OpenAIProvider::with_overrides(
+                            key.clone(),
+                            caps,
+                            timeout,
+                        )),
+                    );
+                }
+            }
+            "google" => {
+                if let Some(ref key) = c.api_key {
+                    registry.register(
+                        "google".to_string(),
+                        Arc::new(leviath_providers::GeminiProvider::with_overrides(
+                            key.clone(),
+                            caps,
+                            timeout,
+                        )),
+                    );
+                }
+            }
+            "openrouter" => {
+                if let Some(ref key) = c.api_key {
+                    registry.register(
+                        "openrouter".to_string(),
+                        Arc::new(leviath_providers::OpenRouterProvider::with_overrides(
+                            key.clone(),
+                            caps,
+                            timeout,
+                        )),
+                    );
+                }
+            }
+            "ollama" => {
+                let url = c
+                    .base_url
+                    .clone()
+                    .unwrap_or_else(|| "http://localhost:11434".to_string());
+                registry.register(
+                    "ollama".to_string(),
+                    Arc::new(leviath_providers::OllamaProvider::with_overrides(
+                        url, caps, timeout,
+                    )),
+                );
+            }
+            "claude-code" => {
+                registry.register(
+                    "claude-code".to_string(),
+                    Arc::new(leviath_providers::ClaudeCodeProvider::new()),
+                );
+            }
+            _ => {}
+        }
     }
-
-    if let Some(ref key) = config.providers.openai_api_key {
-        registry.register(
-            "openai".to_string(),
-            Arc::new(leviath_providers::OpenAIProvider::with_overrides(
-                key.clone(),
-                config.model_capabilities.clone(),
-                timeout,
-            )),
-        );
-    }
-
-    if let Some(ref key) = config.providers.google_api_key {
-        registry.register(
-            "google".to_string(),
-            Arc::new(leviath_providers::GeminiProvider::with_overrides(
-                key.clone(),
-                config.model_capabilities.clone(),
-                timeout,
-            )),
-        );
-    }
-
-    if let Some(ref key) = config.openrouter_api_key {
-        registry.register(
-            "openrouter".to_string(),
-            Arc::new(leviath_providers::OpenRouterProvider::with_overrides(
-                key.clone(),
-                config.model_capabilities.clone(),
-                timeout,
-            )),
-        );
-    }
-
-    let ollama_url = config
-        .ollama_base_url
-        .as_deref()
-        .unwrap_or("http://localhost:11434");
-    registry.register(
-        "ollama".to_string(),
-        Arc::new(leviath_providers::OllamaProvider::with_overrides(
-            ollama_url.to_string(),
-            config.model_capabilities.clone(),
-            timeout,
-        )),
-    );
-
-    // Claude Code provider (no API key needed - uses claude CLI subscription)
-    registry.register(
-        "claude-code".to_string(),
-        Arc::new(leviath_providers::ClaudeCodeProvider::new()),
-    );
 
     registry
+}
+
+/// Convenience wrapper: build a [`ProviderRegistry`] straight from a [`Config`].
+///
+/// Kept as a `fn(&Config) -> ProviderRegistry` so it can be passed as the
+/// registry-builder seam that `run`/`models`/`dashboard` inject for tests.
+pub fn build_provider_registry_from_config(config: &Config) -> ProviderRegistry {
+    build_provider_registry(&provider_creds_from_config(config))
 }
 
 #[cfg(test)]
@@ -480,7 +574,7 @@ mod tests {
     #[test]
     fn build_provider_registry_with_empty_config() {
         let config = Config::default();
-        let registry = build_provider_registry(&config);
+        let registry = build_provider_registry_from_config(&config);
         // Should always have ollama and claude-code registered
         assert!(registry.has("ollama"));
         assert!(registry.has("claude-code"));
@@ -499,7 +593,7 @@ mod tests {
             },
             ..Config::default()
         };
-        let registry = build_provider_registry(&config);
+        let registry = build_provider_registry_from_config(&config);
         assert!(registry.has("anthropic"));
     }
 
@@ -512,7 +606,7 @@ mod tests {
             },
             ..Config::default()
         };
-        let registry = build_provider_registry(&config);
+        let registry = build_provider_registry_from_config(&config);
         assert!(registry.has("openai"));
     }
 
@@ -525,7 +619,7 @@ mod tests {
             },
             ..Config::default()
         };
-        let registry = build_provider_registry(&config);
+        let registry = build_provider_registry_from_config(&config);
         assert!(registry.has("google"));
     }
 
@@ -535,7 +629,7 @@ mod tests {
             openrouter_api_key: Some("sk-or-test-12345".to_string()),
             ..Config::default()
         };
-        let registry = build_provider_registry(&config);
+        let registry = build_provider_registry_from_config(&config);
         assert!(registry.has("openrouter"));
     }
 
@@ -545,7 +639,7 @@ mod tests {
             ollama_base_url: Some("http://my-server:11434".to_string()),
             ..Config::default()
         };
-        let registry = build_provider_registry(&config);
+        let registry = build_provider_registry_from_config(&config);
         assert!(registry.has("ollama"));
     }
 
@@ -563,13 +657,107 @@ mod tests {
             ollama_base_url: Some("http://custom:11434".to_string()),
             ..Config::default()
         };
-        let registry = build_provider_registry(&config);
+        let registry = build_provider_registry_from_config(&config);
         assert!(registry.has("anthropic"));
         assert!(registry.has("openai"));
         assert!(registry.has("google"));
         assert!(registry.has("openrouter"));
         assert!(registry.has("ollama"));
         assert!(registry.has("claude-code"));
+    }
+
+    // ─── ProviderCreds seam ─────────────────────────────────────────────
+
+    #[test]
+    fn provider_creds_from_config_includes_defaults_and_keyed() {
+        let config = Config {
+            providers: crate::config::ProviderConfig {
+                anthropic_api_key: Some("sk-ant".to_string()),
+                ..Config::default().providers
+            },
+            ollama_base_url: Some("http://custom:11434".to_string()),
+            ..Config::default()
+        };
+        let creds = provider_creds_from_config(&config);
+        let names: Vec<&str> = creds.iter().map(|c| c.name.as_str()).collect();
+        // anthropic (keyed) + ollama + claude-code, but not openai/google/openrouter.
+        assert!(names.contains(&"anthropic"));
+        assert!(names.contains(&"ollama"));
+        assert!(names.contains(&"claude-code"));
+        assert!(!names.contains(&"openai"));
+        assert!(!names.contains(&"google"));
+        assert!(!names.contains(&"openrouter"));
+        // The ollama base URL is carried through.
+        let ollama = creds.iter().find(|c| c.name == "ollama").unwrap();
+        assert_eq!(ollama.base_url.as_deref(), Some("http://custom:11434"));
+        assert!(ollama.api_key.is_none());
+    }
+
+    #[test]
+    fn build_provider_registry_from_creds_slice() {
+        // Drives the core `build_provider_registry(&[ProviderCreds])` directly:
+        // every keyed provider, the ollama-with-default-url arm, claude-code,
+        // and an unknown provider name (the catch-all no-op arm).
+        let caps = std::collections::HashMap::new();
+        let creds = vec![
+            ProviderCreds {
+                name: "anthropic".to_string(),
+                api_key: Some("sk-ant".to_string()),
+                base_url: None,
+                model_capabilities: caps.clone(),
+                request_timeout_secs: Some(30),
+            },
+            ProviderCreds {
+                name: "openai".to_string(),
+                api_key: Some("sk-oa".to_string()),
+                base_url: None,
+                model_capabilities: caps.clone(),
+                request_timeout_secs: None,
+            },
+            ProviderCreds {
+                name: "google".to_string(),
+                api_key: Some("AIza".to_string()),
+                base_url: None,
+                model_capabilities: caps.clone(),
+                request_timeout_secs: None,
+            },
+            ProviderCreds {
+                name: "openrouter".to_string(),
+                api_key: Some("sk-or".to_string()),
+                base_url: None,
+                model_capabilities: caps.clone(),
+                request_timeout_secs: None,
+            },
+            ProviderCreds {
+                name: "ollama".to_string(),
+                api_key: None,
+                base_url: None, // exercise the default-URL fallback
+                model_capabilities: caps.clone(),
+                request_timeout_secs: None,
+            },
+            ProviderCreds {
+                name: "claude-code".to_string(),
+                api_key: None,
+                base_url: None,
+                model_capabilities: caps.clone(),
+                request_timeout_secs: None,
+            },
+            ProviderCreds {
+                name: "totally-unknown".to_string(),
+                api_key: Some("x".to_string()),
+                base_url: None,
+                model_capabilities: caps,
+                request_timeout_secs: None,
+            },
+        ];
+        let registry = build_provider_registry(&creds);
+        assert!(registry.has("anthropic"));
+        assert!(registry.has("openai"));
+        assert!(registry.has("google"));
+        assert!(registry.has("openrouter"));
+        assert!(registry.has("ollama"));
+        assert!(registry.has("claude-code"));
+        assert!(!registry.has("totally-unknown"));
     }
 
     // ─── resolve_task: multiline file content ───────────────────────────
@@ -607,7 +795,7 @@ mod tests {
     #[test]
     fn build_provider_registry_defaults_always_have_ollama_and_claude_code() {
         let config = Config::default();
-        let registry = build_provider_registry(&config);
+        let registry = build_provider_registry_from_config(&config);
         // These should always be present regardless of key configuration
         let provider_count = ["ollama", "claude-code"]
             .iter()
@@ -666,7 +854,7 @@ mod tests {
             },
             ..crate::config::Config::default()
         };
-        let registry = build_provider_registry(&config);
+        let registry = build_provider_registry_from_config(&config);
         // Verify anthropic provider was registered
         assert!(registry.has("anthropic"));
         // Verify ollama always registered
@@ -716,7 +904,7 @@ mod tests {
             model_capabilities: caps,
             ..crate::config::Config::default()
         };
-        let registry = build_provider_registry(&config);
+        let registry = build_provider_registry_from_config(&config);
         assert!(registry.has("ollama"));
     }
 

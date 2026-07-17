@@ -26,7 +26,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
 
-use super::run::build_provider_registry;
+use super::run::build_provider_registry_from_config;
 use crate::config::Config;
 
 use state::Dashboard;
@@ -293,7 +293,7 @@ async fn run_dashboard_loop<B: ratatui::backend::Backend>(
 /// [`execute`] purely so this (entirely terminal-independent) setup is
 /// unit-testable on its own, separate from the real-terminal I/O sliver.
 async fn init_dashboard(config: &Config) -> (Dashboard, leviath_runtime::EngineHandle) {
-    let registry = build_provider_registry(config);
+    let registry = build_provider_registry_from_config(config);
     let engine = Arc::new(tokio::sync::RwLock::new(AgentEngine::with_providers(
         registry,
     )));

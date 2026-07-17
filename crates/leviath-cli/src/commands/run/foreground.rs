@@ -18,7 +18,7 @@ use super::executor::{run_stage_loop, StageCallbacks, StageContext};
 use super::helpers::initialize_context_window;
 use super::io::{ConsoleIO, RunIO};
 use super::manifest::{find_manifest, parse_manifest};
-use super::session::{build_provider_registry, resolve_task};
+use super::session::{build_provider_registry_from_config, resolve_task};
 use super::RunArgs;
 
 /// Foreground [`InteractionBackend`](super::dynamic_interaction::InteractionBackend):
@@ -531,7 +531,7 @@ impl leviath_runtime::taint::GatePrompt for ForegroundGatePrompt {
 
 /// Run an agent in the foreground (inline, blocking) — the original behavior.
 pub async fn run_foreground(args: RunArgs) -> anyhow::Result<()> {
-    run_foreground_with_registry(args, build_provider_registry).await
+    run_foreground_with_registry(args, build_provider_registry_from_config).await
 }
 
 /// Core of [`run_foreground`], with provider-registry construction injected
@@ -720,7 +720,7 @@ async fn run_foreground_with_registry(
         engine: engine.clone(),
         entity,
         pool: &mut pool,
-        tool_registry: &tool_registry,
+        tool_source: tool_registry.as_ref(),
         current_stage_name: current_stage_name.clone(),
         current_stage_perms: current_stage_perms.clone(),
         current_stage_idx: current_stage_idx.clone(),

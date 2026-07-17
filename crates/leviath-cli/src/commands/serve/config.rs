@@ -4,7 +4,7 @@ use axum::extract::State;
 use axum::response::Json;
 
 use super::types::*;
-use crate::commands::run::build_provider_registry;
+use crate::commands::run::build_provider_registry_from_config;
 
 pub(super) async fn get_config(State(state): State<AppState>) -> Json<RedactedConfig> {
     let c = &*state.config;
@@ -21,7 +21,7 @@ pub(super) async fn get_config(State(state): State<AppState>) -> Json<RedactedCo
 }
 
 pub(super) async fn get_models(State(state): State<AppState>) -> Json<Vec<ModelEntry>> {
-    let registry = build_provider_registry(&state.config);
+    let registry = build_provider_registry_from_config(&state.config);
     let mut models = Vec::new();
 
     for provider_name in registry.provider_names() {
