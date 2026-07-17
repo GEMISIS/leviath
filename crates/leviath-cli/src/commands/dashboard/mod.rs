@@ -5,6 +5,8 @@ mod helpers;
 mod input;
 mod render;
 mod state;
+#[cfg(test)]
+mod test_support;
 mod theme;
 mod types;
 
@@ -363,12 +365,8 @@ pub async fn execute(_args: DashboardArgs) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use state::Dashboard;
 
-    fn make_test_dashboard() -> Dashboard {
-        let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
-        Dashboard::new(cmd_tx)
-    }
+    use crate::commands::dashboard::test_support::make_test_dashboard;
 
     #[test]
     fn dashboard_args_can_be_constructed() {

@@ -628,10 +628,7 @@ impl Dashboard {
 mod tests {
     use super::*;
 
-    fn make_test_dashboard() -> Dashboard {
-        let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
-        Dashboard::new(cmd_tx)
-    }
+    use crate::commands::dashboard::test_support::make_test_dashboard;
 
     fn make_test_agent(id: &str, status: AgentDisplayStatus) -> DashboardAgent {
         DashboardAgent {
