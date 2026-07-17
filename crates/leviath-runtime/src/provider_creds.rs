@@ -179,4 +179,27 @@ mod tests {
         assert!(registry.has("claude-code"));
         assert!(!registry.has("totally-unknown"));
     }
+
+    #[test]
+    fn build_provider_registry_skips_keyed_providers_without_api_key() {
+        // The anthropic/openai/google/openrouter arms only register when an
+        // api_key is present; a `None` key exercises the skip (else) path of
+        // each `if let Some(ref key)` and leaves the provider unregistered.
+        let caps = std::collections::HashMap::new();
+        let creds: Vec<ProviderCreds> = ["anthropic", "openai", "google", "openrouter"]
+            .into_iter()
+            .map(|name| ProviderCreds {
+                name: name.to_string(),
+                api_key: None,
+                base_url: None,
+                model_capabilities: caps.clone(),
+                request_timeout_secs: None,
+            })
+            .collect();
+        let registry = build_provider_registry(&creds);
+        assert!(!registry.has("anthropic"));
+        assert!(!registry.has("openai"));
+        assert!(!registry.has("google"));
+        assert!(!registry.has("openrouter"));
+    }
 }

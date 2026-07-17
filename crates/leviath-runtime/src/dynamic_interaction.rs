@@ -864,12 +864,19 @@ mod tests {
             InteractionResponse::approval("", true, ApprovalScope::Session)
         });
         assert_eq!(r, GateResolution::AlwaysAllow);
-        // A non-block decision short-circuits to AllowOnce without asking (the
-        // asker is never invoked, so its body is a single trivial line).
+        // A text response (no approval) denies. Bind the asker as a fn pointer
+        // (Copy) so its body is exercised here, then reuse it below where the
+        // short-circuit means it is never invoked.
+        let text_asker: fn(&InteractionRequest) -> InteractionResponse =
+            |_req| InteractionResponse::text("", "");
+        let denied = resolve_gate_with_asker(&blocked_decision("shell"), "plan", text_asker);
+        assert_eq!(denied, GateResolution::Deny);
+        // A non-block decision short-circuits to AllowOnce without asking — the
+        // (already-covered) asker is never invoked.
         let r = resolve_gate_with_asker(
             &leviath_core::taint::GateDecision::Allowed,
             "plan",
-            |_req| InteractionResponse::text("", ""),
+            text_asker,
         );
         assert_eq!(r, GateResolution::AllowOnce);
     }
