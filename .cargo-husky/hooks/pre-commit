@@ -38,11 +38,4 @@ cargo xtask check-exclusions \
   || fail "Coverage suppression markers found. Remove them and refactor instead."
 pass "No suppression markers OK"
 
-# 5. Coverage ceiling not silently raised (compares the working tree against
-# the last commit -- this is a pre-commit hook, so HEAD hasn't advanced yet).
-info "Checking the coverage ceiling wasn't raised..."
-cargo xtask check-ceiling \
-  || fail "Coverage ceiling was raised -- see the message above for what's required to do that legitimately."
-pass "Coverage ceiling OK"
-
 pass "All pre-commit checks passed."

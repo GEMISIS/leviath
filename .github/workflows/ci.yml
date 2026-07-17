@@ -79,26 +79,6 @@ jobs:
       - name: Check formatting
         run: cargo fmt --all -- --check
 
-  check-ceiling:
-    name: Coverage ceiling not raised
-    runs-on: ubuntu-latest
-    steps:
-      # fetch-depth: 2 so HEAD~1 (this push's parent commit) is available to
-      # diff against -- a lightweight, fast check that doesn't need the full
-      # cargo-llvm-cov toolchain, so it's a separate job from `coverage`
-      # rather than a step tacked onto it.
-      - uses: actions/checkout@v7
-        with:
-          fetch-depth: 2
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: stable
-      - uses: Swatinem/rust-cache@v2
-      - name: Check coverage ceiling wasn't silently raised
-        env:
-          CEILING_BASELINE_REF: HEAD~1
-        run: cargo run -p xtask -- check-ceiling
-
   # Coverage is measured on Linux only. Source-based (`-C instrument-coverage`)
   # coverage attributes counters per-monomorphization, and that attribution is
   # codegen/target-dependent — the MSVC (Windows) target in particular reports
@@ -129,17 +109,15 @@ jobs:
       # Branch coverage is not collected -- `cargo llvm-cov --branch`
       # reliably crashes with SIGSEGV on an open, unresolved upstream LLVM
       # bug (see the doc comment at the top of xtask/src/coverage.rs).
-      # Coverage enforcement IS active: this step fails the build if missed
-      # regions/lines/functions exceed the locked-in ceiling in
-      # xtask/src/coverage.rs (MAX_MISSED_REGIONS/LINES/FUNCTIONS) -- see
-      # that file's doc comments for why literal 100% isn't the target
-      # (individually investigated, confirmed-permanent tooling limitations)
-      # and how the ceiling should be lowered as real gaps get closed. This
-      # step computes and reports all three metrics (regions/lines/functions).
-      # It also writes a browsable HTML report to coverage/html/ (see the doc
-      # comment on generate_html_report in xtask/src/coverage.rs) -- uploaded
-      # as a build artifact below so it's viewable without needing to run
-      # coverage locally.
+      # Coverage enforcement IS active: this step fails the build if ANY file
+      # is below 100% on regions, lines, or functions. Region coverage is
+      # measured merged-by-source-position (see xtask/src/coverage.rs) so
+      # per-monomorphization jitter can't produce spurious gaps -- the 100%
+      # gate is stable across OSes. This step computes and reports all three
+      # metrics (regions/lines/functions). It also writes a browsable HTML
+      # report to coverage/html/ (see the doc comment on generate_html_report
+      # in xtask/src/coverage.rs) -- uploaded as a build artifact below so it's
+      # viewable without needing to run coverage locally.
       - name: Compute coverage (regions / lines / functions)
         id: cov
         run: cargo xtask coverage
