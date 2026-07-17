@@ -410,7 +410,10 @@ async fn run_interactive_points_stage_with(
             io,
             executor,
         )
-        .await?;
+        .await
+        .expect(
+            "infallible: run_autonomous_stage catches inference errors and always returns Ok(())",
+        );
         return Ok(PointsOutcome::Completed);
     }
 
@@ -609,9 +612,14 @@ async fn run_interactive_points_stage_with(
             // a stage transition. A plain option (no directive) breaks and
             // completes the stage normally.
             let Some(directive) = lookup_directive(&point.directives, &user_text) else {
+                // Collect the directive keys eagerly into a local so the
+                // expression is evaluated regardless of whether a debug-level
+                // subscriber is installed (tracing defers field evaluation when
+                // the level is disabled, which otherwise leaves it uncovered).
+                let directive_keys: Vec<_> = point.directives.keys().collect();
                 tracing::debug!(
                     user_text = %user_text,
-                    directive_keys = ?point.directives.keys().collect::<Vec<_>>(),
+                    directive_keys = ?directive_keys,
                     "No directive match found for user selection — completing stage"
                 );
                 break 'point;
@@ -3271,6 +3279,60 @@ mod tests {
         // Round 2: "Approve" → exits.
         let queued = Mutex::new(VecDeque::from(vec![
             InteractionResponse::choice("", 1),
+            InteractionResponse::choice("", 0),
+        ]));
+        let ask_foreground = move |_req: &crate::interaction::InteractionRequest| {
+            queued
+                .lock()
+                .unwrap()
+                .pop_front()
+                .expect("ask_foreground called more times than expected")
+        };
+
+        let outcome = run_interactive_points_stage_with(
+            &mut engine,
+            entity,
+            "mock",
+            "test-model",
+            12,
+            &[],
+            None,
+            &points,
+            None,
+            &mut io,
+            &mut noop_exec,
+            &ask_foreground,
+        )
+        .await
+        .unwrap();
+        assert_eq!(outcome, PointsOutcome::Completed);
+    }
+
+    #[tokio::test]
+    async fn interactive_points_edit_option_no_context_window() {
+        // Covers the `None` branch of the edit-injection `if let Some(mut
+        // window) = ...get_mut::<ContextWindow>`: a bare entity (no
+        // ContextWindow) drives the foreground edit path, so the edited text
+        // can't be injected but the loop still re-presents and completes.
+        use crate::interaction::InteractionResponse;
+        use std::collections::VecDeque;
+        use std::sync::Mutex;
+
+        let (mut engine, entity) = make_engine_bare_entity("Agent response");
+        let mut io = MockIO::new();
+
+        let points = vec![make_multiple_choice_point_with_edit(
+            "plan_approval",
+            "Approve the plan?",
+            vec!["Approve".to_string(), "Add detail".to_string()],
+            vec!["Add detail".to_string()],
+        )];
+
+        // Round 1: "Add detail" (edit option) → foreground editor returns
+        // non-empty edited text (no window to inject into). Round 2: "Approve".
+        let queued = Mutex::new(VecDeque::from(vec![
+            InteractionResponse::choice("", 1),
+            InteractionResponse::text("", "EDITED WITHOUT WINDOW"),
             InteractionResponse::choice("", 0),
         ]));
         let ask_foreground = move |_req: &crate::interaction::InteractionRequest| {

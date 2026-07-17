@@ -175,7 +175,7 @@ pub(super) struct LogEntry {
 }
 
 /// Command sent from the dashboard to the engine background task.
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq)]
 pub(super) enum EngineCommand {
     CancelAgent { agent_id: String },
     SendInput { agent_id: String, input: String },

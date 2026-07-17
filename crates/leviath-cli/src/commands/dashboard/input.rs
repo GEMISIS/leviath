@@ -1285,10 +1285,14 @@ mod tests {
         assert!(dash.agents[0].pending_request.is_none());
         // The edited text reached the engine with indentation + newline intact.
         let cmd = cmd_rx.try_recv().expect("a SendInput command was queued");
-        assert!(matches!(cmd, EngineCommand::SendInput { .. }));
-        if let EngineCommand::SendInput { input, .. } = cmd {
-            assert_eq!(input, "  indented\nsecond line");
-        }
+        // The edited text reached the engine with indentation + newline intact.
+        assert_eq!(
+            cmd,
+            EngineCommand::SendInput {
+                agent_id: "run-1".to_string(),
+                input: "  indented\nsecond line".to_string(),
+            }
+        );
     }
 
     #[test]
@@ -1312,9 +1316,13 @@ mod tests {
 
         assert!(!dash.input_mode);
         let cmd = cmd_rx.try_recv().expect("a SendInput command was queued");
-        if let EngineCommand::SendInput { input, .. } = cmd {
-            assert_eq!(input, "   ");
-        }
+        assert_eq!(
+            cmd,
+            EngineCommand::SendInput {
+                agent_id: "run-1".to_string(),
+                input: "   ".to_string(),
+            }
+        );
     }
 
     #[test]

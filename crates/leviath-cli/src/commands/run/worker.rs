@@ -330,12 +330,13 @@ pub(super) async fn handle_context_tool(
                     if let Some(existing) = region.get_by_key(k) {
                         let new_content = format!("{}\n{}", existing.content, content);
                         let new_tokens = new_content.len() / 4 + 1;
-                        match region.upsert_by_key(k, new_content, new_tokens) {
-                            Ok(()) => {
-                                format!("Appended to '{}' section under key '{}'.", region_name, k)
-                            }
-                            Err(e) => format!("[error] {}", e),
-                        }
+                        // Upserting an already-present key updates in place with
+                        // no budget check (see Region::upsert_by_key), so this
+                        // cannot fail.
+                        region.upsert_by_key(k, new_content, new_tokens).expect(
+                            "infallible: upserting an existing HashMap key updates in place without a budget check",
+                        );
+                        format!("Appended to '{}' section under key '{}'.", region_name, k)
                     } else {
                         match region.upsert_by_key(k, content.to_string(), tokens) {
                             Ok(()) => {
@@ -512,7 +513,9 @@ async fn maybe_track_file(
         None => return result,
     };
 
-    let (should_track, file_content, replacement_msg) = match tool_name {
+    // Every non-early-return arm below tracks the file, so there is no
+    // separate "should not track" flag — a non-tracked tool returns early.
+    let (file_content, replacement_msg) = match tool_name {
         "read_file" if ft.track_reads => {
             let tokens = result.len() / 4 + 1;
             let msg = format!(
@@ -520,7 +523,7 @@ async fn maybe_track_file(
                  Reference it there — do not call read_file for this path again.",
                 ft.region, path, tokens
             );
-            (true, result.clone(), msg)
+            (result.clone(), msg)
         }
         "write_file" if ft.track_writes => {
             // Re-read the file to get its content
@@ -536,7 +539,7 @@ async fn maybe_track_file(
                  [{}] → ### [{}] ({} tokens).",
                 ft.region, path, tokens
             );
-            (true, content, msg)
+            (content, msg)
         }
         "edit_file" if ft.track_writes => {
             let content = builtins
@@ -551,14 +554,10 @@ async fn maybe_track_file(
                  [{}] → ### [{}] ({} tokens).",
                 ft.region, path, tokens
             );
-            (true, content, msg)
+            (content, msg)
         }
         _ => return result,
     };
-
-    if !should_track {
-        return result;
-    }
 
     // Truncate if configured
     let file_content = if let Some(max_tokens) = ft.max_file_tokens {
@@ -871,25 +870,12 @@ impl<'a> StageCallbacks for WorkerCallbacks<'a> {
         let mut sync_direction_to_entity = true;
         let mut post_tool_sync =
             move |world: &mut bevy_ecs::prelude::World, ent: bevy_ecs::prelude::Entity| {
-                if let Ok(mut guard) = shared_cw_for_sync.try_lock() {
-                    if sync_direction_to_entity {
-                        // shared→entity: merge context tool writes into entity CW
-                        if let Some(shared) = guard.as_ref() {
-                            if let Some(mut entity_cw) =
-                                world.get_mut::<leviath_runtime::ContextWindow>(ent)
-                            {
-                                entity_cw.regions = shared.regions.clone();
-                                entity_cw.current_tokens = shared.current_tokens;
-                            }
-                        }
-                    } else {
-                        // entity→shared: update shared copy with engine's changes
-                        if let Some(entity_cw) = world.get::<leviath_runtime::ContextWindow>(ent) {
-                            *guard = Some(entity_cw.clone());
-                        }
-                    }
-                    sync_direction_to_entity = !sync_direction_to_entity;
-                }
+                sync_direction_to_entity = post_tool_context_sync(
+                    &shared_cw_for_sync,
+                    world,
+                    ent,
+                    sync_direction_to_entity,
+                );
             };
 
         // Worker calls engine with sync callback so context tool changes
@@ -1106,6 +1092,40 @@ impl<'a> StageCallbacks for WorkerCallbacks<'a> {
     }
 }
 
+/// Run one post-tool context-window sync between the shared `ContextWindow`
+/// and the entity's ECS `ContextWindow`, in the direction given by `to_entity`.
+/// Returns the direction for the *next* call (flipped) when the sync ran, or
+/// the same direction unchanged if the shared lock was contended.
+///
+/// Extracted from the post-tool sync closure (and shared with the foreground
+/// runner) so its defensive missing-window branches and the lock-contended
+/// branch are unit-testable — the healthy inference flow only ever exercises
+/// the present-window, uncontended path.
+pub(crate) fn post_tool_context_sync(
+    shared: &tokio::sync::Mutex<Option<leviath_runtime::ContextWindow>>,
+    world: &mut bevy_ecs::prelude::World,
+    ent: bevy_ecs::prelude::Entity,
+    to_entity: bool,
+) -> bool {
+    let Ok(mut guard) = shared.try_lock() else {
+        // Lock contended: skip this sync and keep the same direction.
+        return to_entity;
+    };
+    if to_entity {
+        // shared→entity: merge context tool writes into entity CW
+        if let Some(shared_cw) = guard.as_ref() {
+            if let Some(mut entity_cw) = world.get_mut::<leviath_runtime::ContextWindow>(ent) {
+                entity_cw.regions = shared_cw.regions.clone();
+                entity_cw.current_tokens = shared_cw.current_tokens;
+            }
+        }
+    } else if let Some(entity_cw) = world.get::<leviath_runtime::ContextWindow>(ent) {
+        // entity→shared: update shared copy with engine's changes
+        *guard = Some(entity_cw.clone());
+    }
+    !to_entity
+}
+
 /// Background worker entrypoint: runs stages and writes progress to run-state dir.
 pub async fn execute_worker(args: WorkerArgs) -> anyhow::Result<()> {
     let mut meta = runstate::read_meta(&args.run_id).unwrap_or_else(|_| {
@@ -1129,7 +1149,19 @@ pub async fn execute_worker(args: WorkerArgs) -> anyhow::Result<()> {
 
     let result = run_worker_inner(&args, &mut meta, build_provider_registry_from_config).await;
 
-    match &result {
+    finalize_run_status(&mut meta, &result);
+    meta.touch();
+    let _ = runstate::write_meta(&meta);
+
+    result
+}
+
+/// Apply the terminal [`RunStatus`] implied by a worker's result, preserving a
+/// mid-run `Cancelled` status on the success path. Extracted from
+/// [`execute_worker`] so both the success (`Complete`) and error branches are
+/// unit-testable without a live inference round trip.
+fn finalize_run_status(meta: &mut RunMeta, result: &anyhow::Result<()>) {
+    match result {
         // A user abort sets `Cancelled` mid-run (via on_cancel); don't clobber
         // it with `Complete` on the successful-return path.
         Ok(()) => {
@@ -1142,10 +1174,6 @@ pub async fn execute_worker(args: WorkerArgs) -> anyhow::Result<()> {
             meta.error = Some(e.to_string());
         }
     }
-    meta.touch();
-    let _ = runstate::write_meta(&meta);
-
-    result
 }
 
 /// Core of [`execute_worker`], with provider-registry construction injected
@@ -1686,16 +1714,14 @@ mod tests {
         ));
         let rid = run_id.to_string();
         let responder = tokio::spawn(async move {
-            loop {
-                tokio::time::sleep(std::time::Duration::from_millis(40)).await;
-                if let Some(req) = crate::interaction::read_request(&rid) {
-                    let mut resp =
-                        crate::interaction::InteractionResponse::approval("", approved, scope);
-                    resp.request_id = req.id.clone();
-                    crate::interaction::write_response(&rid, &resp).unwrap();
-                    break;
-                }
-            }
+            // resolve() writes the request synchronously before it blocks on the
+            // response, so a single wait suffices — no poll-miss branch.
+            tokio::time::sleep(std::time::Duration::from_millis(40)).await;
+            let req = crate::interaction::read_request(&rid)
+                .expect("gate prompt must have written a request within 40ms");
+            let mut resp = crate::interaction::InteractionResponse::approval("", approved, scope);
+            resp.request_id = req.id.clone();
+            crate::interaction::write_response(&rid, &resp).unwrap();
         });
         let prompt = WorkerGatePrompt {
             run_id: run_id.to_string(),
@@ -2553,6 +2579,75 @@ model = "claude-sonnet-4-6"
 
         let _ = std::fs::remove_dir_all(crate::runstate::run_dir(run_id));
         let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[tokio::test]
+    async fn run_worker_inner_blueprint_validation_failure_returns_error() {
+        let _guard = crate::runstate::isolate_runs_dir_for_test(
+            "run_worker_inner_blueprint_validation_failure_returns_error",
+        );
+        // Parses cleanly, but `entry_stage` names a stage that doesn't exist, so
+        // `blueprint.validate()` fails — covering the validate() map_err/`?`.
+        // This error occurs before provider registration, so no network is hit.
+        let temp_dir = std::env::temp_dir().join("lev-test-worker-validate-fail");
+        let _ = std::fs::create_dir_all(&temp_dir);
+        let manifest_content = r#"
+[agent]
+name = "test-validate-fail-agent"
+version = "1.0.0"
+description = "Test"
+entry_stage = "does-not-exist"
+
+[stages.main]
+mode = "autonomous"
+max_iterations = 1
+"#;
+        std::fs::write(temp_dir.join("agent.leviath"), manifest_content).unwrap();
+
+        let run_id = "test-execute-worker-validate-fail";
+        let args = WorkerArgs {
+            path: temp_dir.to_string_lossy().to_string(),
+            task: "test task".to_string(),
+            run_id: run_id.to_string(),
+            model: None,
+            yolo: false,
+            allow: vec![],
+            ask: vec![],
+            deny: vec![],
+            max_depth: None,
+        };
+
+        let result = execute_worker(args).await;
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("blueprint validation failed"),
+            "unexpected error: {err}"
+        );
+
+        let _ = std::fs::remove_dir_all(crate::runstate::run_dir(run_id));
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn finalize_run_status_sets_complete_preserves_cancelled_and_records_error() {
+        // Ok + non-cancelled → Complete.
+        let mut m = make_meta("finalize-ok", 1);
+        m.status = RunStatus::Running;
+        finalize_run_status(&mut m, &Ok(()));
+        assert_eq!(m.status, RunStatus::Complete);
+
+        // Ok + already Cancelled → stays Cancelled (not clobbered).
+        let mut m2 = make_meta("finalize-cancelled", 1);
+        m2.status = RunStatus::Cancelled;
+        finalize_run_status(&mut m2, &Ok(()));
+        assert_eq!(m2.status, RunStatus::Cancelled);
+
+        // Err → Error + message.
+        let mut m3 = make_meta("finalize-err", 1);
+        m3.status = RunStatus::Running;
+        finalize_run_status(&mut m3, &Err(anyhow::anyhow!("boom")));
+        assert_eq!(m3.status, RunStatus::Error);
+        assert_eq!(m3.error.as_deref(), Some("boom"));
     }
 
     // ─── run_worker_inner (mock provider, no network) ────────────────────────
@@ -4119,6 +4214,30 @@ for line in sys.stdin:
     }
 
     #[tokio::test]
+    async fn handle_context_tool_read_lists_keys_skips_keyless_entries() {
+        // A HashMap region containing a keyless entry (added via add_entry, not
+        // context_write) exercises the `entry.key == None` skip in the
+        // list-keys branch of context_read.
+        let mut window = ContextWindow::new(10000);
+        let mut region = leviath_core::Region::new(
+            "notes".to_string(),
+            leviath_core::RegionKind::HashMap { max_entries: None },
+            5000,
+        );
+        region
+            .upsert_by_key("kept", "keyed value".to_string(), 3)
+            .unwrap();
+        region.add_entry("keyless value".to_string(), 3).unwrap();
+        window.add_region(region);
+        let cw = Arc::new(Mutex::new(Some(window)));
+
+        let args = serde_json::json!({ "region": "notes" });
+        let result = handle_context_tool("context_read", &args, &cw).await;
+        assert!(result.contains("kept"), "expected keyed entry: {}", result);
+        assert!(result.contains("entries"), "expected header: {}", result);
+    }
+
+    #[tokio::test]
     async fn handle_context_tool_list_all_regions() {
         let cw = make_context_window_with_hashmap("notes");
         let args = serde_json::json!({});
@@ -4473,6 +4592,50 @@ for line in sys.stdin:
                 "entity_to_shared"
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn post_tool_context_sync_covers_all_branches() {
+        use bevy_ecs::prelude::World;
+
+        let mut world = World::new();
+        let mut cw = ContextWindow::new(1000);
+        cw.add_region(leviath_core::Region::new(
+            "notes".to_string(),
+            leviath_core::RegionKind::HashMap { max_entries: None },
+            500,
+        ));
+        let ent_with = world.spawn(cw).id();
+        let ent_without = world.spawn_empty().id();
+
+        // entity→shared, entity has CW → shared becomes Some; direction flips to true.
+        let shared: Arc<Mutex<Option<ContextWindow>>> = Arc::new(Mutex::new(None));
+        let next = post_tool_context_sync(&shared, &mut world, ent_with, false);
+        assert!(next);
+        assert!(shared.lock().await.is_some());
+
+        // shared→entity, both present → positive path; direction flips to false.
+        let next = post_tool_context_sync(&shared, &mut world, ent_with, true);
+        assert!(!next);
+
+        // shared→entity, shared Some but entity missing CW → entity-None branch.
+        post_tool_context_sync(&shared, &mut world, ent_without, true);
+
+        // shared→entity, shared None → shared-None branch.
+        let empty: Arc<Mutex<Option<ContextWindow>>> = Arc::new(Mutex::new(None));
+        post_tool_context_sync(&empty, &mut world, ent_with, true);
+
+        // entity→shared, entity missing CW → get-None branch (shared untouched).
+        let seeded: Arc<Mutex<Option<ContextWindow>>> =
+            Arc::new(Mutex::new(Some(ContextWindow::new(10))));
+        post_tool_context_sync(&seeded, &mut world, ent_without, false);
+        assert!(seeded.lock().await.is_some());
+
+        // Lock contended: try_lock fails → returns the direction unchanged.
+        let contended: Arc<Mutex<Option<ContextWindow>>> = Arc::new(Mutex::new(None));
+        let _held = contended.try_lock().expect("first lock should succeed");
+        let same = post_tool_context_sync(&contended, &mut world, ent_with, true);
+        assert!(same, "contended lock must leave the direction unchanged");
     }
 
     // ─── maybe_track_file tests ──────────────────────────────────────────────
@@ -5330,10 +5493,10 @@ for line in sys.stdin:
 
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].0, "call-context_write");
+        let write_result = &out[0].1;
         assert!(
-            out[0].1.contains("Stored in 'notes'"),
-            "unexpected result: {}",
-            out[0].1
+            write_result.contains("Stored in 'notes'"),
+            "unexpected result: {write_result}",
         );
 
         let log = crate::runstate::tail_stage_log(run_id, 0, 65536);
@@ -5380,18 +5543,16 @@ for line in sys.stdin:
 
         assert_eq!(out.len(), 2);
         // read_files result was replaced with the batch summary.
+        let batch_result = &out[0].1;
         assert!(
-            out[0]
-                .1
-                .contains("stored in your system prompt under [files]"),
-            "unexpected batch result: {}",
-            out[0].1
+            batch_result.contains("stored in your system prompt under [files]"),
+            "unexpected batch result: {batch_result}",
         );
         // read_file result was replaced with the single-file reference message.
+        let single_result = &out[1].1;
         assert!(
-            out[1].1.contains("[files]") && out[1].1.contains("### ["),
-            "unexpected single result: {}",
-            out[1].1
+            single_result.contains("[files]") && single_result.contains("### ["),
+            "unexpected single result: {single_result}",
         );
 
         // Both files ended up in the HashMap region.

@@ -408,8 +408,12 @@ pub async fn run_stage_loop(
                 for (i, entry) in stage.model.models.iter().enumerate() {
                     if eng.providers().has(&entry.provider) {
                         if i > 0 {
+                            // Hoist the indexed access out of the tracing macro so
+                            // it is evaluated eagerly (tracing defers field
+                            // evaluation when the level is disabled).
+                            let preferred_provider = &stage.model.models[0].provider;
                             tracing::info!(
-                                preferred_provider = %stage.model.models[0].provider,
+                                preferred_provider = %preferred_provider,
                                 selected_provider = %entry.provider,
                                 selected_model = %entry.model,
                                 "Using lower-priority model (higher-priority providers unavailable)"
@@ -660,9 +664,10 @@ pub async fn run_stage_loop(
 
         // Log effective tools for debugging
         let tool_names: Vec<&str> = effective_tools.iter().map(|t| t.name.as_str()).collect();
+        let tool_count = effective_tools.len();
         tracing::info!(
             stage = %stage.name,
-            tool_count = effective_tools.len(),
+            tool_count,
             tools = ?tool_names,
             "Stage tools resolved"
         );
@@ -1198,6 +1203,9 @@ mod tests {
         /// Number of times run_autonomous was invoked (for the required-region
         /// re-run gate test).
         run_autonomous_calls: usize,
+        /// When true, run_autonomous seeds a taint-audit event so the
+        /// on_taint_audit persistence path is exercised.
+        seed_taint_audit: bool,
     }
 
     impl MockCallbacks {
@@ -1220,6 +1228,7 @@ mod tests {
                 taint_global: false,
                 taint_audits: Vec::new(),
                 run_autonomous_calls: 0,
+                seed_taint_audit: false,
             }
         }
     }
@@ -1285,6 +1294,22 @@ mod tests {
             self.run_autonomous_calls += 1;
             if self.run_autonomous_should_error {
                 return Err(anyhow::anyhow!("simulated autonomous failure"));
+            }
+            if self.seed_taint_audit {
+                // Seed a recorded gate event so run_stage_loop's
+                // `taint_audit_log(...)` is non-empty and on_taint_audit fires.
+                let mut gate = leviath_runtime::taint::TaintGate::new(
+                    leviath_core::taint::SecurityConfig::default(),
+                );
+                gate.record_allow(
+                    "agent-1",
+                    "seed_tool",
+                    leviath_core::taint::InputMode::Traditional,
+                    leviath_core::taint::TaintLevel::Public,
+                    leviath_core::taint::TaintLevel::Public,
+                    leviath_core::taint::GateDecisionSource::AutoAllow,
+                );
+                _engine.configure_taint(_entity, gate, leviath_core::PolicyConfig::default(), None);
             }
             // Simulate successful autonomous completion (never populates any
             // region — so a required-region gate keeps re-running).
@@ -1548,6 +1573,72 @@ mod tests {
             .get::<leviath_runtime::SubAgentChildren>(entity)
             .unwrap();
         assert_eq!(children.children.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn run_stage_loop_fan_out_worker_stage_missing_errors() {
+        // A fan_out whose worker_stage names a non-existent stage makes
+        // run_fan_out_stage return Err (its entry-stage lookup fails), which
+        // propagates through the `?` in the FanOut arm and fails run_stage_loop.
+        let mut fan = make_stage("parallel");
+        fan.mode = StageMode::FanOut {
+            config: leviath_core::blueprint::FanOutConfig {
+                worker_agent: None,
+                worker_stage: Some("ghost".to_string()), // not a real stage
+                worker_query: None,
+                merge_stage: None,
+                max_workers: 2,
+                on_worker_failure: leviath_core::blueprint::WorkerFailurePolicy::Continue,
+                split_prompt: "split it".to_string(),
+            },
+        };
+        let done = make_stage("done");
+        let bp = make_blueprint(vec![fan, done]);
+
+        let mut registry = ProviderRegistry::new();
+        registry.register(
+            "anthropic".to_string(),
+            Arc::new(FanOutProvider {
+                split: std::sync::Mutex::new(Some(r#"[{"id":"a","context":{}}]"#.to_string())),
+            }),
+        );
+        let mut engine = AgentEngine::with_providers(registry);
+        let mut pool = AgentPool::new(bp.clone());
+        let agent_id = pool.spawn_agent(engine.world_mut());
+        let entity = pool.get_agent(&agent_id).unwrap();
+        initialize_context_window(&mut engine, entity, &bp, "task");
+        let engine: leviath_runtime::EngineHandle =
+            std::sync::Arc::new(tokio::sync::RwLock::new(engine));
+
+        let tool_registry = make_tool_registry().await;
+        let mut cb = MockCallbacks::new();
+        let mut reg = std::collections::HashMap::new();
+        reg.insert(bp.name.clone(), bp.clone());
+
+        let mut ctx = StageContext {
+            blueprint: &bp,
+            engine: engine.clone(),
+            entity,
+            pool: &mut pool,
+            tool_source: tool_registry.as_ref(),
+            current_stage_name: Arc::new(Mutex::new(String::new())),
+            current_stage_perms: Arc::new(Mutex::new(HashMap::new())),
+            current_stage_idx: Arc::new(Mutex::new(0)),
+            model_override: None,
+            user_default_model: None,
+            compaction_ref: None,
+            agent_registry: Arc::new(reg),
+        };
+
+        let res = run_stage_loop(
+            &mut ctx,
+            &mut cb,
+            "agent-1",
+            &mut MockIO::new(),
+            &mut noop_exec,
+        )
+        .await;
+        assert!(res.is_err(), "missing worker entry stage must fail the run");
     }
 
     #[tokio::test]
@@ -2223,6 +2314,17 @@ mod tests {
         .await
         .unwrap();
 
+        // Seed a benign conversation entry so the negative-assertion predicate
+        // below actually iterates (an empty region never runs the closure).
+        {
+            let mut __wg = ctx.engine.write().await;
+            let mut __w = __wg
+                .world_mut()
+                .get_mut::<ContextWindow>(ctx.entity)
+                .unwrap();
+            let _ = __w.add_to_region("conversation", "user message".to_string(), 3);
+        }
+
         // Verify system_prompt landed in the "system" (Pinned) region
         let __g = ctx.engine.read().await;
         let window = __g.world().get::<ContextWindow>(ctx.entity).unwrap();
@@ -2246,6 +2348,59 @@ mod tests {
             !conv_has_stage,
             "system_prompt should NOT be in conversation region"
         );
+    }
+
+    #[tokio::test]
+    async fn system_prompt_injection_errors_when_target_region_missing() {
+        // Stage layout has no Pinned region and no "conversation" region, so the
+        // target-region fallback ("conversation") matches nothing: the
+        // `find(...)` None-arm runs and inject_stage_system_prompt's `?`
+        // propagates the add_to_region error, failing the run.
+        let mut stage = make_stage("main");
+        stage.context_layout = Some(ContextLayout::new(
+            vec![RegionDefinition::new(
+                "notes".to_string(),
+                RegionKind::SlidingWindow {
+                    max_items: 10,
+                    eviction_strategy: EvictionStrategy::PerItem,
+                },
+                5000,
+            )],
+            5000,
+        ));
+        stage
+            .config
+            .insert("system_prompt".to_string(), serde_json::json!("Be terse."));
+
+        let bp = make_blueprint(vec![stage]);
+        let (engine, mut pool, entity) = make_engine_and_entity(&bp);
+        let tool_registry = make_tool_registry().await;
+        let mut cb = MockCallbacks::new();
+
+        let mut ctx = StageContext {
+            blueprint: &bp,
+            engine: engine.clone(),
+            entity,
+            pool: &mut pool,
+            tool_source: tool_registry.as_ref(),
+            current_stage_name: Arc::new(Mutex::new(String::new())),
+            current_stage_perms: Arc::new(Mutex::new(HashMap::new())),
+            current_stage_idx: Arc::new(Mutex::new(0)),
+            model_override: None,
+            user_default_model: None,
+            compaction_ref: None,
+            agent_registry: std::sync::Arc::new(std::collections::HashMap::new()),
+        };
+
+        let res = run_stage_loop(
+            &mut ctx,
+            &mut cb,
+            "agent-1",
+            &mut MockIO::new(),
+            &mut noop_exec,
+        )
+        .await;
+        assert!(res.is_err(), "missing target region must fail the run");
     }
 
     #[tokio::test]
@@ -2791,15 +2946,14 @@ mod tests {
         // Answer the plan_approval choice with "Abort" (index 1).
         let responder_run_id = run_id.clone();
         let responder = tokio::spawn(async move {
-            loop {
-                tokio::time::sleep(std::time::Duration::from_millis(30)).await;
-                if let Some(req) = crate::interaction::read_request(&responder_run_id) {
-                    let mut resp = crate::interaction::InteractionResponse::choice("", 1);
-                    resp.request_id = req.id.clone();
-                    crate::interaction::write_response(&responder_run_id, &resp).unwrap();
-                    break;
-                }
-            }
+            // The stage posts its interaction request before awaiting the
+            // response, so the request is present once this task is scheduled.
+            tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+            let req = crate::interaction::read_request(&responder_run_id)
+                .expect("stage posts its interaction request before awaiting a response");
+            let mut resp = crate::interaction::InteractionResponse::choice("", 1);
+            resp.request_id = req.id.clone();
+            crate::interaction::write_response(&responder_run_id, &resp).unwrap();
         });
 
         let mut ctx = StageContext {
@@ -3450,6 +3604,28 @@ mod tests {
         assert_eq!(cls.clearance, leviath_core::TaintLevel::Public);
     }
 
+    #[test]
+    fn build_stage_taint_gate_mcp_override_all_none_leaves_defaults() {
+        // An override with every field None exercises the None arms of each
+        // `if let` (sensitivity / direction / clearance), leaving the tool's
+        // classification unchanged from its default.
+        let mut policy = PolicyConfig::default();
+        policy.mcp_overrides.insert(
+            "srv.plain".to_string(),
+            leviath_core::McpToolOverride {
+                sensitivity: None,
+                direction: None,
+                clearance: None,
+            },
+        );
+        let gate =
+            build_stage_taint_gate(true, None, None, &policy).expect("global-on builds a gate");
+        let cls = gate.tool_classification("srv.plain");
+        let def = ToolClassification::default();
+        assert_eq!(cls.sensitivity, def.sensitivity);
+        assert_eq!(cls.clearance, def.clearance);
+    }
+
     #[tokio::test]
     async fn run_stage_loop_configures_taint_when_global_enabled() {
         // With the global taint switch on, the per-stage taint-config path in
@@ -3491,6 +3667,46 @@ mod tests {
         // The run completed with the per-stage taint-config path exercised
         // (build_stage_taint_gate → configure_taint → enable_entity_taint_tracking).
         assert_eq!(cb.completed_at, Some(0));
+    }
+
+    #[tokio::test]
+    async fn run_stage_loop_persists_taint_audit_events() {
+        // A stage that leaves taint-audit events behind must hand them to
+        // on_taint_audit (the `!taint_audit.is_empty()` branch).
+        let mut stage = make_stage("main");
+        stage.max_iterations = Some(1);
+        let bp = make_blueprint(vec![stage]);
+        let (engine, mut pool, entity) = make_engine_and_entity_with_provider(&bp);
+        let tool_registry = make_tool_registry().await;
+        let mut cb = MockCallbacks::new();
+        cb.seed_taint_audit = true;
+
+        let mut ctx = StageContext {
+            blueprint: &bp,
+            engine: engine.clone(),
+            entity,
+            pool: &mut pool,
+            tool_source: tool_registry.as_ref(),
+            current_stage_name: Arc::new(Mutex::new(String::new())),
+            current_stage_perms: Arc::new(Mutex::new(HashMap::new())),
+            current_stage_idx: Arc::new(Mutex::new(0)),
+            model_override: None,
+            user_default_model: None,
+            compaction_ref: None,
+            agent_registry: std::sync::Arc::new(std::collections::HashMap::new()),
+        };
+
+        run_stage_loop(
+            &mut ctx,
+            &mut cb,
+            "agent-1",
+            &mut MockIO::new(),
+            &mut noop_exec,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(cb.taint_audits, vec![0]);
     }
 
     // ─── Tool result routing tests ─────────────────────────────────────────
@@ -3890,15 +4106,14 @@ mod tests {
 
         let responder_run_id = run_id.clone();
         let responder = tokio::spawn(async move {
-            loop {
-                tokio::time::sleep(std::time::Duration::from_millis(30)).await;
-                if let Some(req) = crate::interaction::read_request(&responder_run_id) {
-                    let mut resp = crate::interaction::InteractionResponse::choice("", 1);
-                    resp.request_id = req.id.clone();
-                    crate::interaction::write_response(&responder_run_id, &resp).unwrap();
-                    break;
-                }
-            }
+            // The stage posts its interaction request before awaiting the
+            // response, so the request is present once this task is scheduled.
+            tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+            let req = crate::interaction::read_request(&responder_run_id)
+                .expect("stage posts its interaction request before awaiting a response");
+            let mut resp = crate::interaction::InteractionResponse::choice("", 1);
+            resp.request_id = req.id.clone();
+            crate::interaction::write_response(&responder_run_id, &resp).unwrap();
         });
 
         let mut ctx = StageContext {

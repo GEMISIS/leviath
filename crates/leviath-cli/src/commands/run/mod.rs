@@ -159,22 +159,18 @@ pub async fn execute(args: RunArgs) -> anyhow::Result<()> {
 }
 
 async fn execute_background(args: RunArgs, exe: &std::path::Path) -> anyhow::Result<()> {
-    execute_background_with(args, exe, runstate::create_run).await
+    execute_background_with(args, exe, &runstate::create_run).await
 }
 
-/// COVERAGE-CONFIRMED-ARTIFACT: this function is generic over `create_run`
-/// and has 2 monomorphizations -- production's `runstate::create_run` and
-/// `execute_background_create_run_fails_returns_error`'s always-failing
-/// test closure. Every source position in this function has at least one
-/// covered instantiation (confirmed via direct HTML/JSON segment
-/// inspection: the file's HTML coverage report shows no red/uncovered
-/// regions anywhere in this function), but `cargo-llvm-cov`'s per-file
-/// region-coverage summary table still reports one shared position as
-/// missed. This is a measurement artifact, not an untested branch.
+/// `create_run` is a `&dyn Fn` trait object (rather than `impl Fn`) so this
+/// function has a single monomorphization shared by production's
+/// `runstate::create_run` and the tests' injected closures — otherwise
+/// `cargo-llvm-cov` attributes a shared source position to whichever
+/// instantiation doesn't take it and reports a spurious missed region.
 async fn execute_background_with(
     args: RunArgs,
     exe: &std::path::Path,
-    create_run: impl Fn(&runstate::RunMeta) -> anyhow::Result<()>,
+    create_run: &dyn Fn(&runstate::RunMeta) -> anyhow::Result<()>,
 ) -> anyhow::Result<()> {
     // Background mode: create run state, spawn detached worker process(es)
     let path = args.path.as_deref().unwrap_or(".").to_string();
@@ -918,6 +914,54 @@ prompt = "Do the thing"
         let _ = std::fs::remove_dir_all(&temp_dir);
     }
 
+    #[tokio::test]
+    async fn execute_background_blueprint_validation_failure_returns_error() {
+        // A manifest that parses into a Blueprint but fails `validate()`:
+        // `entry_stage` names a stage that does not exist, so `validate_graph`
+        // errors — covering the `.map_err(|e| ... "blueprint validation failed")`
+        // arm in execute_background_with.
+        let pid = std::process::id();
+        let agent_name = format!("test-execute-bg-invalid-bp-{pid}");
+        let temp_dir = std::env::temp_dir().join(&agent_name);
+        let _ = std::fs::create_dir_all(&temp_dir);
+        std::fs::write(
+            temp_dir.join("agent.leviath"),
+            r#"
+[agent]
+name = "invalid-bp"
+version = "1.0.0"
+description = "Test agent"
+entry_stage = "does-not-exist"
+
+[stages.main]
+mode = "autonomous"
+prompt = "Do the thing"
+"#,
+        )
+        .unwrap();
+
+        let args = RunArgs {
+            path: Some(temp_dir.to_string_lossy().to_string()),
+            task: Some("task".to_string()),
+            model: None,
+            foreground: false,
+            yolo: false,
+            allow: vec![],
+            ask: vec![],
+            deny: vec![],
+            max_depth: None,
+            count: 1,
+        };
+        let result = execute(args).await;
+        assert!(result.is_err());
+        let err = format!("{:#}", result.unwrap_err());
+        assert!(
+            err.contains("blueprint validation failed"),
+            "expected validation-failure error, got: {err}"
+        );
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
     // ─── resolve_task error path (line 136) ──────────────────────────────────
 
     /// Covers `resolve_task(...)? ` (line 136) via the "empty task file"
@@ -1063,7 +1107,7 @@ prompt = "Do the thing"
         let exe = std::env::current_exe().unwrap();
 
         // Inject a create_run stub that always fails — no env-var mutation needed.
-        let result = super::execute_background_with(args, &exe, |_meta| {
+        let result = super::execute_background_with(args, &exe, &|_meta| {
             Err(anyhow::anyhow!("injected create_run failure"))
         })
         .await;
