@@ -1935,16 +1935,17 @@ mod tests {
         let _ = std::fs::remove_dir_all(runstate::run_dir(&run_id));
     }
 
-    #[cfg(unix)]
     #[tokio::test]
     async fn interactive_points_edit_ipc_request_write_error() {
         // Covers the `request_interaction_async(...).await?` error arm in the
-        // IPC edit path: the responder answers the choice, then makes the run
-        // directory read-only. Reading the (already-written) choice response
-        // still works, but the subsequent edit request's write_request fails,
-        // so the `?` propagates and the stage returns Err.
+        // IPC edit path: the responder answers the choice, then blocks the
+        // atomic write's tmp target with a directory. Reading the
+        // (already-written) choice response still works, but the subsequent
+        // edit request's write_request fails, so the `?` propagates and the
+        // stage returns Err. Blocking the tmp path fails the write on every
+        // platform (the prior version made the run dir read-only via chmod,
+        // Unix-only).
         use crate::interaction::InteractionResponse;
-        use std::os::unix::fs::PermissionsExt;
 
         let _guard = crate::runstate::isolate_runs_dir_for_test(
             "interactive_points_edit_ipc_request_write_error",
@@ -1989,12 +1990,12 @@ mod tests {
             let mut resp = InteractionResponse::choice("", 1); // "Add detail" (edit)
             resp.request_id = req.id.clone();
             crate::interaction::write_response(&rid, &resp).unwrap();
-            // Make the run dir read-only: the choice response above is still
-            // readable, but the edit request's write will fail.
+            // Block the next atomic write: the choice response above is still
+            // readable, but the edit request's write_request writes to
+            // `pending.json.tmp`, which we replace with a *directory* so that
+            // write fails on every platform.
             let dir = runstate::run_dir(&rid);
-            let mut perms = std::fs::metadata(&dir).unwrap().permissions();
-            perms.set_mode(0o555);
-            std::fs::set_permissions(&dir, perms).unwrap();
+            std::fs::create_dir_all(dir.join("pending.json.tmp")).unwrap();
         });
 
         let result = run_interactive_points_stage(
@@ -2013,9 +2014,7 @@ mod tests {
         .await;
 
         let _ = responder.await;
-        // Restore permissions so cleanup can remove the directory.
         let dir = runstate::run_dir(&run_id);
-        let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755));
         assert!(result.is_err());
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -3028,15 +3027,15 @@ mod tests {
 
     // ─── Coverage: request_interaction_async error (lines 168:80) ────────────
 
-    #[cfg(unix)]
     #[tokio::test]
     async fn interactive_stage_tools_request_interaction_async_error() {
         let _guard = crate::runstate::isolate_runs_dir_for_test(
             "interactive_stage_tools_request_interaction_async_error",
         );
-        // Covers line 168:80: `?` on `request_interaction_async` when the run
-        // directory is read-only → write_request fails → Err propagates.
-        use std::os::unix::fs::PermissionsExt;
+        // Covers the `?` on `request_interaction_async`: write_request's atomic
+        // write targets `pending.json.tmp`, which we replace with a *directory*
+        // so the write fails and the Err propagates -- on every platform (the
+        // prior version made the run dir read-only via chmod, Unix-only).
         let bp = make_blueprint(vec![make_stage("main")]);
         let (mut engine, _pool, entity) = make_engine_and_entity(&bp, "Response");
         let mut io = MockIO::new();
@@ -3058,12 +3057,11 @@ mod tests {
             "/tmp".into(),
             1,
         );
-        // Create the run directory, then make it read-only so write_request fails
+        // Create the run directory, then block the atomic write's tmp target
+        // with a directory so write_request fails.
         runstate::create_run(&meta).unwrap();
         let dir = runstate::run_dir(&run_id);
-        let mut perms = std::fs::metadata(&dir).unwrap().permissions();
-        perms.set_mode(0o555);
-        std::fs::set_permissions(&dir, perms).unwrap();
+        std::fs::create_dir_all(dir.join("pending.json.tmp")).unwrap();
 
         let tools = vec![leviath_providers::Tool {
             name: "t".to_string(),
@@ -3085,24 +3083,18 @@ mod tests {
         )
         .await;
 
-        // Restore write permissions so cleanup works
-        let mut perms2 = std::fs::metadata(&dir).unwrap().permissions();
-        perms2.set_mode(0o755);
-        let _ = std::fs::set_permissions(&dir, perms2);
         let _ = std::fs::remove_dir_all(&dir);
 
         assert!(result.is_err());
     }
 
-    #[cfg(unix)]
     #[tokio::test]
     async fn interactive_stage_no_tools_request_interaction_async_error() {
         let _guard = crate::runstate::isolate_runs_dir_for_test(
             "interactive_stage_no_tools_request_interaction_async_error",
         );
-        // Same as above but no-tools path (streaming). Covers the same `?` at
-        // line 168 via the else branch (no tools).
-        use std::os::unix::fs::PermissionsExt;
+        // Same as above but no-tools path (streaming). Covers the same `?` via
+        // the else branch (no tools).
         let bp = make_blueprint(vec![make_stage("main")]);
         let (mut engine, _pool, entity) = make_engine_and_entity(&bp, "Response");
         let mut io = MockIO::new();
@@ -3126,9 +3118,7 @@ mod tests {
         );
         runstate::create_run(&meta).unwrap();
         let dir = runstate::run_dir(&run_id);
-        let mut perms = std::fs::metadata(&dir).unwrap().permissions();
-        perms.set_mode(0o555);
-        std::fs::set_permissions(&dir, perms).unwrap();
+        std::fs::create_dir_all(dir.join("pending.json.tmp")).unwrap();
 
         let result = run_interactive_stage(
             &mut engine,
@@ -3144,10 +3134,6 @@ mod tests {
         )
         .await;
 
-        // Restore and cleanup
-        let mut perms2 = std::fs::metadata(&dir).unwrap().permissions();
-        perms2.set_mode(0o755);
-        let _ = std::fs::set_permissions(&dir, perms2);
         let _ = std::fs::remove_dir_all(&dir);
 
         assert!(result.is_err());
@@ -3631,7 +3617,6 @@ mod tests {
 
     // ─── Coverage: request_interaction_async error in interactive_points (line 474:97) ─
 
-    #[cfg(unix)]
     #[tokio::test]
     async fn interactive_points_request_interaction_async_error_propagates() {
         let _guard = crate::runstate::isolate_runs_dir_for_test(
@@ -3640,12 +3625,14 @@ mod tests {
         // Covers the `?` on `request_interaction_async` in the background path.
         //
         // We respond to the first choice with "Revise" (which has a directive),
-        // then immediately make the run dir read-only so:
-        //   1) response.json is readable (already written before chmod)
+        // then immediately block the atomic write's tmp target with a directory
+        // so:
+        //   1) response.json is readable (already written)
         //   2) the directive is injected and the loop re-runs inference
         //   3) round 2's choice request → write_request fails → Err via `?`
+        // Blocking the tmp path fails on every platform (the prior version made
+        // the run dir read-only via chmod, Unix-only).
         use crate::interaction::InteractionResponse;
-        use std::os::unix::fs::PermissionsExt;
 
         let bp = make_blueprint(vec![make_stage("main")]);
         let (mut engine, _pool, entity) = make_engine_and_entity(&bp, "Agent response");
@@ -3692,15 +3679,12 @@ mod tests {
             let mut resp = InteractionResponse::choice("", 1); // "Revise"
             resp.request_id = req.id.clone();
             crate::interaction::write_response(&run_id_for_responder, &resp).unwrap();
-            // Immediately make the dir read-only: response.json is on disk
-            // so take_response can still read it, but write_request for the
-            // followup will fail.
+            // Immediately block the next atomic write: response.json is on disk
+            // so take_response can still read it, but the followup's
+            // write_request writes `pending.json.tmp`, which we replace with a
+            // directory so that write fails.
             let dir = runstate::run_dir(&run_id_for_responder);
-            let _ = std::fs::metadata(&dir).map(|m| {
-                let mut perms = m.permissions();
-                perms.set_mode(0o555);
-                std::fs::set_permissions(&dir, perms)
-            });
+            let _ = std::fs::create_dir_all(dir.join("pending.json.tmp"));
         });
         // Yield so the spawned task runs its first read_request check (returns None)
         // before we start run_interactive_points_stage (which writes the request).
@@ -3723,16 +3707,10 @@ mod tests {
 
         let _ = responder.await;
 
-        // Restore permissions and cleanup
         let dir = runstate::run_dir(&run_id);
-        let _ = std::fs::metadata(&dir).map(|m| {
-            let mut perms2 = m.permissions();
-            perms2.set_mode(0o755);
-            std::fs::set_permissions(&dir, perms2)
-        });
         let _ = std::fs::remove_dir_all(&dir);
 
-        // The error from write_request (read-only dir) propagates via `?`.
+        // The error from the failed write_request propagates via `?`.
         assert!(result.is_err());
     }
 
@@ -3803,16 +3781,14 @@ mod tests {
 
     // ─── Coverage: first request_interaction_async fails (line 421:96) ─────────
 
-    #[cfg(unix)]
     #[tokio::test]
     async fn interactive_points_first_request_interaction_async_error() {
         let _guard = crate::runstate::isolate_runs_dir_for_test(
             "interactive_points_first_request_interaction_async_error",
         );
-        // Covers line 421:96: `?` on `request_interaction_async` for the initial
-        // (non-followup) interaction point when `write_request` fails because the
-        // run directory is read-only before the stage even starts.
-        use std::os::unix::fs::PermissionsExt;
+        // Covers the `?` on `request_interaction_async` for the initial
+        // (non-followup) interaction point when `write_request` fails because
+        // the atomic write's tmp target is blocked before the stage starts.
 
         let bp = make_blueprint(vec![make_stage("main")]);
         let (mut engine, _pool, entity) = make_engine_and_entity(&bp, "Agent response");
@@ -3837,13 +3813,12 @@ mod tests {
         );
         runstate::create_run(&meta).unwrap();
 
-        // Make the run directory read-only BEFORE calling the stage so that
-        // `write_request` (called by `request_interaction_async` at line 384 of
-        // interaction.rs) fails immediately → propagates via `?` at line 421.
+        // Block the atomic write's tmp target BEFORE calling the stage so that
+        // `write_request` (called by `request_interaction_async`) fails
+        // immediately → propagates via `?`. A directory at `pending.json.tmp`
+        // makes the write fail on every platform.
         let dir = runstate::run_dir(&run_id);
-        let mut perms = std::fs::metadata(&dir).unwrap().permissions();
-        perms.set_mode(0o555);
-        std::fs::set_permissions(&dir, perms).unwrap();
+        std::fs::create_dir_all(dir.join("pending.json.tmp")).unwrap();
 
         let points = vec![make_free_text_point("q", "What now?")];
 
@@ -3862,12 +3837,6 @@ mod tests {
         )
         .await;
 
-        // Restore permissions and clean up
-        let _ = std::fs::metadata(&dir).map(|m| {
-            let mut perms2 = m.permissions();
-            perms2.set_mode(0o755);
-            std::fs::set_permissions(&dir, perms2)
-        });
         let _ = std::fs::remove_dir_all(&dir);
 
         assert!(result.is_err());
