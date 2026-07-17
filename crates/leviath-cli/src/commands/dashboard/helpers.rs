@@ -119,13 +119,13 @@ pub(super) fn yank_to_clipboard(text: &str) -> bool {
 /// OSC52 clipboard fallback, delegating to the real terminal write in
 /// `leviath_sys`.
 ///
-/// This is a cli-local safety twin, NOT the OS mechanism itself (that lives,
-/// fully tested, in `leviath_sys::tty`). It exists only because `leviath_sys`
-/// compiles as a *non-test* dependency even in this crate's test build, so a
-/// cli test that reached the real `osc52_yank` would write OSC escape bytes to
-/// the terminal running `cargo test`. The `#[cfg(test)]` twin below keeps those
-/// tests (and `input.rs`'s `key('y')` handler tests) from ever touching a real
-/// terminal.
+/// COVERAGE-EXCLUDED: this is a cli-local safety twin, NOT the OS mechanism
+/// itself (that lives, fully tested, in `leviath_sys::tty`). It exists only
+/// because `leviath_sys` compiles as a *non-test* dependency even in this
+/// crate's test build, so a cli test that reached the real `osc52_yank` would
+/// write OSC escape bytes to the terminal running `cargo test`. The
+/// `#[cfg(test)]` twin below keeps those tests (and `input.rs`'s `key('y')`
+/// handler tests) from ever touching a real terminal.
 #[cfg(not(test))]
 fn osc52_fallback(text: &str) -> bool {
     leviath_sys::osc52_yank(text)
