@@ -1347,6 +1347,7 @@ async fn run_worker_inner(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::write_test_agent;
     use leviath_providers::{FinishReason, InferenceResponse, Provider, TokenUsage};
 
     // ─── Helpers ──────────────────────────────────────────────────────────────
@@ -2799,7 +2800,7 @@ max_iterations = 1
 provider = "anthropic"
 model = "claude-sonnet-4-6"
 "#;
-        std::fs::write(temp_dir.join("agent.leviath"), manifest_content).unwrap();
+        write_test_agent(&temp_dir, manifest_content);
 
         let run_id = format!("test-worker-title-none-{pid}-{now}");
         let dir = crate::runstate::run_dir(&run_id);
@@ -2880,7 +2881,7 @@ model = "mock-model"
 [tool_permissions]
 bash = "ask"
 "#;
-        std::fs::write(temp_dir.join("agent.leviath"), manifest_content).unwrap();
+        write_test_agent(&temp_dir, manifest_content);
 
         let run_id = "test-worker-mock-provider-round-trip";
         let dir = crate::runstate::run_dir(run_id);
@@ -2948,7 +2949,7 @@ description = "Test"
 [stages.main]
 mode = "autonomous"
 "#;
-        std::fs::write(temp_dir.join("agent.leviath"), manifest_content).unwrap();
+        write_test_agent(&temp_dir, manifest_content);
 
         let run_id = "test-execute-worker-no-yolo";
         let dir = crate::runstate::run_dir(run_id);

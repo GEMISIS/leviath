@@ -243,7 +243,7 @@ fn parse_agent_name(content: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::with_tracing;
+    use crate::test_support::{with_tracing, write_test_agent};
 
     // ─── agents_dir_from_home ─────────────────────────────────────────────
 
@@ -1072,7 +1072,7 @@ name = "test-install-agent-xyz"
 version = "0.1.0"
 description = "test"
 "#;
-        std::fs::write(dir.path().join("agent.leviath"), manifest).unwrap();
+        write_test_agent(dir.path(), manifest);
         std::fs::write(dir.path().join("readme.txt"), "hello").unwrap();
 
         let agents_dir = tempfile::tempdir().unwrap();

@@ -458,7 +458,7 @@ fn truncate_str(s: &str, max: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::with_tracing;
+    use crate::test_support::{with_tracing, write_test_agent};
 
     // ─── validate_test_case ────────────────────────────────────────────────
 
@@ -623,7 +623,7 @@ description = "test"
 [stages.main]
 model = { provider = "anthropic", model = "claude-sonnet-4-6" }
 "#;
-        std::fs::write(project.join("agent.leviath"), manifest).unwrap();
+        write_test_agent(project, manifest);
 
         // Create tests directory with a test file
         let tests_dir = project.join("tests");
@@ -660,7 +660,7 @@ description = "test"
 [stages.main]
 model = { provider = "anthropic", model = "claude-sonnet-4-6" }
 "#;
-        std::fs::write(project.join("agent.leviath"), manifest).unwrap();
+        write_test_agent(project, manifest);
 
         let args = TestArgs {
             path: Some(project.to_str().unwrap().to_string()),
@@ -789,7 +789,7 @@ description = "test"
 [stages.main]
 model = { provider = "anthropic", model = "claude-sonnet-4-6" }
 "#;
-        std::fs::write(project.join("agent.leviath"), manifest).unwrap();
+        write_test_agent(project, manifest);
         let tests_dir = project.join("tests");
         std::fs::create_dir_all(&tests_dir).unwrap();
         let test_toml = r#"
@@ -827,7 +827,7 @@ description = "test"
 [stages.main]
 model = { provider = "anthropic", model = "claude-sonnet-4-6" }
 "#;
-        std::fs::write(project.join("agent.leviath"), manifest).unwrap();
+        write_test_agent(project, manifest);
         let tests_dir = project.join("tests");
         std::fs::create_dir_all(&tests_dir).unwrap();
         // No assertions = fails validation
@@ -918,7 +918,7 @@ description = "test"
 [stages.main]
 model = { provider = "anthropic", model = "claude-sonnet-4-6" }
 "#;
-        std::fs::write(project.join("agent.leviath"), manifest).unwrap();
+        write_test_agent(project, manifest);
         let tests_dir = project.join("tests");
         std::fs::create_dir_all(&tests_dir).unwrap();
         let test_toml = r#"
@@ -954,7 +954,7 @@ description = "test"
 [stages.main]
 model = { provider = "anthropic", model = "claude-sonnet-4-6" }
 "#;
-        std::fs::write(project.join("agent.leviath"), manifest).unwrap();
+        write_test_agent(project, manifest);
         let tests_dir = project.join("tests");
         std::fs::create_dir_all(&tests_dir).unwrap();
 
@@ -983,7 +983,7 @@ description = "test"
 [stages.main]
 model = { provider = "anthropic", model = "claude-sonnet-4-6" }
 "#;
-        std::fs::write(project.join("agent.leviath"), manifest).unwrap();
+        write_test_agent(project, manifest);
         let tests_dir = project.join("tests");
         std::fs::create_dir_all(&tests_dir).unwrap();
 
@@ -1012,7 +1012,7 @@ description = "test"
 [stages.main]
 model = { provider = "anthropic", model = "claude-sonnet-4-6" }
 "#;
-        std::fs::write(project.join("agent.leviath"), manifest).unwrap();
+        write_test_agent(project, manifest);
         let tests_dir = project.join("tests");
         std::fs::create_dir_all(&tests_dir).unwrap();
 
@@ -1045,7 +1045,7 @@ description = "test"
 [stages.main]
 model = { provider = "anthropic", model = "claude-sonnet-4-6" }
 "#;
-        std::fs::write(project.join("agent.leviath"), manifest).unwrap();
+        write_test_agent(project, manifest);
         let tests_dir = project.join("tests");
         std::fs::create_dir_all(&tests_dir).unwrap();
 
@@ -1074,7 +1074,7 @@ description = "test"
 [stages.main]
 model = { provider = "anthropic", model = "claude-sonnet-4-6" }
 "#;
-        std::fs::write(project.join("agent.leviath"), manifest).unwrap();
+        write_test_agent(project, manifest);
         let tests_dir = project.join("tests");
         std::fs::create_dir_all(&tests_dir).unwrap();
 
@@ -1107,7 +1107,7 @@ description = "test"
 [stages.main]
 model = { provider = "anthropic", model = "claude-sonnet-4-6" }
 "#;
-        std::fs::write(project.join("agent.leviath"), manifest).unwrap();
+        write_test_agent(project, manifest);
         let tests_dir = project.join("tests");
         std::fs::create_dir_all(&tests_dir).unwrap();
 
@@ -1150,7 +1150,7 @@ description = "test"
 [stages.main]
 model = { provider = "anthropic", model = "claude-sonnet-4-6" }
 "#;
-        std::fs::write(project.join("agent.leviath"), manifest).unwrap();
+        write_test_agent(project, manifest);
         let tests_dir = project.join("tests");
         std::fs::create_dir_all(&tests_dir).unwrap();
         std::fs::write(tests_dir.join("bad.toml"), "not valid {{{ toml").unwrap();
@@ -1402,7 +1402,7 @@ description = "test"
 [stages.main]
 model = { provider = "anthropic", model = "claude-sonnet-4-6" }
 "#;
-        std::fs::write(project.join("agent.leviath"), manifest).unwrap();
+        write_test_agent(project, manifest);
         let tests_dir = project.join("tests");
         std::fs::create_dir_all(&tests_dir).unwrap();
 
@@ -1458,7 +1458,7 @@ description = "test"
 [stages.main]
 model = { provider = "anthropic", model = "claude-sonnet-4-6" }
 "#;
-        std::fs::write(project.join("agent.leviath"), manifest).unwrap();
+        write_test_agent(project, manifest);
         let tests_dir = project.join("tests");
         std::fs::create_dir_all(&tests_dir).unwrap();
         // Remove all permissions on the tests directory.
@@ -1490,7 +1490,7 @@ description = "test"
 [stages.main]
 model = { provider = "anthropic", model = "claude-sonnet-4-6" }
 "#;
-        std::fs::write(project.join("agent.leviath"), manifest).unwrap();
+        write_test_agent(project, manifest);
         let tests_dir = project.join("tests");
         std::fs::create_dir_all(&tests_dir).unwrap();
         let toml_path = tests_dir.join("unreadable.toml");
@@ -1528,7 +1528,7 @@ description = "test"
 [stages.main]
 model = { provider = "anthropic", model = "claude-sonnet-4-6" }
 "#;
-        std::fs::write(project.join("agent.leviath"), manifest).unwrap();
+        write_test_agent(project, manifest);
         let tests_dir = project.join("tests");
         std::fs::create_dir_all(&tests_dir).unwrap();
         let rhai_path = tests_dir.join("unreadable.rhai");
@@ -1836,7 +1836,7 @@ description = "test"
 [stages.main]
 model = { provider = "anthropic", model = "claude-sonnet-4-6" }
 "#;
-        std::fs::write(project.join("agent.leviath"), manifest).unwrap();
+        write_test_agent(project, manifest);
         let tests_dir = project.join("tests");
         std::fs::create_dir_all(&tests_dir).unwrap();
         std::fs::write(tests_dir.join("basic.toml"), test_toml).unwrap();
@@ -2079,7 +2079,7 @@ description = "test"
 [stages.main]
 model = { provider = "anthropic", model = "claude-sonnet-4-6" }
 "#;
-        std::fs::write(project.join("agent.leviath"), manifest).unwrap();
+        write_test_agent(project, manifest);
         let tests_dir = project.join("tests");
         std::fs::create_dir_all(&tests_dir).unwrap();
         std::fs::write(tests_dir.join("script.rhai"), "true").unwrap();
@@ -2110,7 +2110,7 @@ description = "test"
 [stages.main]
 model = { provider = "anthropic", model = "claude-sonnet-4-6" }
 "#;
-        std::fs::write(project.join("agent.leviath"), manifest).unwrap();
+        write_test_agent(project, manifest);
         let tests_dir = project.join("tests");
         std::fs::create_dir_all(&tests_dir).unwrap();
         std::fs::write(tests_dir.join("script.rhai"), "false").unwrap();
@@ -2142,7 +2142,7 @@ description = "test"
 [stages.main]
 model = { provider = "anthropic", model = "claude-sonnet-4-6" }
 "#;
-        std::fs::write(project.join("agent.leviath"), manifest).unwrap();
+        write_test_agent(project, manifest);
         let tests_dir = project.join("tests");
         std::fs::create_dir_all(&tests_dir).unwrap();
         std::fs::write(tests_dir.join("script.rhai"), "this is not valid rhai (((").unwrap();
@@ -2174,7 +2174,7 @@ description = "test"
 [stages.main]
 model = { provider = "anthropic", model = "claude-sonnet-4-6" }
 "#;
-        std::fs::write(project.join("agent.leviath"), manifest).unwrap();
+        write_test_agent(project, manifest);
         let tests_dir = project.join("tests");
         std::fs::create_dir_all(&tests_dir).unwrap();
         // Returns an integer, not a bool -- exercises the `else` arm of the
@@ -2207,7 +2207,7 @@ description = "test"
 [stages.main]
 model = { provider = "anthropic", model = "claude-sonnet-4-6" }
 "#;
-        std::fs::write(project.join("agent.leviath"), manifest).unwrap();
+        write_test_agent(project, manifest);
         let tests_dir = project.join("tests");
         std::fs::create_dir_all(&tests_dir).unwrap();
         std::fs::write(tests_dir.join("script.rhai"), "false").unwrap();
@@ -2282,7 +2282,7 @@ description = "test"
 [stages.main]
 model = { provider = "anthropic", model = "claude-sonnet-4-6" }
 "#;
-        std::fs::write(project.join("agent.leviath"), manifest).unwrap();
+        write_test_agent(project, manifest);
         let tests_dir = project.join("tests");
         std::fs::create_dir_all(&tests_dir).unwrap();
         // A .txt file — neither .toml nor .rhai — exercises the implicit else

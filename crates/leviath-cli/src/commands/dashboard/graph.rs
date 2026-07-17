@@ -78,6 +78,7 @@ pub(super) fn load_graph_info(agent_path: &str) -> Option<GraphTransitionInfo> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::write_test_agent;
 
     #[test]
     fn graph_edge_debug_format() {
@@ -274,7 +275,7 @@ mod tests {
     // ─── load_graph_info ────────────────────────────────────────────────────
 
     fn write_agent_manifest(dir: &std::path::Path, content: &str) {
-        std::fs::write(dir.join("agent.leviath"), content).unwrap();
+        write_test_agent(dir, content);
     }
 
     #[test]

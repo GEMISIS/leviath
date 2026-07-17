@@ -202,6 +202,7 @@ fn print_warnings(blueprint: &leviath_core::Blueprint) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::write_test_agent;
 
     /// Helper to create a minimal valid blueprint TOML with given stages.
     fn make_blueprint_toml(stages_toml: &str) -> String {
@@ -598,7 +599,7 @@ max_iterations = 5
 system = { kind = "pinned", max_tokens = 1000 }
 conversation = { kind = "sliding_window", max_items = 50, max_tokens = 10000 }
 "#;
-        std::fs::write(dir.path().join("agent.leviath"), manifest).unwrap();
+        write_test_agent(dir.path(), manifest);
 
         let args = ValidateArgs {
             path: dir.path().to_str().unwrap().to_string(),

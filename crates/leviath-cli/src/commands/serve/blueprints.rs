@@ -214,6 +214,7 @@ pub(super) async fn validate_blueprint(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::write_test_agent;
     use axum::body::Body;
     use axum::http::Request;
     use axum::routing::{get, post};
@@ -918,7 +919,7 @@ description = "Should be discovered"
 [stages.work]
 prompt = "Do work"
 "#;
-        std::fs::write(agent_dir.join("agent.leviath"), content).unwrap();
+        write_test_agent(agent_dir, content);
 
         let config = crate::config::Config {
             agent_paths: vec![dir.path().to_path_buf()],
@@ -975,7 +976,7 @@ description = "Directly in scan dir"
 [stages.run]
 prompt = "Run"
 "#;
-        std::fs::write(dir.path().join("agent.leviath"), content).unwrap();
+        write_test_agent(dir.path(), content);
 
         let config = crate::config::Config {
             agent_paths: vec![dir.path().to_path_buf()],

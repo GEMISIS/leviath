@@ -279,6 +279,7 @@ pub async fn execute_worker(args: WorkerArgs) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::write_test_agent;
     #[test]
     fn run_args_defaults() {
         let args = RunArgs {
@@ -584,7 +585,7 @@ mode = "autonomous"
 prompt = "Do the thing"
 "#
         );
-        std::fs::write(dir.join("agent.leviath"), manifest_content).unwrap();
+        write_test_agent(dir, manifest_content);
     }
 
     /// Core of [`cleanup_runs_with_prefix`]: scans `dir` and removes every
