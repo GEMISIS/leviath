@@ -1311,20 +1311,16 @@ mod tests {
     }
 
     #[test]
-    #[cfg(unix)]
     fn list_runs_in_dir_unreadable_dir_returns_empty() {
         // Covers the `if let Ok(entries) = std::fs::read_dir(&dir)` pattern
         // *not* matching: `dir.exists()` is true (so the earlier early-return
-        // is skipped) but the directory itself denies read+execute, so
-        // `read_dir` fails and the whole block is silently skipped rather
-        // than panicking or propagating an error.
-        use std::os::unix::fs::PermissionsExt;
+        // is skipped) but `read_dir` fails, so the whole block is silently
+        // skipped. Pointing at a *file* makes `read_dir` fail on every platform
+        // (the prior version used a `chmod 0o000` directory, Unix-only).
         let dir = tempfile::tempdir().unwrap();
-        let unreadable = dir.path().join("unreadable-runs");
-        std::fs::create_dir(&unreadable).unwrap();
-        std::fs::set_permissions(&unreadable, std::fs::Permissions::from_mode(0o000)).unwrap();
-        let result = list_runs_in_dir(unreadable.clone());
-        std::fs::set_permissions(&unreadable, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let not_a_dir = dir.path().join("runs-is-a-file");
+        std::fs::write(&not_a_dir, "not a dir").unwrap();
+        let result = list_runs_in_dir(not_a_dir);
         assert!(result.is_empty());
     }
 
