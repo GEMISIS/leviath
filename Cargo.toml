@@ -9,6 +9,7 @@ members = [
     "crates/leviath-package",
     "crates/leviath-cli",
     "crates/leviath-tools",
+    "crates/leviath-sys",
     "xtask",
 ]
 
@@ -29,6 +30,7 @@ leviath-mcp = { path = "crates/leviath-mcp" }
 leviath-scripting = { path = "crates/leviath-scripting" }
 leviath-package = { path = "crates/leviath-package" }
 leviath-tools = { path = "crates/leviath-tools" }
+leviath-sys = { path = "crates/leviath-sys" }
 
 # External dependencies
 bevy_ecs = "0.15"
@@ -58,6 +60,7 @@ flate2 = "1.0"
 tar = "0.4"
 dirs = "6.0.0"
 dotenvy = "0.15"
+libc = "0.2"
 crossterm = "0.28"
 ratatui = "0.29"
 pulldown-cmark = "0.12"
