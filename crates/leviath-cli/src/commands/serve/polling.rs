@@ -351,22 +351,24 @@ mod tests {
         // Not in map yet.
         assert!(!poll.last_status.contains_key("run-1"));
 
-        // Insert a running (non-terminal) status. The closure is called and
-        // all three match arms return false, covering the false branches.
+        // Insert a running (non-terminal) status: the `||` chain evaluates all
+        // three comparisons (each returning false), covering every operand's
+        // false path.
         poll.last_status
             .insert("run-1".to_string(), ("Running".to_string(), 1, 0, 0, 0));
         let was_terminal = poll
             .last_status
             .get("run-1")
             .is_some_and(|(s, _, _, _, _)| {
-                matches!(s.as_str(), "Complete" | "Error" | "Cancelled")
+                let s = s.as_str();
+                s == "Complete" || s == "Error" || s == "Cancelled"
             });
         assert!(!was_terminal);
 
         // Iterate through all three terminal statuses at ONE source position so
-        // LLVM sees the closure's "Complete=true", "Error=true", and
-        // "Cancelled=true" branches covered — the loop body's is_some_and call
-        // is the single instrumented region that receives all three inputs.
+        // each comparison's true path is exercised by a single instrumented
+        // closure. `assert_is_terminal` is called with `true` here (its normal
+        // return) and with `false` in the should_panic test below (its panic).
         for (i, status) in ["Complete", "Error", "Cancelled"].iter().enumerate() {
             poll.last_status
                 .insert("run-1".to_string(), (status.to_string(), i + 5, 0, 100, 50));
@@ -374,7 +376,8 @@ mod tests {
                 .last_status
                 .get("run-1")
                 .is_some_and(|(s, _, _, _, _)| {
-                    matches!(s.as_str(), "Complete" | "Error" | "Cancelled")
+                    let s = s.as_str();
+                    s == "Complete" || s == "Error" || s == "Cancelled"
                 });
             assert_is_terminal(was_terminal, status);
         }

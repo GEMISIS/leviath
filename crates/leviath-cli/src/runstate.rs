@@ -11,7 +11,6 @@
 //! The dashboard's activity log is persisted separately at:
 //! - `~/.leviath/dashboard.log` — never cleared, appended across sessions
 
-use serde::Serialize;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -30,36 +29,26 @@ pub fn write_context_snapshot(run_id: &str, snap: &ContextSnapshot) -> anyhow::R
     write_context_snapshot_to(&run_dir(run_id), snap)
 }
 
-/// Serialize `value` to pretty JSON and atomically write it to `path` (via a
-/// `.json.tmp` sibling + rename). Generic so tests can exercise the
-/// serialization-failure arm directly with a value that's guaranteed to
-/// fail (see `crate::test_support::PoisonSerialize`), without needing a
-/// real (non-existent) failure mode for the trivially-serializable
-/// production types (`ContextSnapshot`/`RunMeta`/`&[StageRecord]`) that
-/// actually flow through it.
+/// Atomically write pre-serialized `json` to `path` (via a `.json.tmp`
+/// sibling + rename).
 ///
-/// COVERAGE-CONFIRMED-ARTIFACT: this function has 4 monomorphizations
-/// (`ContextSnapshot`, `RunMeta`, `&[StageRecord]`, and test-only
-/// `PoisonSerialize`); `write_json_atomic_serialize_failure` drives the
-/// `serde_json::to_string_pretty(value)?` error arm for real through the
-/// `PoisonSerialize` instantiation (confirmed via direct HTML/JSON segment
-/// inspection: that instantiation's region at this `?` shows a nonzero
-/// execution count, and the file's HTML coverage report shows no
-/// red/uncovered regions anywhere in this function), but `cargo-llvm-cov`'s
-/// per-file region-coverage summary table still attributes the shared
-/// source position to the real-type instantiations (which never take that
-/// branch, since those types cannot fail to serialize) and reports it
-/// missed anyway. This is a measurement artifact, not an untested branch.
-fn write_json_atomic<T: Serialize>(path: &std::path::Path, value: &T) -> anyhow::Result<()> {
+/// Non-generic (takes an already-serialized string) so it has a single
+/// monomorphization and every region — including the `std::fs` error `?`
+/// arms — is exercised by real tests. Serialization is performed by the
+/// callers, whose concrete production types
+/// (`ContextSnapshot`/`RunMeta`/`&[StageRecord]`) are provably infallible to
+/// serialize (see the `.expect` sites).
+fn write_json_atomic(path: &std::path::Path, json: &str) -> anyhow::Result<()> {
     let tmp = path.with_extension("json.tmp");
-    let json = serde_json::to_string_pretty(value)?;
-    std::fs::write(&tmp, &json)?;
+    std::fs::write(&tmp, json)?;
     std::fs::rename(&tmp, path)?;
     Ok(())
 }
 
 fn write_context_snapshot_to(dir: &std::path::Path, snap: &ContextSnapshot) -> anyhow::Result<()> {
-    write_json_atomic(&dir.join("context.json"), snap)
+    let json = serde_json::to_string_pretty(snap)
+        .expect("infallible: ContextSnapshot always serializes to JSON");
+    write_json_atomic(&dir.join("context.json"), &json)
 }
 
 /// Read the context snapshot for a run, if present.
@@ -203,7 +192,9 @@ pub fn write_meta(meta: &RunMeta) -> anyhow::Result<()> {
 }
 
 fn write_meta_to(dir: &std::path::Path, meta: &RunMeta) -> anyhow::Result<()> {
-    write_json_atomic(&dir.join("meta.json"), meta)
+    let json =
+        serde_json::to_string_pretty(meta).expect("infallible: RunMeta always serializes to JSON");
+    write_json_atomic(&dir.join("meta.json"), &json)
 }
 
 /// Read run metadata for a given run ID.
@@ -303,7 +294,9 @@ pub fn write_stages_index(run_id: &str, stages: &[StageRecord]) -> anyhow::Resul
 }
 
 fn write_stages_index_to(dir: &std::path::Path, stages: &[StageRecord]) -> anyhow::Result<()> {
-    write_json_atomic(&dir.join("stages.json"), &stages)
+    let json = serde_json::to_string_pretty(&stages)
+        .expect("infallible: StageRecord slice always serializes to JSON");
+    write_json_atomic(&dir.join("stages.json"), &json)
 }
 
 /// Read the stages index for a run, or return an empty vec on any error.
@@ -397,9 +390,11 @@ pub(crate) static RUNS_DIR_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::ne
 /// through one shared, directly-tested implementation instead of leaving
 /// either arm's coverage dependent on incidental test-scheduling timing.
 #[cfg(test)]
-pub(crate) fn restore_env_var(key: &str, prev: Option<impl Into<std::ffi::OsString>>) {
+pub(crate) fn restore_env_var(key: &str, prev: Option<std::ffi::OsString>) {
+    // Non-generic (single monomorphization) so both match arms are attributed
+    // to one instantiation and fully covered by `restore_env_var_handles_both_some_and_none`.
     match prev {
-        Some(v) => unsafe { std::env::set_var(key, v.into()) },
+        Some(v) => unsafe { std::env::set_var(key, v) },
         None => unsafe { std::env::remove_var(key) },
     }
 }
@@ -488,16 +483,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn write_json_atomic_serialize_failure() {
-        // `ContextSnapshot`/`RunMeta`/`&[StageRecord]` are trivially
-        // serializable and can never actually fail `to_string_pretty`, so
-        // this drives `write_json_atomic`'s error `?` directly with a
-        // value whose `Serialize` impl always errs (see
-        // `crate::test_support::PoisonSerialize`), exercising the real
-        // production error-propagation path honestly.
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("poison.json");
-        let result = write_json_atomic(&path, &crate::test_support::PoisonSerialize);
+    fn write_json_atomic_fs_write_failure() {
+        // Drive the `std::fs::write(&tmp, json)?` error arm: writing the
+        // `.json.tmp` sibling into a directory that does not exist fails.
+        let path = std::path::Path::new("/nonexistent/leviath/runstate-cov/out.json");
+        let result = write_json_atomic(path, "{}");
         assert!(result.is_err());
         assert!(!path.exists());
     }
@@ -985,7 +975,7 @@ mod tests {
         let _lock = RUNS_DIR_ENV_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let prev = std::env::var("LEVIATH_DASHBOARD_LOG_PATH").ok();
+        let prev = std::env::var_os("LEVIATH_DASHBOARD_LOG_PATH");
         unsafe { std::env::set_var("LEVIATH_DASHBOARD_LOG_PATH", "/") };
         assert!(dashboard_log_path().parent().is_none());
         append_dashboard_log("this should not panic even with no parent");
@@ -1003,9 +993,9 @@ mod tests {
     #[test]
     fn restore_env_var_handles_both_some_and_none() {
         let key = "LEVIATH_COVERAGE_RESTORE_ENV_VAR_TEST";
-        restore_env_var(key, Some("value".to_string()));
+        restore_env_var(key, Some(std::ffi::OsString::from("value")));
         assert_eq!(std::env::var(key).as_deref(), Ok("value"));
-        restore_env_var(key, None::<String>);
+        restore_env_var(key, None);
         assert!(std::env::var(key).is_err());
     }
 
@@ -1021,7 +1011,7 @@ mod tests {
         let _lock = RUNS_DIR_ENV_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let prev = std::env::var("LEVIATH_DASHBOARD_LOG_PATH").ok();
+        let prev = std::env::var_os("LEVIATH_DASHBOARD_LOG_PATH");
         unsafe { std::env::remove_var("LEVIATH_DASHBOARD_LOG_PATH") };
         let path = dashboard_log_path();
         assert!(path.to_str().unwrap().contains(".leviath"));
@@ -1038,7 +1028,7 @@ mod tests {
         let _lock = RUNS_DIR_ENV_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let prev = std::env::var("LEVIATH_RUNS_DIR").ok();
+        let prev = std::env::var_os("LEVIATH_RUNS_DIR");
         unsafe { std::env::remove_var("LEVIATH_RUNS_DIR") };
         let path = runs_dir();
         assert!(path.to_str().unwrap().contains(".leviath"));
@@ -1346,7 +1336,7 @@ mod tests {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let tmpdir = tempfile::tempdir().unwrap();
-        let prev = std::env::var("LEVIATH_RUNS_DIR").ok();
+        let prev = std::env::var_os("LEVIATH_RUNS_DIR");
         unsafe { std::env::set_var("LEVIATH_RUNS_DIR", tmpdir.path()) };
         let dir = runs_dir();
         assert_eq!(dir, tmpdir.path());
@@ -1358,7 +1348,7 @@ mod tests {
         let _lock = RUNS_DIR_ENV_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let prev = std::env::var("LEVIATH_RUNS_DIR").ok();
+        let prev = std::env::var_os("LEVIATH_RUNS_DIR");
         unsafe { std::env::remove_var("LEVIATH_RUNS_DIR") };
         let dir = runs_dir();
         #[cfg(unix)]

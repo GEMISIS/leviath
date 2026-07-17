@@ -1073,19 +1073,17 @@ mod subagent_tests {
             conv.contains("stop and reconsider"),
             "worker should receive a message addressed to its agent_id"
         );
-        // The message did not leak into the parent's context.
+        // The message did not leak into the parent's context: the parent's
+        // conversation region stays empty (the message was routed only to the
+        // child), so there is nothing to search.
         let root_window = eng.world().get::<ContextWindow>(root_entity).unwrap();
-        let root_conv = root_window
+        let root_region_len = root_window
             .get_region("conversation")
-            .map(|r| {
-                r.content
-                    .iter()
-                    .map(|e| e.content.clone())
-                    .collect::<Vec<_>>()
-                    .join("\n")
-            })
-            .unwrap_or_default();
-        assert!(!root_conv.contains("stop and reconsider"));
+            .map_or(0, |r| r.content.len());
+        assert_eq!(
+            root_region_len, 0,
+            "message must not leak into the parent conversation"
+        );
     }
 
     #[tokio::test]
