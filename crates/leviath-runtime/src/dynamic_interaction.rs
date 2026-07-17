@@ -12,8 +12,8 @@
 
 use async_trait::async_trait;
 
-use crate::interaction::{response_approved, response_as_choice, response_as_text};
-use crate::interaction::{ApprovalScope, InteractionRequest, InteractionResponse};
+use leviath_core::interaction::{response_approved, response_as_choice, response_as_text};
+use leviath_core::interaction::{ApprovalScope, InteractionRequest, InteractionResponse};
 
 // ─── Shared taint-gate prompt helpers ──────────────────────────────────────
 // Used by both the worker (IPC) and foreground (stdin) GatePrompt impls so the
@@ -22,7 +22,7 @@ use crate::interaction::{ApprovalScope, InteractionRequest, InteractionResponse}
 
 /// Extract `(tool_name, taint, clearance)` from a blocked gate decision, or
 /// `None` if the decision isn't a block.
-pub(crate) fn gate_block_info(
+pub fn gate_block_info(
     decision: &leviath_core::taint::GateDecision,
 ) -> Option<(String, leviath_core::TaintLevel, leviath_core::TaintLevel)> {
     match decision {
@@ -37,7 +37,7 @@ pub(crate) fn gate_block_info(
 }
 
 /// Build the approval-prompt arguments explaining why an outbound call was gated.
-pub(crate) fn gate_prompt_args(
+pub fn gate_prompt_args(
     tool_name: &str,
     taint: leviath_core::TaintLevel,
     clearance: leviath_core::TaintLevel,
@@ -52,11 +52,8 @@ pub(crate) fn gate_prompt_args(
 }
 
 /// Map an approval outcome (approved, session-scope) to a gate resolution.
-pub(crate) fn map_gate_approval(
-    approved: bool,
-    session: bool,
-) -> leviath_runtime::taint::GateResolution {
-    use leviath_runtime::taint::GateResolution;
+pub fn map_gate_approval(approved: bool, session: bool) -> crate::taint::GateResolution {
+    use crate::taint::GateResolution;
     match (approved, session) {
         (false, _) => GateResolution::Deny,
         (true, true) => GateResolution::AlwaysAllow,
@@ -67,12 +64,12 @@ pub(crate) fn map_gate_approval(
 /// Resolve a foreground taint-gate block by asking via `ask` (real stdin in
 /// production, a mock in tests) and mapping the response. Kept free of the
 /// blocking stdin call itself so the request-building + mapping are testable.
-pub(crate) fn resolve_gate_with_asker(
+pub fn resolve_gate_with_asker(
     decision: &leviath_core::taint::GateDecision,
     stage_name: &str,
     ask: impl Fn(&InteractionRequest) -> InteractionResponse,
-) -> leviath_runtime::taint::GateResolution {
-    use leviath_runtime::taint::GateResolution;
+) -> crate::taint::GateResolution {
+    use crate::taint::GateResolution;
     let Some((tool_name, taint, clearance)) = gate_block_info(decision) else {
         return GateResolution::AllowOnce;
     };
@@ -473,7 +470,7 @@ mod tests {
         assert_eq!(asked[0].body.as_deref(), Some("M"));
         assert_eq!(
             asked[0].body_format,
-            crate::interaction::BodyFormat::Markdown
+            leviath_core::interaction::BodyFormat::Markdown
         );
         assert_eq!(asked[0].stage_name, "plan");
     }
@@ -541,7 +538,10 @@ mod tests {
         assert_eq!(asked[0].id, "ask-call3");
         assert_eq!(asked[0].prompt, "Q?");
         assert!(asked[0].required);
-        assert_eq!(asked[0].kind, crate::interaction::InteractionKind::FreeText);
+        assert_eq!(
+            asked[0].kind,
+            leviath_core::interaction::InteractionKind::FreeText
+        );
         assert_eq!(asked[0].stage_name, "implement");
     }
 
@@ -646,7 +646,7 @@ mod tests {
         assert_eq!(asked[0].id, "ask-call5");
         assert_eq!(
             asked[0].kind,
-            crate::interaction::InteractionKind::MultipleChoice
+            leviath_core::interaction::InteractionKind::MultipleChoice
         );
         assert_eq!(asked[0].options, vec!["X".to_string(), "Y".to_string()]);
     }
@@ -658,7 +658,7 @@ mod tests {
         let backend = MockBackend::with_responses(vec![InteractionResponse::approval(
             "",
             true,
-            crate::interaction::ApprovalScope::Once,
+            leviath_core::interaction::ApprovalScope::Once,
         )]);
         let result = dispatch_dynamic_interaction(
             &backend,
@@ -677,7 +677,7 @@ mod tests {
         let backend = MockBackend::with_responses(vec![InteractionResponse::approval(
             "",
             false,
-            crate::interaction::ApprovalScope::Once,
+            leviath_core::interaction::ApprovalScope::Once,
         )]);
         let result = dispatch_dynamic_interaction(
             &backend,
@@ -712,7 +712,7 @@ mod tests {
         let backend = MockBackend::with_responses(vec![InteractionResponse::approval(
             "",
             true,
-            crate::interaction::ApprovalScope::Once,
+            leviath_core::interaction::ApprovalScope::Once,
         )]);
         dispatch_dynamic_interaction(
             &backend,
@@ -724,7 +724,10 @@ mod tests {
         .await;
         let asked = backend.asked.lock().unwrap();
         assert_eq!(asked[0].id, "ask-call4");
-        assert_eq!(asked[0].kind, crate::interaction::InteractionKind::Confirm);
+        assert_eq!(
+            asked[0].kind,
+            leviath_core::interaction::InteractionKind::Confirm
+        );
         assert_eq!(asked[0].options, vec!["Yes".to_string(), "No".to_string()]);
     }
 
@@ -747,7 +750,10 @@ mod tests {
         assert_eq!(result, "User-edited document:\nedited plan");
         let asked = backend.asked.lock().unwrap();
         assert_eq!(asked[0].id, "edit-call1");
-        assert_eq!(asked[0].kind, crate::interaction::InteractionKind::EditText);
+        assert_eq!(
+            asked[0].kind,
+            leviath_core::interaction::InteractionKind::EditText
+        );
         assert_eq!(asked[0].body.as_deref(), Some("original plan"));
     }
 
@@ -835,7 +841,7 @@ mod tests {
 
     #[test]
     fn map_gate_approval_covers_all_outcomes() {
-        use leviath_runtime::taint::GateResolution;
+        use crate::taint::GateResolution;
         assert_eq!(map_gate_approval(false, false), GateResolution::Deny);
         assert_eq!(map_gate_approval(false, true), GateResolution::Deny);
         assert_eq!(map_gate_approval(true, false), GateResolution::AllowOnce);
@@ -844,7 +850,7 @@ mod tests {
 
     #[test]
     fn resolve_gate_with_asker_maps_response() {
-        use leviath_runtime::taint::GateResolution;
+        use crate::taint::GateResolution;
         // Deny.
         let r = resolve_gate_with_asker(&blocked_decision("shell"), "plan", |_req| {
             InteractionResponse::approval("", false, ApprovalScope::Once)

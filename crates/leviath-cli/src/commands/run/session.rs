@@ -2,7 +2,14 @@
 
 use crate::config::Config;
 use leviath_runtime::ProviderRegistry;
-use std::sync::Arc;
+
+// `ProviderCreds` + `build_provider_registry(&[ProviderCreds])` moved into
+// `leviath-runtime` (plain data + provider instantiation, no `Config`
+// dependency). Re-exported here so `commands::run`'s public re-export and all
+// existing call sites keep resolving. The `Config`-based translators
+// (`provider_creds_from_config` / `build_provider_registry_from_config`) stay
+// below because they need the CLI's `Config`.
+pub use leviath_runtime::provider_creds::{build_provider_registry, ProviderCreds};
 
 /// Resolve the task string from a CLI argument.
 ///
@@ -270,29 +277,6 @@ fn launch_editor_with(
     anyhow::bail!("No editor found. Set $VISUAL or $EDITOR, or install vim/nano/notepad.")
 }
 
-/// Plain-data provider credentials, decoupled from [`Config`].
-///
-/// This is the first of the two Phase-3 decoupling seams: it lets
-/// [`build_provider_registry`] instantiate providers without depending on the
-/// CLI's `Config`/`ProviderConfig` types, so a later phase can relocate the run
-/// engine into `leviath-runtime` without a `runtime -> cli` dependency. Build
-/// one per provider that should be registered via
-/// [`provider_creds_from_config`].
-#[derive(Clone, Debug)]
-pub struct ProviderCreds {
-    /// Provider identifier: `anthropic` | `openai` | `google` | `openrouter` |
-    /// `ollama` | `claude-code`. Selects which provider is instantiated.
-    pub name: String,
-    /// API key, when the provider needs one (`None` for `ollama`/`claude-code`).
-    pub api_key: Option<String>,
-    /// Base URL override (used by `ollama`; `None` uses the built-in default).
-    pub base_url: Option<String>,
-    /// Per-model capability overrides forwarded to the provider.
-    pub model_capabilities: std::collections::HashMap<String, leviath_providers::ModelCapabilities>,
-    /// HTTP request timeout in seconds (`None` uses the provider default).
-    pub request_timeout_secs: Option<u64>,
-}
-
 /// Build the list of [`ProviderCreds`] a [`Config`] implies. `ollama` and
 /// `claude-code` are always present (they need no key); the API-key providers
 /// are included only when their key is configured. This is the sole point that
@@ -345,87 +329,6 @@ pub fn provider_creds_from_config(config: &Config) -> Vec<ProviderCreds> {
     });
 
     creds
-}
-
-/// Build a [`ProviderRegistry`] from decoupled [`ProviderCreds`].
-pub fn build_provider_registry(creds: &[ProviderCreds]) -> ProviderRegistry {
-    let mut registry = ProviderRegistry::new();
-
-    for c in creds {
-        let caps = c.model_capabilities.clone();
-        let timeout = c.request_timeout_secs;
-        match c.name.as_str() {
-            "anthropic" => {
-                if let Some(ref key) = c.api_key {
-                    registry.register(
-                        "anthropic".to_string(),
-                        Arc::new(leviath_providers::AnthropicProvider::with_overrides(
-                            key.clone(),
-                            caps,
-                            timeout,
-                        )),
-                    );
-                }
-            }
-            "openai" => {
-                if let Some(ref key) = c.api_key {
-                    registry.register(
-                        "openai".to_string(),
-                        Arc::new(leviath_providers::OpenAIProvider::with_overrides(
-                            key.clone(),
-                            caps,
-                            timeout,
-                        )),
-                    );
-                }
-            }
-            "google" => {
-                if let Some(ref key) = c.api_key {
-                    registry.register(
-                        "google".to_string(),
-                        Arc::new(leviath_providers::GeminiProvider::with_overrides(
-                            key.clone(),
-                            caps,
-                            timeout,
-                        )),
-                    );
-                }
-            }
-            "openrouter" => {
-                if let Some(ref key) = c.api_key {
-                    registry.register(
-                        "openrouter".to_string(),
-                        Arc::new(leviath_providers::OpenRouterProvider::with_overrides(
-                            key.clone(),
-                            caps,
-                            timeout,
-                        )),
-                    );
-                }
-            }
-            "ollama" => {
-                let url = c
-                    .base_url
-                    .clone()
-                    .unwrap_or_else(|| "http://localhost:11434".to_string());
-                registry.register(
-                    "ollama".to_string(),
-                    Arc::new(leviath_providers::OllamaProvider::with_overrides(
-                        url, caps, timeout,
-                    )),
-                );
-            }
-            "claude-code" => {
-                registry.register(
-                    "claude-code".to_string(),
-                    Arc::new(leviath_providers::ClaudeCodeProvider::new()),
-                );
-            }
-            _ => {}
-        }
-    }
-
-    registry
 }
 
 /// Convenience wrapper: build a [`ProviderRegistry`] straight from a [`Config`].
@@ -693,72 +596,8 @@ mod tests {
         assert!(ollama.api_key.is_none());
     }
 
-    #[test]
-    fn build_provider_registry_from_creds_slice() {
-        // Drives the core `build_provider_registry(&[ProviderCreds])` directly:
-        // every keyed provider, the ollama-with-default-url arm, claude-code,
-        // and an unknown provider name (the catch-all no-op arm).
-        let caps = std::collections::HashMap::new();
-        let creds = vec![
-            ProviderCreds {
-                name: "anthropic".to_string(),
-                api_key: Some("sk-ant".to_string()),
-                base_url: None,
-                model_capabilities: caps.clone(),
-                request_timeout_secs: Some(30),
-            },
-            ProviderCreds {
-                name: "openai".to_string(),
-                api_key: Some("sk-oa".to_string()),
-                base_url: None,
-                model_capabilities: caps.clone(),
-                request_timeout_secs: None,
-            },
-            ProviderCreds {
-                name: "google".to_string(),
-                api_key: Some("AIza".to_string()),
-                base_url: None,
-                model_capabilities: caps.clone(),
-                request_timeout_secs: None,
-            },
-            ProviderCreds {
-                name: "openrouter".to_string(),
-                api_key: Some("sk-or".to_string()),
-                base_url: None,
-                model_capabilities: caps.clone(),
-                request_timeout_secs: None,
-            },
-            ProviderCreds {
-                name: "ollama".to_string(),
-                api_key: None,
-                base_url: None, // exercise the default-URL fallback
-                model_capabilities: caps.clone(),
-                request_timeout_secs: None,
-            },
-            ProviderCreds {
-                name: "claude-code".to_string(),
-                api_key: None,
-                base_url: None,
-                model_capabilities: caps.clone(),
-                request_timeout_secs: None,
-            },
-            ProviderCreds {
-                name: "totally-unknown".to_string(),
-                api_key: Some("x".to_string()),
-                base_url: None,
-                model_capabilities: caps,
-                request_timeout_secs: None,
-            },
-        ];
-        let registry = build_provider_registry(&creds);
-        assert!(registry.has("anthropic"));
-        assert!(registry.has("openai"));
-        assert!(registry.has("google"));
-        assert!(registry.has("openrouter"));
-        assert!(registry.has("ollama"));
-        assert!(registry.has("claude-code"));
-        assert!(!registry.has("totally-unknown"));
-    }
+    // `build_provider_registry_from_creds_slice` moved with
+    // `build_provider_registry` into `leviath-runtime::provider_creds`.
 
     // ─── resolve_task: multiline file content ───────────────────────────
 

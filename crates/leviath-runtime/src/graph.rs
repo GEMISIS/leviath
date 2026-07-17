@@ -1,9 +1,9 @@
 //! Graph traversal: transition resolution, edge transforms, compaction.
 
+use crate::{AgentEngine, ContextWindow};
 use leviath_core::blueprint::{EdgeTransform, StageResult, TransitionCondition, TransitionEdge};
 use leviath_core::lifecycle::CompactionConfig;
 use leviath_core::{Blueprint, RegionKind, Stage};
-use leviath_runtime::{AgentEngine, ContextWindow};
 use std::collections::HashMap;
 
 /// COVERAGE-EXCLUDED: llvm-cov's tracing-macro message-literal region is
@@ -599,12 +599,11 @@ async fn compact_transform_impl(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::with_tracing;
+    use crate::{AgentPool, ProviderRegistry};
     use leviath_core::blueprint::ModelConfig;
     use leviath_core::layout::RegionDefinition;
     use leviath_core::{ContextLayout, EvictionStrategy};
-    use leviath_runtime::{AgentPool, ProviderRegistry};
-
-    use crate::test_support::with_tracing;
 
     #[test]
     fn region_is_compact_target_respects_names_and_carry() {
@@ -704,7 +703,7 @@ mod tests {
         let entity = pool.get_agent(&agent_id).unwrap();
 
         // Initialize context window
-        crate::commands::run::helpers::initialize_context_window(
+        crate::context_setup::initialize_context_window(
             &mut engine,
             entity,
             blueprint,
@@ -1881,7 +1880,7 @@ mod tests {
         let agent_id = pool.spawn_agent(engine.world_mut());
         let entity = pool.get_agent(&agent_id).unwrap();
 
-        crate::commands::run::helpers::initialize_context_window(
+        crate::context_setup::initialize_context_window(
             &mut engine,
             entity,
             blueprint,
@@ -1939,7 +1938,7 @@ mod tests {
         let agent_id = pool.spawn_agent(engine.world_mut());
         let entity = pool.get_agent(&agent_id).unwrap();
 
-        crate::commands::run::helpers::initialize_context_window(
+        crate::context_setup::initialize_context_window(
             &mut engine,
             entity,
             blueprint,
