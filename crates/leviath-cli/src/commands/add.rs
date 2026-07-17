@@ -359,50 +359,45 @@ description = "test"
         assert!(result.is_err());
     }
 
-    #[cfg(unix)]
     #[test]
-    fn copy_dir_recursive_unreadable_file_errors() {
-        use std::os::unix::fs::PermissionsExt;
-
+    fn copy_dir_recursive_file_over_existing_dir_errors() {
+        // Copying a file onto a destination path that already exists as a
+        // directory fails on every platform (EISDIR / ERROR_ACCESS_DENIED),
+        // exercising the `std::fs::copy(...)?` error arm. The prior version
+        // made the source file unreadable via `chmod 0o000`, which only fails
+        // on Unix.
         let src_dir = tempfile::tempdir().unwrap();
-        let file_path = src_dir.path().join("secret.txt");
-        std::fs::write(&file_path, "top secret").unwrap();
-        std::fs::set_permissions(&file_path, std::fs::Permissions::from_mode(0o000)).unwrap();
+        std::fs::write(src_dir.path().join("clash"), "top secret").unwrap();
 
         let dst_dir = tempfile::tempdir().unwrap();
         let dst_path = dst_dir.path().join("copy");
+        // Pre-create dst/clash as a directory so the file copy collides.
+        std::fs::create_dir_all(dst_path.join("clash")).unwrap();
 
         let result = copy_dir_recursive(src_dir.path(), &dst_path);
-
-        // Restore permissions so the tempdir can clean itself up on drop.
-        std::fs::set_permissions(&file_path, std::fs::Permissions::from_mode(0o644)).unwrap();
-
         assert!(result.is_err());
     }
 
-    #[cfg(unix)]
     #[test]
-    fn copy_dir_recursive_unreadable_subdir_errors() {
-        use std::os::unix::fs::PermissionsExt;
-
+    fn copy_dir_recursive_recursion_error_propagates() {
+        // Exercises the recursive-call error-propagation branch OS-agnostically:
+        // the destination already has a *file* where the recursion needs to
+        // create a subdirectory, so the nested `create_dir_all` fails on every
+        // platform and that `Err` bubbles up through the parent's
+        // `copy_dir_recursive(...)?`. The prior version made the source
+        // subdirectory unreadable via `chmod 0o000`, which only fails on Unix.
         let src_dir = tempfile::tempdir().unwrap();
         let sub = src_dir.path().join("sub");
         std::fs::create_dir_all(&sub).unwrap();
         std::fs::write(sub.join("file.txt"), "data").unwrap();
-        std::fs::set_permissions(&sub, std::fs::Permissions::from_mode(0o000)).unwrap();
 
         let dst_dir = tempfile::tempdir().unwrap();
         let dst_path = dst_dir.path().join("copy");
+        std::fs::create_dir_all(&dst_path).unwrap();
+        // Block the recursion's create_dir_all(dst/sub) with a file at that path.
+        std::fs::write(dst_path.join("sub"), "i am a file").unwrap();
 
-        // Exercises the recursive-call error-propagation branch: the
-        // subdirectory itself is unreadable, so the nested
-        // `copy_dir_recursive` call's own `read_dir` fails and that `Err`
-        // bubbles up through the parent's `copy_dir_recursive(...)?`.
         let result = copy_dir_recursive(src_dir.path(), &dst_path);
-
-        // Restore permissions so the tempdir can clean itself up on drop.
-        std::fs::set_permissions(&sub, std::fs::Permissions::from_mode(0o755)).unwrap();
-
         assert!(result.is_err());
     }
 
@@ -509,58 +504,46 @@ description = "test"
         assert!(result.is_err());
     }
 
-    #[cfg(unix)]
     #[test]
-    fn install_from_dir_remove_dir_all_permission_denied_errors() {
-        use std::os::unix::fs::PermissionsExt;
-
+    fn install_from_dir_remove_dir_all_failure_errors() {
+        // The existing install target is a *file*, so `exists()` passes the
+        // reinstall guard but `remove_dir_all` (which requires a directory)
+        // fails on every platform, exercising that `?` arm. The prior version
+        // dropped write permission on the parent dir, which only fails on Unix.
         let src = tempfile::tempdir().unwrap();
         std::fs::write(
             src.path().join("agent.leviath"),
-            "[agent]\nname = \"locked-agent\"\n",
+            "[agent]\nname = \"file-agent\"\n",
         )
         .unwrap();
 
         let agents_dir = tempfile::tempdir().unwrap();
-        let existing = agents_dir.path().join("locked-agent");
-        std::fs::create_dir_all(&existing).unwrap();
-        std::fs::write(existing.join("stale.txt"), "old").unwrap();
-
-        // Removing write permission on agents_dir prevents unlinking the
-        // "locked-agent" entry inside it, forcing `remove_dir_all` to fail.
-        std::fs::set_permissions(agents_dir.path(), std::fs::Permissions::from_mode(0o555))
-            .unwrap();
+        std::fs::write(agents_dir.path().join("file-agent"), "not a dir").unwrap();
 
         let result = install_from_dir(src.path(), agents_dir.path());
-
-        // Restore permissions so the tempdir can clean itself up on drop.
-        std::fs::set_permissions(agents_dir.path(), std::fs::Permissions::from_mode(0o755))
-            .unwrap();
-
         assert!(result.is_err());
     }
 
-    #[cfg(unix)]
     #[test]
     fn install_from_dir_copy_failure_propagates() {
-        use std::os::unix::fs::PermissionsExt;
-
+        // `agents_dir` is itself a *file*, so `copy_dir_recursive`'s
+        // `create_dir_all` for the install target (a child path of a file)
+        // fails on every platform, and that `Err` propagates through
+        // `install_from_dir`'s `copy_dir_recursive(...)?`. The prior version
+        // made a source file unreadable via `chmod 0o000` (Unix-only).
         let src = tempfile::tempdir().unwrap();
         std::fs::write(
             src.path().join("agent.leviath"),
             "[agent]\nname = \"broken-copy-agent\"\n",
         )
         .unwrap();
-        let secret = src.path().join("secret.txt");
-        std::fs::write(&secret, "top secret").unwrap();
-        std::fs::set_permissions(&secret, std::fs::Permissions::from_mode(0o000)).unwrap();
+        std::fs::write(src.path().join("extra.txt"), "data").unwrap();
 
-        let agents_dir = tempfile::tempdir().unwrap();
-        let result = install_from_dir(src.path(), agents_dir.path());
+        let tmp = tempfile::tempdir().unwrap();
+        let agents_file = tmp.path().join("agents-is-a-file");
+        std::fs::write(&agents_file, "not a dir").unwrap();
 
-        // Restore permissions so the tempdir can clean itself up on drop.
-        std::fs::set_permissions(&secret, std::fs::Permissions::from_mode(0o644)).unwrap();
-
+        let result = install_from_dir(src.path(), &agents_file);
         assert!(result.is_err());
     }
 
