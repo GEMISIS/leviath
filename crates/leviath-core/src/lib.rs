@@ -12,7 +12,9 @@
 
 pub mod blueprint;
 pub mod cache;
+pub mod config;
 pub mod error;
+pub mod interaction;
 pub mod layout;
 pub mod lifecycle;
 pub mod manifest;
