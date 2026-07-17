@@ -9,6 +9,17 @@ use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
+/// The directory-read operation used while walking a project tree, injectable
+/// so tests can force the walk's `read_dir` error and recursion-propagation
+/// arms deterministically on every platform (a `chmod 0o000` subdirectory is
+/// Unix-only; the OS-agnostic failures — a missing top-level path, a
+/// mismatched `base`, an empty tar entry name — can't produce a *recursive*
+/// read failure, because during recursion `base` is always an ancestor of the
+/// entry). It is a trait object rather than `impl Fn` so production and every
+/// test share exactly ONE monomorphization of the walk functions. Production
+/// always passes `std::fs::read_dir`.
+type DirReader<'a> = &'a dyn Fn(&Path) -> std::io::Result<fs::ReadDir>;
+
 /// Bundles agents for distribution as `.leviath-bundle` archives.
 pub struct AgentBundler {
     /// File patterns to exclude from the bundle
@@ -50,6 +61,11 @@ impl AgentBundler {
     /// `&&PathBuf` coerce to `&Path` automatically via deref coercion at the
     /// call site, so no caller needs to change beyond that.
     pub fn bundle(&self, project_path: &Path) -> anyhow::Result<Vec<u8>> {
+        self.bundle_with(project_path, &|p| fs::read_dir(p))
+    }
+
+    /// [`Self::bundle`] with an injectable directory reader; see [`DirReader`].
+    fn bundle_with(&self, project_path: &Path, read_dir: DirReader) -> anyhow::Result<Vec<u8>> {
         tracing::info!(path = %project_path.display(), "Bundling agent");
 
         if !project_path.is_dir() {
@@ -66,7 +82,7 @@ impl AgentBundler {
         }
 
         let mut buf = Vec::new();
-        self.write_bundle(project_path, &mut buf)?;
+        self.write_bundle(project_path, &mut buf, read_dir)?;
 
         tracing::info!(size_bytes = buf.len(), "Bundle created");
 
@@ -81,13 +97,18 @@ impl AgentBundler {
     /// the tar/gzip finalization error paths below -- shares exactly ONE
     /// monomorphization of this function (and, transitively, of
     /// `add_directory_to_tar`) instead of one per concrete sink type.
-    fn write_bundle(&self, project_path: &Path, sink: &mut dyn Write) -> anyhow::Result<()> {
+    fn write_bundle(
+        &self,
+        project_path: &Path,
+        sink: &mut dyn Write,
+        read_dir: DirReader,
+    ) -> anyhow::Result<()> {
         let mut encoder = GzEncoder::new(sink, Compression::default());
         {
             let mut tar = tar::Builder::new(&mut encoder as &mut dyn Write);
 
             // Walk the project directory and add files
-            self.add_directory_to_tar(&mut tar, project_path, project_path)?;
+            self.add_directory_to_tar(&mut tar, project_path, project_path, read_dir)?;
 
             tar.into_inner()
                 .map_err(|e| anyhow::anyhow!("Failed to finalize tar archive: {}", e))?;
@@ -148,8 +169,9 @@ impl AgentBundler {
         tar: &mut tar::Builder<&mut dyn Write>,
         dir: &Path,
         base: &Path,
+        read_dir: DirReader,
     ) -> anyhow::Result<()> {
-        for entry in fs::read_dir(dir)
+        for entry in read_dir(dir)
             .map_err(|e| anyhow::anyhow!("Failed to read directory '{}': {}", dir.display(), e))?
         {
             // `ReadDir::next()`'s `Err` arm surfaces OS-level directory-read
@@ -173,7 +195,7 @@ impl AgentBundler {
                 .map_err(|e| anyhow::anyhow!("Failed to compute relative path: {}", e))?;
 
             if path.is_dir() {
-                self.add_directory_to_tar(tar, &path, base)?;
+                self.add_directory_to_tar(tar, &path, base, read_dir)?;
                 continue;
             }
             if !path.is_file() {
@@ -419,29 +441,25 @@ mod tests {
             .contains("Failed to write bundle"));
     }
 
-    #[cfg(unix)]
+    // The tar-append error arm ("Failed to add ...") is exercised OS-agnostically
+    // by calling the walk directly with a `base` equal to the file being
+    // appended: `strip_prefix(base)` then yields an *empty* relative path, which
+    // `tar::Builder::append_path_with_name` rejects on every platform ("paths in
+    // archives must have at least one component"). The prior version made the
+    // file unreadable via `chmod 0o000`, which only fails on Unix.
     #[test]
-    fn test_bundle_unreadable_file_returns_error() {
-        use std::os::unix::fs::PermissionsExt;
-
+    fn test_add_directory_to_tar_append_failure_returns_error() {
         let dir = tempfile::tempdir().unwrap();
         let project = dir.path();
-        fs::write(
-            project.join("agent.leviath"),
-            "[agent]\nname = \"test\"\nversion = \"1.0.0\"\ndescription = \"test\"\n",
-        )
-        .unwrap();
-
-        let secret = project.join("secret.dat");
-        fs::write(&secret, b"cant read me").unwrap();
-        // Remove all permissions so opening the file for the tar archive fails.
-        fs::set_permissions(&secret, fs::Permissions::from_mode(0o000)).unwrap();
+        let file = project.join("file.txt");
+        fs::write(&file, b"content").unwrap();
 
         let bundler = AgentBundler::new();
-        let result = bundler.bundle(project);
-
-        // Restore permissions so tempdir cleanup can remove the file.
-        fs::set_permissions(&secret, fs::Permissions::from_mode(0o644)).unwrap();
+        let mut sink = Vec::new();
+        let mut tar = tar::Builder::new(&mut sink as &mut dyn Write);
+        // base == the file: for that entry `strip_prefix` returns "" (empty), so
+        // the file is appended under an empty name and tar rejects it.
+        let result = bundler.add_directory_to_tar(&mut tar, project, &file, &|p| fs::read_dir(p));
 
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("Failed to add"));
@@ -569,11 +587,17 @@ mod tests {
 
     // ─── add_directory_to_tar: recursive read_dir failure propagates ────
 
-    #[cfg(unix)]
+    // A `read_dir` that fails when the walk recurses into a subdirectory
+    // exercises, in one go, the recursive read-dir map_err (`Failed to read
+    // directory`), the recursion `?` that propagates it back up, and both
+    // enclosing `?`s in `write_bundle` and `bundle_with`. Injecting the reader
+    // makes this deterministic on every platform; the prior version relied on
+    // a `chmod 0o000` subdirectory, which only fails on Unix. (During real
+    // recursion `base` is always an ancestor of the entry, so no OS-agnostic
+    // path/tar failure can surface *inside* a recursion -- injection is the
+    // only cross-platform way to reach these propagation arms.)
     #[test]
-    fn test_bundle_unreadable_subdirectory_returns_error() {
-        use std::os::unix::fs::PermissionsExt;
-
+    fn test_bundle_recursive_read_dir_failure_propagates() {
         let dir = tempfile::tempdir().unwrap();
         let project = dir.path();
         fs::write(
@@ -581,20 +605,20 @@ mod tests {
             "[agent]\nname = \"test\"\nversion = \"1.0.0\"\ndescription = \"test\"\n",
         )
         .unwrap();
-
         let locked = project.join("locked");
         fs::create_dir_all(&locked).unwrap();
         fs::write(locked.join("secret.txt"), "shh").unwrap();
-        // Remove all permissions so `fs::read_dir` fails when the walk
-        // recurses into this subdirectory, propagating an `Err` back up
-        // through the parent call's `?`.
-        fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
 
         let bundler = AgentBundler::new();
-        let result = bundler.bundle(project);
-
-        // Restore permissions so tempdir cleanup can remove the directory.
-        fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).unwrap();
+        // Succeeds for the top-level walk, fails only when recursing into
+        // `locked`, so the failure surfaces from *inside* the recursion.
+        let result = bundler.bundle_with(project, &|p| {
+            if p.file_name() == Some(std::ffi::OsStr::new("locked")) {
+                Err(std::io::Error::other("simulated read_dir failure"))
+            } else {
+                fs::read_dir(p)
+            }
+        });
 
         assert!(result.is_err());
         assert!(result
@@ -623,7 +647,8 @@ mod tests {
         let bundler = AgentBundler::new();
         let mut sink = Vec::new();
         let mut tar = tar::Builder::new(&mut sink as &mut dyn Write);
-        let result = bundler.add_directory_to_tar(&mut tar, project, unrelated.path());
+        let result =
+            bundler.add_directory_to_tar(&mut tar, project, unrelated.path(), &|p| fs::read_dir(p));
 
         assert!(result.is_err());
         assert!(result
@@ -661,7 +686,7 @@ mod tests {
 
         let bundler = AgentBundler::new();
         let mut sink = AlwaysFailingWriter;
-        let result = bundler.write_bundle(dir.path(), &mut sink);
+        let result = bundler.write_bundle(dir.path(), &mut sink, &|p| fs::read_dir(p));
 
         assert!(result.is_err());
         assert!(result
@@ -698,7 +723,7 @@ mod tests {
 
         let bundler = AgentBundler::new();
         let mut sink = FailsAfterFirstWriteWriter::default();
-        let result = bundler.write_bundle(dir.path(), &mut sink);
+        let result = bundler.write_bundle(dir.path(), &mut sink, &|p| fs::read_dir(p));
 
         assert!(result.is_err());
         assert!(result
