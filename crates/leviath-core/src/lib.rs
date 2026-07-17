@@ -15,8 +15,10 @@ pub mod cache;
 pub mod error;
 pub mod layout;
 pub mod lifecycle;
+pub mod manifest;
 pub mod policy;
 pub mod region;
+pub mod run_meta;
 pub mod taint;
 
 pub use blueprint::{

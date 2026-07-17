@@ -4,8 +4,8 @@ use clap::Args;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use super::run::parse_manifest_public;
 use crate::config::Config;
+use leviath_core::manifest::parse_manifest;
 
 #[derive(Args)]
 pub struct ListArgs {
@@ -23,7 +23,7 @@ struct AgentInfo {
 
 fn read_agent_info(manifest_path: &Path) -> Option<AgentInfo> {
     let content = fs::read_to_string(manifest_path).ok()?;
-    let blueprint = parse_manifest_public(&content).ok()?;
+    let blueprint = parse_manifest(&content).ok()?;
     Some(AgentInfo {
         name: blueprint.name,
         version: blueprint.version,

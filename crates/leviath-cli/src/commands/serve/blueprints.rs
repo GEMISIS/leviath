@@ -8,7 +8,7 @@ use axum::http::StatusCode;
 use axum::response::Json;
 
 use super::types::*;
-use crate::commands::run::parse_manifest_public;
+use leviath_core::manifest::parse_manifest;
 
 /// Resolve the installed agents directory.
 pub(super) fn agents_dir() -> PathBuf {
@@ -52,7 +52,7 @@ pub(super) fn discover_blueprints(config: &crate::config::Config) -> Vec<Bluepri
 
 pub(super) fn read_blueprint_info(manifest_path: &Path, dir: &Path) -> Option<BlueprintInfo> {
     let content = std::fs::read_to_string(manifest_path).ok()?;
-    let bp = parse_manifest_public(&content).ok()?;
+    let bp = parse_manifest(&content).ok()?;
     Some(BlueprintInfo {
         name: bp.name,
         version: bp.version,
@@ -85,7 +85,7 @@ pub(super) async fn create_blueprint(
     // can be built from it directly below instead of re-reading the file we
     // just wrote (which used to make the re-read's error arm a TOCTOU-only,
     // untestable dead branch).
-    let bp = parse_manifest_public(&body.manifest).map_err(|e| {
+    let bp = parse_manifest(&body.manifest).map_err(|e| {
         (
             StatusCode::BAD_REQUEST,
             Json(ErrorResponse {
@@ -127,7 +127,7 @@ pub(super) async fn update_blueprint(
     AxumPath(name): AxumPath<String>,
     Json(body): Json<UpdateBlueprintReq>,
 ) -> Result<Json<BlueprintInfo>, (StatusCode, Json<ErrorResponse>)> {
-    let bp = parse_manifest_public(&body.manifest).map_err(|e| {
+    let bp = parse_manifest(&body.manifest).map_err(|e| {
         (
             StatusCode::BAD_REQUEST,
             Json(ErrorResponse {
@@ -193,7 +193,7 @@ pub(super) async fn delete_blueprint(
 pub(super) async fn validate_blueprint(
     Json(body): Json<ValidateBlueprintReq>,
 ) -> Json<ValidateResponse> {
-    match parse_manifest_public(&body.manifest) {
+    match parse_manifest(&body.manifest) {
         Ok(bp) => match bp.validate() {
             Ok(()) => Json(ValidateResponse {
                 valid: true,
@@ -792,7 +792,7 @@ prompt = "Run"
     #[tokio::test]
     async fn validate_blueprint_parses_but_fails_structural_validation_returns_ok_valid_false() {
         // Distinct from the manifest above: this one parses fine as TOML/a
-        // Blueprint (Ok(bp) from parse_manifest_public), but bp.validate()
+        // Blueprint (Ok(bp) from parse_manifest), but bp.validate()
         // itself rejects it -- an entry_stage that doesn't match any defined
         // stage. Exercises the `Ok(bp) => match bp.validate() { Err(e) => .. }`
         // arm, which `validate_blueprint_invalid_manifest_returns_ok_valid_false`

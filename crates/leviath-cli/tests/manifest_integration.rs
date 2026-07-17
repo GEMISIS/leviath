@@ -46,7 +46,7 @@ fn all_builtin_agents_parse_successfully() {
         let content = std::fs::read_to_string(path)
             .unwrap_or_else(|e| panic!("Failed to read {}: {}", path.display(), e));
 
-        let blueprint = leviath_cli::commands::run::parse_manifest_public(&content)
+        let blueprint = leviath_core::manifest::parse_manifest(&content)
             .unwrap_or_else(|e| panic!("Failed to parse agent '{}': {}", name, e));
 
         // Basic sanity checks
@@ -69,7 +69,7 @@ fn all_builtin_agents_validate() {
 
     for (name, path) in &manifests {
         let content = std::fs::read_to_string(path).unwrap();
-        let blueprint = leviath_cli::commands::run::parse_manifest_public(&content).unwrap();
+        let blueprint = leviath_core::manifest::parse_manifest(&content).unwrap();
 
         blueprint
             .validate()
@@ -83,7 +83,7 @@ fn all_builtin_agents_have_valid_entry_stage() {
 
     for (name, path) in &manifests {
         let content = std::fs::read_to_string(path).unwrap();
-        let blueprint = leviath_cli::commands::run::parse_manifest_public(&content).unwrap();
+        let blueprint = leviath_core::manifest::parse_manifest(&content).unwrap();
 
         let entry = blueprint.resolve_entry_stage_name();
         assert!(
@@ -101,7 +101,7 @@ fn all_builtin_agents_transition_targets_exist() {
 
     for (name, path) in &manifests {
         let content = std::fs::read_to_string(path).unwrap();
-        let blueprint = leviath_cli::commands::run::parse_manifest_public(&content).unwrap();
+        let blueprint = leviath_core::manifest::parse_manifest(&content).unwrap();
 
         for stage in &blueprint.stages {
             if let Some(ref transitions) = stage.transitions {
@@ -123,7 +123,7 @@ fn all_builtin_agents_transition_targets_exist() {
 fn specific_agent_coder_has_expected_structure() {
     let path = workspace_root().join("agents/coder/agent.leviath");
     let content = std::fs::read_to_string(&path).unwrap();
-    let bp = leviath_cli::commands::run::parse_manifest_public(&content).unwrap();
+    let bp = leviath_core::manifest::parse_manifest(&content).unwrap();
 
     assert_eq!(bp.name, "coder");
     assert!(bp.stages.len() >= 2); // at least analyze + implement
@@ -139,7 +139,7 @@ fn specific_agent_coder_has_expected_structure() {
 fn specific_agent_researcher_has_graph_transitions() {
     let path = workspace_root().join("agents/researcher/agent.leviath");
     let content = std::fs::read_to_string(&path).unwrap();
-    let bp = leviath_cli::commands::run::parse_manifest_public(&content).unwrap();
+    let bp = leviath_core::manifest::parse_manifest(&content).unwrap();
 
     assert_eq!(bp.name, "researcher");
     // Researcher should have multiple stages with transitions

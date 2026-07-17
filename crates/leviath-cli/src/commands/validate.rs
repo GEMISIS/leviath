@@ -44,7 +44,7 @@ fn check_manifest(path: &std::path::Path) -> Result<leviath_core::Blueprint, Man
         ))
     })?;
 
-    let blueprint = super::run::parse_manifest_public(&content)
+    let blueprint = leviath_core::manifest::parse_manifest(&content)
         .map_err(|e| ManifestCheckError::Parse(e.to_string()))?;
 
     blueprint
@@ -223,7 +223,7 @@ conversation = {{ kind = "sliding_window", max_items = 50, max_tokens = 10000 }}
     }
 
     fn parse(toml: &str) -> leviath_core::Blueprint {
-        super::super::run::parse_manifest_public(toml).unwrap()
+        leviath_core::manifest::parse_manifest(toml).unwrap()
     }
 
     #[test]

@@ -11,165 +11,19 @@
 //! The dashboard's activity log is persisted separately at:
 //! - `~/.leviath/dashboard.log` — never cleared, appended across sessions
 
-use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use serde::Serialize;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-/// Current status of a background run.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "snake_case")]
-pub enum RunStatus {
-    Starting,
-    Running,
-    WaitingInput,
-    Complete,
-    /// All required stages done; agent still accepts optional follow-up input.
-    /// Shown as "Complete" in the dashboard — no kill option, input still enabled.
-    CompleteInteractive,
-    Error,
-    Cancelled,
-}
-
-impl std::fmt::Display for RunStatus {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            RunStatus::Starting => write!(f, "Starting"),
-            RunStatus::Running => write!(f, "Running"),
-            RunStatus::WaitingInput => write!(f, "WaitingInput"),
-            RunStatus::Complete => write!(f, "Complete"),
-            RunStatus::CompleteInteractive => write!(f, "CompleteInteractive"),
-            RunStatus::Error => write!(f, "Error"),
-            RunStatus::Cancelled => write!(f, "Cancelled"),
-        }
-    }
-}
-
-/// Metadata for a single background agent run.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RunMeta {
-    pub run_id: String,
-    pub agent_name: String,
-    /// Absolute path to the agent manifest directory
-    pub agent_path: String,
-    pub task: String,
-    pub model: Option<String>,
-    /// PID of the worker process
-    pub pid: u32,
-    pub status: RunStatus,
-    pub current_stage: String,
-    pub stage_index: usize,
-    pub num_stages: usize,
-    pub iteration: usize,
-    pub prompt_tokens: usize,
-    pub completion_tokens: usize,
-    /// Cumulative tokens read from provider cache.
-    #[serde(default)]
-    pub cached_tokens: usize,
-    /// Cumulative tokens written to provider cache.
-    #[serde(default)]
-    pub cache_write_tokens: usize,
-    /// Total number of tool calls made across all iterations.
-    #[serde(default)]
-    pub tool_calls: usize,
-    /// Absolute path to the working directory for tool execution
-    pub workdir: String,
-    /// Unix timestamp (seconds)
-    pub started_at: i64,
-    /// Unix timestamp (seconds)
-    pub updated_at: i64,
-    pub error: Option<String>,
-    /// Short human-readable title generated from the task prompt (None until generated).
-    #[serde(default)]
-    pub title: Option<String>,
-    /// Custom key-value pairs from the spawn request (API metadata).
-    #[serde(default)]
-    pub metadata: HashMap<String, String>,
-    /// Webhook URL to POST on agent completion/error.
-    #[serde(default)]
-    pub callback_url: Option<String>,
-    /// Links sub-agent runs to their parent run.
-    #[serde(default)]
-    pub parent_run_id: Option<String>,
-}
-
-impl RunMeta {
-    pub fn new(
-        run_id: String,
-        agent_name: String,
-        agent_path: String,
-        task: String,
-        model: Option<String>,
-        workdir: String,
-        num_stages: usize,
-    ) -> Self {
-        let now = now_secs();
-        Self {
-            run_id,
-            agent_name,
-            agent_path,
-            task,
-            model,
-            pid: 0,
-            status: RunStatus::Starting,
-            current_stage: String::new(),
-            stage_index: 0,
-            num_stages,
-            iteration: 0,
-            prompt_tokens: 0,
-            completion_tokens: 0,
-            cached_tokens: 0,
-            cache_write_tokens: 0,
-            tool_calls: 0,
-            workdir,
-            started_at: now,
-            updated_at: now,
-            error: None,
-            title: None,
-            metadata: HashMap::new(),
-            callback_url: None,
-            parent_run_id: None,
-        }
-    }
-
-    pub fn touch(&mut self) {
-        self.updated_at = now_secs();
-    }
-}
-
-/// One content entry within a region, captured at snapshot time.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RegionEntrySnapshot {
-    pub content: String,
-    pub tokens: usize,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub metadata: Option<serde_json::Value>,
-    /// Key for HashMap region entries (file paths, section names, etc.)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub key: Option<String>,
-}
-
-/// Per-region token snapshot written by the background worker after each inference.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RegionSnapshot {
-    pub name: String,
-    /// Stringified kind: "pinned", "temporary", "clearable", "sliding", "compacting", "history"
-    pub kind: String,
-    pub current_tokens: usize,
-    pub max_tokens: usize,
-    /// Actual content entries stored in this region (empty for zero-token regions).
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub entries: Vec<RegionEntrySnapshot>,
-}
-
-/// Snapshot of the full context window, written to `context.json` alongside `meta.json`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ContextSnapshot {
-    pub stage_name: String,
-    pub total_tokens: usize,
-    pub max_tokens: usize,
-    pub regions: Vec<RegionSnapshot>,
-}
+// The plain run-state data types (RunMeta, RunStatus, the snapshot structs, and
+// the per-stage records) now live in `leviath_core::run_meta`. They are
+// re-exported here unchanged so existing `crate::runstate::RunMeta` /
+// `runstate::RunMeta` call sites across the cli keep compiling. All on-disk IO
+// for these types remains in this module.
+pub use leviath_core::run_meta::{
+    ContextSnapshot, RegionEntrySnapshot, RegionSnapshot, RunMeta, RunStatus, StageRecord,
+    StageRunStatus,
+};
 
 /// Atomically write a context snapshot for the run.
 pub fn write_context_snapshot(run_id: &str, snap: &ContextSnapshot) -> anyhow::Result<()> {
@@ -437,61 +291,6 @@ pub fn tail_log(run_id: &str, max_bytes: u64) -> String {
 }
 
 // ─── Per-stage persistence ────────────────────────────────────────────────────
-
-/// Status of an individual stage within a run.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "snake_case")]
-pub enum StageRunStatus {
-    Pending,
-    Active,
-    WaitingInput,
-    Complete,
-    Error,
-}
-
-impl std::fmt::Display for StageRunStatus {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            StageRunStatus::Pending => write!(f, "Pending"),
-            StageRunStatus::Active => write!(f, "Active"),
-            StageRunStatus::WaitingInput => write!(f, "WaitingInput"),
-            StageRunStatus::Complete => write!(f, "Complete"),
-            StageRunStatus::Error => write!(f, "Error"),
-        }
-    }
-}
-
-/// Metadata record for a single stage within a run.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct StageRecord {
-    pub name: String,
-    pub index: usize,
-    pub status: StageRunStatus,
-    pub prompt_tokens: usize,
-    pub completion_tokens: usize,
-    /// Tokens read from provider cache in this stage.
-    #[serde(default)]
-    pub cached_tokens: usize,
-    /// Unix timestamp (seconds); None until the stage starts.
-    pub started_at: Option<i64>,
-    /// Unix timestamp (seconds); None until the stage ends.
-    pub ended_at: Option<i64>,
-}
-
-impl StageRecord {
-    pub fn new(name: String, index: usize) -> Self {
-        Self {
-            name,
-            index,
-            status: StageRunStatus::Pending,
-            prompt_tokens: 0,
-            completion_tokens: 0,
-            cached_tokens: 0,
-            started_at: None,
-            ended_at: None,
-        }
-    }
-}
 
 /// Directory for per-stage files within a run.
 pub fn stage_dir(run_id: &str, stage_idx: usize) -> PathBuf {
