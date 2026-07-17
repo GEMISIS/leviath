@@ -721,33 +721,58 @@ model = { models = [{ provider = "mock", model = "m" }] }
     use leviath_core::Region;
     use leviath_runtime::{AgentEngine, ProviderRegistry, SubAgentChildren};
 
-    /// Provider whose first `infer` (the split) returns a scripted payload; all
-    /// later calls (workers) return no-tool-call "done" so workers finish.
-    struct ScriptProvider {
-        first: std::sync::Mutex<Option<String>>,
+    type Scripted = (String, Vec<leviath_providers::ToolCall>);
+
+    /// One scriptable provider for all fan-out tests: each `infer` pops the next
+    /// scripted `(content, tool_calls)`; once the script is exhausted it returns
+    /// a no-tool "done" (so workers finish) — or errors, if `error_when_empty`.
+    /// The first `infer` in a fan-out run is the split; the rest are workers.
+    struct ScriptedProvider {
+        script: std::sync::Mutex<std::collections::VecDeque<Scripted>>,
+        error_when_empty: bool,
     }
-    impl ScriptProvider {
-        fn new(split: &str) -> Self {
+    impl ScriptedProvider {
+        /// Split returns `json`, then workers get "done".
+        fn split(json: &str) -> Self {
             Self {
-                first: std::sync::Mutex::new(Some(split.to_string())),
+                script: std::sync::Mutex::new(vec![(json.to_string(), vec![])].into()),
+                error_when_empty: false,
+            }
+        }
+        /// Split returns `json`, then every worker inference errors.
+        fn split_then_error(json: &str) -> Self {
+            Self {
+                script: std::sync::Mutex::new(vec![(json.to_string(), vec![])].into()),
+                error_when_empty: true,
+            }
+        }
+        /// Fully scripted responses (split first, then per-worker turns).
+        fn scripted(items: Vec<Scripted>) -> Self {
+            Self {
+                script: std::sync::Mutex::new(items.into()),
+                error_when_empty: false,
             }
         }
     }
     #[async_trait::async_trait]
-    impl leviath_providers::Provider for ScriptProvider {
+    impl leviath_providers::Provider for ScriptedProvider {
         async fn infer(
             &self,
             _req: leviath_providers::InferenceRequest,
         ) -> leviath_providers::Result<leviath_providers::InferenceResponse> {
-            let content = self
-                .first
-                .lock()
-                .unwrap()
-                .take()
-                .unwrap_or_else(|| "done".to_string());
+            let next = self.script.lock().unwrap().pop_front();
+            let (content, tool_calls) = match next {
+                Some(r) => r,
+                None if self.error_when_empty => {
+                    return Err(leviath_providers::ProviderError::Other(
+                        "worker boom".into(),
+                    ))
+                }
+                None => ("done".to_string(), vec![]),
+            };
             Ok(leviath_providers::InferenceResponse {
                 content,
-                tool_calls: vec![],
+                tool_calls,
                 tokens_used: leviath_providers::TokenUsage {
                     prompt_tokens: 1,
                     completion_tokens: 1,
@@ -769,6 +794,15 @@ model = { models = [{ provider = "mock", model = "m" }] }
         }
         fn capabilities(&self, _m: &str) -> leviath_providers::ModelCapabilities {
             leviath_providers::ModelCapabilities::default()
+        }
+    }
+
+    /// Build a `context_write` / `ask_user_text` etc. tool call for scripting.
+    fn tool_call(name: &str, args: serde_json::Value) -> leviath_providers::ToolCall {
+        leviath_providers::ToolCall {
+            id: "c1".to_string(),
+            name: name.to_string(),
+            arguments: args,
         }
     }
 
@@ -817,7 +851,7 @@ model = { models = [{ provider = "mock", model = "m" }] }
     /// conversation region, returned as a shared handle.
     async fn setup(split: &str) -> (EngineHandle, Entity, Arc<ToolRegistry>) {
         let mut registry = ProviderRegistry::new();
-        registry.register("mock".into(), Arc::new(ScriptProvider::new(split)));
+        registry.register("mock".into(), Arc::new(ScriptedProvider::split(split)));
         let mut engine = AgentEngine::with_providers(registry);
         let mut pool = AgentPool::new(fanout_blueprint(base_config()));
         let pid = pool.spawn_agent(engine.world_mut());
@@ -852,7 +886,7 @@ model = { models = [{ provider = "mock", model = "m" }] }
 
         // Registered provider → used.
         let mut reg = ProviderRegistry::new();
-        reg.register("mock".into(), Arc::new(ScriptProvider::new("[]")));
+        reg.register("mock".into(), Arc::new(ScriptedProvider::split("[]")));
         let engine2: EngineHandle =
             Arc::new(tokio::sync::RwLock::new(AgentEngine::with_providers(reg)));
         let model2 = ModelConfig::new("mock".into(), "the-model".into());
@@ -948,58 +982,15 @@ model = { models = [{ provider = "mock", model = "m" }] }
         assert_eq!(outcome, FanOutOutcome::FailAll);
     }
 
-    /// Provider whose first call (split) returns work items and every later
-    /// call (a worker) errors — used to exercise the fail_all path.
-    struct SplitThenErrorProvider {
-        first: std::sync::Mutex<Option<String>>,
-    }
-    #[async_trait::async_trait]
-    impl leviath_providers::Provider for SplitThenErrorProvider {
-        async fn infer(
-            &self,
-            _req: leviath_providers::InferenceRequest,
-        ) -> leviath_providers::Result<leviath_providers::InferenceResponse> {
-            match self.first.lock().unwrap().take() {
-                Some(split) => Ok(leviath_providers::InferenceResponse {
-                    content: split,
-                    tool_calls: vec![],
-                    tokens_used: leviath_providers::TokenUsage {
-                        prompt_tokens: 1,
-                        completion_tokens: 1,
-                        total_tokens: 2,
-                        cached_tokens: 0,
-                        cache_write_tokens: 0,
-                    },
-                    finish_reason: leviath_providers::FinishReason::Complete,
-                }),
-                None => Err(leviath_providers::ProviderError::Other(
-                    "worker boom".into(),
-                )),
-            }
-        }
-        fn count_tokens(&self, _t: &str, _m: &str) -> usize {
-            4
-        }
-        fn max_context_tokens(&self, _m: &str) -> usize {
-            100_000
-        }
-        fn name(&self) -> &str {
-            "mock"
-        }
-        fn capabilities(&self, _m: &str) -> leviath_providers::ModelCapabilities {
-            leviath_providers::ModelCapabilities::default()
-        }
-    }
-
     #[tokio::test]
     async fn run_fan_out_fail_all_routes_error() {
         // Build an engine whose workers error, with on_worker_failure = fail_all.
         let mut registry = ProviderRegistry::new();
         registry.register(
             "mock".into(),
-            Arc::new(SplitThenErrorProvider {
-                first: std::sync::Mutex::new(Some(r#"[{"id":"a","context":{}}]"#.into())),
-            }),
+            Arc::new(ScriptedProvider::split_then_error(
+                r#"[{"id":"a","context":{}}]"#,
+            )),
         );
         let mut engine = AgentEngine::with_providers(registry);
         let mut pool = AgentPool::new(fanout_blueprint(base_config()));
@@ -1045,68 +1036,21 @@ model = { models = [{ provider = "mock", model = "m" }] }
         ));
     }
 
-    /// Provider: call 0 = split (1 item); call 1 = worker issues a context_write;
-    /// later calls = done. Exercises worker context_* tool support.
-    struct ContextWorkerProvider {
-        n: std::sync::Mutex<usize>,
-    }
-    #[async_trait::async_trait]
-    impl leviath_providers::Provider for ContextWorkerProvider {
-        async fn infer(
-            &self,
-            _req: leviath_providers::InferenceRequest,
-        ) -> leviath_providers::Result<leviath_providers::InferenceResponse> {
-            let mut n = self.n.lock().unwrap();
-            let call = *n;
-            *n += 1;
-            let tokens = leviath_providers::TokenUsage {
-                prompt_tokens: 1,
-                completion_tokens: 1,
-                total_tokens: 2,
-                cached_tokens: 0,
-                cache_write_tokens: 0,
-            };
-            let (content, tool_calls) = match call {
-                0 => (r#"[{"id":"a","context":{}}]"#.to_string(), vec![]),
-                1 => (
-                    "writing".to_string(),
-                    vec![leviath_providers::ToolCall {
-                        id: "c1".to_string(),
-                        name: "context_write".to_string(),
-                        arguments: serde_json::json!({"region":"sys","content":"WORKER WROTE THIS"}),
-                    }],
-                ),
-                _ => ("done".to_string(), vec![]),
-            };
-            Ok(leviath_providers::InferenceResponse {
-                content,
-                tool_calls,
-                tokens_used: tokens,
-                finish_reason: leviath_providers::FinishReason::Complete,
-            })
-        }
-        fn count_tokens(&self, _t: &str, _m: &str) -> usize {
-            4
-        }
-        fn max_context_tokens(&self, _m: &str) -> usize {
-            100_000
-        }
-        fn name(&self) -> &str {
-            "mock"
-        }
-        fn capabilities(&self, _m: &str) -> leviath_providers::ModelCapabilities {
-            leviath_providers::ModelCapabilities::default()
-        }
-    }
-
     #[tokio::test]
     async fn run_fan_out_worker_can_use_context_tools() {
         let mut registry = ProviderRegistry::new();
         registry.register(
             "mock".into(),
-            Arc::new(ContextWorkerProvider {
-                n: std::sync::Mutex::new(0),
-            }),
+            Arc::new(ScriptedProvider::scripted(vec![
+                (r#"[{"id":"a","context":{}}]"#.to_string(), vec![]),
+                (
+                    "writing".to_string(),
+                    vec![tool_call(
+                        "context_write",
+                        serde_json::json!({"region":"sys","content":"WORKER WROTE THIS"}),
+                    )],
+                ),
+            ])),
         );
         let mut engine = AgentEngine::with_providers(registry);
         let mut pool = AgentPool::new(fanout_blueprint(base_config()));
@@ -1172,9 +1116,16 @@ model = { models = [{ provider = "mock", model = "m" }] }
         let mut registry = ProviderRegistry::new();
         registry.register(
             "mock".into(),
-            Arc::new(InteractionWorkerProvider {
-                n: std::sync::Mutex::new(0),
-            }),
+            Arc::new(ScriptedProvider::scripted(vec![
+                (r#"[{"id":"a","context":{}}]"#.to_string(), vec![]),
+                (
+                    "asking".to_string(),
+                    vec![tool_call(
+                        "ask_user_text",
+                        serde_json::json!({"prompt":"which approach?"}),
+                    )],
+                ),
+            ])),
         );
         let mut engine = AgentEngine::with_providers(registry);
         let mut pool = AgentPool::new(fanout_blueprint(base_config()));
@@ -1222,59 +1173,6 @@ model = { models = [{ provider = "mock", model = "m" }] }
             eng.world().get::<AgentState>(child).unwrap().status,
             AgentStatus::Complete
         );
-    }
-
-    /// Provider: call 0 = split (1 item); call 1 = worker calls ask_user_text;
-    /// later = done.
-    struct InteractionWorkerProvider {
-        n: std::sync::Mutex<usize>,
-    }
-    #[async_trait::async_trait]
-    impl leviath_providers::Provider for InteractionWorkerProvider {
-        async fn infer(
-            &self,
-            _req: leviath_providers::InferenceRequest,
-        ) -> leviath_providers::Result<leviath_providers::InferenceResponse> {
-            let mut n = self.n.lock().unwrap();
-            let call = *n;
-            *n += 1;
-            let (content, tool_calls) = match call {
-                0 => (r#"[{"id":"a","context":{}}]"#.to_string(), vec![]),
-                1 => (
-                    "asking".to_string(),
-                    vec![leviath_providers::ToolCall {
-                        id: "c1".to_string(),
-                        name: "ask_user_text".to_string(),
-                        arguments: serde_json::json!({"prompt":"which approach?"}),
-                    }],
-                ),
-                _ => ("done".to_string(), vec![]),
-            };
-            Ok(leviath_providers::InferenceResponse {
-                content,
-                tool_calls,
-                tokens_used: leviath_providers::TokenUsage {
-                    prompt_tokens: 1,
-                    completion_tokens: 1,
-                    total_tokens: 2,
-                    cached_tokens: 0,
-                    cache_write_tokens: 0,
-                },
-                finish_reason: leviath_providers::FinishReason::Complete,
-            })
-        }
-        fn count_tokens(&self, _t: &str, _m: &str) -> usize {
-            4
-        }
-        fn max_context_tokens(&self, _m: &str) -> usize {
-            100_000
-        }
-        fn name(&self) -> &str {
-            "mock"
-        }
-        fn capabilities(&self, _m: &str) -> leviath_providers::ModelCapabilities {
-            leviath_providers::ModelCapabilities::default()
-        }
     }
 
     #[test]
