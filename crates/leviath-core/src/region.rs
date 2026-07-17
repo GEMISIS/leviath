@@ -620,30 +620,21 @@ impl Region {
             let max = *max_items;
             match eviction_strategy.clone() {
                 EvictionStrategy::PerItem => {
-                    while self.content.len() > max {
-                        if self.remove_oldest().is_none() {
-                            break;
-                        }
-                    }
+                    // `remove_oldest` only returns None when empty, which the
+                    // `len > max >= 0` guard already precludes; folding it into
+                    // the condition keeps the guard without a dead break arm.
+                    while self.content.len() > max && self.remove_oldest().is_some() {}
                 }
                 EvictionStrategy::Bulk { overflow } => {
                     if self.content.len() > max + overflow {
-                        while self.content.len() > max {
-                            if self.remove_oldest().is_none() {
-                                break;
-                            }
-                        }
+                        while self.content.len() > max && self.remove_oldest().is_some() {}
                     }
                 }
                 EvictionStrategy::Compact { compact_count } => {
                     if self.content.len() > max + compact_count * 2 {
                         // Fallback: runtime hasn't compacted, bulk-evict to prevent
                         // unbounded growth.
-                        while self.content.len() > max {
-                            if self.remove_oldest().is_none() {
-                                break;
-                            }
-                        }
+                        while self.content.len() > max && self.remove_oldest().is_some() {}
                         self.needs_message_compaction = false;
                     } else if self.content.len() > max + compact_count {
                         self.needs_message_compaction = true;
@@ -700,10 +691,10 @@ impl Region {
         let group_size = self.turn_group_size_at(0);
         let mut first = None;
         let mut extra_tokens = 0usize;
-        for i in 0..group_size {
-            if self.content.is_empty() {
-                break;
-            }
+        // `group_size <= content.len()`, so the window never empties mid-group;
+        // the `!is_empty()` guard lives in the loop condition (no dead break arm).
+        let mut i = 0;
+        while i < group_size && !self.content.is_empty() {
             let entry_tokens = self.content[0].tokens;
             self.current_tokens -= entry_tokens;
             let removed = self.content.remove(0);
@@ -715,15 +706,17 @@ impl Region {
             } else {
                 extra_tokens += entry_tokens;
             }
+            i += 1;
         }
         // Embed extra group tokens in the returned entry so callers that use
         // `entry.tokens` to adjust their own totals account for the full group.
-        if extra_tokens > 0 {
-            if let Some(ref mut entry) = first {
-                entry.tokens += extra_tokens;
-            }
-        }
-        first
+        // `first` is `Some` whenever we removed anything (guaranteed by the
+        // non-empty early return), so `map` always runs; `extra_tokens` is 0
+        // for a single-entry group, making the add a no-op there.
+        first.map(|mut entry| {
+            entry.tokens += extra_tokens;
+            entry
+        })
     }
 
     /// Remove all entries whose content starts with the given prefix.

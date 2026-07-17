@@ -126,9 +126,13 @@ pub fn parse_manifest(content: &str) -> Result<Blueprint> {
                 let mut parameters = std::collections::HashMap::new();
                 if let Some(params) = mt.get("parameters").and_then(|v| v.as_table()) {
                     for (k, v) in params {
-                        if let Ok(json_val) = serde_json::to_value(v) {
-                            parameters.insert(k.clone(), json_val);
-                        }
+                        // Converting a parsed `toml::Value` to JSON is infallible:
+                        // serde_json maps non-finite floats to null rather than
+                        // erroring, and every other toml scalar/collection maps
+                        // cleanly.
+                        let json_val = serde_json::to_value(v)
+                            .expect("infallible: toml::Value always converts to serde_json::Value");
+                        parameters.insert(k.clone(), json_val);
                     }
                 }
 
