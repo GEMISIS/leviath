@@ -1683,9 +1683,18 @@ mod tests {
         std::fs::create_dir_all(&bad_subdir).unwrap();
         std::fs::write(bad_subdir.join("meta.json"), "not valid json").unwrap();
 
+        // A subdirectory with NO meta.json exercises the *other* skip branch:
+        // the `if let Ok(json) = read_to_string(&meta_path)` else arm (the file
+        // can't be read), distinct from the parse-fails arm above. Covering
+        // both here keeps list_runs_in_dir at 100% on every OS deterministically
+        // (previously one arm happened to be hit only on some platforms).
+        let no_meta_run_id = "cov-listed-no-meta-run";
+        std::fs::create_dir_all(tmpdir.path().join(no_meta_run_id)).unwrap();
+
         let runs = list_runs_in_dir(tmpdir.path().to_path_buf());
         assert!(runs.iter().any(|r| r.run_id == good_run_id));
         assert!(!runs.iter().any(|r| r.run_id == bad_run_id));
+        assert!(!runs.iter().any(|r| r.run_id == no_meta_run_id));
     }
 
     #[test]

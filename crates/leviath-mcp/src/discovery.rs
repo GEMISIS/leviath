@@ -58,11 +58,14 @@ impl ToolDiscovery {
         let tools = client.list_tools().await?;
         self.servers.insert(server_name.to_string(), tools.clone());
 
-        tracing::info!(
-            server = %server_name,
-            tool_count = tools.len(),
-            "Discovered tools"
-        );
+        // Bind `tool_count` in a plain `let` (rather than as an inline
+        // `tool_count = tools.len()` field) so the length is computed
+        // unconditionally: as an inline field it's only evaluated when a
+        // tracing subscriber is active, which made this region's coverage
+        // depend on test ordering / the ambient global subscriber and so
+        // differ across OSes.
+        let tool_count = tools.len();
+        tracing::info!(server = %server_name, tool_count, "Discovered tools");
 
         Ok(tools)
     }

@@ -342,7 +342,21 @@ fn check_permissions() {
 /// The permission mechanism (metadata probe + `chmod`) lives in `leviath_sys`;
 /// this function owns only the policy of what to log for each outcome.
 fn check_permissions_at(path: &std::path::Path) {
-    match leviath_sys::ensure_file_private(path) {
+    check_permissions_at_with(path, leviath_sys::ensure_file_private);
+}
+
+/// Core of [`check_permissions_at`] with the permission-hardening operation
+/// injected, so the "fix failed" arm can be covered deterministically on every
+/// OS. On disk that `Err` only occurs when a file exists but `chmod` fails —
+/// forcing that without root differs per platform (macOS `chflags uchg`, no
+/// portable Linux equivalent), so a `fn` pointer is injected instead of relying
+/// on an OS-specific trick. A `fn` pointer (not `impl Fn`) keeps this to a
+/// single monomorphization.
+fn check_permissions_at_with(
+    path: &std::path::Path,
+    ensure: fn(&std::path::Path) -> std::io::Result<Option<u32>>,
+) {
+    match ensure(path) {
         Ok(Some(old_mode)) => log_permissive_perms_warning(old_mode),
         Ok(None) => {}
         Err(e) => log_fix_config_file_permissions_failed(&e),
@@ -972,73 +986,29 @@ google_api_key = "AIza-existing"
     // On macOS/BSD, `chflags uchg` sets the user-immutable flag -- settable
     // by a regular file owner without root -- which blocks `chmod` (and thus
     // `std::fs::set_permissions`) with EPERM while leaving `exists()`/
-    // `metadata()` reads (and thus `path.exists()`/mode inspection) working
-    // normally. This is the one deterministic, non-racy way found to force
-    // `set_permissions`'s real `Err` arm without root or a TOCTOU race.
-    // Linux's nearest equivalent (`chattr +i`) requires CAP_LINUX_IMMUTABLE
-    // (root), so this is macOS-only.
-    #[cfg(target_os = "macos")]
-    fn set_uchg(path: &std::path::Path) {
-        let status = std::process::Command::new("chflags")
-            .arg("uchg")
-            .arg(path)
-            .status()
-            .expect("chflags should be available on macOS");
-        assert!(status.success());
-    }
-
-    #[cfg(target_os = "macos")]
-    struct UchgGuard(std::path::PathBuf);
-    #[cfg(target_os = "macos")]
-    impl Drop for UchgGuard {
-        fn drop(&mut self) {
-            // Clear the flag so tempfile's own cleanup can remove the file/dir.
-            let _ = std::process::Command::new("chflags")
-                .arg("nouchg")
-                .arg(&self.0)
-                .status();
+    // The "fix failed" arm of `check_permissions_at` (a file that exists but
+    // whose `chmod` fails) is exercised deterministically on every OS by
+    // injecting a failing `ensure` fn — no `chflags uchg`/root trick, which was
+    // macOS-only and left this branch uncovered on Linux CI.
+    #[test]
+    fn check_permissions_at_with_logs_when_fix_fails() {
+        fn ensure_fails(_: &std::path::Path) -> std::io::Result<Option<u32>> {
+            Err(std::io::Error::other("simulated chmod failure"))
         }
+        // Must not panic; the failure is only logged.
+        with_tracing(|| {
+            check_permissions_at_with(std::path::Path::new("/does/not/matter"), ensure_fails)
+        });
     }
 
-    #[cfg(target_os = "macos")]
     #[test]
-    fn check_permissions_at_chmod_failure_logs_warning_not_panic() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("config.toml");
-        std::fs::write(&path, "").unwrap();
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
-        set_uchg(&path);
-        let _guard = UchgGuard(path.clone());
-
-        // Must not panic; the chmod attempt fails and is only logged.
-        with_tracing(|| check_permissions_at(&path));
-
-        // The flag prevented the fix -- mode is unchanged (still permissive).
-        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
-        assert_eq!(mode & 0o777, 0o644);
-    }
-
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn set_file_permissions_chmod_failure_logs_warning_not_panic() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("f.toml");
-        std::fs::write(&path, "").unwrap();
-        set_uchg(&path);
-        let _guard = UchgGuard(path.clone());
-
-        with_tracing(|| set_file_permissions(&path)); // must not panic
-    }
-
-    #[cfg(target_os = "macos")]
-    #[test]
-    fn set_dir_permissions_chmod_failure_logs_warning_not_panic() {
-        let dir = tempfile::tempdir().unwrap();
-        set_uchg(dir.path());
-        let _guard = UchgGuard(dir.path().to_path_buf());
-
-        with_tracing(|| set_dir_permissions(dir.path())); // must not panic
+    fn check_permissions_at_with_logs_when_file_is_permissive() {
+        fn ensure_permissive(_: &std::path::Path) -> std::io::Result<Option<u32>> {
+            Ok(Some(0o100644))
+        }
+        with_tracing(|| {
+            check_permissions_at_with(std::path::Path::new("/does/not/matter"), ensure_permissive)
+        });
     }
 
     // Portable failure injection for the `set_permissions` error arms of
