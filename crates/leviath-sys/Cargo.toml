@@ -1,0 +1,16 @@
+[package]
+name = "leviath-sys"
+description = "Platform/OS-specific system calls for Leviath, isolated behind a cross-platform API: file permissions, detached process spawning, signals, controlling TTY, and executable resolution"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+tracing = { workspace = true }
+
+[target.'cfg(unix)'.dependencies]
+libc = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"
