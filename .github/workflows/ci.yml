@@ -79,22 +79,26 @@ jobs:
       - name: Check formatting
         run: cargo fmt --all -- --check
 
-  # Coverage is measured on Linux only. Source-based (`-C instrument-coverage`)
-  # coverage attributes counters per-monomorphization, and that attribution is
-  # codegen/target-dependent — the MSVC (Windows) target in particular reports
-  # far more "missed" regions/lines for the *identical, passing* test suite
-  # (derive-macro and generic instantiations that llvm-cov credits on
-  # Linux/macOS but not on Windows). Coverage answers "is the code tested?" —
-  # a platform-independent question — so we measure it once on a canonical OS.
-  # The full test suite still runs on all three OSes via the `test` job above
-  # (with per-OS status badges), so nothing about cross-platform testing is lost.
+  # Coverage runs on all three OSes and enforces a hard 100%. Source-based
+  # (`-C instrument-coverage`) region counters used to differ per OS because
+  # llvm-cov's per-file summary sums them *per monomorphization*, and which
+  # instantiations get credited is codegen/target-dependent (Windows/MSVC in
+  # particular under-credited generics that Linux/macOS covered). That is
+  # exactly why coverage used to be measured on one canonical OS. It no longer
+  # applies: `xtask coverage` now measures regions **merged by source
+  # position** (a region counts as covered if any monomorphization covers it —
+  # see xtask/src/coverage.rs), which removes the per-OS/per-instantiation
+  # jitter, so each OS can enforce 100% of the code it actually compiles.
+  # OS-specific code is covered by tests that run on that OS (e.g. leviath-sys's
+  # `unix` vs `fallback` submodules); code `#[cfg]`'d out of a target is not
+  # compiled there and so never counts against it.
   coverage:
     name: Coverage (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest]
+        os: [ubuntu-latest, macos-latest, windows-latest]
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
