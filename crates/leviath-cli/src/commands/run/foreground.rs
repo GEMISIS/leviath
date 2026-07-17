@@ -371,25 +371,12 @@ impl StageCallbacks for ForegroundCallbacks {
         let mut sync_direction_to_entity = true;
         let mut post_tool_sync =
             move |world: &mut bevy_ecs::prelude::World, ent: bevy_ecs::prelude::Entity| {
-                if let Ok(mut guard) = shared_cw_for_sync.try_lock() {
-                    if sync_direction_to_entity {
-                        // shared→entity: merge context tool writes into entity CW
-                        if let Some(shared) = guard.as_ref() {
-                            if let Some(mut entity_cw) =
-                                world.get_mut::<leviath_runtime::ContextWindow>(ent)
-                            {
-                                entity_cw.regions = shared.regions.clone();
-                                entity_cw.current_tokens = shared.current_tokens;
-                            }
-                        }
-                    } else {
-                        // entity→shared: update shared copy with engine's changes
-                        if let Some(entity_cw) = world.get::<leviath_runtime::ContextWindow>(ent) {
-                            *guard = Some(entity_cw.clone());
-                        }
-                    }
-                    sync_direction_to_entity = !sync_direction_to_entity;
-                }
+                sync_direction_to_entity = super::worker::post_tool_context_sync(
+                    &shared_cw_for_sync,
+                    world,
+                    ent,
+                    sync_direction_to_entity,
+                );
             };
 
         let response = engine
@@ -1115,6 +1102,22 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn dispatch_tool_calls_foreground_context_tool_short_circuits() {
+        // A `context_*` tool name takes the early context-tool branch:
+        // handle_context_tool runs and its result is pushed, then `continue`.
+        let state = make_dispatch_state("context-tool").await;
+        let backend = ForegroundInteractionBackend;
+        let calls = vec![make_tool_call(
+            "context_read",
+            serde_json::json!({"region": "conversation"}),
+        )];
+        let out = dispatch_tool_calls_foreground(&state, calls, &backend, &approve_once).await;
+
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].0, "call-context_read");
+    }
+
+    #[tokio::test]
     async fn dispatch_tool_calls_foreground_deny_policy_returns_denied_message() {
         let mut state = make_dispatch_state("deny").await;
         let mut global = HashMap::new();
@@ -1587,6 +1590,103 @@ model = "mock-model"
         let _ = std::fs::remove_dir_all(&temp_dir);
     }
 
+    struct InferFailProvider;
+
+    #[async_trait]
+    impl leviath_providers::Provider for InferFailProvider {
+        async fn infer(
+            &self,
+            _request: leviath_providers::InferenceRequest,
+        ) -> Result<leviath_providers::InferenceResponse, leviath_providers::ProviderError>
+        {
+            Err(leviath_providers::ProviderError::Other(
+                "mock infer failure".to_string(),
+            ))
+        }
+
+        fn count_tokens(&self, text: &str, _model: &str) -> usize {
+            text.len() / 4
+        }
+
+        fn max_context_tokens(&self, _model: &str) -> usize {
+            100_000
+        }
+
+        fn name(&self) -> &str {
+            "mock"
+        }
+
+        fn capabilities(&self, _model: &str) -> leviath_providers::ModelCapabilities {
+            leviath_providers::ModelCapabilities::default()
+        }
+
+        async fn list_models(
+            &self,
+        ) -> Result<Vec<leviath_providers::ModelInfo>, leviath_providers::ProviderError> {
+            Ok(vec![])
+        }
+    }
+
+    /// Covers `run_autonomous`'s inference-error handling: the `Err(e)` arm of
+    /// the `match &response` (io.on_error) and the
+    /// `response.map_err(|e| anyhow::anyhow!("{}", e))?` propagation, driven by
+    /// a provider whose `infer` always fails.
+    #[tokio::test]
+    async fn run_foreground_with_registry_propagates_inference_error() {
+        let _config_guard = crate::config::isolate_config_path_for_test("fg-infer-fail");
+
+        let temp_dir = std::env::temp_dir().join("lev-test-foreground-infer-fail");
+        let _ = std::fs::create_dir_all(&temp_dir);
+        let manifest_content = r#"
+[agent]
+name = "test-foreground-infer-fail"
+version = "1.0.0"
+description = "Test agent"
+
+[stages.main]
+mode = "autonomous"
+max_iterations = 2
+
+[stages.main.model]
+provider = "mock"
+model = "mock-model"
+"#;
+        write_test_agent(&temp_dir, manifest_content);
+
+        let args = RunArgs {
+            path: Some(temp_dir.to_string_lossy().to_string()),
+            task: Some("test task".to_string()),
+            model: None,
+            foreground: true,
+            yolo: true,
+            allow: vec![],
+            ask: vec![],
+            deny: vec![],
+            max_depth: None,
+            count: 1,
+        };
+
+        let result = with_tracing(|| {
+            run_foreground_with_registry(args, |_config| {
+                let mut registry = leviath_runtime::ProviderRegistry::new();
+                registry.register("mock".to_string(), Arc::new(InferFailProvider));
+                registry
+            })
+        })
+        .await;
+        assert!(result.is_err());
+
+        // Cover the `Provider` trait methods the failing run never exercises.
+        let provider = InferFailProvider;
+        assert_eq!(provider.count_tokens("abcd", "mock-model"), 1);
+        assert_eq!(provider.max_context_tokens("mock-model"), 100_000);
+        assert_eq!(provider.name(), "mock");
+        let _ = provider.capabilities("mock-model");
+        assert!(provider.list_models().await.unwrap().is_empty());
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
     #[tokio::test]
     async fn run_foreground_fails_with_nonexistent_path() {
         let args = RunArgs {
@@ -1783,6 +1883,55 @@ model = "mock-model"
 
         let result = run_foreground_with_registry(args, empty_registry).await;
         assert!(result.is_err());
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    /// Covers the `blueprint.validate().map_err(|e| ... "blueprint validation
+    /// failed")` arm: a manifest that parses into a Blueprint but fails
+    /// `validate()` because `entry_stage` names a nonexistent stage.
+    #[tokio::test]
+    async fn run_foreground_with_registry_fails_on_blueprint_validation() {
+        let _config_guard = crate::config::isolate_config_path_for_test("fg-invalid-bp");
+
+        let temp_dir = std::env::temp_dir().join("lev-test-fg-invalid-bp");
+        let _ = std::fs::create_dir_all(&temp_dir);
+        std::fs::write(
+            temp_dir.join("agent.leviath"),
+            r#"
+[agent]
+name = "invalid-bp"
+version = "1.0.0"
+description = "x"
+entry_stage = "does-not-exist"
+
+[stages.main]
+mode = "autonomous"
+prompt = "Do the thing"
+"#,
+        )
+        .unwrap();
+
+        let args = RunArgs {
+            path: Some(temp_dir.to_string_lossy().to_string()),
+            task: Some("test".to_string()),
+            model: None,
+            foreground: true,
+            yolo: false,
+            allow: vec![],
+            ask: vec![],
+            deny: vec![],
+            max_depth: None,
+            count: 1,
+        };
+
+        let result = run_foreground_with_registry(args, empty_registry).await;
+        assert!(result.is_err());
+        let err = format!("{:#}", result.unwrap_err());
+        assert!(
+            err.contains("blueprint validation failed"),
+            "expected validation-failure error, got: {err}"
+        );
 
         let _ = std::fs::remove_dir_all(&temp_dir);
     }
