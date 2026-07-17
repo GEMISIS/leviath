@@ -52,9 +52,9 @@ fn osc52_sequence(text: &str) -> String {
 
 /// Open the process's controlling terminal for writing.
 ///
-/// The `#[cfg(not(test))]` body opens the real `/dev/tty` (Unix) — exercising
-/// it from a test would write OSC escape bytes to the terminal running
-/// `cargo test`. The `#[cfg(test)]` twin always fails harmlessly instead, and
+/// COVERAGE-EXCLUDED: the real body opens `/dev/tty` (Unix); exercising it from
+/// a test would write OSC escape bytes to the terminal running `cargo test`.
+/// The `#[cfg(test)]` twin always fails harmlessly instead, and
 /// [`osc52_write_via`]'s branch logic is covered directly via injected openers.
 /// The real body is never compiled into a test build, so it never counts toward
 /// coverage.
@@ -106,6 +106,12 @@ fn osc52_write_via(
 /// Tries the controlling `/dev/tty` first, then falls back to stdout. Returns
 /// whether the sequence was written. Intended as a last-resort fallback after
 /// native clipboard tools (`pbcopy`/`xclip`/`wl-copy`) have been tried.
+///
+/// COVERAGE-EXCLUDED: the real body writes to the process's actual `stdout()`
+/// (and `/dev/tty`); running it in a test would corrupt the terminal running
+/// `cargo test`. The `#[cfg(test)]` twin swaps an in-memory sink in, keeping
+/// identical control flow, and `osc52_write_via`'s branches are covered
+/// directly. The real body is never compiled into a test build.
 #[cfg(not(test))]
 pub fn osc52_yank(text: &str) -> bool {
     let mut out = io::stdout();
