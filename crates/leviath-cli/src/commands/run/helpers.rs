@@ -1,6 +1,6 @@
 //! Shared helper functions: title generation, context window setup, snapshots.
 
-use leviath_core::{Blueprint, ContextLayout, EvictionStrategy, Region, RegionKind};
+use leviath_core::RegionKind;
 use leviath_runtime::{AgentEngine, ContextWindow};
 
 use crate::config::Config;
@@ -126,91 +126,11 @@ pub async fn generate_title(
     }
 }
 
-/// Initialize context window regions on an entity from the blueprint.
-pub fn initialize_context_window(
-    engine: &mut AgentEngine,
-    entity: bevy_ecs::prelude::Entity,
-    blueprint: &Blueprint,
-    task: &str,
-) {
-    if let Some(mut window) = engine.world_mut().get_mut::<ContextWindow>(entity) {
-        for region_def in &blueprint.context_layout.regions {
-            let region = Region::new(
-                region_def.name.clone(),
-                region_def.kind.clone(),
-                region_def.max_tokens,
-            );
-            window.add_region(region);
-        }
-
-        if window.get_region("tool_results").is_none() {
-            let tool_region = Region::new("tool_results".to_string(), RegionKind::Temporary, 5000);
-            window.add_region(tool_region);
-        }
-
-        if window.get_region("conversation").is_none() {
-            let conv_region = Region::new(
-                "conversation".to_string(),
-                RegionKind::SlidingWindow {
-                    max_items: 50,
-                    eviction_strategy: EvictionStrategy::PerItem,
-                },
-                10000,
-            );
-            window.add_region(conv_region);
-        }
-
-        // Seed the task text into a pinned region.
-        // Prefer a region explicitly named "task"; fall back to the first pinned region.
-        let task_region_name = blueprint
-            .context_layout
-            .regions
-            .iter()
-            .find(|r| r.name == "task" && matches!(r.kind, RegionKind::Pinned))
-            .or_else(|| {
-                blueprint
-                    .context_layout
-                    .regions
-                    .iter()
-                    .find(|r| matches!(r.kind, RegionKind::Pinned))
-            })
-            .map(|r| r.name.clone());
-
-        if let Some(region_name) = task_region_name {
-            let task_tokens = task.len() / 4 + 1;
-            let _ = window.add_to_region(&region_name, task.to_string(), task_tokens);
-        }
-    }
-}
-
-/// Swap context layout to a stage-specific layout (preserving existing content where possible).
-pub fn swap_context_layout(
-    engine: &mut AgentEngine,
-    entity: bevy_ecs::prelude::Entity,
-    layout: &ContextLayout,
-) {
-    if let Some(mut window) = engine.world_mut().get_mut::<ContextWindow>(entity) {
-        let mut new_regions = Vec::new();
-        for region_def in &layout.regions {
-            let mut new_region = Region::new(
-                region_def.name.clone(),
-                region_def.kind.clone(),
-                region_def.max_tokens,
-            );
-
-            if let Some(existing) = window.get_region(&region_def.name) {
-                for entry in &existing.content {
-                    let _ = new_region.add_entry(entry.content.clone(), entry.tokens);
-                }
-            }
-
-            new_regions.push(new_region);
-        }
-
-        window.regions = new_regions;
-        window.current_tokens = window.calculate_tokens();
-    }
-}
+// `initialize_context_window` + `swap_context_layout` moved into
+// `leviath-runtime::context_setup` (pure engine/context operations, no CLI
+// dependency). Re-exported so `super::helpers::...` /
+// `crate::commands::run::helpers::...` call sites keep resolving.
+pub use leviath_runtime::context_setup::{initialize_context_window, swap_context_layout};
 
 /// Snapshot the current context window to `context.json` for the background dashboard.
 /// No-op when running in foreground mode (run_id is None).
@@ -290,6 +210,7 @@ mod tests {
     use async_trait::async_trait;
     use leviath_core::blueprint::ModelConfig;
     use leviath_core::layout::RegionDefinition;
+    use leviath_core::{ContextLayout, EvictionStrategy};
     use leviath_providers::{
         FinishReason, InferenceRequest, InferenceResponse, ModelCapabilities, Provider,
         ProviderError, TokenUsage,

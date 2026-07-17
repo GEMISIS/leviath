@@ -10,11 +10,9 @@
 //! - `foreground`: Foreground (inline, blocking) run mode
 //! - `worker`: Background worker run mode
 
-mod dynamic_interaction;
 pub mod executor;
 mod fanout;
 mod foreground;
-mod graph;
 mod helpers;
 mod inference;
 pub mod io;
@@ -23,6 +21,12 @@ mod session;
 mod stages;
 pub mod tool_source;
 mod worker;
+
+// These seams moved into `leviath-runtime`; re-export under their historical
+// `commands::run::<name>` paths so existing `super::<name>::...` references
+// across the run submodules keep resolving.
+pub use leviath_runtime::dynamic_interaction;
+pub use leviath_runtime::graph;
 
 use clap::Args;
 use std::path::Path;
