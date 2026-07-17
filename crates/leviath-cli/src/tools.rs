@@ -1074,6 +1074,20 @@ mod subagent_tests {
         let mut root_pool = AgentPool::new(make_blueprint("root"));
         let root_id = root_pool.spawn_agent(engine.world_mut());
         let root_entity = root_pool.get_agent(&root_id).unwrap();
+        // Give the root a conversation region so the no-leak assertion below
+        // actually inspects it (spawn_agent creates an empty window).
+        engine
+            .world_mut()
+            .get_mut::<ContextWindow>(root_entity)
+            .unwrap()
+            .add_region(Region::new(
+                "conversation".to_string(),
+                leviath_core::RegionKind::SlidingWindow {
+                    max_items: 50,
+                    eviction_strategy: leviath_core::EvictionStrategy::PerItem,
+                },
+                10000,
+            ));
         let engine: EngineHandle = Arc::new(RwLock::new(engine));
 
         let worker_bp = make_blueprint("worker-bp");

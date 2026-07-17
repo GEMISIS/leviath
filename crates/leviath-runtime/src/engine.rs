@@ -2850,9 +2850,7 @@ mod tests {
         let (engine, entity) = make_engine_with_mock();
         let handle: EngineHandle = Arc::new(tokio::sync::RwLock::new(engine));
 
-        let mut exec = |_calls: Vec<leviath_providers::ToolCall>| -> ToolResultsFuture<'static> {
-            Box::pin(async { Vec::new() })
-        };
+        let mut exec = ok_exec();
 
         let result = run_inference_loop_shared(
             &handle,
@@ -2924,6 +2922,20 @@ mod tests {
         fn capabilities(&self, _model: &str) -> leviath_providers::ModelCapabilities {
             leviath_providers::ModelCapabilities::default()
         }
+    }
+
+    #[tokio::test]
+    async fn barrier_provider_trait_surface() {
+        use leviath_providers::Provider;
+        let p = BarrierProvider {
+            name: "b".to_string(),
+            barrier: Arc::new(tokio::sync::Barrier::new(1)),
+            content: "x".to_string(),
+        };
+        assert_eq!(p.count_tokens("abcd", "m"), 4);
+        assert_eq!(p.max_context_tokens("m"), 100_000);
+        assert_eq!(p.name(), "b");
+        let _ = p.capabilities("m");
     }
 
     /// Spawn a minimal agent (state + inbox + cancel token + a small context
@@ -2999,12 +3011,8 @@ mod tests {
         let b = spawn_mock_agent(&mut engine, "agent-b");
         let handle: EngineHandle = Arc::new(tokio::sync::RwLock::new(engine));
 
-        let mut exec_a = |_: Vec<leviath_providers::ToolCall>| -> ToolResultsFuture<'static> {
-            Box::pin(async { Vec::new() })
-        };
-        let mut exec_b = |_: Vec<leviath_providers::ToolCall>| -> ToolResultsFuture<'static> {
-            Box::pin(async { Vec::new() })
-        };
+        let mut exec_a = ok_exec();
+        let mut exec_b = ok_exec();
 
         let fa = run_inference_loop_shared(
             &handle,
@@ -3060,9 +3068,7 @@ mod tests {
             token.cancel();
         }
         let handle: EngineHandle = Arc::new(tokio::sync::RwLock::new(engine));
-        let mut exec = |_: Vec<leviath_providers::ToolCall>| -> ToolResultsFuture<'static> {
-            Box::pin(async { Vec::new() })
-        };
+        let mut exec = ok_exec();
         let result = run_inference_loop_shared(
             &handle,
             entity,
@@ -3517,6 +3523,56 @@ mod tests {
         // Returns the last response (not an error) after hitting max_iterations.
         assert!(result.is_ok());
         assert_eq!(result.unwrap().content, "again");
+    }
+
+    #[tokio::test]
+    async fn test_run_inference_loop_cancel_after_response_returns_last() {
+        // Sequential loop: a tool executor cancels the agent mid-run, so the
+        // next iteration returns the prior response (last_response.map path).
+        let responses = vec![
+            InferenceResponse {
+                content: "first turn".to_string(),
+                tool_calls: vec![leviath_providers::ToolCall {
+                    id: "call_1".to_string(),
+                    name: "bash".to_string(),
+                    arguments: serde_json::json!({}),
+                }],
+                tokens_used: leviath_providers::TokenUsage {
+                    prompt_tokens: 1,
+                    completion_tokens: 1,
+                    total_tokens: 2,
+                    cached_tokens: 0,
+                    cache_write_tokens: 0,
+                },
+                finish_reason: leviath_providers::FinishReason::ToolCall,
+            },
+            default_response(),
+        ];
+        let mut registry = ProviderRegistry::new();
+        registry.register(
+            "mock".to_string(),
+            Arc::new(MockProvider::with_responses("mock", responses)),
+        );
+        let mut engine = AgentEngine::with_providers(registry);
+        let entity = spawn_mock_agent(&mut engine, "seq-cancel");
+        let token = engine
+            .world()
+            .get::<CancellationToken>(entity)
+            .unwrap()
+            .clone();
+        let result = engine
+            .run_inference_loop(entity, "mock", "m", Vec::new(), 10, move |calls| {
+                token.cancel();
+                async move {
+                    calls
+                        .into_iter()
+                        .map(|c| (c.id, "ok".to_string()))
+                        .collect()
+                }
+            })
+            .await;
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().content, "first turn");
     }
 
     #[tokio::test]

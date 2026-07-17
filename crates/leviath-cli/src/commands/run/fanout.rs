@@ -273,17 +273,20 @@ pub async fn run_fan_out_stage(
     io: &mut dyn RunIO,
 ) -> anyhow::Result<FanOutOutcome> {
     // ── 1. Split phase: one inference (no tools) that yields JSON work items ──
-    if !config.split_prompt.is_empty() {
+    // Append the split prompt to the parent conversation (empty is harmless).
+    {
         let mut eng = engine.write().await;
-        if let Some(mut w) = eng.world_mut().get_mut::<ContextWindow>(parent_entity) {
-            let tokens = config.split_prompt.len() / 4 + 1;
-            let _ = w.add_typed_entry(
-                "conversation",
-                leviath_core::EntryKind::UserMessage,
-                config.split_prompt.clone(),
-                tokens,
-            );
-        }
+        let mut w = eng
+            .world_mut()
+            .get_mut::<ContextWindow>(parent_entity)
+            .expect("parent entity always has a ContextWindow");
+        let tokens = config.split_prompt.len() / 4 + 1;
+        let _ = w.add_typed_entry(
+            "conversation",
+            leviath_core::EntryKind::UserMessage,
+            config.split_prompt.clone(),
+            tokens,
+        );
     }
     let mut noop = |_: Vec<leviath_providers::ToolCall>| -> ToolResultsFuture<'static> {
         Box::pin(async { Vec::new() })
