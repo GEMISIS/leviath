@@ -32,6 +32,21 @@ fn log_packing_agent() {
 fn log_packing_agent() {}
 
 pub async fn execute(args: PackArgs) -> anyhow::Result<()> {
+    execute_with_bundle(args, &|dir| AgentBundler::new().bundle(dir)).await
+}
+
+/// [`execute`] with an injectable bundling operation.
+///
+/// The `bundle` closure is a trait object so its failure arm (`bundler.bundle`
+/// erroring) can be exercised on every platform. Reaching that arm through the
+/// real bundler requires the directory walk itself to fail, which is only
+/// possible OS-agnostically via injection inside `leviath-package`; here the
+/// simpler seam is to inject the whole bundle step. Production always passes
+/// the real `AgentBundler`.
+async fn execute_with_bundle(
+    args: PackArgs,
+    bundle: &dyn Fn(&Path) -> anyhow::Result<Vec<u8>>,
+) -> anyhow::Result<()> {
     let path = args.path.unwrap_or_else(|| ".".to_string());
     let project_path = Path::new(&path);
 
@@ -50,10 +65,9 @@ pub async fn execute(args: PackArgs) -> anyhow::Result<()> {
         determine_output_path(args.output.as_deref(), &blueprint.name, &blueprint.version);
 
     // Bundle the project
-    let bundler = AgentBundler::new();
     let project_dir = manifest_path.parent().unwrap_or(Path::new("."));
 
-    let data = bundler.bundle(project_dir)?;
+    let data = bundle(project_dir)?;
     let bundle_size = data.len();
 
     std::fs::write(&output_path, &data).map_err(|e| {
@@ -138,22 +152,52 @@ fn format_size(bytes: usize) -> String {
     }
 }
 
+/// The real directory reader used in production. A named function (rather than
+/// an inline closure) so tests that need to pass a reader which their code path
+/// never actually invokes don't introduce an uncovered closure-body region.
+fn real_read_dir(p: &Path) -> std::io::Result<std::fs::ReadDir> {
+    std::fs::read_dir(p)
+}
+
 /// Count files in `dir` recursively; returns 0 on I/O errors.
 fn count_files(dir: &Path) -> usize {
+    count_files_with(dir, &real_read_dir)
+}
+
+/// [`count_files`] with an injectable directory reader so the "read_dir failed
+/// on an existing directory -> return the count so far" arm can be exercised
+/// deterministically on every platform. That arm is otherwise only reachable
+/// via a `chmod 0o000` directory (Unix-only). A trait object (not `impl Fn`)
+/// keeps every caller sharing one monomorphization. Production always passes
+/// `std::fs::read_dir`.
+fn count_files_with(
+    dir: &Path,
+    read_dir: &dyn Fn(&Path) -> std::io::Result<std::fs::ReadDir>,
+) -> usize {
     let mut count = 0;
     if dir.is_dir() {
-        if let Ok(entries) = std::fs::read_dir(dir) {
+        if let Ok(entries) = read_dir(dir) {
             for entry in entries.filter_map(|e| e.ok()) {
-                let path = entry.path();
-                if path.is_file() {
-                    count += 1;
-                } else if path.is_dir() {
-                    count += count_files(&path);
-                }
+                count += count_path(&entry.path(), read_dir);
             }
         }
     }
     count
+}
+
+/// Count the files contributed by a single walked path: 1 for a regular file,
+/// the recursive count for a directory, and 0 for anything else (a broken
+/// symlink, a special file, or a path that vanished mid-walk). Split out so the
+/// "neither a file nor a directory" arm is testable OS-agnostically (a
+/// nonexistent path is neither), rather than only via a Unix broken symlink.
+fn count_path(path: &Path, read_dir: &dyn Fn(&Path) -> std::io::Result<std::fs::ReadDir>) -> usize {
+    if path.is_file() {
+        1
+    } else if path.is_dir() {
+        count_files_with(path, read_dir)
+    } else {
+        0
+    }
 }
 
 #[cfg(test)]
@@ -237,31 +281,27 @@ mod tests {
         assert_eq!(count_files(&file), 0);
     }
 
-    #[cfg(unix)]
     #[test]
-    fn count_files_unreadable_dir_returns_zero() {
-        use std::os::unix::fs::PermissionsExt;
+    fn count_files_read_dir_error_returns_zero() {
+        // An injected `read_dir` that fails on an existing directory exercises
+        // the "read_dir errored -> keep the count so far" arm deterministically
+        // on every platform. The prior version made the directory unreadable
+        // via `chmod 0o000`, which only fails on Unix.
         let dir = tempfile::tempdir().unwrap();
-        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o000)).unwrap();
-        let result = count_files(dir.path());
-        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
+        let result = count_files_with(dir.path(), &|_| {
+            Err(std::io::Error::other("simulated read_dir failure"))
+        });
         assert_eq!(result, 0);
     }
 
-    #[cfg(unix)]
     #[test]
-    fn count_files_skips_non_file_non_dir_entries() {
-        // A broken symlink is neither is_file() nor is_dir(), so count_files
-        // skips it.  This covers the implicit "else" branch of the
-        // if/else-if in count_files.
-        use std::os::unix::fs::symlink;
+    fn count_path_neither_file_nor_dir_counts_zero() {
+        // A nonexistent path is neither a file nor a directory, so `count_path`
+        // contributes 0 -- covering the `else` arm on every platform. The prior
+        // version used a Unix-only dangling symlink.
         let dir = tempfile::tempdir().unwrap();
-        // Create a dangling symlink: points to a target that does not exist.
-        let link = dir.path().join("dangling.link");
-        symlink("/tmp/this_target_does_not_exist_leviath_test", &link).unwrap();
-        std::fs::write(dir.path().join("real.txt"), "x").unwrap();
-        // The symlink is neither a file nor a dir, so only real.txt is counted.
-        assert_eq!(count_files(dir.path()), 1);
+        let missing = dir.path().join("does-not-exist");
+        assert_eq!(count_path(&missing, &real_read_dir), 0);
     }
 
     // ─── find_manifest ─────────────────────────────────────────────────────
@@ -508,55 +548,42 @@ mod tests {
         execute(args).await.unwrap_err();
     }
 
-    #[cfg(unix)]
     #[tokio::test]
     async fn execute_unreadable_manifest_errors() {
-        // Manifest exists but is chmod 000 — covers map_err on lines 28-29.
-        // This test assumes it is not running as root (chmod 000 blocks reads).
-        use std::os::unix::fs::PermissionsExt;
+        // `agent.leviath` exists but is a *directory*: `find_manifest` returns
+        // it (exists() passes), then `read_to_string` fails on every platform,
+        // covering the "Failed to read manifest" map_err arm. The prior version
+        // used `chmod 0o000`, which only fails on Unix.
         with_tracing(|| {});
         let project = tempfile::tempdir().unwrap();
-        let manifest = project.path().join("agent.leviath");
-        std::fs::write(
-            &manifest,
-            "[agent]\nname = \"x\"\nversion = \"0.1.0\"\ndescription = \"d\"\n",
-        )
-        .unwrap();
-        std::fs::set_permissions(&manifest, std::fs::Permissions::from_mode(0o000)).unwrap();
+        std::fs::create_dir_all(project.path().join("agent.leviath")).unwrap();
         let output_dir = tempfile::tempdir().unwrap();
         let output_path = output_dir.path().join("out.leviath-bundle");
         let args = PackArgs {
             path: Some(project.path().to_str().unwrap().to_string()),
             output: Some(output_path.to_str().unwrap().to_string()),
         };
-        let result = execute(args).await;
-        std::fs::set_permissions(&manifest, std::fs::Permissions::from_mode(0o644)).unwrap();
-        let e = result.unwrap_err();
+        let e = execute(args).await.unwrap_err();
         assert!(e.to_string().contains("Failed to read manifest"));
     }
 
-    #[cfg(unix)]
     #[tokio::test]
     async fn execute_bundle_error_propagated() {
-        // An unreadable file in the project causes bundler.bundle to fail —
-        // covers the ? on bundler.bundle(project_dir)? on line 42.
-        // This test assumes it is not running as root (chmod 000 blocks reads).
-        use std::os::unix::fs::PermissionsExt;
+        // Inject a bundling op that fails, covering the `bundle(project_dir)?`
+        // error arm on every platform. The prior version relied on an
+        // unreadable (chmod 0o000) file making the real bundler fail, which
+        // only fails on Unix.
         with_tracing(|| {});
         let project = make_project_dir(false, false);
-        let secret = project.path().join("secret.txt");
-        std::fs::write(&secret, "secret data").unwrap();
-        std::fs::set_permissions(&secret, std::fs::Permissions::from_mode(0o000)).unwrap();
         let output_dir = tempfile::tempdir().unwrap();
         let output_path = output_dir.path().join("out.leviath-bundle");
         let args = PackArgs {
             path: Some(project.path().to_str().unwrap().to_string()),
             output: Some(output_path.to_str().unwrap().to_string()),
         };
-        let result = execute(args).await;
-        std::fs::set_permissions(&secret, std::fs::Permissions::from_mode(0o644)).unwrap();
-        // Non-root: bundler cannot open the file → propagated as an error.
+        let result =
+            execute_with_bundle(args, &|_| Err(anyhow::anyhow!("simulated bundle failure"))).await;
         let e = result.unwrap_err();
-        assert!(e.to_string().contains("Failed to add"));
+        assert!(e.to_string().contains("simulated bundle failure"));
     }
 }
