@@ -1356,22 +1356,14 @@ max_tokens = 5000
         assert!(result.unwrap());
     }
 
-    /// Covers `fs::read_to_string(&manifest_path)?` failing (line 135) by
-    /// making the manifest file unreadable on Unix.
+    /// Covers `fs::read_to_string(&manifest_path)?` failing by making
+    /// `agent.leviath` a *directory*: `exists()` passes the guard but the read
+    /// fails on every platform (the prior version used `chmod 0o000`, Unix-only).
     #[tokio::test]
-    #[cfg(unix)]
     async fn execute_with_registry_manifest_unreadable_errors() {
-        use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().unwrap();
         let project = dir.path();
-        let manifest_path = project.join("agent.leviath");
-        std::fs::write(
-            &manifest_path,
-            "[agent]\nname=\"x\"\nversion=\"0.1.0\"\ndescription=\"x\"",
-        )
-        .unwrap();
-        // Make the file unreadable.
-        std::fs::set_permissions(&manifest_path, std::fs::Permissions::from_mode(0o000)).unwrap();
+        std::fs::create_dir_all(project.join("agent.leviath")).unwrap();
         let tests_dir = project.join("tests");
         std::fs::create_dir_all(&tests_dir).unwrap();
         let args = TestArgs {
@@ -1380,8 +1372,6 @@ max_tokens = 5000
             dry_run: true,
         };
         let result = execute_with_registry(args, Box::new(build_registry_from_config)).await;
-        // Restore permissions so tempdir cleanup succeeds.
-        std::fs::set_permissions(&manifest_path, std::fs::Permissions::from_mode(0o644)).unwrap();
         assert!(result.is_err());
     }
 
@@ -1441,12 +1431,11 @@ model = { provider = "anthropic", model = "claude-sonnet-4-6" }
         assert!(result.is_err());
     }
 
-    /// Covers `fs::read_dir(&tests_dir)?` (line 151) failing when the
-    /// tests directory is inaccessible.
+    /// Covers `fs::read_dir(&tests_dir)?` failing by making `tests` a *file*:
+    /// `exists()` passes the guard but `read_dir` fails on every platform (the
+    /// prior version used `chmod 0o000`, Unix-only).
     #[tokio::test]
-    #[cfg(unix)]
     async fn execute_with_registry_tests_dir_unreadable_errors() {
-        use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().unwrap();
         let project = dir.path();
         let manifest = r#"
@@ -1459,26 +1448,23 @@ description = "test"
 model = { provider = "anthropic", model = "claude-sonnet-4-6" }
 "#;
         write_test_agent(project, manifest);
-        let tests_dir = project.join("tests");
-        std::fs::create_dir_all(&tests_dir).unwrap();
-        // Remove all permissions on the tests directory.
-        std::fs::set_permissions(&tests_dir, std::fs::Permissions::from_mode(0o000)).unwrap();
+        // `tests` is a file, not a directory.
+        std::fs::write(project.join("tests"), "not a dir").unwrap();
         let args = TestArgs {
             path: Some(project.to_str().unwrap().to_string()),
             filter: None,
             dry_run: true,
         };
         let result = execute_with_registry(args, Box::new(build_registry_from_config)).await;
-        std::fs::set_permissions(&tests_dir, std::fs::Permissions::from_mode(0o755)).unwrap();
         assert!(result.is_err());
     }
 
-    /// Covers `fs::read_to_string(&test_path)?` (line 163) for a .toml file
-    /// that becomes unreadable after creation.
+    /// Covers `fs::read_to_string(&test_path)?` for a `.toml` entry by making
+    /// it a *directory* (extension is still `toml`): `read_dir` yields it but
+    /// the read fails on every platform (the prior version used `chmod 0o000`,
+    /// Unix-only).
     #[tokio::test]
-    #[cfg(unix)]
     async fn execute_with_registry_toml_unreadable_errors() {
-        use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().unwrap();
         let project = dir.path();
         let manifest = r#"
@@ -1493,30 +1479,22 @@ model = { provider = "anthropic", model = "claude-sonnet-4-6" }
         write_test_agent(project, manifest);
         let tests_dir = project.join("tests");
         std::fs::create_dir_all(&tests_dir).unwrap();
-        let toml_path = tests_dir.join("unreadable.toml");
-        std::fs::write(
-            &toml_path,
-            "[[test]]\nname=\"x\"\ninput=\"y\"\nexpect_contains=\"z\"",
-        )
-        .unwrap();
-        // Make the .toml file unreadable.
-        std::fs::set_permissions(&toml_path, std::fs::Permissions::from_mode(0o000)).unwrap();
+        std::fs::create_dir_all(tests_dir.join("unreadable.toml")).unwrap();
         let args = TestArgs {
             path: Some(project.to_str().unwrap().to_string()),
             filter: None,
             dry_run: true,
         };
         let result = execute_with_registry(args, Box::new(build_registry_from_config)).await;
-        std::fs::set_permissions(&toml_path, std::fs::Permissions::from_mode(0o644)).unwrap();
         assert!(result.is_err());
     }
 
-    /// Covers `fs::read_to_string(&test_path)?` (line 238) for a .rhai file
-    /// that becomes unreadable after creation.
+    /// Covers `fs::read_to_string(&test_path)?` for a `.rhai` entry by making
+    /// it a *directory* (extension is still `rhai`): `read_dir` yields it but
+    /// the read fails on every platform (the prior version used `chmod 0o000`,
+    /// Unix-only).
     #[tokio::test]
-    #[cfg(unix)]
     async fn execute_with_registry_rhai_unreadable_errors() {
-        use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().unwrap();
         let project = dir.path();
         let manifest = r#"
@@ -1531,17 +1509,13 @@ model = { provider = "anthropic", model = "claude-sonnet-4-6" }
         write_test_agent(project, manifest);
         let tests_dir = project.join("tests");
         std::fs::create_dir_all(&tests_dir).unwrap();
-        let rhai_path = tests_dir.join("unreadable.rhai");
-        std::fs::write(&rhai_path, "true").unwrap();
-        // Make the .rhai file unreadable.
-        std::fs::set_permissions(&rhai_path, std::fs::Permissions::from_mode(0o000)).unwrap();
+        std::fs::create_dir_all(tests_dir.join("unreadable.rhai")).unwrap();
         let args = TestArgs {
             path: Some(project.to_str().unwrap().to_string()),
             filter: None,
             dry_run: true,
         };
         let result = execute_with_registry(args, Box::new(build_registry_from_config)).await;
-        std::fs::set_permissions(&rhai_path, std::fs::Permissions::from_mode(0o644)).unwrap();
         assert!(result.is_err());
     }
 

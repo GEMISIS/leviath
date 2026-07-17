@@ -852,19 +852,16 @@ max_iterations = 5
     // exercises `std::fs::read_to_string`'s own `Err` arm (a manifest file
     // that *is* found via `path.is_file()`/`.exists()`, but can't actually
     // be read), which no other test reaches.
-    #[cfg(unix)]
     #[test]
-    fn check_manifest_permission_denied_file_is_io_error() {
-        use std::os::unix::fs::PermissionsExt;
+    fn check_manifest_unreadable_file_is_io_error() {
+        // `agent.leviath` exists but is a *directory*, so it's found via
+        // `.exists()` yet `read_to_string` fails on every platform, exercising
+        // the read_to_string map_err arm. The prior version used `chmod 0o000`,
+        // which only fails on Unix.
         let dir = tempfile::tempdir().unwrap();
-        let manifest_path = write_manifest(dir.path(), "irrelevant content");
-        std::fs::set_permissions(&manifest_path, std::fs::Permissions::from_mode(0o000)).unwrap();
+        std::fs::create_dir_all(dir.path().join("agent.leviath")).unwrap();
 
-        let result = check_manifest(&manifest_path);
-
-        // Restore permissions so the tempdir can clean itself up regardless
-        // of the assertion outcome below.
-        std::fs::set_permissions(&manifest_path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let result = check_manifest(dir.path());
 
         let err = result.unwrap_err();
         let e = unwrap_io_err(err);

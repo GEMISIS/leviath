@@ -1799,26 +1799,20 @@ model = "mock-model"
         let _ = result;
     }
 
-    /// Covers `read_to_string(...).map_err(...)` error branch (line 385) and
-    /// the `yolo=false` path that skips the `if args.yolo { ... }` insert
-    /// (line 420).  We provide a valid directory with a manifest that
-    /// `find_manifest` finds, but the file is removed before `read_to_string`
-    /// is called.  Since `find_manifest` checks `exists()`, we write the file,
-    /// create the RunArgs with the path, then delete the file, so
-    /// `read_to_string` fails.
+    /// Covers `read_to_string(...).map_err(...)` error branch and the
+    /// `yolo=false` path that skips the `if args.yolo { ... }` insert.
+    /// `agent.leviath` exists but is a *directory*, so `find_manifest` locates
+    /// it via `.exists()` yet `read_to_string` fails on every platform. The
+    /// prior version used `chmod 0o000` (Unix-only).
     #[tokio::test]
     async fn run_foreground_with_registry_fails_on_manifest_read_error() {
         let _config_guard = crate::config::isolate_config_path_for_test("fg-manifest-read-error");
 
         let temp_dir = std::env::temp_dir().join("lev-test-fg-manifest-read");
+        let _ = std::fs::remove_dir_all(&temp_dir);
         let _ = std::fs::create_dir_all(&temp_dir);
-        let manifest_path = temp_dir.join("agent.leviath");
-        // Write minimal manifest so find_manifest succeeds
-        std::fs::write(
-            &manifest_path,
-            "[agent]\nname = \"x\"\nversion = \"1.0.0\"\ndescription = \"x\"\n",
-        )
-        .unwrap();
+        // agent.leviath is a directory: found via exists(), unreadable as a file.
+        std::fs::create_dir_all(temp_dir.join("agent.leviath")).unwrap();
 
         let args = RunArgs {
             path: Some(temp_dir.to_string_lossy().to_string()),
@@ -1833,27 +1827,8 @@ model = "mock-model"
             count: 1,
         };
 
-        // Remove the manifest after find_manifest can locate it but before
-        // read_to_string runs — not possible to race that way in a single
-        // thread.  Instead, make the manifest unreadable (chmod 000 on Unix).
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&manifest_path, std::fs::Permissions::from_mode(0o000))
-                .unwrap();
-
-            let result = run_foreground_with_registry(args, empty_registry).await;
-            assert!(result.is_err());
-            // Restore permissions so cleanup works
-            std::fs::set_permissions(&manifest_path, std::fs::Permissions::from_mode(0o644))
-                .unwrap();
-        }
-        #[cfg(not(unix))]
-        {
-            // On non-Unix, skip the permission test but still exercise the
-            // yolo=false path by using an invalid manifest path.
-            let _ = args;
-        }
+        let result = run_foreground_with_registry(args, empty_registry).await;
+        assert!(result.is_err());
 
         let _ = std::fs::remove_dir_all(&temp_dir);
     }
