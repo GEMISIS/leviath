@@ -100,7 +100,17 @@ fn rules_dir() -> std::path::PathBuf {
 }
 
 async fn execute_list() -> anyhow::Result<()> {
-    execute_list_with(&load_policy()?, &rules_dir())
+    execute_list_from(load_policy(), &rules_dir())
+}
+
+/// Core of [`execute_list`] with the loaded policy passed in as a `Result` so
+/// the `load_policy()?` error arm is unit-testable without a corrupt real
+/// config file.
+fn execute_list_from(
+    loaded: anyhow::Result<leviath_core::PolicyConfig>,
+    rules: &std::path::Path,
+) -> anyhow::Result<()> {
+    execute_list_with(&loaded?, rules)
 }
 
 fn execute_list_with(
@@ -186,7 +196,18 @@ fn execute_list_with(
 }
 
 async fn execute_add(args: PolicyAddArgs) -> anyhow::Result<()> {
-    execute_add_with(args, &policy_path(), &load_policy()?)
+    execute_add_from(args, &policy_path(), load_policy())
+}
+
+/// Core of [`execute_add`] with the loaded policy passed in as a `Result` so
+/// the `load_policy()?` error arm is unit-testable without a corrupt real
+/// config file.
+fn execute_add_from(
+    args: PolicyAddArgs,
+    path: &std::path::Path,
+    loaded: anyhow::Result<leviath_core::PolicyConfig>,
+) -> anyhow::Result<()> {
+    execute_add_with(args, path, &loaded?)
 }
 
 fn execute_add_with(
@@ -221,9 +242,12 @@ fn execute_add_with(
         std::fs::create_dir_all(parent)?;
     }
 
-    // Serialize and write
-    let toml_str =
-        toml::to_string_pretty(&config).map_err(|e| anyhow::anyhow!("TOML error: {}", e))?;
+    // Serialize and write. `PolicyConfig` is a struct of arrays-of-tables
+    // (`allowlist`) followed by a table (`mcp_overrides`), whose entries hold
+    // only inline values — there is no primitive-after-table ordering hazard,
+    // so TOML serialization cannot fail.
+    let toml_str = toml::to_string_pretty(&config)
+        .expect("infallible: PolicyConfig always serializes to TOML");
     std::fs::write(path, toml_str)?;
 
     println!("Added rule: {} [max: {}]", args.tool, args.max_sensitivity);
@@ -243,7 +267,19 @@ async fn execute_test(args: PolicyTestArgs) -> anyhow::Result<()> {
         )
     })?;
 
-    let config = load_policy()?;
+    execute_test_with(&args, taint, load_policy())
+}
+
+/// Core of [`execute_test`] with the parsed taint level and the loaded policy
+/// (as a `Result`) passed in, so both the `load_policy()?` error arm and the
+/// allowlist-hit branch are unit-testable with crafted configs (the real
+/// default config has an empty allowlist).
+fn execute_test_with(
+    args: &PolicyTestArgs,
+    taint: leviath_core::TaintLevel,
+    loaded: anyhow::Result<leviath_core::PolicyConfig>,
+) -> anyhow::Result<()> {
+    let config = loaded?;
     let classification = leviath_core::taint::builtin_tool_classification(&args.tool);
 
     println!("Tool: {}", args.tool);
@@ -341,9 +377,113 @@ mod tests {
     }
 
     #[test]
+    fn load_policy_from_read_error_propagates() {
+        // The path exists but is a directory, so read_to_string fails —
+        // exercising load_policy_from's `read_to_string(path)?` error arm.
+        let dir = tempfile::tempdir().unwrap();
+        assert!(load_policy_from(dir.path()).is_err());
+    }
+
+    #[test]
     fn load_policy_returns_default_when_no_file() {
         let config = load_policy().unwrap();
         assert!(config.allowlist.is_empty());
+    }
+
+    #[test]
+    fn execute_list_with_read_dir_error_propagates() {
+        // `rules` exists but is a regular file (not a directory), so read_dir
+        // fails — exercising execute_list_with's `read_dir(rules)?` error arm.
+        let dir = tempfile::tempdir().unwrap();
+        let rules_file = dir.path().join("rules");
+        std::fs::write(&rules_file, "i am a file, not a dir").unwrap();
+        let config = leviath_core::PolicyConfig::default();
+        assert!(execute_list_with(&config, &rules_file).is_err());
+    }
+
+    #[test]
+    fn execute_list_from_propagates_load_error() {
+        // The `loaded?` error arm of execute_list_from.
+        let dir = tempfile::tempdir().unwrap();
+        assert!(execute_list_from(Err(anyhow::anyhow!("boom")), dir.path()).is_err());
+    }
+
+    #[test]
+    fn execute_add_from_propagates_load_error() {
+        // The `loaded?` error arm of execute_add_from.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("policy.toml");
+        let args = PolicyAddArgs {
+            tool: "shell".to_string(),
+            target: None,
+            max_sensitivity: "internal".to_string(),
+        };
+        assert!(execute_add_from(args, &path, Err(anyhow::anyhow!("boom"))).is_err());
+    }
+
+    #[test]
+    fn execute_add_from_ok_writes_policy() {
+        // The Ok path of execute_add_from delegates to execute_add_with.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("policy.toml");
+        let args = PolicyAddArgs {
+            tool: "shell".to_string(),
+            target: None,
+            max_sensitivity: "internal".to_string(),
+        };
+        assert!(execute_add_from(args, &path, Ok(leviath_core::PolicyConfig::default())).is_ok());
+        assert!(path.exists());
+    }
+
+    #[test]
+    fn execute_add_with_write_error_and_no_parent() {
+        // path == "/" has no parent (covers the `if let Some(parent)` None arm)
+        // and cannot be written as a file (covers `std::fs::write(path, ..)?`).
+        let args = PolicyAddArgs {
+            tool: "shell".to_string(),
+            target: None,
+            max_sensitivity: "internal".to_string(),
+        };
+        let config = leviath_core::PolicyConfig::default();
+        assert!(execute_add_with(args, std::path::Path::new("/"), &config).is_err());
+    }
+
+    #[test]
+    fn execute_test_with_propagates_load_error() {
+        // The `loaded?` error arm of execute_test_with.
+        let args = PolicyTestArgs {
+            tool: "shell".to_string(),
+            target: None,
+            taint: "private".to_string(),
+        };
+        let res = execute_test_with(
+            &args,
+            leviath_core::TaintLevel::Private,
+            Err(anyhow::anyhow!("boom")),
+        );
+        assert!(res.is_err());
+    }
+
+    #[test]
+    fn execute_test_with_allowlist_rule_hit() {
+        // An outbound tool blocked by clearance but permitted by a matching
+        // allowlist rule exercises the `check_allowlist(...) == Some` branch.
+        let args = PolicyTestArgs {
+            tool: "shell".to_string(),
+            target: None,
+            taint: "private".to_string(),
+        };
+        let config = leviath_core::PolicyConfig {
+            allowlist: vec![leviath_core::AllowlistRule {
+                tool: "shell".to_string(),
+                to: vec![],
+                channel: vec![],
+                max_sensitivity: leviath_core::TaintLevel::Private,
+            }],
+            mcp_overrides: Default::default(),
+        };
+        let res = execute_test_with(&args, leviath_core::TaintLevel::Private, Ok(config));
+        assert!(res.is_ok());
     }
 
     #[tokio::test]
@@ -505,28 +645,6 @@ mod tests {
         assert_eq!(rule.tool, "send_email");
         assert_eq!(rule.to, vec!["alice@*".to_string()]);
         assert_eq!(rule.max_sensitivity, leviath_core::TaintLevel::Private);
-    }
-
-    #[test]
-    fn policy_add_args_build_rule_without_target() {
-        let args = PolicyAddArgs {
-            tool: "shell".to_string(),
-            target: None,
-            max_sensitivity: "internal".to_string(),
-        };
-        let sensitivity = leviath_core::TaintLevel::from_str_loose(&args.max_sensitivity).unwrap();
-        let rule = leviath_core::AllowlistRule {
-            tool: args.tool.clone(),
-            to: args
-                .target
-                .as_ref()
-                .map(|t| vec![t.clone()])
-                .unwrap_or_default(),
-            channel: vec![],
-            max_sensitivity: sensitivity,
-        };
-        assert!(rule.to.is_empty());
-        assert_eq!(rule.max_sensitivity, leviath_core::TaintLevel::Internal);
     }
 
     #[test]
