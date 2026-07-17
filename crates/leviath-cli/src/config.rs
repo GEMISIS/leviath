@@ -511,22 +511,36 @@ pub(crate) struct ConfigPathTestGuard {
     _lock: std::sync::MutexGuard<'static, ()>,
 }
 
+/// Restore one environment variable to a previously-snapshotted value:
+/// re-set it if it was present, or remove it if it was absent.
+///
+/// Extracted so both arms are exercised by a deterministic unit test
+/// ([`tests::restore_env_var_covers_both_arms`]) regardless of which provider
+/// keys happen to be set in the ambient test environment. Inline, the `Some`
+/// arm was only ever hit when a snapshotted var was actually set — never in a
+/// clean environment (a fresh CI runner, where none of the provider keys are
+/// exported), leaving the `Some` arm permanently uncovered there.
+#[cfg(test)]
+fn restore_env_var(key: &str, value: Option<&std::ffi::OsStr>) {
+    match value {
+        Some(v) => std::env::set_var(key, v),
+        None => std::env::remove_var(key),
+    }
+}
+
 #[cfg(test)]
 impl Drop for ConfigPathTestGuard {
     fn drop(&mut self) {
-        match self.original_config_path.take() {
-            Some(path) => std::env::set_var("LEVIATH_CONFIG_PATH", path),
-            None => std::env::remove_var("LEVIATH_CONFIG_PATH"),
-        }
-        match self.original_skip_dotenv.take() {
-            Some(v) => std::env::set_var("LEVIATH_SKIP_DOTENV", v),
-            None => std::env::remove_var("LEVIATH_SKIP_DOTENV"),
-        }
+        restore_env_var(
+            "LEVIATH_CONFIG_PATH",
+            self.original_config_path.take().as_deref(),
+        );
+        restore_env_var(
+            "LEVIATH_SKIP_DOTENV",
+            self.original_skip_dotenv.take().as_deref(),
+        );
         for (key, value) in self.original_keys.drain(..) {
-            match value {
-                Some(v) => std::env::set_var(key, v),
-                None => std::env::remove_var(key),
-            }
+            restore_env_var(key, value.as_deref());
         }
         let _ = std::fs::remove_dir_all(&self.fake_dir);
     }
@@ -573,6 +587,37 @@ pub(crate) fn isolate_config_path_for_test(unique: &str) -> ConfigPathTestGuard 
 mod tests {
     use super::*;
     use crate::test_support::with_tracing;
+
+    // ─── restore_env_var ─────────────────────────────────────────────────────
+
+    /// Exercises both arms of [`restore_env_var`] deterministically, so its
+    /// `Some` arm is covered even in a clean environment where none of the
+    /// provider keys the guards snapshot are set (the state on a fresh CI
+    /// runner). Uses a dedicated sentinel key no other code reads, and holds
+    /// `CONFIG_PATH_ENV_LOCK` to serialize with the crate's other
+    /// env-mutating tests.
+    #[test]
+    fn restore_env_var_covers_both_arms() {
+        let _lock = CONFIG_PATH_ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let key = "LEVIATH_TEST_RESTORE_ENV_VAR_SENTINEL";
+        let original = std::env::var_os(key);
+
+        // `Some` arm: the var is (re)set to the given value.
+        restore_env_var(key, Some(std::ffi::OsStr::new("sentinel-value")));
+        assert_eq!(
+            std::env::var_os(key).as_deref(),
+            Some(std::ffi::OsStr::new("sentinel-value"))
+        );
+
+        // `None` arm: the var is removed.
+        restore_env_var(key, None);
+        assert!(std::env::var_os(key).is_none());
+
+        // Leave the ambient environment exactly as we found it.
+        restore_env_var(key, original.as_deref());
+    }
 
     // ─── leviath_home_dir ────────────────────────────────────────────────────
 
@@ -733,10 +778,7 @@ google_api_key = "AIza-existing"
         let config = with_tracing(|| Config::load_from_path(&path)).unwrap();
 
         for (key, original) in saved {
-            match original {
-                Some(v) => std::env::set_var(key, v),
-                None => std::env::remove_var(key),
-            }
+            restore_env_var(key, original.as_deref());
         }
 
         assert_eq!(
