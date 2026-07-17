@@ -337,13 +337,8 @@ pub fn create_run(meta: &RunMeta) -> anyhow::Result<()> {
 fn create_run_in(dir: &std::path::Path, meta: &RunMeta) -> anyhow::Result<()> {
     std::fs::create_dir_all(dir)?;
 
-    // Set restrictive permissions on the run directory (Unix only)
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let perms = std::fs::Permissions::from_mode(0o700);
-        let _ = std::fs::set_permissions(dir, perms);
-    }
+    // Restrict the run directory to owner-only (no-op on non-Unix).
+    let _ = leviath_sys::secure_dir_perms(dir);
 
     write_meta_to(dir, meta)
 }
