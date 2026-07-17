@@ -80,13 +80,13 @@ fn dump_request(body: &serde_json::Value, dir: Option<&str>) {
     let path = std::path::Path::new(dir).join(format!("anthropic-req-{nanos}.json"));
     let _ = std::fs::create_dir_all(dir);
     // `body` is an already-built `serde_json::Value`, which is infallibly
-    // serializable (no NaN/Inf numbers, keys always strings), so there is no
-    // reachable error arm to handle here — `to_string_pretty` only fails on a
-    // custom `Serialize` impl that errors, which a `Value` never has.
-    if let Ok(pretty) = serde_json::to_string_pretty(body) {
-        if std::fs::write(&path, &pretty).is_ok() {
-            tracing::info!(request_bytes = bytes, path = %path.display(), "dumped anthropic request body");
-        }
+    // serializable (no NaN/Inf numbers, keys always strings) — `to_string_pretty`
+    // only fails on a custom `Serialize` impl that errors, which a `Value` never
+    // has. So there is no reachable error arm; `.expect` documents that.
+    let pretty = serde_json::to_string_pretty(body)
+        .expect("infallible: a serde_json::Value always serializes");
+    if std::fs::write(&path, &pretty).is_ok() {
+        tracing::info!(request_bytes = bytes, path = %path.display(), "dumped anthropic request body");
     }
 }
 

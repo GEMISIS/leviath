@@ -92,7 +92,7 @@ pub struct ModelInfo {
 ///
 /// Provider serialization converts this to the appropriate API format
 /// (e.g., Anthropic content blocks, OpenAI message + tool_calls).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum MessageContent {
     /// Plain text content (backward compatible).
@@ -131,7 +131,7 @@ impl MessageContent {
 }
 
 /// A content block within a rich message.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum ContentBlock {
     /// A text content block.
@@ -1041,14 +1041,14 @@ mod tests {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move {
-            if let Ok((mut sock, _)) = listener.accept().await {
-                let mut buf = [0u8; 4096];
-                // Read until the peer goes away; never respond.
-                while let Ok(n) = sock.read(&mut buf).await {
-                    if n == 0 {
-                        break;
-                    }
-                }
+            let (mut sock, _) = listener.accept().await.expect("accept succeeds");
+            let mut buf = [0u8; 4096];
+            // Keep reading (draining the request) and never respond. This is a
+            // diverging `loop` (type `!`) with no `break`, so there is no
+            // data-dependent branch and no unreachable task-exit tail; the
+            // runtime aborts the task at test end.
+            loop {
+                let _ = sock.read(&mut buf).await;
             }
         });
 

@@ -112,31 +112,40 @@ pub fn build_openai_request_body(request: &InferenceRequest) -> serde_json::Valu
                         _ => None,
                     })
                     .collect();
-                let tool_uses: Vec<&ContentBlock> = blocks
+                // Extract (tool_use_id, content) directly; the filter_map's
+                // `None` arm also runs for non-ToolResult blocks, so there is
+                // no unreachable match arm.
+                let tool_results: Vec<(&str, &str)> = blocks
                     .iter()
-                    .filter(|b| matches!(b, ContentBlock::ToolUse { .. }))
+                    .filter_map(|b| match b {
+                        ContentBlock::ToolResult {
+                            tool_use_id,
+                            content,
+                            ..
+                        } => Some((tool_use_id.as_str(), content.as_str())),
+                        _ => None,
+                    })
                     .collect();
-                let tool_results: Vec<&ContentBlock> = blocks
+                // Build OpenAI tool_calls directly from the ToolUse blocks. The
+                // filter_map's `None` arm also runs for non-ToolUse blocks, so
+                // there is no unreachable match arm.
+                let tool_calls: Vec<serde_json::Value> = blocks
                     .iter()
-                    .filter(|b| matches!(b, ContentBlock::ToolResult { .. }))
+                    .filter_map(|b| match b {
+                        ContentBlock::ToolUse { id, name, input } => Some(serde_json::json!({
+                            "id": id,
+                            "type": "function",
+                            "function": {
+                                "name": name,
+                                "arguments": input.to_string(),
+                            }
+                        })),
+                        _ => None,
+                    })
                     .collect();
 
-                if !tool_uses.is_empty() {
+                if !tool_calls.is_empty() {
                     // Assistant message with tool calls
-                    let tool_calls: Vec<serde_json::Value> = tool_uses
-                        .iter()
-                        .map(|b| match b {
-                            ContentBlock::ToolUse { id, name, input } => serde_json::json!({
-                                "id": id,
-                                "type": "function",
-                                "function": {
-                                    "name": name,
-                                    "arguments": input.to_string(),
-                                }
-                            }),
-                            _ => unreachable!(),
-                        })
-                        .collect();
                     let content = text_parts.join("");
                     let mut msg_json = serde_json::json!({
                         "role": "assistant",
@@ -148,19 +157,12 @@ pub fn build_openai_request_body(request: &InferenceRequest) -> serde_json::Valu
                     messages.push(msg_json);
                 } else if !tool_results.is_empty() {
                     // Each tool result becomes a separate "tool" role message
-                    for block in &tool_results {
-                        if let ContentBlock::ToolResult {
-                            tool_use_id,
-                            content,
-                            ..
-                        } = block
-                        {
-                            messages.push(serde_json::json!({
-                                "role": "tool",
-                                "tool_call_id": tool_use_id,
-                                "content": content,
-                            }));
-                        }
+                    for (tool_use_id, content) in &tool_results {
+                        messages.push(serde_json::json!({
+                            "role": "tool",
+                            "tool_call_id": tool_use_id,
+                            "content": content,
+                        }));
                     }
                 } else {
                     // Text-only blocks
