@@ -1,35 +1,24 @@
 //! Command dispatch: the `Commands` enum and the `dispatch()` function that
 //! routes a parsed subcommand to its executor.
 //!
-//! This lives in the library crate (not `main.rs`, the binary's own entry
-//! point) specifically so it can be unit-tested under `cargo llvm-cov`'s
-//! `--lib` scope. `main.rs`'s own code is invisible to that scope entirely
-//! -- `xtask/src/coverage.rs` only ever runs `--lib` plus one `--test
-//! <name>` scope per integration-test file for a package, deliberately
-//! never a `--bin` scope (see `package_test_targets`'s doc comment there) --
-//! so a `#[cfg(test)] mod tests` placed directly in `main.rs` would compile
-//! and pass under `cargo test --bin lev`, but would never actually be
-//! executed by `cargo xtask coverage`, leaving its measured coverage
-//! unchanged. `main.rs`'s only real coverage comes from
-//! `tests/cli_dispatch.rs` spawning the actual compiled `lev` binary, which
-//! deliberately never spawns `dash`/`run` (foreground)/`serve`/
-//! `__run-worker` for hard safety reasons documented there (no test may
-//! touch a real terminal/TTY, bind a real network port, or spawn a
-//! subprocess that could hang).
+//! This lives in the library crate (not `main.rs`) so its routing logic can be
+//! unit-tested under `cargo llvm-cov`'s `--lib` scope. The subcommands whose
+//! real execution performs I/O a unit test must never trigger — a real
+//! terminal takeover (`dash`), blocking stdin (`setup` interactive,
+//! foreground `run`), binding a real port (`serve`), spawning a detached
+//! worker or running a real inference loop (`run` background / `__run-worker`)
+//! — are routed through the [`RiskyExecutors`] trait rather than called
+//! directly. That way:
 //!
-//! Moving the dispatch match here means its command-construction/
-//! argument-passing logic can be driven directly by a real unit test (see
-//! `tests` below) that constructs every `Commands` variant and calls
-//! `dispatch()`, while the 3 risky underlying executors
-//! (`commands::run::execute`, `commands::serve::execute`,
-//! `commands::run::execute_worker`) are reached through
-//! `#[cfg(not(test))]`/`#[cfg(test)]` twins so the unit test never actually
-//! touches a real terminal/network/subprocess -- exactly what
-//! `cli_dispatch.rs`'s own docs already promise never happens, just
-//! verified by a different, still totally safe mechanism.
-//! (`commands::dashboard::execute` already has its own such twin -- see
-//! `commands/dashboard/mod.rs` -- so `Commands::Dashboard` is dispatched
-//! straight through without a wrapper here.)
+//! * unit tests drive `dispatch()`'s full routing match against a
+//!   `#[cfg(test)]` mock (`MockRisky`) that touches nothing real, and
+//! * the real implementations live in the (coverage-unmeasured) `lev` binary
+//!   as `main.rs`'s `RealExecutors`, which simply wires real I/O into the
+//!   library's already-tested command cores.
+//!
+//! This replaces the previous `#[cfg(not(test))]`/`#[cfg(test)]` twin trick:
+//! injection gives the same "routing is tested, real I/O is never touched by a
+//! test" guarantee without any coverage escape hatch in library code.
 
 use crate::commands;
 
@@ -80,77 +69,75 @@ pub enum Commands {
     RunWorker(commands::run::WorkerArgs),
 }
 
-/// Route a parsed subcommand to its executor. Extracted from `main()` so it
-/// can be unit-tested (see the module doc comment above for why that
-/// requires living here rather than in `main.rs`).
-pub async fn dispatch(command: Commands) -> anyhow::Result<()> {
+/// The subset of commands whose real execution performs I/O that a unit test
+/// must never trigger. `dispatch()` routes these through this trait so its
+/// routing logic stays unit-testable with a mock; the real implementations are
+/// supplied by the binary (`main.rs`'s `RealExecutors`).
+///
+/// `async fn` in a trait is fine here: `dispatch` takes `&impl RiskyExecutors`
+/// (static dispatch, no `dyn`), so no boxing or `Send` bound is required.
+#[allow(async_fn_in_trait)]
+pub trait RiskyExecutors {
+    /// `lev run` — foreground (blocking stdin/terminal) or a detached worker spawn.
+    async fn run(&self, args: commands::run::RunArgs) -> anyhow::Result<()>;
+    /// `lev setup` — interactive (blocking stdin) or `--non-interactive`.
+    async fn setup(&self, args: commands::setup::SetupArgs) -> anyhow::Result<()>;
+    /// `lev dash` — takes over the real terminal and blocks on real keyboard input.
+    async fn dashboard(&self, args: commands::dashboard::DashboardArgs) -> anyhow::Result<()>;
+    /// `lev serve` — binds a real port and serves indefinitely.
+    async fn serve(&self, args: commands::serve::ServeArgs) -> anyhow::Result<()>;
+    /// `lev __run-worker` — the background worker's real inference loop.
+    async fn worker(&self, args: commands::run::WorkerArgs) -> anyhow::Result<()>;
+}
+
+/// Route a parsed subcommand to its executor. Safe commands are called
+/// directly (and are exercised through `dispatch()` by the tests below); the
+/// I/O-risky ones go through `ex` (see [`RiskyExecutors`]).
+pub async fn dispatch(command: Commands, ex: &impl RiskyExecutors) -> anyhow::Result<()> {
     match command {
         Commands::Create(args) => commands::create::execute(args).await,
-        Commands::Setup(args) => commands::setup::execute(args).await,
-        Commands::Run(args) => dispatch_run(args).await,
+        Commands::Setup(args) => ex.setup(args).await,
+        Commands::Run(args) => ex.run(args).await,
         Commands::List(args) => commands::list::execute(args).await,
         Commands::Add(args) => commands::add::execute(args).await,
         Commands::Remove(args) => commands::remove::execute(args).await,
         Commands::Test(args) => commands::test::execute(args).await,
         Commands::Pack(args) => commands::pack::execute(args).await,
-        Commands::Dashboard(args) => commands::dashboard::execute(args).await,
+        Commands::Dashboard(args) => ex.dashboard(args).await,
         Commands::Models(args) => commands::models::execute(args).await,
         Commands::Validate(args) => commands::validate::execute(args).await,
         Commands::Policy(args) => commands::policy::execute(args).await,
-        Commands::Serve(args) => dispatch_serve(args).await,
-        Commands::RunWorker(args) => dispatch_run_worker(args).await,
+        Commands::Serve(args) => ex.serve(args).await,
+        Commands::RunWorker(args) => ex.worker(args).await,
     }
-}
-
-/// COVERAGE-EXCLUDED: `commands::run::execute` can run in foreground mode
-/// (reading real stdin / writing the real terminal) or spawn a real
-/// detached background worker process -- neither of which any test in this
-/// suite may safely do (see the hard safety rule in this module's doc
-/// comment). `dispatch()`'s own routing logic is still fully exercised by
-/// `dispatch_run_variant_is_routed`/etc. below; only the real execution is
-/// swapped for a no-op under test.
-#[cfg(not(test))]
-async fn dispatch_run(args: commands::run::RunArgs) -> anyhow::Result<()> {
-    commands::run::execute(args).await
-}
-
-#[cfg(test)]
-async fn dispatch_run(_args: commands::run::RunArgs) -> anyhow::Result<()> {
-    Ok(())
-}
-
-/// COVERAGE-EXCLUDED: see `dispatch_run` -- `commands::serve::execute`
-/// binds a real network port and serves real HTTP/WebSocket traffic
-/// indefinitely (until a shutdown signal `dispatch()`'s caller never
-/// supplies), which no test in this suite may safely do.
-#[cfg(not(test))]
-async fn dispatch_serve(args: commands::serve::ServeArgs) -> anyhow::Result<()> {
-    commands::serve::execute(args).await
-}
-
-#[cfg(test)]
-async fn dispatch_serve(_args: commands::serve::ServeArgs) -> anyhow::Result<()> {
-    Ok(())
-}
-
-/// COVERAGE-EXCLUDED: see `dispatch_run` -- `commands::run::execute_worker`
-/// is the background worker entry point, spawned as its own real subprocess
-/// by `commands::run::execute`'s background path; running it directly here
-/// would perform real inference-loop/subprocess work, which no test in this
-/// suite may safely do.
-#[cfg(not(test))]
-async fn dispatch_run_worker(args: commands::run::WorkerArgs) -> anyhow::Result<()> {
-    commands::run::execute_worker(args).await
-}
-
-#[cfg(test)]
-async fn dispatch_run_worker(_args: commands::run::WorkerArgs) -> anyhow::Result<()> {
-    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Test double for [`RiskyExecutors`]: every method is a no-op returning
+    /// `Ok(())`, so `dispatch()`'s risky routing arms are exercised without
+    /// touching a real terminal / stdin / port / subprocess.
+    struct MockRisky;
+
+    impl RiskyExecutors for MockRisky {
+        async fn run(&self, _args: commands::run::RunArgs) -> anyhow::Result<()> {
+            Ok(())
+        }
+        async fn setup(&self, _args: commands::setup::SetupArgs) -> anyhow::Result<()> {
+            Ok(())
+        }
+        async fn dashboard(&self, _args: commands::dashboard::DashboardArgs) -> anyhow::Result<()> {
+            Ok(())
+        }
+        async fn serve(&self, _args: commands::serve::ServeArgs) -> anyhow::Result<()> {
+            Ok(())
+        }
+        async fn worker(&self, _args: commands::run::WorkerArgs) -> anyhow::Result<()> {
+            Ok(())
+        }
+    }
 
     fn create_args() -> commands::create::CreateArgs {
         commands::create::CreateArgs {
@@ -159,8 +146,10 @@ mod tests {
         }
     }
 
+    // ─── Risky variants: routed through the injected executor ────────────────
+
     #[tokio::test]
-    async fn dispatch_run_variant_is_routed_without_touching_real_environment() {
+    async fn dispatch_run_variant_is_routed_through_the_executor() {
         let args = commands::run::RunArgs {
             path: None,
             task: None,
@@ -173,23 +162,45 @@ mod tests {
             max_depth: None,
             count: 1,
         };
-        let result = dispatch(Commands::Run(args)).await;
+        let result = dispatch(Commands::Run(args), &MockRisky).await;
         assert!(result.is_ok());
     }
 
     #[tokio::test]
-    async fn dispatch_serve_variant_is_routed_without_binding_a_real_port() {
+    async fn dispatch_setup_variant_is_routed_through_the_executor() {
+        let args = commands::setup::SetupArgs {
+            non_interactive: true,
+            anthropic_key: None,
+            openai_key: None,
+            google_key: None,
+            openrouter_key: None,
+            ollama_url: None,
+            default_model: None,
+        };
+        let result = dispatch(Commands::Setup(args), &MockRisky).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn dispatch_dashboard_variant_is_routed_through_the_executor() {
+        let args = commands::dashboard::DashboardArgs {};
+        let result = dispatch(Commands::Dashboard(args), &MockRisky).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn dispatch_serve_variant_is_routed_through_the_executor() {
         let args = commands::serve::ServeArgs {
             port: 0,
             host: "127.0.0.1".to_string(),
             cors: "*".to_string(),
         };
-        let result = dispatch(Commands::Serve(args)).await;
+        let result = dispatch(Commands::Serve(args), &MockRisky).await;
         assert!(result.is_ok());
     }
 
     #[tokio::test]
-    async fn dispatch_run_worker_variant_is_routed_without_a_real_subprocess() {
+    async fn dispatch_run_worker_variant_is_routed_through_the_executor() {
         let args = commands::run::WorkerArgs {
             path: "/unused/path".to_string(),
             task: "unused task".to_string(),
@@ -201,60 +212,23 @@ mod tests {
             deny: vec![],
             max_depth: None,
         };
-        let result = dispatch(Commands::RunWorker(args)).await;
+        let result = dispatch(Commands::RunWorker(args), &MockRisky).await;
         assert!(result.is_ok());
     }
 
-    #[tokio::test]
-    async fn dispatch_dashboard_variant_is_routed_via_its_own_test_twin() {
-        // `commands::dashboard::execute` already has its own `#[cfg(test)]`
-        // no-op twin (see `commands/dashboard/mod.rs`), so `dispatch()`
-        // calls it directly with no wrapper of its own.
-        let args = commands::dashboard::DashboardArgs {};
-        let result = dispatch(Commands::Dashboard(args)).await;
-        assert!(result.is_ok());
-    }
+    // ─── Safe variants: called directly, driven through dispatch() ───────────
 
     #[tokio::test]
     async fn dispatch_create_variant_is_routed() {
-        // A quick sanity check that non-risky variants still flow through
-        // `dispatch()`'s match unchanged: an already-existing directory
-        // makes `create::execute` return a real, harmless `Err` without
-        // touching anything outside a tempdir.
+        // An already-existing directory makes `create::execute` return a real,
+        // harmless `Err` without touching anything outside a tempdir.
         let dir = tempfile::tempdir().unwrap();
         let args = commands::create::CreateArgs {
             name: dir.path().to_str().unwrap().to_string(),
             ..create_args()
         };
-        let result = dispatch(Commands::Create(args)).await;
+        let result = dispatch(Commands::Create(args), &MockRisky).await;
         assert!(result.is_err());
-    }
-
-    // The remaining variants below don't need a real/fake distinction --
-    // their executors are already safe to call directly -- but `dispatch()`
-    // itself was never previously routed through for them, leaving those
-    // specific match-arm regions uncovered even though the executors they
-    // call are separately, thoroughly tested elsewhere. Each test below
-    // just needs to prove the arm is reachable and passes its args through.
-
-    #[tokio::test]
-    async fn dispatch_setup_variant_is_routed() {
-        // Isolated config path: `--non-interactive` setup saves a real
-        // config file, which must not land in the developer's real
-        // `~/.leviath/config.toml`.
-        let guard = crate::config::isolate_config_path_for_test("dispatch-setup");
-        let args = commands::setup::SetupArgs {
-            non_interactive: true,
-            anthropic_key: None,
-            openai_key: None,
-            google_key: None,
-            openrouter_key: None,
-            ollama_url: None,
-            default_model: None,
-        };
-        let result = dispatch(Commands::Setup(args)).await;
-        drop(guard);
-        assert!(result.is_ok());
     }
 
     #[tokio::test]
@@ -262,7 +236,7 @@ mod tests {
         let args = commands::list::ListArgs {
             filter: "all".to_string(),
         };
-        let result = dispatch(Commands::List(args)).await;
+        let result = dispatch(Commands::List(args), &MockRisky).await;
         assert!(result.is_ok());
     }
 
@@ -272,7 +246,7 @@ mod tests {
             package: "definitely-not-a-real-bundle-xyz.leviath-bundle".to_string(),
             registry: None,
         };
-        let result = dispatch(Commands::Add(args)).await;
+        let result = dispatch(Commands::Add(args), &MockRisky).await;
         assert!(result.is_err());
     }
 
@@ -281,7 +255,7 @@ mod tests {
         let args = commands::remove::RemoveArgs {
             name: "definitely-not-an-installed-agent-xyz".to_string(),
         };
-        let result = dispatch(Commands::Remove(args)).await;
+        let result = dispatch(Commands::Remove(args), &MockRisky).await;
         assert!(result.is_err());
     }
 
@@ -293,7 +267,7 @@ mod tests {
             filter: None,
             dry_run: true,
         };
-        let result = dispatch(Commands::Test(args)).await;
+        let result = dispatch(Commands::Test(args), &MockRisky).await;
         assert!(result.is_err());
     }
 
@@ -304,7 +278,7 @@ mod tests {
             path: Some(dir.path().to_str().unwrap().to_string()),
             output: None,
         };
-        let result = dispatch(Commands::Pack(args)).await;
+        let result = dispatch(Commands::Pack(args), &MockRisky).await;
         assert!(result.is_err());
     }
 
@@ -317,7 +291,7 @@ mod tests {
                 remote: false,
             }),
         };
-        let result = dispatch(Commands::Models(args)).await;
+        let result = dispatch(Commands::Models(args), &MockRisky).await;
         drop(guard);
         assert!(result.is_ok());
     }
@@ -333,7 +307,7 @@ mod tests {
                 .unwrap()
                 .to_string(),
         };
-        let result = dispatch(Commands::Validate(args)).await;
+        let result = dispatch(Commands::Validate(args), &MockRisky).await;
         assert!(result.is_err());
     }
 
@@ -342,7 +316,7 @@ mod tests {
         let args = commands::policy::PolicyArgs {
             command: commands::policy::PolicyCommand::List(commands::policy::PolicyListArgs {}),
         };
-        let result = dispatch(Commands::Policy(args)).await;
+        let result = dispatch(Commands::Policy(args), &MockRisky).await;
         assert!(result.is_ok());
     }
 
@@ -355,7 +329,7 @@ mod tests {
                 taint: "public".to_string(),
             }),
         };
-        let result = dispatch(Commands::Policy(args)).await;
+        let result = dispatch(Commands::Policy(args), &MockRisky).await;
         assert!(result.is_ok());
     }
 }

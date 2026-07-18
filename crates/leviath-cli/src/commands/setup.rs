@@ -36,33 +36,11 @@ pub struct SetupArgs {
     pub default_model: Option<String>,
 }
 
-pub async fn execute(args: SetupArgs) -> anyhow::Result<()> {
-    // Load existing config so we can preserve existing values as defaults
-    let mut config = Config::load().unwrap_or_default();
-    let save_path = Config::config_path();
-
-    if args.non_interactive {
-        return run_non_interactive_setup(&mut config, &args, &save_path);
-    }
-
-    // The interactive branch reads from real stdin — an irreducible system
-    // boundary identical to `request_interaction_stdin` in interaction.rs.
-    // In test builds we swap stdin for a Cursor so the branch is exercisable.
-    #[cfg(not(test))]
-    {
-        let stdin = io::stdin();
-        run_interactive_setup(&mut config, &mut stdin.lock(), &save_path)
-    }
-    #[cfg(test)]
-    {
-        let mut cursor = io::Cursor::new(b"\n\n\n\n\n\n\n".to_vec());
-        run_interactive_setup(&mut config, &mut cursor, &save_path)
-    }
-}
-
 /// Core of the `--non-interactive` path, with an explicit `save_path` for
-/// the same testability reason as `run_interactive_setup`.
-fn run_non_interactive_setup(
+/// the same testability reason as `run_interactive_setup`. `pub` so the
+/// binary's `real_setup` (the command's real stdin/entrypoint wiring) can
+/// call it.
+pub fn run_non_interactive_setup(
     config: &mut Config,
     args: &SetupArgs,
     save_path: &std::path::Path,
@@ -78,7 +56,9 @@ fn run_non_interactive_setup(
 /// of hardcoding the real `~/.leviath/config.toml` — factored out so it can
 /// be exercised in tests with an in-memory reader and a tempfile path
 /// instead of blocking on real stdin and writing to the user's real config.
-fn run_interactive_setup<R: io::BufRead>(
+/// `pub` so the binary's `real_setup` can drive it with the process's real
+/// `stdin().lock()`.
+pub fn run_interactive_setup<R: io::BufRead>(
     config: &mut Config,
     reader: &mut R,
     save_path: &std::path::Path,
@@ -943,12 +923,20 @@ mod tests {
         assert_eq!(loaded.default_model.as_deref(), Some("my-model"));
     }
 
-    // ─── execute (real entry point) ──────────────────────────────────────
+    // ─── config-path write-through ───────────────────────────────────────
+    //
+    // The `execute()` entrypoint (branch on `non_interactive`, and the real
+    // stdin read for the interactive path) now lives in the binary's
+    // `real_setup`; the library keeps the two fully-tested cores. This test
+    // pins the same guarantee `execute_non_interactive_...` used to — that
+    // `run_non_interactive_setup` writes through `Config::config_path()` —
+    // exercised directly against the core with an isolated config path.
 
-    #[tokio::test]
-    async fn execute_non_interactive_applies_flags_and_saves_to_isolated_path() {
-        let _guard = crate::config::isolate_config_path_for_test("setup-execute-non-interactive");
+    #[test]
+    fn run_non_interactive_setup_writes_through_config_path() {
+        let _guard = crate::config::isolate_config_path_for_test("setup-non-interactive-configpath");
 
+        let mut config = Config::load().unwrap_or_default();
         let args = SetupArgs {
             non_interactive: true,
             anthropic_key: Some("sk-ant-execute-test".to_string()),
@@ -959,34 +947,14 @@ mod tests {
             default_model: None,
         };
 
-        let result = execute(args).await;
-        assert!(result.is_ok());
+        run_non_interactive_setup(&mut config, &args, &Config::config_path()).unwrap();
 
         // Config::load() re-reads via the same (isolated) LEVIATH_CONFIG_PATH,
-        // proving execute() actually wrote through Config::config_path().
+        // proving the setup core wrote through Config::config_path().
         let reloaded = Config::load().unwrap();
         assert_eq!(
             reloaded.providers.anthropic_api_key.as_deref(),
             Some("sk-ant-execute-test")
         );
-    }
-
-    #[tokio::test]
-    async fn execute_interactive_mode_uses_cursor_in_test() {
-        // Exercises the `#[cfg(test)]` branch of `execute()` — the branch that
-        // would otherwise block on real stdin. The Cursor provides 7 empty
-        // lines (one per prompt), so all values stay at their defaults.
-        let _guard = crate::config::isolate_config_path_for_test("setup-execute-interactive");
-        let args = SetupArgs {
-            non_interactive: false,
-            anthropic_key: None,
-            openai_key: None,
-            google_key: None,
-            openrouter_key: None,
-            ollama_url: None,
-            default_model: None,
-        };
-        let result = execute(args).await;
-        assert!(result.is_ok());
     }
 }

@@ -13,17 +13,8 @@ mod types;
 pub use types::{AgentDisplayStatus, AgentEvent, DashboardAgent, DashboardArgs};
 
 use crossterm::event::{Event, KeyEventKind};
-#[cfg(not(test))]
-use crossterm::{
-    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
-    ExecutableCommand,
-};
 use leviath_runtime::AgentEngine;
 use ratatui::Terminal;
-#[cfg(not(test))]
-use ratatui::{TerminalOptions, Viewport};
-#[cfg(not(test))]
-use std::io::stdout;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
@@ -68,21 +59,23 @@ async fn engine_background_loop(
 /// elapses" (i.e. `crossterm::event::poll` + `event::read`), so the
 /// dashboard's main loop ([`run_dashboard_loop`]) can be driven by canned
 /// events in tests instead of blocking on a real terminal.
-trait EventSource {
+pub trait EventSource {
     fn poll_event(&mut self, timeout: Duration) -> std::io::Result<Option<Event>>;
 }
 
 /// Production [`EventSource`]: reads real terminal input via crossterm.
 /// Uses injectable function pointers for `poll` and `read` so the two
 /// branches of `poll_event` can be exercised in unit tests without a real
-/// TTY.  In production, construct via [`CrosstermEventSource::new`].
-struct CrosstermEventSource {
+/// TTY.  In production, construct via [`CrosstermEventSource::new`]. Wired
+/// into the real dashboard only by the binary's `real_dashboard`.
+pub struct CrosstermEventSource {
     poll_fn: fn(Duration) -> std::io::Result<bool>,
     read_fn: fn() -> std::io::Result<Event>,
 }
 
+#[allow(clippy::new_without_default)] // constructed only by the binary's real_dashboard
 impl CrosstermEventSource {
-    fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             poll_fn: crossterm::event::poll,
             read_fn: crossterm::event::read,
@@ -101,77 +94,15 @@ impl EventSource for CrosstermEventSource {
 }
 
 /// Abstracts terminal setup/teardown so [`execute_core`] can be tested with
-/// a [`ratatui::backend::TestBackend`] and no-op TTY operations.
-trait TerminalSetup {
+/// a [`ratatui::backend::TestBackend`] and no-op TTY operations. The real
+/// crossterm implementation (`CrosstermSetup`) lives in the binary — see
+/// `real_dashboard` — since it can only be exercised against a real terminal.
+pub trait TerminalSetup {
     type B: ratatui::backend::Backend;
     fn enable(&mut self) -> anyhow::Result<()>;
     fn create_terminal(&mut self) -> anyhow::Result<Terminal<Self::B>>;
     fn disable(&mut self);
     fn print_done(&self);
-}
-
-/// Production [`TerminalSetup`] that performs real crossterm terminal
-/// operations: enabling raw mode, entering/leaving the real alternate screen,
-/// and building a real `CrosstermBackend` on `stdout`. Only ever wired into
-/// the real [`execute`] entrypoint (itself `#[cfg(not(test))]`); structurally
-/// absent from the test binary, so [`execute_core`]/[`run_dashboard_loop`]
-/// monomorphize only over test doubles (see [`TestSetup`]) under `cargo test`.
-///
-/// COVERAGE-EXCLUDED: real terminal setup -- creates a real CrosstermBackend
-/// on stdout and mutates raw mode / the real alternate screen; cannot be run
-/// under `cargo test` without hijacking the test runner's own terminal (the
-/// same terminal-safety rationale that gates `execute`).
-#[cfg(not(test))]
-struct CrosstermSetup {
-    viewport: Viewport,
-}
-
-/// COVERAGE-EXCLUDED: real terminal setup constructor -- only reachable from
-/// the real `execute` entrypoint, never from any test build.
-#[cfg(not(test))]
-impl CrosstermSetup {
-    fn new() -> Self {
-        Self {
-            viewport: Viewport::Fullscreen,
-        }
-    }
-}
-
-/// COVERAGE-EXCLUDED: real terminal operations -- enables raw mode,
-/// enters/leaves the real alternate screen, and builds a real CrosstermBackend
-/// on stdout; cannot be exercised under `cargo test` without taking over the
-/// test runner's terminal.
-#[cfg(not(test))]
-impl TerminalSetup for CrosstermSetup {
-    type B = ratatui::backend::CrosstermBackend<std::io::Stdout>;
-
-    fn enable(&mut self) -> anyhow::Result<()> {
-        enable_raw_mode().map_err(anyhow::Error::from)?;
-        stdout()
-            .execute(EnterAlternateScreen)
-            .map_err(anyhow::Error::from)?;
-        Ok(())
-    }
-
-    fn create_terminal(&mut self) -> anyhow::Result<Terminal<Self::B>> {
-        let backend = ratatui::backend::CrosstermBackend::new(stdout());
-        Terminal::with_options(
-            backend,
-            TerminalOptions {
-                viewport: self.viewport.clone(),
-            },
-        )
-        .map_err(anyhow::Error::from)
-    }
-
-    fn disable(&mut self) {
-        disable_raw_mode().ok();
-        stdout().execute(LeaveAlternateScreen).ok();
-    }
-
-    fn print_done(&self) {
-        println!("Dashboard closed.");
-    }
 }
 
 /// Terminal-independent core: runs the dashboard event loop after terminal
@@ -283,52 +214,25 @@ async fn init_dashboard(config: &Config) -> (Dashboard, leviath_runtime::EngineH
     (dashboard, engine)
 }
 
-/// [`CrosstermEventSource`] for real keyboard input. Separated from
-/// [`execute`] so the non-TTY logic (tick-rate setup, event source
-/// construction, and the loop invocation itself) can be exercised in tests
+/// Load config, build the dashboard + engine, and run the event loop against
+/// the injected [`TerminalSetup`] and [`EventSource`]. This is the whole
+/// `lev dash` command minus the two real-terminal doubles — so it is fully
+/// unit-testable (drive it with `TestSetup` + a canned `TestEventSource`), and
+/// the binary's `real_dashboard` supplies the real crossterm `CrosstermSetup`
+/// + [`CrosstermEventSource`].
 ///
-/// Deliberately not called from any test (see [`execute_core`] and
-/// [`run_dashboard_loop`] for the fully-covered, injectable logic this
-/// delegates to). A `#[cfg(test)]`-guarded "is a real TTY attached?" check
-/// was tried here and removed: it checked `is_terminal(&stdout())`, but
-/// crossterm's raw-mode/alternate-screen calls act on the process's
-/// controlling terminal (`/dev/tty`), not specifically fd 1 -- the two can
-/// disagree depending on how the test binary is invoked. When they disagree
-/// in the "looks safe but isn't" direction, calling this for real enables
-/// actual raw mode and the actual alternate screen, then blocks forever
-/// polling actual keyboard input (nothing ever sets `should_quit`), leaving
-/// the invoking terminal hijacked full-screen until it's killed and reset.
-/// That happened twice against a real editor terminal. Not worth a few
-/// lines of coverage on a thin pass-through.
-/// COVERAGE-EXCLUDED: the real `lev dashboard` entrypoint -- wires
-/// `Config::load()`, `init_dashboard()`, a real `CrosstermEventSource`, and a
-/// real `CrosstermSetup` into `execute_core`, which then enables real raw
-/// mode / the real alternate screen and blocks on real keyboard input via
-/// `crossterm::event::poll`/`read`. Every component it wires together is
-/// independently, exhaustively tested elsewhere (`init_dashboard`,
-/// `execute_core`, `run_dashboard_loop`, `CrosstermEventSource`,
-/// `CrosstermSetup` above); `execute` itself is a thin composition root with
-/// nothing left to unit test safely -- an `is_terminal()`-based "skip if this
-/// looks like a real TTY" guard was tried here twice and removed after it
-/// still let a test hang full-screen waiting on real keyboard input that
-/// nothing ever supplies (see the pre-existing comment retained below).
-#[cfg(not(test))]
-pub async fn execute(_args: DashboardArgs) -> anyhow::Result<()> {
+/// The real terminal wiring cannot live here: constructing `CrosstermSetup`
+/// enables actual raw mode / the alternate screen and blocks forever on real
+/// keyboard input (an `is_terminal()` guard was tried and removed after it
+/// still hung a real editor terminal full-screen). That irreducible sliver is
+/// the binary's job; everything it composes is exercised here.
+pub async fn execute_with<S: TerminalSetup, E: EventSource>(
+    setup: &mut S,
+    events: &mut E,
+) -> anyhow::Result<()> {
     let config = Config::load()?;
     let (mut dashboard, engine) = init_dashboard(&config).await;
-    let mut events = CrosstermEventSource::new();
-    execute_core(
-        &mut dashboard,
-        &engine,
-        &mut CrosstermSetup::new(),
-        &mut events,
-    )
-    .await
-}
-
-#[cfg(test)]
-pub async fn execute(_args: DashboardArgs) -> anyhow::Result<()> {
-    Ok(())
+    execute_core(&mut dashboard, &engine, setup, events).await
 }
 
 #[cfg(test)]
@@ -1100,6 +1004,40 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn execute_with_loads_config_inits_and_runs_the_loop() {
+        // Drives the whole `execute_with` composition root (Config::load +
+        // init_dashboard + execute_core) against the test terminal doubles,
+        // with both the config path and the dashboard log path isolated so
+        // nothing touches the developer's real ~/.leviath.
+        let _cfg = crate::config::isolate_config_path_for_test("execute_with_dashboard");
+        let _runs = crate::runstate::isolate_runs_dir_for_test("execute_with_dashboard");
+        let mut setup = TestSetup::new();
+        let mut events = TestEventSource::new(vec![key(KeyCode::Esc)]);
+        let result = execute_with(&mut setup, &mut events).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn execute_with_propagates_config_load_error() {
+        // Covers the `Config::load()?` error arm of `execute_with`: point the
+        // isolated config path at a malformed file so the load fails and the
+        // `?` propagates before the dashboard/engine are ever built.
+        // `isolate_config_path_for_test` creates the fake config dir, so the
+        // path's parent already exists — write the malformed file directly.
+        let _cfg =
+            crate::config::isolate_config_path_for_test("execute_with_dashboard_bad_config");
+        std::fs::write(
+            crate::config::Config::config_path(),
+            b"this is not valid toml ][ = =",
+        )
+        .unwrap();
+        let mut setup = TestSetup::new();
+        let mut events = TestEventSource::new(vec![]);
+        let result = execute_with(&mut setup, &mut events).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
     async fn execute_core_enable_error_propagates() {
         let _guard =
             crate::runstate::isolate_runs_dir_for_test("execute_core_enable_error_propagates");
@@ -1145,30 +1083,9 @@ mod tests {
         assert!(result.is_err());
     }
 
-    // `execute()`'s real (`#[cfg(not(test))]`) body is deliberately not
-    // called from any test -- see the doc comment on `execute` for why: in
-    // short, an `is_terminal()`-based "skip if this looks like a real TTY"
-    // guard was tried and removed after it twice failed to prevent
-    // `execute()` from enabling real raw mode / the real alternate screen
-    // and then hanging full-screen, waiting on keyboard input that no
-    // automated test run supplies. `execute_core` and `run_dashboard_loop`
-    // (exercised extensively above via `TestBackend` and injected
-    // `TerminalSetup`/`EventSource` implementations) cover all of its actual
-    // logic; the real `execute` is just a thin wire-up of real components
-    // with nothing left to unit test safely, so under `#[cfg(test)]` it's
-    // replaced by a bare `Ok(())` composition-root stub (unlike
-    // `start_message_reader`/`ForegroundInteractionBackend::ask` in
-    // `foreground.rs`, whose test twins still delegate into their tested
-    // generic cores -- `execute` IS the top of this call graph, so there's
-    // no "tested core with a fake factory" left to delegate to).
-    //
-    // The `#[cfg(test)]` stub itself (the bare `Ok(())` body above) is safe
-    // to call directly, though -- it touches no I/O at all -- so the test
-    // below closes out that stub's own coverage rather than leaving it as an
-    // uncalled function.
-    #[tokio::test]
-    async fn execute_test_stub_returns_ok() {
-        let result = execute(DashboardArgs {}).await;
-        assert!(result.is_ok());
-    }
+    // The real `lev dash` wiring (the crossterm `CrosstermSetup` + the real
+    // `CrosstermEventSource` + the `Config::load`/`init_dashboard`/`execute_core`
+    // composition) now lives in the binary's `real_dashboard`; the fully-tested
+    // seam it composes, `execute_with`, is covered by
+    // `execute_with_loads_config_inits_and_runs_the_loop` above.
 }
