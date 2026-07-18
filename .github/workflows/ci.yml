@@ -82,19 +82,15 @@ jobs:
       - name: Check formatting
         run: cargo fmt --all -- --check
 
-  # Coverage runs on all three OSes and enforces a hard 100%. Source-based
-  # (`-C instrument-coverage`) region counters used to differ per OS because
-  # llvm-cov's per-file summary sums them *per monomorphization*, and which
-  # instantiations get credited is codegen/target-dependent (Windows/MSVC in
-  # particular under-credited generics that Linux/macOS covered). That is
-  # exactly why coverage used to be measured on one canonical OS. It no longer
-  # applies: `xtask coverage` now measures regions **merged by source
-  # position** (a region counts as covered if any monomorphization covers it —
-  # see xtask/src/coverage.rs), which removes the per-OS/per-instantiation
-  # jitter, so each OS can enforce 100% of the code it actually compiles.
-  # OS-specific code is covered by tests that run on that OS (e.g. leviath-sys's
-  # `unix` vs `fallback` submodules); code `#[cfg]`'d out of a target is not
-  # compiled there and so never counts against it.
+  # Coverage runs on all three OSes and enforces a hard 100% on regions, lines,
+  # and functions, reading llvm-cov's own per-file summary directly (see
+  # xtask/src/coverage.rs). When llvm-cov summarizes a generic it groups the
+  # monomorphizations, so a source span covered by any instantiation counts as
+  # covered. OS-specific code is covered by tests that run on that OS (e.g.
+  # leviath-sys's `unix` vs `fallback` submodules); code `#[cfg]`'d out of a
+  # target is not compiled there and so never counts against it. If a region is
+  # reported missed on only one OS, that's a real untested instantiation on that
+  # target — close it with a test on that OS, don't relax the gate.
   #
   # For speed, coverage is fanned out: this `coverage` job computes ONE
   # package's coverage per runner (os × package matrix), each writing its own
@@ -135,9 +131,9 @@ jobs:
         uses: taiki-e/install-action@v2
         with:
           tool: cargo-llvm-cov
-      # Computes this one package's regions/lines/functions merged-by-source-
-      # position (see xtask/src/coverage.rs) and writes coverage/per-package/
-      # <pkg>.json plus a browsable coverage/html/<pkg> report. Does NOT run the
+      # Computes this one package's regions/lines/functions from llvm-cov's own
+      # per-file summary (see xtask/src/coverage.rs) and writes coverage/per-
+      # package/<pkg>.json plus a browsable coverage/html/<pkg> report. Does NOT run the
       # 100% gate — that's coverage-gate's job, once all packages are collected.
       - name: Compute coverage for ${{ matrix.package }}
         run: cargo xtask coverage --package ${{ matrix.package }}

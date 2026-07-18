@@ -42,24 +42,14 @@
 //! for why its numbers aren't the authoritative ones `run_report`'s 100% gate
 //! uses.
 //!
-//! **Region coverage is measured merged-by-source-position, not summed
-//! per-monomorphization.** llvm-cov's per-file `summary.regions` *sums* regions
-//! across every monomorphization of a generic function: a generic fn with N
-//! instantiations contributes its regions N times, and a source position that
-//! one instantiation exercises but another doesn't is counted as missed. That
-//! per-instantiation jitter (its size and even *which* files it lands on vary
-//! by OS/toolchain — the same `getInstantiationGroups` family of quirks behind
-//! the `--branch` crash and the `--workspace` inaccuracy above) is noise this
-//! project eliminates rather than tolerating: we read
-//! llvm-cov's per-function `regions` arrays directly and key each **code**
-//! region (`Kind == 0`) by `(filename, line/col start, line/col end)`, counting
-//! a position as covered if *any* instantiation executed it (see
-//! [`merge_regions_by_position`]). For a file with no multi-instantiation
-//! generics this yields the identical count to `summary.regions`; for
-//! multi-instantiation generics it is strictly lower (the dedup) and never
-//! spuriously counts a covered source position as missed. `lines` and
-//! `functions` are already stable across instantiations and are used as
-//! llvm-cov reports them.
+//! **Region coverage uses llvm-cov's own per-file `summary.regions`.** The gate
+//! reads each per-package run's per-file summary exactly as llvm-cov reports it
+//! — regions, lines, and functions alike — and fails any file below 100% on any
+//! metric. When llvm-cov summarizes a generic function it groups the
+//! monomorphizations, so a source position covered by any instantiation counts
+//! as covered. A region reported missed on one OS therefore denotes a real
+//! uncovered instantiation path *on that OS* — closed with a test that
+//! exercises that instantiation, not by re-counting.
 //!
 //! **The gate enforces a hard 100%.** With region jitter removed, any file
 //! below 100% on regions/lines/functions is a real, closeable gap and fails
@@ -289,9 +279,10 @@ fn aggregate_per_package(dir: &str) -> Result<CovData> {
 /// Per-package `--lib` deliberately mirrors how [`run_coverage`]'s
 /// authoritative gate measures, so the browsable report agrees with the 100%
 /// gate. A single `cargo llvm-cov --workspace --html` pass (the previous
-/// approach) disagreed on two counts: (a) it sums regions per-monomorphization
-/// across the whole workspace, inflating "missed" counts on generic-heavy
-/// files; and (b) `--workspace` instruments the `[[bin]]` targets, whose
+/// approach) disagreed on two counts: (a) a whole-workspace merge hits the
+/// `getInstantiationGroups` inaccuracy documented at the top of this file,
+/// inflating "missed" counts on generic-heavy files; and (b) `--workspace`
+/// instruments the `[[bin]]` targets, whose
 /// `#[cfg(not(test))]` code is compiled but never executed under `cargo test`,
 /// so their real bodies (e.g. `dispatch.rs`'s process-spawning wrappers)
 /// rendered as uncovered red even though the gate correctly never counts them.
@@ -417,11 +408,12 @@ fn report_data(data: &CovData, github_output: Option<&str>) -> Result<()> {
 
     anyhow::bail!(
         "[coverage] Coverage must be 100% on regions, lines, and functions, but \
-         {} file(s) have gaps (listed above). Region coverage is measured \
-         merged-by-source-position, so per-monomorphization jitter is already \
-         removed -- every gap above is a real, closeable one. Cover it with a \
-         test; if a line is genuinely unreachable real-IO, split it behind a \
-         `#[cfg(not(test))]`/`#[cfg(test)]` seam. Investigate exactly which \
+         {} file(s) have gaps (listed above). Each gap is a real, closeable one: \
+         cover it with a test. A region missed on only one OS is an untested \
+         generic instantiation on that target — exercise that instantiation. If \
+         a line is genuinely un-unit-testable real-IO, move it into the \
+         coverage-excluded `lev` binary (main.rs) or behind an injected seam — \
+         never a `#[cfg(not(test))]` (which is banned). Investigate exactly which \
          lines/regions are uncovered with `cargo llvm-cov show` or the browsable \
          `coverage/html/index.html` report.",
         gaps.len()
@@ -519,10 +511,10 @@ pub fn run_coverage(runner: &dyn Runner, output_path: &str) -> Result<CovData> {
 /// one invocation, but only 2 missed when measured via `--lib` alone. A clean
 /// `target/llvm-cov-target` between every scoped run is belt-and-suspenders
 /// against cross-run contamination of the profraw/profdata llvm-cov
-/// accumulates there. Per-target region counts are already merged-by-source-
-/// position by [`run_single_target`]; [`merge_target_reports`] then recombines
-/// the separately-scoped results (`max`-covered per file). Per-target JSONs are
-/// written under `scratch_dir`.
+/// accumulates there. Each scoped run's per-file counts come straight from
+/// llvm-cov's own summary via [`run_single_target`]; [`merge_target_reports`]
+/// then recombines the separately-scoped results (`max`-covered per file).
+/// Per-target JSONs are written under `scratch_dir`.
 fn coverage_one_package(
     runner: &dyn Runner,
     meta: &serde_json::Value,
@@ -620,117 +612,8 @@ fn run_single_target(
         );
     }
 
-    let mut report = parse_json(output_path)
-        .with_context(|| format!("parsing coverage JSON for {pkg} ({})", scope.join(" ")))?;
-
-    // Re-parse the same raw JSON to recompute each file's region metric
-    // merged-by-source-position (deduplicating llvm-cov's per-monomorphization
-    // double-counting -- see this file's top doc comment). `lines`/`functions`
-    // are left as llvm-cov reports them.
-    let raw = std::fs::read_to_string(output_path)
-        .with_context(|| format!("re-reading coverage JSON for {pkg} ({})", scope.join(" ")))?;
-    let raw: serde_json::Value = serde_json::from_str(&raw)
-        .with_context(|| format!("re-parsing coverage JSON for {pkg} ({})", scope.join(" ")))?;
-    apply_merged_regions(&mut report, &raw);
-
-    Ok(report)
-}
-
-/// Overwrite each file's `summary.regions` in `report` with the
-/// merged-by-source-position count/covered derived from the raw JSON's
-/// per-function `regions` arrays, recomputing the percentage.
-///
-/// Only files present in the merged map are updated; `lines` and `functions`
-/// are never touched. `report`'s own per-target `totals` are intentionally not
-/// recomputed here — `merge_target_reports` rebuilds package totals from the
-/// (now-corrected) file summaries, and per-target totals are never read before
-/// that merge.
-fn apply_merged_regions(report: &mut LlvmCovReport, raw: &serde_json::Value) {
-    let Some(data_arr) = raw["data"].as_array() else {
-        return;
-    };
-    for (i, data) in data_arr.iter().enumerate() {
-        let per_file = merge_regions_by_position(&data["functions"]);
-        let Some(cov_data) = report.data.get_mut(i) else {
-            continue;
-        };
-        for file in &mut cov_data.files {
-            if let Some(&(count, covered)) = per_file.get(&file.filename) {
-                file.summary.regions.count = count;
-                file.summary.regions.covered = covered;
-                file.summary.regions.recompute_percent();
-            }
-        }
-    }
-}
-
-/// Compute per-file region coverage merged by source position across ALL
-/// function instantiations, keyed on `(filename, LineStart, ColStart, LineEnd,
-/// ColEnd)`.
-///
-/// `functions` is llvm-cov's per-`data`-element `functions` array. Each element
-/// has `filenames: [String]` and `regions: [[LineStart, ColStart, LineEnd,
-/// ColEnd, ExecutionCount, FileID, ExpandedFileID, Kind]]`. Only code regions
-/// (`Kind == 0`) are counted; a position is "covered" if ANY instantiation
-/// executed it (`ExecutionCount > 0`). Returns a map from filename to
-/// `(distinct-region-count, covered-count)`.
-fn merge_regions_by_position(
-    functions: &serde_json::Value,
-) -> std::collections::HashMap<String, (u64, u64)> {
-    // (filename, l_start, c_start, l_end, c_end) -> covered by any instantiation
-    let mut positions: std::collections::HashMap<(String, u64, u64, u64, u64), bool> =
-        std::collections::HashMap::new();
-
-    let Some(funcs) = functions.as_array() else {
-        return std::collections::HashMap::new();
-    };
-
-    for func in funcs {
-        let (Some(filenames), Some(regions)) =
-            (func["filenames"].as_array(), func["regions"].as_array())
-        else {
-            continue;
-        };
-        for region in regions {
-            let Some(arr) = region.as_array() else {
-                continue;
-            };
-            // [LineStart, ColStart, LineEnd, ColEnd, ExecutionCount, FileID,
-            //  ExpandedFileID, Kind]
-            if arr.len() < 8 {
-                continue;
-            }
-            // Code regions only (Kind == 0); skip expansion/gap/skipped kinds.
-            if arr[7].as_u64() != Some(0) {
-                continue;
-            }
-            let file_id = arr[5].as_u64().unwrap_or(0) as usize;
-            let Some(filename) = filenames.get(file_id).and_then(|v| v.as_str()) else {
-                continue;
-            };
-            let key = (
-                filename.to_owned(),
-                arr[0].as_u64().unwrap_or(0),
-                arr[1].as_u64().unwrap_or(0),
-                arr[2].as_u64().unwrap_or(0),
-                arr[3].as_u64().unwrap_or(0),
-            );
-            let executed = arr[4].as_u64().unwrap_or(0) > 0;
-            let covered = positions.entry(key).or_insert(false);
-            *covered |= executed;
-        }
-    }
-
-    let mut per_file: std::collections::HashMap<String, (u64, u64)> =
-        std::collections::HashMap::new();
-    for ((filename, ..), covered) in positions {
-        let entry = per_file.entry(filename).or_insert((0, 0));
-        entry.0 += 1;
-        if covered {
-            entry.1 += 1;
-        }
-    }
-    per_file
+    parse_json(output_path)
+        .with_context(|| format!("parsing coverage JSON for {pkg} ({})", scope.join(" ")))
 }
 
 /// Parse workspace package names from `cargo metadata` JSON.
@@ -1497,146 +1380,6 @@ mod tests {
         assert_eq!(merged.files.len(), 2);
         assert_eq!(merged.totals.regions.count, 8);
         assert_eq!(merged.totals.regions.covered, 8);
-    }
-
-    // ── merge_regions_by_position ────────────────────────────────────────────
-
-    #[test]
-    fn merge_regions_by_position_dedups_across_instantiations() {
-        // Two "functions" = two instantiations of the same generic over the
-        // same source spans:
-        //   span A (1,1)-(1,10): count 0 in inst-1, count 3 in inst-2 → COVERED
-        //   span B (5,1)-(5,10): count 0 in both instantiations       → UNCOVERED
-        //   span C (8,1)-(8,10): Kind != 0 (an expansion region)      → IGNORED
-        // Region tuple: [LineStart, ColStart, LineEnd, ColEnd,
-        //                ExecutionCount, FileID, ExpandedFileID, Kind]
-        let functions = serde_json::json!([
-            {
-                "filenames": ["/src/a.rs"],
-                "regions": [
-                    [1, 1, 1, 10, 0, 0, 0, 0],
-                    [5, 1, 5, 10, 0, 0, 0, 0],
-                    [8, 1, 8, 10, 7, 0, 0, 2]
-                ]
-            },
-            {
-                "filenames": ["/src/a.rs"],
-                "regions": [
-                    [1, 1, 1, 10, 3, 0, 0, 0],
-                    [5, 1, 5, 10, 0, 0, 0, 0],
-                    [8, 1, 8, 10, 9, 0, 0, 2]
-                ]
-            }
-        ]);
-        let per_file = merge_regions_by_position(&functions);
-        // Only spans A and B are code regions (Kind == 0); C is ignored.
-        // A is covered (any instantiation executed it), B is not.
-        assert_eq!(per_file.get("/src/a.rs"), Some(&(2, 1)));
-    }
-
-    #[test]
-    fn merge_regions_by_position_non_array_is_empty() {
-        // A missing/`null` `functions` value yields an empty map.
-        assert!(merge_regions_by_position(&serde_json::Value::Null).is_empty());
-    }
-
-    #[test]
-    fn merge_regions_by_position_skips_malformed_entries() {
-        // Functions missing `filenames`/`regions`, non-array regions, short
-        // region tuples, and out-of-range FileIDs are all skipped without
-        // panicking; the one well-formed covered region is counted.
-        let functions = serde_json::json!([
-            { "filenames": ["/src/a.rs"] },                       // no regions
-            { "regions": [[1, 1, 1, 2, 1, 0, 0, 0]] },            // no filenames
-            { "filenames": ["/src/a.rs"], "regions": ["nope"] },  // region not an array
-            { "filenames": ["/src/a.rs"], "regions": [[1, 1, 1]] }, // too short
-            { "filenames": ["/src/a.rs"], "regions": [[9, 1, 9, 2, 1, 5, 0, 0]] }, // bad FileID
-            { "filenames": ["/src/a.rs"], "regions": [[2, 1, 2, 5, 4, 0, 0, 0]] }  // valid, covered
-        ]);
-        let per_file = merge_regions_by_position(&functions);
-        assert_eq!(per_file.get("/src/a.rs"), Some(&(1, 1)));
-    }
-
-    #[test]
-    fn apply_merged_regions_overwrites_region_metric() {
-        // The parsed report's summed regions (10/6) are replaced by the
-        // merged-by-position count derived from the raw functions array
-        // (1 distinct code region, covered), and lines/functions are left
-        // untouched.
-        let mut report = LlvmCovReport {
-            data: vec![CovData {
-                files: vec![FileCov {
-                    filename: "/src/a.rs".to_owned(),
-                    summary: Metrics {
-                        regions: metric(10, 6),
-                        lines: metric(20, 18),
-                        functions: metric(5, 5),
-                    },
-                }],
-                totals: partial_metrics(10, 6),
-            }],
-        };
-        let raw = serde_json::json!({
-            "data": [{
-                "functions": [{
-                    "filenames": ["/src/a.rs"],
-                    "regions": [[1, 1, 1, 10, 2, 0, 0, 0]]
-                }]
-            }]
-        });
-        apply_merged_regions(&mut report, &raw);
-        let regions = &report.data[0].files[0].summary.regions;
-        assert_eq!((regions.count, regions.covered), (1, 1));
-        assert!((regions.percent - 100.0).abs() < f64::EPSILON);
-        // lines/functions untouched.
-        assert_eq!(report.data[0].files[0].summary.lines.count, 20);
-        assert_eq!(report.data[0].files[0].summary.functions.count, 5);
-    }
-
-    #[test]
-    fn apply_merged_regions_no_data_array_is_noop() {
-        // Raw JSON without a `data` array leaves the report unchanged.
-        let mut report = LlvmCovReport {
-            data: vec![CovData {
-                files: vec![FileCov {
-                    filename: "/src/a.rs".to_owned(),
-                    summary: partial_metrics(10, 6),
-                }],
-                totals: partial_metrics(10, 6),
-            }],
-        };
-        apply_merged_regions(&mut report, &serde_json::json!({}));
-        assert_eq!(report.data[0].files[0].summary.regions.count, 10);
-    }
-
-    #[test]
-    fn apply_merged_regions_extra_data_element_is_ignored() {
-        // A raw `data` array longer than the report's `data` (the trailing
-        // element has no matching CovData) exercises the `get_mut` None arm,
-        // and a file absent from the merged map keeps its original regions.
-        let mut report = LlvmCovReport {
-            data: vec![CovData {
-                files: vec![FileCov {
-                    filename: "/src/present.rs".to_owned(),
-                    summary: partial_metrics(10, 6),
-                }],
-                totals: partial_metrics(10, 6),
-            }],
-        };
-        let raw = serde_json::json!({
-            "data": [
-                {
-                    "functions": [{
-                        "filenames": ["/src/other.rs"],
-                        "regions": [[1, 1, 1, 10, 1, 0, 0, 0]]
-                    }]
-                },
-                { "functions": [] }
-            ]
-        });
-        apply_merged_regions(&mut report, &raw);
-        // present.rs isn't in the merged map → regions unchanged.
-        assert_eq!(report.data[0].files[0].summary.regions.count, 10);
     }
 
     // ── gap_files ────────────────────────────────────────────────────────────
