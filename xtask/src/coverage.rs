@@ -599,6 +599,17 @@ fn run_single_target(
 ) -> Result<LlvmCovReport> {
     let mut args = vec!["llvm-cov", "--all-features", "--package", pkg];
     args.extend_from_slice(scope);
+    // Exclude binary entry points (`src/main.rs`) from measurement. A bin is
+    // the composition root: it wires real terminal/stdin/network/subprocess
+    // I/O — which no unit test may trigger — into the library's tested cores.
+    // The `--test` scope would otherwise capture the spawned, instrumented
+    // `lev` binary's profile (from `tests/cli_dispatch.rs`), forcing that
+    // un-unit-testable wiring to be "covered". Keeping bins unmeasured is what
+    // lets library code stay 100%-covered with zero `#[cfg(not(test))]`
+    // escape hatches (see `crates/leviath-cli/src/main.rs`). `/main\.rs$`
+    // requires a path separator so it matches only real bin roots, never a
+    // file like `domain.rs`.
+    args.extend_from_slice(&["--ignore-filename-regex", r"/main\.rs$"]);
     args.extend_from_slice(&["--json", "--output-path", output_path]);
 
     if !runner.cargo(&args)? {
