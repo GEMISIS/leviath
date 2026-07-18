@@ -107,15 +107,14 @@ pub trait TerminalSetup {
 }
 
 /// Terminal-independent core: runs the dashboard event loop after terminal
-/// setup. Extracted from [`execute`] so it can be driven in tests via
-/// [`TerminalSetup`] + [`EventSource`] without a real TTY.
+/// setup, driven in tests via [`TerminalSetup`] + [`EventSource`] without a real
+/// TTY.
 ///
-/// Generic over `S: TerminalSetup` and `E: EventSource`. In the measured test
-/// build the only `TerminalSetup` in scope is the test-double [`TestSetup`]
-/// (the real [`CrosstermSetup`] is `#[cfg(not(test))]`), so every
-/// monomorphization of this function -- and of the [`run_dashboard_loop`] it
-/// calls -- runs against a `ratatui::backend::TestBackend` and canned events,
-/// keeping the whole function coverable under `cargo test`.
+/// Generic over `S: TerminalSetup` and `E: EventSource`. The only
+/// `TerminalSetup` in the library is the test double [`TestSetup`] (the real
+/// `CrosstermSetup` lives in the binary), so every monomorphization here — and
+/// in [`run_dashboard_loop`] — runs against a `ratatui::backend::TestBackend`
+/// with canned events, keeping the whole function covered.
 async fn execute_core<S: TerminalSetup, E: EventSource>(
     dashboard: &mut Dashboard,
     engine: &leviath_runtime::EngineHandle,
@@ -951,11 +950,9 @@ mod tests {
 
     // ─── CrosstermEventSource::new constructor ──────────────────────────────
     //
-    // The constructor only ever *stores* fn pointers (crossterm's real
-    // `poll`/`read`) -- taking a function's address never invokes it, so
-    // merely constructing the type touches no real terminal state. The
-    // production `CrosstermSetup` (real raw-mode/alternate-screen/backend
-    // wiring) is `#[cfg(not(test))]`, hence absent from this build entirely.
+    // The constructor only *stores* fn pointers (crossterm's real `poll`/`read`);
+    // taking a function's address never invokes it, so constructing the type
+    // touches no real terminal state.
 
     #[test]
     fn crossterm_event_source_new_constructs_without_touching_real_events() {
@@ -988,11 +985,10 @@ mod tests {
     // ─── execute_core / TestSetup ───────────────────────────────────────────
     //
     // `execute_core` and the `run_dashboard_loop` it calls are generic over
-    // `TerminalSetup`/`EventSource`. In this (test) build the only
-    // `TerminalSetup` in scope is the [`TestSetup`] double (the real
-    // `CrosstermSetup` is `#[cfg(not(test))]`), so these tests drive every
-    // arm of `execute_core` against a `TestBackend` -- deterministically, and
-    // without ever touching a real terminal.
+    // `TerminalSetup`/`EventSource`. The only `TerminalSetup` in the library is
+    // the [`TestSetup`] double (the real `CrosstermSetup` lives in the binary),
+    // so these tests drive every arm of `execute_core` against a `TestBackend`
+    // deterministically, without touching a real terminal.
 
     #[tokio::test]
     async fn execute_core_happy_path_quits_on_esc() {
