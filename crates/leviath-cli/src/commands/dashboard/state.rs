@@ -60,19 +60,34 @@ pub(crate) struct Dashboard {
     pub(super) list_search_query: String,
     /// Sorted + filtered indices into self.agents (drives both display and selection).
     pub(super) display_indices: Vec<usize>,
+    /// Filesystem path this dashboard appends its activity log to. Production
+    /// construction resolves the real [`runstate::dashboard_log_path`]; tests
+    /// (`make_test_dashboard`) inject a temp path so no test ever writes to the
+    /// user's real `~/.leviath/dashboard.log`.
+    pub(super) log_path: std::path::PathBuf,
 }
 
 impl Dashboard {
     pub(super) fn new(cmd_tx: mpsc::UnboundedSender<EngineCommand>) -> Self {
+        Self::new_with_log_path(cmd_tx, runstate::dashboard_log_path())
+    }
+
+    /// Core of [`new`](Self::new) with the activity-log path injected, so tests
+    /// can point it at a temp dir instead of the real `~/.leviath/dashboard.log`.
+    pub(super) fn new_with_log_path(
+        cmd_tx: mpsc::UnboundedSender<EngineCommand>,
+        log_path: std::path::PathBuf,
+    ) -> Self {
         let (event_tx, event_rx) = create_event_channel();
         let mut table_state = TableState::default();
         table_state.select(Some(0));
 
         // Seed the in-memory log buffer from the tail of the persistent log so
         // the panel shows recent history immediately on launch (not a blank panel).
-        let log = Self::load_log_seed();
+        let log = Self::load_log_seed(&log_path);
 
         Self {
+            log_path,
             agents: Vec::new(),
             selected: 0,
             log,
@@ -105,15 +120,14 @@ impl Dashboard {
 
     /// Read the last 32 KB of dashboard.log and convert each line into a
     /// `LogEntry` for the initial in-memory buffer.
-    fn load_log_seed() -> Vec<LogEntry> {
-        let tail = runstate::tail_file(&runstate::dashboard_log_path(), 32_768);
+    fn load_log_seed(log_path: &std::path::Path) -> Vec<LogEntry> {
+        let tail = runstate::tail_file(log_path, 32_768);
         Self::parse_log_lines(&tail)
     }
 
     /// Core parsing logic of [`load_log_seed`], split out so it can be
-    /// exercised in tests against controlled input -- `dashboard_log_path()`
-    /// always points at the real, shared `~/.leviath/dashboard.log`, with no
-    /// injectable override, so tests can't safely control its content.
+    /// exercised in tests against controlled input independently of the log
+    /// path (which `load_log_seed` now takes as a parameter).
     fn parse_log_lines(tail: &str) -> Vec<LogEntry> {
         let mut entries = Vec::new();
         for line in tail.lines() {
@@ -220,8 +234,9 @@ impl Dashboard {
         if self.log.len() > 200 {
             self.log.remove(0);
         }
-        // Persist to the append-only dashboard log.
-        runstate::append_dashboard_log(&msg);
+        // Persist to the append-only dashboard log (path injected at
+        // construction, so tests never touch the real ~/.leviath/dashboard.log).
+        runstate::append_dashboard_log_to(&self.log_path, &msg);
     }
 
     #[allow(dead_code)]
@@ -1604,11 +1619,18 @@ mod tests {
 
     #[test]
     fn load_log_seed_returns_vec() {
-        // We cannot control the on-disk file in tests, but we can confirm
-        // the method returns a Vec (even if empty) without panicking.
-        let entries = Dashboard::load_log_seed();
-        // Just assert it's a valid Vec
-        let _ = entries.len();
+        // Missing file → empty seed, no panic.
+        let missing = std::env::temp_dir().join("leviath-nonexistent-dashboard-seed.log");
+        let _ = std::fs::remove_file(&missing);
+        assert!(Dashboard::load_log_seed(&missing).is_empty());
+
+        // Existing file → its lines are parsed into the seed buffer.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("dashboard.log");
+        std::fs::write(&path, "2026-01-02 03:04:05 seeded message\n").unwrap();
+        let entries = Dashboard::load_log_seed(&path);
+        assert_eq!(entries.len(), 1);
+        assert!(entries[0].message.contains("seeded message"));
     }
 
     // ─── parse_log_lines: the pure parsing core of load_log_seed ──────────

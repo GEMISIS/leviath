@@ -9,8 +9,13 @@
 use crate::commands::dashboard::state::Dashboard;
 use tokio::sync::mpsc;
 
-/// Build a `Dashboard` wired to a throwaway command channel.
+/// Build a `Dashboard` wired to a throwaway command channel, with its activity
+/// log pointed at a shared temp file so `add_log` never appends to the user's
+/// real `~/.leviath/dashboard.log`.
 pub(crate) fn make_test_dashboard() -> Dashboard {
     let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
-    Dashboard::new(cmd_tx)
+    let log_path = std::env::temp_dir()
+        .join("leviath-test-dashboard")
+        .join("dashboard.log");
+    Dashboard::new_with_log_path(cmd_tx, log_path)
 }
