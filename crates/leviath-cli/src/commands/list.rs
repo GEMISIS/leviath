@@ -515,10 +515,7 @@ system = { kind = "pinned", max_tokens = 1000 }
     // sequence isn't reproducible: NTFS/Win32 refuse to remove a directory
     // that's a live process's current working directory (a sharing
     // violation), so `remove_dir_all` itself fails there instead of
-    // succeeding -- confirmed via real Windows CI (this test previously
-    // `.unwrap()`ed that removal unconditionally and panicked on
-    // `windows-latest`, which also poisoned the shared `CWD_LOCK` and
-    // cascaded into unrelated `manifest.rs` test failures). Unix-only.
+    // succeeding -- confirmed via real Windows CI. Unix-only.
     #[cfg(unix)]
     #[tokio::test]
     async fn execute_falls_back_to_default_cwd_when_current_dir_is_gone() {

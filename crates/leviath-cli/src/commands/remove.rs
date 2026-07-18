@@ -139,8 +139,7 @@ mod tests {
         install_test_agent(&installer, "err-agent");
 
         // An injected uninstall that fails exercises the `uninstall(name)?`
-        // error arm deterministically on every platform. The prior version
-        // dropped write permission on the parent dir, which only fails on Unix.
+        // error arm deterministically on every platform.
         let result = remove_agent_with(&installer, "err-agent", &|_| {
             Err(anyhow::anyhow!("simulated uninstall failure"))
         });

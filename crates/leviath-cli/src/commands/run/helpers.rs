@@ -803,11 +803,12 @@ mod tests {
 
     // ─── generate_title: fenced-code-block regression ───────────────────
     //
-    // When the model wraps its answer in a markdown fence, taking only the
-    // first line of the response used to grab the fence/language-tag line
-    // itself (e.g. "```python") instead of the actual title on the next
-    // line — confirmed via real run-state data showing title: "python" for
-    // a task about downloading webpages, instead of a real title.
+    // When the model wraps its answer in a markdown fence, naively taking the
+    // first line of the response would grab the fence/language-tag line itself
+    // (e.g. "```python") instead of the actual title on the next line —
+    // confirmed via real run-state data showing title: "python" for a task
+    // about downloading webpages, instead of a real title. `generate_title`
+    // unwraps the fence.
 
     #[tokio::test]
     async fn generate_title_unwraps_fenced_code_block_with_language_tag() {

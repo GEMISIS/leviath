@@ -83,7 +83,7 @@ pub(super) async fn create_blueprint(
 ) -> Result<Json<BlueprintInfo>, (StatusCode, Json<ErrorResponse>)> {
     // Validate manifest first, keeping the parsed Blueprint so the response
     // can be built from it directly below instead of re-reading the file we
-    // just wrote (which used to make the re-read's error arm a TOCTOU-only,
+    // just wrote (re-reading would make the re-read's error arm a TOCTOU-only,
     // untestable dead branch).
     let bp = parse_manifest(&body.manifest).map_err(|e| {
         (

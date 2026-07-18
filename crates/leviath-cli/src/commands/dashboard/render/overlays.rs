@@ -470,9 +470,10 @@ mod tests {
 
     // ─── Regression: help overlay must scope to the current page ──────────
     //
-    // draw_help_overlay() used to always render both the "Main list" and
-    // "Detail view"/"Input" sections regardless of self.detail_view, so the
-    // user always saw keybindings for a page they weren't even on.
+    // draw_help_overlay() must scope its sections to `self.detail_view`:
+    // rendering both the "Main list" and "Detail view"/"Input" sections
+    // regardless of page would show the user keybindings for a page they
+    // aren't on.
 
     fn rendered_buffer(terminal: &Terminal<TestBackend>) -> String {
         terminal

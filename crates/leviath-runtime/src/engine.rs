@@ -1215,15 +1215,14 @@ impl AgentEngine {
     ///
     /// This split exists purely for coverage measurement, not behavior.
     /// `cargo-llvm-cov` instruments each monomorphization of a generic
-    /// function separately; this function used to contain the whole loop
-    /// body directly, and with ~15-20 call sites (each passing a distinct
-    /// closure type) that meant ~15-20 separate coverage-mapping instances
-    /// of the same branches. Even though every branch was covered by the
-    /// union of all tests, llvm-cov would occasionally report a region as
-    /// uncovered for one instantiation, undercounting real coverage. Moving
-    /// the logic into one non-generic method compiles it (and instruments
-    /// it) exactly once, regardless of how many distinct closure types call
-    /// through this wrapper.
+    /// function separately: if this function contained the whole loop body
+    /// directly, its ~15-20 call sites (each passing a distinct closure type)
+    /// would produce ~15-20 separate coverage-mapping instances of the same
+    /// branches. Even when every branch is covered by the union of all tests,
+    /// llvm-cov can report a region as uncovered for one instantiation,
+    /// undercounting real coverage. Keeping the logic in one non-generic method
+    /// compiles it (and instruments it) exactly once, regardless of how many
+    /// distinct closure types call through this wrapper.
     #[allow(clippy::too_many_arguments)]
     pub async fn run_inference_loop_filtered<'p, F, Fut>(
         &mut self,
@@ -1672,7 +1671,7 @@ mod tests {
         );
 
         // Sweep every char budget from 0 through the full length: exercises the
-        // mid-multibyte-char cut points that used to panic.
+        // mid-multibyte-char cut points, which must not panic.
         for max_chars in 0..=text.chars().count() + 5 {
             let out = truncate_on_char_boundary(&text, max_chars);
             // `out` is a valid `String` by construction; assert the invariants.

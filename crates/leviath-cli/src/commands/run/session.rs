@@ -1300,31 +1300,28 @@ mod tests {
     // executable via `Command::new(path)` on Windows, exit instantly, and
     // never touch a real interactive editor.
     //
-    // The "editor ended with no exit code" case (killed by a Unix signal) was
-    // previously believed to be a permanent Windows gap: on Windows
-    // `ExitStatus::code()` is always `Some(_)` (even via
-    // `ExitStatusExt::from_raw`), so no real or fabricated status reaches the
-    // "try next candidate" arm there. That was solved by narrowing the injected
-    // `run` seam's return type from `ExitStatus` to `EditorRunOutcome`: the
-    // status-to-outcome decision now lives in the pure `classify_editor_exit`
+    // The "editor ended with no exit code" case (killed by a Unix signal) is a
+    // Windows testability challenge: on Windows `ExitStatus::code()` is always
+    // `Some(_)` (even via `ExitStatusExt::from_raw`), so no real or fabricated
+    // status reaches the "try next candidate" arm there. The injected `run`
+    // seam returns `EditorRunOutcome` rather than `ExitStatus`: the
+    // status-to-outcome decision lives in the pure `classify_editor_exit`
     // (unit-tested for the code-less case on every platform), and the
     // "outcome == Aborted, try next" arm is driven directly via injection in
     // `launch_editor_with_aborted_candidate_falls_through_to_next` -- both
     // cross-platform, no code-less `ExitStatus` required.
     //
-    // Three other Unix tests that rely on PATH-starvation --
+    // Three other Unix tests rely on PATH-starvation --
     // `launch_editor_empty_visual_and_editor_are_skipped`,
     // `launch_editor_no_editor_found_when_path_has_no_candidates`, and
-    // `resolve_task_with_editor_path_propagates_launch_editor_error` -- were
-    // previously believed to have no safe Windows equivalent either, on the
-    // theory that `Command::new("notepad")` resolves via `System32`
-    // unconditionally before consulting `$PATH`, so PATH-starvation can't
-    // make it fail there. That's true of PATH-starvation specifically, but
-    // it turned out to be the wrong lever: injecting the "run this candidate"
-    // step itself (`launch_editor_with`'s `run` parameter) or the "launch the
-    // editor" step (`resolve_task_with_editor`'s `launch_editor_fn`
-    // parameter) sidesteps real process resolution entirely, closing all
-    // three gaps on every platform -- see
+    // `resolve_task_with_editor_path_propagates_launch_editor_error`.
+    // PATH-starvation has no safe Windows equivalent: `Command::new("notepad")`
+    // resolves via `System32` unconditionally before consulting `$PATH`, so
+    // PATH-starvation can't make it fail there. Instead, injecting the "run
+    // this candidate" step itself (`launch_editor_with`'s `run` parameter) or
+    // the "launch the editor" step (`resolve_task_with_editor`'s
+    // `launch_editor_fn` parameter) sidesteps real process resolution
+    // entirely, closing all three gaps on every platform -- see
     // `launch_editor_with_no_editor_found_when_every_candidate_not_found`,
     // `launch_editor_with_empty_visual_and_editor_are_skipped`, and
     // `resolve_task_with_editor_injected_editor_failure_propagates` above.

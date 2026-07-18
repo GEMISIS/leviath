@@ -536,9 +536,8 @@ pub async fn run_foreground(args: RunArgs, io: ForegroundIo) -> anyhow::Result<(
 /// generic `impl FnOnce` parameter would make `run_foreground_with_registry`
 /// monomorphize separately per test for no benefit. A concrete `fn` pointer
 /// type lets every call site (production and test) share one instantiation.
-/// (`run_stage_loop` itself is now fully type-erased — see its doc comment —
-/// so this no longer affects its coverage, but the `fn`-pointer form is still
-/// the right minimal-instantiation choice here.)
+/// (`run_stage_loop` itself is fully type-erased — see its doc comment — and
+/// the `fn`-pointer form is the right minimal-instantiation choice here.)
 pub async fn run_foreground_with_registry(
     args: RunArgs,
     build_registry: fn(&Config) -> leviath_runtime::ProviderRegistry,
@@ -960,13 +959,13 @@ mod tests {
         let engine = leviath_runtime::AgentEngine::with_providers(registry);
         // Drives the real spawn+forward logic via `start_message_reader_with`
         // (what `StageCallbacks::start_message_reader` delegates to) with
-        // `tokio::io::empty()` instead of real stdin. This previously called
-        // the trait method directly, which constructs `tokio::io::stdin()`
-        // for real the moment the spawned task starts running -- on a live
-        // TTY that read never reaches EOF, and since it's tracked by tokio's
-        // blocking pool, awaiting/timing-out/aborting the handle doesn't
-        // matter: tearing down this test's runtime at the end of the test
-        // still blocks forever waiting for that leaked real stdin read.
+        // `tokio::io::empty()` instead of real stdin. Calling the trait method
+        // directly would construct `tokio::io::stdin()` for real the moment the
+        // spawned task starts running -- on a live TTY that read never reaches
+        // EOF, and since it's tracked by tokio's blocking pool,
+        // awaiting/timing-out/aborting the handle doesn't matter: tearing down
+        // this test's runtime at the end of the test would still block forever
+        // waiting for that leaked real stdin read.
         // `tokio::io::empty()` reaches EOF immediately with no blocking-pool
         // involvement at all, so this is fully bounded regardless of
         // environment.
@@ -1849,8 +1848,7 @@ model = "mock-model"
     /// Covers `read_to_string(...).map_err(...)` error branch and the
     /// `yolo=false` path that skips the `if args.yolo { ... }` insert.
     /// `agent.leviath` exists but is a *directory*, so `find_manifest` locates
-    /// it via `.exists()` yet `read_to_string` fails on every platform. The
-    /// prior version used `chmod 0o000` (Unix-only).
+    /// it via `.exists()` yet `read_to_string` fails on every platform.
     #[tokio::test]
     async fn run_foreground_with_registry_fails_on_manifest_read_error() {
         let _config_guard = crate::config::isolate_config_path_for_test("fg-manifest-read-error");
@@ -1961,11 +1959,11 @@ prompt = "Do the thing"
     /// Covers `resolve_task(...)? ` error branch (line 389) via the "empty
     /// task file" error, not `task: None`. `task: None` reaches
     /// `resolve_task`'s real, un-injected `std::io::stdin().is_terminal()`
-    /// check (see `session.rs`) -- under `cargo test` run from a real
-    /// interactive terminal that's actually true, so this used to launch a
-    /// real editor (`vim`/`nano`/`vi`, whichever is found first with no
-    /// `$EDITOR`/`$VISUAL` set) with the test process's real inherited
-    /// stdio, hanging the whole test run on real keyboard input. An empty
+    /// check (see `session.rs`) -- which is actually true under `cargo test`
+    /// run from a real interactive terminal, so it would launch a real editor
+    /// (`vim`/`nano`/`vi`, whichever is found first with no `$EDITOR`/`$VISUAL`
+    /// set) with the test process's real inherited stdio, hanging the whole
+    /// test run on real keyboard input. An empty
     /// task file hits a `resolve_task` error deterministically, in every
     /// environment, without depending on whether stdin happens to be a TTY.
     #[tokio::test]

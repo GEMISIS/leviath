@@ -1964,8 +1964,7 @@ mod tests {
         // (already-written) choice response still works, but the subsequent
         // edit request's write_request fails, so the `?` propagates and the
         // stage returns Err. Blocking the tmp path fails the write on every
-        // platform (the prior version made the run dir read-only via chmod,
-        // Unix-only).
+        // platform.
         use crate::interaction::InteractionResponse;
 
         let _guard = crate::runstate::isolate_runs_dir_for_test(
@@ -3157,8 +3156,7 @@ mod tests {
         );
         // Covers the `?` on `request_interaction_async`: write_request's atomic
         // write targets `pending.json.tmp`, which we replace with a *directory*
-        // so the write fails and the Err propagates -- on every platform (the
-        // prior version made the run dir read-only via chmod, Unix-only).
+        // so the write fails and the Err propagates -- on every platform.
         let bp = make_blueprint(vec![make_stage("main")]);
         let (mut engine, _pool, entity) = make_engine_and_entity(&bp, "Response");
         let mut io = MockIO::new();
@@ -3755,8 +3753,7 @@ mod tests {
         //   1) response.json is readable (already written)
         //   2) the directive is injected and the loop re-runs inference
         //   3) round 2's choice request → write_request fails → Err via `?`
-        // Blocking the tmp path fails on every platform (the prior version made
-        // the run dir read-only via chmod, Unix-only).
+        // Blocking the tmp path fails on every platform.
         use crate::interaction::InteractionResponse;
 
         let bp = make_blueprint(vec![make_stage("main")]);

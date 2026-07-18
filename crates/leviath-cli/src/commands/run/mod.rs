@@ -22,9 +22,8 @@ mod stages;
 pub mod tool_source;
 mod worker;
 
-// These seams moved into `leviath-runtime`; re-export under their historical
-// `commands::run::<name>` paths so existing `super::<name>::...` references
-// across the run submodules keep resolving.
+// Re-exports of seams from `leviath-runtime` under their `commands::run::<name>`
+// paths so `super::<name>::...` references across the run submodules resolve.
 pub use leviath_runtime::dynamic_interaction;
 pub use leviath_runtime::graph;
 
@@ -629,8 +628,7 @@ prompt = "Do the thing"
 
     /// RAII guard that runs [`cleanup_runs_with_prefix`] on drop, so a
     /// mid-test assertion failure can't leak real run directories under
-    /// `~/.leviath/runs` (as happened once while developing these tests,
-    /// before this guard existed).
+    /// `~/.leviath/runs`.
     struct RunPrefixCleanup<'a>(&'a str);
     impl Drop for RunPrefixCleanup<'_> {
         fn drop(&mut self) {
@@ -982,10 +980,9 @@ prompt = "Do the thing"
 
     /// Covers `resolve_task(...)? ` (line 136) via the "empty task file"
     /// error, not `task: None`. `task: None` reaches `resolve_task`'s real,
-    /// un-injected `std::io::stdin().is_terminal()` check -- under `cargo
-    /// test` run from a real interactive terminal that's actually true
-    /// (not the "always non-TTY" assumption this test used to make), so it
-    /// launched a real editor (`vim`/`nano`/`vi`) with the test process's
+    /// un-injected `std::io::stdin().is_terminal()` check -- which is actually
+    /// true under `cargo test` run from a real interactive terminal, so it
+    /// would launch a real editor (`vim`/`nano`/`vi`) with the test process's
     /// real inherited stdio, hanging the whole run on real keyboard input.
     /// An empty task file hits a `resolve_task` error deterministically in
     /// every environment, without depending on whether stdin is a TTY.

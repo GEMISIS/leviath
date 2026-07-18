@@ -389,9 +389,9 @@ mod tests {
     #[tokio::test]
     async fn acquire_prunes_expired_token_count_entries() {
         // acquire()'s pruning loop also prunes `token_counts` (shared state
-        // with check_tpm()'s own, separate pruning loop) -- no prior test
-        // seeded an expired token_counts entry before calling acquire()
-        // itself, so that pop_front() call was never exercised from this
+        // with check_tpm()'s own, separate pruning loop) -- no other test
+        // seeds an expired token_counts entry before calling acquire()
+        // itself, so that pop_front() call is otherwise unexercised from this
         // function.
         let limiter = RateLimiter::new(&RateLimitConfig {
             requests_per_minute: 60,

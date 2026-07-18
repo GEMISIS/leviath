@@ -1030,16 +1030,14 @@ sys.stdout.close()
     // notification flush gets EPIPE. The process stays alive (sleeping) so the
     // process itself doesn't exit before our write attempt.
     //
-    // Ordering note: os.close(0) happens BEFORE the response is written to
-    // stdout, not after. A previous version closed stdin after flushing the
-    // response, reasoning that "os.close(0) happens synchronously between
-    // Python's stdout.flush() return and our notification write" -- but
-    // that's not actually a happens-before relationship from our side: our
-    // client can finish reading the response and race ahead to the
-    // notification write while the child is still merely *about* to execute
-    // the next line, before the close(0) syscall has actually completed.
-    // That race was flaky (passed on some CI runners, failed on others,
-    // depending on process-scheduling speed). Closing stdin first guarantees
+    // Ordering note: os.close(0) MUST happen BEFORE the response is written to
+    // stdout, not after. Closing after flushing the response is NOT a
+    // happens-before relationship from our side: our client can finish reading
+    // the response and race ahead to the notification write while the child is
+    // still merely *about* to execute the next line, before the close(0)
+    // syscall has actually completed. That race is flaky (passes on some CI
+    // runners, fails on others, depending on process-scheduling speed).
+    // Closing stdin first guarantees
     // the read end is fully closed before the response bytes can even be
     // sent, which our client necessarily observes only after they're sent --
     // so by the time we read the response and attempt the notification

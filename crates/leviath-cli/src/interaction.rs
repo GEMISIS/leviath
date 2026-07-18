@@ -106,12 +106,12 @@ pub fn clear_interaction(run_id: &str) {
 
 /// The decision produced by a single iteration of a request-polling loop.
 ///
-/// The polling loops used to inline the "did a matching response arrive? did we
-/// time out? otherwise keep waiting" logic, which made their coverage depend on
-/// wall-clock timing (whether a response happened to be present on the first
-/// poll or a later one). Extracting that decision into this pure, synchronous
-/// helper lets every arm be unit-tested deterministically — no sleeping, no
-/// races — so the loops themselves collapse into a thin `match`.
+/// Extracting this decision into a pure, synchronous helper — rather than
+/// inlining the "did a matching response arrive? did we time out? otherwise
+/// keep waiting" logic in each polling loop — lets every arm be unit-tested
+/// deterministically (no sleeping, no races, no dependence on whether a
+/// response happened to be present on the first poll or a later one), so the
+/// loops themselves collapse into a thin `match`.
 enum PollStep {
     /// A matching response is available; the loop should resume with it.
     Answer(InteractionResponse),
@@ -1871,9 +1871,9 @@ mod tests {
 
     // ─── Deterministic loop-arm coverage (pre-written stale response) ──────
     //
-    // Each polling loop's `KeepWaiting => continue` arm previously depended on
-    // whether a real response happened to be present on the first poll or a
-    // later one — a wall-clock race that made coverage nondeterministic. These
+    // Naively, each polling loop's `KeepWaiting => continue` arm depends on
+    // whether a real response happens to be present on the first poll or a
+    // later one — a wall-clock race that would make coverage nondeterministic. These
     // tests pre-write a STALE response (a different `request_id`) BEFORE calling,
     // so the very first poll is *guaranteed* to consume it and take the
     // KeepWaiting/continue path — regardless of scheduling — via take_response's

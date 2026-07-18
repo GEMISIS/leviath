@@ -148,10 +148,10 @@ pub fn append_dashboard_log_to(path: &Path, msg: &str) {
 
 /// Process-wide counter mixed into [`new_run_id`]'s suffix so that multiple
 /// runs spawned in a tight loop (e.g. `lev run --count N`) within the same
-/// wall-clock second never collide. Before this, the suffix was derived
-/// purely from `now` (whole seconds), so every run in a `--count N` batch
-/// got the *same* run ID -- silently collapsing N runs into one on-disk
-/// entry and leaving N-1 worker processes writing state nobody could see.
+/// wall-clock second never collide. Without it, a suffix derived purely from
+/// `now` (whole seconds) gives every run in a `--count N` batch the *same* run
+/// ID -- silently collapsing N runs into one on-disk entry and leaving N-1
+/// worker processes writing state nobody could see.
 static RUN_ID_COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 
 /// Generate a unique run ID: "<agent_name>-<timestamp>-<suffix>".
@@ -423,13 +423,13 @@ impl Drop for RunsDirTestGuard {
 /// ...) never touch the real `~/.leviath/runs/` or `~/.leviath/dashboard.log`.
 ///
 /// This matters more than it looks: those are the exact files `lev dash`/
-/// `lev serve` read from. Before this guard existed, tests wrote real
-/// fixture entries (`agent_name: "test"`, `workdir: "/tmp"`, etc.) straight
-/// into the user's actual runs directory. Most got cleaned up by each test's
-/// own `remove_dir_all` at the end -- but a test process killed mid-run
-/// (e.g. Ctrl+C on a hung test) never reaches that cleanup, so the entries
-/// stayed behind permanently, showing up as orphaned "waiting" agents in the
-/// user's real dashboard.
+/// `lev serve` read from. Without this guard, tests writing real fixture
+/// entries (`agent_name: "test"`, `workdir: "/tmp"`, etc.) straight into the
+/// user's actual runs directory can leave orphans behind: most get cleaned up
+/// by each test's own `remove_dir_all` at the end, but a test process killed
+/// mid-run (e.g. Ctrl+C on a hung test) never reaches that cleanup, so the
+/// entries stay behind permanently, showing up as orphaned "waiting" agents in
+/// the user's real dashboard.
 #[cfg(test)]
 pub(crate) fn isolate_runs_dir_for_test(unique: &str) -> RunsDirTestGuard {
     let lock = RUNS_DIR_ENV_LOCK
@@ -1329,8 +1329,7 @@ mod tests {
         // Covers the `if let Ok(entries) = std::fs::read_dir(&dir)` pattern
         // *not* matching: `dir.exists()` is true (so the earlier early-return
         // is skipped) but `read_dir` fails, so the whole block is silently
-        // skipped. Pointing at a *file* makes `read_dir` fail on every platform
-        // (the prior version used a `chmod 0o000` directory, Unix-only).
+        // skipped. Pointing at a *file* makes `read_dir` fail on every platform.
         let dir = tempfile::tempdir().unwrap();
         let not_a_dir = dir.path().join("runs-is-a-file");
         std::fs::write(&not_a_dir, "not a dir").unwrap();
@@ -1342,9 +1341,7 @@ mod tests {
     fn append_stage_output_open_failure_is_silently_skipped() {
         // When `output.log` already exists as a *directory*, `OpenOptions::open`
         // fails and the write is silently skipped (the `if let Ok(file)` false
-        // path). Making the target a directory fails the open on every platform;
-        // this branch was previously only reached incidentally via a
-        // `chmod 0o555` read-only run dir (Unix-only).
+        // path). Making the target a directory fails the open on every platform.
         let _guard = crate::runstate::isolate_runs_dir_for_test("append_stage_output_open_failure");
         let run_id = "append-out-openfail";
         ensure_stage_dir(run_id, 0);
@@ -1720,8 +1717,7 @@ mod tests {
         // A subdirectory with NO meta.json exercises the *other* skip branch:
         // the `if let Ok(json) = read_to_string(&meta_path)` else arm (the file
         // can't be read), distinct from the parse-fails arm above. Covering
-        // both here keeps list_runs_in_dir at 100% on every OS deterministically
-        // (previously one arm happened to be hit only on some platforms).
+        // both here keeps list_runs_in_dir at 100% on every OS deterministically.
         let no_meta_run_id = "cov-listed-no-meta-run";
         std::fs::create_dir_all(tmpdir.path().join(no_meta_run_id)).unwrap();
 

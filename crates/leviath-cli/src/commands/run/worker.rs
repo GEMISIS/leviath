@@ -1188,8 +1188,7 @@ fn finalize_run_status(meta: &mut RunMeta, result: &anyhow::Result<()>) {
 /// generic `impl FnOnce` parameter would make `run_worker_inner` monomorphize
 /// separately per test for no benefit. A concrete `fn` pointer type lets every
 /// call site (production and test) share one instantiation. (`run_stage_loop`
-/// itself is now fully type-erased — see its doc comment — so this no longer
-/// affects its coverage.)
+/// itself is fully type-erased — see its doc comment.)
 async fn run_worker_inner(
     args: &WorkerArgs,
     meta: &mut RunMeta,

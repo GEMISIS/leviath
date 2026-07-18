@@ -33,13 +33,12 @@ use leviath_runtime::taint::TaintGate;
 ///
 /// The stage system prompt is essential, must-include instruction context, so a
 /// prompt that doesn't fit its region is a **hard error**, not something to
-/// silently drop. Previously the `add_to_region` rejection (`TokenBudgetExceeded`
-/// when the prompt plus the preloaded task exceeded the region's `max_tokens`,
-/// 2000 by default) was swallowed by `let _ =`, leaving the model running with
-/// no instructions at all and no signal to the operator. Now the failure
-/// propagates as a clear, actionable error telling the author to size the
-/// region (or shorten the prompt); the shipped default agents are all sized to
-/// fit comfortably.
+/// silently drop. The `add_to_region` rejection (`TokenBudgetExceeded` when the
+/// prompt plus the preloaded task exceeds the region's `max_tokens`, 2000 by
+/// default) propagates as a clear, actionable error telling the author to size
+/// the region (or shorten the prompt); swallowing it would leave the model
+/// running with no instructions at all and no signal to the operator. The
+/// shipped default agents are all sized to fit comfortably.
 fn inject_stage_system_prompt(
     window: &mut ContextWindow,
     target_region: &str,
@@ -360,9 +359,7 @@ pub trait StageCallbacks: Send {
 /// as a *single* monomorphization shared by the foreground, worker, and test
 /// callers — rather than one per (`CB`, `F`) combination. That single
 /// instantiation is exercised end-to-end by this module's tests, so its
-/// coverage no longer depends on `cargo-llvm-cov`'s instantiation-group merging
-/// (which previously under-reported this function's regions/lines whenever a
-/// branch was covered only in some other, real-IO-only instantiation).
+/// coverage does not depend on `cargo-llvm-cov`'s instantiation-group merging.
 #[allow(clippy::too_many_arguments)]
 pub async fn run_stage_loop(
     ctx: &mut StageContext<'_>,
@@ -2823,13 +2820,13 @@ mod tests {
 
     // ─── on_stage_result must fire for Interactive/InteractivePoints too ────
     //
-    // Regression test: previously only the Autonomous branch called
-    // cb.on_stage_result(), so the stage record for Interactive/
-    // InteractivePoints stages was never marked Complete — it stayed stuck
+    // Regression test: all stage modes must call cb.on_stage_result(), not
+    // just the Autonomous branch, or the stage record for Interactive/
+    // InteractivePoints stages is never marked Complete — it stays stuck
     // at StageRunStatus::Active forever (confirmed via real run-state data:
     // a "plan" stage with mode = interactive_points stuck at status "active",
     // ended_at: null, long after the run had moved on to later stages). That
-    // made the dashboard keep showing a spinner on a stage tab that wasn't
+    // makes the dashboard keep showing a spinner on a stage tab that isn't
     // actually running anymore.
 
     #[tokio::test]

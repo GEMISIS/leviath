@@ -422,11 +422,11 @@ mod tests {
 
     // ─── Regression: mid-run message input pane must actually render ──────
     //
-    // Pressing 'i' (formerly 'm') on an Active agent that accepts mid-run
-    // messages sets input_mode = true, but prompt_height used to only
-    // account for the `is_waiting` case — so the input pane never actually
-    // got laid out or rendered for an Active, non-waiting agent. Verify the
-    // textarea's hint text actually appears in the rendered buffer.
+    // Pressing 'i' on an Active agent that accepts mid-run messages sets
+    // input_mode = true. `prompt_height` must account for this case (not just
+    // the `is_waiting` case), or the input pane never gets laid out or
+    // rendered for an Active, non-waiting agent. Verify the textarea's hint
+    // text actually appears in the rendered buffer.
     #[test]
     fn draw_detail_view_renders_input_pane_for_accepts_messages_while_active() {
         let backend = TestBackend::new(120, 40);

@@ -1344,7 +1344,7 @@ max_tokens = 5000
 
     /// Covers `fs::read_to_string(&manifest_path)?` failing by making
     /// `agent.leviath` a *directory*: `exists()` passes the guard but the read
-    /// fails on every platform (the prior version used `chmod 0o000`, Unix-only).
+    /// fails on every platform.
     #[tokio::test]
     async fn execute_with_registry_manifest_unreadable_errors() {
         let dir = tempfile::tempdir().unwrap();
@@ -1418,8 +1418,7 @@ model = { provider = "anthropic", model = "claude-sonnet-4-6" }
     }
 
     /// Covers `fs::read_dir(&tests_dir)?` failing by making `tests` a *file*:
-    /// `exists()` passes the guard but `read_dir` fails on every platform (the
-    /// prior version used `chmod 0o000`, Unix-only).
+    /// `exists()` passes the guard but `read_dir` fails on every platform.
     #[tokio::test]
     async fn execute_with_registry_tests_dir_unreadable_errors() {
         let dir = tempfile::tempdir().unwrap();
@@ -1447,8 +1446,7 @@ model = { provider = "anthropic", model = "claude-sonnet-4-6" }
 
     /// Covers `fs::read_to_string(&test_path)?` for a `.toml` entry by making
     /// it a *directory* (extension is still `toml`): `read_dir` yields it but
-    /// the read fails on every platform (the prior version used `chmod 0o000`,
-    /// Unix-only).
+    /// the read fails on every platform.
     #[tokio::test]
     async fn execute_with_registry_toml_unreadable_errors() {
         let dir = tempfile::tempdir().unwrap();
@@ -1477,8 +1475,7 @@ model = { provider = "anthropic", model = "claude-sonnet-4-6" }
 
     /// Covers `fs::read_to_string(&test_path)?` for a `.rhai` entry by making
     /// it a *directory* (extension is still `rhai`): `read_dir` yields it but
-    /// the read fails on every platform (the prior version used `chmod 0o000`,
-    /// Unix-only).
+    /// the read fails on every platform.
     #[tokio::test]
     async fn execute_with_registry_rhai_unreadable_errors() {
         let dir = tempfile::tempdir().unwrap();

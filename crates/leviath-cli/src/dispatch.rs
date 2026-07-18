@@ -16,9 +16,8 @@
 //!   as `main.rs`'s `RealExecutors`, which simply wires real I/O into the
 //!   library's already-tested command cores.
 //!
-//! This replaces the previous `#[cfg(not(test))]`/`#[cfg(test)]` twin trick:
-//! injection gives the same "routing is tested, real I/O is never touched by a
-//! test" guarantee without any coverage escape hatch in library code.
+//! Injection gives a "routing is tested, real I/O is never touched by a test"
+//! guarantee without any coverage escape hatch in library code.
 
 use crate::commands;
 

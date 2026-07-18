@@ -1,8 +1,8 @@
 //! Filesystem discovery of `agent.leviath` manifests.
 //!
-//! The pure `TOML` -> [`leviath_core::Blueprint`] parser now lives in
+//! The pure `TOML` -> [`leviath_core::Blueprint`] parser lives in
 //! [`leviath_core::manifest`]; it is re-exported here as [`parse_manifest`] so
-//! existing `super::manifest::parse_manifest` call sites keep working unchanged.
+//! `super::manifest::parse_manifest` call sites resolve.
 
 use std::path::{Path, PathBuf};
 

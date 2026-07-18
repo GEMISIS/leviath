@@ -923,9 +923,8 @@ mod tests {
     async fn poll_once_webhook_send_failure_is_logged_not_panicked() {
         // Points callback_url at a closed local port so the spawned webhook
         // task's `client.post(&url)...send().await` genuinely fails,
-        // exercising the `Err(e) => error!(...)` arm -- previously
-        // unreached since the only other webhook test uses a real,
-        // responding mock server.
+        // exercising the `Err(e) => error!(...)` arm (the only other webhook
+        // test uses a real, responding mock server).
         use crate::runstate::{RunMeta, RunStatus};
 
         let (state, mut evt_rx) = make_test_state();
@@ -1201,15 +1200,14 @@ mod tests {
 
     #[tokio::test]
     async fn polling_loop_wrapper_picks_up_real_runs_from_disk() {
-        // Regression note: this test used to spawn the real `polling_loop`
-        // (which scans the real, system-wide `~/.leviath/runs` directory)
-        // and wait for its own run's event to arrive. That made it flaky
-        // under a full-suite run: any genuinely active `lev` background
-        // worker processes on the machine emit a continuous stream of real
-        // events every 200ms poll cycle, and under heavy concurrent-test
-        // CPU contention the bounded broadcast channel could drop this
-        // test's own event via `Lagged` overflow before it was ever
-        // received -- an environmental race with unrelated real activity,
+        // Regression note: spawning the real `polling_loop` (which scans the
+        // real, system-wide `~/.leviath/runs` directory) and waiting for this
+        // run's event to arrive is flaky under a full-suite run: any genuinely
+        // active `lev` background worker processes on the machine emit a
+        // continuous stream of real events every 200ms poll cycle, and under
+        // heavy concurrent-test CPU contention the bounded broadcast channel
+        // can drop this test's own event via `Lagged` overflow before it is
+        // ever received -- an environmental race with unrelated real activity,
         // not a bug in `polling_loop` itself. `polling_loop_with` injects
         // the run list instead, eliminating the real-directory dependency
         // (and the flakiness) entirely while still exercising the exact

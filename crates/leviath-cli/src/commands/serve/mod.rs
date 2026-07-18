@@ -50,18 +50,16 @@ pub async fn execute(args: ServeArgs) -> anyhow::Result<()> {
 /// awaiting a `oneshot::Receiver` -- shares exactly ONE monomorphization of
 /// this (large, multi-branch) function instead of one per concrete future
 /// type. Confirmed via HTML/JSON segment inspection that every source
-/// position already had a covered instantiation before this change (this
-/// is the same trait-object-erasure technique used for `io::Write` in
-/// `leviath-package`'s `bundler.rs`), so this is a coverage-attribution fix
-/// with no behavior change, not a fix for an actual gap in testing.
+/// position has a covered instantiation (this is the same trait-object-erasure
+/// technique used for `io::Write` in `leviath-package`'s `bundler.rs`).
 ///
 /// `ready`, if given, is sent the real bound `SocketAddr` right after
 /// `TcpListener::bind` succeeds (before serving starts). Production passes
 /// `None`; tests pass `Some(tx)` with `args.port = 0` so the OS picks a free
 /// port and the test learns which one was actually bound directly -- no
-/// probe-bind-drop-rebind dance, which was a genuine TOCTOU race (confirmed
+/// probe-bind-drop-rebind dance, which is a genuine TOCTOU race (confirmed
 /// to reproduce on real CI: another process/test could grab the just-freed
-/// port before this function's own bind ran) rather than a test-only
+/// port before this function's own bind runs), not just a test-only
 /// convenience.
 async fn execute_with_shutdown(
     args: ServeArgs,
@@ -833,7 +831,7 @@ prompt = "Run"
         // time; execute_with_shutdown reports the real bound SocketAddr back
         // via `ready` the instant it's bound, so there's no
         // probe-bind-drop-rebind gap for another process/test to race into
-        // (a real, CI-reproducing TOCTOU this used to have -- see
+        // (that gap is a real, CI-reproducing TOCTOU -- see
         // execute_with_shutdown's doc comment). Exercises the exact same
         // production code path execute() does (its own body is just this
         // call with `ready: None`), so this remains a real end-to-end test

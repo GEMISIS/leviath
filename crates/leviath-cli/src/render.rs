@@ -988,7 +988,7 @@ mod tests {
         // `Start(Item)` pushes the bullet marker into `current_spans`, then
         // `Start(Heading)` fires with no Text/other event in between --
         // exercises the `!self.current_spans.is_empty()` flush at heading
-        // start (previously only ever empty by the time headings occurred).
+        // start.
         let md = "- # nested heading in item\n- item2";
         let text = markdown_to_text(md, 80);
         let all: String = text

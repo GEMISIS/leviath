@@ -135,11 +135,9 @@ async fn execute_core<S: TerminalSetup, E: EventSource>(
 /// it can run against a [`ratatui::backend::TestBackend`] and a canned
 /// [`EventSource`] in tests, instead of a real terminal. Exits (returning
 /// `Ok(())`) once `dashboard.should_quit` is set; propagates the first I/O
-/// error from drawing or event polling, exactly as the original inline loop
-/// in `execute` did (including leaving raw mode / the alternate screen
-/// untouched on error -- restoring those is `execute`'s responsibility, not
-/// this loop's, and this refactor preserves that pre-existing behavior
-/// rather than changing it as a side effect of a coverage pass).
+/// error from drawing or event polling, leaving raw mode / the alternate
+/// screen untouched on error -- restoring those is `execute`'s
+/// responsibility, not this loop's.
 ///
 /// Generic over `B: Backend` and `impl EventSource`; in the measured test
 /// build it is only ever instantiated once -- with the single
@@ -228,8 +226,8 @@ async fn init_dashboard(
 ///
 /// The real terminal wiring cannot live here: constructing `CrosstermSetup`
 /// enables actual raw mode / the alternate screen and blocks forever on real
-/// keyboard input (an `is_terminal()` guard was tried and removed after it
-/// still hung a real editor terminal full-screen). That irreducible sliver is
+/// keyboard input (an `is_terminal()` guard does not prevent the hang -- it
+/// still hangs a real editor terminal full-screen). That irreducible sliver is
 /// the binary's job; everything it composes is exercised here.
 /// `yank_fn` is the clipboard implementation the dashboard's `y` keypress uses;
 /// the binary passes the real native-tool/OSC52 clipboard (which can write the
@@ -784,13 +782,10 @@ mod tests {
         assert!(result.is_ok());
     }
 
-    // A previous version of this comment claimed `crossterm::event::poll`
-    // "has no terminal-mutating side effects... safe to call from a real
-    // unit test regardless of environment" and had a test call
-    // `CrosstermEventSource::new().poll_event(1ms)` for real to prove it.
-    // That claim was wrong, confirmed by hanging for 60+ seconds under a
-    // real pty, in complete isolation (`--test-threads=1`, nothing else
-    // running). Root cause: `crossterm::event::poll`'s internal
+    // `crossterm::event::poll` cannot be called from a real unit test: it
+    // hangs for 60+ seconds under a real pty, even in complete isolation
+    // (`--test-threads=1`, nothing else running). Root cause:
+    // `crossterm::event::poll`'s internal
     // `INTERNAL_EVENT_READER` is a lazily-constructed, process-wide
     // singleton (`parking_lot::Mutex<Option<InternalEventReader>>`); the
     // passed timeout only bounds *acquiring that mutex*
@@ -1093,7 +1088,7 @@ mod tests {
 
     // The real `lev dash` wiring (the crossterm `CrosstermSetup` + the real
     // `CrosstermEventSource` + the `Config::load`/`init_dashboard`/`execute_core`
-    // composition) now lives in the binary's `real_dashboard`; the fully-tested
+    // composition) lives in the binary's `real_dashboard`; the fully-tested
     // seam it composes, `execute_with`, is covered by
     // `execute_with_loads_config_inits_and_runs_the_loop` above.
 }
