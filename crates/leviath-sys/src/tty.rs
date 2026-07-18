@@ -52,7 +52,7 @@ fn osc52_sequence(text: &str) -> String {
 
 /// Open the process's controlling terminal for writing.
 ///
-/// COVERAGE-EXCLUDED: the real body opens `/dev/tty` (Unix); exercising it from
+/// REAL-IO-EXCLUDED: the real body opens `/dev/tty` (Unix); exercising it from
 /// a test would write OSC escape bytes to the terminal running `cargo test`.
 /// The `#[cfg(test)]` twin always fails harmlessly instead, and
 /// [`osc52_write_via`]'s branch logic is covered directly via injected openers.
@@ -107,7 +107,7 @@ fn osc52_write_via(
 /// whether the sequence was written. Intended as a last-resort fallback after
 /// native clipboard tools (`pbcopy`/`xclip`/`wl-copy`) have been tried.
 ///
-/// COVERAGE-EXCLUDED: the real body writes to the process's actual `stdout()`
+/// REAL-IO-EXCLUDED: the real body writes to the process's actual `stdout()`
 /// (and `/dev/tty`); running it in a test would corrupt the terminal running
 /// `cargo test`. The `#[cfg(test)]` twin swaps an in-memory sink in, keeping
 /// identical control flow, and `osc52_write_via`'s branches are covered
