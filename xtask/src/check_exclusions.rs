@@ -154,6 +154,28 @@ pub fn scan_workspace_from(root: &Path) -> Result<Vec<Violation>> {
         scan_dir(&crates_dir, true, &mut violations)?;
     }
 
+    // Cap the number of `#[cfg(not(test))]` gates in the one allowed crate
+    // (leviath-sys), so real-IO exclusions can't accrete silently. Raising the
+    // cap is a deliberate, reviewed change to `MAX_SYS_EXCLUSIONS`.
+    let sys_dir = crates_dir.join(ALLOWED_CFG_NOT_TEST_CRATE);
+    if sys_dir.exists() {
+        let count = count_cfg_not_test_gates(&sys_dir);
+        if count > MAX_SYS_EXCLUSIONS {
+            violations.push(Violation {
+                file: sys_dir.clone(),
+                line_num: 0,
+                line: String::new(),
+                pattern: "cfg(not(test)) cap exceeded in leviath-sys",
+                reason: format!(
+                    "crates/{ALLOWED_CFG_NOT_TEST_CRATE}/ has {count} #[cfg(not(test))] gates but \
+                     the cap (MAX_SYS_EXCLUSIONS) is {MAX_SYS_EXCLUSIONS}. Prefer an injected seam \
+                     over a new real-IO exclusion; if one is genuinely unavoidable, raise the cap \
+                     deliberately in xtask/src/check_exclusions.rs."
+                ),
+            });
+        }
+    }
+
     // CI and config files
     for rel in &[
         ".github/workflows/ci.yml",
@@ -227,49 +249,94 @@ pub fn scan_file(path: &Path, is_rs: bool, violations: &mut Vec<Violation>) {
 
 // ── `#[cfg(not(test))]` escape-hatch audit ──────────────────────────────────
 //
-// `#[cfg(not(test))]` / `#[cfg(test)]` twins are a *legitimate* pattern for
-// code that genuinely cannot be exercised by a real test: real terminal/TTY
-// interaction (e.g. `dashboard/mod.rs`'s `enter_alt_screen`/`leave_alt_screen`
-// entering/leaving the real alternate screen, `dashboard/helpers.rs`'s
-// `open_controlling_tty` opening a real `/dev/tty`), real blocking stdin
-// reads, real subprocess spawns, and the `cargo llvm-cov` tracing-macro
-// region-counting quirk documented in `xtask/src/coverage.rs` (a macro
-// field-capture sub-region reads zero even though the branch executes and is
-// asserted on). It is NOT a general-purpose way to dodge writing a real test
-// for code that could otherwise be made testable, so this check keeps it
-// honest and auditable rather than banning it outright:
+// `#[cfg(not(test))]` hides its real body from coverage measurement, so it is
+// the one attribute an agent could use to dodge testing. The policy is a single
+// unabusable PATH rule: it is **banned in every crate except `leviath-sys`** —
+// the leaf crate that quarantines raw OS syscalls. There is no marker that
+// makes it acceptable in ordinary library code, so it can't be smuggled in
+// with a plausible-looking justification. Un-unit-testable real-I/O composition
+// (real terminal, blocking stdin, port bind, subprocess spawn, real inference)
+// belongs in the coverage-excluded `lev` binary (`main.rs`) or behind an
+// injected seam (see the dispatch `RiskyExecutors` trait, dashboard
+// `execute_with`, and the run `ForegroundIo` bundle).
 //
-// 1. Every `#[cfg(not(test))]`-gated `fn`/method must be immediately preceded
-//    (skipping over blank lines and other attributes) by a `///` doc comment
-//    containing `COVERAGE-EXCLUDED: <non-empty reason>` — a human-readable
-//    justification, reviewable in every PR that adds or touches one. The
-//    justification may span multiple `///` lines (marker on the first line,
-//    reason continuing below it); the marker just has to appear somewhere in
-//    the contiguous doc-comment block touching the attribute.
+// Inside `leviath-sys` the attribute is permitted for the final syscall leaves,
+// but still audited:
+// 1. Every gate must be immediately preceded (skipping blanks/attributes) by a
+//    `// REAL-IO-EXCLUDED: <non-empty reason>` comment (`//` or `///`) — a
+//    reviewable justification.
 // 2. Every `#[cfg(not(test))]`-gated `fn NAME` must have a matching
-//    `#[cfg(test)]`-gated `fn NAME` (same name) elsewhere in the same file —
-//    proof the real body was actually swapped for a no-op twin rather than
-//    just hidden from the test binary with nothing standing in for it.
+//    `#[cfg(test)]`-gated `fn NAME` twin in the same file, so the surrounding
+//    logic stays testable.
+// 3. The total number of gates in `leviath-sys` is capped at
+//    [`MAX_SYS_EXCLUSIONS`] (enforced in `scan_workspace_from`) — raising it is
+//    a deliberate, reviewed diff.
 //
-// This is a line/regex-style scan (matching the rest of this file), not a
-// full parser: it looks for the exact `#[cfg(not(test))]` / `#[cfg(test)]`
-// attribute on its own line, and reads the function name off the next
-// non-blank, non-attribute line by splitting on the `fn` keyword token. It is
-// deliberately tolerant of being fooled by unusual formatting — the existing
-// scanner in this file makes the same trade-off.
+// This is a line/regex-style scan (matching the rest of this file), not a full
+// parser: it looks for the exact `#[cfg(not(test))]` / `#[cfg(test)]` attribute
+// on its own line, and reads a function name off the next non-blank,
+// non-attribute line by splitting on the `fn` token. It is deliberately
+// tolerant of being fooled by unusual formatting — the existing scanner in this
+// file makes the same trade-off.
 
 /// Doc-comment marker required immediately before every `#[cfg(not(test))]`
-/// function/method, explaining why the real body cannot be exercised by a
-/// real test.
-const COVERAGE_EXCLUDED_MARKER: &str = "COVERAGE-EXCLUDED:";
+/// item that lives in `crates/leviath-sys/` (the ONE crate permitted to use the
+/// attribute — see the module doc above), explaining why the real body cannot
+/// be exercised by a real test.
+const REAL_IO_EXCLUDED_MARKER: &str = "REAL-IO-EXCLUDED:";
+
+/// The directory whose `#[cfg(not(test))]` uses are permitted (the leaf crate
+/// that quarantines raw OS syscalls). Matched as a path component so it never
+/// false-matches a substring.
+const ALLOWED_CFG_NOT_TEST_CRATE: &str = "leviath-sys";
+
+/// Hard cap on the number of `#[cfg(not(test))]` gates allowed inside
+/// `crates/leviath-sys/`. Raising it is a deliberate, reviewed one-line diff —
+/// the ratchet that stops real-IO exclusions accreting silently.
+const MAX_SYS_EXCLUSIONS: usize = 2;
+
+/// True if `path` is inside the one crate permitted to use `#[cfg(not(test))]`.
+fn is_allowed_cfg_not_test_path(path: &Path) -> bool {
+    path.components()
+        .any(|c| c.as_os_str() == ALLOWED_CFG_NOT_TEST_CRATE)
+}
+
+/// Recursively count `#[cfg(not(test))]` attribute lines under `dir` (a
+/// trimmed exact match, so doc-comment mentions in backticks don't count),
+/// skipping `target/` and hidden dirs. Used to enforce [`MAX_SYS_EXCLUSIONS`].
+fn count_cfg_not_test_gates(dir: &Path) -> usize {
+    let mut count = 0;
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return 0;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            if name != "target" && !name.starts_with('.') {
+                count += count_cfg_not_test_gates(&path);
+            }
+        } else if path.extension().is_some_and(|e| e == "rs") {
+            if let Ok(content) = std::fs::read_to_string(&path) {
+                count += content
+                    .lines()
+                    .filter(|l| l.trim() == "#[cfg(not(test))]")
+                    .count();
+            }
+        }
+    }
+    count
+}
 
 /// Scan a single file's already-read `content` for `#[cfg(not(test))]`
 /// escape-hatch violations (see the module doc above for the two rules).
 fn scan_cfg_not_test_escape_hatches(path: &Path, content: &str, violations: &mut Vec<Violation>) {
     let lines: Vec<&str> = content.lines().collect();
+    let allowed = is_allowed_cfg_not_test_path(path);
 
     // Every `fn NAME` immediately gated by `#[cfg(test)]` anywhere in the
-    // file — the pool of legitimate "twins" for rule 2.
+    // file — the pool of legitimate "twins" (only relevant inside the allowed
+    // crate).
     let mut test_fn_names: std::collections::HashSet<String> = std::collections::HashSet::new();
     for (idx, line) in lines.iter().enumerate() {
         if line.trim() == "#[cfg(test)]" {
@@ -283,38 +350,58 @@ fn scan_cfg_not_test_escape_hatches(path: &Path, content: &str, violations: &mut
         if line.trim() != "#[cfg(not(test))]" {
             continue;
         }
-        // If the attribute doesn't gate a `fn`/method declaration (e.g. it
-        // gates a `use` statement or a plain block), it's out of scope for
-        // this check entirely.
-        let Some(fn_name) = fn_name_after_attribute(&lines, idx) else {
-            continue;
-        };
 
-        if !preceded_by_coverage_excluded_marker(&lines, idx) {
+        // Rule 1 (path ban): `#[cfg(not(test))]` is forbidden in every crate
+        // except `leviath-sys`. There is no marker that can satisfy this in
+        // ordinary library code — the escape hatch is a physical location, not
+        // a comment, so it can't be forged by dropping in a justification.
+        if !allowed {
             violations.push(Violation {
                 file: path.to_owned(),
                 line_num: idx + 1,
                 line: (*line).to_owned(),
-                pattern: "cfg(not(test)) missing COVERAGE-EXCLUDED marker",
-                reason: format!(
-                    "fn `{fn_name}` is #[cfg(not(test))] but is not immediately preceded by a \
-                     `/// COVERAGE-EXCLUDED: <reason>` doc comment explaining why it cannot be \
-                     exercised by a real test"
-                ),
+                pattern: "cfg(not(test)) outside crates/leviath-sys",
+                reason:
+                    "#[cfg(not(test))] is banned in library code. Real-I/O composition belongs in \
+                     the (coverage-excluded) `lev` binary or behind an injected seam (see the \
+                     dispatch `RiskyExecutors` pattern and `main.rs`); only crates/leviath-sys/ \
+                     (raw OS syscalls) may use #[cfg(not(test))], and only with a \
+                     `REAL-IO-EXCLUDED:` justification + a #[cfg(test)] twin"
+                        .to_owned(),
+            });
+            continue;
+        }
+
+        // Inside leviath-sys: require the `REAL-IO-EXCLUDED:` justification on
+        // every gate (fn/method, `use`, `impl`, `struct`, or inline block)...
+        if !preceded_by_real_io_excluded_marker(&lines, idx) {
+            violations.push(Violation {
+                file: path.to_owned(),
+                line_num: idx + 1,
+                line: (*line).to_owned(),
+                pattern: "cfg(not(test)) missing REAL-IO-EXCLUDED marker",
+                reason: "#[cfg(not(test))] in leviath-sys must be immediately preceded by a \
+                     `// REAL-IO-EXCLUDED: <reason>` comment explaining why the real body cannot \
+                     be exercised by a test"
+                    .to_owned(),
             });
         }
 
-        if !test_fn_names.contains(&fn_name) {
-            violations.push(Violation {
-                file: path.to_owned(),
-                line_num: idx + 1,
-                line: (*line).to_owned(),
-                pattern: "cfg(not(test)) missing #[cfg(test)] twin",
-                reason: format!(
-                    "fn `{fn_name}` is #[cfg(not(test))] but has no matching #[cfg(test)] \
-                     fn `{fn_name}` in the same file"
-                ),
-            });
+        // ...and, when it gates a `fn`, a matching `#[cfg(test)]` twin so the
+        // surrounding logic stays testable.
+        if let Some(fn_name) = fn_name_after_attribute(&lines, idx) {
+            if !test_fn_names.contains(&fn_name) {
+                violations.push(Violation {
+                    file: path.to_owned(),
+                    line_num: idx + 1,
+                    line: (*line).to_owned(),
+                    pattern: "cfg(not(test)) missing #[cfg(test)] twin",
+                    reason: format!(
+                        "fn `{fn_name}` is #[cfg(not(test))] but has no matching #[cfg(test)] \
+                         fn `{fn_name}` in the same file"
+                    ),
+                });
+            }
         }
     }
 }
@@ -357,19 +444,20 @@ fn extract_fn_name(line: &str) -> Option<String> {
 }
 
 /// Scan backward from `attr_idx` (the `#[cfg(not(test))]` line), skipping
-/// blank lines and other attribute lines, to find the contiguous `///`
-/// doc-comment block (if any) immediately touching the attribute, then check
-/// whether ANY line in that block contains `COVERAGE-EXCLUDED:` followed by a
-/// non-empty reason.
+/// blank lines and other attribute lines, to find the contiguous comment
+/// block (`//` or `///`, if any) immediately touching the attribute, then
+/// check whether ANY line in that block contains `REAL-IO-EXCLUDED:` followed
+/// by a non-empty reason.
 ///
 /// Justifications are frequently multi-line -- the marker on the first line
-/// of the paragraph, with the reason continuing across further `///` lines
+/// of the paragraph, with the reason continuing across further comment lines
 /// below it before the attribute -- so this doesn't require the marker to be
-/// on the single line touching the attribute, only somewhere in the doc
-/// comment that does.
-fn preceded_by_coverage_excluded_marker(lines: &[&str], attr_idx: usize) -> bool {
+/// on the single line touching the attribute, only somewhere in the comment
+/// block that does. Both `//` line comments (used on `use`/block gates) and
+/// `///` doc comments (used on `fn` gates) are accepted.
+fn preceded_by_real_io_excluded_marker(lines: &[&str], attr_idx: usize) -> bool {
     // Skip blank lines and other attributes stacked above `attr_idx` to find
-    // where the doc-comment block (if any) ends.
+    // where the comment block (if any) ends.
     let mut i = attr_idx;
     let doc_end = loop {
         if i == 0 {
@@ -380,19 +468,19 @@ fn preceded_by_coverage_excluded_marker(lines: &[&str], attr_idx: usize) -> bool
         if trimmed.is_empty() || trimmed.starts_with("#[") {
             continue;
         }
-        if !trimmed.starts_with("///") {
-            return false; // nearest substantive line isn't a doc comment
+        if !trimmed.starts_with("//") {
+            return false; // nearest substantive line isn't a comment
         }
         break i;
     };
 
-    // Walk backward through the contiguous `///` block starting at
+    // Walk backward through the contiguous comment block starting at
     // `doc_end`, checking every line in it for the marker.
     let mut j = doc_end;
     loop {
         let trimmed = lines[j].trim();
-        if let Some(pos) = trimmed.find(COVERAGE_EXCLUDED_MARKER) {
-            if !trimmed[pos + COVERAGE_EXCLUDED_MARKER.len()..]
+        if let Some(pos) = trimmed.find(REAL_IO_EXCLUDED_MARKER) {
+            if !trimmed[pos + REAL_IO_EXCLUDED_MARKER.len()..]
                 .trim()
                 .is_empty()
             {
@@ -403,7 +491,7 @@ fn preceded_by_coverage_excluded_marker(lines: &[&str], attr_idx: usize) -> bool
             return false;
         }
         j -= 1;
-        if !lines[j].trim().starts_with("///") {
+        if !lines[j].trim().starts_with("//") {
             return false;
         }
     }
@@ -429,7 +517,7 @@ fn preceded_by_coverage_excluded_marker(lines: &[&str], attr_idx: usize) -> bool
 // with NO twin requirement (there is no swapped-out real/fake pair here,
 // just one real function). Every function tagged with this marker must
 // still have a non-empty, reviewable justification, exactly like
-// `COVERAGE-EXCLUDED` above, and the marker must actually be attached (via
+// `REAL-IO-EXCLUDED` above, and the marker must actually be attached (via
 // an immediately-following doc-comment/attribute block) to a real `fn` --
 // not left floating as an unattached comment.
 
@@ -508,7 +596,8 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
 
-    /// Write `content` to a temp file and scan it.
+    /// Write `content` to a temp file (a plain, NON-`leviath-sys` path) and
+    /// scan it.
     fn scan_content(content: &str, is_rs: bool) -> Vec<Violation> {
         let dir = TempDir::new().unwrap();
         let name = if is_rs { "test.rs" } else { "ci.yml" };
@@ -516,6 +605,20 @@ mod tests {
         std::fs::write(&path, content).unwrap();
         let mut violations = Vec::new();
         scan_file(&path, is_rs, &mut violations);
+        violations
+    }
+
+    /// Like [`scan_content`] but writes under a path with a `leviath-sys`
+    /// component, so the file is treated as the one crate permitted to use
+    /// `#[cfg(not(test))]`.
+    fn scan_sys_content(content: &str) -> Vec<Violation> {
+        let dir = TempDir::new().unwrap();
+        let sys_dir = dir.path().join("crates").join("leviath-sys").join("src");
+        std::fs::create_dir_all(&sys_dir).unwrap();
+        let path = sys_dir.join("test.rs");
+        std::fs::write(&path, content).unwrap();
+        let mut violations = Vec::new();
+        scan_file(&path, true, &mut violations);
         violations
     }
 
@@ -909,162 +1012,44 @@ mod tests {
         );
     }
 
-    // ── `#[cfg(not(test))]` escape-hatch audit ────────────────────────────────
+    // ── `#[cfg(not(test))]` path-based ban ────────────────────────────────────
 
     #[test]
-    fn cfg_not_test_fn_without_marker_is_violation() {
+    fn cfg_not_test_outside_leviath_sys_is_violation() {
+        // Ordinary library code may not use `#[cfg(not(test))]` at all.
+        let v = scan_content("#[cfg(not(test))]\nfn real_thing() {}\n", true);
+        assert!(
+            v.iter()
+                .any(|v| v.pattern.contains("outside crates/leviath-sys")),
+            "expected an outside-leviath-sys violation: {v:?}"
+        );
+    }
+
+    #[test]
+    fn cfg_not_test_outside_leviath_sys_even_with_marker_and_twin_is_violation() {
+        // No comment can whitelist the attribute outside leviath-sys — the
+        // escape hatch is a physical location, not a forgeable marker.
         let v = scan_content(
-            "#[cfg(not(test))]\nfn real_thing() {}\n\n#[cfg(test)]\nfn real_thing() {}\n",
+            "// REAL-IO-EXCLUDED: real terminal write\n#[cfg(not(test))]\nfn real_thing() {}\n\n\
+             #[cfg(test)]\nfn real_thing() {}\n",
             true,
         );
         assert!(
             v.iter()
-                .any(|v| v.pattern.contains("missing COVERAGE-EXCLUDED marker")),
-            "expected a missing-marker violation: {v:?}"
+                .any(|v| v.pattern.contains("outside crates/leviath-sys")),
+            "a marker must not whitelist cfg(not(test)) outside leviath-sys: {v:?}"
         );
     }
 
     #[test]
-    fn cfg_not_test_fn_without_twin_is_violation() {
-        let v = scan_content(
-            "/// COVERAGE-EXCLUDED: real terminal write, cannot be tested\n\
-             #[cfg(not(test))]\nfn real_thing() {}\n",
-            true,
-        );
-        assert!(
-            v.iter()
-                .any(|v| v.pattern.contains("missing #[cfg(test)] twin")),
-            "expected a missing-twin violation: {v:?}"
-        );
-    }
-
-    #[test]
-    fn cfg_not_test_fn_with_marker_and_twin_is_clean() {
-        let v = scan_content(
-            "/// COVERAGE-EXCLUDED: real terminal write, cannot be tested\n\
-             #[cfg(not(test))]\nfn real_thing() -> std::io::Result<()> { Ok(()) }\n\n\
-             #[cfg(test)]\nfn real_thing() -> std::io::Result<()> { Ok(()) }\n",
-            true,
-        );
-        assert!(v.is_empty(), "expected no violations: {v:?}");
-    }
-
-    #[test]
-    fn cfg_not_test_on_use_statement_is_out_of_scope() {
-        // `#[cfg(not(test))]` gating a `use` (not a `fn`) is not this check's
-        // concern -- no marker or twin is required.
+    fn cfg_not_test_on_use_outside_leviath_sys_is_violation() {
+        // Even non-`fn` gates (`use`/block/etc.) are banned outside the crate.
         let v = scan_content("#[cfg(not(test))]\nuse std::io::Write;\n", true);
-        assert!(v.is_empty(), "expected no violations: {v:?}");
-    }
-
-    #[test]
-    fn cfg_not_test_on_block_is_out_of_scope() {
-        // Mirrors `runstate.rs`/`setup.rs`'s real pattern: `#[cfg(not(test))]`
-        // gating a bare `{ ... }` block inside a function body, not a `fn`
-        // itself.
-        let v = scan_content(
-            "fn wrapper() {\n    #[cfg(not(test))]\n    {\n        do_real_thing();\n    }\n}\n",
-            true,
-        );
-        assert!(v.is_empty(), "expected no violations: {v:?}");
-    }
-
-    #[test]
-    fn cfg_not_test_marker_with_empty_reason_is_violation() {
-        let v = scan_content(
-            "/// COVERAGE-EXCLUDED:\n#[cfg(not(test))]\nfn real_thing() {}\n\n\
-             #[cfg(test)]\nfn real_thing() {}\n",
-            true,
-        );
         assert!(
             v.iter()
-                .any(|v| v.pattern.contains("missing COVERAGE-EXCLUDED marker")),
-            "empty reason should still be flagged: {v:?}"
+                .any(|v| v.pattern.contains("outside crates/leviath-sys")),
+            "expected an outside-leviath-sys violation: {v:?}"
         );
-    }
-
-    #[test]
-    fn cfg_not_test_marker_in_non_doc_comment_is_violation() {
-        // A plain `//` comment (not `///`) doesn't count as the doc-comment
-        // marker even if it contains the right literal text.
-        let v = scan_content(
-            "// COVERAGE-EXCLUDED: real terminal write\n#[cfg(not(test))]\nfn real_thing() {}\n\n\
-             #[cfg(test)]\nfn real_thing() {}\n",
-            true,
-        );
-        assert!(
-            v.iter()
-                .any(|v| v.pattern.contains("missing COVERAGE-EXCLUDED marker")),
-            "plain comment should not satisfy the marker requirement: {v:?}"
-        );
-    }
-
-    #[test]
-    fn cfg_not_test_marker_skips_other_attributes_and_blank_lines() {
-        let v = scan_content(
-            "/// COVERAGE-EXCLUDED: real terminal write, cannot be tested\n\
-             \n\
-             #[allow(dead_code)]\n\
-             #[cfg(not(test))]\n\
-             fn real_thing() {}\n\n\
-             #[cfg(test)]\nfn real_thing() {}\n",
-            true,
-        );
-        assert!(v.is_empty(), "expected no violations: {v:?}");
-    }
-
-    #[test]
-    fn cfg_not_test_marker_on_first_line_of_multiline_doc_block_is_accepted() {
-        // Mirrors the real-world convention used throughout this codebase:
-        // the marker on the first `///` line, with the reason continuing
-        // across further contiguous `///` lines before the attribute.
-        let v = scan_content(
-            "/// COVERAGE-EXCLUDED: llvm-cov's tracing-macro region-counting\n\
-             /// quirk -- the branch executes and is asserted on, but the\n\
-             /// macro's field-capture sub-region still reads zero.\n\
-             #[cfg(not(test))]\nfn real_thing() {}\n\n\
-             #[cfg(test)]\nfn real_thing() {}\n",
-            true,
-        );
-        assert!(v.is_empty(), "expected no violations: {v:?}");
-    }
-
-    #[test]
-    fn cfg_not_test_multiline_doc_block_without_marker_anywhere_is_violation() {
-        let v = scan_content(
-            "/// This body does something real.\n\
-             /// It cannot be tested for reasons.\n\
-             #[cfg(not(test))]\nfn real_thing() {}\n\n\
-             #[cfg(test)]\nfn real_thing() {}\n",
-            true,
-        );
-        assert!(
-            v.iter()
-                .any(|v| v.pattern.contains("missing COVERAGE-EXCLUDED marker")),
-            "expected a missing-marker violation: {v:?}"
-        );
-    }
-
-    #[test]
-    fn cfg_not_test_twin_lookup_skips_attributes_and_blank_lines_before_fn() {
-        let v = scan_content(
-            "/// COVERAGE-EXCLUDED: real terminal write, cannot be tested\n\
-             #[cfg(not(test))]\nfn real_thing() {}\n\n\
-             #[cfg(test)]\n\n#[allow(dead_code)]\nfn real_thing() {}\n",
-            true,
-        );
-        assert!(v.is_empty(), "expected no violations: {v:?}");
-    }
-
-    #[test]
-    fn cfg_not_test_fn_name_extraction_handles_pub_async_generic() {
-        let v = scan_content(
-            "/// COVERAGE-EXCLUDED: real subprocess spawn, cannot be tested\n\
-             #[cfg(not(test))]\npub(crate) async fn spawn_it<T>(x: T) -> T { x }\n\n\
-             #[cfg(test)]\npub(crate) async fn spawn_it<T>(x: T) -> T { x }\n",
-            true,
-        );
-        assert!(v.is_empty(), "expected no violations: {v:?}");
     }
 
     #[test]
@@ -1074,36 +1059,153 @@ mod tests {
         assert!(v.is_empty(), "config files should not be scanned: {v:?}");
     }
 
+    // ── `#[cfg(not(test))]` audit inside leviath-sys (the one allowed crate) ──
+
     #[test]
-    fn cfg_not_test_as_first_line_of_file_has_no_preceding_line() {
-        // attr_idx == 0: there's nothing to scan backward over, so the
-        // marker requirement is unmet.
-        let v = scan_content("#[cfg(not(test))]\nfn real_thing() {}\n", true);
+    fn sys_cfg_not_test_fn_without_marker_is_violation() {
+        let v = scan_sys_content(
+            "#[cfg(not(test))]\nfn real_thing() {}\n\n#[cfg(test)]\nfn real_thing() {}\n",
+        );
         assert!(
             v.iter()
-                .any(|v| v.pattern.contains("missing COVERAGE-EXCLUDED marker")),
+                .any(|v| v.pattern.contains("missing REAL-IO-EXCLUDED marker")),
             "expected a missing-marker violation: {v:?}"
         );
     }
 
     #[test]
-    fn cfg_not_test_followed_by_non_fn_declaration_is_out_of_scope() {
-        let v = scan_content("#[cfg(not(test))]\nstruct RealThing;\n", true);
+    fn sys_cfg_not_test_fn_without_twin_is_violation() {
+        let v = scan_sys_content(
+            "/// REAL-IO-EXCLUDED: real terminal write, cannot be tested\n\
+             #[cfg(not(test))]\nfn real_thing() {}\n",
+        );
+        assert!(
+            v.iter()
+                .any(|v| v.pattern.contains("missing #[cfg(test)] twin")),
+            "expected a missing-twin violation: {v:?}"
+        );
+    }
+
+    #[test]
+    fn sys_cfg_not_test_fn_with_marker_and_twin_is_clean() {
+        let v = scan_sys_content(
+            "/// REAL-IO-EXCLUDED: real terminal write, cannot be tested\n\
+             #[cfg(not(test))]\nfn real_thing() -> std::io::Result<()> { Ok(()) }\n\n\
+             #[cfg(test)]\nfn real_thing() -> std::io::Result<()> { Ok(()) }\n",
+        );
         assert!(v.is_empty(), "expected no violations: {v:?}");
     }
 
     #[test]
-    fn cfg_not_test_as_last_line_of_file_is_out_of_scope() {
-        // fn_name_after_attribute walks off the end of the file without
-        // finding a substantive line.
-        let v = scan_content("#[cfg(not(test))]", true);
+    fn sys_cfg_not_test_line_comment_marker_is_accepted() {
+        // A plain `//` marker (not `///`) is accepted — non-`fn` gates in
+        // leviath-sys use line comments.
+        let v = scan_sys_content(
+            "// REAL-IO-EXCLUDED: real terminal write\n#[cfg(not(test))]\n\
+             use std::io::Write;\n",
+        );
+        assert!(v.is_empty(), "line-comment marker should satisfy: {v:?}");
+    }
+
+    #[test]
+    fn sys_cfg_not_test_marker_with_empty_reason_is_violation() {
+        let v = scan_sys_content(
+            "/// REAL-IO-EXCLUDED:\n#[cfg(not(test))]\nfn real_thing() {}\n\n\
+             #[cfg(test)]\nfn real_thing() {}\n",
+        );
+        assert!(
+            v.iter()
+                .any(|v| v.pattern.contains("missing REAL-IO-EXCLUDED marker")),
+            "empty reason should still be flagged: {v:?}"
+        );
+    }
+
+    #[test]
+    fn sys_cfg_not_test_marker_skips_other_attributes_and_blank_lines() {
+        let v = scan_sys_content(
+            "/// REAL-IO-EXCLUDED: real terminal write, cannot be tested\n\
+             \n\
+             #[allow(dead_code)]\n\
+             #[cfg(not(test))]\n\
+             fn real_thing() {}\n\n\
+             #[cfg(test)]\nfn real_thing() {}\n",
+        );
         assert!(v.is_empty(), "expected no violations: {v:?}");
     }
 
     #[test]
-    fn cfg_not_test_missing_both_marker_and_twin_reports_two_violations() {
-        let v = scan_content("#[cfg(not(test))]\nfn real_thing() {}\n", true);
+    fn sys_cfg_not_test_marker_on_first_line_of_multiline_block_is_accepted() {
+        let v = scan_sys_content(
+            "/// REAL-IO-EXCLUDED: opens the real /dev/tty; exercising it would\n\
+             /// write escape bytes to the terminal running `cargo test`.\n\
+             #[cfg(not(test))]\nfn real_thing() {}\n\n\
+             #[cfg(test)]\nfn real_thing() {}\n",
+        );
+        assert!(v.is_empty(), "expected no violations: {v:?}");
+    }
+
+    #[test]
+    fn sys_cfg_not_test_fn_name_extraction_handles_pub_async_generic() {
+        let v = scan_sys_content(
+            "/// REAL-IO-EXCLUDED: real subprocess spawn, cannot be tested\n\
+             #[cfg(not(test))]\npub(crate) async fn spawn_it<T>(x: T) -> T { x }\n\n\
+             #[cfg(test)]\npub(crate) async fn spawn_it<T>(x: T) -> T { x }\n",
+        );
+        assert!(v.is_empty(), "expected no violations: {v:?}");
+    }
+
+    #[test]
+    fn sys_cfg_not_test_missing_both_marker_and_twin_reports_two_violations() {
+        let v = scan_sys_content("#[cfg(not(test))]\nfn real_thing() {}\n");
         assert_eq!(v.len(), 2, "expected both violations: {v:?}");
+    }
+
+    // ── leviath-sys exclusion cap ─────────────────────────────────────────────
+
+    #[test]
+    fn sys_cfg_not_test_over_cap_is_violation() {
+        // A fake workspace whose leviath-sys crate has MAX_SYS_EXCLUSIONS + 1
+        // gates must trip the cap.
+        let dir = TempDir::new().unwrap();
+        let sys = dir.path().join("crates").join("leviath-sys").join("src");
+        std::fs::create_dir_all(&sys).unwrap();
+        let mut body = String::new();
+        for i in 0..MAX_SYS_EXCLUSIONS + 1 {
+            body.push_str(&format!(
+                "// REAL-IO-EXCLUDED: leaf {i}\n#[cfg(not(test))]\nfn leaf_{i}() {{}}\n\
+                 #[cfg(test)]\nfn leaf_{i}() {{}}\n\n"
+            ));
+        }
+        std::fs::write(sys.join("lib.rs"), body).unwrap();
+        let violations = scan_workspace_from(dir.path()).unwrap();
+        assert!(
+            violations
+                .iter()
+                .any(|v| v.pattern.contains("cap exceeded in leviath-sys")),
+            "expected a cap violation: {violations:?}"
+        );
+    }
+
+    #[test]
+    fn sys_cfg_not_test_at_cap_is_clean() {
+        let dir = TempDir::new().unwrap();
+        let sys = dir.path().join("crates").join("leviath-sys").join("src");
+        std::fs::create_dir_all(&sys).unwrap();
+        let mut body = String::new();
+        for i in 0..MAX_SYS_EXCLUSIONS {
+            body.push_str(&format!(
+                "// REAL-IO-EXCLUDED: leaf {i}\n#[cfg(not(test))]\nfn leaf_{i}() {{}}\n\
+                 #[cfg(test)]\nfn leaf_{i}() {{}}\n\n"
+            ));
+        }
+        std::fs::write(sys.join("lib.rs"), body).unwrap();
+        let violations = scan_workspace_from(dir.path()).unwrap();
+        assert!(
+            !violations
+                .iter()
+                .any(|v| v.pattern.contains("cap exceeded")),
+            "at-cap should be clean: {violations:?}"
+        );
     }
 
     // ── `COVERAGE-CONFIRMED-ARTIFACT` marker audit ────────────────────────────
@@ -1172,9 +1274,9 @@ mod tests {
 
     #[test]
     fn coverage_confirmed_artifact_in_plain_comment_is_ignored() {
-        // A plain `//` comment doesn't count as the doc-comment marker even
-        // if it contains the right literal text -- mirrors how the
-        // COVERAGE-EXCLUDED marker is scoped to `///` lines only.
+        // A plain `//` comment doesn't count as the CONFIRMED-ARTIFACT
+        // doc-comment marker even if it contains the right literal text (this
+        // marker is scoped to `///` lines only).
         let v = scan_content(
             "// COVERAGE-CONFIRMED-ARTIFACT: some reason\nfn generic_helper() {}\n",
             true,
