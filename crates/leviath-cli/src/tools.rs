@@ -11,37 +11,6 @@ use leviath_tools::{BuiltinTools, ToolContext};
 
 use crate::config::{Config, ToolPolicy};
 
-/// COVERAGE-EXCLUDED: llvm-cov's tracing-macro message-literal region is
-/// permanently uncovered regardless of restructuring (event!/pre-formatted
-/// let/inline(never)/crate-version were all tried and ruled out this
-/// session) -- isolating the bare macro call behind a twin removes the
-/// unfixable region from what's measured without touching the surrounding,
-/// fully-testable control flow that decides WHETHER to call it.
-#[cfg(not(test))]
-fn log_mcp_server_connected(server: &str) {
-    tracing::info!(server = %server, "Connected MCP server");
-}
-
-#[cfg(test)]
-fn log_mcp_server_connected(_server: &str) {}
-
-/// COVERAGE-EXCLUDED: see [`log_mcp_server_connected`].
-#[cfg(not(test))]
-fn log_mcp_server_connect_failed() {
-    tracing::warn!("Failed to connect MCP server — skipping");
-}
-
-#[cfg(test)]
-fn log_mcp_server_connect_failed() {}
-
-/// COVERAGE-EXCLUDED: see [`log_mcp_server_connected`].
-#[cfg(not(test))]
-fn log_spawned_sub_agent() {
-    tracing::info!("Spawned sub-agent");
-}
-
-#[cfg(test)]
-fn log_spawned_sub_agent() {}
 
 /// Combined tool registry: native built-in tools + MCP-discovered tools.
 ///
@@ -79,7 +48,7 @@ impl ToolRegistry {
                                 parameters: meta.schema,
                             });
                         }
-                        log_mcp_server_connected(&server_cfg.name);
+                        tracing::info!(server = %server_cfg.name, "Connected MCP server");
                     }
                     Err(e) => {
                         let span = tracing::warn_span!(
@@ -90,7 +59,7 @@ impl ToolRegistry {
                         let _enter = span.enter();
                         span.record("server", tracing::field::display(&server_cfg.name));
                         span.record("error", tracing::field::display(&e));
-                        log_mcp_server_connect_failed();
+                        tracing::warn!("Failed to connect MCP server — skipping");
                     }
                 }
             }
@@ -477,7 +446,7 @@ impl SubAgentExecutor {
         span.record("child", tracing::field::display(&child_agent_id));
         span.record("blueprint", tracing::field::display(&blueprint_name));
         span.record("depth", child_depth as u64);
-        log_spawned_sub_agent();
+        tracing::info!("Spawned sub-agent");
 
         let _ = task; // Task is used by the caller to set up the child's context
         format!(

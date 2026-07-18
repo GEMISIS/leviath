@@ -526,20 +526,7 @@ pub async fn run_foreground(args: RunArgs) -> anyhow::Result<()> {
 /// with a [`Provider`](leviath_providers::Provider) mock instead of either
 /// stopping at [`StageCallbacks::on_provider_missing`] or making a real,
 /// billed network call.
-/// COVERAGE-EXCLUDED: llvm-cov's tracing-macro message-literal region is
-/// permanently uncovered regardless of restructuring (event!/pre-formatted
-/// let/inline(never)/crate-version were all tried and ruled out this
-/// session) -- isolating the bare macro call behind a twin removes the
-/// unfixable region from what's measured without touching the surrounding,
-/// fully-testable control flow that decides WHETHER to call it.
-#[cfg(not(test))]
-fn log_running_agent_foreground() {
-    tracing::info!("Running agent (foreground)");
-}
-
-#[cfg(test)]
-fn log_running_agent_foreground() {}
-
+///
 /// `build_registry` is a plain function pointer (not `impl FnOnce`)
 /// deliberately: every test below passes a non-capturing closure, and a
 /// generic `impl FnOnce` parameter would make `run_foreground_with_registry`
@@ -575,7 +562,7 @@ async fn run_foreground_with_registry(
     let _enter = span.enter();
     span.record("path", tracing::field::display(&path));
     span.record("task", tracing::field::display(&task));
-    log_running_agent_foreground();
+    tracing::info!("Running agent (foreground)");
 
     println!("Agent: {} v{}", blueprint.name, blueprint.version);
     println!("Task: {}", task);

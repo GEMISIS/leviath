@@ -15,20 +15,6 @@ pub struct CreateArgs {
     pub template: String,
 }
 
-/// COVERAGE-EXCLUDED: llvm-cov's tracing-macro message-literal region is
-/// permanently uncovered regardless of restructuring (event!/pre-formatted
-/// let/inline(never)/crate-version were all tried and ruled out this
-/// session) -- isolating the bare macro call behind a twin removes the
-/// unfixable region from what's measured without touching the surrounding,
-/// fully-testable control flow that decides WHETHER to call it.
-#[cfg(not(test))]
-fn log_creating_agent_blueprint() {
-    tracing::info!("Creating agent blueprint");
-}
-
-#[cfg(test)]
-fn log_creating_agent_blueprint() {}
-
 pub async fn execute(args: CreateArgs) -> anyhow::Result<()> {
     execute_with(args, &|path, contents| fs::write(path, contents))
 }
@@ -47,7 +33,7 @@ fn execute_with(
     args: CreateArgs,
     write_file: &dyn Fn(&Path, &[u8]) -> std::io::Result<()>,
 ) -> anyhow::Result<()> {
-    log_creating_agent_blueprint();
+    tracing::info!("Creating agent blueprint");
 
     let blueprint_dir = Path::new(&args.name);
 

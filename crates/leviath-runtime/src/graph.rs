@@ -12,23 +12,6 @@ use std::collections::HashMap;
 /// session) -- isolating the bare macro call behind a twin removes the
 /// unfixable region from what's measured without touching the surrounding,
 /// fully-testable control flow that decides WHETHER to call it.
-#[cfg(not(test))]
-fn log_llm_transition_no_match() {
-    tracing::warn!("LLM transition response didn't match any edge — using first available");
-}
-
-#[cfg(test)]
-fn log_llm_transition_no_match() {}
-
-/// COVERAGE-EXCLUDED: see [`log_llm_transition_no_match`].
-#[cfg(not(test))]
-fn log_compact_context_failed<E: std::fmt::Display>(e: &E) {
-    tracing::warn!(error = %e, "Failed to compact context during edge transform");
-}
-
-#[cfg(test)]
-fn log_compact_context_failed<E: std::fmt::Display>(_e: &E) {}
-
 /// Determine whether a blueprint uses graph mode (any stage has transitions set).
 pub fn is_graph_mode(blueprint: &Blueprint) -> bool {
     blueprint.stages.iter().any(|s| s.transitions.is_some())
@@ -325,7 +308,7 @@ pub async fn prompt_llm_transition(
     let _enter = span.enter();
     span.record("stage", tracing::field::display(&stage.name));
     span.record("llm_response", tracing::field::display(&choice));
-    log_llm_transition_no_match();
+    tracing::warn!("LLM transition response didn't match any edge — using first available");
     Some(edges.first()?.1.clone())
 }
 
@@ -591,7 +574,7 @@ async fn compact_transform_impl(
             window.current_tokens = window.calculate_tokens();
         }
         Err(e) => {
-            log_compact_context_failed(&e);
+            tracing::warn!(error = %e, "Failed to compact context during edge transform");
         }
     }
 }

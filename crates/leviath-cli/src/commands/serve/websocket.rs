@@ -7,19 +7,6 @@ use tokio::sync::broadcast;
 
 use super::types::*;
 
-/// COVERAGE-EXCLUDED: llvm-cov's tracing-macro message-literal region is
-/// permanently uncovered regardless of restructuring (event!/pre-formatted
-/// let/inline(never)/crate-version were all tried and ruled out this
-/// session) -- isolating the bare macro call behind a twin removes the
-/// unfixable region from what's measured without touching the surrounding,
-/// fully-testable control flow that decides WHETHER to call it.
-#[cfg(not(test))]
-fn log_ws_subscriber_lagged(n: u64) {
-    tracing::warn!("WebSocket subscriber lagged by {} events", n);
-}
-
-#[cfg(test)]
-fn log_ws_subscriber_lagged(_n: u64) {}
 
 pub(super) async fn ws_global(
     State(state): State<AppState>,
@@ -77,7 +64,7 @@ async fn handle_ws(
                         }
                     }
                     Err(broadcast::error::RecvError::Lagged(n)) => {
-                        log_ws_subscriber_lagged(n);
+                        tracing::warn!("WebSocket subscriber lagged by {} events", n);
                     }
                     Err(broadcast::error::RecvError::Closed) => break,
                 }
