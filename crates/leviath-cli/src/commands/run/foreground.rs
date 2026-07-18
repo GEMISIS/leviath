@@ -21,44 +21,50 @@ use super::manifest::{find_manifest, parse_manifest};
 use super::session::{build_provider_registry_from_config, resolve_task};
 use super::RunArgs;
 
+/// Type-erased async buffered reader supplied by
+/// [`ForegroundIo::make_message_reader`].
+pub type BoxedAsyncBufRead = std::pin::Pin<Box<dyn tokio::io::AsyncBufRead + Send>>;
+
+/// Real-stdin dependencies the binary injects into a foreground run so the
+/// library core never touches `std::io::stdin()` directly (and is thus fully
+/// testable with in-memory fakes). Production supplies real-stdin
+/// implementations from `main.rs`; tests pass fakes that never block.
+pub struct ForegroundIo {
+    /// Answers an interaction request by reading real stdin. Production composes
+    /// `|req| request_interaction_from_reader(req, &mut std::io::stdin().lock())`
+    /// in the binary. Used for tool-approval prompts, dynamic interactions
+    /// (`ask_user_*` / `present_for_review`), the taint gate, and interactive
+    /// points.
+    pub ask: fn(&InteractionRequest) -> InteractionResponse,
+    /// Constructs the async reader the user-message forwarder reads from.
+    /// Production: `|| Box::pin(tokio::io::BufReader::new(tokio::io::stdin()))`.
+    pub make_message_reader: fn() -> BoxedAsyncBufRead,
+    /// Probes whether the process stdin is a TTY (drives interactive
+    /// editor-launch vs. error in `resolve_task`). Production:
+    /// `|| std::io::stdin().is_terminal()`.
+    pub stdin_is_terminal: fn() -> bool,
+}
+
 /// Foreground [`InteractionBackend`](super::dynamic_interaction::InteractionBackend):
-/// answers via stdin and prints the review document directly (no per-stage
-/// log file to persist to in foreground mode).
-struct ForegroundInteractionBackend;
+/// answers via the injected stdin `asker` and prints the review document
+/// directly (no per-stage log file to persist to in foreground mode).
+struct ForegroundInteractionBackend {
+    /// Injected real-stdin asker (see [`ForegroundIo::ask`]).
+    asker: fn(&InteractionRequest) -> InteractionResponse,
+}
 
 #[async_trait]
 impl super::dynamic_interaction::InteractionBackend for ForegroundInteractionBackend {
-    /// COVERAGE-EXCLUDED: `request_interaction_stdin` blocks on real stdin via
-    /// `std::io::stdin().lock()`; the underlying logic is fully covered by
+    /// Delegates to the injected `asker`. The only real-stdin variant lives in
+    /// the binary (`main.rs`); tests inject a mock that never blocks, and the
+    /// underlying protocol logic is fully covered by
     /// `request_interaction_from_reader`'s in-memory-reader tests in
-    /// `interaction.rs`. A previous test here drove this for real through
-    /// `spawn_blocking` + a timeout, which doesn't help: on a live TTY the
-    /// read never reaches EOF, that blocking-pool thread is tracked by
-    /// tokio, and tearing down the test's runtime blocks forever waiting for
-    /// it regardless of what the test does with the `JoinHandle`. Hit
-    /// exactly this hang running interactively.
-    #[cfg(not(test))]
+    /// `interaction.rs`.
     async fn ask(
         &self,
         req: crate::interaction::InteractionRequest,
     ) -> crate::interaction::InteractionResponse {
-        crate::interaction::request_interaction_stdin(&req)
-    }
-
-    /// Never invoked by any test (see the real body's doc comment above) --
-    /// this canned "declined" response exists only so the trait impl
-    /// compiles under `#[cfg(test)]`; its exact value is otherwise
-    /// unobserved.
-    #[cfg(test)]
-    async fn ask(
-        &self,
-        req: crate::interaction::InteractionRequest,
-    ) -> crate::interaction::InteractionResponse {
-        crate::interaction::InteractionResponse::approval(
-            &req.id,
-            false,
-            crate::interaction::ApprovalScope::Once,
-        )
+        (self.asker)(&req)
     }
 
     fn on_review_document(&self, _tool_call_id: &str, title: &str, markdown: &str) {
@@ -114,8 +120,8 @@ struct ForegroundToolDispatchState {
 /// [`super::executor::run_stage_loop`] in [`run_foreground`], lifted out into
 /// a standalone function so it can be unit-tested directly. `interaction_backend`
 /// and `ask_approval` are injected so tests never block on real stdin: in
-/// production these are [`ForegroundInteractionBackend`] and
-/// [`crate::interaction::request_interaction_stdin`] respectively.
+/// production these are a [`ForegroundInteractionBackend`] and the injected
+/// [`ForegroundIo::ask`] respectively.
 async fn dispatch_tool_calls_foreground(
     state: &ForegroundToolDispatchState,
     calls: Vec<leviath_providers::ToolCall>,
@@ -271,6 +277,12 @@ where
 struct ForegroundCallbacks {
     /// Shared context window for context_* tool dispatch (synced with entity CW).
     context_window: Arc<Mutex<Option<leviath_runtime::ContextWindow>>>,
+    /// Injected real-stdin asker for the taint gate prompt and interactive
+    /// points (see [`ForegroundIo::ask`]).
+    asker: fn(&InteractionRequest) -> InteractionResponse,
+    /// Injected factory for the user-message reader (see
+    /// [`ForegroundIo::make_message_reader`]).
+    make_message_reader: fn() -> BoxedAsyncBufRead,
 }
 
 #[async_trait]
@@ -315,33 +327,18 @@ impl StageCallbacks for ForegroundCallbacks {
         println!();
     }
 
-    /// COVERAGE-EXCLUDED: constructs a real `tokio::io::stdin()` reader;
-    /// merely calling this factory starts a real blocking stdin read on a
-    /// tokio blocking-pool thread that never reaches EOF on a live TTY (see
-    /// `start_message_reader_with`'s doc comment). The injected `make_reader`
-    /// closure this delegates to is fully exercised via `tokio::io::empty()`
-    /// in the `#[cfg(test)]` twin below and in
-    /// `foreground_start_message_reader_returns_handle_when_accepts`.
-    #[cfg(not(test))]
+    /// Delegates to [`start_message_reader_with`] with the injected
+    /// [`ForegroundIo::make_message_reader`] factory. In production that
+    /// factory constructs a real `tokio::io::stdin()` reader (see
+    /// `start_message_reader_with`'s doc comment for why merely constructing it
+    /// is unsafe under `cargo test`); tests inject `tokio::io::empty()`.
     fn start_message_reader(
         &mut self,
         engine: &leviath_runtime::AgentEngine,
         agent_id: &str,
         accepts: bool,
     ) -> Option<tokio::task::JoinHandle<()>> {
-        start_message_reader_with(engine, agent_id, accepts, || {
-            tokio::io::BufReader::new(tokio::io::stdin())
-        })
-    }
-
-    #[cfg(test)]
-    fn start_message_reader(
-        &mut self,
-        engine: &leviath_runtime::AgentEngine,
-        agent_id: &str,
-        accepts: bool,
-    ) -> Option<tokio::task::JoinHandle<()>> {
-        start_message_reader_with(engine, agent_id, accepts, tokio::io::empty)
+        start_message_reader_with(engine, agent_id, accepts, self.make_message_reader)
     }
 
     fn get_run_context(&mut self) -> Option<(&str, &mut RunMeta)> {
@@ -483,7 +480,12 @@ impl StageCallbacks for ForegroundCallbacks {
     }
 
     fn make_gate_prompt(&self) -> Option<Box<dyn leviath_runtime::taint::GatePrompt>> {
-        Some(Box::new(ForegroundGatePrompt))
+        Some(Box::new(ForegroundGatePrompt { asker: self.asker }))
+    }
+
+    fn interaction_point_asker(&self) -> Option<super::executor::InteractionAsker> {
+        // Foreground resolves interaction points via the injected stdin asker.
+        Some(self.asker)
     }
 
     async fn on_post_stage(
@@ -496,9 +498,12 @@ impl StageCallbacks for ForegroundCallbacks {
     }
 }
 
-/// Foreground taint [`GatePrompt`]: prompts on stdin (allow-once / session /
-/// deny) when the gate blocks an outbound call.
-struct ForegroundGatePrompt;
+/// Foreground taint [`GatePrompt`]: prompts via the injected stdin `asker`
+/// (allow-once / session / deny) when the gate blocks an outbound call.
+struct ForegroundGatePrompt {
+    /// Injected real-stdin asker (see [`ForegroundIo::ask`]).
+    asker: fn(&InteractionRequest) -> InteractionResponse,
+}
 
 #[async_trait::async_trait]
 impl leviath_runtime::taint::GatePrompt for ForegroundGatePrompt {
@@ -508,17 +513,16 @@ impl leviath_runtime::taint::GatePrompt for ForegroundGatePrompt {
     ) -> leviath_runtime::taint::GateResolution {
         // All request-building + response-mapping lives in the tested
         // `resolve_gate_with_asker`; only the real-stdin read is untestable.
-        super::dynamic_interaction::resolve_gate_with_asker(
-            decision,
-            "taint-gate",
-            crate::interaction::request_interaction_stdin,
-        )
+        super::dynamic_interaction::resolve_gate_with_asker(decision, "taint-gate", self.asker)
     }
 }
 
 /// Run an agent in the foreground (inline, blocking) — the original behavior.
-pub async fn run_foreground(args: RunArgs) -> anyhow::Result<()> {
-    run_foreground_with_registry(args, build_provider_registry_from_config).await
+///
+/// `io` bundles the real-stdin dependencies the binary supplies (see
+/// [`ForegroundIo`]); the library never constructs them itself.
+pub async fn run_foreground(args: RunArgs, io: ForegroundIo) -> anyhow::Result<()> {
+    run_foreground_with_registry(args, build_provider_registry_from_config, io).await
 }
 
 /// Core of [`run_foreground`], with provider-registry construction injected
@@ -535,9 +539,10 @@ pub async fn run_foreground(args: RunArgs) -> anyhow::Result<()> {
 /// (`run_stage_loop` itself is now fully type-erased — see its doc comment —
 /// so this no longer affects its coverage, but the `fn`-pointer form is still
 /// the right minimal-instantiation choice here.)
-async fn run_foreground_with_registry(
+pub async fn run_foreground_with_registry(
     args: RunArgs,
     build_registry: fn(&Config) -> leviath_runtime::ProviderRegistry,
+    io: ForegroundIo,
 ) -> anyhow::Result<()> {
     let path = args.path.unwrap_or_else(|| ".".to_string());
 
@@ -552,7 +557,12 @@ async fn run_foreground_with_registry(
         .map_err(|e| anyhow::anyhow!("blueprint validation failed: {e}"))?;
 
     let description = Some(blueprint.description.as_str());
-    let task = resolve_task(&args.task, &blueprint.name, description)?;
+    let task = resolve_task(
+        &args.task,
+        &blueprint.name,
+        description,
+        &io.stdin_is_terminal,
+    )?;
 
     let span = tracing::info_span!(
         "run_foreground_start",
@@ -656,6 +666,8 @@ async fn run_foreground_with_registry(
     let shared_context_window: Arc<Mutex<Option<leviath_runtime::ContextWindow>>> =
         Arc::new(Mutex::new(None));
     let exec_context_window = shared_context_window.clone();
+    // Injected real-stdin asker (copied into the exec closure below).
+    let exec_ask = io.ask;
     let mut exec = move |calls: Vec<leviath_providers::ToolCall>| -> leviath_runtime::ToolResultsFuture<'static> {
         let state = ForegroundToolDispatchState {
             builtins: builtins.clone(),
@@ -670,14 +682,8 @@ async fn run_foreground_with_registry(
             context_window: exec_context_window.clone(),
         };
         Box::pin(async move {
-            let interaction_backend = ForegroundInteractionBackend;
-            dispatch_tool_calls_foreground(
-                &state,
-                calls,
-                &interaction_backend,
-                &crate::interaction::request_interaction_stdin,
-            )
-            .await
+            let interaction_backend = ForegroundInteractionBackend { asker: exec_ask };
+            dispatch_tool_calls_foreground(&state, calls, &interaction_backend, &exec_ask).await
         })
     };
 
@@ -686,6 +692,8 @@ async fn run_foreground_with_registry(
 
     let mut callbacks = ForegroundCallbacks {
         context_window: shared_context_window.clone(),
+        asker: io.ask,
+        make_message_reader: io.make_message_reader,
     };
     let mut io = ConsoleIO::new();
 
@@ -708,6 +716,49 @@ async fn run_foreground_with_registry(
 
     tool_registry.shutdown().await;
     Ok(())
+}
+
+/// Test-only declining asker fake (echoes the request id, denies). `pub(crate)`
+/// so the `commands::run` module's own `execute` tests can build a foreground
+/// `io` without constructing real stdin.
+#[cfg(test)]
+pub(crate) fn test_decline(req: &InteractionRequest) -> InteractionResponse {
+    InteractionResponse::approval(&req.id, false, crate::interaction::ApprovalScope::Once)
+}
+
+/// Test-only message-reader factory: an empty reader that hits EOF immediately
+/// (never blocks, no tokio blocking-pool involvement).
+#[cfg(test)]
+pub(crate) fn test_empty_reader() -> BoxedAsyncBufRead {
+    Box::pin(tokio::io::empty())
+}
+
+/// Test-only stdin-is-a-TTY probe: deterministically false.
+#[cfg(test)]
+pub(crate) fn test_not_a_tty() -> bool {
+    false
+}
+
+/// A fully-fake [`ForegroundIo`] (declining asker, empty message reader,
+/// never-a-TTY probe) for tests that must supply one but never block on stdin.
+#[cfg(test)]
+pub(crate) fn test_foreground_io() -> ForegroundIo {
+    ForegroundIo {
+        ask: test_decline,
+        make_message_reader: test_empty_reader,
+        stdin_is_terminal: test_not_a_tty,
+    }
+}
+
+/// A [`ForegroundCallbacks`] with an empty shared context window and the
+/// fake stdin dependencies, for the callbacks/trait-method tests below.
+#[cfg(test)]
+fn test_callbacks() -> ForegroundCallbacks {
+    ForegroundCallbacks {
+        context_window: Arc::new(Mutex::new(None)),
+        asker: test_decline,
+        make_message_reader: test_empty_reader,
+    }
 }
 
 #[cfg(test)]
@@ -735,25 +786,19 @@ mod tests {
 
     #[test]
     fn foreground_callbacks_construction() {
-        let _cb = ForegroundCallbacks {
-            context_window: Arc::new(Mutex::new(None)),
-        };
+        let _cb = test_callbacks();
     }
 
     #[tokio::test]
     async fn foreground_on_provider_missing_returns_true() {
-        let mut cb = ForegroundCallbacks {
-            context_window: Arc::new(Mutex::new(None)),
-        };
+        let mut cb = test_callbacks();
         let result = cb.on_provider_missing("nonexistent", 0).await;
         assert!(result);
     }
 
     #[tokio::test]
     async fn foreground_on_stage_enter_does_not_panic() {
-        let mut cb = ForegroundCallbacks {
-            context_window: Arc::new(Mutex::new(None)),
-        };
+        let mut cb = test_callbacks();
         cb.on_stage_enter("plan", 0, "anthropic", "claude-sonnet-4-6", "")
             .await;
         cb.on_stage_enter("code", 1, "openai", "gpt-5", " (visit 2)")
@@ -762,25 +807,19 @@ mod tests {
 
     #[tokio::test]
     async fn foreground_on_claude_code_warning_does_not_panic() {
-        let mut cb = ForegroundCallbacks {
-            context_window: Arc::new(Mutex::new(None)),
-        };
+        let mut cb = test_callbacks();
         cb.on_claude_code_warning(0).await;
     }
 
     #[test]
     fn foreground_get_run_context_returns_none() {
-        let mut cb = ForegroundCallbacks {
-            context_window: Arc::new(Mutex::new(None)),
-        };
+        let mut cb = test_callbacks();
         assert!(cb.get_run_context().is_none());
     }
 
     #[tokio::test]
     async fn foreground_on_stage_result_is_noop() {
-        let mut cb = ForegroundCallbacks {
-            context_window: Arc::new(Mutex::new(None)),
-        };
+        let mut cb = test_callbacks();
         let registry = leviath_runtime::ProviderRegistry::new();
         let mut engine = leviath_runtime::AgentEngine::with_providers(registry);
         let mut pool = AgentPool::new(leviath_core::Blueprint::new(
@@ -797,9 +836,7 @@ mod tests {
 
     #[tokio::test]
     async fn foreground_on_stage_error_graph_mode() {
-        let mut cb = ForegroundCallbacks {
-            context_window: Arc::new(Mutex::new(None)),
-        };
+        let mut cb = test_callbacks();
         let err = anyhow::anyhow!("test error");
         let result = cb.on_stage_error("main", 0, &err, true).await;
         assert_eq!(result, Some(StageResult::Error));
@@ -807,9 +844,7 @@ mod tests {
 
     #[tokio::test]
     async fn foreground_on_stage_error_linear_mode() {
-        let mut cb = ForegroundCallbacks {
-            context_window: Arc::new(Mutex::new(None)),
-        };
+        let mut cb = test_callbacks();
         let err = anyhow::anyhow!("test error");
         let result = cb.on_stage_error("main", 0, &err, false).await;
         assert!(result.is_none());
@@ -817,25 +852,28 @@ mod tests {
 
     #[tokio::test]
     async fn foreground_on_transition_is_noop() {
-        let mut cb = ForegroundCallbacks {
-            context_window: Arc::new(Mutex::new(None)),
-        };
+        let mut cb = test_callbacks();
         cb.on_transition("plan", "code", 0).await;
     }
 
     #[tokio::test]
     async fn foreground_on_complete_does_not_panic() {
-        let mut cb = ForegroundCallbacks {
-            context_window: Arc::new(Mutex::new(None)),
-        };
+        let mut cb = test_callbacks();
         cb.on_complete(2).await;
+    }
+
+    #[test]
+    fn foreground_interaction_point_asker_returns_the_injected_asker() {
+        // Foreground resolves interaction points via the injected stdin asker,
+        // so its `StageCallbacks::interaction_point_asker` override returns
+        // `Some(_)` (worker/fanout inherit the `None` default).
+        let cb = test_callbacks();
+        assert!(cb.interaction_point_asker().is_some());
     }
 
     #[tokio::test]
     async fn foreground_on_post_stage_is_noop() {
-        let mut cb = ForegroundCallbacks {
-            context_window: Arc::new(Mutex::new(None)),
-        };
+        let mut cb = test_callbacks();
         let registry = leviath_runtime::ProviderRegistry::new();
         let engine = leviath_runtime::AgentEngine::with_providers(registry);
         let entity = bevy_ecs::prelude::Entity::from_raw(0);
@@ -844,9 +882,7 @@ mod tests {
 
     #[test]
     fn foreground_start_message_reader_returns_none_when_not_accepts() {
-        let mut cb = ForegroundCallbacks {
-            context_window: Arc::new(Mutex::new(None)),
-        };
+        let mut cb = test_callbacks();
         let registry = leviath_runtime::ProviderRegistry::new();
         let engine = leviath_runtime::AgentEngine::with_providers(registry);
         let handle = cb.start_message_reader(&engine, "agent-1", false);
@@ -865,9 +901,7 @@ mod tests {
     /// monomorphization's spawned task body actually runs to completion.
     #[tokio::test]
     async fn foreground_start_message_reader_returns_handle_when_accepts_via_trait() {
-        let mut cb = ForegroundCallbacks {
-            context_window: Arc::new(Mutex::new(None)),
-        };
+        let mut cb = test_callbacks();
         let registry = leviath_runtime::ProviderRegistry::new();
         let engine = leviath_runtime::AgentEngine::with_providers(registry);
         let handle = cb.start_message_reader(&engine, "agent-1", true);
@@ -877,9 +911,7 @@ mod tests {
 
     #[tokio::test]
     async fn foreground_on_stage_enter_with_visit_label() {
-        let mut cb = ForegroundCallbacks {
-            context_window: Arc::new(Mutex::new(None)),
-        };
+        let mut cb = test_callbacks();
         // Should not panic
         cb.on_stage_enter("review", 2, "openai", "gpt-5", " (visit 3)")
             .await;
@@ -887,26 +919,20 @@ mod tests {
 
     #[tokio::test]
     async fn foreground_on_complete_multiple_stages() {
-        let mut cb = ForegroundCallbacks {
-            context_window: Arc::new(Mutex::new(None)),
-        };
+        let mut cb = test_callbacks();
         cb.on_complete(5).await;
     }
 
     #[tokio::test]
     async fn foreground_on_transition_is_noop_different_stages() {
-        let mut cb = ForegroundCallbacks {
-            context_window: Arc::new(Mutex::new(None)),
-        };
+        let mut cb = test_callbacks();
         cb.on_transition("plan", "implement", 0).await;
         cb.on_transition("implement", "review", 1).await;
     }
 
     #[tokio::test]
     async fn foreground_on_stage_result_no_response_is_noop() {
-        let mut cb = ForegroundCallbacks {
-            context_window: Arc::new(Mutex::new(None)),
-        };
+        let mut cb = test_callbacks();
         let registry = leviath_runtime::ProviderRegistry::new();
         let mut engine = leviath_runtime::AgentEngine::with_providers(registry);
         let mut pool = AgentPool::new(leviath_core::Blueprint::new(
@@ -953,9 +979,7 @@ mod tests {
 
     #[tokio::test]
     async fn foreground_on_stage_error_various_stages() {
-        let mut cb = ForegroundCallbacks {
-            context_window: Arc::new(Mutex::new(None)),
-        };
+        let mut cb = test_callbacks();
         // Linear mode: returns None
         let err = anyhow::anyhow!("stage failed");
         assert!(cb.on_stage_error("plan", 0, &err, false).await.is_none());
@@ -969,9 +993,7 @@ mod tests {
 
     #[tokio::test]
     async fn foreground_callbacks_complete_sequence() {
-        let mut cb = ForegroundCallbacks {
-            context_window: Arc::new(Mutex::new(None)),
-        };
+        let mut cb = test_callbacks();
 
         // Simulate a complete stage lifecycle
         cb.on_stage_enter("plan", 0, "anthropic", "claude-sonnet-4-6", "")
@@ -1004,9 +1026,7 @@ mod tests {
     fn foreground_callbacks_all_provider_missing_messages() {
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
-            let mut cb = ForegroundCallbacks {
-                context_window: Arc::new(Mutex::new(None)),
-            };
+            let mut cb = test_callbacks();
             // Test with various provider names
             for provider in ["anthropic", "openai", "google", "openrouter", "ollama"] {
                 let result = cb.on_provider_missing(provider, 0).await;
@@ -1020,31 +1040,38 @@ mod tests {
     #[test]
     fn foreground_interaction_backend_on_review_document_does_not_panic() {
         use crate::commands::run::dynamic_interaction::InteractionBackend;
-        let backend = ForegroundInteractionBackend;
+        let backend = ForegroundInteractionBackend {
+            asker: test_decline,
+        };
         backend.on_review_document("call-1", "Title", "# Markdown body");
     }
 
-    // `ask()`'s real (`#[cfg(not(test))]`) body (`request_interaction_stdin`)
-    // is deliberately not called from any test -- see the doc comment on
-    // that impl above. The `spawn_blocking` + timeout wrapper this test used
-    // to have doesn't bound anything real: on a live TTY the underlying
-    // blocking stdin read never reaches EOF, tokio's blocking pool tracks it
-    // regardless of whether the `JoinHandle` is awaited/timed-out/aborted,
-    // and this test's runtime teardown hung waiting for it.
-    // `request_interaction_from_reader` (interaction.rs) has full
-    // in-memory-reader coverage of the actual logic `ask()` delegates to.
-    //
-    // The `#[cfg(test)]` twin below it, however, is plain in-memory code (no
-    // I/O) -- it's safe to call directly, so we do, purely for coverage.
+    // `ForegroundInteractionBackend::ask` delegates to its injected `asker`.
+    // In production the binary injects the real-stdin asker; here we inject the
+    // in-memory `test_decline` fake (which never blocks) and assert the
+    // delegation echoes the request id and returns the fake's response. The
+    // real-stdin protocol logic itself is covered by
+    // `request_interaction_from_reader`'s in-memory-reader tests in
+    // `interaction.rs`.
     #[tokio::test]
-    async fn foreground_interaction_backend_ask_returns_canned_decline() {
+    async fn foreground_interaction_backend_ask_delegates_to_injected_asker() {
         use crate::commands::run::dynamic_interaction::InteractionBackend;
-        let backend = ForegroundInteractionBackend;
+        let backend = ForegroundInteractionBackend {
+            asker: test_decline,
+        };
         let req = InteractionRequest::confirm("ask-cov", "Proceed?", "stage");
         let resp = backend.ask(req).await;
         assert_eq!(resp.request_id, "ask-cov");
         assert_eq!(resp.approved, Some(false));
         assert_eq!(resp.scope, Some(crate::interaction::ApprovalScope::Once));
+    }
+
+    #[test]
+    fn test_stdin_probe_fake_reports_not_a_tty() {
+        // Directly covers the `test_not_a_tty` fake (the injected
+        // `ForegroundIo::stdin_is_terminal` in tests), which the run-path tests
+        // never invoke because they always pass a concrete `--task`.
+        assert!(!test_not_a_tty());
     }
 
     // ─── dispatch_tool_calls_foreground ─────────────────────────────────────
@@ -1093,7 +1120,9 @@ mod tests {
         // A `context_*` tool name takes the early context-tool branch:
         // handle_context_tool runs and its result is pushed, then `continue`.
         let state = make_dispatch_state("context-tool").await;
-        let backend = ForegroundInteractionBackend;
+        let backend = ForegroundInteractionBackend {
+            asker: test_decline,
+        };
         let calls = vec![make_tool_call(
             "context_read",
             serde_json::json!({"region": "conversation"}),
@@ -1111,7 +1140,9 @@ mod tests {
         global.insert("bash".to_string(), ToolPolicy::Deny);
         state.global_perms = Arc::new(global);
 
-        let backend = ForegroundInteractionBackend;
+        let backend = ForegroundInteractionBackend {
+            asker: test_decline,
+        };
         let calls = vec![make_tool_call("bash", serde_json::json!({"command": "ls"}))];
         let out = dispatch_tool_calls_foreground(&state, calls, &backend, &approve_once).await;
 
@@ -1128,7 +1159,9 @@ mod tests {
         launch.insert("*".to_string(), ToolPolicy::Allow);
         state.launch_overrides = Arc::new(launch);
 
-        let backend = ForegroundInteractionBackend;
+        let backend = ForegroundInteractionBackend {
+            asker: test_decline,
+        };
         let calls = vec![make_tool_call(
             "read_file",
             serde_json::json!({"path": "definitely-not-here.txt"}),
@@ -1151,7 +1184,9 @@ mod tests {
             .await
             .insert("read_file".to_string());
 
-        let backend = ForegroundInteractionBackend;
+        let backend = ForegroundInteractionBackend {
+            asker: test_decline,
+        };
         let calls = vec![make_tool_call(
             "read_file",
             serde_json::json!({"path": "definitely-not-here.txt"}),
@@ -1169,7 +1204,9 @@ mod tests {
         global.insert("read_file".to_string(), ToolPolicy::Ask);
         state.global_perms = Arc::new(global);
 
-        let backend = ForegroundInteractionBackend;
+        let backend = ForegroundInteractionBackend {
+            asker: test_decline,
+        };
         let calls = vec![make_tool_call(
             "read_file",
             serde_json::json!({"path": "definitely-not-here.txt"}),
@@ -1188,7 +1225,9 @@ mod tests {
         global.insert("read_file".to_string(), ToolPolicy::Ask);
         state.global_perms = Arc::new(global);
 
-        let backend = ForegroundInteractionBackend;
+        let backend = ForegroundInteractionBackend {
+            asker: test_decline,
+        };
         let calls = vec![make_tool_call(
             "read_file",
             serde_json::json!({"path": "definitely-not-here.txt"}),
@@ -1207,7 +1246,9 @@ mod tests {
         global.insert("read_file".to_string(), ToolPolicy::Ask);
         state.global_perms = Arc::new(global);
 
-        let backend = ForegroundInteractionBackend;
+        let backend = ForegroundInteractionBackend {
+            asker: test_decline,
+        };
         let calls = vec![make_tool_call(
             "read_file",
             serde_json::json!({"path": "definitely-not-here.txt"}),
@@ -1265,7 +1306,9 @@ mod tests {
         global.insert("read_file".to_string(), ToolPolicy::Deny);
         state.global_perms = Arc::new(global);
 
-        let backend = ForegroundInteractionBackend;
+        let backend = ForegroundInteractionBackend {
+            asker: test_decline,
+        };
         let calls = vec![
             make_tool_call("bash", serde_json::json!({"command": "ls"})),
             make_tool_call("read_file", serde_json::json!({"path": "x"})),
@@ -1287,7 +1330,9 @@ mod tests {
         launch.insert("*".to_string(), ToolPolicy::Allow);
         state.launch_overrides = Arc::new(launch);
 
-        let backend = ForegroundInteractionBackend;
+        let backend = ForegroundInteractionBackend {
+            asker: test_decline,
+        };
         let calls = vec![make_tool_call("some_mcp_tool", serde_json::json!({}))];
         let out = dispatch_tool_calls_foreground(&state, calls, &backend, &approve_once).await;
 
@@ -1302,7 +1347,9 @@ mod tests {
         global.insert("some_mcp_tool".to_string(), ToolPolicy::Ask);
         state.global_perms = Arc::new(global);
 
-        let backend = ForegroundInteractionBackend;
+        let backend = ForegroundInteractionBackend {
+            asker: test_decline,
+        };
         let calls = vec![make_tool_call("some_mcp_tool", serde_json::json!({}))];
         let out = dispatch_tool_calls_foreground(&state, calls, &backend, &approve_once).await;
 
@@ -1426,7 +1473,9 @@ bash = "ask"
         // `run_stage_loop` surfaces as `Ok(())`, not an error. Wrapped in
         // `with_tracing` because this path reaches the `tracing::info!` at
         // the top of `run_foreground_with_registry`.
-        with_tracing(|| run_foreground(args)).await.unwrap();
+        with_tracing(|| run_foreground(args, test_foreground_io()))
+            .await
+            .unwrap();
 
         let _ = std::fs::remove_dir_all(&temp_dir);
     }
@@ -1557,11 +1606,15 @@ model = "mock-model"
         // Wrapped in `with_tracing` because this path reaches the
         // `tracing::info!` at the top of `run_foreground_with_registry`.
         with_tracing(|| {
-            run_foreground_with_registry(args, |_config| {
-                let mut registry = leviath_runtime::ProviderRegistry::new();
-                registry.register("mock".to_string(), Arc::new(MockProvider::new()));
-                registry
-            })
+            run_foreground_with_registry(
+                args,
+                |_config| {
+                    let mut registry = leviath_runtime::ProviderRegistry::new();
+                    registry.register("mock".to_string(), Arc::new(MockProvider::new()));
+                    registry
+                },
+                test_foreground_io(),
+            )
         })
         .await
         .unwrap();
@@ -1654,11 +1707,15 @@ model = "mock-model"
         };
 
         let result = with_tracing(|| {
-            run_foreground_with_registry(args, |_config| {
-                let mut registry = leviath_runtime::ProviderRegistry::new();
-                registry.register("mock".to_string(), Arc::new(InferFailProvider));
-                registry
-            })
+            run_foreground_with_registry(
+                args,
+                |_config| {
+                    let mut registry = leviath_runtime::ProviderRegistry::new();
+                    registry.register("mock".to_string(), Arc::new(InferFailProvider));
+                    registry
+                },
+                test_foreground_io(),
+            )
         })
         .await;
         assert!(result.is_err());
@@ -1689,7 +1746,7 @@ model = "mock-model"
             count: 1,
         };
 
-        let result = run_foreground(args).await;
+        let result = run_foreground(args, test_foreground_io()).await;
         assert!(result.is_err());
         let err_msg = result.unwrap_err().to_string();
         assert_contains_display(
@@ -1745,7 +1802,10 @@ model = "mock-model"
             count: 1,
         };
 
-        let result = with_tracing(|| run_foreground_with_registry(args, empty_registry)).await;
+        let result = with_tracing(|| {
+            run_foreground_with_registry(args, empty_registry, test_foreground_io())
+        })
+        .await;
         assert!(result.is_ok());
 
         let _ = std::fs::remove_dir_all(&temp_dir);
@@ -1781,7 +1841,7 @@ model = "mock-model"
         };
 
         // find_manifest(".") will fail unless there's an agent.leviath in cwd
-        let result = run_foreground_with_registry(args, empty_registry).await;
+        let result = run_foreground_with_registry(args, empty_registry, test_foreground_io()).await;
         // Accept either Ok or Err — we just need the unwrap_or_else to fire.
         let _ = result;
     }
@@ -1814,7 +1874,7 @@ model = "mock-model"
             count: 1,
         };
 
-        let result = run_foreground_with_registry(args, empty_registry).await;
+        let result = run_foreground_with_registry(args, empty_registry, test_foreground_io()).await;
         assert!(result.is_err());
 
         let _ = std::fs::remove_dir_all(&temp_dir);
@@ -1843,7 +1903,7 @@ model = "mock-model"
             count: 1,
         };
 
-        let result = run_foreground_with_registry(args, empty_registry).await;
+        let result = run_foreground_with_registry(args, empty_registry, test_foreground_io()).await;
         assert!(result.is_err());
 
         let _ = std::fs::remove_dir_all(&temp_dir);
@@ -1887,7 +1947,7 @@ prompt = "Do the thing"
             count: 1,
         };
 
-        let result = run_foreground_with_registry(args, empty_registry).await;
+        let result = run_foreground_with_registry(args, empty_registry, test_foreground_io()).await;
         assert!(result.is_err());
         let err = format!("{:#}", result.unwrap_err());
         assert!(
@@ -1935,7 +1995,7 @@ prompt = "Do the thing"
             count: 1,
         };
 
-        let result = run_foreground_with_registry(args, empty_registry).await;
+        let result = run_foreground_with_registry(args, empty_registry, test_foreground_io()).await;
         assert!(result.is_err());
         let err_msg = result.unwrap_err().to_string();
         assert_contains_display(err_msg.contains("is empty"), "unexpected error", &err_msg);
@@ -1981,7 +2041,10 @@ prompt = "Do the thing"
         // Wrapped in `with_tracing` because this path reaches the
         // `tracing::info!` at the top of `run_foreground_with_registry`
         // (after manifest parsing, before `Config::load()` fails).
-        let result = with_tracing(|| run_foreground_with_registry(args, empty_registry)).await;
+        let result = with_tracing(|| {
+            run_foreground_with_registry(args, empty_registry, test_foreground_io())
+        })
+        .await;
         assert!(result.is_err());
         let err_msg = result.unwrap_err().to_string();
         assert_contains_display(
@@ -2037,7 +2100,9 @@ model = "claude-sonnet-4-6"
 
         // No provider configured (config isolated above) → aborts cleanly at
         // `on_provider_missing`, same as the yolo:true counterpart above.
-        with_tracing(|| run_foreground(args)).await.unwrap();
+        with_tracing(|| run_foreground(args, test_foreground_io()))
+            .await
+            .unwrap();
 
         let _ = std::fs::remove_dir_all(&temp_dir);
     }
@@ -2138,11 +2203,15 @@ allowed = ["read_file"]
         // Wrapped in `with_tracing` because this path reaches the
         // `tracing::info!` at the top of `run_foreground_with_registry`.
         let result = with_tracing(|| {
-            run_foreground_with_registry(args, |_config| {
-                let mut registry = leviath_runtime::ProviderRegistry::new();
-                registry.register("error-mock".to_string(), Arc::new(ErrorProvider));
-                registry
-            })
+            run_foreground_with_registry(
+                args,
+                |_config| {
+                    let mut registry = leviath_runtime::ProviderRegistry::new();
+                    registry.register("error-mock".to_string(), Arc::new(ErrorProvider));
+                    registry
+                },
+                test_foreground_io(),
+            )
         })
         .await;
 
@@ -2156,9 +2225,7 @@ allowed = ["read_file"]
     async fn foreground_taint_trait_methods_callable() {
         // Exercises the foreground taint overrides + default hooks (Config/policy
         // load are read-only real IO; we assert shape, not specific values).
-        let mut cb = ForegroundCallbacks {
-            context_window: Arc::new(Mutex::new(None)),
-        };
+        let mut cb = test_callbacks();
         let _enabled: bool = cb.taint_global_enabled();
         let _policy = cb.taint_policy();
         assert!(cb.make_gate_prompt().is_some());
@@ -2191,7 +2258,9 @@ allowed = ["read_file"]
         // to AllowOnce *without* invoking the real stdin asker, so the
         // ForegroundGatePrompt::resolve method itself can be driven safely.
         use leviath_runtime::taint::GatePrompt;
-        let prompt = ForegroundGatePrompt;
+        let prompt = ForegroundGatePrompt {
+            asker: test_decline,
+        };
         let r = prompt
             .resolve(&leviath_core::taint::GateDecision::Allowed)
             .await;

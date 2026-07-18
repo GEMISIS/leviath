@@ -24,7 +24,6 @@ use tower_http::cors::{Any, CorsLayer};
 
 use crate::config::Config;
 
-
 // ─── Entrypoint ──────────────────────────────────────────────────────────────
 
 /// Aborts a spawned task when dropped — including when dropped mid-flight as

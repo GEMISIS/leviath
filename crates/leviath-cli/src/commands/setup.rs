@@ -934,7 +934,8 @@ mod tests {
 
     #[test]
     fn run_non_interactive_setup_writes_through_config_path() {
-        let _guard = crate::config::isolate_config_path_for_test("setup-non-interactive-configpath");
+        let _guard =
+            crate::config::isolate_config_path_for_test("setup-non-interactive-configpath");
 
         let mut config = Config::load().unwrap_or_default();
         let args = SetupArgs {

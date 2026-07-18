@@ -370,35 +370,12 @@ pub async fn request_interaction_bg_review(
 
 // ─── Foreground (stdin) path ─────────────────────────────────────────────────
 
-/// Request interaction from a foreground (stdin-connected) process.
-///
-/// Renders the prompt and reads stdin instead of using the file-based channel.
-/// Returns the same `InteractionResponse` type for unified handling.
-///
-/// COVERAGE-EXCLUDED: locks and reads real `std::io::stdin()`, which cannot be
-/// driven under `cargo test` without OS-specific fd redirection (the prior
-/// Unix-only `libc::dup2(/dev/null, 0)` test). The actual protocol logic lives
-/// in [`request_interaction_from_reader`], which is fully covered with in-memory
-/// readers; the `#[cfg(test)]` twin below routes through it so the wrapper is
-/// exercised cross-platform without touching real stdin.
-#[cfg(not(test))]
-pub fn request_interaction_stdin(req: &InteractionRequest) -> InteractionResponse {
-    let stdin = std::io::stdin();
-    request_interaction_from_reader(req, &mut stdin.lock())
-}
-
-#[cfg(test)]
-pub fn request_interaction_stdin(req: &InteractionRequest) -> InteractionResponse {
-    // Test twin: never touches real stdin. An empty reader hits EOF immediately,
-    // so `request_interaction_from_reader` returns its safe default.
-    request_interaction_from_reader(req, &mut std::io::empty())
-}
-
-/// Same protocol as [`request_interaction_stdin`], reading from any
-/// [`std::io::BufRead`] instead of hardcoding `io::stdin()`. This is the
-/// actual implementation — factored out so it can be exercised in tests
-/// with an in-memory reader (e.g. `Cursor<&[u8]>`) instead of blocking on
-/// real stdin.
+/// Resolve an interaction request by reading from any [`std::io::BufRead`]
+/// instead of hardcoding `io::stdin()`. This is the actual foreground protocol
+/// implementation — factored out so it can be exercised in tests with an
+/// in-memory reader (e.g. `Cursor<&[u8]>`) instead of blocking on real stdin.
+/// The real-stdin caller lives in the binary (`main.rs`), which composes
+/// `request_interaction_from_reader(req, &mut std::io::stdin().lock())`.
 ///
 /// If the reader hits EOF (returns `Ok(0)`) before a valid answer is given
 /// — e.g. stdin is closed/piped from `/dev/null` — returns a safe default
@@ -2366,17 +2343,5 @@ mod tests {
         let mut reader = reader_from("1\n");
         let resp = request_interaction_from_reader(&req, &mut reader);
         assert_eq!(resp.approved, Some(true));
-    }
-
-    #[test]
-    fn stdin_request_interaction_stdin_twin_returns_default_on_eof() {
-        // Exercises the `#[cfg(test)]` twin of `request_interaction_stdin`
-        // cross-platform: the twin uses an empty reader (immediate EOF), so a
-        // FreeText request returns the safe default without touching real
-        // stdin. The prior version redirected fd 0 to /dev/null via libc
-        // (Unix-only).
-        let req = InteractionRequest::free_text("stdin-wrap-test", "Q?", "stage", false);
-        let resp = request_interaction_stdin(&req);
-        assert_eq!(resp.request_id, "stdin-wrap-test");
     }
 }

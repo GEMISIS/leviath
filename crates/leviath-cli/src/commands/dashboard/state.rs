@@ -65,18 +65,36 @@ pub(crate) struct Dashboard {
     /// (`make_test_dashboard`) inject a temp path so no test ever writes to the
     /// user's real `~/.leviath/dashboard.log`.
     pub(super) log_path: std::path::PathBuf,
+    /// Clipboard copy function (`text -> success`). Production injects the real
+    /// native-tool/OSC52 clipboard (which can write the real terminal); tests
+    /// (and [`new`](Self::new)) inject a no-op so a `y` keypress never touches
+    /// the clipboard or TTY.
+    pub(super) yank_fn: fn(&str) -> bool,
 }
 
 impl Dashboard {
+    /// Default/test constructor: points the activity log at a shared temp file
+    /// and uses a no-op clipboard, so unit tests never touch the real
+    /// `~/.leviath/dashboard.log`, the system clipboard, or the TTY. Production
+    /// builds the dashboard via [`new_with_log_path`](Self::new_with_log_path)
+    /// (see `init_dashboard`), injecting the real log path and clipboard fn.
+    /// Test-only: production always goes through `new_with_log_path`.
+    #[cfg(test)]
     pub(super) fn new(cmd_tx: mpsc::UnboundedSender<EngineCommand>) -> Self {
-        Self::new_with_log_path(cmd_tx, runstate::dashboard_log_path())
+        let log_path = std::env::temp_dir()
+            .join("leviath-test-dashboard")
+            .join("dashboard.log");
+        Self::new_with_log_path(cmd_tx, log_path, |_| false)
     }
 
-    /// Core of [`new`](Self::new) with the activity-log path injected, so tests
-    /// can point it at a temp dir instead of the real `~/.leviath/dashboard.log`.
+    /// Core of [`new`](Self::new) with the activity-log path and clipboard
+    /// function injected, so production can supply the real
+    /// `~/.leviath/dashboard.log` + real OSC52/native clipboard while tests
+    /// point them at a temp dir + a no-op.
     pub(super) fn new_with_log_path(
         cmd_tx: mpsc::UnboundedSender<EngineCommand>,
         log_path: std::path::PathBuf,
+        yank_fn: fn(&str) -> bool,
     ) -> Self {
         let (event_tx, event_rx) = create_event_channel();
         let mut table_state = TableState::default();
@@ -88,6 +106,7 @@ impl Dashboard {
 
         Self {
             log_path,
+            yank_fn,
             agents: Vec::new(),
             selected: 0,
             log,

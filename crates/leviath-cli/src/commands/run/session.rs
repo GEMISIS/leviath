@@ -17,32 +17,18 @@ pub use leviath_runtime::provider_creds::{build_provider_registry, ProviderCreds
 /// - `Some(s)` otherwise → use `s` as a literal prompt.
 /// - `None` when stdin is not a TTY → error.
 /// - `None` when stdin is a TTY → launch the user's editor on a temp prompt file.
+///
+/// `stdin_is_terminal` is injected (a `&dyn Fn() -> bool`) rather than probing
+/// the real process stdin here, so the library core stays free of direct
+/// `std::io::stdin()` access and is fully testable. In production the binary
+/// passes `&|| std::io::stdin().is_terminal()`.
 pub fn resolve_task(
     arg: &Option<String>,
     agent_name: &str,
     description: Option<&str>,
+    stdin_is_terminal: &dyn Fn() -> bool,
 ) -> anyhow::Result<String> {
-    resolve_task_with(arg, agent_name, description, &stdin_is_terminal)
-}
-
-/// COVERAGE-EXCLUDED: probes the real process stdin via `IsTerminal`. Under
-/// `cargo test` the result is environment-dependent (a real TTY when a human
-/// runs `cargo test` vs. a pipe in CI) and, when true, would drive
-/// `resolve_task` into launching a real editor. The `#[cfg(test)]` twin returns
-/// a fixed value so the wrapper is exercised cross-platform; both the TTY and
-/// non-TTY branches of the resolution logic itself are covered via
-/// `resolve_task_with` with an injected probe.
-#[cfg(not(test))]
-fn stdin_is_terminal() -> bool {
-    use std::io::IsTerminal;
-    std::io::stdin().is_terminal()
-}
-
-#[cfg(test)]
-fn stdin_is_terminal() -> bool {
-    // Deterministic: never a TTY, so `resolve_task(&None, ..)` takes the
-    // "no task provided" error path without spawning an editor.
-    false
+    resolve_task_with(arg, agent_name, description, stdin_is_terminal)
 }
 
 /// Same as [`resolve_task`], but with the stdin-is-a-TTY check injected
@@ -390,6 +376,15 @@ mod tests {
     /// with platform-appropriate script paths).
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 
+    /// Shared "stdin is never a TTY" probe for the `resolve_task` tests whose
+    /// argument is `Some(..)` (so the probe is never consulted) or that
+    /// explicitly want the non-TTY error path. A single named `fn` (rather than
+    /// a fresh `|| false` closure per call site) keeps every call site sharing
+    /// one instantiation and one covered region.
+    fn never_a_tty() -> bool {
+        false
+    }
+
     /// RAII guard that clears `VISUAL`/`EDITOR` on drop, restoring a clean
     /// environment for subsequent tests regardless of panics.
     struct EnvGuard;
@@ -438,7 +433,12 @@ mod tests {
 
     #[test]
     fn resolve_task_with_literal_string() {
-        let result = resolve_task(&Some("do something".to_string()), "test", None);
+        let result = resolve_task(
+            &Some("do something".to_string()),
+            "test",
+            None,
+            &never_a_tty,
+        );
         assert_eq!(result.unwrap(), "do something");
     }
 
@@ -449,7 +449,12 @@ mod tests {
         let file = dir.join("task.txt");
         std::fs::write(&file, "task from file\n").unwrap();
 
-        let result = resolve_task(&Some(file.to_str().unwrap().to_string()), "test", None);
+        let result = resolve_task(
+            &Some(file.to_str().unwrap().to_string()),
+            "test",
+            None,
+            &never_a_tty,
+        );
         assert_eq!(result.unwrap(), "task from file");
 
         let _ = std::fs::remove_dir_all(&dir);
@@ -462,7 +467,12 @@ mod tests {
         let file = dir.join("empty.txt");
         std::fs::write(&file, "   \n  ").unwrap();
 
-        let result = resolve_task(&Some(file.to_str().unwrap().to_string()), "test", None);
+        let result = resolve_task(
+            &Some(file.to_str().unwrap().to_string()),
+            "test",
+            None,
+            &never_a_tty,
+        );
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("empty"));
 
@@ -475,6 +485,7 @@ mod tests {
             &Some("/nonexistent/path/do_something".to_string()),
             "test",
             None,
+            &never_a_tty,
         );
         // Path doesn't exist as a file, so it's treated as a literal string
         assert_eq!(result.unwrap(), "/nonexistent/path/do_something");
@@ -487,7 +498,12 @@ mod tests {
         let file = dir.join("whitespace.txt");
         std::fs::write(&file, "   \n\t\n  \n").unwrap();
 
-        let result = resolve_task(&Some(file.to_str().unwrap().to_string()), "test", None);
+        let result = resolve_task(
+            &Some(file.to_str().unwrap().to_string()),
+            "test",
+            None,
+            &never_a_tty,
+        );
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("empty"));
 
@@ -501,7 +517,12 @@ mod tests {
         let file = dir.join("trimme.txt");
         std::fs::write(&file, "  hello world  \n\n").unwrap();
 
-        let result = resolve_task(&Some(file.to_str().unwrap().to_string()), "test", None);
+        let result = resolve_task(
+            &Some(file.to_str().unwrap().to_string()),
+            "test",
+            None,
+            &never_a_tty,
+        );
         assert_eq!(result.unwrap(), "hello world");
 
         let _ = std::fs::remove_dir_all(&dir);
@@ -509,7 +530,12 @@ mod tests {
 
     #[test]
     fn resolve_task_preserves_literal_string_as_is() {
-        let result = resolve_task(&Some("  spaces around  ".to_string()), "test", None);
+        let result = resolve_task(
+            &Some("  spaces around  ".to_string()),
+            "test",
+            None,
+            &never_a_tty,
+        );
         assert_eq!(result.unwrap(), "  spaces around  ");
     }
 
@@ -647,7 +673,12 @@ mod tests {
         let file = dir.join("multi.txt");
         std::fs::write(&file, "line one\nline two\nline three\n").unwrap();
 
-        let result = resolve_task(&Some(file.to_str().unwrap().to_string()), "test", None);
+        let result = resolve_task(
+            &Some(file.to_str().unwrap().to_string()),
+            "test",
+            None,
+            &never_a_tty,
+        );
         let task = result.unwrap();
         assert!(task.contains("line one"));
         assert!(task.contains("line two"));
@@ -664,6 +695,7 @@ mod tests {
             &Some("Write a function that does X & Y <html>".to_string()),
             "test",
             None,
+            &never_a_tty,
         );
         assert_eq!(result.unwrap(), "Write a function that does X & Y <html>");
     }
@@ -687,7 +719,7 @@ mod tests {
     #[test]
     fn resolve_task_literal_empty_string() {
         // Empty string is treated as literal, returns as-is
-        let result = resolve_task(&Some("".to_string()), "test", None);
+        let result = resolve_task(&Some("".to_string()), "test", None, &never_a_tty);
         assert_eq!(result.unwrap(), "");
     }
 
@@ -700,7 +732,12 @@ mod tests {
         let file = dir.join("trail.txt");
         std::fs::write(&file, "task content\n\n\n\n").unwrap();
 
-        let result = resolve_task(&Some(file.to_str().unwrap().to_string()), "test", None);
+        let result = resolve_task(
+            &Some(file.to_str().unwrap().to_string()),
+            "test",
+            None,
+            &never_a_tty,
+        );
         assert_eq!(result.unwrap(), "task content");
 
         let _ = std::fs::remove_dir_all(&dir);
@@ -752,6 +789,7 @@ mod tests {
             &Some(file.to_str().unwrap().to_string()),
             "api-agent",
             Some("API agent"),
+            &never_a_tty,
         );
         let task = result.unwrap();
         assert!(task.contains("Implement a REST API server"));
@@ -803,23 +841,26 @@ mod tests {
     }
 
     #[test]
-    fn resolve_task_none_arg_uses_real_stdin_check_via_public_wrapper() {
-        // Smoke test that the public resolve_task() wrapper still compiles
-        // and delegates correctly — doesn't assert on the TTY-dependent
-        // outcome itself, since that legitimately varies by environment.
-        let result = resolve_task(&Some("literal task".to_string()), "test-agent", None);
+    fn resolve_task_none_arg_uses_injected_probe_via_public_wrapper() {
+        // Smoke test that the public `resolve_task()` wrapper still compiles
+        // and delegates to `resolve_task_with` with the caller-supplied probe.
+        // A literal task never consults the probe, so the outcome is
+        // deterministic regardless of environment.
+        let result = resolve_task(
+            &Some("literal task".to_string()),
+            "test-agent",
+            None,
+            &never_a_tty,
+        );
         assert_eq!(result.unwrap(), "literal task");
     }
 
     #[test]
-    fn resolve_task_none_arg_uses_stdin_is_terminal_twin() {
-        // Drives `resolve_task`'s real (non-injected) path, which delegates to
-        // the `#[cfg(test)]` `stdin_is_terminal` twin (always false). No task +
-        // not-a-TTY hits the "no task provided" error, cross-platform, without
-        // touching real stdin or launching an editor. (The prior version was
-        // `#[cfg(unix)]` and set VISUAL=/usr/bin/true to guard the TTY-true
-        // branch that a real stdin probe could hit.)
-        let result = resolve_task(&None, "test-agent", None);
+    fn resolve_task_none_arg_errors_via_public_wrapper_when_not_a_tty() {
+        // Drives `resolve_task`'s public wrapper with an injected "never a TTY"
+        // probe: no task + not-a-TTY hits the "no task provided" error,
+        // cross-platform, without touching real stdin or launching an editor.
+        let result = resolve_task(&None, "test-agent", None, &never_a_tty);
         assert!(result.is_err());
     }
 
