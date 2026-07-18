@@ -2,16 +2,15 @@
 //!
 //! OSC52 is a last-resort clipboard mechanism: it asks the *terminal emulator*
 //! to set the system clipboard, so it works over SSH and without any native
-//! clipboard tool. The bytes must reach the real terminal — either the
-//! controlling `/dev/tty` or stdout — which is exactly what cannot be observed
-//! from a unit test without corrupting the terminal that `cargo test` runs in.
+//! clipboard tool. The bytes must reach the real terminal — the controlling
+//! `/dev/tty` or stdout.
 //!
-//! The genuinely-untestable leaves ([`open_controlling_tty`] and the real
-//! `stdout()` write inside [`osc52_yank`]) are isolated behind `#[cfg(test)]`
-//! twins so they are never compiled into a test/coverage build. All of the
-//! surrounding branch logic ([`osc52_sequence`], [`osc52_write_via`]) is
-//! exercised for real on Linux by injecting fake openers and an in-memory sink
-//! (see the tests), so nothing here relies on a coverage exclusion.
+//! This module holds the pure, fully-tested pieces: [`osc52_sequence`] (the
+//! base64/escape encoding) and [`osc52_write_via`] (the tty-then-stdout branch
+//! logic, parameterized over the tty opener and the fallback sink so every
+//! branch is exercised via injected fakes). The genuinely-untestable real-I/O
+//! leaves (opening `/dev/tty`, writing the real `stdout()`) are composed in the
+//! CLI binary — see `real_yank` in `crates/leviath-cli/src/main.rs`.
 
 use std::fs::File;
 use std::io::{self, Write};
@@ -50,42 +49,17 @@ fn osc52_sequence(text: &str) -> String {
     format!("\x1b]52;c;{}\x07", encoded)
 }
 
-/// Open the process's controlling terminal for writing.
-///
-/// REAL-IO-EXCLUDED: the real body opens `/dev/tty` (Unix); exercising it from
-/// a test would write OSC escape bytes to the terminal running `cargo test`.
-/// The `#[cfg(test)]` twin always fails harmlessly instead, and
-/// [`osc52_write_via`]'s branch logic is covered directly via injected openers.
-/// The real body is never compiled into a test build, so it never counts toward
-/// coverage.
-#[cfg(not(test))]
-fn open_controlling_tty() -> io::Result<File> {
-    #[cfg(unix)]
-    {
-        std::fs::OpenOptions::new().write(true).open("/dev/tty")
-    }
-    #[cfg(not(unix))]
-    {
-        Err(io::Error::other("no controlling terminal on this platform"))
-    }
-}
-
-#[cfg(test)]
-fn open_controlling_tty() -> io::Result<File> {
-    Err(io::Error::other(
-        "open_controlling_tty is disabled under cfg(test)",
-    ))
-}
-
 /// Core OSC52 write logic, parameterized over how to open the TTY and where the
 /// stdout fallback writes, so every branch is exercisable without touching a
-/// real terminal.
+/// real terminal. `pub` so the CLI binary can compose it with the real
+/// `/dev/tty` opener + real `stdout()` (the un-unit-testable leaves) — see
+/// `real_yank` in `crates/leviath-cli/src/main.rs`.
 ///
 /// The fallback is a `&mut dyn Write` (not a generic `T: Write`) deliberately:
 /// a single vtable dispatch on this cold, human-driven path costs nothing, and
 /// a non-generic function has exactly one coverage-mapping instance instead of
 /// one per caller type — no phantom-uncovered monomorphization for llvm-cov.
-fn osc52_write_via(
+pub fn osc52_write_via(
     text: &str,
     open_tty: fn() -> io::Result<File>,
     stdout_fallback: &mut dyn Write,
@@ -99,32 +73,6 @@ fn osc52_write_via(
     // Fallback: write to stdout. Report the real outcome so callers can show an
     // error when even this fails.
     stdout_fallback.write_all(osc.as_bytes()).is_ok() && stdout_fallback.flush().is_ok()
-}
-
-/// Copy `text` to the clipboard using the OSC52 terminal escape sequence.
-///
-/// Tries the controlling `/dev/tty` first, then falls back to stdout. Returns
-/// whether the sequence was written. Intended as a last-resort fallback after
-/// native clipboard tools (`pbcopy`/`xclip`/`wl-copy`) have been tried.
-///
-/// REAL-IO-EXCLUDED: the real body writes to the process's actual `stdout()`
-/// (and `/dev/tty`); running it in a test would corrupt the terminal running
-/// `cargo test`. The `#[cfg(test)]` twin swaps an in-memory sink in, keeping
-/// identical control flow, and `osc52_write_via`'s branches are covered
-/// directly. The real body is never compiled into a test build.
-#[cfg(not(test))]
-pub fn osc52_yank(text: &str) -> bool {
-    let mut out = io::stdout();
-    osc52_write_via(text, open_controlling_tty, &mut out)
-}
-
-#[cfg(test)]
-pub fn osc52_yank(text: &str) -> bool {
-    // Never write to the real terminal from a test — it corrupts (and can
-    // hang) the terminal running `cargo test`. The in-memory sink keeps the
-    // exact same control flow while touching nothing real.
-    let mut out = Vec::new();
-    osc52_write_via(text, open_controlling_tty, &mut out)
 }
 
 #[cfg(test)]
@@ -238,17 +186,5 @@ mod tests {
             !sink.buf.is_empty(),
             "write should have run before flush failed"
         );
-    }
-
-    #[test]
-    fn open_controlling_tty_twin_errors_under_test() {
-        assert!(open_controlling_tty().is_err());
-    }
-
-    #[test]
-    fn osc52_yank_writes_without_touching_a_real_terminal() {
-        // Under cfg(test): the failing tty twin + in-memory sink, exercising
-        // the yank entry point end-to-end.
-        assert!(osc52_yank("clipboard text"));
     }
 }
