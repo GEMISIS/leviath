@@ -240,3 +240,35 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Check coverage suppression markers
         run: cargo xtask check-exclusions
+
+  # `crates/leviath-cli/src/main.rs` is the ONE file excluded from coverage
+  # measurement — the thin, un-unit-tested composition root where real terminal
+  # / stdin / port / subprocess / `/dev/tty` I/O is wired into the tested lib
+  # cores. Changing it needs deliberate maintainer sign-off: this job fails any
+  # PR that touches main.rs unless the maintainer applies the
+  # `allow-main-rs-change` label.
+  guard-main-rs:
+    name: Guard bin entrypoint (main.rs)
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: Require maintainer override to change main.rs
+        env:
+          LABELS: ${{ join(github.event.pull_request.labels.*.name, ',') }}
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          if git diff --name-only "$BASE" "$HEAD" | grep -qx 'crates/leviath-cli/src/main.rs'; then
+            case ",$LABELS," in
+              *,allow-main-rs-change,*)
+                echo "main.rs change approved via 'allow-main-rs-change' label." ;;
+              *)
+                echo "::error file=crates/leviath-cli/src/main.rs::main.rs is the coverage-excluded bin entrypoint; changing it needs maintainer approval. Apply the 'allow-main-rs-change' label to override."
+                exit 1 ;;
+            esac
+          else
+            echo "main.rs unchanged."
+          fi
