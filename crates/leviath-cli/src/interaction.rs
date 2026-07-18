@@ -102,6 +102,55 @@ pub fn clear_interaction(run_id: &str) {
     let _ = std::fs::remove_file(response_path(run_id));
 }
 
+// ─── Poll step (pure, deterministically testable) ─────────────────────────────
+
+/// The decision produced by a single iteration of a request-polling loop.
+///
+/// The polling loops used to inline the "did a matching response arrive? did we
+/// time out? otherwise keep waiting" logic, which made their coverage depend on
+/// wall-clock timing (whether a response happened to be present on the first
+/// poll or a later one). Extracting that decision into this pure, synchronous
+/// helper lets every arm be unit-tested deterministically — no sleeping, no
+/// races — so the loops themselves collapse into a thin `match`.
+enum PollStep {
+    /// A matching response is available; the loop should resume with it.
+    Answer(InteractionResponse),
+    /// The (optional) timeout elapsed with no matching response.
+    TimedOut,
+    /// No matching response yet — either nothing was on disk, or a stale
+    /// response for a *different* request was consumed and discarded. Keep
+    /// polling.
+    KeepWaiting,
+}
+
+/// Perform one poll iteration's worth of decision-making, without sleeping.
+///
+/// Consumes any response file via [`take_response`]; if it belongs to a
+/// different request (`request_id` non-empty and mismatched) it is discarded
+/// and [`PollStep::KeepWaiting`] is returned (matching the previous inline
+/// `continue`-on-stale behaviour, which also skipped the timeout check that
+/// iteration). Otherwise a present response is returned as
+/// [`PollStep::Answer`]. With no response, the elapsed time is compared against
+/// `timeout`: `Some(t)` yields [`PollStep::TimedOut`] once `started.elapsed() >=
+/// t`, while `None` (wait indefinitely) never times out.
+fn poll_step(run_id: &str, req_id: &str, started: Instant, timeout: Option<Duration>) -> PollStep {
+    if let Some(resp) = take_response(run_id) {
+        if !resp.request_id.is_empty() && resp.request_id != req_id {
+            // Stale response for a different request — discarded; keep waiting.
+            return PollStep::KeepWaiting;
+        }
+        return PollStep::Answer(resp);
+    }
+
+    if let Some(t) = timeout {
+        if started.elapsed() >= t {
+            return PollStep::TimedOut;
+        }
+    }
+
+    PollStep::KeepWaiting
+}
+
 // ─── Worker-side blocking request ───────────────────────────────────────────
 
 /// Called from within a background worker to block until the user answers.
@@ -133,27 +182,24 @@ pub fn request_interaction(
     loop {
         std::thread::sleep(Duration::from_millis(100));
 
-        if let Some(resp) = take_response(run_id) {
-            if !resp.request_id.is_empty() && resp.request_id != req.id {
-                // Stale response for a different request — discard and keep waiting.
-                continue;
-            }
-            // Clean up and resume
-            clear_interaction(run_id);
-            meta.status = RunStatus::Running;
-            meta.touch();
-            let _ = write_meta(meta);
-            return Ok(resp);
-        }
-
-        if let Some(t) = timeout {
-            if started.elapsed() >= t {
+        match poll_step(run_id, &req.id, started, timeout) {
+            PollStep::Answer(resp) => {
+                // Clean up and resume
                 clear_interaction(run_id);
                 meta.status = RunStatus::Running;
                 meta.touch();
                 let _ = write_meta(meta);
+                return Ok(resp);
+            }
+            PollStep::TimedOut => {
+                clear_interaction(run_id);
+                meta.status = RunStatus::Running;
+                meta.touch();
+                let _ = write_meta(meta);
+                let t = timeout.expect("TimedOut is only returned when a timeout is set");
                 anyhow::bail!("Interaction timed out after {:.1}s", t.as_secs_f32());
             }
+            PollStep::KeepWaiting => continue,
         }
     }
 }
@@ -184,26 +230,23 @@ pub async fn request_interaction_async(
     loop {
         tokio::time::sleep(Duration::from_millis(100)).await;
 
-        if let Some(resp) = take_response(run_id) {
-            if !resp.request_id.is_empty() && resp.request_id != req.id {
-                // Stale response for a different request — discard and keep waiting.
-                continue;
-            }
-            clear_interaction(run_id);
-            meta.status = RunStatus::Running;
-            meta.touch();
-            let _ = write_meta(meta);
-            return Ok(resp);
-        }
-
-        if let Some(t) = timeout {
-            if started.elapsed() >= t {
+        match poll_step(run_id, &req.id, started, timeout) {
+            PollStep::Answer(resp) => {
                 clear_interaction(run_id);
                 meta.status = RunStatus::Running;
                 meta.touch();
                 let _ = write_meta(meta);
+                return Ok(resp);
+            }
+            PollStep::TimedOut => {
+                clear_interaction(run_id);
+                meta.status = RunStatus::Running;
+                meta.touch();
+                let _ = write_meta(meta);
+                let t = timeout.expect("TimedOut is only returned when a timeout is set");
                 anyhow::bail!("Interaction timed out after {:.1}s", t.as_secs_f32());
             }
+            PollStep::KeepWaiting => continue,
         }
     }
 }
@@ -256,32 +299,30 @@ pub async fn request_tool_approval_background(
     loop {
         tokio::time::sleep(Duration::from_millis(100)).await;
 
-        if let Some(resp) = take_response(run_id) {
-            if !resp.request_id.is_empty() && resp.request_id != req.id {
-                // Stale response for a different request — discard and keep waiting.
-                continue;
+        match poll_step(run_id, &req.id, started, Some(timeout)) {
+            PollStep::Answer(resp) => {
+                clear_interaction(run_id);
+                // Restore Running status
+                if let Ok(mut meta) = crate::runstate::read_meta(run_id) {
+                    meta.status = RunStatus::Running;
+                    meta.touch();
+                    let _ = write_meta(&meta);
+                }
+                let approved = resp.approved.unwrap_or(false);
+                let scope = resp.scope.unwrap_or(ApprovalScope::Once);
+                return (approved, scope);
             }
-            clear_interaction(run_id);
-            // Restore Running status
-            if let Ok(mut meta) = crate::runstate::read_meta(run_id) {
-                meta.status = RunStatus::Running;
-                meta.touch();
-                let _ = write_meta(&meta);
+            PollStep::TimedOut => {
+                clear_interaction(run_id);
+                // Timeout → auto-deny (safe default)
+                if let Ok(mut meta) = crate::runstate::read_meta(run_id) {
+                    meta.status = RunStatus::Running;
+                    meta.touch();
+                    let _ = write_meta(&meta);
+                }
+                return (false, ApprovalScope::Once);
             }
-            let approved = resp.approved.unwrap_or(false);
-            let scope = resp.scope.unwrap_or(ApprovalScope::Once);
-            return (approved, scope);
-        }
-
-        if started.elapsed() >= timeout {
-            clear_interaction(run_id);
-            // Timeout → auto-deny (safe default)
-            if let Ok(mut meta) = crate::runstate::read_meta(run_id) {
-                meta.status = RunStatus::Running;
-                meta.touch();
-                let _ = write_meta(&meta);
-            }
-            return (false, ApprovalScope::Once);
+            PollStep::KeepWaiting => continue,
         }
     }
 }
@@ -302,21 +343,27 @@ pub async fn request_interaction_bg_review(
         let _ = write_meta(&meta);
     }
 
+    // Review never times out (`None`), so `poll_step` only ever yields
+    // `Answer` or `KeepWaiting` here; `started` is unused but required by the
+    // shared signature.
+    let started = Instant::now();
+
     loop {
         tokio::time::sleep(Duration::from_millis(100)).await;
-        if let Some(resp) = take_response(run_id) {
-            if !resp.request_id.is_empty() && resp.request_id != req.id {
-                // Stale response — keep waiting
-                continue;
+        match poll_step(run_id, &req.id, started, None) {
+            PollStep::Answer(resp) => {
+                clear_interaction(run_id);
+                // Restore Running status
+                if let Ok(mut meta) = crate::runstate::read_meta(run_id) {
+                    meta.status = RunStatus::Running;
+                    meta.touch();
+                    let _ = write_meta(&meta);
+                }
+                return resp;
             }
-            clear_interaction(run_id);
-            // Restore Running status
-            if let Ok(mut meta) = crate::runstate::read_meta(run_id) {
-                meta.status = RunStatus::Running;
-                meta.touch();
-                let _ = write_meta(&meta);
-            }
-            return resp;
+            // No timeout for review; `TimedOut` is never produced, so both
+            // non-answer outcomes just keep polling.
+            PollStep::KeepWaiting | PollStep::TimedOut => continue,
         }
     }
 }
@@ -483,6 +530,153 @@ pub fn request_interaction_from_reader(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ─── poll_step (pure, no sleeping, no wall-clock races) ─────────────────
+    //
+    // These directly exercise every arm of the extracted decision helper so the
+    // three polling loops' branches are covered deterministically, independent
+    // of how the wall clock happens to interleave with a real response file.
+
+    impl PollStep {
+        /// Test-only: collapse into a (tag, optional response) pair so the
+        /// `poll_step_*` assertions need neither a `Debug`/`PartialEq` derive
+        /// (which would add uncovered impl regions to this file) nor an
+        /// unreachable `_ => panic!` arm. Every arm below is exercised by the
+        /// tests: `Answer` (matching/empty-id), `TimedOut` (elapsed), and
+        /// `KeepWaiting` (no response / stale / no timeout).
+        fn parts(self) -> (&'static str, Option<InteractionResponse>) {
+            match self {
+                PollStep::Answer(r) => ("answer", Some(r)),
+                PollStep::TimedOut => ("timed_out", None),
+                PollStep::KeepWaiting => ("keep_waiting", None),
+            }
+        }
+    }
+
+    #[test]
+    fn poll_step_answer_when_matching_response() {
+        let _guard =
+            crate::runstate::isolate_runs_dir_for_test("poll_step_answer_when_matching_response");
+        let run_id = "poll-step-answer";
+        let dir = crate::runstate::run_dir(run_id);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        write_response(run_id, &InteractionResponse::text("req-A", "the answer")).unwrap();
+
+        let (tag, resp) = poll_step(
+            run_id,
+            "req-A",
+            Instant::now(),
+            Some(Duration::from_secs(60)),
+        )
+        .parts();
+        assert_eq!(tag, "answer");
+        assert_eq!(resp.unwrap().value.as_deref(), Some("the answer"));
+        // The response file was consumed by take_response.
+        assert!(take_response(run_id).is_none());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn poll_step_answer_when_response_has_empty_request_id() {
+        // An empty `request_id` short-circuits the staleness check (the
+        // `!resp.request_id.is_empty()` operand is false), so the response is
+        // accepted even though it doesn't equal `req_id`.
+        let _guard = crate::runstate::isolate_runs_dir_for_test(
+            "poll_step_answer_when_response_has_empty_request_id",
+        );
+        let run_id = "poll-step-answer-empty-id";
+        let dir = crate::runstate::run_dir(run_id);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        write_response(run_id, &InteractionResponse::text("", "empty-id answer")).unwrap();
+
+        let (tag, resp) = poll_step(
+            run_id,
+            "req-A",
+            Instant::now(),
+            Some(Duration::from_secs(60)),
+        )
+        .parts();
+        assert_eq!(tag, "answer");
+        assert_eq!(resp.unwrap().value.as_deref(), Some("empty-id answer"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn poll_step_keep_waiting_when_stale_response() {
+        // A response whose request_id differs is stale: discarded (consumed off
+        // disk) and reported as KeepWaiting.
+        let _guard = crate::runstate::isolate_runs_dir_for_test(
+            "poll_step_keep_waiting_when_stale_response",
+        );
+        let run_id = "poll-step-stale";
+        let dir = crate::runstate::run_dir(run_id);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        write_response(run_id, &InteractionResponse::text("other-req", "stale")).unwrap();
+
+        let (tag, resp) = poll_step(
+            run_id,
+            "req-A",
+            Instant::now(),
+            Some(Duration::from_secs(60)),
+        )
+        .parts();
+        assert_eq!(tag, "keep_waiting");
+        assert!(resp.is_none());
+        // The stale response was consumed, so a follow-up poll sees nothing.
+        assert!(take_response(run_id).is_none());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn poll_step_keep_waiting_when_no_response_and_timeout_not_elapsed() {
+        // No response on disk and the timeout hasn't elapsed → keep waiting.
+        // Covers the `started.elapsed() >= t` FALSE branch.
+        let _guard = crate::runstate::isolate_runs_dir_for_test(
+            "poll_step_keep_waiting_when_no_response_and_timeout_not_elapsed",
+        );
+        let run_id = "poll-step-no-response";
+        // Deliberately no dir/file: take_response returns None.
+        let (tag, resp) = poll_step(
+            run_id,
+            "req-A",
+            Instant::now(),
+            Some(Duration::from_secs(60)),
+        )
+        .parts();
+        assert_eq!(tag, "keep_waiting");
+        assert!(resp.is_none());
+    }
+
+    #[test]
+    fn poll_step_keep_waiting_when_no_response_and_no_timeout() {
+        // `timeout == None` (wait indefinitely) with no response → keep waiting;
+        // covers the `if let Some(t) = timeout` None arm.
+        let _guard = crate::runstate::isolate_runs_dir_for_test(
+            "poll_step_keep_waiting_when_no_response_and_no_timeout",
+        );
+        let run_id = "poll-step-no-timeout";
+        let (tag, _resp) = poll_step(run_id, "req-A", Instant::now(), None).parts();
+        assert_eq!(tag, "keep_waiting");
+    }
+
+    #[test]
+    fn poll_step_timed_out_when_elapsed() {
+        // No response and `started` far enough in the past that
+        // `started.elapsed() >= timeout` is deterministically true — no sleeping.
+        let _guard = crate::runstate::isolate_runs_dir_for_test("poll_step_timed_out_when_elapsed");
+        let run_id = "poll-step-timeout";
+        let timeout = Duration::from_millis(50);
+        let started = Instant::now() - Duration::from_millis(500);
+        let (tag, resp) = poll_step(run_id, "req-A", started, Some(timeout)).parts();
+        assert_eq!(tag, "timed_out");
+        assert!(resp.is_none());
+    }
 
     // ─── File I/O roundtrip (write_request, read_request, etc.) ────────────
 
@@ -1694,6 +1888,178 @@ mod tests {
         .await;
         assert!(!approved);
         assert_eq!(scope, ApprovalScope::Once);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ─── Deterministic loop-arm coverage (pre-written stale response) ──────
+    //
+    // Each polling loop's `KeepWaiting => continue` arm previously depended on
+    // whether a real response happened to be present on the first poll or a
+    // later one — a wall-clock race that made coverage nondeterministic. These
+    // tests pre-write a STALE response (a different `request_id`) BEFORE calling,
+    // so the very first poll is *guaranteed* to consume it and take the
+    // KeepWaiting/continue path — regardless of scheduling — via take_response's
+    // short-circuit (a present response is examined before any timeout check).
+    // For the three timeout functions, with no further response the loop then
+    // deterministically times out, covering the TimedOut arm too.
+
+    #[test]
+    fn test_request_interaction_sync_stale_prewritten_then_timeout_is_deterministic() {
+        let _guard = crate::runstate::isolate_runs_dir_for_test(
+            "test_request_interaction_sync_stale_prewritten_then_timeout_is_deterministic",
+        );
+        let run_id = "test-sync-stale-prewritten-timeout";
+        let dir = crate::runstate::run_dir(run_id);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let mut meta = crate::runstate::RunMeta::new(
+            run_id.to_string(),
+            "agent".to_string(),
+            "/tmp/agent.toml".to_string(),
+            "task".to_string(),
+            None,
+            "/tmp".to_string(),
+            1,
+        );
+        crate::runstate::create_run(&meta).unwrap();
+
+        write_response(run_id, &InteractionResponse::text("stale-id", "stale")).unwrap();
+
+        let req = InteractionRequest::free_text("target-req", "What?", "plan", true);
+        let result = request_interaction(run_id, &mut meta, req, Some(Duration::from_millis(50)));
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("timed out"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn test_request_interaction_async_stale_prewritten_then_timeout_is_deterministic() {
+        let _guard = crate::runstate::isolate_runs_dir_for_test(
+            "test_request_interaction_async_stale_prewritten_then_timeout_is_deterministic",
+        );
+        let run_id = "test-async-stale-prewritten-timeout";
+        let dir = crate::runstate::run_dir(run_id);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let mut meta = crate::runstate::RunMeta::new(
+            run_id.to_string(),
+            "agent".to_string(),
+            "/tmp/agent.toml".to_string(),
+            "task".to_string(),
+            None,
+            "/tmp".to_string(),
+            1,
+        );
+        crate::runstate::create_run(&meta).unwrap();
+
+        write_response(run_id, &InteractionResponse::text("stale-id", "stale")).unwrap();
+
+        let req = InteractionRequest::free_text("target-req", "What?", "plan", true);
+        let result =
+            request_interaction_async(run_id, &mut meta, req, Some(Duration::from_millis(50)))
+                .await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("timed out"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn test_request_tool_approval_background_stale_prewritten_then_timeout_is_deterministic()
+    {
+        let _guard = crate::runstate::isolate_runs_dir_for_test(
+            "test_request_tool_approval_background_stale_prewritten_then_timeout_is_deterministic",
+        );
+        let run_id = "test-tool-approval-stale-prewritten-timeout";
+        let dir = crate::runstate::run_dir(run_id);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let meta = crate::runstate::RunMeta::new(
+            run_id.to_string(),
+            "agent".to_string(),
+            "/tmp/agent.toml".to_string(),
+            "task".to_string(),
+            None,
+            "/tmp".to_string(),
+            1,
+        );
+        crate::runstate::create_run(&meta).unwrap();
+
+        // Stale approval (different request_id) is discarded on the first poll.
+        write_response(
+            run_id,
+            &InteractionResponse::approval("stale-id", true, ApprovalScope::Session),
+        )
+        .unwrap();
+
+        let args = serde_json::json!({"command": "ls"});
+        let (approved, scope) = request_tool_approval_background(
+            run_id,
+            "bash",
+            &args,
+            "code",
+            Duration::from_millis(50),
+        )
+        .await;
+        // Stale response ignored → falls through to the timeout auto-deny.
+        assert!(!approved);
+        assert_eq!(scope, ApprovalScope::Once);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn test_request_interaction_bg_review_keep_waiting_arm_is_deterministic() {
+        // bg_review never times out, so its `KeepWaiting => continue` arm can
+        // only be reached by a poll that finds no matching response. We make
+        // that deterministic without any wall-clock race: pre-write a STALE
+        // response, then have the responder write the matching one ONLY AFTER it
+        // observes the stale one was consumed (the response file disappears).
+        // The file disappears exactly when the worker's poll took the stale one
+        // and continued — i.e. exercised the KeepWaiting arm — so ordering is
+        // guaranteed regardless of scheduling.
+        let _guard = crate::runstate::isolate_runs_dir_for_test(
+            "test_request_interaction_bg_review_keep_waiting_arm_is_deterministic",
+        );
+        let run_id = "test-bg-review-keepwaiting-det";
+        let dir = crate::runstate::run_dir(run_id);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let meta = crate::runstate::RunMeta::new(
+            run_id.to_string(),
+            "agent".to_string(),
+            "/tmp/agent.toml".to_string(),
+            "task".to_string(),
+            None,
+            "/tmp".to_string(),
+            1,
+        );
+        crate::runstate::create_run(&meta).unwrap();
+
+        // Stale response present before the first poll → guaranteed KeepWaiting.
+        write_response(run_id, &InteractionResponse::text("stale-id", "stale")).unwrap();
+        // Capture the response path now so the responder doesn't re-resolve
+        // LEVIATH_RUNS_DIR later (mirrors the tool-approval tests' guard).
+        let resp_path = response_path(run_id);
+
+        let resp_path_responder = resp_path.clone();
+        tokio::spawn(async move {
+            // Wait until the worker consumes the stale response (file vanishes),
+            // which only happens on the KeepWaiting/continue path.
+            while resp_path_responder.exists() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            let correct = InteractionResponse::text("bg-rev-det", "final answer");
+            let json = serde_json::to_string_pretty(&correct).unwrap();
+            std::fs::write(&resp_path_responder, json).ok();
+        });
+
+        let req = InteractionRequest::review("bg-rev-det", "Review", "# Plan\n\nDetails", "plan");
+        let resp = request_interaction_bg_review(run_id, req).await;
+        assert_eq!(resp.value.as_deref(), Some("final answer"));
+        assert_eq!(resp.request_id, "bg-rev-det");
 
         let _ = std::fs::remove_dir_all(&dir);
     }
