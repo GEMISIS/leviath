@@ -21,7 +21,6 @@ use tracing::info;
 
 use leviath_cli::commands;
 use leviath_cli::commands::dashboard::{CrosstermEventSource, DashboardArgs, TerminalSetup};
-use leviath_cli::config::Config;
 use leviath_cli::dispatch::{dispatch, Commands, RiskyExecutors};
 
 /// Leviath CLI - Agent framework with structured context windows
@@ -62,7 +61,9 @@ impl RiskyExecutors for RealExecutors {
     }
 
     async fn setup(&self, args: commands::setup::SetupArgs) -> anyhow::Result<()> {
-        real_setup(args)
+        // The interactive arm reads the process's real stdin; the branch +
+        // config wiring is the tested `setup::execute_with`.
+        commands::setup::execute_with(&args, || io::stdin().lock())
     }
 
     async fn dashboard(&self, args: DashboardArgs) -> anyhow::Result<()> {
@@ -76,21 +77,6 @@ impl RiskyExecutors for RealExecutors {
     async fn worker(&self, args: commands::run::WorkerArgs) -> anyhow::Result<()> {
         commands::run::execute_worker(args).await
     }
-}
-
-/// Real `lev setup`: the branch on `--non-interactive` plus the interactive
-/// path's real `stdin().lock()`. The two cores it calls
-/// (`run_non_interactive_setup` / `run_interactive_setup`) are unit-tested.
-fn real_setup(args: commands::setup::SetupArgs) -> anyhow::Result<()> {
-    let mut config = Config::load().unwrap_or_default();
-    let save_path = Config::config_path();
-
-    if args.non_interactive {
-        return commands::setup::run_non_interactive_setup(&mut config, &args, &save_path);
-    }
-
-    let stdin = io::stdin();
-    commands::setup::run_interactive_setup(&mut config, &mut stdin.lock(), &save_path)
 }
 
 /// Real `lev dash`: supplies the real crossterm terminal backend and event
