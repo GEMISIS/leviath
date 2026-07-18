@@ -1159,17 +1159,24 @@ mod tests {
 
     #[test]
     fn resolve_rejects_excessive_parent_dir_traversal() {
-        // An empty workdir (canonicalize("") fails, so the raw "" is kept)
-        // means the very first component of a "../"-prefixed request is a
-        // ParentDir with an empty accumulator, so `normalized.pop()` fails
-        // immediately -- hitting the "escapes the working directory" bail.
-        // Using "" avoids consuming a platform-specific leading root/drive
-        // prefix first, so this branch fires deterministically on every OS
-        // (a real temp-dir path decomposes into a platform-varying number of
-        // components, which is why a fixed count of ".." segments would land
-        // on the other "would escape" bail on some platforms).
-        let tools = BuiltinTools::new(ToolContext::new(PathBuf::from("")));
-        let result = tools.resolve("../etc/passwd");
+        // A *relative, nonexistent* workdir keeps `resolve`'s accumulator free
+        // of any platform-specific leading root/drive/prefix components:
+        // `canonicalize` fails for a path that doesn't exist (on every OS), so
+        // `ToolContext::new` keeps the raw relative `PathBuf` verbatim. The
+        // request then decomposes into exactly `[Normal(workdir), ParentDir,
+        // ParentDir, ...]`; the first `..` pops the single workdir component and
+        // the second `..` calls `normalized.pop()` on an *empty* accumulator,
+        // which returns `false` -- firing the "escapes the working directory"
+        // bail deterministically on every OS.
+        //
+        // (An empty "" workdir is not portable here: on Windows `canonicalize("")`
+        // can succeed and yield an absolute cwd whose Prefix/RootDir components
+        // absorb the `..`, so `pop()` never fails and this bail is never hit --
+        // which is exactly why this branch was Windows-uncovered before.)
+        let tools = BuiltinTools::new(ToolContext::new(PathBuf::from(
+            "leviath-nonexistent-relative-workdir",
+        )));
+        let result = tools.resolve("../../etc/passwd");
         assert!(result.is_err());
         assert!(result
             .unwrap_err()
