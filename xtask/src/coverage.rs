@@ -112,16 +112,71 @@ impl Runner for RealRunner {
     }
 }
 
-// ── Public entry point ──────────────────────────────────────────────────────
+// ── Coverage mode (CLI argument parsing) ──────────────────────────────────────
 
-pub fn run() -> Result<()> {
-    run_with(&RealRunner)
+/// Which coverage computation to perform, parsed from the arguments following
+/// `cargo xtask coverage`.
+///
+/// The measurement math is identical across all three — `Package` and `Gate`
+/// merely split the single-runner `All` flow across CI runners: each package
+/// computes its own `CovData` in parallel (`Package`), then one dependent job
+/// aggregates them and enforces the gate (`Gate`).
+#[derive(Debug, PartialEq, Eq)]
+pub enum CoverageMode {
+    /// No arguments: compute every workspace package, aggregate, enforce the
+    /// hard 100% gate, and render the full HTML report (local-dev convenience).
+    All,
+    /// `--package <pkg>`: compute just one package's coverage, writing its
+    /// `CovData` to `coverage/per-package/<pkg>.json` and its browsable HTML to
+    /// `coverage/html/<pkg>`. Does NOT aggregate or run the gate — that is
+    /// `Gate`'s job, after every package's per-package JSON is collected.
+    Package(String),
+    /// `--gate`: aggregate every `coverage/per-package/*.json` and enforce the
+    /// hard 100% gate — the same gap detection and failure message `All` uses.
+    Gate,
 }
 
-pub fn run_with(runner: &dyn Runner) -> Result<()> {
-    let github_output = std::env::var("GITHUB_OUTPUT").ok();
+impl CoverageMode {
+    /// Parse the arguments that follow the `coverage` subcommand.
+    pub fn parse(args: &[String]) -> Result<Self> {
+        match args.first().map(String::as_str) {
+            None => Ok(Self::All),
+            Some("--gate") => Ok(Self::Gate),
+            Some("--package") => {
+                let pkg = args.get(1).context(
+                    "`--package` requires a package name, e.g. \
+                     `cargo xtask coverage --package leviath-core`",
+                )?;
+                Ok(Self::Package(pkg.clone()))
+            }
+            Some(other) => anyhow::bail!(
+                "unknown `coverage` argument `{other}` (expected no arguments, \
+                 `--gate`, or `--package <pkg>`)"
+            ),
+        }
+    }
+}
+
+// ── Public entry point ──────────────────────────────────────────────────────
+
+pub fn run(mode: CoverageMode) -> Result<()> {
+    run_with(&RealRunner, mode)
+}
+
+pub fn run_with(runner: &dyn Runner, mode: CoverageMode) -> Result<()> {
     std::fs::create_dir_all("coverage")
         .expect("failed to create coverage/ directory — check filesystem permissions");
+    match mode {
+        CoverageMode::All => run_all(runner),
+        CoverageMode::Package(pkg) => run_package_mode(runner, &pkg),
+        CoverageMode::Gate => run_gate_mode(),
+    }
+}
+
+/// `cargo xtask coverage` with no arguments: the original all-in-one path —
+/// compute every package, aggregate, enforce the 100% gate, and render HTML.
+fn run_all(runner: &dyn Runner) -> Result<()> {
+    let github_output = std::env::var("GITHUB_OUTPUT").ok();
     let report_result = run_report(runner, "coverage/llvm-cov.json", github_output.as_deref());
     // Always attempt the HTML report, even if the 100% gate above failed
     // -- browsing exactly which lines are (un)covered is often the fastest
@@ -131,6 +186,101 @@ pub fn run_with(runner: &dyn Runner) -> Result<()> {
     // is what's returned once both have run.
     generate_html_report(runner)?;
     report_result
+}
+
+/// `cargo xtask coverage --package <pkg>`: compute exactly one package — via
+/// the identical per-target/merge logic the all-packages path uses — and write
+/// its `CovData` to `coverage/per-package/<pkg>.json`, plus its browsable HTML
+/// to `coverage/html/<pkg>`. Deliberately does NOT aggregate or run the gate:
+/// on CI each package runs this on its own runner in parallel, and one
+/// dependent `--gate` job aggregates the collected JSONs and enforces 100%.
+fn run_package_mode(runner: &dyn Runner, pkg: &str) -> Result<()> {
+    run_package_mode_in(
+        runner,
+        pkg,
+        std::path::Path::new("coverage"),
+        "coverage/per-package",
+    )
+}
+
+fn run_package_mode_in(
+    runner: &dyn Runner,
+    pkg: &str,
+    scratch_dir: &std::path::Path,
+    per_package_dir: &str,
+) -> Result<()> {
+    println!("[coverage] Computing coverage for package {pkg}…");
+    let meta = runner.cargo_metadata()?;
+    let data = coverage_one_package(runner, &meta, pkg, scratch_dir)?;
+
+    std::fs::create_dir_all(per_package_dir)
+        .with_context(|| format!("creating {per_package_dir}"))?;
+    let out_path = format!("{per_package_dir}/{pkg}.json");
+    let json = serde_json::to_string_pretty(&data)
+        .expect("failed to serialise per-package CovData — all fields are serialisable");
+    std::fs::write(&out_path, json).with_context(|| format!("writing {out_path}"))?;
+    println!("[coverage] Wrote per-package coverage to {out_path}");
+
+    // One package's browsable HTML — no top-level index in this mode (the
+    // `--gate` step writes that once all packages' HTML dirs are present).
+    generate_package_html(runner, pkg)?;
+    Ok(())
+}
+
+/// `cargo xtask coverage --gate`: aggregate every per-package JSON and enforce
+/// the hard 100% gate — the SAME gap detection and error message the all-in-one
+/// path uses, just fed from pre-computed per-package `CovData` instead of
+/// recomputing them here.
+fn run_gate_mode() -> Result<()> {
+    let github_output = std::env::var("GITHUB_OUTPUT").ok();
+    run_gate_mode_in(
+        "coverage/per-package",
+        "coverage/html",
+        github_output.as_deref(),
+    )
+}
+
+fn run_gate_mode_in(
+    per_package_dir: &str,
+    html_dir: &str,
+    github_output: Option<&str>,
+) -> Result<()> {
+    println!("[coverage] Aggregating per-package coverage from {per_package_dir}…");
+    let data = aggregate_per_package(per_package_dir)?;
+    // Link whatever per-package HTML dirs exist (each is uploaded separately
+    // on CI); write the index before the gate so it's produced even on failure.
+    write_gate_html_index(html_dir)?;
+    report_data(&data, github_output)
+}
+
+/// Aggregate every `<pkg>.json` `CovData` under `dir` into one report:
+/// concatenate all files and sum totals via [`Metrics::add`], then
+/// [`Metrics::recompute_percents`] — the identical arithmetic the all-in-one
+/// path applies across packages, so the gate result is byte-for-byte the same.
+fn aggregate_per_package(dir: &str) -> Result<CovData> {
+    let mut paths: Vec<std::path::PathBuf> = std::fs::read_dir(dir)
+        .with_context(|| format!("reading per-package coverage directory {dir}"))?
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("json"))
+        .collect();
+    paths.sort();
+
+    let mut all_files: Vec<FileCov> = Vec::new();
+    let mut totals = Metrics::default();
+    for path in &paths {
+        let raw = std::fs::read_to_string(path)
+            .with_context(|| format!("reading per-package coverage JSON {}", path.display()))?;
+        let data: CovData = serde_json::from_str(&raw)
+            .with_context(|| format!("parsing per-package coverage JSON {}", path.display()))?;
+        totals.add(&data.totals);
+        all_files.extend(data.files);
+    }
+    totals.recompute_percents();
+    Ok(CovData {
+        files: all_files,
+        totals,
+    })
 }
 
 /// Generate browsable per-package HTML coverage reports — one
@@ -158,33 +308,39 @@ fn generate_html_report(runner: &dyn Runner) -> Result<()> {
     let meta = runner.cargo_metadata()?;
     let packages = parse_workspace_packages(&meta);
     for pkg in &packages {
-        // Clean slate between packages (same reason as `run_coverage`).
-        runner.remove_dir("target/llvm-cov-target");
-        let out_dir = format!("coverage/html/{pkg}");
-        if !runner.cargo(&[
-            "llvm-cov",
-            "--all-features",
-            "--package",
-            pkg,
-            "--lib",
-            "--html",
-            "--output-dir",
-            &out_dir,
-        ])? {
-            anyhow::bail!(
-                "cargo llvm-cov exited non-zero while generating the HTML report for {pkg}"
-            );
-        }
+        generate_package_html(runner, pkg)?;
     }
-    write_html_index(&packages)?;
+    write_html_index("coverage/html", &packages)?;
     println!("[coverage] HTML report: coverage/html/index.html");
     Ok(())
 }
 
-/// Write a small top-level `coverage/html/index.html` linking to each
-/// per-package report at `coverage/html/<pkg>/html/index.html`.
-fn write_html_index(packages: &[String]) -> Result<()> {
-    std::fs::create_dir_all("coverage/html").context("creating coverage/html directory")?;
+/// Generate one package's browsable `cargo llvm-cov --lib --html` report into
+/// `coverage/html/<pkg>`, cleaning `target/llvm-cov-target` first (same reason
+/// as the coverage runs). Shared by the all-in-one HTML path and `--package`.
+fn generate_package_html(runner: &dyn Runner, pkg: &str) -> Result<()> {
+    // Clean slate between packages (same reason as `run_coverage`).
+    runner.remove_dir("target/llvm-cov-target");
+    let out_dir = format!("coverage/html/{pkg}");
+    if !runner.cargo(&[
+        "llvm-cov",
+        "--all-features",
+        "--package",
+        pkg,
+        "--lib",
+        "--html",
+        "--output-dir",
+        &out_dir,
+    ])? {
+        anyhow::bail!("cargo llvm-cov exited non-zero while generating the HTML report for {pkg}");
+    }
+    Ok(())
+}
+
+/// Write a small top-level `<html_dir>/index.html` linking to each per-package
+/// report at `<html_dir>/<pkg>/html/index.html`.
+fn write_html_index(html_dir: &str, packages: &[String]) -> Result<()> {
+    std::fs::create_dir_all(html_dir).with_context(|| format!("creating {html_dir} directory"))?;
     let mut html = String::from(
         "<!doctype html>\n<meta charset=\"utf-8\">\n<title>Leviath coverage</title>\n\
          <h1>Leviath coverage — per-package reports</h1>\n\
@@ -197,8 +353,29 @@ fn write_html_index(packages: &[String]) -> Result<()> {
         ));
     }
     html.push_str("</ul>\n");
-    std::fs::write("coverage/html/index.html", html).context("writing coverage/html/index.html")?;
+    let index_path = format!("{html_dir}/index.html");
+    std::fs::write(&index_path, html).with_context(|| format!("writing {index_path}"))?;
     Ok(())
+}
+
+/// Discover whatever per-package HTML report dirs already exist under
+/// `html_dir` (each `--package` run drops one) and write the top-level index
+/// linking them. Used by `--gate`, where the per-package HTML dirs may or may
+/// not have been collected onto this runner.
+fn write_gate_html_index(html_dir: &str) -> Result<()> {
+    let mut packages: Vec<String> = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(html_dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                    packages.push(name.to_owned());
+                }
+            }
+        }
+    }
+    packages.sort();
+    write_html_index(html_dir, &packages)
 }
 
 /// Core reporting logic extracted from `run_with` for unit-testability.
@@ -214,10 +391,19 @@ pub fn run_report(
 ) -> Result<()> {
     println!("[coverage] Running coverage analysis…");
     let data = run_coverage(runner, output_path)?;
+    report_data(&data, github_output)
+}
 
+/// Print the summary, publish badge percentages, and enforce the hard 100%
+/// gate over `data`.
+///
+/// Shared by the all-in-one path ([`run_report`]) and the `--gate` path
+/// ([`run_gate_mode_in`]) so both emit the identical summary and — crucially —
+/// the identical failure message when any file is below 100%.
+fn report_data(data: &CovData, github_output: Option<&str>) -> Result<()> {
     print_summary(&data.totals);
 
-    let gaps = gap_files(&data);
+    let gaps = gap_files(data);
 
     // Always publish the computed percentages -- the coverage badges need
     // real numbers regardless of whether 100% is currently met.
@@ -287,7 +473,7 @@ pub fn run_coverage(runner: &dyn Runner, output_path: &str) -> Result<CovData> {
 
     // Place per-target JSON files next to the aggregated output file so they
     // always land in a writable directory (avoids relative-path issues in tests).
-    let out_dir = std::path::Path::new(output_path)
+    let scratch_dir = std::path::Path::new(output_path)
         .parent()
         .unwrap_or(std::path::Path::new("."));
 
@@ -296,45 +482,7 @@ pub fn run_coverage(runner: &dyn Runner, output_path: &str) -> Result<CovData> {
 
     for pkg in &packages {
         println!("[coverage]   → {pkg}");
-
-        // Scope to --lib, then to each integration-test binary, SEPARATELY,
-        // rather than one bare `cargo llvm-cov --package X` call that lets
-        // llvm-cov merge every test binary's profraw data internally. That
-        // internal multi-binary merge is subject to the same
-        // `getInstantiationGroups` merge-inaccuracy bug documented above for
-        // cross-package `--workspace` runs -- confirmed empirically:
-        // leviath-cli's commands/add.rs read 6 missed regions when merged
-        // across all 3 of its test binaries (lib + 2 integration tests) in
-        // one invocation, but only 2 missed when measured via `--lib` alone.
-        // See `merge_target_reports` for how the separately-scoped results
-        // are safely recombined.
-        let mut scopes: Vec<Vec<&str>> = vec![vec!["--lib"]];
-        for test_name in package_test_targets(&meta, pkg) {
-            scopes.push(vec!["--test", test_name]);
-        }
-
-        let mut target_reports: Vec<CovData> = Vec::new();
-        for scope in &scopes {
-            // Clean slate between every scoped run: belt-and-suspenders
-            // against cross-run contamination of the profraw/profdata
-            // llvm-cov accumulates under here.
-            runner.remove_dir("target/llvm-cov-target");
-
-            let scope_tag = scope.join("-").replace(['-', ' '], "_");
-            let target_output = out_dir
-                .join(format!("llvm-cov-{pkg}-{scope_tag}.json"))
-                .to_string_lossy()
-                .into_owned();
-
-            let report = run_single_target(runner, pkg, scope, &target_output)
-                .with_context(|| format!("coverage failed for {pkg} ({})", scope.join(" ")))?;
-
-            if let Some(data) = report.data.into_iter().next() {
-                target_reports.push(data);
-            }
-        }
-
-        let pkg_data = merge_target_reports(target_reports);
+        let pkg_data = coverage_one_package(runner, &meta, pkg, scratch_dir)?;
         totals.add(&pkg_data.totals);
         all_files.extend(pkg_data.files);
     }
@@ -357,6 +505,55 @@ pub fn run_coverage(runner: &dyn Runner, output_path: &str) -> Result<CovData> {
         .expect("failed to serialise aggregated JSON — all fields are serialisable");
     std::fs::write(output_path, json).with_context(|| format!("writing {output_path}"))?;
     Ok(aggregated)
+}
+
+/// Compute one package's coverage exactly as the all-packages loop does — the
+/// single source of truth shared by [`run_coverage`] and `--package` mode.
+///
+/// Scopes to `--lib`, then to each integration-test binary, SEPARATELY, rather
+/// than one bare `cargo llvm-cov --package X` call that lets llvm-cov merge
+/// every test binary's profraw data internally. That internal multi-binary
+/// merge is subject to the same `getInstantiationGroups` merge-inaccuracy bug
+/// documented at the top of this file for cross-package `--workspace` runs --
+/// confirmed empirically: leviath-cli's commands/add.rs read 6 missed regions
+/// when merged across all 3 of its test binaries (lib + 2 integration tests) in
+/// one invocation, but only 2 missed when measured via `--lib` alone. A clean
+/// `target/llvm-cov-target` between every scoped run is belt-and-suspenders
+/// against cross-run contamination of the profraw/profdata llvm-cov
+/// accumulates there. Per-target region counts are already merged-by-source-
+/// position by [`run_single_target`]; [`merge_target_reports`] then recombines
+/// the separately-scoped results (`max`-covered per file). Per-target JSONs are
+/// written under `scratch_dir`.
+fn coverage_one_package(
+    runner: &dyn Runner,
+    meta: &serde_json::Value,
+    pkg: &str,
+    scratch_dir: &std::path::Path,
+) -> Result<CovData> {
+    let mut scopes: Vec<Vec<&str>> = vec![vec!["--lib"]];
+    for test_name in package_test_targets(meta, pkg) {
+        scopes.push(vec!["--test", test_name]);
+    }
+
+    let mut target_reports: Vec<CovData> = Vec::new();
+    for scope in &scopes {
+        runner.remove_dir("target/llvm-cov-target");
+
+        let scope_tag = scope.join("-").replace(['-', ' '], "_");
+        let target_output = scratch_dir
+            .join(format!("llvm-cov-{pkg}-{scope_tag}.json"))
+            .to_string_lossy()
+            .into_owned();
+
+        let report = run_single_target(runner, pkg, scope, &target_output)
+            .with_context(|| format!("coverage failed for {pkg} ({})", scope.join(" ")))?;
+
+        if let Some(data) = report.data.into_iter().next() {
+            target_reports.push(data);
+        }
+    }
+
+    Ok(merge_target_reports(target_reports))
 }
 
 /// Merge multiple coverage reports for the SAME package (one per test
@@ -736,7 +933,24 @@ impl Metric {
 mod tests {
     use super::*;
     use std::collections::HashMap;
+    use std::sync::Mutex;
     use tempfile::TempDir;
+
+    // ── Real-`coverage/`-dir serialization ────────────────────────────────────
+    //
+    // A handful of tests exercise the fixed-path wrappers that read/write the
+    // real repo-relative `coverage/` directory (the all-in-one and gate/package
+    // round-trip paths). Serialize them so their concurrent writes to shared
+    // files (e.g. `coverage/html/index.html`) can't collide — notably on
+    // Windows, where two simultaneous writes to one path can fail.
+
+    static FS_LOCK: Mutex<()> = Mutex::new(());
+
+    fn fs_guard() -> std::sync::MutexGuard<'static, ()> {
+        FS_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
 
     // ── Mock runner ──────────────────────────────────────────────────────────
 
@@ -1897,15 +2111,462 @@ mod tests {
     // ── run_with ──────────────────────────────────────────────────────────────
 
     #[test]
-    fn run_with_html_generation_failure_is_err_even_when_coverage_passes() {
+    fn run_with_all_html_generation_failure_is_err_even_when_coverage_passes() {
         // 100% coverage (report check would be Ok), but HTML generation
         // itself fails -- the overall result must still surface that error,
         // not silently swallow it just because the 100% gate passed.
+        let _guard = fs_guard();
         let runner = MockRunner::new(simple_metadata(&["leviath-core"])).with_fail_html();
-        let result = run_with(&runner);
+        let result = run_with(&runner, CoverageMode::All);
         assert!(
             result.is_err(),
             "an HTML generation failure must fail run_with even when coverage itself passed: {result:?}"
+        );
+    }
+
+    #[test]
+    fn run_with_all_success_returns_ok() {
+        // Covers run_all's success return: run_report Ok, HTML Ok → Ok.
+        let _guard = fs_guard();
+        let runner = MockRunner::new(simple_metadata(&["leviath-core"]));
+        let result = run_with(&runner, CoverageMode::All);
+        assert!(
+            result.is_ok(),
+            "all-in-one 100% run should pass: {result:?}"
+        );
+    }
+
+    #[test]
+    fn run_with_package_then_gate_round_trips_at_100_percent() {
+        // End-to-end through the fixed-path wrappers: `--package` writes a
+        // per-package CovData, then `--gate` aggregates it and passes the 100%
+        // gate. This is the only test that touches the real `coverage/` dir for
+        // per-package/gate flows, so the fs lock keeps it isolated from the
+        // all-in-one tests above (which also write under `coverage/`).
+        let _guard = fs_guard();
+        // Clean slate so the gate only sees this test's file.
+        let _ = std::fs::remove_dir_all("coverage/per-package");
+        let runner = MockRunner::new(simple_metadata(&["leviath-core"]));
+
+        let pkg_result = run_with(&runner, CoverageMode::Package("leviath-core".to_owned()));
+        assert!(
+            pkg_result.is_ok(),
+            "--package run should pass: {pkg_result:?}"
+        );
+        assert!(
+            std::path::Path::new("coverage/per-package/leviath-core.json").exists(),
+            "per-package JSON should have been written"
+        );
+
+        let gate_result = run_with(&runner, CoverageMode::Gate);
+        assert!(
+            gate_result.is_ok(),
+            "--gate over a 100% per-package report should pass: {gate_result:?}"
+        );
+        let _ = std::fs::remove_dir_all("coverage/per-package");
+    }
+
+    // ── CoverageMode::parse ───────────────────────────────────────────────────
+
+    #[test]
+    fn parse_mode_no_args_is_all() {
+        assert_eq!(CoverageMode::parse(&[]).unwrap(), CoverageMode::All);
+    }
+
+    #[test]
+    fn parse_mode_gate() {
+        assert_eq!(
+            CoverageMode::parse(&["--gate".to_owned()]).unwrap(),
+            CoverageMode::Gate
+        );
+    }
+
+    #[test]
+    fn parse_mode_package() {
+        assert_eq!(
+            CoverageMode::parse(&["--package".to_owned(), "leviath-core".to_owned()]).unwrap(),
+            CoverageMode::Package("leviath-core".to_owned())
+        );
+    }
+
+    #[test]
+    fn parse_mode_package_without_name_is_err() {
+        let result = CoverageMode::parse(&["--package".to_owned()]);
+        assert!(
+            result.is_err(),
+            "missing package name must error: {result:?}"
+        );
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("requires a package name"));
+    }
+
+    #[test]
+    fn parse_mode_unknown_flag_is_err() {
+        let result = CoverageMode::parse(&["--nope".to_owned()]);
+        assert!(result.is_err(), "unknown flag must error: {result:?}");
+        assert!(result.unwrap_err().to_string().contains("--nope"));
+    }
+
+    // ── coverage_one_package ──────────────────────────────────────────────────
+
+    #[test]
+    fn coverage_one_package_merges_lib_and_test_scopes() {
+        // A package with an integration test target is scoped per-target
+        // (--lib, then --test <name>) and merged into one CovData.
+        let dir = tempfile::tempdir().unwrap();
+        let meta = metadata_with_targets(
+            "leviath-cli",
+            serde_json::json!([
+                {"kind": ["lib"], "name": "leviath_cli"},
+                {"kind": ["test"], "name": "cli_dispatch"},
+            ]),
+        );
+        let runner = MockRunner::new(meta.clone());
+        let data = coverage_one_package(&runner, &meta, "leviath-cli", dir.path()).unwrap();
+        assert!(data.totals.is_100_percent());
+    }
+
+    #[test]
+    fn coverage_one_package_propagates_target_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let meta = simple_metadata(&["leviath-core"]);
+        let runner =
+            MockRunner::new(meta.clone()).with_package("leviath-core", Err("boom".to_owned()));
+        let result = coverage_one_package(&runner, &meta, "leviath-core", dir.path());
+        assert!(
+            result.is_err(),
+            "a failing scope must propagate: {result:?}"
+        );
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("coverage failed for leviath-core"));
+    }
+
+    // ── run_package_mode_in ───────────────────────────────────────────────────
+
+    #[test]
+    fn run_package_mode_in_writes_per_package_json() {
+        let dir = tempfile::tempdir().unwrap();
+        let per_pkg = dir.path().join("per-package");
+        let meta = simple_metadata(&["leviath-core"]);
+        let runner = MockRunner::new(meta);
+        let result = run_package_mode_in(
+            &runner,
+            "leviath-core",
+            dir.path(),
+            per_pkg.to_str().unwrap(),
+        );
+        assert!(result.is_ok(), "package mode should succeed: {result:?}");
+        let json_path = per_pkg.join("leviath-core.json");
+        assert!(json_path.exists(), "per-package JSON must be written");
+        // It must deserialize as CovData (the shape --gate aggregates).
+        let raw = std::fs::read_to_string(&json_path).unwrap();
+        let parsed: CovData = serde_json::from_str(&raw).unwrap();
+        assert!(parsed.totals.is_100_percent());
+    }
+
+    #[test]
+    fn run_package_mode_in_metadata_error_propagates() {
+        let dir = tempfile::tempdir().unwrap();
+        let runner = MockRunner::new(simple_metadata(&[])).with_fail_metadata();
+        let result = run_package_mode_in(&runner, "leviath-core", dir.path(), "unused");
+        assert!(
+            result.is_err(),
+            "metadata failure must propagate: {result:?}"
+        );
+    }
+
+    #[test]
+    fn run_package_mode_in_coverage_error_propagates() {
+        let dir = tempfile::tempdir().unwrap();
+        let per_pkg = dir.path().join("per-package");
+        let meta = simple_metadata(&["leviath-core"]);
+        let runner = MockRunner::new(meta).with_package("leviath-core", Err("boom".to_owned()));
+        let result = run_package_mode_in(
+            &runner,
+            "leviath-core",
+            dir.path(),
+            per_pkg.to_str().unwrap(),
+        );
+        assert!(
+            result.is_err(),
+            "coverage failure must propagate: {result:?}"
+        );
+    }
+
+    #[test]
+    fn run_package_mode_in_write_error_propagates() {
+        // per_package_dir is a *file*, so create_dir_all fails.
+        let dir = tempfile::tempdir().unwrap();
+        let blocker = dir.path().join("blocker");
+        std::fs::write(&blocker, "not a dir").unwrap();
+        let meta = simple_metadata(&["leviath-core"]);
+        let runner = MockRunner::new(meta);
+        let result = run_package_mode_in(
+            &runner,
+            "leviath-core",
+            dir.path(),
+            blocker.to_str().unwrap(),
+        );
+        assert!(
+            result.is_err(),
+            "unwritable per-package dir must error: {result:?}"
+        );
+    }
+
+    #[test]
+    fn run_package_mode_in_html_failure_propagates() {
+        let dir = tempfile::tempdir().unwrap();
+        let per_pkg = dir.path().join("per-package");
+        let meta = simple_metadata(&["leviath-core"]);
+        let runner = MockRunner::new(meta).with_fail_html();
+        let result = run_package_mode_in(
+            &runner,
+            "leviath-core",
+            dir.path(),
+            per_pkg.to_str().unwrap(),
+        );
+        assert!(
+            result.is_err(),
+            "an HTML failure must propagate: {result:?}"
+        );
+    }
+
+    // ── aggregate_per_package ─────────────────────────────────────────────────
+
+    fn write_covdata(dir: &std::path::Path, name: &str, data: &CovData) {
+        let json = serde_json::to_string_pretty(data).unwrap();
+        std::fs::write(dir.join(name), json).unwrap();
+    }
+
+    #[test]
+    fn aggregate_per_package_sums_and_ignores_non_json() {
+        let dir = tempfile::tempdir().unwrap();
+        write_covdata(
+            dir.path(),
+            "a.json",
+            &CovData {
+                files: vec![FileCov {
+                    filename: "/src/a.rs".to_owned(),
+                    summary: full_metrics(5),
+                }],
+                totals: full_metrics(5),
+            },
+        );
+        write_covdata(
+            dir.path(),
+            "b.json",
+            &CovData {
+                files: vec![FileCov {
+                    filename: "/src/b.rs".to_owned(),
+                    summary: full_metrics(3),
+                }],
+                totals: full_metrics(3),
+            },
+        );
+        // A non-.json file that must be ignored by the extension filter.
+        std::fs::write(dir.path().join("notes.txt"), "ignore me").unwrap();
+
+        let agg = aggregate_per_package(dir.path().to_str().unwrap()).unwrap();
+        assert_eq!(agg.files.len(), 2, "both per-package files aggregated");
+        assert_eq!(agg.totals.regions.count, 8);
+        assert_eq!(agg.totals.regions.covered, 8);
+        assert!(agg.totals.is_100_percent());
+    }
+
+    #[test]
+    fn aggregate_per_package_missing_dir_is_err() {
+        let result = aggregate_per_package("/tmp/no_such_per_package_dir_xyz_123");
+        assert!(result.is_err(), "missing dir must error: {result:?}");
+    }
+
+    #[test]
+    fn aggregate_per_package_read_error_propagates() {
+        // A subdirectory named `x.json` — read_to_string fails on a directory.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("x.json")).unwrap();
+        let result = aggregate_per_package(dir.path().to_str().unwrap());
+        assert!(
+            result.is_err(),
+            "reading a dir-as-file must error: {result:?}"
+        );
+    }
+
+    #[test]
+    fn aggregate_per_package_parse_error_propagates() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("bad.json"), "not valid json").unwrap();
+        let result = aggregate_per_package(dir.path().to_str().unwrap());
+        assert!(result.is_err(), "invalid JSON must error: {result:?}");
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("parsing per-package coverage JSON"));
+    }
+
+    // ── run_gate_mode_in ──────────────────────────────────────────────────────
+
+    #[test]
+    fn run_gate_mode_in_100_percent_is_ok() {
+        let dir = tempfile::tempdir().unwrap();
+        let per_pkg = dir.path().join("per-package");
+        std::fs::create_dir(&per_pkg).unwrap();
+        write_covdata(
+            &per_pkg,
+            "leviath-core.json",
+            &CovData {
+                files: vec![FileCov {
+                    filename: "/src/a.rs".to_owned(),
+                    summary: full_metrics(5),
+                }],
+                totals: full_metrics(5),
+            },
+        );
+        let html = dir.path().join("html");
+        let result = run_gate_mode_in(per_pkg.to_str().unwrap(), html.to_str().unwrap(), None);
+        assert!(result.is_ok(), "100% gate should pass: {result:?}");
+        assert!(
+            html.join("index.html").exists(),
+            "gate must write the top-level HTML index"
+        );
+    }
+
+    #[test]
+    fn run_gate_mode_in_gap_fails_with_same_message() {
+        let dir = tempfile::tempdir().unwrap();
+        let per_pkg = dir.path().join("per-package");
+        std::fs::create_dir(&per_pkg).unwrap();
+        write_covdata(
+            &per_pkg,
+            "leviath-core.json",
+            &CovData {
+                files: vec![FileCov {
+                    filename: "/src/gap.rs".to_owned(),
+                    summary: partial_metrics(10, 8),
+                }],
+                totals: partial_metrics(10, 8),
+            },
+        );
+        let html = dir.path().join("html");
+        let result = run_gate_mode_in(per_pkg.to_str().unwrap(), html.to_str().unwrap(), None);
+        assert!(result.is_err(), "a gap must fail the gate: {result:?}");
+        assert!(
+            result.unwrap_err().to_string().contains("must be 100%"),
+            "gate must reuse run_report's failure message"
+        );
+    }
+
+    #[test]
+    fn run_gate_mode_in_aggregate_error_propagates() {
+        let dir = tempfile::tempdir().unwrap();
+        let html = dir.path().join("html");
+        // per-package dir doesn't exist → aggregate errors before the gate.
+        let result = run_gate_mode_in(
+            dir.path().join("missing").to_str().unwrap(),
+            html.to_str().unwrap(),
+            None,
+        );
+        assert!(
+            result.is_err(),
+            "missing per-package dir must error: {result:?}"
+        );
+    }
+
+    #[test]
+    fn run_gate_mode_in_github_output_error_propagates() {
+        // 100% (gaps empty) but an unwritable GITHUB_OUTPUT path → the
+        // write_github_output `?` inside report_data fails.
+        let dir = tempfile::tempdir().unwrap();
+        let per_pkg = dir.path().join("per-package");
+        std::fs::create_dir(&per_pkg).unwrap();
+        write_covdata(
+            &per_pkg,
+            "leviath-core.json",
+            &CovData {
+                files: vec![],
+                totals: full_metrics(1),
+            },
+        );
+        let html = dir.path().join("html");
+        let result = run_gate_mode_in(
+            per_pkg.to_str().unwrap(),
+            html.to_str().unwrap(),
+            Some("/no/such/dir/gha_output.txt"),
+        );
+        assert!(
+            result.is_err(),
+            "unwritable GITHUB_OUTPUT must error: {result:?}"
+        );
+    }
+
+    // ── generate_package_html ─────────────────────────────────────────────────
+
+    #[test]
+    fn generate_package_html_success_is_ok() {
+        let runner = MockRunner::new(simple_metadata(&["leviath-core"]));
+        assert!(generate_package_html(&runner, "leviath-core").is_ok());
+    }
+
+    #[test]
+    fn generate_package_html_cargo_exit_failure_is_err() {
+        let runner = MockRunner::new(simple_metadata(&["leviath-core"])).with_fail_html();
+        let result = generate_package_html(&runner, "leviath-core");
+        assert!(
+            result.is_err(),
+            "non-zero --html exit must error: {result:?}"
+        );
+        assert!(result.unwrap_err().to_string().contains("HTML report"));
+    }
+
+    #[test]
+    fn generate_package_html_cargo_spawn_failure_is_err() {
+        let runner = MockRunner::new(simple_metadata(&["leviath-core"])).with_fail_cargo_err();
+        assert!(generate_package_html(&runner, "leviath-core").is_err());
+    }
+
+    // ── write_gate_html_index ─────────────────────────────────────────────────
+
+    #[test]
+    fn write_gate_html_index_lists_existing_dirs_and_skips_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let html = dir.path().join("html");
+        std::fs::create_dir_all(html.join("leviath-core")).unwrap();
+        std::fs::create_dir_all(html.join("leviath-cli")).unwrap();
+        // A stray file at the top level must be skipped (is_dir == false).
+        std::fs::write(html.join("stray.txt"), "x").unwrap();
+
+        write_gate_html_index(html.to_str().unwrap()).unwrap();
+        let index = std::fs::read_to_string(html.join("index.html")).unwrap();
+        assert!(index.contains("leviath-core/html/index.html"));
+        assert!(index.contains("leviath-cli/html/index.html"));
+        assert!(!index.contains("stray.txt"));
+    }
+
+    #[test]
+    fn write_gate_html_index_missing_dir_writes_empty_index() {
+        // read_dir Err branch → no packages, but write_html_index still
+        // creates the dir and writes an (empty) index.
+        let dir = tempfile::tempdir().unwrap();
+        let html = dir.path().join("nonexistent-html");
+        write_gate_html_index(html.to_str().unwrap()).unwrap();
+        assert!(html.join("index.html").exists());
+    }
+
+    // ── write_html_index ──────────────────────────────────────────────────────
+
+    #[test]
+    fn write_html_index_create_dir_error_propagates() {
+        // html_dir is a *file*, so create_dir_all fails.
+        let dir = tempfile::tempdir().unwrap();
+        let blocker = dir.path().join("blocker");
+        std::fs::write(&blocker, "not a dir").unwrap();
+        let result = write_html_index(blocker.to_str().unwrap(), &[]);
+        assert!(
+            result.is_err(),
+            "unwritable html dir must error: {result:?}"
         );
     }
 

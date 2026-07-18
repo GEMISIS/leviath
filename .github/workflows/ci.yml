@@ -92,8 +92,75 @@ jobs:
   # OS-specific code is covered by tests that run on that OS (e.g. leviath-sys's
   # `unix` vs `fallback` submodules); code `#[cfg]`'d out of a target is not
   # compiled there and so never counts against it.
+  #
+  # For speed, coverage is fanned out: this `coverage` job computes ONE
+  # package's coverage per runner (os × package matrix), each writing its own
+  # `coverage/per-package/<pkg>.json` (byte-for-byte the same numbers a single
+  # `cargo xtask coverage` run would produce for that package — the per-package
+  # measurement is unchanged, it's just distributed). The dependent
+  # `coverage-gate` job then aggregates every package's JSON and enforces the
+  # hard 100% gate. `cargo-llvm-cov` is installed from a prebuilt binary via
+  # taiki-e/install-action (was `cargo install --locked`, minutes → seconds).
   coverage:
-    name: Coverage (${{ matrix.os }})
+    name: Coverage (${{ matrix.os }} / ${{ matrix.package }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      # One package's failure must still let the others report their numbers.
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        # The workspace members `parse_workspace_packages` returns (xtask
+        # excluded — it is the coverage tool, not measured by the gate).
+        package:
+          - leviath-core
+          - leviath-runtime
+          - leviath-providers
+          - leviath-mcp
+          - leviath-scripting
+          - leviath-package
+          - leviath-tools
+          - leviath-cli
+          - leviath-sys
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+          components: llvm-tools
+      - uses: Swatinem/rust-cache@v2
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov
+      # Computes this one package's regions/lines/functions merged-by-source-
+      # position (see xtask/src/coverage.rs) and writes coverage/per-package/
+      # <pkg>.json plus a browsable coverage/html/<pkg> report. Does NOT run the
+      # 100% gate — that's coverage-gate's job, once all packages are collected.
+      - name: Compute coverage for ${{ matrix.package }}
+        run: cargo xtask coverage --package ${{ matrix.package }}
+      - name: Upload per-package coverage JSON
+        uses: actions/upload-artifact@v7
+        with:
+          name: cov-${{ matrix.os }}-${{ matrix.package }}
+          path: coverage/per-package/*.json
+          retention-days: 14
+      - name: Upload HTML coverage report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: coverage-html-${{ matrix.os }}-${{ matrix.package }}
+          path: coverage/html/
+          retention-days: 14
+
+  # Aggregates every per-package JSON for this OS and enforces the hard 100%
+  # gate (fails if ANY file is below 100% on regions, lines, or functions).
+  # This is the authoritative gate that replaced the old inline check; the
+  # measurement is identical, just fed from pre-computed per-package results.
+  # Branch coverage is not collected -- `cargo llvm-cov --branch` reliably
+  # crashes with SIGSEGV on an open upstream LLVM bug (see coverage.rs).
+  coverage-gate:
+    name: Coverage gate (${{ matrix.os }})
+    needs: [coverage]
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -104,40 +171,25 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: stable
-          components: llvm-tools,rustfmt,clippy
       - uses: Swatinem/rust-cache@v2
-      - name: Install cargo-llvm-cov
-        run: cargo install cargo-llvm-cov --locked
-      - name: Check coverage suppression markers
-        run: cargo xtask check-exclusions
-      # Branch coverage is not collected -- `cargo llvm-cov --branch`
-      # reliably crashes with SIGSEGV on an open, unresolved upstream LLVM
-      # bug (see the doc comment at the top of xtask/src/coverage.rs).
-      # Coverage enforcement IS active: this step fails the build if ANY file
-      # is below 100% on regions, lines, or functions. Region coverage is
-      # measured merged-by-source-position (see xtask/src/coverage.rs) so
-      # per-monomorphization jitter can't produce spurious gaps -- the 100%
-      # gate is stable across OSes. This step computes and reports all three
-      # metrics (regions/lines/functions). It also writes a browsable HTML
-      # report to coverage/html/ (see the doc comment on generate_html_report
-      # in xtask/src/coverage.rs) -- uploaded as a build artifact below so it's
-      # viewable without needing to run coverage locally.
-      - name: Compute coverage (regions / lines / functions)
-        id: cov
-        run: cargo xtask coverage
-      - name: Upload HTML coverage report
-        if: always()
-        uses: actions/upload-artifact@v7
+      # Collect only THIS OS's per-package JSONs onto one runner. Each artifact
+      # holds a single <pkg>.json at its root; merge-multiple flattens them all
+      # into coverage/per-package/ where `--gate` globs *.json.
+      - name: Download per-package coverage JSONs
+        uses: actions/download-artifact@v8
         with:
-          name: coverage-html-${{ matrix.os }}
-          path: coverage/html/
-          retention-days: 14
+          pattern: cov-${{ matrix.os }}-*
+          path: coverage/per-package
+          merge-multiple: true
+      - name: Enforce 100% coverage gate
+        id: cov
+        run: cargo xtask coverage --gate
       # Publish all three coverage-percentage gists — only from ubuntu on
-      # push to main (all three OSes compute coverage; only one need
-      # publish). Only the lines gist is actually rendered as a README badge
-      # today (three separate numbers read as confusing to newcomers there),
-      # but regions/functions are published too so they're a click away in
-      # the gist for anyone who wants the full picture.
+      # push to main (all three OSes gate; only one need publish). Only the
+      # lines gist is actually rendered as a README badge today (three separate
+      # numbers read as confusing to newcomers there), but regions/functions
+      # are published too so they're a click away in the gist for anyone who
+      # wants the full picture.
       - name: Update lines coverage badge
         if: matrix.os == 'ubuntu-latest' && github.ref == 'refs/heads/main' && github.event_name == 'push'
         uses: schneegans/dynamic-badges-action@v1.7.0
@@ -174,3 +226,17 @@ jobs:
           valColorRange: ${{ steps.cov.outputs.functions }}
           minColorRange: 50
           maxColorRange: 100
+
+  # The zero-exclusions policy scan runs once (it's OS-independent) rather than
+  # once per coverage runner as it used to.
+  check-exclusions:
+    name: Check coverage suppression markers
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Check coverage suppression markers
+        run: cargo xtask check-exclusions
