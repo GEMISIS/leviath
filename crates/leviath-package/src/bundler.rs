@@ -585,6 +585,51 @@ mod tests {
         assert!(!names.iter().any(|n| n.contains("dangling")));
     }
 
+    // A portable analogue of `test_bundle_skips_broken_symlink` that needs no
+    // `std::os::unix::fs::symlink`: a directory entry whose backing path no
+    // longer exists on disk classifies as *neither* a regular file nor a
+    // directory (`is_file()` and `is_dir()` both return `false`), exercising
+    // the `if !path.is_file() { continue; }` skip on every OS. We produce such
+    // a dangling entry via the injected reader: it opens the directory, then
+    // renames that directory out from under the still-open `ReadDir` handle.
+    // The open handle stays valid and still yields `ghost.txt`, but the entry's
+    // reconstructed `path()` (built from the *original* directory name) now
+    // points at a location that has moved away and no longer resolves --
+    // confirmed empirically to be neither file nor dir.
+    #[test]
+    fn test_add_directory_to_tar_skips_neither_file_nor_dir() {
+        let root = tempfile::tempdir().unwrap();
+        let src = root.path().join("src");
+        let moved = root.path().join("src-moved");
+        fs::create_dir_all(&src).unwrap();
+        fs::write(src.join("ghost.txt"), "content").unwrap();
+
+        let bundler = AgentBundler::new();
+        let mut sink = Vec::new();
+        let mut tar = tar::Builder::new(&mut sink as &mut dyn Write);
+
+        let src_for_reader = src.clone();
+        let moved_for_reader = moved.clone();
+        let read_dir = move |p: &Path| -> std::io::Result<fs::ReadDir> {
+            // `.unwrap()` rather than `?` on purpose: these operations succeed
+            // deterministically here, and `?` would leave its never-taken `Err`
+            // arm as an uncovered region.
+            let rd = fs::read_dir(p).unwrap();
+            // Move the directory aside *after* opening it.
+            fs::rename(&src_for_reader, &moved_for_reader).unwrap();
+            Ok(rd)
+        };
+
+        let result = bundler.add_directory_to_tar(&mut tar, &src, &src, &read_dir);
+        assert!(result.is_ok());
+        tar.finish().unwrap();
+        drop(tar);
+
+        // The dangling entry was skipped -- nothing was appended to the tar.
+        let mut archive = tar::Archive::new(&sink[..]);
+        assert_eq!(archive.entries().unwrap().count(), 0);
+    }
+
     // ─── add_directory_to_tar: recursive read_dir failure propagates ────
 
     // A `read_dir` that fails when the walk recurses into a subdirectory

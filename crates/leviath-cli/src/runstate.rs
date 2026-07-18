@@ -1115,6 +1115,26 @@ mod tests {
         assert_eq!(result, "exactly");
     }
 
+    #[test]
+    fn tail_file_tail_without_newline_returns_whole_window() {
+        // When the last `max_bytes` window of a larger file contains no '\n'
+        // at all (a single long line with no line breaks), `tail_file` cannot
+        // skip to a newline boundary, so it falls through to the `else` arm and
+        // returns the whole (newline-free) tail window verbatim. Bytes are
+        // written raw (never via `writeln!`, which would append '\n') so that
+        // on *every* OS the tail slice is guaranteed newline-free -- on Windows
+        // ordinary text output is `\r\n`-terminated, which would otherwise keep
+        // a '\n' in the window and take the `if` arm instead.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("no_newline.txt");
+        // 100 raw bytes, no newline anywhere.
+        let content = "a".repeat(100);
+        std::fs::write(&path, content.as_bytes()).unwrap();
+        // A 10-byte window is smaller than the file (100) and contains no '\n'.
+        let result = tail_file(&path, 10);
+        assert_eq!(result, "aaaaaaaaaa");
+    }
+
     // ─── RunMeta metadata and callback_url ─────────────────────────────────
 
     #[test]
