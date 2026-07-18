@@ -606,10 +606,12 @@ fn run_single_target(
     // `lev` binary's profile (from `tests/cli_dispatch.rs`), forcing that
     // un-unit-testable wiring to be "covered". Keeping bins unmeasured is what
     // lets library code stay 100%-covered with zero `#[cfg(not(test))]`
-    // escape hatches (see `crates/leviath-cli/src/main.rs`). `/main\.rs$`
-    // requires a path separator so it matches only real bin roots, never a
-    // file like `domain.rs`.
-    args.extend_from_slice(&["--ignore-filename-regex", r"/main\.rs$"]);
+    // escape hatches (see `crates/leviath-cli/src/main.rs`). The `[\\/]`
+    // requires a path separator so it matches only real bin roots (never a
+    // file like `domain.rs`) — and accepts BOTH `/` (Unix) and `\` (Windows,
+    // where llvm-cov reports `...\src\main.rs`), so the bin is excluded on
+    // every OS.
+    args.extend_from_slice(&["--ignore-filename-regex", r"[\\/]main\.rs$"]);
     args.extend_from_slice(&["--json", "--output-path", output_path]);
 
     if !runner.cargo(&args)? {
