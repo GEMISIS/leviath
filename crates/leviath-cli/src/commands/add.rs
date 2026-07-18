@@ -52,7 +52,6 @@ thread_local! {
     static FORCE_AGENTS_DIR_ERROR: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
-
 /// Core `lev add` logic, parameterized by installer + agents base directory
 /// so it can be tested against tempdirs instead of the real
 /// `~/.leviath/agents`.

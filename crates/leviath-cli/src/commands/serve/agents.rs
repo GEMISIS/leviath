@@ -73,7 +73,6 @@ impl SpawnAgentIo for RealSpawnAgentIo {
     }
 }
 
-
 pub(super) async fn spawn_agent(
     State(state): State<AppState>,
     Json(body): Json<SpawnAgentReq>,

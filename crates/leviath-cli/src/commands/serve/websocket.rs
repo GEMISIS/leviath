@@ -7,7 +7,6 @@ use tokio::sync::broadcast;
 
 use super::types::*;
 
-
 pub(super) async fn ws_global(
     State(state): State<AppState>,
     ws: WebSocketUpgrade,

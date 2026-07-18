@@ -208,6 +208,13 @@ pub struct StageContext<'a> {
     pub agent_registry: Arc<HashMap<String, Blueprint>>,
 }
 
+/// A foreground interaction-point asker: resolves an `InteractionRequest` to a
+/// response (real stdin in the binary, a mock in tests). Used by
+/// [`crate::commands::run::stages::run_interactive_points_stage`] on the
+/// foreground (no-run-context) path.
+pub type InteractionAsker =
+    fn(&crate::interaction::InteractionRequest) -> crate::interaction::InteractionResponse;
+
 /// Trait for mode-specific behavior in the stage loop.
 ///
 /// Foreground and worker modes each implement this trait, and the unified
@@ -244,6 +251,17 @@ pub trait StageCallbacks: Send {
     /// Get run_context for interactive stages.
     /// Foreground returns `None` (stdin); worker returns `Some((run_id, meta))`.
     fn get_run_context(&mut self) -> Option<(&str, &mut RunMeta)>;
+
+    /// The foreground (stdin) asker for interactive-points stages, or `None`.
+    ///
+    /// Foreground overrides this to return `Some(..)` (its injected asker);
+    /// background/worker callers keep the default `None` and resolve interaction
+    /// points via IPC (`get_run_context` returns `Some`).
+    /// [`crate::commands::run::stages::run_interactive_points_stage`] requires a
+    /// `Some` asker only when there's no run context (true foreground).
+    fn interaction_point_asker(&self) -> Option<InteractionAsker> {
+        None
+    }
 
     /// Run an autonomous stage.
     ///
@@ -764,6 +782,9 @@ pub async fn run_stage_loop(
             }
             StageMode::InteractivePoints { points } => {
                 let pts = points.clone();
+                // Compute the foreground asker before borrowing `cb` mutably via
+                // `get_run_context` (which returns a `&mut` into `cb`).
+                let asker = cb.interaction_point_asker();
                 let run_context = cb.get_run_context();
                 let outcome = run_interactive_points_stage(
                     &mut eng,
@@ -777,6 +798,7 @@ pub async fn run_stage_loop(
                     run_context,
                     io,
                     exec,
+                    asker,
                 )
                 .await?;
                 match outcome {

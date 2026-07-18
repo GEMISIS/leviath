@@ -11,7 +11,6 @@ use leviath_tools::{BuiltinTools, ToolContext};
 
 use crate::config::{Config, ToolPolicy};
 
-
 /// Combined tool registry: native built-in tools + MCP-discovered tools.
 ///
 /// Cheap to clone (all fields are `Arc`s). The `call` method dispatches

@@ -82,7 +82,6 @@ pub enum PointsOutcome {
     Aborted,
 }
 
-
 /// Run an interactive stage.
 ///
 /// `run_context`: if `Some((run_id, meta))`, interaction is handled via the
@@ -322,11 +321,26 @@ pub async fn run_autonomous_stage(
     Ok(())
 }
 
+/// Placeholder foreground asker bound only in background (IPC) mode, where the
+/// stdin-dispatch branch of [`run_interactive_points_stage_with`] is never
+/// taken. Returns an empty text response. Directly unit-tested so its body is
+/// covered even though the interaction loop never invokes it in background mode.
+fn ipc_mode_unused_asker(
+    req: &crate::interaction::InteractionRequest,
+) -> crate::interaction::InteractionResponse {
+    crate::interaction::InteractionResponse::text(&req.id, "")
+}
+
 /// Run an InteractivePoints stage: autonomous iterations with pauses at each interaction point.
 ///
 /// `run_context`: if `Some((run_id, meta))`, interaction is handled via the
 /// file-based IPC channel (background worker). If `None`, stdin is used
-/// (foreground).
+/// (foreground) and `asker` must be `Some(..)`.
+///
+/// `asker` is the foreground stdin asker (from
+/// [`StageCallbacks::interaction_point_asker`](super::executor::StageCallbacks::interaction_point_asker)).
+/// It is required only on the foreground path (`run_context == None` with
+/// interaction points); background runs pass `None` and resolve via IPC.
 #[allow(clippy::too_many_arguments)]
 pub async fn run_interactive_points_stage(
     engine: &mut AgentEngine,
@@ -340,7 +354,20 @@ pub async fn run_interactive_points_stage(
     run_context: Option<(&str, &mut RunMeta)>,
     io: &mut dyn RunIO,
     executor: &mut ToolExecutorDyn<'_>,
+    asker: Option<super::executor::InteractionAsker>,
 ) -> anyhow::Result<PointsOutcome> {
+    // Resolve the foreground asker into the `&dyn Fn` the core takes. In
+    // foreground mode (no run_context) it is required; background mode resolves
+    // interaction points via IPC and never consults it, so a placeholder is
+    // bound there.
+    let ask: &(dyn Fn(&crate::interaction::InteractionRequest) -> crate::interaction::InteractionResponse
+          + Sync) = match asker {
+        Some(ref f) => f,
+        // Background (IPC) mode and the empty-points autonomous fallback never
+        // consult the asker, so bind the placeholder there rather than bailing.
+        None if run_context.is_some() || points.is_empty() => &ipc_mode_unused_asker,
+        None => anyhow::bail!("interactive points in foreground mode require an interaction asker"),
+    };
     run_interactive_points_stage_with(
         engine,
         entity,
@@ -353,7 +380,7 @@ pub async fn run_interactive_points_stage(
         run_context,
         io,
         executor,
-        &crate::interaction::request_interaction_stdin,
+        ask,
     )
     .await
 }
@@ -361,8 +388,8 @@ pub async fn run_interactive_points_stage(
 /// Core of [`run_interactive_points_stage`], with the foreground (stdin)
 /// interaction dispatch injected as `ask_foreground` so tests can drive the
 /// `run_context = None` path with a mock closure instead of blocking on real
-/// process stdin. Production callers always go through the public wrapper
-/// above, which passes the real [`crate::interaction::request_interaction_stdin`].
+/// process stdin. Production callers go through the public wrapper above, which
+/// supplies the injected asker (or a background placeholder).
 #[allow(clippy::too_many_arguments)]
 async fn run_interactive_points_stage_with(
     engine: &mut AgentEngine,
@@ -511,8 +538,8 @@ async fn run_interactive_points_stage_with(
                 }
             } else {
                 // Foreground (stdin) path — dispatched through the injected
-                // `ask_foreground` closure (real `request_interaction_stdin`
-                // in production, a mock in tests) rather than calling it
+                // `ask_foreground` closure (the binary's real stdin asker in
+                // production, a mock in tests) rather than reading stdin
                 // directly, so this whole branch is testable without
                 // blocking on real stdin.
                 let resp = ask_foreground(&ipc_req);
@@ -1362,6 +1389,9 @@ mod tests {
             None,
             &mut io,
             &mut noop_exec,
+            // Foreground (run_context None), but empty points delegate to the
+            // autonomous path, so the asker is never consulted.
+            Some(wrapper_mock_asker),
         )
         .await
         .unwrap();
@@ -1670,6 +1700,7 @@ mod tests {
             Some((&run_id, &mut meta)),
             &mut io,
             &mut noop_exec,
+            None,
         )
         .await
         .unwrap();
@@ -1729,6 +1760,7 @@ mod tests {
             Some((&run_id, &mut meta)),
             &mut io,
             &mut noop_exec,
+            None,
         )
         .await
         .unwrap();
@@ -1807,6 +1839,7 @@ mod tests {
             Some((&run_id, &mut meta)),
             &mut io,
             &mut noop_exec,
+            None,
         )
         .await
         .unwrap();
@@ -1896,6 +1929,7 @@ mod tests {
             Some((&run_id, &mut meta)),
             &mut io,
             &mut noop_exec,
+            None,
         )
         .await
         .unwrap();
@@ -1997,6 +2031,7 @@ mod tests {
             Some((&run_id, &mut meta)),
             &mut io,
             &mut noop_exec,
+            None,
         )
         .await;
 
@@ -2068,6 +2103,7 @@ mod tests {
             Some((&run_id, &mut meta)),
             &mut io,
             &mut noop_exec,
+            None,
         )
         .await
         .unwrap();
@@ -2219,9 +2255,105 @@ mod tests {
     // go through the background file-IPC responder, regardless of test name),
     // these call `run_interactive_points_stage_with` directly with
     // `run_context: None` and a mock `ask_foreground` closure -- the actual
-    // foreground/stdin dispatch path, previously untested because the public
-    // wrapper always calls the real, stdin-blocking
-    // `crate::interaction::request_interaction_stdin`.
+    // foreground/stdin dispatch path. In production the binary injects a real
+    // stdin asker (via `StageCallbacks::interaction_point_asker`); tests use a
+    // mock so this branch never blocks on real stdin.
+
+    /// Shared mock foreground asker — a plain `fn` matching
+    /// [`super::executor::InteractionAsker`] — for the public
+    /// `run_interactive_points_stage` wrapper tests. Approves the first choice.
+    fn wrapper_mock_asker(
+        _req: &crate::interaction::InteractionRequest,
+    ) -> crate::interaction::InteractionResponse {
+        crate::interaction::InteractionResponse::choice("", 0)
+    }
+
+    #[test]
+    fn ipc_mode_unused_asker_returns_empty_text() {
+        // Covers the background-mode placeholder asker's body (never invoked by
+        // the interaction loop itself, since background resolves via IPC).
+        let req = crate::interaction::InteractionRequest::free_text("x", "p", "s", false);
+        let resp = super::ipc_mode_unused_asker(&req);
+        assert_eq!(resp.request_id, "x");
+        assert_eq!(resp.value.as_deref(), Some(""));
+    }
+
+    #[tokio::test]
+    async fn public_wrapper_foreground_dispatches_via_injected_asker() {
+        // Drives the public `run_interactive_points_stage` on the foreground
+        // path (run_context None) with an injected `Some(asker)` and a real
+        // interaction point -- covering the wrapper's `Some(asker)` arm and the
+        // foreground stdin-dispatch branch reached through the public API.
+        let bp = make_blueprint(vec![make_stage("main")]);
+        let (mut engine, _pool, entity) = make_engine_and_entity(&bp, "Agent response");
+        let mut io = MockIO::new();
+        let points = vec![make_multiple_choice_point(
+            "plan_approval",
+            "Approve the plan?",
+            vec!["Approve".to_string(), "Revise".to_string()],
+        )];
+
+        run_interactive_points_stage(
+            &mut engine,
+            entity,
+            "mock",
+            "test-model",
+            4,
+            &[],
+            None,
+            &points,
+            None,
+            &mut io,
+            &mut noop_exec,
+            Some(wrapper_mock_asker),
+        )
+        .await
+        .unwrap();
+
+        let window = engine
+            .world()
+            .get::<leviath_runtime::ContextWindow>(entity)
+            .unwrap();
+        let conversation = window.get_region("conversation").unwrap();
+        let all_content: String = conversation
+            .content
+            .iter()
+            .map(|e| e.content.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(all_content.contains("Approve"));
+    }
+
+    #[tokio::test]
+    async fn public_wrapper_foreground_without_asker_errors() {
+        // Covers the wrapper's bail arm: foreground (run_context None) with
+        // interaction points but no injected asker is a misconfiguration.
+        let bp = make_blueprint(vec![make_stage("main")]);
+        let (mut engine, _pool, entity) = make_engine_and_entity(&bp, "Agent response");
+        let mut io = MockIO::new();
+        let points = vec![make_free_text_point("clarify", "Anything else?")];
+
+        let result = run_interactive_points_stage(
+            &mut engine,
+            entity,
+            "mock",
+            "test-model",
+            4,
+            &[],
+            None,
+            &points,
+            None,
+            &mut io,
+            &mut noop_exec,
+            None,
+        )
+        .await;
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("require an interaction asker"));
+    }
 
     #[tokio::test]
     async fn foreground_path_choice_no_followup_completes_without_ipc() {
@@ -2504,6 +2636,7 @@ mod tests {
             Some((&run_id, &mut meta)),
             &mut io,
             &mut noop_exec,
+            None,
         )
         .await
         .unwrap();
@@ -2569,6 +2702,7 @@ mod tests {
             Some((&run_id, &mut meta)),
             &mut io,
             &mut noop_exec,
+            None,
         )
         .await
         .unwrap();
@@ -2634,6 +2768,7 @@ mod tests {
             Some((&run_id, &mut meta)),
             &mut io,
             &mut noop_exec,
+            None,
         )
         .await
         .unwrap();
@@ -2690,6 +2825,7 @@ mod tests {
             Some((&run_id, &mut meta)),
             &mut io,
             &mut noop_exec,
+            None,
         )
         .await
         .unwrap();
@@ -3266,6 +3402,7 @@ mod tests {
             Some((&run_id, &mut meta)),
             &mut io,
             &mut noop_exec,
+            None,
         )
         .await
         .unwrap();
@@ -3561,6 +3698,7 @@ mod tests {
             Some((&run_id, &mut meta)),
             &mut io,
             &mut exec_binding,
+            None,
         );
         // Stage will block on p2 forever; we cancel it after a timeout
         let _ = tokio::time::timeout(std::time::Duration::from_secs(5), stage_fut).await;
@@ -3689,6 +3827,7 @@ mod tests {
             Some((&run_id, &mut meta)),
             &mut io,
             &mut noop_exec,
+            None,
         )
         .await;
 
@@ -3755,6 +3894,7 @@ mod tests {
             Some((&run_id, &mut meta)),
             &mut io,
             &mut noop_exec,
+            None,
         )
         .await
         .unwrap();
@@ -3821,6 +3961,7 @@ mod tests {
             Some((&run_id, &mut meta)),
             &mut io,
             &mut noop_exec,
+            None,
         )
         .await;
 

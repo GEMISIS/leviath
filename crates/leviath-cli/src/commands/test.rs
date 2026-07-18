@@ -93,7 +93,6 @@ fn build_registry_from_config(config: &Config) -> ProviderRegistry {
     reg
 }
 
-
 /// Core of [`execute`], with provider-registry construction injected so
 /// tests can drive the non-dry-run path with a mock [`Provider`] instead of
 /// either skipping it (dry-run only) or making a real, billed network call

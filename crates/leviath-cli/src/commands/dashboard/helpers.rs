@@ -105,37 +105,6 @@ pub(super) fn elapsed_str_until(started_at: i64, until: i64) -> String {
     }
 }
 
-/// Copy `text` to the system clipboard.  Returns `true` on success.
-///
-/// Strategy (in order):
-/// 1. `pbcopy` (macOS)
-/// 2. `xclip -selection clipboard` (Linux X11)
-/// 3. `wl-copy` (Linux Wayland)
-/// 4. OSC52 via /dev/tty → stdout fallback
-pub(super) fn yank_to_clipboard(text: &str) -> bool {
-    yank_to_clipboard_via(text, osc52_fallback)
-}
-
-/// OSC52 clipboard fallback, delegating to the real terminal write in
-/// `leviath_sys`.
-///
-/// COVERAGE-EXCLUDED: this is a cli-local safety twin, NOT the OS mechanism
-/// itself (that lives, fully tested, in `leviath_sys::tty`). It exists only
-/// because `leviath_sys` compiles as a *non-test* dependency even in this
-/// crate's test build, so a cli test that reached the real `osc52_yank` would
-/// write OSC escape bytes to the terminal running `cargo test`. The
-/// `#[cfg(test)]` twin below keeps those tests (and `input.rs`'s `key('y')`
-/// handler tests) from ever touching a real terminal.
-#[cfg(not(test))]
-fn osc52_fallback(text: &str) -> bool {
-    leviath_sys::osc52_yank(text)
-}
-
-#[cfg(test)]
-fn osc52_fallback(_text: &str) -> bool {
-    true
-}
-
 /// The native clipboard tools tried, in order, before falling back to OSC52.
 const NATIVE_CLIPBOARD_CMDS: &[(&str, &[&str])] = &[
     ("pbcopy", &[]),
@@ -143,10 +112,16 @@ const NATIVE_CLIPBOARD_CMDS: &[(&str, &[&str])] = &[
     ("wl-copy", &[]),
 ];
 
-/// Core `yank_to_clipboard` logic, parameterized over the OSC52 fallback so
-/// tests that force this path (e.g. by starving `PATH`) can inject a fake
-/// that never touches the real TTY.
-fn yank_to_clipboard_via(text: &str, osc52_fallback: fn(&str) -> bool) -> bool {
+/// Copy `text` to the system clipboard (returns `true` on success),
+/// parameterized over the OSC52 fallback so tests can inject a fake that never
+/// touches the real TTY. Strategy: native tool (`pbcopy`/`xclip`/`wl-copy`)
+/// first, then the injected OSC52 fallback.
+///
+/// `pub` so the binary's `real_dashboard` can build the real dashboard
+/// clipboard fn as `|t| yank_to_clipboard_via(t, leviath_sys::osc52_yank)` and
+/// inject it — keeping the real `/dev/tty` write (which no unit test may
+/// trigger) out of the coverage-measured library.
+pub fn yank_to_clipboard_via(text: &str, osc52_fallback: fn(&str) -> bool) -> bool {
     yank_to_clipboard_with(text, NATIVE_CLIPBOARD_CMDS, osc52_fallback)
 }
 
@@ -703,26 +678,10 @@ mod tests {
         assert!(result);
     }
 
-    // ─── yank_to_clipboard (the real, un-suffixed wrapper) ───────────────────
-
-    #[test]
-    fn test_yank_to_clipboard_delegates_to_osc52_fallback_twin() {
-        // Calls the real, un-suffixed `yank_to_clipboard` (unlike the tests
-        // above, which call `yank_to_clipboard_via` with an injected fake) so
-        // its one-line delegation to `osc52_fallback` is covered. Safe because
-        // `osc52_fallback` is `#[cfg(test)]`-twinned to a no-op that returns
-        // `true` without touching a real terminal — the real OSC52 write and
-        // all of its branches are tested in `leviath_sys::tty`. Starving `PATH`
-        // skips the native-tool loop so control reaches the fallback.
-        let _lock = crate::config::PATH_ENV_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let original_path = std::env::var_os("PATH");
-        unsafe {
-            std::env::set_var("PATH", "/lev-definitely-empty-path-dir");
-        }
-        let result = yank_to_clipboard("real wrapper test content");
-        restore_path(original_path);
-        assert!(result);
-    }
+    // The real dashboard clipboard fn (native tools → real OSC52 `/dev/tty`
+    // write) is now composed in the binary's `real_dashboard` as
+    // `|t| yank_to_clipboard_via(t, leviath_sys::osc52_yank)` and injected into
+    // `Dashboard`; the native-tool and fallback branches of
+    // `yank_to_clipboard_via`/`_with` are covered above with injected fakes, and
+    // the real OSC52 write is tested in `leviath_sys::tty`.
 }

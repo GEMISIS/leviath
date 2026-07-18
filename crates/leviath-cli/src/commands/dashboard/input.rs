@@ -327,7 +327,7 @@ impl Dashboard {
     }
 
     fn handle_yank(&mut self) {
-        self.handle_yank_with_fn(super::helpers::yank_to_clipboard);
+        self.handle_yank_with_fn(self.yank_fn);
     }
 
     fn handle_yank_with_fn(&mut self, yank_fn: fn(&str) -> bool) {
@@ -2272,16 +2272,12 @@ mod tests {
 
     #[test]
     fn yank_with_real_content_reports_success() {
-        // Uses `handle_yank_with_fn` with an injected always-succeeds
-        // fallback instead of `handle_key(KeyCode::Char('y'))` (which would
-        // dispatch to the real `handle_yank` -> `helpers::yank_to_clipboard`
-        // -> potentially the real `osc52_yank_raw`, which opens the actual
-        // `/dev/tty`). Whether that real path's native-tool-vs-OSC52 branch
-        // is taken depends on what clipboard tools happen to be installed on
-        // the machine `cargo test` runs on, which made the toast message
-        // (and therefore this assertion) inherently non-deterministic; the
-        // real dispatch path itself is exercised by `helpers.rs`'s own
-        // dedicated, deterministic tests instead.
+        // Uses `handle_yank_with_fn` with an injected always-succeeds clipboard
+        // fn for a deterministic toast assertion. (`handle_yank` itself uses
+        // the dashboard's injected `yank_fn`, which is a no-op under
+        // `make_test_dashboard`; the native-tool-vs-OSC52 branches live in
+        // `helpers::yank_to_clipboard_via`'s own tests, and the real OSC52
+        // write in `leviath_sys::tty`.)
         let _guard =
             crate::runstate::isolate_runs_dir_for_test("yank_with_real_content_reports_success");
         let run_id = "test-yank-real-content";

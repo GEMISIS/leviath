@@ -57,7 +57,7 @@ struct RealExecutors;
 
 impl RiskyExecutors for RealExecutors {
     async fn run(&self, args: commands::run::RunArgs) -> anyhow::Result<()> {
-        commands::run::execute(args).await
+        commands::run::execute(args, real_foreground_io()).await
     }
 
     async fn setup(&self, args: commands::setup::SetupArgs) -> anyhow::Result<()> {
@@ -101,7 +101,29 @@ async fn real_dashboard(_args: DashboardArgs) -> anyhow::Result<()> {
         viewport: Viewport::Fullscreen,
     };
     let mut events = CrosstermEventSource::new();
-    commands::dashboard::execute_with(&mut setup, &mut events).await
+    commands::dashboard::execute_with(&mut setup, &mut events, real_yank).await
+}
+
+/// Real clipboard copy for the dashboard's `y` keypress: native tool then the
+/// real OSC52 `/dev/tty` write (`leviath_sys::osc52_yank`). The native-tool /
+/// fallback branch logic is unit-tested in `yank_to_clipboard_via`; the real
+/// terminal write is tested in `leviath_sys::tty`.
+fn real_yank(text: &str) -> bool {
+    commands::dashboard::yank_to_clipboard_via(text, leviath_sys::osc52_yank)
+}
+
+/// Real foreground I/O bundle: real stdin for interactions and the message
+/// reader, and the real `is_terminal` probe. Wires the process's real stdin
+/// into `run`'s fully-tested foreground cores.
+fn real_foreground_io() -> commands::run::ForegroundIo {
+    use std::io::IsTerminal;
+    commands::run::ForegroundIo {
+        ask: |req| {
+            leviath_cli::interaction::request_interaction_from_reader(req, &mut io::stdin().lock())
+        },
+        make_message_reader: || Box::pin(tokio::io::BufReader::new(tokio::io::stdin())),
+        stdin_is_terminal: || io::stdin().is_terminal(),
+    }
 }
 
 /// Real [`TerminalSetup`]: enables raw mode, enters/leaves the real alternate

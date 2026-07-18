@@ -39,6 +39,13 @@ pub use session::{
     ProviderCreds,
 };
 
+// Foreground run entry points + the real-stdin dependency bundle the binary
+// injects. `foreground` is a private module, so these re-exports are how
+// `main.rs` names `ForegroundIo` and calls the foreground run with real stdin.
+pub use foreground::{
+    run_foreground, run_foreground_with_registry, BoxedAsyncBufRead, ForegroundIo,
+};
+
 #[derive(Args)]
 pub struct RunArgs {
     /// Path to agent project or agent.leviath (or installed agent name)
@@ -144,22 +151,30 @@ fn open_log_file(log_path: &std::path::Path) -> (std::fs::File, std::fs::File) {
     (log_file, log_file2)
 }
 
-pub async fn execute(args: RunArgs) -> anyhow::Result<()> {
+/// `io` carries the real-stdin dependencies the binary injects (see
+/// [`foreground::ForegroundIo`]). Foreground runs use all of them; background
+/// runs only need the `stdin_is_terminal` probe (for task resolution's
+/// editor-launch path), which is threaded down to [`execute_background`].
+pub async fn execute(args: RunArgs, io: foreground::ForegroundIo) -> anyhow::Result<()> {
     if args.foreground {
         if args.count > 1 {
             anyhow::bail!("--count is not supported with --foreground");
         }
-        return foreground::run_foreground(args).await;
+        return foreground::run_foreground(args, io).await;
     }
 
     // current_exe always succeeds on supported platforms; any failure is a fatal
     // misconfiguration that should surface as a panic rather than a user error.
     let exe = std::env::current_exe().expect("current executable path must be available");
-    execute_background(args, &exe).await
+    execute_background(args, &exe, io.stdin_is_terminal).await
 }
 
-async fn execute_background(args: RunArgs, exe: &std::path::Path) -> anyhow::Result<()> {
-    execute_background_with(args, exe, &runstate::create_run).await
+async fn execute_background(
+    args: RunArgs,
+    exe: &std::path::Path,
+    stdin_is_terminal: fn() -> bool,
+) -> anyhow::Result<()> {
+    execute_background_with(args, exe, &runstate::create_run, stdin_is_terminal).await
 }
 
 /// `create_run` is a `&dyn Fn` trait object (rather than `impl Fn`) so this
@@ -171,6 +186,7 @@ async fn execute_background_with(
     args: RunArgs,
     exe: &std::path::Path,
     create_run: &dyn Fn(&runstate::RunMeta) -> anyhow::Result<()>,
+    stdin_is_terminal: fn() -> bool,
 ) -> anyhow::Result<()> {
     // Background mode: create run state, spawn detached worker process(es)
     let path = args.path.as_deref().unwrap_or(".").to_string();
@@ -185,7 +201,7 @@ async fn execute_background_with(
 
     // Resolve the task once (may launch an interactive editor) before spawning workers.
     let description = Some(blueprint.description.as_str());
-    let task = session::resolve_task(&args.task, &blueprint.name, description)?;
+    let task = session::resolve_task(&args.task, &blueprint.name, description, &stdin_is_terminal)?;
 
     let workdir = std::env::current_dir()
         .ok()
@@ -427,7 +443,7 @@ prompt = "Implement"
             max_depth: None,
             count: 2, // count > 1 with foreground is not allowed
         };
-        let result = execute(args).await;
+        let result = execute(args, foreground::test_foreground_io()).await;
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         // Expected error about --count with --foreground.
@@ -448,7 +464,7 @@ prompt = "Implement"
             max_depth: None,
             count: 1,
         };
-        let result = execute(args).await;
+        let result = execute(args, foreground::test_foreground_io()).await;
         assert!(result.is_err()); // manifest not found
     }
 
@@ -481,7 +497,7 @@ prompt = "Implement"
             max_depth: None,
             count: 1,
         };
-        let result = execute(args).await;
+        let result = execute(args, foreground::test_foreground_io()).await;
         let _ = std::fs::remove_dir_all(&agent_dir);
         // Expected read error for directory manifest.
         assert!(result.is_err());
@@ -523,7 +539,7 @@ prompt = "Implement"
         };
 
         let bad_exe = std::path::Path::new("/nonexistent/executable/path/leviath-cli");
-        let result = super::execute_background(args, bad_exe).await;
+        let result = super::execute_background(args, bad_exe, foreground::test_not_a_tty).await;
         // Expected spawn error.
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
@@ -663,7 +679,7 @@ prompt = "Do the thing"
         };
 
         let harmless_exe = std::path::Path::new("/usr/bin/true");
-        super::execute_background(args, harmless_exe)
+        super::execute_background(args, harmless_exe, foreground::test_not_a_tty)
             .await
             .expect("expected background execute to succeed");
 
@@ -701,7 +717,7 @@ prompt = "Do the thing"
         };
 
         let harmless_exe = std::path::Path::new("/usr/bin/true");
-        super::execute_background(args, harmless_exe)
+        super::execute_background(args, harmless_exe, foreground::test_not_a_tty)
             .await
             .expect("expected multi-count background execute to succeed");
 
@@ -754,7 +770,7 @@ prompt = "Do the thing"
 
         let harmless_exe = temp_dir.join("harmless.bat");
         write_harmless_bat(&harmless_exe);
-        super::execute_background(args, &harmless_exe)
+        super::execute_background(args, &harmless_exe, foreground::test_not_a_tty)
             .await
             .expect("expected background execute to succeed");
 
@@ -792,7 +808,7 @@ prompt = "Do the thing"
 
         let harmless_exe = temp_dir.join("harmless.bat");
         write_harmless_bat(&harmless_exe);
-        super::execute_background(args, &harmless_exe)
+        super::execute_background(args, &harmless_exe, foreground::test_not_a_tty)
             .await
             .expect("expected multi-count background execute to succeed");
 
@@ -869,7 +885,7 @@ prompt = "Do the thing"
             max_depth: None,
             count: 1,
         };
-        let result = execute(args).await;
+        let result = execute(args, foreground::test_foreground_io()).await;
         // foreground::run_foreground should return an error for nonexistent path
         assert!(result.is_err());
     }
@@ -908,7 +924,7 @@ prompt = "Do the thing"
             max_depth: None,
             count: 1,
         };
-        let result = execute(args).await;
+        let result = execute(args, foreground::test_foreground_io()).await;
         // Expected error for invalid manifest TOML.
         assert!(result.is_err());
         let _ = std::fs::remove_dir_all(&temp_dir);
@@ -952,7 +968,7 @@ prompt = "Do the thing"
             max_depth: None,
             count: 1,
         };
-        let result = execute(args).await;
+        let result = execute(args, foreground::test_foreground_io()).await;
         assert!(result.is_err());
         let err = format!("{:#}", result.unwrap_err());
         assert!(
@@ -1000,7 +1016,7 @@ prompt = "Do the thing"
             max_depth: None,
             count: 1,
         };
-        let result = execute(args).await;
+        let result = execute(args, foreground::test_foreground_io()).await;
         // Expected error for empty task file.
         assert!(result.is_err());
         let err_msg = result.unwrap_err().to_string();
@@ -1107,9 +1123,12 @@ prompt = "Do the thing"
         let exe = std::env::current_exe().unwrap();
 
         // Inject a create_run stub that always fails — no env-var mutation needed.
-        let result = super::execute_background_with(args, &exe, &|_meta| {
-            Err(anyhow::anyhow!("injected create_run failure"))
-        })
+        let result = super::execute_background_with(
+            args,
+            &exe,
+            &|_meta| Err(anyhow::anyhow!("injected create_run failure")),
+            foreground::test_not_a_tty,
+        )
         .await;
         let _ = std::fs::remove_dir_all(&temp_dir);
 

@@ -10,6 +10,7 @@ mod test_support;
 mod theme;
 mod types;
 
+pub use helpers::yank_to_clipboard_via;
 pub use types::{AgentDisplayStatus, AgentEvent, DashboardAgent, DashboardArgs};
 
 use crossterm::event::{Event, KeyEventKind};
@@ -194,14 +195,18 @@ async fn run_dashboard_loop<B: ratatui::backend::Backend>(
 /// engine background loop, and seeds the startup log line. Split out of
 /// [`execute`] purely so this (entirely terminal-independent) setup is
 /// unit-testable on its own, separate from the real-terminal I/O sliver.
-async fn init_dashboard(config: &Config) -> (Dashboard, leviath_runtime::EngineHandle) {
+async fn init_dashboard(
+    config: &Config,
+    yank_fn: fn(&str) -> bool,
+) -> (Dashboard, leviath_runtime::EngineHandle) {
     let registry = build_provider_registry_from_config(config);
     let engine = Arc::new(tokio::sync::RwLock::new(AgentEngine::with_providers(
         registry,
     )));
 
     let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
-    let mut dashboard = Dashboard::new(cmd_tx);
+    let mut dashboard =
+        Dashboard::new_with_log_path(cmd_tx, crate::runstate::dashboard_log_path(), yank_fn);
 
     // Store event_tx for background loop
     let bg_event_tx = dashboard.event_tx.clone();
@@ -226,12 +231,16 @@ async fn init_dashboard(config: &Config) -> (Dashboard, leviath_runtime::EngineH
 /// keyboard input (an `is_terminal()` guard was tried and removed after it
 /// still hung a real editor terminal full-screen). That irreducible sliver is
 /// the binary's job; everything it composes is exercised here.
+/// `yank_fn` is the clipboard implementation the dashboard's `y` keypress uses;
+/// the binary passes the real native-tool/OSC52 clipboard (which can write the
+/// real terminal), tests pass a no-op.
 pub async fn execute_with<S: TerminalSetup, E: EventSource>(
     setup: &mut S,
     events: &mut E,
+    yank_fn: fn(&str) -> bool,
 ) -> anyhow::Result<()> {
     let config = Config::load()?;
-    let (mut dashboard, engine) = init_dashboard(&config).await;
+    let (mut dashboard, engine) = init_dashboard(&config, yank_fn).await;
     execute_core(&mut dashboard, &engine, setup, events).await
 }
 
@@ -331,7 +340,7 @@ mod tests {
             "init_dashboard_seeds_startup_log_and_starts_background_loop",
         );
         let config = Config::default();
-        let (dashboard, engine) = init_dashboard(&config).await;
+        let (dashboard, engine) = init_dashboard(&config, |_| false).await;
 
         assert!(dashboard
             .log
@@ -995,7 +1004,7 @@ mod tests {
         let _guard =
             crate::runstate::isolate_runs_dir_for_test("execute_core_happy_path_quits_on_esc");
         let config = Config::default();
-        let (mut dashboard, engine) = init_dashboard(&config).await;
+        let (mut dashboard, engine) = init_dashboard(&config, |_| false).await;
         let mut setup = TestSetup::new();
         let mut events = TestEventSource::new(vec![key(KeyCode::Esc)]);
         let result = execute_core(&mut dashboard, &engine, &mut setup, &mut events).await;
@@ -1013,7 +1022,7 @@ mod tests {
         let _runs = crate::runstate::isolate_runs_dir_for_test("execute_with_dashboard");
         let mut setup = TestSetup::new();
         let mut events = TestEventSource::new(vec![key(KeyCode::Esc)]);
-        let result = execute_with(&mut setup, &mut events).await;
+        let result = execute_with(&mut setup, &mut events, |_| false).await;
         assert!(result.is_ok());
     }
 
@@ -1024,8 +1033,7 @@ mod tests {
         // `?` propagates before the dashboard/engine are ever built.
         // `isolate_config_path_for_test` creates the fake config dir, so the
         // path's parent already exists — write the malformed file directly.
-        let _cfg =
-            crate::config::isolate_config_path_for_test("execute_with_dashboard_bad_config");
+        let _cfg = crate::config::isolate_config_path_for_test("execute_with_dashboard_bad_config");
         std::fs::write(
             crate::config::Config::config_path(),
             b"this is not valid toml ][ = =",
@@ -1033,7 +1041,7 @@ mod tests {
         .unwrap();
         let mut setup = TestSetup::new();
         let mut events = TestEventSource::new(vec![]);
-        let result = execute_with(&mut setup, &mut events).await;
+        let result = execute_with(&mut setup, &mut events, |_| false).await;
         assert!(result.is_err());
     }
 
@@ -1042,7 +1050,7 @@ mod tests {
         let _guard =
             crate::runstate::isolate_runs_dir_for_test("execute_core_enable_error_propagates");
         let config = Config::default();
-        let (mut dashboard, engine) = init_dashboard(&config).await;
+        let (mut dashboard, engine) = init_dashboard(&config, |_| false).await;
         // `setup.enable()?` fails first, so the loop is never reached.
         let mut setup = TestSetup {
             enable_should_fail: true,
@@ -1059,7 +1067,7 @@ mod tests {
             "execute_core_create_terminal_error_propagates",
         );
         let config = Config::default();
-        let (mut dashboard, engine) = init_dashboard(&config).await;
+        let (mut dashboard, engine) = init_dashboard(&config, |_| false).await;
         // `enable()` succeeds, then `create_terminal()?` fails -- deterministic
         // (no real backend / TTY involved), so this can never hang.
         let mut setup = TestSetup {
@@ -1076,7 +1084,7 @@ mod tests {
         let _guard =
             crate::runstate::isolate_runs_dir_for_test("execute_core_loop_error_propagates");
         let config = Config::default();
-        let (mut dashboard, engine) = init_dashboard(&config).await;
+        let (mut dashboard, engine) = init_dashboard(&config, |_| false).await;
         let mut setup = TestSetup::new();
         let mut events = TestEventSource::failing();
         let result = execute_core(&mut dashboard, &engine, &mut setup, &mut events).await;

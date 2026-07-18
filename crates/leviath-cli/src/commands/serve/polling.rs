@@ -65,7 +65,6 @@ async fn fire_webhook(client: reqwest::Client, url: String, payload: serde_json:
     }
 }
 
-
 /// Process one poll cycle for a given set of runs. Extracted from polling_loop
 /// so tests can call it directly with synthetic RunMeta without depending on
 /// the global ~/.leviath/runs/ directory.
