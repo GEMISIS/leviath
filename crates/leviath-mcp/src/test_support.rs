@@ -11,9 +11,7 @@
 //! `_guard` binding kept alive across `.await` points on a single-threaded
 //! runtime) makes those field expressions actually evaluate.
 //!
-//! This was previously duplicated verbatim in `discovery.rs`, `execution.rs`,
-//! and `client.rs`; it now lives here once and is shared via
-//! `crate::test_support::always_on_tracing_guard`.
+//! Shared via `crate::test_support::always_on_tracing_guard`.
 //!
 //! `tracing::subscriber::set_default` installs a thread-local, scope-guarded
 //! default (returned as a `DefaultGuard`) rather than a process-global one,

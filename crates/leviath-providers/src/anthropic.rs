@@ -1352,9 +1352,9 @@ mod tests {
     fn build_request_body_caps_total_cache_control_at_4_with_many_system_regions() {
         use leviath_core::CacheHint;
         // issue #12 regression: 5 cacheable system regions (architecture/
-        // program_flows/plan/task pinned + files hashmap) previously emitted 5
-        // `cache_control` blocks → hard Anthropic 400. They must now consolidate
-        // within the 4-block total budget.
+        // program_flows/plan/task pinned + files hashmap) must consolidate
+        // within the 4-block total `cache_control` budget; emitting 5
+        // `cache_control` blocks is a hard Anthropic 400.
         let provider = AnthropicProvider::new("test-key".to_string());
         let system = vec![
             crate::SystemBlock {

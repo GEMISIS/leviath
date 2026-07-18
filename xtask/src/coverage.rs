@@ -11,9 +11,9 @@
 //! `-ignore-filename-regex`, and with or without limiting `llvm-cov` to a
 //! single worker thread (`-num-threads=1`) — so it isn't a race in llvm-cov's
 //! own thread pool, it's deterministic. There is no known workaround short of
-//! an upstream LLVM fix, so this project no longer requests `--branch` at
-//! all, and the toolchain no longer needs to be pinned to a specific nightly:
-//! branch coverage was the only reason nightly was required (source-based
+//! an upstream LLVM fix, so this project does not request `--branch` at
+//! all, and the toolchain does not need to be pinned to a specific nightly:
+//! branch coverage is the only reason nightly would be required (source-based
 //! coverage instrumentation itself, `-C instrument-coverage`, has worked on
 //! stable Rust for years).
 //!
@@ -49,9 +49,8 @@
 //! one instantiation exercises but another doesn't is counted as missed. That
 //! per-instantiation jitter (its size and even *which* files it lands on vary
 //! by OS/toolchain — the same `getInstantiationGroups` family of quirks behind
-//! the `--branch` crash and the `--workspace` inaccuracy above) is why this
-//! project historically enforced a tolerance ceiling on missed regions rather
-//! than a hard 100%. Instead of tolerating that noise, we eliminate it: we read
+//! the `--branch` crash and the `--workspace` inaccuracy above) is noise this
+//! project eliminates rather than tolerating: we read
 //! llvm-cov's per-function `regions` arrays directly and key each **code**
 //! region (`Kind == 0`) by `(filename, line/col start, line/col end)`, counting
 //! a position as covered if *any* instantiation executed it (see

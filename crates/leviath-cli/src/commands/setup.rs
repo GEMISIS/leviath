@@ -939,11 +939,11 @@ mod tests {
     // ─── config-path write-through ───────────────────────────────────────
     //
     // The `execute()` entrypoint (branch on `non_interactive`, and the real
-    // stdin read for the interactive path) now lives in the binary's
-    // `real_setup`; the library keeps the two fully-tested cores. This test
-    // pins the same guarantee `execute_non_interactive_...` used to — that
-    // `run_non_interactive_setup` writes through `Config::config_path()` —
-    // exercised directly against the core with an isolated config path.
+    // stdin read for the interactive path) lives in the binary's `real_setup`;
+    // the library keeps the two fully-tested cores. This test pins the
+    // guarantee that `run_non_interactive_setup` writes through
+    // `Config::config_path()`, exercised directly against the core with an
+    // isolated config path.
 
     #[test]
     fn run_non_interactive_setup_writes_through_config_path() {
@@ -983,7 +983,8 @@ mod tests {
 
     #[test]
     fn execute_with_non_interactive_applies_flags_and_never_builds_the_reader() {
-        let _guard = crate::config::isolate_config_path_for_test("setup-execute-with-noninteractive");
+        let _guard =
+            crate::config::isolate_config_path_for_test("setup-execute-with-noninteractive");
         let args = SetupArgs {
             non_interactive: true,
             anthropic_key: Some("sk-ant-ew".to_string()),
@@ -996,7 +997,11 @@ mod tests {
         // `--non-interactive` short-circuits before the reader factory runs.
         execute_with(&args, seven_blank_lines).unwrap();
         assert_eq!(
-            Config::load().unwrap().providers.anthropic_api_key.as_deref(),
+            Config::load()
+                .unwrap()
+                .providers
+                .anthropic_api_key
+                .as_deref(),
             Some("sk-ant-ew")
         );
     }

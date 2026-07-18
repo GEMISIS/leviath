@@ -1,7 +1,7 @@
 //! Shared test-only tracing-coverage helper — exactly ONE copy per crate on
 //! purpose. `tracing::subscriber::set_global_default` only succeeds once per
-//! test binary; every file that previously had its own private copy left the
-//! losing copies' trait methods permanently dead. This structurally fixes that.
+//! test binary, so a single shared subscriber keeps every trait method
+//! reachable as the active subscriber.
 
 pub(crate) struct AlwaysOnSubscriber;
 

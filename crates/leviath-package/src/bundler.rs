@@ -445,8 +445,7 @@ mod tests {
     // by calling the walk directly with a `base` equal to the file being
     // appended: `strip_prefix(base)` then yields an *empty* relative path, which
     // `tar::Builder::append_path_with_name` rejects on every platform ("paths in
-    // archives must have at least one component"). The prior version made the
-    // file unreadable via `chmod 0o000`, which only fails on Unix.
+    // archives must have at least one component").
     #[test]
     fn test_add_directory_to_tar_append_failure_returns_error() {
         let dir = tempfile::tempdir().unwrap();
@@ -636,8 +635,7 @@ mod tests {
     // exercises, in one go, the recursive read-dir map_err (`Failed to read
     // directory`), the recursion `?` that propagates it back up, and both
     // enclosing `?`s in `write_bundle` and `bundle_with`. Injecting the reader
-    // makes this deterministic on every platform; the prior version relied on
-    // a `chmod 0o000` subdirectory, which only fails on Unix. (During real
+    // makes this deterministic on every platform. (During real
     // recursion `base` is always an ancestor of the entry, so no OS-agnostic
     // path/tar failure can surface *inside* a recursion -- injection is the
     // only cross-platform way to reach these propagation arms.)

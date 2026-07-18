@@ -22,10 +22,9 @@ pub enum ToolPolicy {
     Deny,
 }
 
-// `TitleConfig` (plain data used by the engine's title generation) now lives in
+// `TitleConfig` (plain data used by the engine's title generation) lives in
 // `leviath_core::config` so `leviath-runtime` can reference it without a CLI
-// dependency. Re-exported here so existing `crate::config::TitleConfig` paths
-// continue to resolve unchanged.
+// dependency. Re-exported here so `crate::config::TitleConfig` paths resolve.
 pub use leviath_core::config::TitleConfig;
 
 /// CLI configuration.
@@ -391,21 +390,19 @@ pub(crate) static CONFIG_PATH_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex:
 /// Serializes any test, anywhere in the crate, that mutates the
 /// process-global `PATH` env var (e.g. to starve editor/clipboard-tool
 /// resolution). Declared here for the same reason as `CONFIG_PATH_ENV_LOCK`
-/// above: `commands/run/session.rs`'s `launch_editor` tests and
-/// `commands/dashboard/helpers.rs`'s clipboard-fallback test each used to
-/// hold only their own file-local lock, which doesn't actually serialize
-/// against each other since each is a distinct Rust item despite the shared
-/// name -- a real (if narrow) cross-file race window.
+/// above: a per-file lock (as in `commands/run/session.rs`'s `launch_editor`
+/// tests and `commands/dashboard/helpers.rs`'s clipboard-fallback test) does
+/// not serialize against another file's tests, since each is a distinct Rust
+/// item despite the shared name -- a real (if narrow) cross-file race window.
 #[cfg(test)]
 pub(crate) static PATH_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// Serializes any test, anywhere in the crate, that mutates the process's
 /// current working directory (via `std::env::set_current_dir`) or whose
 /// assertions implicitly depend on it. Declared here for the same reason as
-/// `CONFIG_PATH_ENV_LOCK`/`PATH_ENV_LOCK` above: `commands/run/manifest.rs`'s
-/// CWD-dependent `find_manifest` tests previously held only their own
-/// file-local lock, which wouldn't actually serialize against a CWD-mutating
-/// test added to a different file later.
+/// `CONFIG_PATH_ENV_LOCK`/`PATH_ENV_LOCK` above: a per-file lock (as in
+/// `commands/run/manifest.rs`'s CWD-dependent `find_manifest` tests) would not
+/// serialize against a CWD-mutating test in a different file.
 #[cfg(test)]
 pub(crate) static CWD_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 

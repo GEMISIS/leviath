@@ -797,8 +797,8 @@ mod tests {
 
     #[test]
     fn cfg_not_test_in_leviath_sys_is_also_a_violation() {
-        // leviath-sys used to be the one allowlisted crate; the ban is now flat,
-        // so a gate there (even marker+twin) is flagged like anywhere else.
+        // The cfg(not(test)) ban is flat (no allowlisted crate), so a gate in
+        // leviath-sys (even marker+twin) is flagged like anywhere else.
         let dir = TempDir::new().unwrap();
         let sys = dir.path().join("crates").join("leviath-sys").join("src");
         std::fs::create_dir_all(&sys).unwrap();

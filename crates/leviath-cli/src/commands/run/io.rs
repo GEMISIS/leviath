@@ -257,7 +257,7 @@ mod console_io_tests {
     #[test]
     fn get_user_input_from_reader_eof_returns_empty_string() {
         // EOF is `Ok(0)`, not an error, so this yields `Some("")` rather
-        // than `None` -- matches the pre-existing inline behavior.
+        // than `None`.
         let mut reader = Cursor::new(Vec::<u8>::new());
         assert_eq!(get_user_input_from_reader(&mut reader), Some(String::new()));
     }

@@ -308,7 +308,7 @@ mod tests {
         // frame to use the 8-byte extended-length encoding (0x7f) instead of
         // the 2-byte one (0x7e) that every other event in this file's tests
         // is small enough to use -- exercising `recv_frame`'s `len == 127`
-        // branch, previously never triggered.
+        // branch.
         let state = test_state();
         let tx = state.event_tx.clone();
         let addr = spawn_test_server(state).await;

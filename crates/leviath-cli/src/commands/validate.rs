@@ -856,8 +856,7 @@ max_iterations = 5
     fn check_manifest_unreadable_file_is_io_error() {
         // `agent.leviath` exists but is a *directory*, so it's found via
         // `.exists()` yet `read_to_string` fails on every platform, exercising
-        // the read_to_string map_err arm. The prior version used `chmod 0o000`,
-        // which only fails on Unix.
+        // the read_to_string map_err arm.
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(dir.path().join("agent.leviath")).unwrap();
 

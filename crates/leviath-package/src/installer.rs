@@ -532,9 +532,7 @@ description = "{}"
         // The installed "agent" entry is a regular file rather than a
         // directory: `exists()` passes the guard, but `remove_dir_all`
         // requires a directory and fails on every platform (NotADirectory),
-        // exercising the "Failed to remove agent" error arm. The prior version
-        // removed write permission from the parent directory, which only fails
-        // on Unix (and not when running as root).
+        // exercising the "Failed to remove agent" error arm.
         let dir = tempfile::tempdir().unwrap();
         let installer = AgentInstaller::with_install_dir(dir.path().to_path_buf());
         let agent_path = dir.path().join("not-a-dir");

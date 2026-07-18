@@ -1678,8 +1678,8 @@ mod tests {
 
     #[test]
     fn detail_view_m_key_no_longer_bound() {
-        // 'm' used to be a separate "send message" keybinding; it has been
-        // unified into 'i'. Pressing 'm' must no longer enter input mode.
+        // The message keybinding is 'i', not 'm'. Pressing 'm' must not enter
+        // input mode.
         let mut dash = make_test_dashboard();
         let mut agent = make_test_agent("run-1", AgentDisplayStatus::Active);
         agent.accepts_messages = true;

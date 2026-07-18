@@ -2,18 +2,12 @@
 //!
 //! There is exactly ONE copy of this in the crate on purpose:
 //! `tracing::subscriber::set_global_default` only succeeds once per test
-//! binary, so before this module existed, every file in this crate that had
-//! its own private copy of `AlwaysOnSubscriber` left every *other* file's
-//! copy permanently dead code -- whichever file's test happened to run
-//! first "won" `set_global_default`, and the losing files' `Subscriber`
-//! trait-method impls (`enabled`, `new_span`, `record`,
-//! `record_follows_from`, `enter`, `exit`, ...) could never actually be
-//! invoked as an active subscriber, inflating `cargo llvm-cov` missed
-//! regions across most of those files. `rebuild_interest_cache()` still
-//! made tracing-macro coverage globally correct regardless of which
-//! instance won (that's the original bug this pattern fixes), but the
-//! losing copies' own methods stayed dead. Consolidating to one shared
-//! instance fixes that structurally.
+//! binary, so a single shared `AlwaysOnSubscriber` is the only instance that
+//! can win `set_global_default` and be invoked as the active subscriber. Any
+//! additional private copies would leave the losing copies' `Subscriber`
+//! trait-method impls (`enabled`, `new_span`, `record`, `record_follows_from`,
+//! `enter`, `exit`, ...) as dead code, inflating `cargo llvm-cov` missed
+//! regions.
 
 /// Minimal no-op `Subscriber` that reports every callsite as enabled.
 ///

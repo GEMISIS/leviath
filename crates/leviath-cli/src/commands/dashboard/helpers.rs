@@ -128,8 +128,8 @@ pub fn yank_to_clipboard_via(text: &str, osc52_fallback: fn(&str) -> bool) -> bo
 /// [`yank_to_clipboard_via`] with the native-tool command list injected, so a
 /// test can drive the spawn-success and non-zero-exit branches with a program
 /// guaranteed present on the host (the real `pbcopy`/`xclip`/`wl-copy` names
-/// don't exist on Windows, so a fake `#!/bin/sh` script on `PATH` -- the prior
-/// approach -- couldn't exercise these branches there).
+/// don't exist on Windows, so a fake `#!/bin/sh` script on `PATH` couldn't
+/// exercise these branches there).
 fn yank_to_clipboard_with(
     text: &str,
     clipboard_cmds: &[(&str, &[&str])],
@@ -484,29 +484,22 @@ mod tests {
 
     // ── yank_to_clipboard: at least exercises the code path ──────────────────
     //
-    // A previous version of this test ("test_yank_to_clipboard_small_text")
-    // called `yank_to_clipboard_via` with the ambient, untouched `PATH` and
-    // relied on whichever native tool happened to be installed -- which made
-    // whether its nested fallback closure ever actually ran (and thus
-    // whether it was ever covered) depend on the machine `cargo test`
-    // happened to run on. Both the "native tool succeeds" and "falls back to
-    // OSC52" branches of `yank_to_clipboard_via` are already covered
-    // deterministically below (`..._native_tool_success_returns_true_...`,
+    // Ambient-`PATH` smoke tests are avoided here. Both the "native tool
+    // succeeds" and "falls back to OSC52" branches of `yank_to_clipboard_via`
+    // are covered deterministically below (`..._native_tool_success_returns_true_...`,
     // `..._nonzero_exit_falls_through_to_fallback`,
-    // `..._falls_back_to_osc52_when_no_native_tool_on_path`), so that smoke
-    // test added no unique coverage -- it's removed rather than made
-    // deterministic by also starving `PATH`, to avoid growing the number of
-    // `PATH`-mutation windows tests not holding `PATH_ENV_LOCK` (e.g. the
-    // dashboard's real `key('y')` handlers in `input.rs`) could race with.
+    // `..._falls_back_to_osc52_when_no_native_tool_on_path`) by starving
+    // `PATH`, so an ambient-`PATH` test adds no unique coverage while growing
+    // the number of `PATH`-mutation windows that tests not holding
+    // `PATH_ENV_LOCK` (e.g. the dashboard's real `key('y')` handlers in
+    // `input.rs`) could race with.
 
     #[test]
     fn test_yank_to_clipboard_empty() {
         // Starves `PATH` so the injected fallback is reached deterministically
         // regardless of which native clipboard tools happen to be installed
-        // on the machine `cargo test` runs on (see the removed
-        // `test_yank_to_clipboard_small_text`/`..._returns_true` tests'
-        // replacement comments above for why ambient-`PATH` smoke tests are
-        // avoided here).
+        // on the machine `cargo test` runs on (see the ambient-`PATH`
+        // rationale above for why ambient-`PATH` smoke tests are avoided here).
         let _lock = crate::config::PATH_ENV_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -543,8 +536,7 @@ mod tests {
     /// host, injected in place of `pbcopy`/`xclip`/`wl-copy` so the spawn-loop
     /// branches are exercised cross-platform. `true`/`false` exist on
     /// macOS/Linux; `cmd /C exit N` is the Windows equivalent (both drain/ignore
-    /// stdin and exit deterministically), replacing the prior Unix-only
-    /// `#!/bin/sh` fake scripts.
+    /// stdin and exit deterministically).
     #[cfg(not(windows))]
     fn exit_cmd(success: bool) -> (&'static str, &'static [&'static str]) {
         if success {
@@ -634,26 +626,22 @@ mod tests {
 
     // ─── yank_to_clipboard ──────────────────────────────────────────────────
     //
-    // A previous version of this test ("test_yank_to_clipboard_returns_true")
-    // called `yank_to_clipboard_via` with the ambient, untouched `PATH`,
-    // relying on the real `pbcopy` this dev machine happens to have
-    // installed. Its nested fallback closure only got covered on runs where
-    // a concurrently-running `PATH`-mutating test happened to race with it --
-    // nondeterministic, and the exact kind of flakiness this file's
-    // `PATH_ENV_LOCK`-guarded tests exist to avoid. `yank_to_clipboard`
-    // itself (the public, un-suffixed wrapper this test also indirectly
-    // covered) is still exercised for real by the dashboard's `key('y')`
-    // handler tests in `input.rs`; the native-success and OSC52-fallback
-    // branches of `yank_to_clipboard_via` it delegates to are covered
-    // deterministically by the tests immediately below.
+    // Ambient-`PATH` smoke tests are avoided here: their nested fallback
+    // closure only gets covered when a concurrently-running `PATH`-mutating
+    // test races with them -- nondeterministic, the exact kind of flakiness
+    // this file's `PATH_ENV_LOCK`-guarded tests exist to avoid.
+    // `yank_to_clipboard` itself (the public, un-suffixed wrapper) is
+    // exercised for real by the dashboard's `key('y')` handler tests in
+    // `input.rs`; the native-success and OSC52-fallback branches of
+    // `yank_to_clipboard_via` it delegates to are covered deterministically by
+    // the tests immediately below.
 
     #[test]
     fn test_yank_to_clipboard_falls_back_to_osc52_when_no_native_tool_on_path() {
         // `PATH` is process-global; `crate::config::PATH_ENV_LOCK` serializes
         // against `commands/run/session.rs`'s PATH-mutating `launch_editor`
-        // tests too (previously each side only held its own file-local lock,
-        // which doesn't actually serialize across files despite the shared
-        // name).
+        // tests too (a per-file lock would not serialize across files despite
+        // the shared name).
         let _lock = crate::config::PATH_ENV_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);

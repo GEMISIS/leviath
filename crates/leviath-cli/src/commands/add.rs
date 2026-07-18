@@ -332,9 +332,7 @@ description = "test"
     fn copy_dir_recursive_file_over_existing_dir_errors() {
         // Copying a file onto a destination path that already exists as a
         // directory fails on every platform (EISDIR / ERROR_ACCESS_DENIED),
-        // exercising the `std::fs::copy(...)?` error arm. The prior version
-        // made the source file unreadable via `chmod 0o000`, which only fails
-        // on Unix.
+        // exercising the `std::fs::copy(...)?` error arm.
         let src_dir = tempfile::tempdir().unwrap();
         std::fs::write(src_dir.path().join("clash"), "top secret").unwrap();
 
@@ -353,8 +351,7 @@ description = "test"
         // the destination already has a *file* where the recursion needs to
         // create a subdirectory, so the nested `create_dir_all` fails on every
         // platform and that `Err` bubbles up through the parent's
-        // `copy_dir_recursive(...)?`. The prior version made the source
-        // subdirectory unreadable via `chmod 0o000`, which only fails on Unix.
+        // `copy_dir_recursive(...)?`.
         let src_dir = tempfile::tempdir().unwrap();
         let sub = src_dir.path().join("sub");
         std::fs::create_dir_all(&sub).unwrap();
@@ -477,8 +474,7 @@ description = "test"
     fn install_from_dir_remove_dir_all_failure_errors() {
         // The existing install target is a *file*, so `exists()` passes the
         // reinstall guard but `remove_dir_all` (which requires a directory)
-        // fails on every platform, exercising that `?` arm. The prior version
-        // dropped write permission on the parent dir, which only fails on Unix.
+        // fails on every platform, exercising that `?` arm.
         let src = tempfile::tempdir().unwrap();
         std::fs::write(
             src.path().join("agent.leviath"),
@@ -498,8 +494,7 @@ description = "test"
         // `agents_dir` is itself a *file*, so `copy_dir_recursive`'s
         // `create_dir_all` for the install target (a child path of a file)
         // fails on every platform, and that `Err` propagates through
-        // `install_from_dir`'s `copy_dir_recursive(...)?`. The prior version
-        // made a source file unreadable via `chmod 0o000` (Unix-only).
+        // `install_from_dir`'s `copy_dir_recursive(...)?`.
         let src = tempfile::tempdir().unwrap();
         std::fs::write(
             src.path().join("agent.leviath"),

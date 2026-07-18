@@ -20,13 +20,13 @@ pub async fn execute(args: CreateArgs) -> anyhow::Result<()> {
 }
 
 /// Core of `execute()`, parameterized over the file-write primitive so tests
-/// can force any individual write's error arm deterministically -- without
-/// the process-global umask mutation this file used to need (and reject, for
-/// good reason: `cargo test`'s default thread-based parallelism means a
-/// restrictive umask can't be scoped to one test the way an env var or CWD
-/// lock can, so ANY other test creating a file/directory on another thread
-/// during that window would silently get the same zero-permission
-/// treatment). Each real call site still goes through the exact same
+/// can force any individual write's error arm deterministically -- without a
+/// process-global umask mutation (which is rejected here, for good reason:
+/// `cargo test`'s default thread-based parallelism means a restrictive umask
+/// can't be scoped to one test the way an env var or CWD lock can, so ANY
+/// other test creating a file/directory on another thread during that window
+/// would silently get the same zero-permission treatment). Each real call site
+/// still goes through the exact same
 /// `std::fs::write` in production (`execute` above passes it directly, with
 /// zero indirection cost); only tests substitute a fake.
 fn execute_with(

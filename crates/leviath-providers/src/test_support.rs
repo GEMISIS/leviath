@@ -10,9 +10,7 @@
 //! this as the default subscriber for a test's duration makes those field
 //! expressions actually evaluate.
 //!
-//! This was previously duplicated verbatim in `anthropic.rs`, `ollama.rs`,
-//! `gemini.rs`, `openai.rs`, `openrouter.rs`, and `rate_limit.rs`; it now
-//! lives here once and is shared via `crate::test_support::always_on_tracing_guard`.
+//! Shared via `crate::test_support::always_on_tracing_guard`.
 //!
 //! `tracing::subscriber::set_default` installs a thread-local, scope-guarded
 //! default (returned as a `DefaultGuard`) rather than a process-global one,

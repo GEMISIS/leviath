@@ -200,17 +200,6 @@ mod tests {
     // once as a bare statement (rather than wrapping the whole test body) to
     // install the shared `AlwaysOnSubscriber` (see `crate::test_support`) as
     // the process-wide default before the rest of the test runs.
-    //
-    // (A `diagnose_tracing_setup` test used to live here, whose only
-    // purpose was printing dispatcher/level-filter diagnostics and firing
-    // one ad hoc `tracing::info!("test event")` with no assertions. Its
-    // `tracing::info!` message-literal region is the confirmed,
-    // permanently-uncovered llvm-cov macro-codegen artifact documented on
-    // `config.rs`'s `log_permissive_perms_warning` -- and since it asserted
-    // nothing, and the underlying "tracing works once `with_tracing` has
-    // installed the subscriber" behavior is already exercised by every
-    // other test below, removing it drops the artifact from what's
-    // measured without losing any real coverage.)
 
     // ─── format_size ───────────────────────────────────────────────────────
 
@@ -271,8 +260,7 @@ mod tests {
     fn count_files_read_dir_error_returns_zero() {
         // An injected `read_dir` that fails on an existing directory exercises
         // the "read_dir errored -> keep the count so far" arm deterministically
-        // on every platform. The prior version made the directory unreadable
-        // via `chmod 0o000`, which only fails on Unix.
+        // on every platform.
         let dir = tempfile::tempdir().unwrap();
         let result = count_files_with(dir.path(), &|_| {
             Err(std::io::Error::other("simulated read_dir failure"))
@@ -283,8 +271,7 @@ mod tests {
     #[test]
     fn count_path_neither_file_nor_dir_counts_zero() {
         // A nonexistent path is neither a file nor a directory, so `count_path`
-        // contributes 0 -- covering the `else` arm on every platform. The prior
-        // version used a Unix-only dangling symlink.
+        // contributes 0 -- covering the `else` arm on every platform.
         let dir = tempfile::tempdir().unwrap();
         let missing = dir.path().join("does-not-exist");
         assert_eq!(count_path(&missing, &real_read_dir), 0);
@@ -538,8 +525,7 @@ mod tests {
     async fn execute_unreadable_manifest_errors() {
         // `agent.leviath` exists but is a *directory*: `find_manifest` returns
         // it (exists() passes), then `read_to_string` fails on every platform,
-        // covering the "Failed to read manifest" map_err arm. The prior version
-        // used `chmod 0o000`, which only fails on Unix.
+        // covering the "Failed to read manifest" map_err arm.
         with_tracing(|| {});
         let project = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(project.path().join("agent.leviath")).unwrap();
@@ -556,9 +542,7 @@ mod tests {
     #[tokio::test]
     async fn execute_bundle_error_propagated() {
         // Inject a bundling op that fails, covering the `bundle(project_dir)?`
-        // error arm on every platform. The prior version relied on an
-        // unreadable (chmod 0o000) file making the real bundler fail, which
-        // only fails on Unix.
+        // error arm on every platform.
         with_tracing(|| {});
         let project = make_project_dir(false, false);
         let output_dir = tempfile::tempdir().unwrap();
