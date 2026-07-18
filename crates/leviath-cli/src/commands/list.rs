@@ -194,50 +194,33 @@ fn get_agents_dir_from_home(home: Option<PathBuf>) -> anyhow::Result<PathBuf> {
     Ok(home.join(".leviath").join("agents"))
 }
 
-/// COVERAGE-EXCLUDED: `get_agents_dir_from_home`'s `None` arm is fully
-/// covered directly by `get_agents_dir_from_home_none_returns_error`, but
-/// this real wrapper's own call to `leviath_home_dir()` can't be forced to
-/// return `None` in a test: on macOS, `dirs::home_dir()` falls back to a
-/// passwd-database lookup independent of `$HOME`, so there is no
-/// environment manipulation short of running as a UID with no passwd entry
-/// (not something any test in this suite may safely attempt) that makes it
-/// fail. Isolating this real-environment query behind a twin removes the
-/// unforceable branch from what's measured; the twin below adds a
-/// test-only failure-injection toggle so `execute()`'s own
-/// error-propagation branch for this call (the `?` right after) can still
-/// be driven for real, instead of just relocating the same permanently-Ok
-/// gap one level up.
-#[cfg(not(test))]
+/// Resolve `~/.leviath/agents`, the directory `lev list` scans for installed
+/// agents.
+///
+/// A thin wrapper over [`get_agents_dir_from_home`] supplying the real home
+/// directory. The `#[cfg(test)]` guard below only lets tests force the
+/// "no home directory" error arm of `execute()` deterministically — the real
+/// `leviath_home_dir()` can't be made to return `None` in any environment a
+/// test may safely create (on macOS `dirs::home_dir()` falls back to a
+/// passwd-database lookup independent of `$HOME`). It does NOT hide the real
+/// body from coverage: with the toggle off, `get_agents_dir_from_home(
+/// leviath_home_dir())` runs (and is measured) in every ordinary test, and
+/// only computes a `PathBuf` (no filesystem writes). The `None` arm of
+/// `get_agents_dir_from_home` is covered directly by
+/// `get_agents_dir_from_home_none_returns_error`.
 fn get_agents_dir() -> anyhow::Result<PathBuf> {
+    #[cfg(test)]
+    if FORCE_AGENTS_DIR_ERROR.with(|f| f.get()) {
+        anyhow::bail!("Could not determine home directory");
+    }
     get_agents_dir_from_home(crate::config::leviath_home_dir())
 }
 
 #[cfg(test)]
 thread_local! {
-    /// Test-only toggle for [`get_agents_dir`]'s twin below, letting
-    /// `execute_returns_err_when_agents_dir_unresolvable` force the `Err`
-    /// arm deterministically.
+    /// Test-only toggle letting `execute_returns_err_when_agents_dir_unresolvable`
+    /// force `get_agents_dir`'s `Err` arm deterministically.
     static FORCE_AGENTS_DIR_ERROR: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-}
-
-/// Under test, real home-dir resolution always succeeds in every real
-/// dev/CI environment (see the doc comment above for why the failure
-/// branch can't be forced for real), so this twin normally returns a
-/// placeholder path shaped like the real one (`.../.leviath/agents`) --
-/// keeping existing shape assertions (see
-/// `get_agents_dir_returns_path_with_agents`) meaningful, just rooted
-/// under a temp dir instead of the real home directory -- unless
-/// [`FORCE_AGENTS_DIR_ERROR`] has been set, in which case it fails the
-/// same way the real implementation would with no home directory.
-#[cfg(test)]
-fn get_agents_dir() -> anyhow::Result<PathBuf> {
-    if FORCE_AGENTS_DIR_ERROR.with(|f| f.get()) {
-        anyhow::bail!("Could not determine home directory");
-    }
-    Ok(std::env::temp_dir()
-        .join(".leviath-test-placeholder")
-        .join(".leviath")
-        .join("agents"))
 }
 
 #[cfg(test)]

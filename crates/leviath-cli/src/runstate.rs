@@ -11,7 +11,7 @@
 //! The dashboard's activity log is persisted separately at:
 //! - `~/.leviath/dashboard.log` — never cleared, appended across sessions
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 // The plain run-state data types (RunMeta, RunStatus, the snapshot structs, and
@@ -102,42 +102,36 @@ fn dashboard_log_path_from(env_override: Option<&str>) -> PathBuf {
 
 /// Path to the persistent dashboard activity log (~/.leviath/dashboard.log).
 ///
-/// Under `#[cfg(test)]`, when `LEVIATH_DASHBOARD_LOG_PATH` isn't explicitly
-/// set, this falls back to a fixed, shared *test* location instead of the
-/// real home directory. Unlike `runs_dir()` (fully covered by per-test
-/// `isolate_runs_dir_for_test` guards), dashboard activity logging is called
-/// pervasively from production code deep inside ordinary dashboard input
-/// handling (`Dashboard::add_log`, hit by nearly every key-handler test in
-/// `dashboard/input.rs`) -- retrofitting every transitive caller with its
-/// own guard isn't practical, and this is inherently a shared, append-only,
-/// best-effort log where per-test isolation doesn't matter the way it does
-/// for `runs_dir` (no test needs a *clean* view of it). This is the one
-/// place in the crate where the test-vs-prod fallback intentionally
-/// diverges, specifically to guarantee zero test writes reach the user's
-/// real `~/.leviath/dashboard.log` even from tests nobody remembered to
-/// isolate.
+/// Honours the `LEVIATH_DASHBOARD_LOG_PATH` override when set (tests use it via
+/// [`isolate_runs_dir_for_test`]); otherwise resolves the real home-relative
+/// path. This function only *computes* a `PathBuf` — it never writes — so both
+/// arms are safe to exercise directly in tests. The write side
+/// ([`append_dashboard_log`] and `Dashboard::add_log`) is what must stay off
+/// the user's real log in tests: `append_dashboard_log`'s own tests set the
+/// override, and `Dashboard` carries an injected log path (a temp dir under
+/// `make_test_dashboard`) so no dashboard-input test ever appends to the real
+/// `~/.leviath/dashboard.log`.
 pub fn dashboard_log_path() -> PathBuf {
-    if let Ok(path) = std::env::var("LEVIATH_DASHBOARD_LOG_PATH") {
-        return dashboard_log_path_from(Some(&path));
-    }
-    #[cfg(test)]
-    {
-        dirs::home_dir()
-            .unwrap_or_default()
-            .join(".leviath-test")
-            .join("shared-dashboard.log")
-    }
-    #[cfg(not(test))]
-    {
-        dashboard_log_path_from(None)
+    match std::env::var("LEVIATH_DASHBOARD_LOG_PATH") {
+        Ok(path) => dashboard_log_path_from(Some(&path)),
+        Err(_) => dashboard_log_path_from(None),
     }
 }
 
-/// Append a timestamped line to the persistent dashboard activity log.
-/// Silently ignores I/O errors — the dashboard log is best-effort.
+/// Append a timestamped line to the persistent dashboard activity log at the
+/// default [`dashboard_log_path`]. Silently ignores I/O errors — best-effort.
 pub fn append_dashboard_log(msg: &str) {
+    append_dashboard_log_to(&dashboard_log_path(), msg);
+}
+
+/// Append a timestamped line to the dashboard activity log at an explicit
+/// `path`. Silently ignores I/O errors — the dashboard log is best-effort.
+///
+/// The path is a parameter so `Dashboard` can inject a test-isolated log
+/// location, guaranteeing no dashboard-input test appends to the user's real
+/// `~/.leviath/dashboard.log` (see [`dashboard_log_path`]).
+pub fn append_dashboard_log_to(path: &Path, msg: &str) {
     use std::io::Write;
-    let path = dashboard_log_path();
     // Ensure the parent directory exists (first-run case).
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
@@ -145,7 +139,7 @@ pub fn append_dashboard_log(msg: &str) {
     if let Ok(mut file) = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
-        .open(&path)
+        .open(path)
     {
         let timestamp = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
         let _ = writeln!(file, "{} {}", timestamp, msg);
