@@ -1,24 +1,14 @@
-//! Shared test-only tracing-coverage helper.
+//! Shared test-only helpers for this crate's `#[cfg(test)]` code.
 //!
-//! There is exactly ONE copy of this in the crate on purpose:
-//! `tracing::subscriber::set_global_default` only succeeds once per test
-//! binary, so a single shared `AlwaysOnSubscriber` is the only instance that
-//! can win `set_global_default` and be invoked as the active subscriber. Any
-//! additional private copies would leave the losing copies' `Subscriber`
-//! trait-method impls (`enabled`, `new_span`, `record`, `record_follows_from`,
-//! `enter`, `exit`, ...) as dead code, inflating `cargo llvm-cov` missed
-//! regions.
+//! Keep this as the single crate-wide copy: `set_global_default` succeeds only
+//! once per test binary, so only one `AlwaysOnSubscriber` can become the active
+//! subscriber. Duplicate copies would leave the losing ones' trait methods as
+//! uncovered dead code.
 
-/// Minimal no-op `Subscriber` that reports every callsite as enabled.
-///
-/// Without an active subscriber, `tracing::warn!`/`info!`/`debug!` calls
-/// short-circuit their field-argument evaluation before ever reaching it
-/// (no subscriber means the "is this level enabled" check fails first) --
-/// so a multi-line `tracing::warn!(...)` call's field-list lines show as
-/// uncovered by `cargo llvm-cov` even when the surrounding branch
-/// genuinely executes and is asserted on. This bare `Subscriber` impl is
-/// the proven-working pattern used across this workspace (see
-/// `leviath-core/src/layout.rs`).
+/// No-op `Subscriber` that reports every callsite as enabled. A `tracing::`
+/// macro skips evaluating its fields when no subscriber is interested, so
+/// running code under [`with_tracing`] (which installs this) is what makes
+/// those macro-argument lines execute — and count as covered.
 pub(crate) struct AlwaysOnSubscriber;
 
 impl tracing::Subscriber for AlwaysOnSubscriber {
@@ -37,12 +27,8 @@ impl tracing::Subscriber for AlwaysOnSubscriber {
     fn record(&self, _span: &tracing::span::Id, _values: &tracing::span::Record<'_>) {}
     fn record_follows_from(&self, _span: &tracing::span::Id, _follows: &tracing::span::Id) {}
     fn event(&self, event: &tracing::Event<'_>) {
-        // `register_callsite` always returns `Interest::always()`, so
-        // tracing's dispatch macros cache every callsite as
-        // "always enabled" and never call `enabled` again afterward.
-        // Call it directly here (with real metadata from a live event)
-        // so this trait-impl boilerplate method isn't itself left
-        // uncovered.
+        // Callsites are cached as always-enabled, so `enabled` is never called
+        // via the macros; call it here so it's exercised.
         assert!(self.enabled(event.metadata()));
     }
     fn enter(&self, _span: &tracing::span::Id) {}
@@ -57,29 +43,18 @@ impl tracing::Subscriber for AlwaysOnSubscriber {
 pub(crate) fn with_tracing<T>(f: impl FnOnce() -> T) -> T {
     static INSTALLED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
     INSTALLED.get_or_init(|| {
-        // set_global_default registers AlwaysOnSubscriber in LOCKED_DISPATCHERS
-        // (the global dispatcher registry). rebuild_interest_cache then re-evaluates
-        // every callsite against the global subscriber, setting interest to "always".
-        // Without this, tracing macro inner blocks are unreachable in tests because
-        // with_default (thread-local) is NOT consulted during callsite registration,
-        // leaving every callsite cached as interest=never (no global dispatcher).
+        // `rebuild_interest_cache` is required: callsites registered before the
+        // global default is set are cached as interest=never, so without it the
+        // macro bodies stay unreachable (and uncovered) in tests.
         let _ = tracing::subscriber::set_global_default(AlwaysOnSubscriber);
         tracing::callsite::rebuild_interest_cache();
     });
     f()
 }
 
-/// A value that always fails to serialize, for forcing `?`-propagated
-/// `serde_json::to_string`/`to_string_pretty` error arms in tests.
-///
-/// Every "write JSON to disk" helper across this crate serializes a
-/// trivially-serializable struct (`String`/`usize`/enums/`HashMap`s), so
-/// `serde_json::to_string_pretty(...)?` can never actually fail in
-/// practice -- there is no real input that trips it. Rather than leave
-/// those `?` error arms permanently uncovered (or fake up something more
-/// exotic), this wraps an arbitrary payload behind a `Serialize` impl that
-/// deterministically returns `Err`, so tests can drive the real error path
-/// through the real (non-generic-only-for-tests) code, honestly.
+/// A value whose `Serialize` impl always returns `Err`, so tests can drive the
+/// `?` error arm of the crate's `serde_json::to_string_pretty(...)?` helpers
+/// (which serialize trivially-serializable structs that never fail on real input).
 pub(crate) struct PoisonSerialize;
 
 impl serde::Serialize for PoisonSerialize {
@@ -127,20 +102,9 @@ mod tests {
         assert!(err.to_string().contains("PoisonSerialize always fails"));
     }
 
-    /// Exercises the no-op span-related trait methods (`new_span`, `record`,
-    /// `record_follows_from`, `enter`, `exit`) that aren't reachable via
-    /// plain `tracing::info!`/`warn!` event macros used elsewhere in this
-    /// crate.
-    ///
-    /// COVERAGE-CONFIRMED-ARTIFACT: the `tracing::info!(parent: &span, "inside
-    /// span")` call below genuinely executes (confirmed via HTML: the line
-    /// shows a nonzero hit count) and is what exercises `AlwaysOnSubscriber::event`
-    /// with a real, live event -- but llvm-cov's tracing-macro message-literal
-    /// region-counting quirk (the same one documented on `config.rs`'s
-    /// `log_permissive_perms_warning`) still reports that literal's region as
-    /// a miss. Since this is already test code, no `#[cfg(not(test))]` twin
-    /// applies here (there's nothing to isolate it from -- the whole point of
-    /// this test is exercising the macro under a real subscriber).
+    /// Exercises the span-related trait methods (`new_span`, `record`,
+    /// `record_follows_from`, `enter`, `exit`, `event`) that plain
+    /// `tracing::info!`/`warn!` event macros elsewhere don't reach.
     #[test]
     fn always_on_subscriber_span_methods_are_all_no_ops() {
         with_tracing(|| {
