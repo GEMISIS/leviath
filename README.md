@@ -371,7 +371,7 @@ cargo clean -p cargo-husky && cargo test -p xtask
 
 ### Running coverage locally
 
-`cargo xtask coverage` runs `cargo-llvm-cov` across the workspace and reports region/line/function percentages, written to the gitignored `coverage/` folder. CI enforces a hard **100%** on all three metrics — any file below 100% fails the build. Region coverage is measured *merged-by-source-position* (each source span counted once, covered if any monomorphization executes it), so per-monomorphization measurement jitter can't produce spurious gaps and the 100% gate is stable across OSes.
+`cargo xtask coverage` runs `cargo-llvm-cov` per package across the workspace and reports region/line/function percentages, written to the gitignored `coverage/` folder. CI enforces a hard **100%** on all three metrics on Linux, macOS, and Windows — any file below 100% fails the build. The gate reads llvm-cov's own per-file summary directly; llvm-cov groups a generic's monomorphizations, so a source span covered by any instantiation counts as covered. A region reported missed on only one OS means a genuinely untested instantiation on that target — close it with a test on that OS.
 
 ```bash
 cargo xtask coverage                                   # full workspace
