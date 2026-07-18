@@ -53,9 +53,18 @@ pub fn report_violations(violations: Vec<Violation>) -> Result<()> {
 
 // ── Banned patterns ──────────────────────────────────────────────────────────
 
+/// How a [`BannedPattern`] is matched against a single source line.
+pub enum LineMatch {
+    /// Fire if the line contains `pattern` anywhere (case-sensitive substring).
+    Contains,
+    /// Fire only if the whole *trimmed* line equals `pattern`. Used for
+    /// attributes, so a backtick mention inside a doc comment isn't flagged.
+    WholeLine,
+}
+
 /// A string pattern that must not appear in the codebase.
 pub struct BannedPattern {
-    /// Exact substring to search for (case-sensitive).
+    /// The pattern to look for (case-sensitive).
     pub pattern: &'static str,
     /// Human-readable explanation for the error message.
     pub reason: &'static str,
@@ -63,15 +72,36 @@ pub struct BannedPattern {
     pub check_rs: bool,
     /// Apply this check to CI / config / hook files.
     pub check_config: bool,
+    /// How `pattern` is matched against each line.
+    pub match_mode: LineMatch,
 }
 
+/// Every forbidden marker as one declarative table. Adding a rule is a single
+/// entry here; this is the only place a suppression pattern is checked.
 pub const BANNED: &[BannedPattern] = &[
+    // ── `#[cfg(not(test))]` — the one attribute that hides real code FROM
+    //    coverage, so it's the only way to dodge the 100% gate. Banned in every
+    //    crate, no exceptions: un-unit-testable real-I/O lives in the
+    //    coverage-excluded `lev` binary (main.rs) or behind an injected seam
+    //    (RiskyExecutors / execute_with / ForegroundIo /
+    //    leviath_sys::osc52_write_via), never behind this attribute. Whole-line
+    //    match so a backtick mention in a doc comment isn't a false positive.
+    BannedPattern {
+        pattern: "#[cfg(not(test))]",
+        reason: "#[cfg(not(test))] hides real code from coverage and is banned in every \
+                 crate — put un-unit-testable real-I/O in the coverage-excluded `lev` binary \
+                 (main.rs) or behind an injected seam, not behind this attribute",
+        check_rs: true,
+        check_config: false,
+        match_mode: LineMatch::WholeLine,
+    },
     // ── Coverage-attribute suppression (nightly feature) ────────────────────
     BannedPattern {
         pattern: "coverage(off)",
         reason: "coverage(off) suppression is forbidden — refactor the code to be testable instead",
         check_rs: true,
         check_config: false,
+        match_mode: LineMatch::Contains,
     },
     // ── Tarpaulin markers ────────────────────────────────────────────────────
     BannedPattern {
@@ -79,18 +109,21 @@ pub const BANNED: &[BannedPattern] = &[
         reason: "tarpaulin coverage annotation is forbidden",
         check_rs: true,
         check_config: true,
+        match_mode: LineMatch::Contains,
     },
     BannedPattern {
         pattern: "cfg(tarpaulin)",
         reason: "tarpaulin cfg gate is forbidden",
         check_rs: true,
         check_config: false,
+        match_mode: LineMatch::Contains,
     },
     BannedPattern {
         pattern: "cfg(not(tarpaulin))",
         reason: "tarpaulin cfg gate is forbidden",
         check_rs: true,
         check_config: false,
+        match_mode: LineMatch::Contains,
     },
     // ── grcov / lcov exclusion comments ─────────────────────────────────────
     BannedPattern {
@@ -98,12 +131,14 @@ pub const BANNED: &[BannedPattern] = &[
         reason: "LCOV exclusion marker is forbidden",
         check_rs: true,
         check_config: true,
+        match_mode: LineMatch::Contains,
     },
     BannedPattern {
         pattern: "GRCOV_EXCL",
         reason: "grcov exclusion marker is forbidden",
         check_rs: true,
         check_config: true,
+        match_mode: LineMatch::Contains,
     },
     // ── Tarpaulin as a CI tool ───────────────────────────────────────────────
     BannedPattern {
@@ -111,12 +146,14 @@ pub const BANNED: &[BannedPattern] = &[
         reason: "tarpaulin is not the designated coverage tool; use `cargo xtask coverage` instead",
         check_rs: false,
         check_config: true,
+        match_mode: LineMatch::Contains,
     },
     BannedPattern {
         pattern: "cargo tarpaulin",
         reason: "tarpaulin is not the designated coverage tool; use `cargo xtask coverage` instead",
         check_rs: false,
         check_config: true,
+        match_mode: LineMatch::Contains,
     },
 ];
 
@@ -131,10 +168,9 @@ pub struct Violation {
     pub line_num: usize,
     /// The raw line content (untrimmed).
     pub line: String,
-    /// The banned pattern that matched (or a short tag identifying which
-    /// structural check fired).
+    /// The banned pattern that matched.
     pub pattern: &'static str,
-    /// Human-readable reason (owned so checks can build a message dynamically).
+    /// Human-readable reason.
     pub reason: String,
 }
 
@@ -205,7 +241,14 @@ pub fn scan_file(path: &Path, is_rs: bool, violations: &mut Vec<Violation>) {
     for (line_idx, line) in content.lines().enumerate() {
         for banned in BANNED {
             let applies = (is_rs && banned.check_rs) || (!is_rs && banned.check_config);
-            if applies && line.contains(banned.pattern) {
+            if !applies {
+                continue;
+            }
+            let hit = match banned.match_mode {
+                LineMatch::Contains => line.contains(banned.pattern),
+                LineMatch::WholeLine => line.trim() == banned.pattern,
+            };
+            if hit {
                 violations.push(Violation {
                     file: path.to_owned(),
                     line_num: line_idx + 1,
@@ -215,48 +258,6 @@ pub fn scan_file(path: &Path, is_rs: bool, violations: &mut Vec<Violation>) {
                 });
             }
         }
-    }
-
-    if is_rs {
-        scan_cfg_not_test_escape_hatches(path, &content, violations);
-    }
-}
-
-// ── `#[cfg(not(test))]` ban ──────────────────────────────────────────────────
-//
-// `#[cfg(not(test))]` hides its real body from coverage measurement, so it is
-// the one attribute that could be used to dodge testing. The policy is a single
-// flat rule: it is **banned in every crate, no exceptions** — no marker, no
-// allowlisted crate, no cap. Every library crate is 100%-covered; the only
-// un-unit-testable real-I/O (real terminal, blocking stdin, port bind,
-// subprocess spawn, opening `/dev/tty`, writing real `stdout()`) lives in the
-// coverage-excluded `lev` binary (`main.rs`) or behind an injected seam (the
-// dispatch `RiskyExecutors` trait, dashboard `execute_with`, the run
-// `ForegroundIo` bundle, `leviath_sys::osc52_write_via`). A new real-I/O leaf
-// goes in the (approval-gated) bin, never behind a `#[cfg(not(test))]`.
-//
-// This is a line-style scan: it flags the exact `#[cfg(not(test))]` attribute
-// on its own line, so doc-comment mentions in backticks are ignored.
-
-/// Scan a single file's already-read `content` for the banned
-/// `#[cfg(not(test))]` attribute.
-fn scan_cfg_not_test_escape_hatches(path: &Path, content: &str, violations: &mut Vec<Violation>) {
-    for (idx, line) in content.lines().enumerate() {
-        if line.trim() != "#[cfg(not(test))]" {
-            continue;
-        }
-        violations.push(Violation {
-            file: path.to_owned(),
-            line_num: idx + 1,
-            line: line.to_owned(),
-            pattern: "cfg(not(test)) is banned",
-            reason:
-                "#[cfg(not(test))] hides real code from coverage and is banned in every crate. \
-                 Un-unit-testable real-I/O belongs in the coverage-excluded `lev` binary \
-                 (main.rs) or behind an injected seam (RiskyExecutors / execute_with / \
-                 ForegroundIo / leviath_sys::osc52_write_via), not behind this attribute."
-                    .to_owned(),
-        });
     }
 }
 
@@ -675,8 +676,7 @@ mod tests {
     fn cfg_not_test_is_a_violation() {
         let v = scan_content("#[cfg(not(test))]\nfn real_thing() {}\n", true);
         assert!(
-            v.iter()
-                .any(|v| v.pattern.contains("cfg(not(test)) is banned")),
+            v.iter().any(|v| v.pattern.contains("cfg(not(test))")),
             "expected a cfg(not(test)) violation: {v:?}"
         );
     }
@@ -698,8 +698,7 @@ mod tests {
         let mut v = Vec::new();
         scan_file(&path, true, &mut v);
         assert!(
-            v.iter()
-                .any(|v| v.pattern.contains("cfg(not(test)) is banned")),
+            v.iter().any(|v| v.pattern.contains("cfg(not(test))")),
             "leviath-sys is no longer exempt: {v:?}"
         );
     }
@@ -710,8 +709,7 @@ mod tests {
         // the attribute line itself.
         let v = scan_content("#[cfg(not(test))]\nuse std::io::Write;\n", true);
         assert!(
-            v.iter()
-                .any(|v| v.pattern.contains("cfg(not(test)) is banned")),
+            v.iter().any(|v| v.pattern.contains("cfg(not(test))")),
             "expected a cfg(not(test)) violation: {v:?}"
         );
     }
@@ -724,8 +722,7 @@ mod tests {
             true,
         );
         assert!(
-            v.iter()
-                .any(|v| v.pattern.contains("cfg(not(test)) is banned")),
+            v.iter().any(|v| v.pattern.contains("cfg(not(test))")),
             "a comment must not whitelist cfg(not(test)): {v:?}"
         );
     }
@@ -745,8 +742,7 @@ mod tests {
             true,
         );
         assert!(
-            !v.iter()
-                .any(|v| v.pattern.contains("cfg(not(test)) is banned")),
+            !v.iter().any(|v| v.pattern.contains("cfg(not(test))")),
             "a doc-comment mention must not be flagged: {v:?}"
         );
     }
