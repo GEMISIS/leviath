@@ -69,19 +69,6 @@ fn resolve_agents_dir() -> anyhow::Result<std::path::PathBuf> {
     Ok(std::env::temp_dir().join(".leviath-test-placeholder-agents-dir"))
 }
 
-/// COVERAGE-EXCLUDED: llvm-cov's tracing-macro message-literal region is
-/// permanently uncovered regardless of restructuring (event!/pre-formatted
-/// let/inline(never)/crate-version were all tried and ruled out this
-/// session) -- isolating the bare macro call behind a twin removes the
-/// unfixable region from what's measured without touching the surrounding,
-/// fully-testable control flow that decides WHETHER to call it.
-#[cfg(not(test))]
-fn log_installing_agent_package() {
-    tracing::info!("Installing agent package");
-}
-
-#[cfg(test)]
-fn log_installing_agent_package() {}
 
 /// Core `lev add` logic, parameterized by installer + agents base directory
 /// so it can be tested against tempdirs instead of the real
@@ -91,7 +78,7 @@ async fn execute_with(
     installer: &leviath_package::AgentInstaller,
     agents_dir: &Path,
 ) -> anyhow::Result<()> {
-    log_installing_agent_package();
+    tracing::info!("Installing agent package");
 
     let package_path = Path::new(&args.package);
 

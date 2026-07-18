@@ -17,20 +17,6 @@ pub struct PackArgs {
     pub output: Option<String>,
 }
 
-/// COVERAGE-EXCLUDED: llvm-cov's tracing-macro message-literal region is
-/// permanently uncovered regardless of restructuring (event!/pre-formatted
-/// let/inline(never)/crate-version were all tried and ruled out this
-/// session) -- isolating the bare macro call behind a twin removes the
-/// unfixable region from what's measured without touching the surrounding,
-/// fully-testable control flow that decides WHETHER to call it.
-#[cfg(not(test))]
-fn log_packing_agent() {
-    tracing::info!("Packing agent");
-}
-
-#[cfg(test)]
-fn log_packing_agent() {}
-
 pub async fn execute(args: PackArgs) -> anyhow::Result<()> {
     execute_with_bundle(args, &|dir| AgentBundler::new().bundle(dir)).await
 }
@@ -50,7 +36,7 @@ async fn execute_with_bundle(
     let path = args.path.unwrap_or_else(|| ".".to_string());
     let project_path = Path::new(&path);
 
-    log_packing_agent();
+    tracing::info!("Packing agent");
 
     // Find and parse agent.leviath to get name + version
     let manifest_path = find_manifest(project_path)?;

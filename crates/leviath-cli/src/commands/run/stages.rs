@@ -82,19 +82,6 @@ pub enum PointsOutcome {
     Aborted,
 }
 
-/// COVERAGE-EXCLUDED: llvm-cov's tracing-macro message-literal region is
-/// permanently uncovered regardless of restructuring (event!/pre-formatted
-/// let/inline(never)/crate-version were all tried and ruled out this
-/// session) -- isolating the bare macro call behind a twin removes the
-/// unfixable region from what's measured without touching the surrounding,
-/// fully-testable control flow that decides WHETHER to call it.
-#[cfg(not(test))]
-fn log_streaming_unavailable<E: std::fmt::Display>(e: &E) {
-    tracing::debug!("Streaming unavailable, falling back: {}", e);
-}
-
-#[cfg(test)]
-fn log_streaming_unavailable<E: std::fmt::Display>(_e: &E) {}
 
 /// Run an interactive stage.
 ///
@@ -203,7 +190,7 @@ pub async fn run_interactive_stage(
                 {
                     Ok(r) => r,
                     Err(e) => {
-                        log_streaming_unavailable(&e);
+                        tracing::debug!("Streaming unavailable, falling back: {}", e);
                         let r = engine
                             .run_inference_filtered(
                                 entity,

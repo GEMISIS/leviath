@@ -93,19 +93,6 @@ fn build_registry_from_config(config: &Config) -> ProviderRegistry {
     reg
 }
 
-/// COVERAGE-EXCLUDED: llvm-cov's tracing-macro message-literal region is
-/// permanently uncovered regardless of restructuring (event!/pre-formatted
-/// let/inline(never)/crate-version were all tried and ruled out this
-/// session) -- isolating the bare macro call behind a twin removes the
-/// unfixable region from what's measured without touching the surrounding,
-/// fully-testable control flow that decides WHETHER to call it.
-#[cfg(not(test))]
-fn log_running_agent_tests(path: &str) {
-    tracing::info!(path = %path, "Running agent tests");
-}
-
-#[cfg(test)]
-fn log_running_agent_tests(_path: &str) {}
 
 /// Core of [`execute`], with provider-registry construction injected so
 /// tests can drive the non-dry-run path with a mock [`Provider`] instead of
@@ -129,7 +116,7 @@ async fn execute_with_registry(
     build_registry: Box<dyn FnOnce(&Config) -> ProviderRegistry>,
 ) -> anyhow::Result<()> {
     let path = args.path.unwrap_or_else(|| ".".to_string());
-    log_running_agent_tests(&path);
+    tracing::info!(path = %path, "Running agent tests");
 
     let project_path = Path::new(&path);
 

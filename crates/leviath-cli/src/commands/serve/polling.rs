@@ -61,23 +61,10 @@ async fn fire_webhook(client: reqwest::Client, url: String, payload: serde_json:
         let _enter = span.enter();
         span.record("url", tracing::field::display(&url));
         span.record("error", tracing::field::display(&e));
-        log_webhook_callback_failed();
+        tracing::error!("Webhook callback failed");
     }
 }
 
-/// COVERAGE-EXCLUDED: llvm-cov's tracing-macro message-literal region is
-/// permanently uncovered regardless of restructuring (event!/pre-formatted
-/// let/inline(never)/crate-version were all tried and ruled out this
-/// session) -- isolating the bare macro call behind a twin removes the
-/// unfixable region from what's measured without touching the surrounding,
-/// fully-testable control flow that decides WHETHER to call it.
-#[cfg(not(test))]
-fn log_webhook_callback_failed() {
-    tracing::error!("Webhook callback failed");
-}
-
-#[cfg(test)]
-fn log_webhook_callback_failed() {}
 
 /// Process one poll cycle for a given set of runs. Extracted from polling_loop
 /// so tests can call it directly with synthetic RunMeta without depending on

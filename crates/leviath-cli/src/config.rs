@@ -154,7 +154,8 @@ impl Config {
     /// tests against a tempfile instead of the real `~/.leviath/config.toml`.
     fn load_from_path(path: &std::path::Path) -> anyhow::Result<Self> {
         let mut config = if !path.exists() {
-            log_no_config_file_found(path);
+            let path_display = path.display();
+            tracing::debug!("No config file found at {}, using defaults", path_display);
             Self::default()
         } else {
             let content = std::fs::read_to_string(path).map_err(|e| {
@@ -164,7 +165,8 @@ impl Config {
             let c: Self = toml::from_str(&content)
                 .map_err(|e| anyhow::anyhow!("Failed to parse config: {}", e))?;
 
-            log_loaded_config(path);
+            let path_display = path.display();
+            tracing::debug!("Loaded config from {}", path_display);
             c
         };
 
@@ -215,7 +217,8 @@ impl Config {
         // Set restrictive permissions on the config file
         set_file_permissions(path);
 
-        log_saved_config(path);
+        let path_display = path.display();
+        tracing::debug!("Saved config to {}", path_display);
         Ok(())
     }
 
@@ -279,38 +282,6 @@ pub fn leviath_home_dir() -> Option<PathBuf> {
     dirs::home_dir()
 }
 
-/// COVERAGE-EXCLUDED: llvm-cov's tracing-macro message-literal region is
-/// permanently uncovered regardless of restructuring (event!/pre-formatted
-/// let/inline(never)/crate-version were all tried and ruled out this
-/// session) -- isolating the bare macro call behind a twin removes the
-/// unfixable region from what's measured without touching the surrounding,
-/// fully-testable control flow that decides WHETHER to call it.
-#[cfg(not(test))]
-fn log_no_config_file_found(path: &std::path::Path) {
-    tracing::debug!("No config file found at {}, using defaults", path.display());
-}
-
-#[cfg(test)]
-fn log_no_config_file_found(_path: &std::path::Path) {}
-
-/// COVERAGE-EXCLUDED: see [`log_no_config_file_found`].
-#[cfg(not(test))]
-fn log_loaded_config(path: &std::path::Path) {
-    tracing::debug!("Loaded config from {}", path.display());
-}
-
-#[cfg(test)]
-fn log_loaded_config(_path: &std::path::Path) {}
-
-/// COVERAGE-EXCLUDED: see [`log_no_config_file_found`].
-#[cfg(not(test))]
-fn log_saved_config(path: &std::path::Path) {
-    tracing::debug!("Saved config to {}", path.display());
-}
-
-#[cfg(test)]
-fn log_saved_config(_path: &std::path::Path) {}
-
 /// Redact an API key for safe display, showing only first 4 and last 4 characters.
 #[allow(dead_code)] // Public API for use by future commands and display logic
 pub fn redact_key(key: &str) -> String {
@@ -357,37 +328,17 @@ fn check_permissions_at_with(
     ensure: fn(&std::path::Path) -> std::io::Result<Option<u32>>,
 ) {
     match ensure(path) {
-        Ok(Some(old_mode)) => log_permissive_perms_warning(old_mode),
+        Ok(Some(old_mode)) => {
+            let masked_mode = old_mode & 0o777;
+            tracing::warn!(
+                "Config file has overly permissive permissions ({:o}), fixing to 600",
+                masked_mode
+            );
+        }
         Ok(None) => {}
-        Err(e) => log_fix_config_file_permissions_failed(&e),
+        Err(e) => tracing::warn!("Failed to fix config file permissions: {}", e),
     }
 }
-
-/// COVERAGE-EXCLUDED: llvm-cov's tracing-macro message-literal region is
-/// permanently uncovered regardless of restructuring (event!/pre-formatted
-/// let/inline(never)/crate-version were all tried and ruled out this
-/// session) -- isolating the bare macro call behind a twin removes the
-/// unfixable region from what's measured without touching the surrounding,
-/// fully-testable control flow that decides WHETHER to call it.
-#[cfg(not(test))]
-fn log_permissive_perms_warning(old_mode: u32) {
-    tracing::warn!(
-        "Config file has overly permissive permissions ({:o}), fixing to 600",
-        old_mode & 0o777
-    );
-}
-
-#[cfg(test)]
-fn log_permissive_perms_warning(_old_mode: u32) {}
-
-/// COVERAGE-EXCLUDED: see [`log_permissive_perms_warning`].
-#[cfg(not(test))]
-fn log_fix_config_file_permissions_failed(e: &std::io::Error) {
-    tracing::warn!("Failed to fix config file permissions: {}", e);
-}
-
-#[cfg(test)]
-fn log_fix_config_file_permissions_failed(_e: &std::io::Error) {}
 
 /// Set restrictive permissions on the config file.
 fn set_file_permissions(path: &std::path::Path) {
@@ -405,18 +356,9 @@ fn set_file_permissions_with(
     secure: fn(&std::path::Path) -> std::io::Result<()>,
 ) {
     if let Err(e) = secure(path) {
-        log_set_file_permissions_failed(&e);
+        tracing::warn!("Failed to set config file permissions: {}", e);
     }
 }
-
-/// COVERAGE-EXCLUDED: see [`log_permissive_perms_warning`].
-#[cfg(not(test))]
-fn log_set_file_permissions_failed(e: &std::io::Error) {
-    tracing::warn!("Failed to set config file permissions: {}", e);
-}
-
-#[cfg(test)]
-fn log_set_file_permissions_failed(_e: &std::io::Error) {}
 
 /// Set restrictive permissions on the config directory.
 fn set_dir_permissions(path: &std::path::Path) {
@@ -430,18 +372,9 @@ fn set_dir_permissions_with(
     secure: fn(&std::path::Path) -> std::io::Result<()>,
 ) {
     if let Err(e) = secure(path) {
-        log_set_dir_permissions_failed(&e);
+        tracing::warn!("Failed to set config directory permissions: {}", e);
     }
 }
-
-/// COVERAGE-EXCLUDED: see [`log_permissive_perms_warning`].
-#[cfg(not(test))]
-fn log_set_dir_permissions_failed(e: &std::io::Error) {
-    tracing::warn!("Failed to set config directory permissions: {}", e);
-}
-
-#[cfg(test)]
-fn log_set_dir_permissions_failed(_e: &std::io::Error) {}
 
 /// Serializes any test, in this file or elsewhere in the crate, that reads
 /// `Config::config_path()`'s default (unset-env) behavior or that
