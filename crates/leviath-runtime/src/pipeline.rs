@@ -19,9 +19,10 @@ use leviath_providers::{InferenceRequest, Provider, Tool};
 
 use crate::components::{AgentState, AgentStatus, ContextWindow, InferenceConfig};
 use crate::engine::ProviderRegistry;
+use crate::engine::truncate_on_char_boundary;
 use crate::inference_bridge::{InferenceJob, InferenceOutcome, run_inference_job};
 use crate::inference_pool::InferencePools;
-use crate::tool_bridge::{BoxedToolExec, ToolJob};
+use crate::tool_bridge::{BoxedToolExec, ToolJob, ToolOutcome};
 
 // ─── Phase marker components (an agent is in exactly one) ────────────────────
 
@@ -309,6 +310,159 @@ pub fn dispatch_tools(
             .entity(entity)
             .remove::<ReadyForTools>()
             .insert(AwaitingTools);
+    }
+}
+
+/// Per-tool output sensitivity for an agent, populated by the taint-gate system
+/// when taint tracking is enabled. Absent ⇒ taint off ⇒ results tagged Public.
+#[derive(Component, Debug, Clone, Default)]
+pub struct ToolSensitivities(pub std::collections::HashMap<String, leviath_core::TaintLevel>);
+
+/// The receiving end of the tool-outcomes channel, as a world resource.
+#[derive(Resource)]
+pub struct ToolResults(pub UnboundedReceiver<ToolOutcome>);
+
+/// Apply a completed tool batch to an agent's context window: add the assistant
+/// turn (with its tool calls) then each tool result, honoring the stage's
+/// tool-result routing (target region, `persist=false`→scratch, per-result
+/// truncation) and, when a per-tool sensitivity is provided, tagging the result
+/// with that taint level. Tool results MUST be added (Anthropic requires a
+/// `tool_result` for every `tool_use`), so an over-budget region truncates or
+/// falls back to a placeholder rather than dropping. Ported from the core of
+/// `AgentEngine::loop_apply_tool_results` (repetition + message draining are
+/// separate systems).
+fn apply_tool_results(
+    window: &mut ContextWindow,
+    response_content: &str,
+    tool_calls: &[crate::components::ToolCall],
+    tool_results: &[(String, String)],
+    routing: Option<&leviath_core::blueprint::ToolResultRouting>,
+    sensitivities: Option<&std::collections::HashMap<String, leviath_core::TaintLevel>>,
+) {
+    let response_tokens = response_content.len() / 4;
+    let serialized: Vec<leviath_core::SerializedToolCall> = tool_calls
+        .iter()
+        .map(|tc| leviath_core::SerializedToolCall {
+            id: tc.tool_id.clone(),
+            name: tc.name.clone(),
+            arguments: tc.arguments.clone(),
+        })
+        .collect();
+    let _ = window.add_typed_entry(
+        "conversation",
+        leviath_core::EntryKind::AssistantTurn {
+            tool_calls: serialized,
+        },
+        response_content.to_string(),
+        response_tokens,
+    );
+
+    for (tool_call_id, result) in tool_results {
+        let mut result_text = result.clone();
+        let tool_name = tool_calls
+            .iter()
+            .find(|tc| tc.tool_id == *tool_call_id)
+            .map(|tc| tc.name.clone())
+            .unwrap_or_default();
+
+        if let Some(routing) = routing
+            && let Some(max_tokens) = routing.max_result_tokens
+        {
+            let max_chars = max_tokens * 4;
+            if result_text.len() > max_chars {
+                result_text = truncate_on_char_boundary(&result_text, max_chars);
+                result_text.push_str("\n[...truncated]");
+            }
+        }
+        let result_tokens = result_text.len() / 4 + 1;
+
+        let base_region = match routing {
+            Some(r) => r
+                .tool_overrides
+                .get(&tool_name)
+                .map(String::as_str)
+                .unwrap_or(r.default_region.as_str()),
+            None => "conversation",
+        };
+        let target_region = match routing {
+            Some(r) if !r.persist && window.get_region("scratch").is_some() => "scratch",
+            _ => base_region,
+        };
+
+        let taint_level = sensitivities.map(|s| {
+            s.get(&tool_name)
+                .copied()
+                .unwrap_or(leviath_core::TaintLevel::Public)
+        });
+        let add = |window: &mut ContextWindow, region: &str, content: String, tokens: usize| {
+            let kind = leviath_core::EntryKind::ToolResult {
+                tool_call_id: tool_call_id.clone(),
+                tool_name: tool_name.clone(),
+                is_error: false,
+            };
+            match taint_level {
+                Some(level) => {
+                    window.add_typed_tainted_to_region(region, kind, content, tokens, level)
+                }
+                None => window.add_typed_entry(region, kind, content, tokens),
+            }
+        };
+
+        if add(window, target_region, result_text.clone(), result_tokens).is_err() {
+            let available = window
+                .get_region(target_region)
+                .map(|r| r.max_tokens.saturating_sub(r.current_tokens))
+                .unwrap_or(0);
+            let truncated = if available > 100 {
+                let char_budget = (available - 10) * 4;
+                let prefix = truncate_on_char_boundary(&result_text, char_budget);
+                let omitted = result_text.len().saturating_sub(prefix.len());
+                format!("{}... [truncated, {} chars omitted]", prefix, omitted)
+            } else {
+                "[tool result truncated — context window full]".to_string()
+            };
+            let trunc_tokens = truncated.len() / 4 + 1;
+            if add(window, target_region, truncated, trunc_tokens).is_err() {
+                let _ = add(window, target_region, "[result omitted]".to_string(), 5);
+            }
+        }
+    }
+}
+
+/// Tool-collect system: drain finished tool batches and apply them. Results are
+/// written into the agent's context window (routing/truncation/taint honored)
+/// and the agent loops back to `ReadyToInfer`. Outcomes for agents no longer
+/// `AwaitingTools` (cancelled/despawned) are dropped.
+#[allow(clippy::type_complexity)]
+pub fn collect_tools(
+    mut results: ResMut<ToolResults>,
+    mut agents: Query<
+        (
+            &mut ContextWindow,
+            &crate::components::InferenceResult,
+            Option<&crate::components::ToolResultRoutingComponent>,
+            Option<&ToolSensitivities>,
+        ),
+        With<AwaitingTools>,
+    >,
+    mut commands: Commands,
+) {
+    while let Ok(outcome) = results.0.try_recv() {
+        let Ok((mut window, infer, routing, sensitivities)) = agents.get_mut(outcome.entity) else {
+            continue; // stale: agent cancelled/despawned since dispatch
+        };
+        apply_tool_results(
+            &mut window,
+            &infer.response,
+            &infer.tool_calls,
+            &outcome.results,
+            routing.map(|c| &c.routing),
+            sensitivities.map(|s| &s.0),
+        );
+        commands
+            .entity(outcome.entity)
+            .remove::<AwaitingTools>()
+            .insert(ReadyToInfer);
     }
 }
 
@@ -716,5 +870,253 @@ mod tests {
         // Run the produced closure (covers the service's exec path).
         let results = (job.exec)().await;
         assert_eq!(results, vec![("t".to_string(), "ran n".to_string())]);
+    }
+
+    // ── tool-collect (apply_tool_results) ──
+
+    fn ctx(regions: &[(&str, usize)]) -> ContextWindow {
+        let mut w = ContextWindow::new(100_000);
+        for (name, max) in regions {
+            w.add_region(Region::new(name.to_string(), RegionKind::Clearable, *max));
+        }
+        w
+    }
+
+    fn tc(id: &str, name: &str) -> crate::components::ToolCall {
+        crate::components::ToolCall {
+            tool_id: id.to_string(),
+            name: name.to_string(),
+            arguments: serde_json::Value::Null,
+        }
+    }
+
+    fn routing(
+        default: &str,
+        overrides: &[(&str, &str)],
+        persist: bool,
+        max_result: Option<usize>,
+    ) -> leviath_core::blueprint::ToolResultRouting {
+        leviath_core::blueprint::ToolResultRouting {
+            default_region: default.to_string(),
+            tool_overrides: overrides
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
+            persist,
+            max_result_tokens: max_result,
+        }
+    }
+
+    #[test]
+    fn apply_adds_assistant_turn_and_result_to_conversation() {
+        let mut w = ctx(&[("conversation", 10_000)]);
+        apply_tool_results(
+            &mut w,
+            "resp",
+            &[tc("c1", "read")],
+            &[("c1".to_string(), "result".to_string())],
+            None,
+            None,
+        );
+        assert!(w.get_region("conversation").unwrap().current_tokens > 0);
+    }
+
+    #[test]
+    fn apply_falls_back_when_region_missing() {
+        let mut w = ctx(&[]); // no "conversation" region — every add errors
+        // Exhausts the forced-add fallback to the placeholder without panicking.
+        apply_tool_results(
+            &mut w,
+            "resp",
+            &[tc("c1", "read")],
+            &[("c1".to_string(), "long result".to_string())],
+            None,
+            None,
+        );
+    }
+
+    #[test]
+    fn apply_routes_to_override_region() {
+        let mut w = ctx(&[("conversation", 10_000), ("special", 10_000)]);
+        let r = routing("conversation", &[("read", "special")], true, None);
+        apply_tool_results(
+            &mut w,
+            "resp",
+            &[tc("c1", "read")],
+            &[("c1".to_string(), "x".to_string())],
+            Some(&r),
+            None,
+        );
+        assert!(w.get_region("special").unwrap().current_tokens > 0);
+    }
+
+    #[test]
+    fn apply_default_region_when_no_override() {
+        let mut w = ctx(&[("dflt", 10_000)]);
+        let r = routing("dflt", &[], true, None); // no matching override for "read"
+        apply_tool_results(
+            &mut w,
+            "resp",
+            &[tc("c1", "read")],
+            &[("c1".to_string(), "x".to_string())],
+            Some(&r),
+            None,
+        );
+        assert!(w.get_region("dflt").unwrap().current_tokens > 0);
+    }
+
+    #[test]
+    fn apply_routes_to_scratch_when_not_persist() {
+        let mut w = ctx(&[("conversation", 10_000), ("scratch", 10_000)]);
+        let r = routing("conversation", &[], false, None); // persist = false
+        apply_tool_results(
+            &mut w,
+            "resp",
+            &[tc("c1", "read")],
+            &[("c1".to_string(), "x".to_string())],
+            Some(&r),
+            None,
+        );
+        assert!(w.get_region("scratch").unwrap().current_tokens > 0);
+    }
+
+    #[test]
+    fn apply_not_persist_without_scratch_uses_base_region() {
+        let mut w = ctx(&[("conversation", 10_000)]); // no scratch region
+        let r = routing("conversation", &[], false, None); // persist=false but no scratch
+        apply_tool_results(
+            &mut w,
+            "r",
+            &[tc("c1", "read")],
+            &[("c1".to_string(), "x".to_string())],
+            Some(&r),
+            None,
+        );
+        assert!(w.get_region("conversation").unwrap().current_tokens > 0);
+    }
+
+    #[test]
+    fn apply_truncates_per_max_result_tokens() {
+        let mut w = ctx(&[("conversation", 10_000)]);
+        let r = routing("conversation", &[], true, Some(1)); // 1 token ≈ 4 chars
+        let long = "x".repeat(100);
+        apply_tool_results(
+            &mut w,
+            "resp",
+            &[tc("c1", "read")],
+            &[("c1".to_string(), long)],
+            Some(&r),
+            None,
+        );
+        // Truncated, so the stored result is far smaller than 100 chars.
+        assert!(w.get_region("conversation").unwrap().current_tokens < 25);
+    }
+
+    #[test]
+    fn apply_no_truncation_when_result_under_max() {
+        let mut w = ctx(&[("conversation", 10_000)]);
+        let r = routing("conversation", &[], true, Some(100)); // budget 100 tok ≈ 400 chars
+        apply_tool_results(
+            &mut w,
+            "r",
+            &[tc("c1", "read")],
+            &[("c1".to_string(), "short".to_string())], // 5 chars — under budget
+            Some(&r),
+            None,
+        );
+        assert!(w.get_region("conversation").unwrap().current_tokens > 0);
+    }
+
+    #[test]
+    fn apply_tags_taint_when_sensitivities_present() {
+        let mut w = ctx(&[("conversation", 10_000)]);
+        let mut sens = std::collections::HashMap::new();
+        sens.insert("read".to_string(), leviath_core::TaintLevel::Private);
+        apply_tool_results(
+            &mut w,
+            "resp",
+            &[tc("c1", "read")],
+            &[("c1".to_string(), "x".to_string())],
+            None,
+            Some(&sens),
+        );
+        assert!(w.get_region("conversation").unwrap().current_tokens > 0);
+    }
+
+    #[test]
+    fn apply_truncates_to_available_when_region_nearly_full() {
+        let mut w = ctx(&[("conversation", 200)]);
+        // Pre-fill so the tool result can't fit, but >100 tokens remain free.
+        w.add_typed_entry(
+            "conversation",
+            leviath_core::EntryKind::UserMessage,
+            "x".repeat(360),
+            90,
+        )
+        .unwrap();
+        let big = "y".repeat(600); // ~150 tokens — won't fit the ~110 remaining
+        apply_tool_results(
+            &mut w,
+            "r",
+            &[tc("c1", "read")],
+            &[("c1".to_string(), big)],
+            None,
+            None,
+        );
+        // Result was truncated to fit (not dropped), staying within budget.
+        let region = w.get_region("conversation").unwrap();
+        assert!(region.current_tokens > 90 && region.current_tokens <= 200);
+    }
+
+    fn run_collect_tools(world: &mut World) {
+        let mut s = Schedule::default();
+        s.add_systems(collect_tools);
+        s.run(world);
+    }
+
+    #[test]
+    fn collect_tools_applies_and_loops_back_to_infer() {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let mut world = World::new();
+        world.insert_resource(ToolResults(rx));
+        let e = world
+            .spawn((
+                ctx(&[("conversation", 10_000)]),
+                crate::components::InferenceResult {
+                    response: "r".to_string(),
+                    tool_calls: vec![tc("c1", "read")],
+                    tokens_used: 0,
+                    timestamp: 0,
+                },
+                AwaitingTools,
+            ))
+            .id();
+        tx.send(ToolOutcome {
+            entity: e,
+            results: vec![("c1".to_string(), "res".to_string())],
+        })
+        .unwrap();
+
+        run_collect_tools(&mut world);
+
+        assert!(world.get::<ReadyToInfer>(e).is_some());
+        assert!(world.get::<AwaitingTools>(e).is_none());
+    }
+
+    #[test]
+    fn collect_tools_drops_stale_outcome() {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let mut world = World::new();
+        world.insert_resource(ToolResults(rx));
+        let e = world.spawn(ctx(&[("conversation", 10_000)])).id(); // no AwaitingTools
+        tx.send(ToolOutcome {
+            entity: e,
+            results: vec![],
+        })
+        .unwrap();
+
+        run_collect_tools(&mut world);
+
+        assert!(world.get::<ReadyToInfer>(e).is_none());
     }
 }
