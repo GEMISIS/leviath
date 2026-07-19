@@ -592,6 +592,179 @@ pub fn deliver_messages(
     }
 }
 
+// ─── Stage transition ────────────────────────────────────────────────────────
+
+/// The agent's blueprint (its stage graph), as a component.
+#[derive(Component, Debug, Clone)]
+pub struct AgentBlueprint(pub leviath_core::Blueprint);
+
+/// The index of the agent's current stage within its blueprint.
+#[derive(Component, Debug, Clone, Copy)]
+pub struct StageCursor {
+    /// Current stage index.
+    pub index: usize,
+}
+
+/// Pre-resolved [`StageInference`] for every stage of the agent's blueprint,
+/// built once when the agent is spawned (the CLI resolves each stage's provider,
+/// model, and tool definitions). The transition system swaps the agent's
+/// `StageInference` to the entry for its new stage by index.
+#[derive(Component, Debug, Clone)]
+pub struct StageInferences(pub Vec<StageInference>);
+
+/// How many times the agent has entered each stage (for `max_revisits`).
+#[derive(Component, Debug, Clone, Default)]
+pub struct VisitCounts(pub std::collections::HashMap<String, usize>);
+
+/// The stage completed with multiple candidate edges (or a single edge the stage
+/// may decline); an LLM must choose. Holds the choosable edges for the async
+/// transition-choice system.
+#[derive(Component, Debug, Clone)]
+pub struct AwaitingTransitionChoice(pub Vec<leviath_core::blueprint::TransitionEdge>);
+
+/// The outcome of synchronously resolving a completed stage's transition.
+enum StageResolution {
+    /// No valid outgoing transition — the agent is done.
+    Terminal,
+    /// Advance to this stage index.
+    Next(usize),
+    /// Multiple candidate edges — an LLM must choose among them.
+    Choose(Vec<leviath_core::blueprint::TransitionEdge>),
+}
+
+/// Resolve the next stage for a normally-completed stage without any LLM call.
+/// (Ported from the synchronous portion of `graph::resolve_transition`; the
+/// `Error`/`MaxIterations` auto-transitions don't apply to a normal completion,
+/// and the LLM-choice case is returned as [`StageResolution::Choose`].)
+fn resolve_transition_sync(
+    blueprint: &leviath_core::Blueprint,
+    stage: &leviath_core::Stage,
+    stage_idx: usize,
+    visits: &std::collections::HashMap<String, usize>,
+) -> StageResolution {
+    use leviath_core::blueprint::TransitionCondition;
+    match &stage.transitions {
+        None => {
+            if stage_idx + 1 < blueprint.stages.len() {
+                StageResolution::Next(stage_idx + 1)
+            } else {
+                StageResolution::Terminal
+            }
+        }
+        Some(transitions) => {
+            if transitions.is_empty() {
+                return StageResolution::Terminal;
+            }
+            // Filter edges whose target hasn't exhausted its revisit budget.
+            let available: Vec<&leviath_core::blueprint::TransitionEdge> = transitions
+                .values()
+                .filter(|e| match blueprint.find_stage(&e.target) {
+                    Some(ts) => match ts.max_revisits {
+                        Some(max) => visits.get(&e.target).copied().unwrap_or(0) <= max,
+                        None => true,
+                    },
+                    None => false, // unknown target
+                })
+                .collect();
+            // Only Always/LlmChoice edges are auto/LLM-followable on completion.
+            let choosable: Vec<&leviath_core::blueprint::TransitionEdge> = available
+                .into_iter()
+                .filter(|e| {
+                    matches!(
+                        e.condition,
+                        TransitionCondition::Always | TransitionCondition::LlmChoice
+                    )
+                })
+                .collect();
+            match choosable.len() {
+                0 => StageResolution::Terminal,
+                1 if !stage.allow_complete => {
+                    let idx = blueprint
+                        .stages
+                        .iter()
+                        .position(|s| s.name == choosable[0].target)
+                        .unwrap_or(0);
+                    StageResolution::Next(idx)
+                }
+                _ => StageResolution::Choose(choosable.into_iter().cloned().collect()),
+            }
+        }
+    }
+}
+
+/// Transition-resolution system: for each `ResolveTransition` agent, resolve the
+/// next stage. Terminal ⇒ mark the agent `Complete`. A single/linear target ⇒
+/// enter the new stage (swap its `StageInference`, reset stage progress, bump the
+/// visit count) and loop to `ReadyToInfer`. Multiple candidate edges ⇒ hand off
+/// to the async transition-choice system via `AwaitingTransitionChoice`.
+#[allow(clippy::type_complexity)]
+pub fn resolve_transition(
+    mut agents: Query<
+        (
+            Entity,
+            &AgentBlueprint,
+            &mut StageCursor,
+            &mut AgentState,
+            &mut StageProgress,
+            &StageInferences,
+            &mut VisitCounts,
+        ),
+        With<ResolveTransition>,
+    >,
+    mut commands: Commands,
+) {
+    for (entity, bp, mut cursor, mut state, mut progress, stage_infs, mut visits) in
+        agents.iter_mut()
+    {
+        let stage = &bp.0.stages[cursor.index];
+        match resolve_transition_sync(&bp.0, stage, cursor.index, &visits.0) {
+            StageResolution::Terminal => {
+                state.status = AgentStatus::Complete;
+                commands.entity(entity).remove::<ResolveTransition>();
+            }
+            StageResolution::Next(idx) => {
+                enter_stage(
+                    idx,
+                    &bp.0,
+                    &mut cursor,
+                    &mut state,
+                    &mut progress,
+                    &mut visits,
+                );
+                commands
+                    .entity(entity)
+                    .insert(stage_infs.0[idx].clone())
+                    .remove::<ResolveTransition>()
+                    .insert(ReadyToInfer);
+            }
+            StageResolution::Choose(edges) => {
+                commands
+                    .entity(entity)
+                    .remove::<ResolveTransition>()
+                    .insert(AwaitingTransitionChoice(edges));
+            }
+        }
+    }
+}
+
+/// Enter the stage at `idx`: update the cursor + current-stage name, reset
+/// per-stage progress, and bump the stage's visit count. (Context-layout swap and
+/// system-prompt injection are handled by the stage-setup follow-up.)
+fn enter_stage(
+    idx: usize,
+    blueprint: &leviath_core::Blueprint,
+    cursor: &mut StageCursor,
+    state: &mut AgentState,
+    progress: &mut StageProgress,
+    visits: &mut VisitCounts,
+) {
+    cursor.index = idx;
+    let name = blueprint.stages[idx].name.clone();
+    state.current_stage = name.clone();
+    *progress = StageProgress::default();
+    *visits.0.entry(name).or_insert(0) += 1;
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1449,6 +1622,306 @@ mod tests {
                 .unwrap()
                 .current_tokens
                 > 0
+        );
+    }
+
+    // ── transition resolution ──
+
+    fn edge(
+        target: &str,
+        cond: leviath_core::blueprint::TransitionCondition,
+    ) -> (String, leviath_core::blueprint::TransitionEdge) {
+        (
+            target.to_string(),
+            leviath_core::blueprint::TransitionEdge {
+                target: target.to_string(),
+                condition: cond,
+                hint: None,
+                transform: leviath_core::blueprint::EdgeTransform::Direct,
+            },
+        )
+    }
+
+    fn stage_named(
+        name: &str,
+        edges: Option<Vec<(String, leviath_core::blueprint::TransitionEdge)>>,
+        allow_complete: bool,
+        max_revisits: Option<usize>,
+    ) -> leviath_core::Stage {
+        let mut s = leviath_core::Stage::new(
+            name.to_string(),
+            leviath_core::blueprint::ModelConfig::new("p".to_string(), "m".to_string()),
+        );
+        s.allow_complete = allow_complete;
+        s.max_revisits = max_revisits;
+        if let Some(edges) = edges {
+            s.transitions = Some(edges.into_iter().collect());
+        }
+        s
+    }
+
+    fn blueprint(stages: Vec<leviath_core::Stage>) -> leviath_core::Blueprint {
+        let layout = leviath_core::layout::ContextLayout::new(
+            vec![leviath_core::layout::RegionDefinition::new(
+                "conversation".to_string(),
+                RegionKind::Clearable,
+                10_000,
+            )],
+            12_000,
+        );
+        leviath_core::Blueprint::new("t".to_string(), "d".to_string(), stages, layout)
+    }
+
+    fn si(model: &str) -> StageInference {
+        StageInference {
+            provider_name: "p".to_string(),
+            model: model.to_string(),
+            tools: vec![],
+            tool_filter: None,
+        }
+    }
+
+    fn spawn_transition_agent(
+        world: &mut World,
+        bp: leviath_core::Blueprint,
+        stage_infs: Vec<StageInference>,
+        visits: VisitCounts,
+    ) -> Entity {
+        world
+            .spawn((
+                AgentBlueprint(bp),
+                StageCursor { index: 0 },
+                agent_state(),
+                StageProgress {
+                    total_tool_calls: 3,
+                    text_only_nudges: 1,
+                },
+                StageInferences(stage_infs),
+                visits,
+                ResolveTransition,
+            ))
+            .id()
+    }
+
+    fn run_transition(world: &mut World) {
+        let mut s = Schedule::default();
+        s.add_systems(resolve_transition);
+        s.run(world);
+    }
+
+    #[test]
+    fn transition_linear_advances_to_next_stage() {
+        let bp = blueprint(vec![
+            stage_named("a", None, false, None),
+            stage_named("b", None, false, None),
+        ]);
+        let mut world = World::new();
+        let e = spawn_transition_agent(
+            &mut world,
+            bp,
+            vec![si("m0"), si("m1")],
+            VisitCounts::default(),
+        );
+
+        run_transition(&mut world);
+
+        assert_eq!(world.get::<StageCursor>(e).unwrap().index, 1);
+        assert_eq!(world.get::<StageInference>(e).unwrap().model, "m1");
+        assert!(world.get::<ReadyToInfer>(e).is_some());
+        assert!(world.get::<ResolveTransition>(e).is_none());
+        // Progress reset, visit bumped, current stage updated.
+        assert_eq!(world.get::<StageProgress>(e).unwrap().total_tool_calls, 0);
+        assert_eq!(world.get::<AgentState>(e).unwrap().current_stage, "b");
+        assert_eq!(world.get::<VisitCounts>(e).unwrap().0.get("b"), Some(&1));
+    }
+
+    #[test]
+    fn transition_terminal_marks_complete() {
+        let bp = blueprint(vec![stage_named("only", None, false, None)]);
+        let mut world = World::new();
+        let e = spawn_transition_agent(&mut world, bp, vec![si("m")], VisitCounts::default());
+
+        run_transition(&mut world);
+
+        assert_eq!(
+            world.get::<AgentState>(e).unwrap().status,
+            AgentStatus::Complete
+        );
+        assert!(world.get::<ResolveTransition>(e).is_none());
+        assert!(world.get::<ReadyToInfer>(e).is_none());
+    }
+
+    #[test]
+    fn transition_single_graph_edge_advances() {
+        use leviath_core::blueprint::TransitionCondition;
+        let bp = blueprint(vec![
+            stage_named(
+                "a",
+                Some(vec![edge("b", TransitionCondition::Always)]),
+                false,
+                None,
+            ),
+            stage_named("b", None, false, None),
+        ]);
+        let mut world = World::new();
+        let e = spawn_transition_agent(
+            &mut world,
+            bp,
+            vec![si("m0"), si("m1")],
+            VisitCounts::default(),
+        );
+
+        run_transition(&mut world);
+
+        assert_eq!(world.get::<StageCursor>(e).unwrap().index, 1);
+        assert!(world.get::<ReadyToInfer>(e).is_some());
+    }
+
+    #[test]
+    fn transition_empty_transitions_is_terminal() {
+        let bp = blueprint(vec![stage_named("a", Some(vec![]), false, None)]);
+        let mut world = World::new();
+        let e = spawn_transition_agent(&mut world, bp, vec![si("m")], VisitCounts::default());
+
+        run_transition(&mut world);
+
+        assert_eq!(
+            world.get::<AgentState>(e).unwrap().status,
+            AgentStatus::Complete
+        );
+    }
+
+    #[test]
+    fn transition_multiple_edges_awaits_choice() {
+        use leviath_core::blueprint::TransitionCondition;
+        let bp = blueprint(vec![
+            stage_named(
+                "a",
+                Some(vec![
+                    edge("b", TransitionCondition::Always),
+                    edge("c", TransitionCondition::Always),
+                ]),
+                false,
+                None,
+            ),
+            stage_named("b", None, false, None),
+            stage_named("c", None, false, None),
+        ]);
+        let mut world = World::new();
+        let e = spawn_transition_agent(
+            &mut world,
+            bp,
+            vec![si("m0"), si("m1"), si("m2")],
+            VisitCounts::default(),
+        );
+
+        run_transition(&mut world);
+
+        let choice = world.get::<AwaitingTransitionChoice>(e).unwrap();
+        assert_eq!(choice.0.len(), 2);
+        assert!(world.get::<ResolveTransition>(e).is_none());
+        assert!(world.get::<ReadyToInfer>(e).is_none());
+    }
+
+    #[test]
+    fn transition_allow_complete_single_edge_awaits_choice() {
+        use leviath_core::blueprint::TransitionCondition;
+        let bp = blueprint(vec![
+            stage_named(
+                "a",
+                Some(vec![edge("b", TransitionCondition::Always)]),
+                true, // allow_complete: LLM must be asked (can say DONE)
+                None,
+            ),
+            stage_named("b", None, false, None),
+        ]);
+        let mut world = World::new();
+        let e = spawn_transition_agent(
+            &mut world,
+            bp,
+            vec![si("m0"), si("m1")],
+            VisitCounts::default(),
+        );
+
+        run_transition(&mut world);
+
+        assert!(world.get::<AwaitingTransitionChoice>(e).is_some());
+    }
+
+    #[test]
+    fn transition_visit_exhausted_edge_is_terminal() {
+        use leviath_core::blueprint::TransitionCondition;
+        let bp = blueprint(vec![
+            stage_named(
+                "a",
+                Some(vec![edge("b", TransitionCondition::Always)]),
+                false,
+                None,
+            ),
+            stage_named("b", None, false, Some(0)), // max_revisits 0
+        ]);
+        let mut visits = VisitCounts::default();
+        visits.0.insert("b".to_string(), 1); // already visited past its budget
+        let mut world = World::new();
+        let e = spawn_transition_agent(&mut world, bp, vec![si("m0"), si("m1")], visits);
+
+        run_transition(&mut world);
+
+        // Only edge exhausted ⇒ terminal.
+        assert_eq!(
+            world.get::<AgentState>(e).unwrap().status,
+            AgentStatus::Complete
+        );
+    }
+
+    #[test]
+    fn transition_non_choosable_edge_is_terminal() {
+        use leviath_core::blueprint::TransitionCondition;
+        let bp = blueprint(vec![
+            // Only an Error-condition edge, which isn't followable on a normal
+            // completion ⇒ filtered out of the choosable set ⇒ terminal.
+            stage_named(
+                "a",
+                Some(vec![edge("b", TransitionCondition::Error)]),
+                false,
+                None,
+            ),
+            stage_named("b", None, false, None),
+        ]);
+        let mut world = World::new();
+        let e = spawn_transition_agent(
+            &mut world,
+            bp,
+            vec![si("m0"), si("m1")],
+            VisitCounts::default(),
+        );
+
+        run_transition(&mut world);
+
+        assert_eq!(
+            world.get::<AgentState>(e).unwrap().status,
+            AgentStatus::Complete
+        );
+    }
+
+    #[test]
+    fn transition_unknown_target_edge_is_terminal() {
+        use leviath_core::blueprint::TransitionCondition;
+        let bp = blueprint(vec![stage_named(
+            "a",
+            Some(vec![edge("ghost", TransitionCondition::Always)]),
+            false,
+            None,
+        )]);
+        let mut world = World::new();
+        let e = spawn_transition_agent(&mut world, bp, vec![si("m0")], VisitCounts::default());
+
+        run_transition(&mut world);
+
+        // Edge points at a nonexistent stage ⇒ filtered ⇒ terminal.
+        assert_eq!(
+            world.get::<AgentState>(e).unwrap().status,
+            AgentStatus::Complete
         );
     }
 }
