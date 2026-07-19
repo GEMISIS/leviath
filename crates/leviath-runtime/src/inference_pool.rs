@@ -92,6 +92,22 @@ impl InferencePools {
         InferencePermit { _permit: permit }
     }
 
+    /// Try to take a permit for `model` **without waiting**. Returns `None` if
+    /// the pool is currently full.
+    ///
+    /// This is what the synchronous ECS inference-dispatch system calls: a
+    /// system can't `.await`, so instead of blocking on a full pool it leaves
+    /// the agent `ReadyToInfer` and retries on a later tick.
+    pub fn try_acquire(&self, model: &str) -> Option<InferencePermit> {
+        let semaphore = self.semaphore_for(model);
+        // `try_acquire_owned` errors only on "no permits" (pool full) or
+        // "closed" (never, since we never close) — both mean "no slot now".
+        match semaphore.try_acquire_owned() {
+            Ok(permit) => Some(InferencePermit { _permit: permit }),
+            Err(_) => None,
+        }
+    }
+
     /// Fetch (or lazily create) the semaphore for `model`.
     fn semaphore_for(&self, model: &str) -> Arc<Semaphore> {
         let mut map = self
@@ -172,6 +188,18 @@ mod tests {
         drop(permit); // free the slot
         // Now the waiter can obtain the permit.
         let _second = waiting.await.expect("waiter task should not panic");
+    }
+
+    #[test]
+    fn try_acquire_returns_none_when_full() {
+        let mut cfg = InferencePoolConfig::new();
+        cfg.set_limit("m", 1);
+        let pools = InferencePools::new(cfg);
+
+        let permit = pools.try_acquire("m").expect("first slot is free"); // Ok arm
+        assert!(pools.try_acquire("m").is_none()); // Err arm: pool full
+        drop(permit);
+        assert!(pools.try_acquire("m").is_some()); // slot freed
     }
 
     #[tokio::test]
