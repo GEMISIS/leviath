@@ -209,18 +209,28 @@ fn to_inference_result(
 /// to `ProcessResponse`; an error marks the agent `Error`. An outcome for an
 /// agent that is no longer `AwaitingInference` (cancelled or despawned between
 /// dispatch and now) is dropped.
+#[allow(clippy::type_complexity)]
 pub fn collect_inference(
     mut results: ResMut<InferenceResults>,
-    mut agents: Query<&mut AgentState, With<AwaitingInference>>,
+    mut agents: Query<
+        (
+            &mut AgentState,
+            Option<&mut crate::persistence::TokenTotals>,
+        ),
+        With<AwaitingInference>,
+    >,
     mut commands: Commands,
 ) {
     while let Ok(outcome) = results.0.try_recv() {
-        let Ok(mut state) = agents.get_mut(outcome.entity) else {
+        let Ok((mut state, totals)) = agents.get_mut(outcome.entity) else {
             continue; // stale: agent cancelled/despawned since dispatch
         };
         match outcome.result {
             Ok(response) => {
                 state.iteration += 1;
+                if let Some(mut totals) = totals {
+                    totals.add_usage(&response.tokens_used);
+                }
                 let result = to_inference_result(&response);
                 commands
                     .entity(outcome.entity)
@@ -268,24 +278,29 @@ pub struct StageProgress {
 /// last inference asked for tools. Tool calls present ⇒ `ReadyForTools` (and the
 /// stage's running tool-call count is bumped); none ⇒ `ReadyForTransition`. Pure
 /// routing — no I/O.
+#[allow(clippy::type_complexity)]
 pub fn process_response(
     mut agents: Query<
         (
             Entity,
             &crate::components::InferenceResult,
             &mut StageProgress,
+            Option<&mut crate::persistence::TokenTotals>,
         ),
         With<ProcessResponse>,
     >,
     mut commands: Commands,
 ) {
-    for (entity, result, mut progress) in agents.iter_mut() {
+    for (entity, result, mut progress, totals) in agents.iter_mut() {
         let mut e = commands.entity(entity);
         e.remove::<ProcessResponse>();
         if result.tool_calls.is_empty() {
             e.insert(ReadyForTransition);
         } else {
             progress.total_tool_calls += result.tool_calls.len();
+            if let Some(mut totals) = totals {
+                totals.tool_calls += result.tool_calls.len();
+            }
             e.insert(ReadyForTools);
         }
     }
@@ -1764,6 +1779,39 @@ mod tests {
         assert!(world.get::<ProcessResponse>(e).is_none());
     }
 
+    #[test]
+    fn collect_inference_accumulates_token_totals() {
+        let (mut world, tx) = world_with_results();
+        let e = world
+            .spawn((
+                agent_state(),
+                AwaitingInference,
+                crate::persistence::TokenTotals::default(),
+            ))
+            .id();
+        let mut r = resp("hi");
+        r.tokens_used = leviath_providers::TokenUsage {
+            prompt_tokens: 10,
+            completion_tokens: 5,
+            total_tokens: 15,
+            cached_tokens: 2,
+            cache_write_tokens: 1,
+        };
+        tx.send(InferenceOutcome {
+            entity: e,
+            result: Ok(r),
+        })
+        .unwrap();
+
+        run_collect(&mut world);
+
+        let t = world.get::<crate::persistence::TokenTotals>(e).unwrap();
+        assert_eq!(t.prompt_tokens, 10);
+        assert_eq!(t.completion_tokens, 5);
+        assert_eq!(t.cached_tokens, 2);
+        assert_eq!(t.cache_write_tokens, 1);
+    }
+
     // ── process-response routing ──
 
     fn infer_result(with_tools: bool) -> crate::components::InferenceResult {
@@ -1805,6 +1853,27 @@ mod tests {
         assert!(world.get::<ReadyForTransition>(e).is_none());
         // The stage's running tool-call count was bumped.
         assert_eq!(world.get::<StageProgress>(e).unwrap().total_tool_calls, 1);
+    }
+
+    #[test]
+    fn process_response_bumps_tool_calls_in_token_totals() {
+        let mut world = World::new();
+        let e = world
+            .spawn((
+                infer_result(true),
+                StageProgress::default(),
+                crate::persistence::TokenTotals::default(),
+                ProcessResponse,
+            ))
+            .id();
+        run_process(&mut world);
+        assert_eq!(
+            world
+                .get::<crate::persistence::TokenTotals>(e)
+                .unwrap()
+                .tool_calls,
+            1
+        );
     }
 
     #[test]
