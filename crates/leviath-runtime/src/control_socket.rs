@@ -18,7 +18,7 @@ use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::oneshot;
 
 use crate::components::AgentStatus;
-use crate::host::ControlOp;
+use crate::host::{ControlOp, SpawnArgs};
 use leviath_core::interaction::{InteractionRequest, InteractionResponse};
 
 /// A control request over the wire. Agents are addressed by run id (the stable
@@ -26,6 +26,11 @@ use leviath_core::interaction::{InteractionRequest, InteractionResponse};
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum ControlRequest {
+    /// Spawn a new agent.
+    Spawn {
+        /// The spawn request.
+        args: SpawnArgs,
+    },
     /// Query a run's status.
     Status {
         /// The run to query.
@@ -76,6 +81,11 @@ pub enum ControlRequest {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "result", rename_all = "snake_case")]
 pub enum ControlResponse {
+    /// A new agent was spawned; carries its run id.
+    Spawned {
+        /// The new run's id.
+        run_id: String,
+    },
     /// A run's status (or `None` if there is no such run).
     Status {
         /// The status, if the run exists.
@@ -108,6 +118,17 @@ pub enum ControlResponse {
 /// down) yields the operation's neutral result.
 async fn dispatch(req: ControlRequest, op_tx: &UnboundedSender<ControlOp>) -> ControlResponse {
     match req {
+        ControlRequest::Spawn { args } => {
+            let (reply, rx) = oneshot::channel();
+            let _ = op_tx.send(ControlOp::Spawn { args, reply });
+            match rx.await {
+                Ok(Ok(run_id)) => ControlResponse::Spawned { run_id },
+                Ok(Err(message)) => ControlResponse::Error { message },
+                Err(_) => ControlResponse::Error {
+                    message: "daemon is shutting down".to_string(),
+                },
+            }
+        }
         ControlRequest::Status { run_id } => {
             let (reply, rx) = oneshot::channel();
             let _ = op_tx.send(ControlOp::Status { run_id, reply });
@@ -281,6 +302,11 @@ impl ControlClient {
         }
     }
 
+    /// Spawn a new agent.
+    pub async fn spawn(&self, args: SpawnArgs) -> std::io::Result<ControlResponse> {
+        self.request(&ControlRequest::Spawn { args }).await
+    }
+
     /// Query a run's status.
     pub async fn status(&self, run_id: &str) -> std::io::Result<ControlResponse> {
         self.request(&ControlRequest::Status {
@@ -306,6 +332,15 @@ mod tests {
         tokio::spawn(async move {
             while let Some(op) = rx.recv().await {
                 match op {
+                    ControlOp::Spawn { args, reply } => {
+                        // A sentinel run id makes the fake host fail the spawn.
+                        let result = if args.run_id == "FAIL" {
+                            Err("bad blueprint".to_string())
+                        } else {
+                            Ok(args.run_id)
+                        };
+                        let _ = reply.send(result);
+                    }
                     ControlOp::Status { reply, .. } => {
                         let _ = reply.send(Some(AgentStatus::Active));
                     }
@@ -391,6 +426,27 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn spawn_request_round_trips() {
+        let resp = round_trip(&ControlRequest::Spawn {
+            args: SpawnArgs {
+                run_id: "run-9".to_string(),
+                blueprint_path: "/agents/x".to_string(),
+                task: "do it".to_string(),
+                model: None,
+                workdir: "/w".to_string(),
+                metadata: Default::default(),
+            },
+        })
+        .await;
+        assert_eq!(
+            resp,
+            ControlResponse::Spawned {
+                run_id: "run-9".to_string()
+            }
+        );
+    }
+
+    #[tokio::test]
     async fn list_interactions_round_trips() {
         let resp = round_trip(&ControlRequest::ListInteractions).await;
         assert_eq!(
@@ -472,8 +528,22 @@ mod tests {
 
     #[tokio::test]
     async fn client_round_trips_status_and_list() {
-        let (_dir, path) = spawn_server(2);
+        let (_dir, path) = spawn_server(3);
         let client = ControlClient::new(path);
+
+        let spawned = client
+            .spawn(SpawnArgs {
+                run_id: "r-c".to_string(),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            spawned,
+            ControlResponse::Spawned {
+                run_id: "r-c".to_string()
+            }
+        );
 
         let status = client.status("run-a").await.unwrap();
         assert_eq!(
@@ -625,6 +695,37 @@ mod tests {
             )
             .await,
             ControlResponse::Ok { ok: false }
+        );
+        // Spawn with the host gone yields a shutting-down error.
+        let spawn_resp = dispatch(
+            ControlRequest::Spawn {
+                args: SpawnArgs::default(),
+            },
+            &op_tx,
+        )
+        .await;
+        assert_eq!(
+            std::mem::discriminant(&spawn_resp),
+            std::mem::discriminant(&ControlResponse::Error {
+                message: String::new()
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn spawn_error_from_host_becomes_error_response() {
+        let resp = round_trip(&ControlRequest::Spawn {
+            args: SpawnArgs {
+                run_id: "FAIL".to_string(),
+                ..Default::default()
+            },
+        })
+        .await;
+        assert_eq!(
+            resp,
+            ControlResponse::Error {
+                message: "bad blueprint".to_string()
+            }
         );
     }
 }
