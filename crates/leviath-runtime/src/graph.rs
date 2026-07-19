@@ -6,12 +6,6 @@ use leviath_core::lifecycle::CompactionConfig;
 use leviath_core::{Blueprint, RegionKind, Stage};
 use std::collections::HashMap;
 
-/// COVERAGE-EXCLUDED: llvm-cov's tracing-macro message-literal region is
-/// permanently uncovered regardless of restructuring (event!/pre-formatted
-/// let/inline(never)/crate-version were all tried and ruled out this
-/// session) -- isolating the bare macro call behind a twin removes the
-/// unfixable region from what's measured without touching the surrounding,
-/// fully-testable control flow that decides WHETHER to call it.
 /// Determine whether a blueprint uses graph mode (any stage has transitions set).
 pub fn is_graph_mode(blueprint: &Blueprint) -> bool {
     blueprint.stages.iter().any(|s| s.transitions.is_some())

@@ -15,10 +15,9 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 // The plain run-state data types (RunMeta, RunStatus, the snapshot structs, and
-// the per-stage records) now live in `leviath_core::run_meta`. They are
-// re-exported here unchanged so existing `crate::runstate::RunMeta` /
-// `runstate::RunMeta` call sites across the cli keep compiling. All on-disk IO
-// for these types remains in this module.
+// the per-stage records) live in `leviath_core::run_meta`. Re-exported here so
+// `crate::runstate::RunMeta` / `runstate::RunMeta` call sites across the cli
+// resolve. All on-disk IO for these types remains in this module.
 pub use leviath_core::run_meta::{
     ContextSnapshot, RegionEntrySnapshot, RegionSnapshot, RunMeta, RunStatus, StageRecord,
     StageRunStatus,

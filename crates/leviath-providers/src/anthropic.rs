@@ -19,14 +19,6 @@ fn maybe_dump_request(body: &serde_json::Value) {
     );
 }
 
-/// Always log the serialized request size at debug, and — when `dir` is
-/// `Some` — write the full JSON body to `<dir>/anthropic-req-<unix_nanos>.json`.
-///
-/// Diagnostic for the `read_files` stall: it lets us see exactly how the
-/// request that stalls (the one after a batch read, with file-tracked content
-/// injected into the system prompt) differs from the small requests that
-/// succeed — size, structure, and content — without a special build. Enable by
-/// setting `LEVIATH_DUMP_REQUEST_DIR`.
 /// Choose which system-block indices carry a `cache_control` breakpoint.
 ///
 /// Anthropic allows at most 4 `cache_control` blocks per request, counted
@@ -68,6 +60,14 @@ fn system_cache_breakpoints(hints: &[leviath_core::CacheHint], budget: usize) ->
     ends
 }
 
+/// Always log the serialized request size at debug, and — when `dir` is
+/// `Some` — write the full JSON body to `<dir>/anthropic-req-<unix_nanos>.json`.
+///
+/// Diagnostic for comparing request bodies: it lets us see exactly how a
+/// request that stalls (e.g. one after a batch read, with file-tracked content
+/// injected into the system prompt) differs from the small requests that
+/// succeed — size, structure, and content — without a special build. Enable by
+/// setting `LEVIATH_DUMP_REQUEST_DIR`.
 fn dump_request(body: &serde_json::Value, dir: Option<&str>) {
     let bytes = serde_json::to_vec(body).map(|v| v.len()).unwrap_or(0);
     tracing::debug!(request_bytes = bytes, "anthropic request body");

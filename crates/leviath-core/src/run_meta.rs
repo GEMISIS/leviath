@@ -2,7 +2,7 @@
 //!
 //! These are pure data (`serde`-derived structs/enums plus trivial constructors)
 //! with no filesystem or async dependencies, so they can be named by both
-//! `leviath-cli` and the (future) `leviath-runtime` engine. All on-disk IO for
+//! `leviath-cli` and the `leviath-runtime` engine. All on-disk IO for
 //! these types (reading/writing `meta.json`, run directories, snapshots, etc.)
 //! lives in `leviath_cli::runstate`.
 

@@ -373,9 +373,8 @@ mod tests {
     // ─── execute_with: injected write-failure arms ─────────────────────────
     //
     // These exercise the 3 `write_file(...)?` error arms deterministically,
-    // without the process-global umask mutation `execute`'s own comment
-    // history rejected (see git blame) -- each test injects a plain local
-    // closure that fails for one specific target filename, leaving the
+    // without any process-global umask mutation -- each test injects a plain
+    // local closure that fails for one specific target filename, leaving the
     // others to succeed exactly as production would.
 
     fn args_for(dir: &std::path::Path, name: &str) -> CreateArgs {

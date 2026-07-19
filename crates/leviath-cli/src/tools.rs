@@ -169,9 +169,9 @@ use leviath_runtime::{
 };
 use tokio::sync::RwLock;
 
-// `spawn_child_agent` moved into `leviath-runtime` (it operates purely on the
+// `spawn_child_agent` lives in `leviath-runtime` (it operates purely on the
 // engine pool/world + a `Blueprint`). Re-exported here so `crate::tools::
-// spawn_child_agent` / `super::spawn_child_agent` call sites keep resolving.
+// spawn_child_agent` / `super::spawn_child_agent` call sites resolve.
 pub use leviath_runtime::spawn_child_agent;
 
 /// Shared state for sub-agent tool execution.

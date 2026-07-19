@@ -861,22 +861,16 @@ mod tests {
         assert!(dashboard.should_quit);
     }
 
-    // `run_crossterm_events_loop` (and this test, which was its only caller)
-    // were removed. That helper wired a real `CrosstermEventSource` into
-    // `run_dashboard_loop`, and this test tried to bound the result with a
-    // 300ms `tokio::time::timeout`. That bound does not work:
-    // `run_dashboard_loop`'s `loop { ... }` has no `.await` point anywhere in
-    // its body (`poll_event`, `try_lock`, `terminal.draw` are all
-    // synchronous), so on the default current-thread `#[tokio::test]`
-    // runtime the executor's single thread never regains control long
-    // enough for the timeout's own timer to fire -- a future that never
-    // yields can't be preempted by a sibling future racing it. In a non-TTY
-    // sandbox `CrosstermEventSource::poll_event` fails immediately, which is
-    // why this looked bounded in headless testing; on a real terminal (no
-    // scripted key ever sets `should_quit`) it hung indefinitely, observed
-    // as "has been running for over 60 seconds" in practice. This helper had
-    // no production caller (`execute`/`execute_core` call `run_dashboard_loop`
-    // directly), so there was nothing left to preserve coverage of.
+    // Caveat for anyone tempted to bound `run_dashboard_loop` with a
+    // `tokio::time::timeout`: its `loop { ... }` has no `.await` point
+    // (`poll_event`, `try_lock`, `terminal.draw` are all synchronous), so on
+    // the default current-thread `#[tokio::test]` runtime the executor's
+    // single thread never regains control long enough for the timeout's own
+    // timer to fire -- a future that never yields can't be preempted by a
+    // sibling future racing it. In a non-TTY sandbox
+    // `CrosstermEventSource::poll_event` fails immediately (so it looks
+    // bounded in headless testing); on a real terminal, with no scripted key
+    // ever setting `should_quit`, it hangs indefinitely.
 
     // ─── CrosstermEventSource poll branches ─────────────────────────────────
 

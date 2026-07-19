@@ -11,17 +11,16 @@ use leviath_core::Stage;
 
 use crate::runstate::RegionSnapshot;
 
-// The `RunIO` trait moved into `leviath-runtime` (so the relocated stage engine
-// can name it without a `runtime -> cli` cycle). Re-exported here so existing
+// The `RunIO` trait lives in `leviath-runtime` (so the stage engine can name it
+// without a `runtime -> cli` cycle). Re-exported here so
 // `crate::commands::run::io::RunIO` / `super::io::RunIO` paths keep resolving,
 // and so the concrete `ConsoleIO`/`MockIO` impls below can name it.
 pub use leviath_runtime::run_io::RunIO;
 
 /// Reads a single line from `reader` and returns it trimmed, or `None` on a
 /// read error (note: EOF is `Ok(0)`, not an error, so it yields
-/// `Some(String::new())` -- preserved as-is from the original inline
-/// implementation). Takes `&mut dyn BufRead` (rather than a generic `R` or
-/// real stdin) so it has a single coverage-mapping instance and tests can
+/// `Some(String::new())`). Takes `&mut dyn BufRead` (rather than a generic `R`
+/// or real stdin) so it has a single coverage-mapping instance and tests can
 /// drive it with an in-memory reader instead of blocking on real stdin.
 fn get_user_input_from_reader(reader: &mut dyn std::io::BufRead) -> Option<String> {
     let mut buf = String::new();

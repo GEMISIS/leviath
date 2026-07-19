@@ -460,10 +460,9 @@ impl AgentEngine {
     /// always-allow / deny); a deny substitutes a `[blocked]` result and skips
     /// execution. When the gate is inactive, every call executes.
     /// Synchronously classify a batch of tool calls against the current taint
-    /// state. Extracted from [`Self::taint_gate_partition`] so all the
-    /// gate/policy logic lives in a non-async function (fully unit-testable and
-    /// not subject to async-instantiation coverage artifacts); the async fn
-    /// only awaits the prompt.
+    /// state. Keeping all the gate/policy logic in a non-async function makes it
+    /// fully unit-testable and not subject to async-instantiation coverage
+    /// artifacts; the async [`Self::taint_gate_partition`] only awaits the prompt.
     fn gate_decisions(
         &mut self,
         entity: Entity,
@@ -7008,9 +7007,9 @@ mod tests {
     /// max_result_tokens truncation of a multi-byte UTF-8 tool result.
     ///
     /// max_result_tokens=5 → max_chars=20. Byte 20 of the content below lands
-    /// inside a 3-byte "—", so the old `result_text.truncate(20)` panicked; that
-    /// panic in the tool-result path is what stalled `read_files` runs. With the
-    /// char-safe truncation this completes and produces valid UTF-8.
+    /// inside a 3-byte "—", which a byte-index `truncate(20)` would split,
+    /// panicking in the tool-result path and stalling `read_files` runs. The
+    /// char-safe truncation completes and produces valid UTF-8.
     #[tokio::test]
     async fn test_tool_result_truncation_multibyte_utf8_does_not_panic() {
         with_tracing_async(async {

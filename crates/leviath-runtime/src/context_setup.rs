@@ -1,4 +1,4 @@
-//! Engine context-window setup helpers shared by the relocated stage engine.
+//! Engine context-window setup helpers shared by the stage engine.
 //!
 //! These are pure operations over an [`AgentEngine`]'s [`ContextWindow`] driven
 //! by a blueprint/layout, so they live in the runtime (the CLI re-exports them

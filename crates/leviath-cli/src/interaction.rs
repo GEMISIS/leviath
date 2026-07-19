@@ -23,12 +23,12 @@ use std::time::{Duration, Instant};
 
 use crate::runstate::{run_dir, write_meta, RunMeta, RunStatus};
 
-// ─── Value types (moved to `leviath-core`, re-exported for compat) ────────────
+// ─── Value types (re-exported from `leviath-core`) ────────────
 //
-// The plain serde value types and their pure resolver helpers now live in
+// The plain serde value types and their pure resolver helpers live in
 // `leviath_core::interaction` so the engine in `leviath-runtime` can reference
-// them without depending on the CLI. They are re-exported here so existing
-// `crate::interaction::*` paths continue to resolve unchanged.
+// them without depending on the CLI. Re-exported here so `crate::interaction::*`
+// paths resolve.
 pub use leviath_core::interaction::{
     make_interaction_id, response_approved, response_as_choice, response_as_text, ApprovalScope,
     BodyFormat, InteractionKind, InteractionRequest, InteractionResponse,

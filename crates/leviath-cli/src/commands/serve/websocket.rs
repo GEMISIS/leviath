@@ -790,14 +790,13 @@ mod tests {
     }
 
     /// Single shared copy of the `run_id`-extraction match every test below
-    /// exercises, instead of each test carrying its own inline copy. Before
-    /// this, 4 separate tests each duplicated the full match expression at
-    /// a different source line but only ever constructed 1-5 of the 7
-    /// `ServerEvent` variants, so `llvm-cov` (which counts per source line,
-    /// not per logical match) saw most arms of most of those copies as
-    /// never hit -- even though every arm undeniably works, just not from
-    /// that specific copy's test data. A single shared function means every
-    /// arm only needs to be hit once, from any caller, to be covered.
+    /// exercises, instead of each test carrying its own inline copy.
+    /// `llvm-cov` counts coverage per source line, not per logical match: with
+    /// the match duplicated inline across tests that each construct only 1-5 of
+    /// the 7 `ServerEvent` variants, most arms of most copies read as never hit
+    /// -- even though every arm works, just not from that copy's test data. A
+    /// single shared function means every arm only needs to be hit once, from
+    /// any caller, to be covered.
     fn get_run_id(ev: &ServerEvent) -> &str {
         match ev {
             ServerEvent::AgentStatus { run_id, .. } => run_id,

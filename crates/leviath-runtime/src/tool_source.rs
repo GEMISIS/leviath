@@ -1,11 +1,11 @@
 //! Decoupling seam between the stage loop and the concrete tool registry.
 //!
-//! Phase 3 of the engine relocation. The stage loop / stages / fan-out only
+//! The stage loop / stages / fan-out only
 //! need two things from the CLI's [`ToolRegistry`](crate::tools::ToolRegistry):
 //! the set of tool definitions to advertise, and a way to execute a single tool
-//! call by name. Capturing exactly that in [`StageToolSource`] lets a later
-//! phase move the stage loop into `leviath-runtime` without a `runtime -> cli`
-//! dependency on `ToolRegistry`. The concrete `impl`s stay in `tools.rs`.
+//! call by name. Capturing exactly that in [`StageToolSource`] keeps the stage
+//! loop free of a `runtime -> cli` dependency on `ToolRegistry`. The concrete
+//! `impl`s stay in `tools.rs`.
 
 use std::sync::Arc;
 
