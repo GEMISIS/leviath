@@ -70,6 +70,10 @@ pub struct InferenceStage {
     pub pools: Arc<InferencePools>,
     /// Where completed inferences are reported.
     pub outcomes: UnboundedSender<InferenceOutcome>,
+    /// Where completed *transition-choice* inferences are reported (a separate
+    /// lane so the collect systems don't confuse a routing decision with a normal
+    /// agent turn).
+    pub transition_outcomes: UnboundedSender<InferenceOutcome>,
     /// Signalled when an inference completes, to wake the tick loop.
     pub wake: Arc<Notify>,
     /// Runtime the worker tasks are spawned onto.
@@ -765,6 +769,241 @@ fn enter_stage(
     *visits.0.entry(name).or_insert(0) += 1;
 }
 
+/// A transition-choice inference is in flight (an LLM is picking the next stage);
+/// holds the choosable edges so the collect system can match the response back to
+/// one. (Ported from the async portion of `graph::prompt_llm_transition`.)
+#[derive(Component, Debug, Clone)]
+pub struct AwaitingTransitionResponse(pub Vec<leviath_core::blueprint::TransitionEdge>);
+
+/// The receiving end of the transition-choice outcomes channel, as a world
+/// resource for the collect system. (The sending end lives in
+/// [`InferenceStage::transition_outcomes`].)
+#[derive(Resource)]
+pub struct TransitionResults(pub UnboundedReceiver<InferenceOutcome>);
+
+/// Build the LLM prompt that asks which stage to run next. (Ported from the
+/// prompt-building portion of `graph::prompt_llm_transition`.)
+fn build_transition_prompt(
+    stage: &leviath_core::Stage,
+    edges: &[leviath_core::blueprint::TransitionEdge],
+) -> String {
+    let mut p = match &stage.transition_prompt {
+        Some(custom) => {
+            let mut p = custom.clone();
+            p.push_str("\n\nAvailable transitions:\n");
+            p
+        }
+        None => format!(
+            "Stage '{}' is complete. Available next stages:\n",
+            stage.name
+        ),
+    };
+    for edge in edges {
+        p.push_str(&format!("- {}", edge.target));
+        if let Some(hint) = &edge.hint {
+            p.push_str(&format!(": {hint}"));
+        }
+        p.push('\n');
+    }
+    if stage.transition_prompt.is_some() {
+        if stage.allow_complete {
+            p.push_str(
+                "\nRespond with ONLY the stage name you want to transition to, or ONLY the \
+                 word DONE if no further stage is needed and the run should end here.",
+            );
+        } else {
+            p.push_str(
+                "\nRespond with ONLY the stage name you want to transition to, nothing else.",
+            );
+        }
+    } else if stage.allow_complete {
+        p.push_str(
+            "\nWhich stage should run next? Respond with ONLY the stage name, or ONLY the \
+             word DONE if no further stage is needed and the run should end here.",
+        );
+    } else {
+        p.push_str("\nWhich stage should run next? Respond with ONLY the stage name.");
+    }
+    p
+}
+
+/// Match an LLM transition response to one of the choosable edges' target stages,
+/// or `None` if the stage may complete and the LLM said "DONE". Falls back to the
+/// first edge when nothing matches. (Ported from the matching tail of
+/// `graph::prompt_llm_transition`, keyed on `target` for pipeline consistency.)
+fn match_transition_choice(
+    choice: &str,
+    edges: &[leviath_core::blueprint::TransitionEdge],
+    allow_complete: bool,
+) -> Option<String> {
+    if allow_complete && choice.eq_ignore_ascii_case("done") {
+        return None;
+    }
+    for edge in edges {
+        if choice.eq_ignore_ascii_case(&edge.target) || choice.contains(edge.target.as_str()) {
+            return Some(edge.target.clone());
+        }
+    }
+    let lower = choice.to_lowercase();
+    for edge in edges {
+        if lower.contains(&edge.target.to_lowercase()) {
+            return Some(edge.target.clone());
+        }
+    }
+    // Nothing matched — fall back to the first available edge.
+    edges.first().map(|edge| edge.target.clone())
+}
+
+/// Transition-choice dispatch: for each `AwaitingTransitionChoice` agent, inject
+/// the "which stage next?" prompt into its context, build a short deterministic
+/// request, acquire a per-model permit, spawn the inference onto the transition
+/// lane, and move it to `AwaitingTransitionResponse`. Provider-missing / pool-full
+/// leaves it choosing and retries next tick (same backpressure as
+/// [`dispatch_inference`]).
+#[allow(clippy::type_complexity)]
+pub fn dispatch_transition_choice(
+    mut agents: Query<
+        (
+            Entity,
+            &mut ContextWindow,
+            &StageInference,
+            &AgentBlueprint,
+            &StageCursor,
+            &AwaitingTransitionChoice,
+        ),
+        With<AwaitingTransitionChoice>,
+    >,
+    stage: Res<InferenceStage>,
+    providers: Res<Providers>,
+    mut commands: Commands,
+) {
+    for (entity, mut window, si, bp, cursor, choice) in agents.iter_mut() {
+        let Some(provider) = providers.0.get(&si.provider_name).cloned() else {
+            continue; // provider not registered — retry later
+        };
+        let Some(permit) = stage.pools.try_acquire(&si.model) else {
+            continue; // pool full — retry next tick
+        };
+
+        let current = &bp.0.stages[cursor.index];
+        let prompt = build_transition_prompt(current, &choice.0);
+        let tokens = prompt.len() / 4 + 1;
+        let _ = window.add_typed_entry(
+            "conversation",
+            leviath_core::EntryKind::UserMessage,
+            prompt,
+            tokens,
+        );
+
+        let assembled = window.assemble();
+        let remaining = window.max_tokens.saturating_sub(window.current_tokens);
+        let request = InferenceRequest {
+            system: assembled.system_blocks,
+            messages: assembled.messages,
+            model: si.model.clone(),
+            max_tokens: remaining.min(256), // short routing response
+            temperature: 0.0,               // deterministic routing
+            tools: Vec::new(),
+            extra: serde_json::Value::Null,
+        };
+
+        let job = InferenceJob {
+            entity,
+            provider,
+            request,
+            permit,
+        };
+        stage.runtime.spawn(run_inference_job(
+            job,
+            stage.transition_outcomes.clone(),
+            stage.wake.clone(),
+        ));
+        commands
+            .entity(entity)
+            .remove::<AwaitingTransitionChoice>()
+            .insert(AwaitingTransitionResponse(choice.0.clone()));
+    }
+}
+
+/// Transition-choice collect: drain completed routing inferences, match each to a
+/// target stage (or completion), record the decision in context, and either enter
+/// the chosen stage (loop to `ReadyToInfer`) or mark the agent `Complete`. A
+/// provider error marks the agent `Error`.
+#[allow(clippy::type_complexity)]
+pub fn collect_transition_choice(
+    mut results: ResMut<TransitionResults>,
+    mut agents: Query<(
+        &AgentBlueprint,
+        &mut StageCursor,
+        &mut AgentState,
+        &mut StageProgress,
+        &StageInferences,
+        &mut VisitCounts,
+        &mut ContextWindow,
+        &AwaitingTransitionResponse,
+    )>,
+    mut commands: Commands,
+) {
+    while let Ok(outcome) = results.0.try_recv() {
+        let Ok((bp, mut cursor, mut state, mut progress, stage_infs, mut visits, mut window, resp)) =
+            agents.get_mut(outcome.entity)
+        else {
+            continue; // stale: agent cancelled/despawned since dispatch
+        };
+        let response = match outcome.result {
+            Ok(response) => response,
+            Err(err) => {
+                state.status = AgentStatus::Error {
+                    message: err.to_string(),
+                };
+                commands
+                    .entity(outcome.entity)
+                    .remove::<AwaitingTransitionResponse>();
+                continue;
+            }
+        };
+
+        let choice = response.content.trim().to_string();
+        let tokens = choice.len() / 4 + 1;
+        let _ = window.add_typed_entry(
+            "conversation",
+            leviath_core::EntryKind::AssistantTurn { tool_calls: vec![] },
+            format!("Transitioning to: {choice}"),
+            tokens,
+        );
+
+        let allow_complete = bp.0.stages[cursor.index].allow_complete;
+        match match_transition_choice(&choice, &resp.0, allow_complete) {
+            Some(target) => {
+                let idx =
+                    bp.0.stages
+                        .iter()
+                        .position(|s| s.name == target)
+                        .unwrap_or(0);
+                enter_stage(
+                    idx,
+                    &bp.0,
+                    &mut cursor,
+                    &mut state,
+                    &mut progress,
+                    &mut visits,
+                );
+                commands
+                    .entity(outcome.entity)
+                    .insert(stage_infs.0[idx].clone())
+                    .remove::<AwaitingTransitionResponse>()
+                    .insert(ReadyToInfer);
+            }
+            None => {
+                state.status = AgentStatus::Complete;
+                commands
+                    .entity(outcome.entity)
+                    .remove::<AwaitingTransitionResponse>();
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -901,9 +1140,11 @@ mod tests {
         let (tx, rx) = mpsc::unbounded_channel();
         let mut world = World::new();
         world.insert_resource(Providers(registry));
+        let (ttx, _trx) = mpsc::unbounded_channel();
         world.insert_resource(InferenceStage {
             pools: Arc::new(pools),
             outcomes: tx,
+            transition_outcomes: ttx,
             wake: Arc::new(Notify::new()),
             runtime: Handle::current(),
         });
@@ -1923,5 +2164,345 @@ mod tests {
             world.get::<AgentState>(e).unwrap().status,
             AgentStatus::Complete
         );
+    }
+
+    // ── async LLM-choice transition ──
+
+    fn plain_edge(target: &str) -> leviath_core::blueprint::TransitionEdge {
+        leviath_core::blueprint::TransitionEdge {
+            target: target.to_string(),
+            condition: leviath_core::blueprint::TransitionCondition::LlmChoice,
+            hint: None,
+            transform: leviath_core::blueprint::EdgeTransform::Direct,
+        }
+    }
+
+    #[test]
+    fn match_choice_done_completes_when_allowed() {
+        let edges = vec![plain_edge("b")];
+        assert_eq!(match_transition_choice("DONE", &edges, true), None);
+        // Not allowed to complete ⇒ "done" is just text ⇒ falls back to first edge.
+        assert_eq!(
+            match_transition_choice("done", &edges, false),
+            Some("b".to_string())
+        );
+    }
+
+    #[test]
+    fn match_choice_exact_and_contains_and_fallback() {
+        let edges = vec![plain_edge("review"), plain_edge("plan")];
+        // Exact (case-insensitive).
+        assert_eq!(
+            match_transition_choice("REVIEW", &edges, false),
+            Some("review".to_string())
+        );
+        // Substring (choice contains the target verbatim).
+        assert_eq!(
+            match_transition_choice("go to plan now", &edges, false),
+            Some("plan".to_string())
+        );
+        // Lowercase-contains fallback (target casing differs from the response).
+        let mixed = vec![plain_edge("Deploy")];
+        assert_eq!(
+            match_transition_choice("please deploy it", &mixed, false),
+            Some("Deploy".to_string())
+        );
+        // No match at all ⇒ first edge.
+        assert_eq!(
+            match_transition_choice("nonsense", &edges, false),
+            Some("review".to_string())
+        );
+        // No edges ⇒ nothing to pick.
+        assert_eq!(match_transition_choice("x", &[], false), None);
+    }
+
+    #[test]
+    fn build_transition_prompt_default_variants() {
+        let mut with_complete = stage_named("s", None, true, None);
+        with_complete.transition_prompt = None;
+        let edges = vec![{
+            let mut e = plain_edge("next");
+            e.hint = Some("go next".to_string());
+            e
+        }];
+        let p = build_transition_prompt(&with_complete, &edges);
+        assert!(p.contains("Stage 's' is complete"));
+        assert!(p.contains("- next: go next")); // hint rendered
+        assert!(p.contains("DONE")); // allow_complete branch
+
+        let no_complete = stage_named("s", None, false, None);
+        let p2 = build_transition_prompt(&no_complete, &edges);
+        assert!(!p2.contains("DONE"));
+        assert!(p2.contains("ONLY the stage name"));
+    }
+
+    #[test]
+    fn build_transition_prompt_custom_variants() {
+        let mut custom = stage_named("s", None, true, None);
+        custom.transition_prompt = Some("Pick wisely.".to_string());
+        let edges = vec![plain_edge("a")];
+        let p = build_transition_prompt(&custom, &edges);
+        assert!(p.starts_with("Pick wisely."));
+        assert!(p.contains("Available transitions:"));
+        assert!(p.contains("DONE"));
+
+        custom.allow_complete = false;
+        let p2 = build_transition_prompt(&custom, &edges);
+        assert!(!p2.contains("DONE"));
+        assert!(p2.contains("nothing else"));
+    }
+
+    fn conv_window() -> ContextWindow {
+        let mut w = ContextWindow::new(10_000);
+        w.add_region(Region::new(
+            "conversation".to_string(),
+            RegionKind::Clearable,
+            10_000,
+        ));
+        w
+    }
+
+    fn spawn_choosing_agent(
+        world: &mut World,
+        bp: leviath_core::Blueprint,
+        stage_infs: Vec<StageInference>,
+        edges: Vec<leviath_core::blueprint::TransitionEdge>,
+    ) -> Entity {
+        world
+            .spawn((
+                AgentBlueprint(bp),
+                StageCursor { index: 0 },
+                agent_state(),
+                StageProgress::default(),
+                StageInferences(stage_infs),
+                VisitCounts::default(),
+                conv_window(),
+                stage_infs_head(),
+                AwaitingTransitionChoice(edges),
+            ))
+            .id()
+    }
+
+    // The choosing agent also carries its current `StageInference` (dispatch reads
+    // provider/model off it).
+    fn stage_infs_head() -> StageInference {
+        StageInference {
+            provider_name: "cfg".to_string(),
+            model: "m".to_string(),
+            tools: vec![],
+            tool_filter: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn dispatch_choice_moves_to_awaiting_response_and_injects_prompt() {
+        let (mut world, _rx) = build_world(InferencePools::new(InferencePoolConfig::new()));
+        let (ttx, mut trx) = mpsc::unbounded_channel();
+        world.resource_mut::<InferenceStage>().transition_outcomes = ttx;
+
+        let bp = blueprint(vec![
+            stage_named("a", None, false, None),
+            stage_named("b", None, false, None),
+        ]);
+        let e = spawn_choosing_agent(
+            &mut world,
+            bp,
+            vec![si("m0"), si("m1")],
+            vec![plain_edge("b")],
+        );
+
+        let mut schedule = Schedule::default();
+        schedule.add_systems(dispatch_transition_choice);
+        schedule.run(&mut world);
+
+        assert!(world.get::<AwaitingTransitionResponse>(e).is_some());
+        assert!(world.get::<AwaitingTransitionChoice>(e).is_none());
+        // Prompt injected into the conversation region.
+        assert!(
+            world
+                .get::<ContextWindow>(e)
+                .unwrap()
+                .get_region("conversation")
+                .unwrap()
+                .current_tokens
+                > 0
+        );
+        // The spawned routing job reports back on the transition lane.
+        let outcome = trx.recv().await.expect("routing outcome");
+        assert_eq!(outcome.entity, e);
+    }
+
+    #[tokio::test]
+    async fn dispatch_choice_stays_when_provider_missing() {
+        let (mut world, _rx) = build_world(InferencePools::new(InferencePoolConfig::new()));
+        let bp = blueprint(vec![stage_named("a", None, false, None)]);
+        let mut infs = vec![si("m0")];
+        infs[0].provider_name = "ghost".to_string();
+        let e = spawn_choosing_agent(&mut world, bp, infs, vec![plain_edge("a")]);
+        // Override the head StageInference to the missing provider too.
+        world.entity_mut(e).insert(StageInference {
+            provider_name: "ghost".to_string(),
+            model: "m".to_string(),
+            tools: vec![],
+            tool_filter: None,
+        });
+
+        let mut schedule = Schedule::default();
+        schedule.add_systems(dispatch_transition_choice);
+        schedule.run(&mut world);
+
+        assert!(world.get::<AwaitingTransitionChoice>(e).is_some()); // stayed
+    }
+
+    #[tokio::test]
+    async fn dispatch_choice_stays_when_pool_full() {
+        let mut cfg = InferencePoolConfig::new();
+        cfg.set_limit("m", 0); // no permits for model "m"
+        let (mut world, _rx) = build_world(InferencePools::new(cfg));
+        let bp = blueprint(vec![stage_named("a", None, false, None)]);
+        let e = spawn_choosing_agent(&mut world, bp, vec![si("m0")], vec![plain_edge("a")]);
+
+        let mut schedule = Schedule::default();
+        schedule.add_systems(dispatch_transition_choice);
+        schedule.run(&mut world);
+
+        assert!(world.get::<AwaitingTransitionChoice>(e).is_some()); // stayed
+    }
+
+    fn world_with_transition_results() -> (World, mpsc::UnboundedSender<InferenceOutcome>) {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let mut world = World::new();
+        world.insert_resource(TransitionResults(rx));
+        (world, tx)
+    }
+
+    fn spawn_responding_agent(
+        world: &mut World,
+        bp: leviath_core::Blueprint,
+        stage_infs: Vec<StageInference>,
+        edges: Vec<leviath_core::blueprint::TransitionEdge>,
+    ) -> Entity {
+        world
+            .spawn((
+                AgentBlueprint(bp),
+                StageCursor { index: 0 },
+                agent_state(),
+                StageProgress::default(),
+                StageInferences(stage_infs),
+                VisitCounts::default(),
+                conv_window(),
+                AwaitingTransitionResponse(edges),
+            ))
+            .id()
+    }
+
+    fn run_collect_transition(world: &mut World) {
+        let mut s = Schedule::default();
+        s.add_systems(collect_transition_choice);
+        s.run(world);
+    }
+
+    #[test]
+    fn collect_choice_enters_chosen_stage() {
+        let (mut world, tx) = world_with_transition_results();
+        let bp = blueprint(vec![
+            stage_named("a", None, false, None),
+            stage_named("b", None, false, None),
+        ]);
+        let e = spawn_responding_agent(
+            &mut world,
+            bp,
+            vec![si("m0"), si("m1")],
+            vec![plain_edge("b")],
+        );
+        tx.send(InferenceOutcome {
+            entity: e,
+            result: Ok(resp("b")),
+        })
+        .unwrap();
+
+        run_collect_transition(&mut world);
+
+        assert_eq!(world.get::<StageCursor>(e).unwrap().index, 1);
+        assert_eq!(world.get::<StageInference>(e).unwrap().model, "m1");
+        assert!(world.get::<ReadyToInfer>(e).is_some());
+        assert!(world.get::<AwaitingTransitionResponse>(e).is_none());
+        assert_eq!(world.get::<AgentState>(e).unwrap().current_stage, "b");
+    }
+
+    #[test]
+    fn collect_choice_done_completes() {
+        let (mut world, tx) = world_with_transition_results();
+        let bp = blueprint(vec![stage_named("a", None, true, None)]); // allow_complete
+        let e = spawn_responding_agent(&mut world, bp, vec![si("m0")], vec![plain_edge("a")]);
+        tx.send(InferenceOutcome {
+            entity: e,
+            result: Ok(resp("DONE")),
+        })
+        .unwrap();
+
+        run_collect_transition(&mut world);
+
+        assert_eq!(
+            world.get::<AgentState>(e).unwrap().status,
+            AgentStatus::Complete
+        );
+        assert!(world.get::<ReadyToInfer>(e).is_none());
+    }
+
+    #[test]
+    fn collect_choice_unknown_target_falls_back_to_first_stage() {
+        let (mut world, tx) = world_with_transition_results();
+        // Edge target "b" exists as a stage; the LLM names it, so idx resolves. To
+        // exercise the position()-unwrap_or(0) fallback we point the edge at a
+        // name that survives matching but isn't a stage.
+        let bp = blueprint(vec![stage_named("a", None, false, None)]);
+        let e = spawn_responding_agent(&mut world, bp, vec![si("m0")], vec![plain_edge("ghost")]);
+        tx.send(InferenceOutcome {
+            entity: e,
+            result: Ok(resp("ghost")),
+        })
+        .unwrap();
+
+        run_collect_transition(&mut world);
+
+        // Matched "ghost" but no such stage ⇒ idx 0 ⇒ re-enters stage "a".
+        assert_eq!(world.get::<StageCursor>(e).unwrap().index, 0);
+        assert!(world.get::<ReadyToInfer>(e).is_some());
+    }
+
+    #[test]
+    fn collect_choice_marks_error_on_failure() {
+        let (mut world, tx) = world_with_transition_results();
+        let bp = blueprint(vec![stage_named("a", None, false, None)]);
+        let e = spawn_responding_agent(&mut world, bp, vec![si("m0")], vec![plain_edge("a")]);
+        tx.send(InferenceOutcome {
+            entity: e,
+            result: Err(leviath_providers::ProviderError::Other("boom".to_string())),
+        })
+        .unwrap();
+
+        run_collect_transition(&mut world);
+
+        assert_eq!(
+            world.get::<AgentState>(e).unwrap().status,
+            AgentStatus::Error {
+                message: "boom".to_string()
+            }
+        );
+        assert!(world.get::<AwaitingTransitionResponse>(e).is_none());
+    }
+
+    #[test]
+    fn collect_choice_drops_stale_outcome() {
+        let (mut world, tx) = world_with_transition_results();
+        let ghost = world.spawn_empty().id();
+        tx.send(InferenceOutcome {
+            entity: ghost,
+            result: Ok(resp("x")),
+        })
+        .unwrap();
+        // No matching AwaitingTransitionResponse agent ⇒ silently dropped.
+        run_collect_transition(&mut world);
     }
 }
