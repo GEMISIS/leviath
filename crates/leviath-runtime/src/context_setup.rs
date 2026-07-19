@@ -65,6 +65,32 @@ pub fn initialize_context_window(
     }
 }
 
+/// Swap a [`ContextWindow`] to a stage-specific layout in place, preserving each
+/// carried-over region's existing content by name. Pure over the window (no
+/// engine/entity), so both the imperative engine and the ECS pipeline's
+/// stage-entry can share it.
+pub fn apply_layout(window: &mut ContextWindow, layout: &ContextLayout) {
+    let mut new_regions = Vec::new();
+    for region_def in &layout.regions {
+        let mut new_region = Region::new(
+            region_def.name.clone(),
+            region_def.kind.clone(),
+            region_def.max_tokens,
+        );
+
+        if let Some(existing) = window.get_region(&region_def.name) {
+            for entry in &existing.content {
+                let _ = new_region.add_entry(entry.content.clone(), entry.tokens);
+            }
+        }
+
+        new_regions.push(new_region);
+    }
+
+    window.regions = new_regions;
+    window.current_tokens = window.calculate_tokens();
+}
+
 /// Swap context layout to a stage-specific layout (preserving existing content where possible).
 pub fn swap_context_layout(
     engine: &mut AgentEngine,
@@ -72,25 +98,7 @@ pub fn swap_context_layout(
     layout: &ContextLayout,
 ) {
     if let Some(mut window) = engine.world_mut().get_mut::<ContextWindow>(entity) {
-        let mut new_regions = Vec::new();
-        for region_def in &layout.regions {
-            let mut new_region = Region::new(
-                region_def.name.clone(),
-                region_def.kind.clone(),
-                region_def.max_tokens,
-            );
-
-            if let Some(existing) = window.get_region(&region_def.name) {
-                for entry in &existing.content {
-                    let _ = new_region.add_entry(entry.content.clone(), entry.tokens);
-                }
-            }
-
-            new_regions.push(new_region);
-        }
-
-        window.regions = new_regions;
-        window.current_tokens = window.calculate_tokens();
+        apply_layout(&mut window, layout);
     }
 }
 

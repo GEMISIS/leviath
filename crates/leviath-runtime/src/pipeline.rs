@@ -620,6 +620,30 @@ pub struct StageInferences(pub Vec<StageInference>);
 #[derive(Component, Debug, Clone, Default)]
 pub struct VisitCounts(pub std::collections::HashMap<String, usize>);
 
+/// Pre-resolved per-stage setup, applied by [`enter_stage`] when an agent enters
+/// a stage: inference parameters, tool-result routing, whether the stage accepts
+/// live user input, an optional stage-specific context layout, and an optional
+/// system prompt. Built once per stage when the agent is spawned (mirrors
+/// [`StageInferences`]) so stage entry stays synchronous and query-friendly.
+/// (Ported from the imperative loop's per-stage setup in the CLI executor.)
+#[derive(Clone)]
+pub struct StageSetup {
+    /// Per-stage inference config (temperature / max output tokens).
+    pub inference_config: InferenceConfig,
+    /// Optional per-stage tool-result routing.
+    pub routing: Option<leviath_core::ToolResultRouting>,
+    /// Whether the stage delivers live user messages to the agent.
+    pub accepts_messages: bool,
+    /// Optional stage-specific context layout to swap to on entry.
+    pub context_layout: Option<leviath_core::ContextLayout>,
+    /// Optional stage instructions injected as pinned context on entry.
+    pub system_prompt: Option<String>,
+}
+
+/// Pre-resolved [`StageSetup`] for every stage of the agent's blueprint.
+#[derive(Component, Clone)]
+pub struct StageSetups(pub Vec<StageSetup>);
+
 /// The stage completed with multiple candidate edges (or a single edge the stage
 /// may decline); an LLM must choose. Holds the choosable edges for the async
 /// transition-choice system.
@@ -711,14 +735,25 @@ pub fn resolve_transition(
             &mut AgentState,
             &mut StageProgress,
             &StageInferences,
+            &StageSetups,
             &mut VisitCounts,
+            &mut ContextWindow,
         ),
         With<ResolveTransition>,
     >,
     mut commands: Commands,
 ) {
-    for (entity, bp, mut cursor, mut state, mut progress, stage_infs, mut visits) in
-        agents.iter_mut()
+    for (
+        entity,
+        bp,
+        mut cursor,
+        mut state,
+        mut progress,
+        stage_infs,
+        setups,
+        mut visits,
+        mut window,
+    ) in agents.iter_mut()
     {
         let stage = &bp.0.stages[cursor.index];
         match resolve_transition_sync(&bp.0, stage, cursor.index, &visits.0) {
@@ -727,19 +762,27 @@ pub fn resolve_transition(
                 commands.entity(entity).remove::<ResolveTransition>();
             }
             StageResolution::Next(idx) => {
-                enter_stage(
+                let setup = &setups.0[idx];
+                match enter_stage(
                     idx,
                     &bp.0,
                     &mut cursor,
                     &mut state,
                     &mut progress,
                     &mut visits,
-                );
-                commands
-                    .entity(entity)
-                    .insert(stage_infs.0[idx].clone())
-                    .remove::<ResolveTransition>()
-                    .insert(ReadyToInfer);
+                    setup,
+                    &mut window,
+                ) {
+                    Ok(()) => {
+                        let mut ec = commands.entity(entity);
+                        ec.remove::<ResolveTransition>();
+                        attach_stage_components(ec, stage_infs.0[idx].clone(), setup);
+                    }
+                    Err(message) => {
+                        state.status = AgentStatus::Error { message };
+                        commands.entity(entity).remove::<ResolveTransition>();
+                    }
+                }
             }
             StageResolution::Choose(edges) => {
                 commands
@@ -752,8 +795,14 @@ pub fn resolve_transition(
 }
 
 /// Enter the stage at `idx`: update the cursor + current-stage name, reset
-/// per-stage progress, and bump the stage's visit count. (Context-layout swap and
-/// system-prompt injection are handled by the stage-setup follow-up.)
+/// per-stage progress, bump the visit count, set `accepts_messages`, and apply the
+/// stage's context setup — swap to its layout (if any) and (re)inject its system
+/// prompt as pinned `[Stage instructions: …]` context, replacing the previous
+/// stage's. (Ported from the imperative loop's per-stage setup.)
+///
+/// Returns `Err` only when the system prompt doesn't fit its region — the same
+/// hard failure the imperative loop raises; the caller marks the agent `Error`.
+#[allow(clippy::too_many_arguments)]
 fn enter_stage(
     idx: usize,
     blueprint: &leviath_core::Blueprint,
@@ -761,12 +810,69 @@ fn enter_stage(
     state: &mut AgentState,
     progress: &mut StageProgress,
     visits: &mut VisitCounts,
-) {
+    setup: &StageSetup,
+    window: &mut ContextWindow,
+) -> Result<(), String> {
     cursor.index = idx;
     let name = blueprint.stages[idx].name.clone();
     state.current_stage = name.clone();
+    state.accepts_messages = setup.accepts_messages;
     *progress = StageProgress::default();
     *visits.0.entry(name).or_insert(0) += 1;
+
+    if let Some(layout) = &setup.context_layout {
+        crate::context_setup::apply_layout(window, layout);
+    }
+
+    // Inject stage instructions into the first pinned region (cacheable), or the
+    // conversation region if there is none — clearing any prior stage's first.
+    let target = window
+        .regions
+        .iter()
+        .find(|r| matches!(r.kind, leviath_core::RegionKind::Pinned))
+        .map(|r| r.name.clone())
+        .unwrap_or_else(|| "conversation".to_string());
+    if let Some(region) = window.regions.iter_mut().find(|r| r.name == target) {
+        region.remove_entries_by_prefix("[Stage instructions:");
+    }
+    if let Some(sp) = &setup.system_prompt {
+        let content = format!("[Stage instructions: {sp}]");
+        let tokens = content.len() / 4 + 1;
+        window
+            .add_to_region(&target, content, tokens)
+            .map_err(|e| {
+                format!(
+                    "stage system prompt (~{tokens} tokens) does not fit context region \
+                 '{target}': {e}. Increase that region's max_tokens (or shorten the prompt)."
+                )
+            })?;
+    }
+    Ok(())
+}
+
+/// Finish a successful stage entry: attach the new stage's inference config,
+/// tool-result routing (present ⇒ insert, absent ⇒ clear the stale one), and its
+/// pre-resolved [`StageInference`], then mark the agent `ReadyToInfer`. Shared by
+/// both the synchronous and LLM-choice transition paths.
+fn attach_stage_components(
+    mut entity: bevy_ecs::system::EntityCommands,
+    stage_inf: StageInference,
+    setup: &StageSetup,
+) {
+    entity
+        .insert(stage_inf)
+        .insert(setup.inference_config.clone())
+        .insert(ReadyToInfer);
+    match &setup.routing {
+        Some(routing) => {
+            entity.insert(crate::components::ToolResultRoutingComponent {
+                routing: routing.clone(),
+            });
+        }
+        None => {
+            entity.remove::<crate::components::ToolResultRoutingComponent>();
+        }
+    }
 }
 
 /// A transition-choice inference is in flight (an LLM is picking the next stage);
@@ -938,6 +1044,7 @@ pub fn collect_transition_choice(
         &mut AgentState,
         &mut StageProgress,
         &StageInferences,
+        &StageSetups,
         &mut VisitCounts,
         &mut ContextWindow,
         &AwaitingTransitionResponse,
@@ -945,8 +1052,17 @@ pub fn collect_transition_choice(
     mut commands: Commands,
 ) {
     while let Ok(outcome) = results.0.try_recv() {
-        let Ok((bp, mut cursor, mut state, mut progress, stage_infs, mut visits, mut window, resp)) =
-            agents.get_mut(outcome.entity)
+        let Ok((
+            bp,
+            mut cursor,
+            mut state,
+            mut progress,
+            stage_infs,
+            setups,
+            mut visits,
+            mut window,
+            resp,
+        )) = agents.get_mut(outcome.entity)
         else {
             continue; // stale: agent cancelled/despawned since dispatch
         };
@@ -980,19 +1096,29 @@ pub fn collect_transition_choice(
                         .iter()
                         .position(|s| s.name == target)
                         .unwrap_or(0);
-                enter_stage(
+                let setup = &setups.0[idx];
+                match enter_stage(
                     idx,
                     &bp.0,
                     &mut cursor,
                     &mut state,
                     &mut progress,
                     &mut visits,
-                );
-                commands
-                    .entity(outcome.entity)
-                    .insert(stage_infs.0[idx].clone())
-                    .remove::<AwaitingTransitionResponse>()
-                    .insert(ReadyToInfer);
+                    setup,
+                    &mut window,
+                ) {
+                    Ok(()) => {
+                        let mut ec = commands.entity(outcome.entity);
+                        ec.remove::<AwaitingTransitionResponse>();
+                        attach_stage_components(ec, stage_infs.0[idx].clone(), setup);
+                    }
+                    Err(message) => {
+                        state.status = AgentStatus::Error { message };
+                        commands
+                            .entity(outcome.entity)
+                            .remove::<AwaitingTransitionResponse>();
+                    }
+                }
             }
             None => {
                 state.status = AgentStatus::Complete;
@@ -1922,12 +2048,31 @@ mod tests {
         }
     }
 
+    /// A no-op stage setup (no layout, no system prompt, accepts input).
+    fn setup() -> StageSetup {
+        StageSetup {
+            inference_config: InferenceConfig {
+                temperature: None,
+                max_output_tokens: None,
+            },
+            routing: None,
+            accepts_messages: true,
+            context_layout: None,
+            system_prompt: None,
+        }
+    }
+
+    fn setups(n: usize) -> StageSetups {
+        StageSetups((0..n).map(|_| setup()).collect())
+    }
+
     fn spawn_transition_agent(
         world: &mut World,
         bp: leviath_core::Blueprint,
         stage_infs: Vec<StageInference>,
         visits: VisitCounts,
     ) -> Entity {
+        let n = stage_infs.len();
         world
             .spawn((
                 AgentBlueprint(bp),
@@ -1938,6 +2083,8 @@ mod tests {
                     text_only_nudges: 1,
                 },
                 StageInferences(stage_infs),
+                setups(n),
+                conv_window(),
                 visits,
                 ResolveTransition,
             ))
@@ -2166,6 +2313,190 @@ mod tests {
         );
     }
 
+    // ── stage setup on entry ──
+
+    fn pinned_window() -> ContextWindow {
+        let mut w = ContextWindow::new(10_000);
+        w.add_region(Region::new("sys".to_string(), RegionKind::Pinned, 2000));
+        w.add_region(Region::new(
+            "conversation".to_string(),
+            RegionKind::Clearable,
+            10_000,
+        ));
+        w
+    }
+
+    /// Spawn a linear two-stage agent poised to transition, with a custom setup
+    /// for the destination stage and the given starting window.
+    fn spawn_setup_agent(
+        world: &mut World,
+        dest_setup: StageSetup,
+        window: ContextWindow,
+    ) -> Entity {
+        let bp = blueprint(vec![
+            stage_named("a", None, false, None),
+            stage_named("b", None, false, None),
+        ]);
+        world
+            .spawn((
+                AgentBlueprint(bp),
+                StageCursor { index: 0 },
+                agent_state(),
+                StageProgress::default(),
+                StageInferences(vec![si("m0"), si("m1")]),
+                StageSetups(vec![setup(), dest_setup]),
+                VisitCounts::default(),
+                window,
+                ResolveTransition,
+            ))
+            .id()
+    }
+
+    #[test]
+    fn enter_stage_injects_system_prompt_and_config() {
+        let mut s = setup();
+        s.system_prompt = Some("be terse".to_string());
+        s.inference_config = InferenceConfig {
+            temperature: Some(0.3),
+            max_output_tokens: Some(99),
+        };
+        s.accepts_messages = false;
+        let mut world = World::new();
+        let e = spawn_setup_agent(&mut world, s, pinned_window());
+
+        run_transition(&mut world);
+
+        // Instructions landed in the pinned region, not conversation.
+        assert!(
+            world
+                .get::<ContextWindow>(e)
+                .unwrap()
+                .get_region("sys")
+                .unwrap()
+                .current_tokens
+                > 0
+        );
+        let cfg = world.get::<InferenceConfig>(e).unwrap();
+        assert_eq!(cfg.max_output_tokens, Some(99));
+        assert!(!world.get::<AgentState>(e).unwrap().accepts_messages);
+        assert!(world.get::<ReadyToInfer>(e).is_some());
+    }
+
+    #[test]
+    fn enter_stage_swaps_context_layout() {
+        let mut s = setup();
+        s.context_layout = Some(leviath_core::layout::ContextLayout::new(
+            vec![leviath_core::layout::RegionDefinition::new(
+                "scratch".to_string(),
+                RegionKind::Clearable,
+                5000,
+            )],
+            8000,
+        ));
+        let mut world = World::new();
+        let e = spawn_setup_agent(&mut world, s, pinned_window());
+
+        run_transition(&mut world);
+
+        let w = world.get::<ContextWindow>(e).unwrap();
+        assert!(w.get_region("scratch").is_some()); // swapped in
+        assert!(w.get_region("sys").is_none()); // old layout dropped
+    }
+
+    #[test]
+    fn enter_stage_inserts_tool_result_routing() {
+        let mut s = setup();
+        s.routing = Some(leviath_core::ToolResultRouting {
+            default_region: "notes".to_string(),
+            ..Default::default()
+        });
+        let mut world = World::new();
+        let e = spawn_setup_agent(&mut world, s, pinned_window());
+
+        run_transition(&mut world);
+
+        let routing = world
+            .get::<crate::components::ToolResultRoutingComponent>(e)
+            .unwrap();
+        assert_eq!(routing.routing.default_region, "notes");
+    }
+
+    #[test]
+    fn enter_stage_errors_when_system_prompt_overflows_region() {
+        let mut s = setup();
+        s.system_prompt = Some("x".repeat(100_000)); // far exceeds the 2000-tok region
+        let mut world = World::new();
+        let e = spawn_setup_agent(&mut world, s, pinned_window());
+
+        run_transition(&mut world);
+
+        assert_eq!(
+            std::mem::discriminant(&world.get::<AgentState>(e).unwrap().status),
+            std::mem::discriminant(&AgentStatus::Error {
+                message: String::new()
+            })
+        );
+        assert!(world.get::<ReadyToInfer>(e).is_none());
+    }
+
+    #[test]
+    fn enter_stage_without_target_region_skips_injection() {
+        // Neither a pinned region nor a "conversation" region exists, so the
+        // stage-instructions target ("conversation" fallback) isn't found: the
+        // clear is skipped and, with no system prompt, entry still succeeds.
+        let mut w = ContextWindow::new(10_000);
+        w.add_region(Region::new(
+            "notes".to_string(),
+            RegionKind::Clearable,
+            5000,
+        ));
+        let mut world = World::new();
+        let e = spawn_setup_agent(&mut world, setup(), w);
+
+        run_transition(&mut world);
+
+        assert!(world.get::<ReadyToInfer>(e).is_some());
+    }
+
+    #[test]
+    fn collect_choice_errors_when_system_prompt_overflows() {
+        let (mut world, tx) = world_with_transition_results();
+        let bp = blueprint(vec![
+            stage_named("a", None, false, None),
+            stage_named("b", None, false, None),
+        ]);
+        let mut dest = setup();
+        dest.system_prompt = Some("x".repeat(100_000));
+        let e = world
+            .spawn((
+                AgentBlueprint(bp),
+                StageCursor { index: 0 },
+                agent_state(),
+                StageProgress::default(),
+                StageInferences(vec![si("m0"), si("m1")]),
+                StageSetups(vec![setup(), dest]),
+                VisitCounts::default(),
+                pinned_window(),
+                AwaitingTransitionResponse(vec![plain_edge("b")]),
+            ))
+            .id();
+        tx.send(InferenceOutcome {
+            entity: e,
+            result: Ok(resp("b")),
+        })
+        .unwrap();
+
+        run_collect_transition(&mut world);
+
+        assert_eq!(
+            std::mem::discriminant(&world.get::<AgentState>(e).unwrap().status),
+            std::mem::discriminant(&AgentStatus::Error {
+                message: String::new()
+            })
+        );
+        assert!(world.get::<AwaitingTransitionResponse>(e).is_none());
+    }
+
     // ── async LLM-choice transition ──
 
     fn plain_edge(target: &str) -> leviath_core::blueprint::TransitionEdge {
@@ -2382,6 +2713,7 @@ mod tests {
         stage_infs: Vec<StageInference>,
         edges: Vec<leviath_core::blueprint::TransitionEdge>,
     ) -> Entity {
+        let n = stage_infs.len();
         world
             .spawn((
                 AgentBlueprint(bp),
@@ -2389,6 +2721,7 @@ mod tests {
                 agent_state(),
                 StageProgress::default(),
                 StageInferences(stage_infs),
+                setups(n),
                 VisitCounts::default(),
                 conv_window(),
                 AwaitingTransitionResponse(edges),
