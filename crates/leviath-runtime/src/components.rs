@@ -207,7 +207,7 @@ impl ContextWindow {
     /// Add a typed entry to a specific region.
     ///
     /// Like [`add_to_region`](Self::add_to_region) but the entry carries an
-    /// [`EntryKind`] so message roles are determined by type, not text-prefix
+    /// `EntryKind` so message roles are determined by type, not text-prefix
     /// parsing.
     pub fn add_typed_entry(
         &mut self,
@@ -703,7 +703,7 @@ impl ContextWindow {
     ///
     /// The typed+tainted counterpart of [`add_typed_entry`](Self::add_typed_entry)
     /// and [`add_tainted_to_region`](Self::add_tainted_to_region): the entry keeps
-    /// its [`EntryKind`] (so turn-group eviction stays intact) while contributing
+    /// its `EntryKind` (so turn-group eviction stays intact) while contributing
     /// the given taint level (so the taint gate sees sensitive tool output).
     pub fn add_typed_tainted_to_region(
         &mut self,

@@ -1,7 +1,7 @@
 //! Decoupling seam between the stage loop and the concrete tool registry.
 //!
 //! The stage loop / stages / fan-out only
-//! need two things from the CLI's [`ToolRegistry`](crate::tools::ToolRegistry):
+//! need two things from the CLI's `ToolRegistry`:
 //! the set of tool definitions to advertise, and a way to execute a single tool
 //! call by name. Capturing exactly that in [`StageToolSource`] keeps the stage
 //! loop free of a `runtime -> cli` dependency on `ToolRegistry`. The concrete

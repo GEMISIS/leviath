@@ -12,7 +12,7 @@
 //!    `Permissions::from_mode(0o600)` logic each has exactly one implementation
 //!    here, rather than being spread across call sites in `leviath-cli`.
 //! 2. **Per-OS coverage correctness.** Because all platform code is gathered
-//!    into cfg-gated submodules ([`platform`]), the non-target
+//!    into cfg-gated submodules (`platform`), the non-target
 //!    implementations (`#[cfg(windows)]` on a Linux CI run) are simply not
 //!    compiled, so the coverage tool never sees them as gaps. The
 //!    Linux-visible code paths are all reachable from real unit tests.

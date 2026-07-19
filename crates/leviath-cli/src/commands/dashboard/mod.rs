@@ -58,7 +58,7 @@ async fn engine_background_loop(
 
 /// Abstracts "give me the next input event, or `None` if the poll timeout
 /// elapses" (i.e. `crossterm::event::poll` + `event::read`), so the
-/// dashboard's main loop ([`run_dashboard_loop`]) can be driven by canned
+/// dashboard's main loop (`run_dashboard_loop`) can be driven by canned
 /// events in tests instead of blocking on a real terminal.
 pub trait EventSource {
     fn poll_event(&mut self, timeout: Duration) -> std::io::Result<Option<Event>>;
@@ -94,7 +94,7 @@ impl EventSource for CrosstermEventSource {
     }
 }
 
-/// Abstracts terminal setup/teardown so [`execute_core`] can be tested with
+/// Abstracts terminal setup/teardown so `execute_core` can be tested with
 /// a [`ratatui::backend::TestBackend`] and no-op TTY operations. The real
 /// crossterm implementation (`CrosstermSetup`) lives in the binary — see
 /// `real_dashboard` — since it can only be exercised against a real terminal.

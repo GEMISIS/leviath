@@ -5,7 +5,7 @@
 //! clipboard tool. The bytes must reach the real terminal — the controlling
 //! `/dev/tty` or stdout.
 //!
-//! This module holds the pure, fully-tested pieces: [`osc52_sequence`] (the
+//! This module holds the pure, fully-tested pieces: `osc52_sequence` (the
 //! base64/escape encoding) and [`osc52_write_via`] (the tty-then-stdout branch
 //! logic, parameterized over the tty opener and the fallback sink so every
 //! branch is exercised via injected fakes). The genuinely-untestable real-I/O

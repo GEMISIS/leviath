@@ -153,7 +153,7 @@ fn open_log_file(log_path: &std::path::Path) -> (std::fs::File, std::fs::File) {
 /// `io` carries the real-stdin dependencies the binary injects (see
 /// [`foreground::ForegroundIo`]). Foreground runs use all of them; background
 /// runs only need the `stdin_is_terminal` probe (for task resolution's
-/// editor-launch path), which is threaded down to [`execute_background`].
+/// editor-launch path), which is threaded down to `execute_background`.
 pub async fn execute(args: RunArgs, io: foreground::ForegroundIo) -> anyhow::Result<()> {
     if args.foreground {
         if args.count > 1 {
