@@ -17,6 +17,7 @@ use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
 use leviath_providers::{InferenceRequest, Provider, Tool};
 
+use crate::compaction_bridge::{CompactionJob, CompactionOutcome, run_compaction_job};
 use crate::components::{
     AgentMessage, AgentState, AgentStatus, ContextWindow, InferenceConfig, MessageInbox,
 };
@@ -74,6 +75,9 @@ pub struct InferenceStage {
     /// lane so the collect systems don't confuse a routing decision with a normal
     /// agent turn).
     pub transition_outcomes: UnboundedSender<InferenceOutcome>,
+    /// Where completed *compaction* jobs (LLM context summarization) are
+    /// reported — again a separate lane so a summary isn't mistaken for a turn.
+    pub compaction_outcomes: UnboundedSender<crate::compaction_bridge::CompactionOutcome>,
     /// Signalled when an inference completes, to wake the tick loop.
     pub wake: Arc<Notify>,
     /// Runtime the worker tasks are spawned onto.
@@ -545,6 +549,178 @@ pub fn collect_tools(
             .entity(outcome.entity)
             .remove::<AwaitingTools>()
             .insert(ReadyToInfer);
+    }
+}
+
+// ─── Compaction (LLM context summarization) ──────────────────────────────────
+
+/// Per-agent compaction configuration; its presence opts the agent into
+/// automatic eviction + LLM compaction before each inference (mirrors the
+/// imperative loop's `Option<&CompactionConfig>`).
+#[derive(Component, Clone)]
+pub struct CompactionSettings(pub leviath_core::CompactionConfig);
+
+/// A compaction job (LLM summarization) is in flight; the agent is held out of
+/// inference until its summaries land.
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AwaitingCompaction;
+
+/// The receiving end of the compaction-outcomes channel, as a world resource.
+/// (The sending end lives in [`InferenceStage::compaction_outcomes`].)
+#[derive(Resource)]
+pub struct CompactionResults(pub UnboundedReceiver<CompactionOutcome>);
+
+/// The eviction threshold (fraction of budget) at which compaction kicks in —
+/// the same 0.9 the imperative `evict_and_compact` uses.
+const EVICTION_THRESHOLD: f32 = 0.9;
+
+/// Compaction-dispatch system: for each `ReadyToInfer` agent with
+/// [`CompactionSettings`] whose window is over the eviction threshold, do the
+/// synchronous eviction inline; if that surfaces regions needing LLM
+/// summarization (and content to summarize), build one request per region,
+/// acquire a permit for the compaction model, spawn the job, and hold the agent
+/// as `AwaitingCompaction`. Anything that can't proceed (under threshold, nothing
+/// to summarize, provider missing, pool full) simply leaves the agent
+/// `ReadyToInfer` so inference proceeds — compaction is best-effort. (Ported from
+/// `AgentEngine::evict_and_compact`.)
+#[allow(clippy::type_complexity)]
+pub fn dispatch_compaction(
+    mut agents: Query<
+        (Entity, &mut ContextWindow, &CompactionSettings),
+        (With<ReadyToInfer>, Without<AwaitingCompaction>),
+    >,
+    stage: Res<InferenceStage>,
+    providers: Res<Providers>,
+    mut commands: Commands,
+) {
+    for (entity, mut window, settings) in agents.iter_mut() {
+        if !window.needs_eviction(EVICTION_THRESHOLD) {
+            continue; // under threshold — nothing to do
+        }
+        let target_free = window.max_tokens / 10;
+        let Ok(eviction) = window.try_evict(target_free) else {
+            continue; // couldn't evict — proceed to inference as-is
+        };
+
+        // Build a summarize request per region that both needs compaction and
+        // has content to summarize.
+        let config = &settings.0;
+        let mut requests = Vec::new();
+        for region_name in &eviction.needs_compaction {
+            // The names come from `try_evict`'s own scan of `window.regions`, and
+            // nothing between there and here mutates the region set, so the region
+            // is guaranteed present.
+            let region = window
+                .get_region(region_name)
+                .expect("needs_compaction region present: named by try_evict's own scan");
+            let content: String = region
+                .content
+                .iter()
+                .map(|e| e.content.as_str())
+                .collect::<Vec<_>>()
+                .join("\n\n");
+            if content.is_empty() {
+                continue; // nothing to summarize (e.g. token-only placeholder)
+            }
+            requests.push((
+                region_name.clone(),
+                compaction_request(config, &content, region_name),
+            ));
+        }
+        if requests.is_empty() {
+            continue; // sync eviction was enough (or nothing summarizable)
+        }
+
+        let Some(provider) = providers.0.get(&config.provider).cloned() else {
+            continue; // compaction provider not registered — skip, non-fatal
+        };
+        let Some(permit) = stage.pools.try_acquire(&config.model) else {
+            continue; // pool full — skip compaction this round
+        };
+
+        stage.runtime.spawn(run_compaction_job(
+            CompactionJob {
+                entity,
+                provider,
+                requests,
+                permit,
+            },
+            stage.compaction_outcomes.clone(),
+            stage.wake.clone(),
+        ));
+        commands
+            .entity(entity)
+            .remove::<ReadyToInfer>()
+            .insert(AwaitingCompaction);
+    }
+}
+
+/// Compaction-collect system: drain finished compaction jobs and apply each
+/// summary into its paired `CompactHistory` region, clearing the summarized
+/// source region. A provider error leaves the context untouched (best-effort).
+/// Either way the agent returns to `ReadyToInfer`. (Ported from the storage tail
+/// of `AgentEngine::compact_region`.)
+pub fn collect_compaction(
+    mut results: ResMut<CompactionResults>,
+    mut agents: Query<&mut ContextWindow, With<AwaitingCompaction>>,
+    mut commands: Commands,
+) {
+    while let Ok(outcome) = results.0.try_recv() {
+        let Ok(mut window) = agents.get_mut(outcome.entity) else {
+            continue; // stale: agent cancelled/despawned since dispatch
+        };
+        if let Ok(summaries) = outcome.result {
+            for (region_name, summary) in summaries {
+                let summary_tokens = summary.len() / 4;
+                let history = window
+                    .regions
+                    .iter()
+                    .find(|r| {
+                        matches!(&r.kind, leviath_core::RegionKind::CompactHistory { source_region }
+                            if source_region == &region_name)
+                    })
+                    .map(|r| r.name.clone());
+                if let Some(history_name) = history {
+                    let _ = window.add_to_region(&history_name, summary, summary_tokens);
+                }
+                if let Some(region) = window.get_region_mut(&region_name) {
+                    region.clear();
+                }
+            }
+            window.current_tokens = window.calculate_tokens();
+        }
+        commands
+            .entity(outcome.entity)
+            .remove::<AwaitingCompaction>()
+            .insert(ReadyToInfer);
+    }
+}
+
+/// Build the summarize [`InferenceRequest`] for one region's content.
+fn compaction_request(
+    config: &leviath_core::CompactionConfig,
+    content: &str,
+    region_name: &str,
+) -> InferenceRequest {
+    InferenceRequest {
+        system: vec![],
+        messages: vec![
+            leviath_providers::Message {
+                role: "system".to_string(),
+                content: config.system_prompt().to_string().into(),
+                cache_breakpoint: false,
+            },
+            leviath_providers::Message {
+                role: "user".to_string(),
+                content: config.user_prompt(content, region_name).into(),
+                cache_breakpoint: false,
+            },
+        ],
+        model: config.model.clone(),
+        max_tokens: config.max_summary_tokens,
+        temperature: config.temperature,
+        tools: Vec::new(),
+        extra: serde_json::Value::Null,
     }
 }
 
@@ -1401,10 +1577,12 @@ mod tests {
         let mut world = World::new();
         world.insert_resource(Providers(registry));
         let (ttx, _trx) = mpsc::unbounded_channel();
+        let (ctx, _crx) = mpsc::unbounded_channel();
         world.insert_resource(InferenceStage {
             pools: Arc::new(pools),
             outcomes: tx,
             transition_outcomes: ttx,
+            compaction_outcomes: ctx,
             wake: Arc::new(Notify::new()),
             runtime: Handle::current(),
         });
@@ -2755,6 +2933,340 @@ mod tests {
         let mut world = World::new();
         let err = spawn_agent(&mut world, "a".to_string(), bp, "t", vec![resolved("m")]);
         assert!(err.is_err());
+    }
+
+    // ── compaction ──
+
+    fn compacting_window() -> ContextWindow {
+        let mut w = ContextWindow::new(100);
+        let mut conv = Region::new(
+            "conv".to_string(),
+            RegionKind::Compacting {
+                threshold_tokens: 5,
+            },
+            100,
+        );
+        let _ = conv.add_entry("x".repeat(380), 95); // 95 tokens: over threshold, <10 free
+        w.add_region(conv);
+        w.add_region(Region::new(
+            "history".to_string(),
+            RegionKind::CompactHistory {
+                source_region: "conv".to_string(),
+            },
+            100,
+        ));
+        w.current_tokens = w.calculate_tokens();
+        w
+    }
+
+    fn compaction_settings(provider: &str, model: &str) -> CompactionSettings {
+        CompactionSettings(leviath_core::CompactionConfig {
+            provider: provider.to_string(),
+            model: model.to_string(),
+            system_prompt: None,
+            user_prompt_template: None,
+            max_summary_tokens: 200,
+            temperature: 0.2,
+        })
+    }
+
+    fn run_dispatch_compaction(world: &mut World) {
+        let mut s = Schedule::default();
+        s.add_systems(dispatch_compaction);
+        s.run(world);
+    }
+
+    #[tokio::test]
+    async fn compaction_dispatches_when_over_threshold() {
+        // Provider "cfg" is registered by build_world; the window is at the
+        // eviction threshold with a Compacting region that needs summarizing.
+        let (mut world, _rx) = build_world(InferencePools::new(InferencePoolConfig::new()));
+        let e = world
+            .spawn((
+                compacting_window(),
+                compaction_settings("cfg", "m"),
+                agent_state(),
+                ReadyToInfer,
+            ))
+            .id();
+
+        run_dispatch_compaction(&mut world);
+
+        assert!(world.get::<AwaitingCompaction>(e).is_some());
+        assert!(world.get::<ReadyToInfer>(e).is_none());
+    }
+
+    #[tokio::test]
+    async fn compaction_skips_when_under_threshold() {
+        let (mut world, _rx) = build_world(InferencePools::new(InferencePoolConfig::new()));
+        let mut w = ContextWindow::new(1000);
+        w.add_region(Region::new(
+            "conv".to_string(),
+            RegionKind::Compacting {
+                threshold_tokens: 5,
+            },
+            1000,
+        ));
+        let e = world
+            .spawn((
+                w,
+                compaction_settings("cfg", "m"),
+                agent_state(),
+                ReadyToInfer,
+            ))
+            .id();
+
+        run_dispatch_compaction(&mut world);
+
+        // Under threshold ⇒ untouched, ready to infer.
+        assert!(world.get::<ReadyToInfer>(e).is_some());
+        assert!(world.get::<AwaitingCompaction>(e).is_none());
+    }
+
+    #[tokio::test]
+    async fn compaction_skips_when_provider_missing() {
+        let (mut world, _rx) = build_world(InferencePools::new(InferencePoolConfig::new()));
+        let e = world
+            .spawn((
+                compacting_window(),
+                compaction_settings("ghost", "m"), // unregistered provider
+                agent_state(),
+                ReadyToInfer,
+            ))
+            .id();
+
+        run_dispatch_compaction(&mut world);
+
+        assert!(world.get::<ReadyToInfer>(e).is_some());
+        assert!(world.get::<AwaitingCompaction>(e).is_none());
+    }
+
+    #[tokio::test]
+    async fn compaction_skips_when_pool_full() {
+        let mut cfg = InferencePoolConfig::new();
+        cfg.set_limit("m", 0); // no permits for the compaction model
+        let (mut world, _rx) = build_world(InferencePools::new(cfg));
+        let e = world
+            .spawn((
+                compacting_window(),
+                compaction_settings("cfg", "m"),
+                agent_state(),
+                ReadyToInfer,
+            ))
+            .id();
+
+        run_dispatch_compaction(&mut world);
+
+        assert!(world.get::<ReadyToInfer>(e).is_some());
+        assert!(world.get::<AwaitingCompaction>(e).is_none());
+    }
+
+    #[tokio::test]
+    async fn compaction_evicts_but_needs_no_summary() {
+        // A Clearable region over threshold is fully cleared by sync eviction, so
+        // no LLM summary is needed and the agent stays ready to infer.
+        let (mut world, _rx) = build_world(InferencePools::new(InferencePoolConfig::new()));
+        let mut w = ContextWindow::new(100);
+        let mut scratch = Region::new("scratch".to_string(), RegionKind::Clearable, 100);
+        let _ = scratch.add_entry("y".repeat(360), 95);
+        w.add_region(scratch);
+        w.current_tokens = w.calculate_tokens();
+        let e = world
+            .spawn((
+                w,
+                compaction_settings("cfg", "m"),
+                agent_state(),
+                ReadyToInfer,
+            ))
+            .id();
+
+        run_dispatch_compaction(&mut world);
+
+        assert!(world.get::<ReadyToInfer>(e).is_some());
+        assert!(world.get::<AwaitingCompaction>(e).is_none());
+        // The clearable region was emptied by eviction.
+        assert_eq!(
+            world
+                .get::<ContextWindow>(e)
+                .unwrap()
+                .get_region("scratch")
+                .unwrap()
+                .current_tokens,
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn compaction_skips_when_eviction_errors() {
+        // Pinned content over the total budget makes try_evict return
+        // PinnedRegionsOverBudget; compaction is skipped and inference proceeds.
+        let (mut world, _rx) = build_world(InferencePools::new(InferencePoolConfig::new()));
+        let mut w = ContextWindow::new(100);
+        let mut pinned = Region::new("id".to_string(), RegionKind::Pinned, 500);
+        let _ = pinned.add_entry("p".repeat(600), 150); // pinned 150 > budget 100
+        w.add_region(pinned);
+        w.current_tokens = w.calculate_tokens();
+        let e = world
+            .spawn((
+                w,
+                compaction_settings("cfg", "m"),
+                agent_state(),
+                ReadyToInfer,
+            ))
+            .id();
+
+        run_dispatch_compaction(&mut world);
+
+        assert!(world.get::<ReadyToInfer>(e).is_some());
+        assert!(world.get::<AwaitingCompaction>(e).is_none());
+    }
+
+    #[tokio::test]
+    async fn compaction_skips_region_with_empty_content() {
+        // A Compacting region over its token threshold but whose entries carry no
+        // text (a token-only placeholder) yields nothing to summarize.
+        let (mut world, _rx) = build_world(InferencePools::new(InferencePoolConfig::new()));
+        let mut w = ContextWindow::new(100);
+        let mut conv = Region::new(
+            "conv".to_string(),
+            RegionKind::Compacting {
+                threshold_tokens: 5,
+            },
+            100,
+        );
+        let _ = conv.add_entry(String::new(), 95); // empty content, 95 tokens
+        w.add_region(conv);
+        w.current_tokens = w.calculate_tokens();
+        let e = world
+            .spawn((
+                w,
+                compaction_settings("cfg", "m"),
+                agent_state(),
+                ReadyToInfer,
+            ))
+            .id();
+
+        run_dispatch_compaction(&mut world);
+
+        // Nothing summarizable ⇒ no job, stays ready.
+        assert!(world.get::<ReadyToInfer>(e).is_some());
+        assert!(world.get::<AwaitingCompaction>(e).is_none());
+    }
+
+    fn world_with_compaction_results() -> (World, mpsc::UnboundedSender<CompactionOutcome>) {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let mut world = World::new();
+        world.insert_resource(CompactionResults(rx));
+        (world, tx)
+    }
+
+    fn run_collect_compaction(world: &mut World) {
+        let mut s = Schedule::default();
+        s.add_systems(collect_compaction);
+        s.run(world);
+    }
+
+    #[test]
+    fn collect_compaction_stores_summary_and_clears_source() {
+        let (mut world, tx) = world_with_compaction_results();
+        let e = world.spawn((compacting_window(), AwaitingCompaction)).id();
+        tx.send(CompactionOutcome {
+            entity: e,
+            result: Ok(vec![("conv".to_string(), "the summary".to_string())]),
+        })
+        .unwrap();
+
+        run_collect_compaction(&mut world);
+
+        let w = world.get::<ContextWindow>(e).unwrap();
+        assert_eq!(w.get_region("conv").unwrap().current_tokens, 0); // source cleared
+        assert!(w.get_region("history").unwrap().current_tokens > 0); // summary stored
+        assert!(world.get::<ReadyToInfer>(e).is_some());
+        assert!(world.get::<AwaitingCompaction>(e).is_none());
+    }
+
+    #[test]
+    fn collect_compaction_error_leaves_context_and_readies() {
+        let (mut world, tx) = world_with_compaction_results();
+        let e = world.spawn((compacting_window(), AwaitingCompaction)).id();
+        let before = world
+            .get::<ContextWindow>(e)
+            .unwrap()
+            .get_region("conv")
+            .unwrap()
+            .current_tokens;
+        tx.send(CompactionOutcome {
+            entity: e,
+            result: Err(leviath_providers::ProviderError::Other("boom".to_string())),
+        })
+        .unwrap();
+
+        run_collect_compaction(&mut world);
+
+        // Context untouched on failure, but the agent proceeds.
+        assert_eq!(
+            world
+                .get::<ContextWindow>(e)
+                .unwrap()
+                .get_region("conv")
+                .unwrap()
+                .current_tokens,
+            before
+        );
+        assert!(world.get::<ReadyToInfer>(e).is_some());
+    }
+
+    #[test]
+    fn collect_compaction_drops_stale_outcome() {
+        let (mut world, tx) = world_with_compaction_results();
+        let ghost = world.spawn_empty().id();
+        tx.send(CompactionOutcome {
+            entity: ghost,
+            result: Ok(vec![]),
+        })
+        .unwrap();
+        run_collect_compaction(&mut world); // no matching agent ⇒ dropped
+    }
+
+    #[test]
+    fn collect_compaction_summary_for_unpaired_region_is_skipped() {
+        // A summary for a region with no paired CompactHistory still clears the
+        // source (exercises the None history branch).
+        let (mut world, tx) = world_with_compaction_results();
+        let mut w = ContextWindow::new(100);
+        let mut lone = Region::new(
+            "lone".to_string(),
+            RegionKind::Compacting {
+                threshold_tokens: 5,
+            },
+            100,
+        );
+        let _ = lone.add_entry("z".repeat(80), 20);
+        w.add_region(lone);
+        w.current_tokens = w.calculate_tokens();
+        let e = world.spawn((w, AwaitingCompaction)).id();
+        tx.send(CompactionOutcome {
+            entity: e,
+            // "lone" exists but is unpaired (history None); "gone" doesn't exist
+            // at all (get_region_mut None) — both no-op branches.
+            result: Ok(vec![
+                ("lone".to_string(), "s".to_string()),
+                ("gone".to_string(), "s2".to_string()),
+            ]),
+        })
+        .unwrap();
+
+        run_collect_compaction(&mut world);
+
+        assert_eq!(
+            world
+                .get::<ContextWindow>(e)
+                .unwrap()
+                .get_region("lone")
+                .unwrap()
+                .current_tokens,
+            0
+        );
     }
 
     // ── async LLM-choice transition ──
