@@ -11,6 +11,7 @@ pub mod context_setup;
 pub mod dynamic_interaction;
 pub mod engine;
 pub mod graph;
+pub mod inference_pool;
 pub mod pool;
 pub mod provider_creds;
 pub mod repetition;
@@ -34,6 +35,7 @@ pub use engine::{
     AgentEngine, EngineHandle, ProviderRegistry, ToolExecutorDyn, ToolResultsFuture,
     run_inference_loop_shared,
 };
+pub use inference_pool::{InferencePermit, InferencePoolConfig, InferencePools};
 pub use pool::AgentPool;
 pub use provider_creds::{ProviderCreds, build_provider_registry};
 pub use run_io::RunIO;
