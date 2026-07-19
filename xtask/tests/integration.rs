@@ -84,24 +84,6 @@ fn integration_misspelled_subcommand_exits_nonzero() {
     assert!(!ok, "misspelled subcommand should exit non-zero");
 }
 
-// ── check-exclusions ─────────────────────────────────────────────────────────
-
-#[test]
-fn integration_check_exclusions_passes_on_clean_workspace() {
-    // Run from the workspace root (the process inherits CWD = workspace root
-    // when invoked by cargo test in the standard layout).
-    // This test exercises the happy path: a clean workspace passes the scan.
-    let (ok, stdout, stderr) = run_xtask(&["check-exclusions"]);
-    assert!(
-        ok,
-        "check-exclusions should pass on the clean workspace.\nstdout: {stdout}\nstderr: {stderr}"
-    );
-    assert!(
-        stdout.contains("No coverage suppression"),
-        "stdout should confirm no violations, got: {stdout}"
-    );
-}
-
 // ── coverage fast-fail path (workspace has no tests dir) ────────────────────
 
 #[test]

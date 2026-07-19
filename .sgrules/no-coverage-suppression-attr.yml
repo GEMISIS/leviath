@@ -1,0 +1,10 @@
+id: no-coverage-suppression-attr
+language: rust
+severity: error
+message: >-
+  Coverage-suppression attribute is banned (coverage(off) / any tarpaulin
+  attribute). Refactor the code to be testable; the workspace gates a hard 100%
+  with no suppression escape hatches.
+rule:
+  kind: attribute_item
+  regex: 'coverage\(off\)|tarpaulin'

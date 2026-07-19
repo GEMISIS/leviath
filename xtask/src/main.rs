@@ -6,9 +6,10 @@
 //!   coverage                    Compute all packages, aggregate, enforce a hard 100%.
 //!   coverage --package <pkg>    Compute just one package's coverage (CI fan-out).
 //!   coverage --gate             Aggregate collected per-package JSONs and enforce 100%.
-//!   check-exclusions            Verify no coverage-suppression markers exist anywhere.
+//!
+//! The zero-suppression policy (no `#[cfg(not(test))]`, no tarpaulin/lcov/grcov
+//! markers) is enforced separately by ast-grep — see `sgconfig.yml`/`.sgrules/`.
 
-mod check_exclusions;
 mod coverage;
 
 use anyhow::Result;
@@ -22,18 +23,16 @@ fn main() -> Result<()> {
 ///
 /// Extracted from `main` so it can be unit-tested without spawning processes.
 pub fn dispatch(args: &[String]) -> Result<()> {
-    dispatch_with(args, coverage::run, check_exclusions::run)
+    dispatch_with(args, coverage::run)
 }
 
-/// Route the CLI arguments to the provided handler closures.
+/// Route the CLI arguments to the provided handler closure.
 ///
-/// `run_cov` and `run_excl` replace the real `coverage::run` and
-/// `check_exclusions::run` in unit tests, making every match arm reachable
-/// without invoking external tooling.
+/// `run_cov` replaces the real `coverage::run` in unit tests, making every
+/// match arm reachable without invoking external tooling.
 pub fn dispatch_with(
     args: &[String],
     run_cov: impl FnOnce(coverage::CoverageMode) -> Result<()>,
-    run_excl: impl FnOnce() -> Result<()>,
 ) -> Result<()> {
     let subcommand = args.first().map(String::as_str).unwrap_or("help");
     match subcommand {
@@ -41,7 +40,6 @@ pub fn dispatch_with(
             let mode = coverage::CoverageMode::parse(&args[1..])?;
             run_cov(mode)
         }
-        "check-exclusions" => run_excl(),
         "help" | "--help" | "-h" => {
             println!("Usage: cargo xtask <subcommand>");
             println!();
@@ -50,9 +48,6 @@ pub fn dispatch_with(
             println!("  coverage --package <pkg>  Compute one package's coverage (CI fan-out)");
             println!(
                 "  coverage --gate           Aggregate collected per-package JSONs, gate 100%%"
-            );
-            println!(
-                "  check-exclusions          Scan codebase for forbidden coverage-suppression markers"
             );
             Ok(())
         }
@@ -65,28 +60,22 @@ mod tests {
     use super::*;
     use coverage::CoverageMode;
 
-    // ── Named stub functions ───────────────────────────────────────────────────
+    // ── Named stub function ─────────────────────────────────────────────────────
     //
-    // Using named `fn` items rather than `|| Ok(())` closures avoids creating
-    // unique LLVM closure regions that are each only "covered" when they happen
-    // to be the dispatched arm.  A named function's body is covered as soon as it
-    // is called ONCE across the entire test suite — all other tests that pass it
-    // as the "other" arm share that single coverage hit.
-
-    fn always_ok() -> Result<()> {
-        Ok(())
-    }
+    // Using a named `fn` item rather than a `|| Ok(())` closure avoids creating a
+    // unique LLVM closure region that is only "covered" when it happens to be the
+    // dispatched arm. A named function's body is covered as soon as it is called
+    // ONCE across the whole test suite.
 
     /// A `run_cov` stub matching `impl FnOnce(CoverageMode) -> Result<()>`.
     fn cov_ok(_mode: CoverageMode) -> Result<()> {
         Ok(())
     }
 
-    /// Covers the stub bodies so every other test that passes them as a stub
-    /// (and may not call them) benefits from this single coverage hit.
+    /// Covers the stub body so tests that pass it without calling it still get
+    /// this single coverage hit.
     #[test]
-    fn stubs_return_ok() {
-        assert!(always_ok().is_ok());
+    fn stub_returns_ok() {
         assert!(cov_ok(CoverageMode::All).is_ok());
     }
 
@@ -141,14 +130,10 @@ mod tests {
     #[test]
     fn dispatch_with_coverage_no_args_parses_all_and_calls_run_cov() {
         let mut got = None;
-        dispatch_with(
-            &args(&["coverage"]),
-            |mode| {
-                got = Some(mode);
-                Ok(())
-            },
-            always_ok,
-        )
+        dispatch_with(&args(&["coverage"]), |mode| {
+            got = Some(mode);
+            Ok(())
+        })
         .unwrap();
         assert_eq!(got, Some(CoverageMode::All));
     }
@@ -156,14 +141,10 @@ mod tests {
     #[test]
     fn dispatch_with_coverage_gate_parses_gate() {
         let mut got = None;
-        dispatch_with(
-            &args(&["coverage", "--gate"]),
-            |mode| {
-                got = Some(mode);
-                Ok(())
-            },
-            always_ok,
-        )
+        dispatch_with(&args(&["coverage", "--gate"]), |mode| {
+            got = Some(mode);
+            Ok(())
+        })
         .unwrap();
         assert_eq!(got, Some(CoverageMode::Gate));
     }
@@ -171,14 +152,10 @@ mod tests {
     #[test]
     fn dispatch_with_coverage_package_parses_package() {
         let mut got = None;
-        dispatch_with(
-            &args(&["coverage", "--package", "leviath-core"]),
-            |mode| {
-                got = Some(mode);
-                Ok(())
-            },
-            always_ok,
-        )
+        dispatch_with(&args(&["coverage", "--package", "leviath-core"]), |mode| {
+            got = Some(mode);
+            Ok(())
+        })
         .unwrap();
         assert_eq!(got, Some(CoverageMode::Package("leviath-core".to_owned())));
     }
@@ -188,8 +165,7 @@ mod tests {
         // Mode parsing fails before run_cov is ever invoked.
         let result = dispatch_with(
             &args(&["coverage", "--bogus"]),
-            cov_ok, // never called; covered by stubs_return_ok
-            always_ok,
+            cov_ok, // never called; covered by stub_returns_ok
         );
         assert!(
             result.is_err(),
@@ -199,42 +175,13 @@ mod tests {
 
     #[test]
     fn dispatch_with_coverage_propagates_error() {
-        let result = dispatch_with(
-            &args(&["coverage"]),
-            |_mode| anyhow::bail!("simulated coverage failure"),
-            always_ok, // never called; covered by stubs_return_ok
-        );
+        let result = dispatch_with(&args(&["coverage"]), |_mode| {
+            anyhow::bail!("simulated coverage failure")
+        });
         assert!(result.is_err());
         assert!(result
             .unwrap_err()
             .to_string()
             .contains("simulated coverage failure"));
-    }
-
-    // ── check-exclusions arm ──────────────────────────────────────────────────
-
-    #[test]
-    fn dispatch_with_check_exclusions_calls_run_excl() {
-        let mut called = false;
-        dispatch_with(&args(&["check-exclusions"]), cov_ok, || {
-            called = true;
-            Ok(())
-        })
-        .unwrap();
-        assert!(called, "run_excl should have been called");
-    }
-
-    #[test]
-    fn dispatch_with_check_exclusions_propagates_error() {
-        let result = dispatch_with(
-            &args(&["check-exclusions"]),
-            cov_ok, // never called; covered by stubs_return_ok
-            || anyhow::bail!("simulated exclusion failure"),
-        );
-        assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("simulated exclusion failure"));
     }
 }

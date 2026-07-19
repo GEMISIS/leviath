@@ -1,0 +1,10 @@
+id: no-cfg-not-test
+language: rust
+severity: error
+message: >-
+  #[cfg(not(test))] is banned — it hides real code from coverage. Put
+  un-unit-testable real-I/O in the coverage-excluded `lev` binary (main.rs) or
+  behind an injected seam (RiskyExecutors / execute_with / ForegroundIo /
+  leviath_sys::osc52_write_via), never behind this attribute.
+rule:
+  pattern: "#[cfg(not(test))]"

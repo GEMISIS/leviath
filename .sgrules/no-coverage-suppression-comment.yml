@@ -1,0 +1,11 @@
+id: no-coverage-suppression-comment
+language: rust
+severity: error
+message: >-
+  Coverage-exclusion marker comment is banned (LCOV_EXCL / GRCOV_EXCL /
+  tarpaulin_include). Measure real coverage and refactor rather than excluding.
+rule:
+  any:
+    - kind: line_comment
+    - kind: block_comment
+  regex: 'LCOV_EXCL|GRCOV_EXCL|tarpaulin_include'

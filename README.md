@@ -357,7 +357,7 @@ The hook enforces, before every commit:
 - **formatting** (`cargo fmt --check`)
 - **clippy** with warnings-as-errors
 - the **full test suite**
-- the **coverage-suppression-marker lint** (`cargo xtask check-exclusions`)
+- the **coverage-suppression-marker lint** (`ast-grep scan`, if `ast-grep` is installed; CI always enforces it)
 
 It does **not** run the full `cargo xtask coverage` check — that's several minutes, too slow for a local commit gate. CI runs it on every push instead, enforcing 100% for real.
 
