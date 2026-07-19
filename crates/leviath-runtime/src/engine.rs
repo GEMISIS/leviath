@@ -24,7 +24,7 @@ use crate::systems;
 /// lands inside a multi-byte character; taking whole `char`s never does. This
 /// mirrors the char-safe idiom used on the worker side (`worker.rs`). `max_chars`
 /// is an approximate char budget (the caller derives it from a token estimate).
-fn truncate_on_char_boundary(text: &str, max_chars: usize) -> String {
+pub(crate) fn truncate_on_char_boundary(text: &str, max_chars: usize) -> String {
     text.chars().take(max_chars).collect()
 }
 
