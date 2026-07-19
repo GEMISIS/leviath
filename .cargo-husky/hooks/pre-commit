@@ -39,8 +39,9 @@ if command -v ast-grep >/dev/null 2>&1; then
     || fail "Coverage suppression markers found. Remove them and refactor instead."
   pass "No suppression markers OK"
 else
-  info "ast-grep not installed — skipping suppression scan (CI still enforces it)."
-  info "Install: https://ast-grep.github.io/guide/quick-start.html"
+  info "WARNING: ast-grep not installed — the coverage-suppression scan was SKIPPED locally."
+  info "         CI still enforces it, but install ast-grep to catch issues before pushing:"
+  info "         brew install ast-grep | cargo install ast-grep --locked | npm i -g @ast-grep/cli"
 fi
 
 pass "All pre-commit checks passed."
