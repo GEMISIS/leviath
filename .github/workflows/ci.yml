@@ -243,6 +243,22 @@ jobs:
           tool: ast-grep
       - name: Scan for coverage suppression markers
         run: ast-grep scan crates xtask .github/workflows
+      # Guard against a vacuous pass: `ast-grep scan` exits 0 on a mistyped or
+      # empty path, so a green scan alone doesn't prove the lint actually ran.
+      # Plant a real violation and require ast-grep to catch it (non-zero exit);
+      # if this scan *succeeds*, the rules/paths are broken and the check-
+      # exclusions job must fail rather than silently pass.
+      - name: Verify the suppression lint actually fires
+        run: |
+          probe=crates/leviath-core/src/__astgrep_ci_probe.rs
+          printf '#[cfg(not(test))]\nfn __probe() {}\n' > "$probe"
+          if ast-grep scan crates xtask .github/workflows; then
+            rm -f "$probe"
+            echo "::error::ast-grep did NOT catch a planted #[cfg(not(test))] — the suppression lint is misconfigured (bad rules or scan paths)."
+            exit 1
+          fi
+          rm -f "$probe"
+          echo "Suppression lint confirmed: the planted probe was caught."
 
   # `crates/leviath-cli/src/main.rs` is the ONE file excluded from coverage
   # measurement — the thin, un-unit-tested composition root where real terminal

@@ -361,6 +361,16 @@ The hook enforces, before every commit:
 
 It does **not** run the full `cargo xtask coverage` check — that's several minutes, too slow for a local commit gate. CI runs it on every push instead, enforcing 100% for real.
 
+### `ast-grep` (suppression lint)
+
+The suppression-marker scan uses [`ast-grep`](https://ast-grep.github.io), which matches Rust/YAML structurally (via tree-sitter) — rules live in `.sgrules/`. CI installs it automatically and always enforces the scan; the pre-commit hook runs it only if it's installed locally, otherwise it prints a warning and skips (CI is the backstop). Install it once with any of:
+
+```bash
+brew install ast-grep            # macOS / Linuxbrew
+cargo install ast-grep --locked  # from source
+npm install -g @ast-grep/cli     # via npm
+```
+
 If the hook script itself changes (e.g. a commit edits `.cargo-husky/hooks/pre-commit`), `cargo-husky` only reinstalls it on a *fresh* compile of its crate, not on incremental builds. Force it with:
 
 ```bash
