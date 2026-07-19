@@ -13,11 +13,11 @@ use std::sync::Arc;
 use bevy_ecs::prelude::*;
 use tokio::runtime::Handle;
 use tokio::sync::Notify;
-use tokio::sync::mpsc::UnboundedSender;
+use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
 use leviath_providers::{InferenceRequest, Provider, Tool};
 
-use crate::components::{ContextWindow, InferenceConfig};
+use crate::components::{AgentState, AgentStatus, ContextWindow, InferenceConfig};
 use crate::engine::ProviderRegistry;
 use crate::inference_bridge::{InferenceJob, InferenceOutcome, run_inference_job};
 use crate::inference_pool::InferencePools;
@@ -158,6 +158,73 @@ pub fn dispatch_inference(
             .entity(entity)
             .remove::<ReadyToInfer>()
             .insert(AwaitingInference);
+    }
+}
+
+/// The response has been applied and is ready to be examined for tool calls (or
+/// completion) by the process-response system.
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProcessResponse;
+
+/// The receiving end of the inference-outcomes channel, as a world resource for
+/// the collect system. (The sending end lives in [`InferenceStage`].)
+#[derive(Resource)]
+pub struct InferenceResults(pub UnboundedReceiver<InferenceOutcome>);
+
+/// Convert a provider response into the stored `InferenceResult` component.
+/// (Ported from `AgentEngine::apply_inference_response`.)
+fn to_inference_result(
+    response: &leviath_providers::InferenceResponse,
+) -> crate::components::InferenceResult {
+    crate::components::InferenceResult {
+        response: response.content.clone(),
+        tool_calls: response
+            .tool_calls
+            .iter()
+            .map(|tc| crate::components::ToolCall {
+                tool_id: tc.id.clone(),
+                name: tc.name.clone(),
+                arguments: tc.arguments.clone(),
+            })
+            .collect(),
+        tokens_used: response.tokens_used.total_tokens,
+        timestamp: chrono::Utc::now().timestamp(),
+    }
+}
+
+/// Inference-collect system: drain completed inferences and apply them. A
+/// success is stored on the agent (bumping its iteration) and the agent advances
+/// to `ProcessResponse`; an error marks the agent `Error`. An outcome for an
+/// agent that is no longer `AwaitingInference` (cancelled or despawned between
+/// dispatch and now) is dropped.
+pub fn collect_inference(
+    mut results: ResMut<InferenceResults>,
+    mut agents: Query<&mut AgentState, With<AwaitingInference>>,
+    mut commands: Commands,
+) {
+    while let Ok(outcome) = results.0.try_recv() {
+        let Ok(mut state) = agents.get_mut(outcome.entity) else {
+            continue; // stale: agent cancelled/despawned since dispatch
+        };
+        match outcome.result {
+            Ok(response) => {
+                state.iteration += 1;
+                let result = to_inference_result(&response);
+                commands
+                    .entity(outcome.entity)
+                    .insert(result)
+                    .remove::<AwaitingInference>()
+                    .insert(ProcessResponse);
+            }
+            Err(err) => {
+                state.status = AgentStatus::Error {
+                    message: err.to_string(),
+                };
+                commands
+                    .entity(outcome.entity)
+                    .remove::<AwaitingInference>();
+            }
+        }
     }
 }
 
@@ -370,5 +437,114 @@ mod tests {
             self.provider_name = name.to_string();
             self
         }
+    }
+
+    // ── collect system ──
+
+    fn agent_state() -> AgentState {
+        AgentState {
+            agent_id: "a".to_string(),
+            current_stage: "s".to_string(),
+            iteration: 0,
+            status: AgentStatus::Active,
+            spawned_children_ids: vec![],
+            pending_wait: None,
+            accepts_messages: true,
+        }
+    }
+
+    fn resp(text: &str) -> leviath_providers::InferenceResponse {
+        leviath_providers::InferenceResponse {
+            content: text.to_string(),
+            tool_calls: vec![],
+            tokens_used: leviath_providers::TokenUsage {
+                prompt_tokens: 1,
+                completion_tokens: 1,
+                total_tokens: 2,
+                cached_tokens: 0,
+                cache_write_tokens: 0,
+            },
+            finish_reason: leviath_providers::FinishReason::Complete,
+        }
+    }
+
+    fn run_collect(world: &mut World) {
+        let mut schedule = Schedule::default();
+        schedule.add_systems(collect_inference);
+        schedule.run(world);
+    }
+
+    fn world_with_results() -> (World, mpsc::UnboundedSender<InferenceOutcome>) {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let mut world = World::new();
+        world.insert_resource(InferenceResults(rx));
+        (world, tx)
+    }
+
+    #[test]
+    fn collect_applies_ok_and_advances_to_process_response() {
+        let (mut world, tx) = world_with_results();
+        let e = world.spawn((agent_state(), AwaitingInference)).id();
+        let mut response = resp("hi");
+        response.tool_calls.push(leviath_providers::ToolCall {
+            id: "call-1".to_string(),
+            name: "read_file".to_string(),
+            arguments: serde_json::json!({"path": "x"}),
+        });
+        tx.send(InferenceOutcome {
+            entity: e,
+            result: Ok(response),
+        })
+        .unwrap();
+
+        run_collect(&mut world);
+
+        assert!(world.get::<ProcessResponse>(e).is_some());
+        assert!(world.get::<AwaitingInference>(e).is_none());
+        assert_eq!(world.get::<AgentState>(e).unwrap().iteration, 1);
+        let stored = world.get::<crate::components::InferenceResult>(e).unwrap();
+        assert_eq!(stored.response, "hi");
+        // The tool call was mapped onto the stored result.
+        assert_eq!(stored.tool_calls.len(), 1);
+        assert_eq!(stored.tool_calls[0].name, "read_file");
+    }
+
+    #[test]
+    fn collect_marks_error_on_failure() {
+        let (mut world, tx) = world_with_results();
+        let e = world.spawn((agent_state(), AwaitingInference)).id();
+        tx.send(InferenceOutcome {
+            entity: e,
+            result: Err(leviath_providers::ProviderError::Other("boom".to_string())),
+        })
+        .unwrap();
+
+        run_collect(&mut world);
+
+        // `ProviderError::Other`'s Display is the inner message ("boom").
+        assert_eq!(
+            world.get::<AgentState>(e).unwrap().status,
+            AgentStatus::Error {
+                message: "boom".to_string()
+            }
+        );
+        assert!(world.get::<AwaitingInference>(e).is_none());
+    }
+
+    #[test]
+    fn collect_drops_outcome_for_non_awaiting_agent() {
+        let (mut world, tx) = world_with_results();
+        let e = world.spawn(agent_state()).id(); // no AwaitingInference marker
+        tx.send(InferenceOutcome {
+            entity: e,
+            result: Ok(resp("x")),
+        })
+        .unwrap();
+
+        run_collect(&mut world);
+
+        // Untouched — the stale outcome was dropped.
+        assert_eq!(world.get::<AgentState>(e).unwrap().iteration, 0);
+        assert!(world.get::<ProcessResponse>(e).is_none());
     }
 }
