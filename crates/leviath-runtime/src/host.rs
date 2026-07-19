@@ -24,10 +24,45 @@ use crate::components::{AgentMessage, AgentState, AgentStatus};
 use crate::interaction_hub::InteractionHub;
 use crate::world::PipelineWorld;
 use leviath_core::interaction::{InteractionRequest, InteractionResponse};
+use serde::{Deserialize, Serialize};
+
+/// The parameters for spawning an agent into the world. The runtime doesn't know
+/// how to load blueprints or resolve tools — that policy lives in the
+/// [`Spawner`] the daemon installs — so this just carries the raw request.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct SpawnArgs {
+    /// The run id to give the new agent (its directory / control key).
+    pub run_id: String,
+    /// Path to the agent manifest directory or bundle.
+    pub blueprint_path: String,
+    /// The task prompt.
+    pub task: String,
+    /// Optional model override (`provider/model` or `model`).
+    #[serde(default)]
+    pub model: Option<String>,
+    /// Working directory for tool execution.
+    pub workdir: String,
+    /// Custom key/value metadata from the request.
+    #[serde(default)]
+    pub metadata: HashMap<String, String>,
+}
+
+/// The daemon-installed function that turns [`SpawnArgs`] into a live agent:
+/// loads the blueprint, resolves stages/tools, spawns into the world, and
+/// returns the new entity (the host records the run-id mapping). Returns `Err`
+/// with a human-readable message on failure.
+pub type Spawner = Box<dyn FnMut(&mut PipelineWorld, &SpawnArgs) -> Result<Entity, String> + Send>;
 
 /// A control operation addressed to the host, each carrying a oneshot channel the
 /// host replies on. Agents are addressed by run id.
 pub enum ControlOp {
+    /// Spawn a new agent. Reply is the run id on success, or an error message.
+    Spawn {
+        /// The spawn request.
+        args: SpawnArgs,
+        /// Reply channel.
+        reply: oneshot::Sender<Result<String, String>>,
+    },
     /// The status of a run, or `None` if there is no such run.
     Status {
         /// The run to query.
@@ -100,6 +135,7 @@ pub struct WorldHost {
     world: PipelineWorld,
     by_run_id: HashMap<String, Entity>,
     interactions: InteractionHub,
+    spawner: Option<Spawner>,
 }
 
 impl WorldHost {
@@ -115,7 +151,14 @@ impl WorldHost {
             world,
             by_run_id: HashMap::new(),
             interactions,
+            spawner: None,
         }
+    }
+
+    /// Install the spawner used to service `Spawn` control ops. Without one, a
+    /// `Spawn` op replies with an error.
+    pub fn set_spawner(&mut self, spawner: Spawner) {
+        self.spawner = Some(spawner);
     }
 
     /// A clone of the interaction hub, for building per-agent backends.
@@ -156,6 +199,19 @@ impl WorldHost {
     /// harmless (the requester went away).
     pub fn handle(&mut self, op: ControlOp) {
         match op {
+            ControlOp::Spawn { args, reply } => {
+                let result = match self.spawner.as_mut() {
+                    Some(spawner) => match spawner(&mut self.world, &args) {
+                        Ok(entity) => {
+                            self.by_run_id.insert(args.run_id.clone(), entity);
+                            Ok(args.run_id)
+                        }
+                        Err(e) => Err(e),
+                    },
+                    None => Err("this daemon cannot spawn agents".to_string()),
+                };
+                let _ = reply.send(result);
+            }
             ControlOp::Status { run_id, reply } => {
                 let status = self
                     .live_entity(&run_id)
@@ -493,6 +549,55 @@ mod tests {
             })
             .await
         );
+    }
+
+    #[tokio::test]
+    async fn spawn_op_uses_installed_spawner_and_registers() {
+        let mut host = host_with(vec![]);
+        host.set_spawner(Box::new(|world, args| {
+            Ok(world.spawn_agent((agent_state(&args.run_id),)))
+        }));
+
+        let result = ask(&mut host, |reply| ControlOp::Spawn {
+            args: SpawnArgs {
+                run_id: "r1".to_string(),
+                ..Default::default()
+            },
+            reply,
+        })
+        .await;
+        assert_eq!(result, Ok("r1".to_string()));
+
+        // The run is now registered, so Status resolves it.
+        let status = ask(&mut host, |reply| ControlOp::Status {
+            run_id: "r1".to_string(),
+            reply,
+        })
+        .await;
+        assert_eq!(status, Some(AgentStatus::Active));
+    }
+
+    #[tokio::test]
+    async fn spawn_op_propagates_spawner_error() {
+        let mut host = host_with(vec![]);
+        host.set_spawner(Box::new(|_world, _args| Err("bad blueprint".to_string())));
+        let result = ask(&mut host, |reply| ControlOp::Spawn {
+            args: SpawnArgs::default(),
+            reply,
+        })
+        .await;
+        assert_eq!(result, Err("bad blueprint".to_string()));
+    }
+
+    #[tokio::test]
+    async fn spawn_op_errors_without_a_spawner() {
+        let mut host = host_with(vec![]);
+        let result = ask(&mut host, |reply| ControlOp::Spawn {
+            args: SpawnArgs::default(),
+            reply,
+        })
+        .await;
+        assert!(result.unwrap_err().contains("cannot spawn"));
     }
 
     #[tokio::test]
