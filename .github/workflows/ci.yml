@@ -83,28 +83,25 @@ jobs:
         run: cargo fmt --all -- --check
 
   # Coverage runs on all three OSes and enforces a hard 100% on regions, lines,
-  # and functions, reading llvm-cov's own per-file summary directly (see
-  # xtask/src/coverage.rs). When llvm-cov summarizes a generic it groups the
-  # monomorphizations, so a source span covered by any instantiation counts as
-  # covered. OS-specific code is covered by tests that run on that OS (e.g.
-  # leviath-sys's `unix` vs `fallback` submodules); code `#[cfg]`'d out of a
-  # target is not compiled there and so never counts against it. If a region is
-  # reported missed on only one OS, that's a real untested instantiation on that
-  # target — close it with a test on that OS, don't relax the gate.
+  # and functions. Each (os × package) runner GATES one package with llvm-cov's
+  # own thresholds: `cargo xtask coverage --package <pkg>` runs `cargo llvm-cov
+  # --package <pkg> --fail-under-{lines,functions,regions} 100`, failing the job
+  # if that package is below 100% (see xtask/src/coverage.rs). No custom
+  # parsing/merging/aggregation — llvm-cov does the counting and the gating.
   #
-  # For speed, coverage is fanned out: this `coverage` job computes ONE
-  # package's coverage per runner (os × package matrix), each writing its own
-  # `coverage/per-package/<pkg>.json` (byte-for-byte the same numbers a single
-  # `cargo xtask coverage` run would produce for that package — the per-package
-  # measurement is unchanged, it's just distributed). The dependent
-  # `coverage-gate` job then aggregates every package's JSON and enforces the
-  # hard 100% gate. `cargo-llvm-cov` is installed from a prebuilt binary via
-  # taiki-e/install-action (was `cargo install --locked`, minutes → seconds).
+  # Per-PACKAGE (not `--workspace`) is deliberate: `-C instrument-coverage`
+  # records every function in every binary that links it — including binaries
+  # that never call it — so the whole-workspace merge lets a never-run record
+  # shadow the covered one and reads genuinely-tested code below 100%. One
+  # package at a time keeps llvm-cov's counts accurate (see coverage.rs + the
+  # upstream LLVM bug it links). Branch coverage is not collected — `--branch`
+  # reliably SIGSEGVs on that same bug. `cargo-llvm-cov` is installed from a
+  # prebuilt binary via taiki-e/install-action.
   coverage:
     name: Coverage (${{ matrix.os }} / ${{ matrix.package }})
     runs-on: ${{ matrix.os }}
     strategy:
-      # One package's failure must still let the others report their numbers.
+      # One package's failure must not cancel the others' runs.
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
@@ -131,18 +128,11 @@ jobs:
         uses: taiki-e/install-action@v2
         with:
           tool: cargo-llvm-cov
-      # Computes this one package's regions/lines/functions from llvm-cov's own
-      # per-file summary (see xtask/src/coverage.rs) and writes coverage/per-
-      # package/<pkg>.json plus a browsable coverage/html/<pkg> report. Does NOT run the
-      # 100% gate — that's coverage-gate's job, once all packages are collected.
-      - name: Compute coverage for ${{ matrix.package }}
+      # Gates this one package at a hard 100% (regions/lines/functions) via
+      # llvm-cov's --fail-under-* thresholds and writes its browsable HTML to
+      # coverage/html/<pkg>. Fails the job if the package is below 100%.
+      - name: Gate ${{ matrix.package }} at 100%
         run: cargo xtask coverage --package ${{ matrix.package }}
-      - name: Upload per-package coverage JSON
-        uses: actions/upload-artifact@v7
-        with:
-          name: cov-${{ matrix.os }}-${{ matrix.package }}
-          path: coverage/per-package/*.json
-          retention-days: 14
       - name: Upload HTML coverage report
         if: always()
         uses: actions/upload-artifact@v7
@@ -151,12 +141,12 @@ jobs:
           path: coverage/html/
           retention-days: 14
 
-  # Aggregates every per-package JSON for this OS and enforces the hard 100%
-  # gate (fails if ANY file is below 100% on regions, lines, or functions).
-  # This is the authoritative gate that replaced the old inline check; the
-  # measurement is identical, just fed from pre-computed per-package results.
-  # Branch coverage is not collected -- `cargo llvm-cov --branch` reliably
-  # crashes with SIGSEGV on an open upstream LLVM bug (see coverage.rs).
+  # The per-package `coverage` jobs above ARE the gate now (each fails below
+  # 100%). This job is the aggregate signal: `needs: [coverage]` means it only
+  # runs once every package on every OS gated green, so its success == the whole
+  # workspace is 100%. It keeps the stable `Coverage gate (<os>)` check name and
+  # publishes the coverage badges (from ubuntu on push to main). Because the gate
+  # is hard-100%, a green run means 100% by construction — the badges are static.
   coverage-gate:
     name: Coverage gate (${{ matrix.os }})
     needs: [coverage]
@@ -166,29 +156,8 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest, windows-latest]
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: stable
-      - uses: Swatinem/rust-cache@v2
-      # Collect only THIS OS's per-package JSONs onto one runner. Each artifact
-      # holds a single <pkg>.json at its root; merge-multiple flattens them all
-      # into coverage/per-package/ where `--gate` globs *.json.
-      - name: Download per-package coverage JSONs
-        uses: actions/download-artifact@v8
-        with:
-          pattern: cov-${{ matrix.os }}-*
-          path: coverage/per-package
-          merge-multiple: true
-      - name: Enforce 100% coverage gate
-        id: cov
-        run: cargo xtask coverage --gate
-      # Publish all three coverage-percentage gists — only from ubuntu on
-      # push to main (all three OSes gate; only one need publish). Only the
-      # lines gist is actually rendered as a README badge today (three separate
-      # numbers read as confusing to newcomers there), but regions/functions
-      # are published too so they're a click away in the gist for anyone who
-      # wants the full picture.
+      - name: Confirm every package gated 100%
+        run: echo "All packages gated at a hard 100% in the per-package coverage jobs."
       - name: Update lines coverage badge
         if: matrix.os == 'ubuntu-latest' && github.ref == 'refs/heads/main' && github.event_name == 'push'
         uses: schneegans/dynamic-badges-action@v1.7.0
@@ -197,10 +166,8 @@ jobs:
           gistID: ${{ vars.COVERAGE_GIST_ID }}
           filename: leviath-coverage-lines.json
           label: coverage
-          message: ${{ steps.cov.outputs.lines }}%
-          valColorRange: ${{ steps.cov.outputs.lines }}
-          minColorRange: 50
-          maxColorRange: 100
+          message: 100%
+          color: brightgreen
       - name: Update regions coverage badge
         if: matrix.os == 'ubuntu-latest' && github.ref == 'refs/heads/main' && github.event_name == 'push'
         uses: schneegans/dynamic-badges-action@v1.7.0
@@ -209,10 +176,8 @@ jobs:
           gistID: ${{ vars.COVERAGE_GIST_ID }}
           filename: leviath-coverage-regions.json
           label: regions
-          message: ${{ steps.cov.outputs.regions }}%
-          valColorRange: ${{ steps.cov.outputs.regions }}
-          minColorRange: 50
-          maxColorRange: 100
+          message: 100%
+          color: brightgreen
       - name: Update functions coverage badge
         if: matrix.os == 'ubuntu-latest' && github.ref == 'refs/heads/main' && github.event_name == 'push'
         uses: schneegans/dynamic-badges-action@v1.7.0
@@ -221,10 +186,8 @@ jobs:
           gistID: ${{ vars.COVERAGE_GIST_ID }}
           filename: leviath-coverage-functions.json
           label: functions
-          message: ${{ steps.cov.outputs.functions }}%
-          valColorRange: ${{ steps.cov.outputs.functions }}
-          minColorRange: 50
-          maxColorRange: 100
+          message: 100%
+          color: brightgreen
 
   # The zero-exclusions policy scan runs once (it's OS-independent). It uses
   # ast-grep, which matches Rust/YAML *structurally* (via tree-sitter) rather
