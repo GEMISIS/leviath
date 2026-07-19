@@ -237,26 +237,102 @@ pub fn collect_inference(
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ReadyForTools;
 
-/// The response had no tool calls; the agent is ready for the transition system
-/// to decide completion / next stage.
+/// The response had no tool calls; the agent is ready for the empty-response
+/// handler to decide finish vs. a "use your tools" nudge.
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ReadyForTransition;
 
+/// The agent's current stage is complete; the transition system will resolve the
+/// next stage (or completion).
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ResolveTransition;
+
+/// Per-stage progress counters, reset when an agent enters a stage.
+#[derive(Component, Debug, Clone, Default)]
+pub struct StageProgress {
+    /// Total tool calls the agent has made in this stage.
+    pub total_tool_calls: usize,
+    /// Consecutive text-only responses that were nudged toward tool use.
+    pub text_only_nudges: usize,
+}
+
 /// Process-response system: route each `ProcessResponse` agent by whether its
-/// last inference asked for tools. Tool calls present ⇒ `ReadyForTools`; none ⇒
-/// `ReadyForTransition` (the transition system decides finish vs. next stage vs.
-/// a "use your tools" nudge). Pure routing — no I/O.
+/// last inference asked for tools. Tool calls present ⇒ `ReadyForTools` (and the
+/// stage's running tool-call count is bumped); none ⇒ `ReadyForTransition`. Pure
+/// routing — no I/O.
 pub fn process_response(
-    agents: Query<(Entity, &crate::components::InferenceResult), With<ProcessResponse>>,
+    mut agents: Query<
+        (
+            Entity,
+            &crate::components::InferenceResult,
+            &mut StageProgress,
+        ),
+        With<ProcessResponse>,
+    >,
     mut commands: Commands,
 ) {
-    for (entity, result) in agents.iter() {
+    for (entity, result, mut progress) in agents.iter_mut() {
         let mut e = commands.entity(entity);
         e.remove::<ProcessResponse>();
         if result.tool_calls.is_empty() {
             e.insert(ReadyForTransition);
         } else {
+            progress.total_tool_calls += result.tool_calls.len();
             e.insert(ReadyForTools);
+        }
+    }
+}
+
+/// The "use your tools" nudge injected when a model responds with text before
+/// making any tool call.
+const NUDGE_TEXT: &str = "You have tools available. Please use them to complete the task. Start by reading the relevant files in the working directory.";
+/// How many text-only responses to nudge before accepting the text as final.
+const MAX_TEXT_ONLY_NUDGES: usize = 3;
+
+/// Empty-response system: for each `ReadyForTransition` agent decide whether the
+/// stage is done. If the agent has already made tool calls, or we've nudged the
+/// max number of times, the text response is accepted and the agent advances to
+/// `ResolveTransition`. Otherwise (text only, no work yet) the response + a
+/// "use your tools" nudge are added to context and the agent loops back to
+/// `ReadyToInfer`. Ported from `AgentEngine::loop_handle_empty_tool_calls`.
+pub fn handle_empty_response(
+    mut agents: Query<
+        (
+            Entity,
+            &mut ContextWindow,
+            &crate::components::InferenceResult,
+            &mut StageProgress,
+        ),
+        With<ReadyForTransition>,
+    >,
+    mut commands: Commands,
+) {
+    for (entity, mut window, infer, mut progress) in agents.iter_mut() {
+        if progress.total_tool_calls > 0 || progress.text_only_nudges >= MAX_TEXT_ONLY_NUDGES {
+            commands
+                .entity(entity)
+                .remove::<ReadyForTransition>()
+                .insert(ResolveTransition);
+        } else {
+            progress.text_only_nudges += 1;
+            let response_tokens = infer.response.len() / 4 + 1;
+            let _ = window.add_typed_entry(
+                "conversation",
+                leviath_core::EntryKind::AssistantTurn { tool_calls: vec![] },
+                infer.response.clone(),
+                response_tokens,
+            );
+            let nudge_tokens = NUDGE_TEXT.len() / 4 + 1;
+            let _ = window.add_typed_entry(
+                "conversation",
+                leviath_core::EntryKind::UserMessage,
+                NUDGE_TEXT.to_string(),
+                nudge_tokens,
+            );
+            commands
+                .entity(entity)
+                .remove::<ReadyForTransition>()
+                .insert(ReadyToInfer);
         }
     }
 }
@@ -864,20 +940,108 @@ mod tests {
     #[test]
     fn process_routes_tool_calls_to_ready_for_tools() {
         let mut world = World::new();
-        let e = world.spawn((infer_result(true), ProcessResponse)).id();
+        let e = world
+            .spawn((
+                infer_result(true),
+                StageProgress::default(),
+                ProcessResponse,
+            ))
+            .id();
         run_process(&mut world);
         assert!(world.get::<ReadyForTools>(e).is_some());
         assert!(world.get::<ProcessResponse>(e).is_none());
         assert!(world.get::<ReadyForTransition>(e).is_none());
+        // The stage's running tool-call count was bumped.
+        assert_eq!(world.get::<StageProgress>(e).unwrap().total_tool_calls, 1);
     }
 
     #[test]
     fn process_routes_no_tools_to_ready_for_transition() {
         let mut world = World::new();
-        let e = world.spawn((infer_result(false), ProcessResponse)).id();
+        let e = world
+            .spawn((
+                infer_result(false),
+                StageProgress::default(),
+                ProcessResponse,
+            ))
+            .id();
         run_process(&mut world);
         assert!(world.get::<ReadyForTransition>(e).is_some());
         assert!(world.get::<ReadyForTools>(e).is_none());
+    }
+
+    // ── empty-response (finish vs. nudge) ──
+
+    fn run_empty(world: &mut World) {
+        let mut s = Schedule::default();
+        s.add_systems(handle_empty_response);
+        s.run(world);
+    }
+
+    #[test]
+    fn empty_response_finishes_when_agent_made_tool_calls() {
+        let mut world = World::new();
+        let progress = StageProgress {
+            total_tool_calls: 2,
+            text_only_nudges: 0,
+        };
+        let e = world
+            .spawn((
+                ctx(&[("conversation", 10_000)]),
+                infer_result(false),
+                progress,
+                ReadyForTransition,
+            ))
+            .id();
+        run_empty(&mut world);
+        assert!(world.get::<ResolveTransition>(e).is_some());
+        assert!(world.get::<ReadyForTransition>(e).is_none());
+    }
+
+    #[test]
+    fn empty_response_finishes_after_max_nudges() {
+        let mut world = World::new();
+        let progress = StageProgress {
+            total_tool_calls: 0,
+            text_only_nudges: MAX_TEXT_ONLY_NUDGES,
+        };
+        let e = world
+            .spawn((
+                ctx(&[("conversation", 10_000)]),
+                infer_result(false),
+                progress,
+                ReadyForTransition,
+            ))
+            .id();
+        run_empty(&mut world);
+        assert!(world.get::<ResolveTransition>(e).is_some());
+    }
+
+    #[test]
+    fn empty_response_nudges_and_loops_back_when_text_only() {
+        let mut world = World::new();
+        let e = world
+            .spawn((
+                ctx(&[("conversation", 10_000)]),
+                infer_result(false),
+                StageProgress::default(),
+                ReadyForTransition,
+            ))
+            .id();
+        run_empty(&mut world);
+        // Nudged: back to infer, counter bumped, nudge added to context.
+        assert!(world.get::<ReadyToInfer>(e).is_some());
+        assert!(world.get::<ResolveTransition>(e).is_none());
+        assert_eq!(world.get::<StageProgress>(e).unwrap().text_only_nudges, 1);
+        assert!(
+            world
+                .get::<ContextWindow>(e)
+                .unwrap()
+                .get_region("conversation")
+                .unwrap()
+                .current_tokens
+                > 0
+        );
     }
 
     // ── tool-dispatch ──
