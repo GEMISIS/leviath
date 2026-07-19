@@ -177,9 +177,61 @@ pub async fn handle_connection(
     Ok(())
 }
 
+/// The client half of the control transport: connects to the daemon's control
+/// socket, sends one [`ControlRequest`], and reads back its [`ControlResponse`].
+/// A fresh connection per request keeps it simple and stateless.
+pub struct ControlClient {
+    socket_path: std::path::PathBuf,
+}
+
+impl ControlClient {
+    /// A client for the control socket at `socket_path`.
+    pub fn new(socket_path: impl Into<std::path::PathBuf>) -> Self {
+        Self {
+            socket_path: socket_path.into(),
+        }
+    }
+
+    /// Send one request and await its response. Errors if the socket can't be
+    /// reached, the connection closes before a reply, or the reply doesn't parse.
+    pub async fn request(&self, req: &ControlRequest) -> std::io::Result<ControlResponse> {
+        let stream = UnixStream::connect(&self.socket_path).await?;
+        let (read_half, mut write_half) = stream.into_split();
+        let mut line = serde_json::to_string(req).expect("ControlRequest serializes");
+        line.push('\n');
+        // A failed write means the peer is already gone; the read below then sees
+        // EOF and returns the error, so the write needs no separate propagation.
+        let _ = write_half.write_all(line.as_bytes()).await;
+
+        let mut lines = BufReader::new(read_half).lines();
+        match lines.next_line().await? {
+            Some(resp_line) => serde_json::from_str(&resp_line)
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e)),
+            None => Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "control connection closed before a response",
+            )),
+        }
+    }
+
+    /// Query a run's status.
+    pub async fn status(&self, run_id: &str) -> std::io::Result<ControlResponse> {
+        self.request(&ControlRequest::Status {
+            run_id: run_id.to_string(),
+        })
+        .await
+    }
+
+    /// List every known live run.
+    pub async fn list(&self) -> std::io::Result<ControlResponse> {
+        self.request(&ControlRequest::List).await
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::net::UnixListener;
     use tokio::sync::mpsc;
 
     /// A fake host: drains ControlOps and replies with scripted values.
@@ -306,6 +358,96 @@ mod tests {
         drop(write_half);
         drop(lines);
         handle.await.unwrap().unwrap();
+    }
+
+    /// Bind a listener at a temp path, accept exactly `n` connections and serve
+    /// each with `handle_connection`, returning the socket path (and the tempdir
+    /// keeping it alive).
+    fn spawn_server(n: usize) -> (tempfile::TempDir, std::path::PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ctl.sock");
+        let listener = UnixListener::bind(&path).unwrap();
+        let (op_tx, op_rx) = mpsc::unbounded_channel();
+        spawn_fake_host(op_rx);
+        tokio::spawn(async move {
+            for _ in 0..n {
+                let (stream, _) = listener.accept().await.unwrap();
+                let op_tx = op_tx.clone();
+                tokio::spawn(async move {
+                    let _ = handle_connection(stream, op_tx).await;
+                });
+            }
+        });
+        (dir, path)
+    }
+
+    #[tokio::test]
+    async fn client_round_trips_status_and_list() {
+        let (_dir, path) = spawn_server(2);
+        let client = ControlClient::new(path);
+
+        let status = client.status("run-a").await.unwrap();
+        assert_eq!(
+            status,
+            ControlResponse::Status {
+                status: Some(AgentStatus::Active)
+            }
+        );
+        let list = client.list().await.unwrap();
+        assert_eq!(
+            std::mem::discriminant(&list),
+            std::mem::discriminant(&ControlResponse::List { runs: vec![] })
+        );
+    }
+
+    #[tokio::test]
+    async fn client_errors_when_socket_absent() {
+        let client = ControlClient::new("/nonexistent/leviath-ctl.sock");
+        assert!(client.list().await.is_err());
+    }
+
+    /// A server that writes `bytes` verbatim as the "response" then closes.
+    fn spawn_raw_server(bytes: &'static [u8]) -> (tempfile::TempDir, std::path::PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ctl.sock");
+        let listener = UnixListener::bind(&path).unwrap();
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let (_r, mut w) = stream.into_split();
+            let _ = w.write_all(bytes).await;
+        });
+        (dir, path)
+    }
+
+    #[tokio::test]
+    async fn client_errors_on_unparseable_response() {
+        // Valid UTF-8 but not a ControlResponse → InvalidData.
+        let (_dir, path) = spawn_raw_server(b"not json\n");
+        let err = ControlClient::new(&path).list().await.unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+    }
+
+    #[tokio::test]
+    async fn client_errors_on_invalid_utf8_response() {
+        // Invalid UTF-8 makes the response line reader itself error.
+        let (_dir, path) = spawn_raw_server(&[0xff, 0xfe, b'\n']);
+        assert!(ControlClient::new(&path).list().await.is_err());
+    }
+
+    #[tokio::test]
+    async fn client_errors_on_closed_connection_without_reply() {
+        // A server that accepts then immediately drops the connection (no reply).
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("ctl.sock");
+        let listener = UnixListener::bind(&path).unwrap();
+        tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            drop(stream); // hang up before responding
+        });
+
+        let client = ControlClient::new(&path);
+        let err = client.list().await.unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::UnexpectedEof);
     }
 
     #[tokio::test]
