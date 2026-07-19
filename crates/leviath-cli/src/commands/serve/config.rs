@@ -48,10 +48,10 @@ pub(super) async fn get_models(State(state): State<AppState>) -> Json<Vec<ModelE
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::Router;
     use axum::body::Body;
     use axum::http::Request;
     use axum::routing::get;
-    use axum::Router;
     use std::sync::Arc;
     use tokio::sync::broadcast;
     use tower::ServiceExt;

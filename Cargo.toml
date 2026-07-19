@@ -15,11 +15,18 @@ members = [
 
 [workspace.package]
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
 license = "MIT"
 authors = ["Gerald McAlister <gemisis@gmail.com>"]
 repository = "https://github.com/Sun-Forge-AI/leviath"
 description = "A structured agent runtime for LLMs — context memory, multi-stage workflows, and ECS-based orchestration"
+
+# Lints applied to every workspace member that opts in with `[lints] workspace = true`.
+# `unsafe_code = "forbid"` is a hard compile error that cannot be re-enabled by a
+# local `#[allow(unsafe_code)]` -- the OS-level unsafe leviath needs lives in audited
+# dependencies (nix, temp-env), so none is written in our own crates.
+[workspace.lints.rust]
+unsafe_code = "forbid"
 
 [workspace.dependencies]
 # Core crates

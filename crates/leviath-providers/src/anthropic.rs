@@ -2155,10 +2155,12 @@ mod tests {
         };
         let result = provider.infer(request).await;
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .starts_with("Request failed:"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .starts_with("Request failed:")
+        );
     }
 
     #[tokio::test]
@@ -2199,10 +2201,12 @@ mod tests {
         };
         let result = provider.list_models().await;
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .starts_with("Request failed:"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .starts_with("Request failed:")
+        );
     }
 
     // ─── parse_sse_event: message_delta without usage ─────────────────────

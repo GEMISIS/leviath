@@ -75,33 +75,31 @@ pub async fn resolve_transition(
             }
 
             // Step 1: Error condition — auto-transition if error occurred
-            if *stage_result == StageResult::Error {
-                if let Some((_name, edge)) = available
+            if *stage_result == StageResult::Error
+                && let Some((_name, edge)) = available
                     .iter()
                     .find(|(_, e)| e.condition == TransitionCondition::Error)
-                {
-                    let target_idx = blueprint
-                        .stages
-                        .iter()
-                        .position(|s| s.name == edge.target)
-                        .unwrap_or(0);
-                    return Some(((*edge).clone(), target_idx));
-                }
+            {
+                let target_idx = blueprint
+                    .stages
+                    .iter()
+                    .position(|s| s.name == edge.target)
+                    .unwrap_or(0);
+                return Some(((*edge).clone(), target_idx));
             }
 
             // Step 2: MaxIterations condition — auto-transition
-            if *stage_result == StageResult::MaxIterations {
-                if let Some((_name, edge)) = available
+            if *stage_result == StageResult::MaxIterations
+                && let Some((_name, edge)) = available
                     .iter()
                     .find(|(_, e)| e.condition == TransitionCondition::MaxIterations)
-                {
-                    let target_idx = blueprint
-                        .stages
-                        .iter()
-                        .position(|s| s.name == edge.target)
-                        .unwrap_or(0);
-                    return Some(((*edge).clone(), target_idx));
-                }
+            {
+                let target_idx = blueprint
+                    .stages
+                    .iter()
+                    .position(|s| s.name == edge.target)
+                    .unwrap_or(0);
+                return Some(((*edge).clone(), target_idx));
             }
 
             // Step 3: Filter to only always/llm_choice edges for LLM prompt
@@ -1985,14 +1983,17 @@ mod tests {
 
         let window = engine.world().get::<ContextWindow>(entity).unwrap();
         let conv = window.get_region("conversation").unwrap();
-        assert!(conv
-            .content
-            .iter()
-            .any(|e| e.content.contains("concise summary of the conversation")));
-        assert!(!conv
-            .content
-            .iter()
-            .any(|e| e.content.contains("raw conversation content")));
+        assert!(
+            conv.content
+                .iter()
+                .any(|e| e.content.contains("concise summary of the conversation"))
+        );
+        assert!(
+            !conv
+                .content
+                .iter()
+                .any(|e| e.content.contains("raw conversation content"))
+        );
     }
 
     // ─── apply_compact_transform: provider infer() errors ────────────────────
@@ -2024,10 +2025,11 @@ mod tests {
 
         let window = engine.world().get::<ContextWindow>(entity).unwrap();
         let conv = window.get_region("conversation").unwrap();
-        assert!(conv
-            .content
-            .iter()
-            .any(|e| e.content.contains("raw conversation content")));
+        assert!(
+            conv.content
+                .iter()
+                .any(|e| e.content.contains("raw conversation content"))
+        );
     }
 
     // ─── apply_edge_transform: Custom with non-empty compact + no explicit prompt ─
@@ -2704,10 +2706,11 @@ mod tests {
 
         let window = engine.world().get::<ContextWindow>(entity).unwrap();
         let conv = window.get_region("conversation").unwrap();
-        assert!(conv
-            .content
-            .iter()
-            .any(|e| e.content == "preserved content"));
+        assert!(
+            conv.content
+                .iter()
+                .any(|e| e.content == "preserved content")
+        );
     }
 
     // ─── resolve_transition: multiple LlmChoice edges, provider returns no match

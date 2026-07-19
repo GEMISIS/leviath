@@ -213,15 +213,21 @@ mod tests {
     fn agent_display_status_display() {
         assert!(AgentDisplayStatus::Active.to_string().contains("ACTIVE"));
         assert!(AgentDisplayStatus::Waiting.to_string().contains("WAITING"));
-        assert!(AgentDisplayStatus::Complete
-            .to_string()
-            .contains("COMPLETE"));
-        assert!(AgentDisplayStatus::CompleteInteractive
-            .to_string()
-            .contains("COMPLETE"));
-        assert!(AgentDisplayStatus::Error("boom".to_string())
-            .to_string()
-            .contains("boom"));
+        assert!(
+            AgentDisplayStatus::Complete
+                .to_string()
+                .contains("COMPLETE")
+        );
+        assert!(
+            AgentDisplayStatus::CompleteInteractive
+                .to_string()
+                .contains("COMPLETE")
+        );
+        assert!(
+            AgentDisplayStatus::Error("boom".to_string())
+                .to_string()
+                .contains("boom")
+        );
         assert!(AgentDisplayStatus::Idle.to_string().contains("IDLE"));
         assert!(AgentDisplayStatus::Cancelled.to_string().contains("CANCEL"));
     }

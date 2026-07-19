@@ -1,10 +1,10 @@
 //! Header breadcrumb and info strip rendering.
 
+use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Padding, Paragraph};
-use ratatui::Frame;
 
 use crate::commands::dashboard::helpers::{
     elapsed_str, elapsed_str_until, format_tokens, truncate,
@@ -162,8 +162,8 @@ impl Dashboard {
 mod tests {
     use super::*;
     use crate::commands::dashboard::test_support::make_test_dashboard;
-    use ratatui::backend::TestBackend;
     use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
 
     fn make_test_agent(id: &str, status: AgentDisplayStatus) -> DashboardAgent {
         DashboardAgent {

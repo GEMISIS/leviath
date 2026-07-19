@@ -339,10 +339,12 @@ mod tests {
                 let config = Config::default();
                 let (dashboard, engine) = init_dashboard(&config, |_| false).await;
 
-                assert!(dashboard
-                    .log
-                    .iter()
-                    .any(|entry| entry.message.contains("Dashboard started")));
+                assert!(
+                    dashboard
+                        .log
+                        .iter()
+                        .any(|entry| entry.message.contains("Dashboard started"))
+                );
 
                 // The background loop is live: a CancelAgent command sent on
                 // dashboard's own cmd_tx should be processed without panicking.
@@ -439,8 +441,8 @@ mod tests {
 
     #[test]
     fn dashboard_draw_renders_without_panic() {
-        use ratatui::backend::TestBackend;
         use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
         let backend = TestBackend::new(120, 40);
         let mut terminal = Terminal::new(backend).unwrap();
         let mut dash = make_test_dashboard();
@@ -967,9 +969,11 @@ mod tests {
         assert!(backend.hide_cursor().is_ok());
         assert!(backend.show_cursor().is_ok());
         assert!(backend.get_cursor_position().is_ok());
-        assert!(backend
-            .set_cursor_position(ratatui::layout::Position::new(1, 1))
-            .is_ok());
+        assert!(
+            backend
+                .set_cursor_position(ratatui::layout::Position::new(1, 1))
+                .is_ok()
+        );
         assert!(backend.clear().is_ok());
         assert!(backend.size().is_ok());
         assert!(backend.window_size().is_ok());

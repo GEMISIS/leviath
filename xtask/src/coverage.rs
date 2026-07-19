@@ -290,12 +290,16 @@ mod tests {
         run_with(&m, CoverageMode::All).unwrap();
         let calls = m.calls.borrow();
         assert_eq!(calls.len(), 2, "one gate call per non-xtask package");
-        assert!(calls
-            .iter()
-            .any(|a| has_pair(a, "--package", "leviath-core")));
-        assert!(calls
-            .iter()
-            .any(|a| has_pair(a, "--package", "leviath-cli")));
+        assert!(
+            calls
+                .iter()
+                .any(|a| has_pair(a, "--package", "leviath-core"))
+        );
+        assert!(
+            calls
+                .iter()
+                .any(|a| has_pair(a, "--package", "leviath-cli"))
+        );
         assert!(!calls.iter().any(|a| has_pair(a, "--package", "xtask")));
     }
 

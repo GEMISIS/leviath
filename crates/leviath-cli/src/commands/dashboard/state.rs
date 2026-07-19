@@ -1013,10 +1013,11 @@ mod tests {
             .unwrap();
         dash.process_events();
         assert!(!dash.log.is_empty());
-        assert!(dash
-            .log
-            .iter()
-            .any(|e| e.message.contains("test log message")));
+        assert!(
+            dash.log
+                .iter()
+                .any(|e| e.message.contains("test log message"))
+        );
     }
 
     #[test]
@@ -1149,10 +1150,10 @@ mod tests {
         assert_eq!(tree.len(), 3);
         assert_eq!(tree[0].0, 0); // parent
         assert!(tree[0].1.is_empty()); // root has no prefix
-                                       // First child
+        // First child
         assert_eq!(tree[1].0, 1);
         assert!(tree[1].1.contains("├─")); // not last child
-                                           // Second child (last)
+        // Second child (last)
         assert_eq!(tree[2].0, 2);
         assert!(tree[2].1.contains("└─")); // last child
     }
@@ -1478,7 +1479,7 @@ mod tests {
         assert_eq!(tree[1].0, 1); // child1
         assert!(tree[1].1.contains("├─")); // not last child
         assert_eq!(tree[2].0, 3); // grandchild (under child1)
-                                  // grandchild should have deeper connector
+        // grandchild should have deeper connector
         assert!(tree[2].1.len() > tree[1].1.len());
         assert_eq!(tree[3].0, 2); // child2
         assert!(tree[3].1.contains("└─")); // last child
@@ -1520,10 +1521,11 @@ mod tests {
 
         // Should not have removed the agent
         assert_eq!(dash.agents.len(), 1);
-        assert!(dash
-            .log
-            .iter()
-            .any(|e| e.message.contains("Can only delete")));
+        assert!(
+            dash.log
+                .iter()
+                .any(|e| e.message.contains("Can only delete"))
+        );
     }
 
     // ─── delete_selected_agent: no agent selected ─────────────────────────
@@ -2098,10 +2100,11 @@ mod tests {
 
                 dash.sync_from_run_state();
 
-                assert!(dash
-                    .toasts
-                    .iter()
-                    .any(|t| t.message.contains("needs input")));
+                assert!(
+                    dash.toasts
+                        .iter()
+                        .any(|t| t.message.contains("needs input"))
+                );
 
                 cleanup_run(run_id);
             },
@@ -2120,35 +2123,40 @@ mod tests {
         // so with `run.status == WaitingInput`, so that `matches!`'s `false`
         // arm (CompleteInteractive input is optional, no "needs input"
         // toast) was never taken there.
-        crate::runstate::with_isolated_runs_dir("sync_from_run_state_new_agent_complete_interactive_after_initial_sync_no_needs_input_toast", |_d| {
-        let run_id = "test-sync-new-ci-after-initial-no-toast";
-        cleanup_run(run_id);
+        crate::runstate::with_isolated_runs_dir(
+            "sync_from_run_state_new_agent_complete_interactive_after_initial_sync_no_needs_input_toast",
+            |_d| {
+                let run_id = "test-sync-new-ci-after-initial-no-toast";
+                cleanup_run(run_id);
 
-        let mut dash = make_test_dashboard();
-        dash.initial_sync_done = true; // simulate: not the app's first sync
+                let mut dash = make_test_dashboard();
+                dash.initial_sync_done = true; // simulate: not the app's first sync
 
-        let meta = make_run_meta(run_id, RunStatus::CompleteInteractive);
-        runstate::create_run(&meta).unwrap();
-        let req = crate::interaction::InteractionRequest::free_text(
-            "req1",
-            "Any final feedback?",
-            "review",
-            false,
+                let meta = make_run_meta(run_id, RunStatus::CompleteInteractive);
+                runstate::create_run(&meta).unwrap();
+                let req = crate::interaction::InteractionRequest::free_text(
+                    "req1",
+                    "Any final feedback?",
+                    "review",
+                    false,
+                );
+                crate::interaction::write_request(run_id, &req).unwrap();
+
+                dash.sync_from_run_state();
+
+                assert!(
+                    !dash
+                        .toasts
+                        .iter()
+                        .any(|t| t.message.contains("needs input"))
+                );
+                // The separate "completed" toast branch still fires for a brand-new
+                // Complete/CompleteInteractive agent.
+                assert!(dash.toasts.iter().any(|t| t.message.contains("completed")));
+
+                cleanup_run(run_id);
+            },
         );
-        crate::interaction::write_request(run_id, &req).unwrap();
-
-        dash.sync_from_run_state();
-
-        assert!(!dash
-            .toasts
-            .iter()
-            .any(|t| t.message.contains("needs input")));
-        // The separate "completed" toast branch still fires for a brand-new
-        // Complete/CompleteInteractive agent.
-        assert!(dash.toasts.iter().any(|t| t.message.contains("completed")));
-
-        cleanup_run(run_id);
-    });
     }
 
     #[test]
@@ -2197,10 +2205,11 @@ mod tests {
                     agent.status,
                     AgentDisplayStatus::Error("disk full".to_string())
                 );
-                assert!(dash
-                    .toasts
-                    .iter()
-                    .any(|t| t.message.contains("failed") && t.message.contains("disk full")));
+                assert!(
+                    dash.toasts
+                        .iter()
+                        .any(|t| t.message.contains("failed") && t.message.contains("disk full"))
+                );
 
                 cleanup_run(run_id);
             },
@@ -2382,13 +2391,14 @@ mod tests {
 
                 let mut dash = make_test_dashboard();
                 dash.sync_from_run_state();
-                assert!(dash
-                    .agents
-                    .iter()
-                    .find(|a| a.id == run_id)
-                    .unwrap()
-                    .active_until
-                    .is_none());
+                assert!(
+                    dash.agents
+                        .iter()
+                        .find(|a| a.id == run_id)
+                        .unwrap()
+                        .active_until
+                        .is_none()
+                );
 
                 let mut meta2 = make_run_meta(run_id, RunStatus::WaitingInput);
                 meta2.updated_at = meta.started_at + 42;
@@ -2402,10 +2412,11 @@ mod tests {
                 assert_eq!(agent.status, AgentDisplayStatus::Waiting);
                 assert_eq!(agent.active_until, Some(meta2.updated_at));
                 assert_eq!(agent.waiting_prompt.as_deref(), Some("Q?"));
-                assert!(dash
-                    .toasts
-                    .iter()
-                    .any(|t| t.message.contains("needs input")));
+                assert!(
+                    dash.toasts
+                        .iter()
+                        .any(|t| t.message.contains("needs input"))
+                );
 
                 cleanup_run(run_id);
             },

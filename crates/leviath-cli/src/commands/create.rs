@@ -401,9 +401,10 @@ mod tests {
         });
 
         let err = result.unwrap_err();
-        assert!(err
-            .to_string()
-            .contains("injected agent.leviath write failure"));
+        assert!(
+            err.to_string()
+                .contains("injected agent.leviath write failure")
+        );
     }
 
     #[test]
@@ -420,15 +421,17 @@ mod tests {
         });
 
         let err = result.unwrap_err();
-        assert!(err
-            .to_string()
-            .contains("injected .gitignore write failure"));
+        assert!(
+            err.to_string()
+                .contains("injected .gitignore write failure")
+        );
         // The manifest write before it genuinely happened.
-        assert!(dir
-            .path()
-            .join("gitignore-write-fails")
-            .join("agent.leviath")
-            .exists());
+        assert!(
+            dir.path()
+                .join("gitignore-write-fails")
+                .join("agent.leviath")
+                .exists()
+        );
     }
 
     #[test]
@@ -445,9 +448,10 @@ mod tests {
         });
 
         let err = result.unwrap_err();
-        assert!(err
-            .to_string()
-            .contains("injected .env.example write failure"));
+        assert!(
+            err.to_string()
+                .contains("injected .env.example write failure")
+        );
         // The two writes before it genuinely happened.
         let created = dir.path().join("env-example-write-fails");
         assert!(created.join("agent.leviath").exists());

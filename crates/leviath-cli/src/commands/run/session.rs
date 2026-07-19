@@ -9,7 +9,7 @@ use leviath_runtime::ProviderRegistry;
 // existing call sites keep resolving. The `Config`-based translators
 // (`provider_creds_from_config` / `build_provider_registry_from_config`) stay
 // below because they need the CLI's `Config`.
-pub use leviath_runtime::provider_creds::{build_provider_registry, ProviderCreds};
+pub use leviath_runtime::provider_creds::{ProviderCreds, build_provider_registry};
 
 /// Resolve the task string from a CLI argument.
 ///
@@ -146,10 +146,10 @@ fn resolve_task_with_editor(
 
 fn build_task_template(agent_name: &str, description: Option<&str>) -> String {
     let mut template = format!("# Task for agent: {}\n", agent_name);
-    if let Some(desc) = description {
-        if !desc.is_empty() {
-            template.push_str(&format!("# {}\n", desc));
-        }
+    if let Some(desc) = description
+        && !desc.is_empty()
+    {
+        template.push_str(&format!("# {}\n", desc));
     }
     template.push_str("#\n# Describe your task below. Lines starting with '#' are ignored.\n\n");
     template
@@ -249,15 +249,15 @@ fn launch_editor_with(
 
     // Resolve editor candidates in priority order
     let mut candidates: Vec<String> = Vec::new();
-    if let Ok(v) = std::env::var("VISUAL") {
-        if !v.is_empty() {
-            candidates.push(v);
-        }
+    if let Ok(v) = std::env::var("VISUAL")
+        && !v.is_empty()
+    {
+        candidates.push(v);
     }
-    if let Ok(e) = std::env::var("EDITOR") {
-        if !e.is_empty() {
-            candidates.push(e);
-        }
+    if let Ok(e) = std::env::var("EDITOR")
+        && !e.is_empty()
+    {
+        candidates.push(e);
     }
 
     candidates.extend(platform_default_editors());
@@ -1160,10 +1160,12 @@ mod tests {
 
                 let result = launch_editor(&file);
                 assert!(result.is_err());
-                assert!(result
-                    .unwrap_err()
-                    .to_string()
-                    .contains("Failed to launch editor"));
+                assert!(
+                    result
+                        .unwrap_err()
+                        .to_string()
+                        .contains("Failed to launch editor")
+                );
 
                 let _ = std::fs::remove_dir_all(&dir);
             },
@@ -1447,10 +1449,12 @@ mod tests {
 
                 let result = launch_editor(&file);
                 assert!(result.is_err());
-                assert!(result
-                    .unwrap_err()
-                    .to_string()
-                    .contains("Failed to launch editor"));
+                assert!(
+                    result
+                        .unwrap_err()
+                        .to_string()
+                        .contains("Failed to launch editor")
+                );
 
                 let _ = std::fs::remove_dir_all(&dir);
             },
@@ -1595,10 +1599,12 @@ mod tests {
             &move || bad_tmp_dir.clone(),
         );
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("Failed to create task temp file"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("Failed to create task temp file")
+        );
     }
 
     // ─── resolve_task_with: editor path (stdin is a TTY) — Windows twins ──
@@ -1684,10 +1690,12 @@ mod tests {
             .join("task.txt");
         let result = write_task_template(&bad_path, "content");
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("Failed to create task temp file"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("Failed to create task temp file")
+        );
     }
 
     // ─── resolve_task: unreadable file errors ────────────────────────────
@@ -1717,10 +1725,12 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
 
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("Failed to read task file"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("Failed to read task file")
+        );
     }
 
     // Windows has no chmod-style permission bits; instead, opening the file
@@ -1759,9 +1769,11 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
 
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("Failed to read task file"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("Failed to read task file")
+        );
     }
 }

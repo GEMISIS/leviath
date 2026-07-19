@@ -122,30 +122,29 @@ fn poll_once(
                     result: meta.error.clone(),
                 });
 
-                if let Some(ref url) = meta.callback_url {
-                    if !poll
+                if let Some(ref url) = meta.callback_url
+                    && !poll
                         .callback_fired
                         .get(&meta.run_id)
                         .copied()
                         .unwrap_or(false)
-                    {
-                        poll.callback_fired.insert(meta.run_id.clone(), true);
-                        let payload = serde_json::json!({
-                            "event": "agent_completed",
-                            "run_id": meta.run_id,
-                            "agent_id": meta.agent_name,
-                            "status": status_str,
-                            "result": meta.error,
-                            "metadata": meta.metadata,
-                            "tokens": {
-                                "prompt": meta.prompt_tokens,
-                                "completion": meta.completion_tokens,
-                            }
-                        });
-                        let client = client.clone();
-                        let url = url.clone();
-                        tokio::spawn(fire_webhook(client, url, payload));
-                    }
+                {
+                    poll.callback_fired.insert(meta.run_id.clone(), true);
+                    let payload = serde_json::json!({
+                        "event": "agent_completed",
+                        "run_id": meta.run_id,
+                        "agent_id": meta.agent_name,
+                        "status": status_str,
+                        "result": meta.error,
+                        "metadata": meta.metadata,
+                        "tokens": {
+                            "prompt": meta.prompt_tokens,
+                            "completion": meta.completion_tokens,
+                        }
+                    });
+                    let client = client.clone();
+                    let url = url.clone();
+                    tokio::spawn(fire_webhook(client, url, payload));
                 }
             }
 
@@ -608,7 +607,7 @@ mod tests {
     #[test]
     fn polling_loop_emits_context_update() {
         crate::runstate::with_isolated_runs_dir("polling_loop_emits_context_update", |_d| {
-            use crate::runstate::{create_run, write_context_snapshot, ContextSnapshot, RunMeta};
+            use crate::runstate::{ContextSnapshot, RunMeta, create_run, write_context_snapshot};
 
             let (state, mut rx) = make_test_state();
             let mut poll = PollState {
@@ -682,7 +681,7 @@ mod tests {
             "poll_once_no_context_update_when_tokens_unchanged",
             |_d| {
                 use crate::runstate::{
-                    create_run, write_context_snapshot, ContextSnapshot, RunMeta,
+                    ContextSnapshot, RunMeta, create_run, write_context_snapshot,
                 };
 
                 let (state, mut rx) = make_test_state();
@@ -756,10 +755,10 @@ mod tests {
                 });
                 let mut ctx_updates_for_run = 0u32;
                 while let Ok(ev) = rx.try_recv() {
-                    if let ServerEvent::ContextUpdate { run_id: eid, .. } = &ev {
-                        if eid == &run_id {
-                            ctx_updates_for_run += 1;
-                        }
+                    if let ServerEvent::ContextUpdate { run_id: eid, .. } = &ev
+                        && eid == &run_id
+                    {
+                        ctx_updates_for_run += 1;
                     }
                 }
                 // poll_once emitted 0 ContextUpdates for run_id (unchanged tokens);
@@ -788,7 +787,7 @@ mod tests {
     fn polling_loop_emits_interaction_needed() {
         crate::runstate::with_isolated_runs_dir("polling_loop_emits_interaction_needed", |_d| {
             use crate::interaction::{self, InteractionRequest};
-            use crate::runstate::{create_run, RunMeta};
+            use crate::runstate::{RunMeta, create_run};
 
             let (state, mut rx) = make_test_state();
             let mut poll = PollState {
@@ -908,11 +907,12 @@ mod tests {
         poll_once(&state, &mut poll, &client, &[meta]);
 
         // callback_fired should be recorded immediately...
-        assert!(poll
-            .callback_fired
-            .get("run-webhook-1")
-            .copied()
-            .unwrap_or(false));
+        assert!(
+            poll.callback_fired
+                .get("run-webhook-1")
+                .copied()
+                .unwrap_or(false)
+        );
 
         // ...and the webhook POST should actually be delivered.
         let body = tokio::time::timeout(std::time::Duration::from_secs(5), rx)
@@ -961,11 +961,12 @@ mod tests {
 
         // callback_fired is recorded synchronously, before the (failing)
         // webhook send is even attempted.
-        assert!(poll
-            .callback_fired
-            .get("run-webhook-fail")
-            .copied()
-            .unwrap_or(false));
+        assert!(
+            poll.callback_fired
+                .get("run-webhook-fail")
+                .copied()
+                .unwrap_or(false)
+        );
 
         // Give the spawned task time to attempt the connection and fail.
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
@@ -1030,11 +1031,12 @@ mod tests {
         meta.touch();
         // First completion: fires the webhook and marks it fired.
         poll_once(&state, &mut poll, &client, std::slice::from_ref(&meta));
-        assert!(poll
-            .callback_fired
-            .get("run-webhook-2")
-            .copied()
-            .unwrap_or(false));
+        assert!(
+            poll.callback_fired
+                .get("run-webhook-2")
+                .copied()
+                .unwrap_or(false)
+        );
 
         // The mock server only accepts a single connection; if poll_once
         // tried to fire the callback again it would either hang or the

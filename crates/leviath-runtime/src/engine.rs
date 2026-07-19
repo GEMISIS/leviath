@@ -853,14 +853,14 @@ impl AgentEngine {
     /// Extracted so both the sequential loop and the concurrent shared driver
     /// run identical logic under their respective borrows/guards.
     fn loop_check_cancelled(&mut self, entity: Entity, iteration: usize) -> bool {
-        if let Some(token) = self.world.get::<CancellationToken>(entity) {
-            if token.is_cancelled() {
-                tracing::info!(iteration, "Inference loop cancelled");
-                if let Some(mut state) = self.world.get_mut::<AgentState>(entity) {
-                    state.status = AgentStatus::Cancelled;
-                }
-                return true;
+        if let Some(token) = self.world.get::<CancellationToken>(entity)
+            && token.is_cancelled()
+        {
+            tracing::info!(iteration, "Inference loop cancelled");
+            if let Some(mut state) = self.world.get_mut::<AgentState>(entity) {
+                state.status = AgentStatus::Cancelled;
             }
+            return true;
         }
         false
     }
@@ -1013,13 +1013,13 @@ impl AgentEngine {
                 .unwrap_or_default();
 
             // Apply max_result_tokens truncation from routing config
-            if let Some(routing) = tool_result_routing.as_ref() {
-                if let Some(max_tokens) = routing.max_result_tokens {
-                    let max_chars = max_tokens * 4;
-                    if result_text.len() > max_chars {
-                        result_text = truncate_on_char_boundary(&result_text, max_chars);
-                        result_text.push_str("\n[...truncated]");
-                    }
+            if let Some(routing) = tool_result_routing.as_ref()
+                && let Some(max_tokens) = routing.max_result_tokens
+            {
+                let max_chars = max_tokens * 4;
+                if result_text.len() > max_chars {
+                    result_text = truncate_on_char_boundary(&result_text, max_chars);
+                    result_text.push_str("\n[...truncated]");
                 }
             }
 
@@ -2878,12 +2878,14 @@ mod tests {
         assert!(result.is_ok());
         assert_eq!(result.unwrap().content, "mock response");
         // The handle is still usable after the loop (guard was released).
-        assert!(handle
-            .read()
-            .await
-            .world()
-            .get::<AgentState>(entity)
-            .is_some());
+        assert!(
+            handle
+                .read()
+                .await
+                .world()
+                .get::<AgentState>(entity)
+                .is_some()
+        );
     }
 
     /// A provider whose `infer` always fails — used to drive the loop's network
@@ -4201,10 +4203,11 @@ mod tests {
         // Tool results now go to "conversation" as typed entries
         let w = engine.world().get::<ContextWindow>(entity).unwrap();
         let conv = w.get_region("conversation").unwrap();
-        assert!(conv
-            .content
-            .iter()
-            .any(|e| matches!(&e.kind, leviath_core::EntryKind::ToolResult { .. })));
+        assert!(
+            conv.content
+                .iter()
+                .any(|e| matches!(&e.kind, leviath_core::EntryKind::ToolResult { .. }))
+        );
     }
 
     #[tokio::test]
@@ -4296,10 +4299,11 @@ mod tests {
         // Tool results now go to "conversation" as typed entries
         let w = engine.world().get::<ContextWindow>(entity).unwrap();
         let conv = w.get_region("conversation").unwrap();
-        assert!(conv
-            .content
-            .iter()
-            .any(|e| matches!(&e.kind, leviath_core::EntryKind::ToolResult { .. })));
+        assert!(
+            conv.content
+                .iter()
+                .any(|e| matches!(&e.kind, leviath_core::EntryKind::ToolResult { .. }))
+        );
     }
 
     #[tokio::test]
@@ -4396,10 +4400,11 @@ mod tests {
         // Tool results now go to "conversation" as typed entries
         let w = engine.world().get::<ContextWindow>(entity).unwrap();
         let conv = w.get_region("conversation").unwrap();
-        assert!(conv
-            .content
-            .iter()
-            .any(|e| matches!(&e.kind, leviath_core::EntryKind::ToolResult { .. })));
+        assert!(
+            conv.content
+                .iter()
+                .any(|e| matches!(&e.kind, leviath_core::EntryKind::ToolResult { .. }))
+        );
     }
 
     #[test]
@@ -5463,10 +5468,12 @@ mod tests {
         assert!(!tool_results_text(&engine, entity).contains("[blocked]"));
         // The allow was audited.
         let allow_once = leviath_core::taint::GateDecisionSource::UserAllowOnce;
-        assert!(engine
-            .taint_audit_log(entity)
-            .iter()
-            .any(|e| e.allowed && e.decision_source == allow_once));
+        assert!(
+            engine
+                .taint_audit_log(entity)
+                .iter()
+                .any(|e| e.allowed && e.decision_source == allow_once)
+        );
     }
 
     #[tokio::test]
@@ -5477,10 +5484,12 @@ mod tests {
         assert!(executed.lock().unwrap().contains(&"shell".to_string()));
         // Audited as an always-allow decision.
         let always_allow = leviath_core::taint::GateDecisionSource::UserAlwaysAllow;
-        assert!(engine
-            .taint_audit_log(entity)
-            .iter()
-            .any(|e| e.allowed && e.decision_source == always_allow));
+        assert!(
+            engine
+                .taint_audit_log(entity)
+                .iter()
+                .any(|e| e.allowed && e.decision_source == always_allow)
+        );
         // The tool's clearance was raised to Private for the rest of the run.
         let cls = engine
             .taint_gates
@@ -5565,10 +5574,12 @@ mod tests {
         assert!(executed.lock().unwrap().contains(&"shell".to_string()));
         let allowlist_rule =
             leviath_core::taint::GateDecisionSource::AllowlistRule { rule_index: 0 };
-        assert!(engine
-            .taint_audit_log(entity)
-            .iter()
-            .any(|e| e.allowed && e.decision_source == allowlist_rule));
+        assert!(
+            engine
+                .taint_audit_log(entity)
+                .iter()
+                .any(|e| e.allowed && e.decision_source == allowlist_rule)
+        );
     }
 
     #[test]
@@ -5598,12 +5609,14 @@ mod tests {
             })
             .id();
         // No taint tracking yet → overall_taint is None.
-        assert!(engine
-            .world()
-            .get::<ContextWindow>(entity)
-            .unwrap()
-            .overall_taint()
-            .is_none());
+        assert!(
+            engine
+                .world()
+                .get::<ContextWindow>(entity)
+                .unwrap()
+                .overall_taint()
+                .is_none()
+        );
         engine.enable_entity_taint_tracking(entity);
         // Now tracking is on → overall_taint reports (Public with no tainted data).
         assert_eq!(

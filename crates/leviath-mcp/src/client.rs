@@ -1175,12 +1175,12 @@ for line in sys.stdin:
         let mut client = spawn_stub_client(STUB_INIT_LIST_CALL).await;
         client.child.kill().await.expect("kill should succeed");
         let _ = client.child.wait().await; // reap so the pipe's read end is fully gone
-                                           // Empirically, a *tiny* buffered write's subsequent flush() doesn't
-                                           // reliably surface EPIPE immediately after reaping on this platform
-                                           // (unlike a >8KB write, which bypasses BufWriter's buffer and hits
-                                           // the OS directly in write_all() itself -- see the write_all tests
-                                           // below, which are deterministic). A short delay lets the kernel
-                                           // fully settle the closed pipe state before flush() is attempted.
+        // Empirically, a *tiny* buffered write's subsequent flush() doesn't
+        // reliably surface EPIPE immediately after reaping on this platform
+        // (unlike a >8KB write, which bypasses BufWriter's buffer and hits
+        // the OS directly in write_all() itself -- see the write_all tests
+        // below, which are deterministic). A short delay lets the kernel
+        // fully settle the closed pipe state before flush() is attempted.
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         client
     }

@@ -70,8 +70,8 @@ struct BuiltinEntry {
 fn builtin_table() -> Vec<BuiltinEntry> {
     macro_rules! entry {
         // Short form — tools defaults to true
-        ($provider:expr, $id:expr, $name:expr,
-         temp=$t:expr, ctx=$ctx:expr, out=$out:expr) => {
+        ($provider:expr_2021, $id:expr_2021, $name:expr_2021,
+         temp=$t:expr_2021, ctx=$ctx:expr_2021, out=$out:expr_2021) => {
             entry!(
                 $provider,
                 $id,
@@ -83,8 +83,8 @@ fn builtin_table() -> Vec<BuiltinEntry> {
             )
         };
         // Full form — explicit tools flag
-        ($provider:expr, $id:expr, $name:expr,
-         temp=$t:expr, tools=$to:expr, ctx=$ctx:expr, out=$out:expr) => {
+        ($provider:expr_2021, $id:expr_2021, $name:expr_2021,
+         temp=$t:expr_2021, tools=$to:expr_2021, ctx=$ctx:expr_2021, out=$out:expr_2021) => {
             BuiltinEntry {
                 provider: $provider,
                 model_id: $id,
@@ -377,10 +377,10 @@ async fn list_with_registry(
         let registry = build_registry(&config);
         for provider_name in registry.provider_names() {
             // If the caller filtered to a specific provider, skip others.
-            if let Some(ref filter) = args.provider {
-                if filter != provider_name {
-                    continue;
-                }
+            if let Some(ref filter) = args.provider
+                && filter != provider_name
+            {
+                continue;
             }
 
             // `registry.get(provider_name)` is structurally guaranteed
@@ -517,36 +517,36 @@ async fn show_with_registry(
     }
 
     // 3. Optionally fetch from provider API if --remote and --provider are both given.
-    if args.remote {
-        if let Some(ref provider_name) = args.provider {
-            let registry = build_registry(&config);
-            if let Some(provider) = registry.get(provider_name) {
-                match provider.list_models().await {
-                    Ok(models) => {
-                        if let Some(info) = models.iter().find(|m| &m.id == model_id) {
-                            print_model_detail(
-                                model_id,
-                                info.display_name.as_deref(),
-                                &info.provider,
-                                &info.capabilities,
-                                false,
-                            );
-                            return Ok(());
-                        }
-                    }
-                    Err(e) => {
-                        eprintln!(
-                            "Warning: could not fetch models from '{}': {}",
-                            provider_name, e
+    if args.remote
+        && let Some(ref provider_name) = args.provider
+    {
+        let registry = build_registry(&config);
+        if let Some(provider) = registry.get(provider_name) {
+            match provider.list_models().await {
+                Ok(models) => {
+                    if let Some(info) = models.iter().find(|m| &m.id == model_id) {
+                        print_model_detail(
+                            model_id,
+                            info.display_name.as_deref(),
+                            &info.provider,
+                            &info.capabilities,
+                            false,
                         );
+                        return Ok(());
                     }
                 }
-            } else {
-                eprintln!(
-                    "Warning: provider '{}' is not configured (missing API key?)",
-                    provider_name
-                );
+                Err(e) => {
+                    eprintln!(
+                        "Warning: could not fetch models from '{}': {}",
+                        provider_name, e
+                    );
+                }
             }
+        } else {
+            eprintln!(
+                "Warning: provider '{}' is not configured (missing API key?)",
+                provider_name
+            );
         }
     }
 
@@ -573,11 +573,7 @@ async fn show_with_registry(
 // ─── Display helpers ──────────────────────────────────────────────────────────
 
 fn bool_icon(b: bool) -> &'static str {
-    if b {
-        "✓"
-    } else {
-        "✗"
-    }
+    if b { "✓" } else { "✗" }
 }
 
 /// Format a raw token count as a human-friendly string (e.g. 1M, 200K, 128K, 8K).

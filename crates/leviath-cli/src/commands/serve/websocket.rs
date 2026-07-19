@@ -82,8 +82,8 @@ async fn handle_ws(
 mod tests {
     use super::*;
 
-    use axum::routing::get;
     use axum::Router;
+    use axum::routing::get;
     use std::sync::Arc;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpStream;

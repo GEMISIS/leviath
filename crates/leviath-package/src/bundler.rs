@@ -3,8 +3,8 @@
 //! Creates `.leviath-bundle` files which are tar.gz archives containing
 //! the agent manifest, definition, scripts, and documentation.
 
-use flate2::write::GzEncoder;
 use flate2::Compression;
+use flate2::write::GzEncoder;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -435,10 +435,12 @@ mod tests {
         let bundler = AgentBundler::new();
         let result = bundler.bundle_to_file(&project, &output);
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("Failed to write bundle"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("Failed to write bundle")
+        );
     }
 
     // The tar-append error arm ("Failed to add ...") is exercised OS-agnostically
@@ -664,10 +666,12 @@ mod tests {
         });
 
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("Failed to read directory"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("Failed to read directory")
+        );
     }
 
     // ─── add_directory_to_tar: strip_prefix failure (direct unit test) ──
@@ -694,10 +698,12 @@ mod tests {
             bundler.add_directory_to_tar(&mut tar, project, unrelated.path(), &|p| fs::read_dir(p));
 
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("Failed to compute relative path"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("Failed to compute relative path")
+        );
     }
 
     // ─── write_bundle: tar/gzip finalize failure paths ──────────────────
@@ -732,10 +738,12 @@ mod tests {
         let result = bundler.write_bundle(dir.path(), &mut sink, &|p| fs::read_dir(p));
 
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("Failed to finalize tar archive"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("Failed to finalize tar archive")
+        );
     }
 
     /// A `Write` sink that succeeds exactly once (letting the gzip header
@@ -769,10 +777,12 @@ mod tests {
         let result = bundler.write_bundle(dir.path(), &mut sink, &|p| fs::read_dir(p));
 
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("Failed to finalize gzip"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("Failed to finalize gzip")
+        );
     }
 
     // Neither `tar::Builder::into_inner` nor `GzEncoder::finish` ever calls

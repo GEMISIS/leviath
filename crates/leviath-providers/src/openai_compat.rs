@@ -4,9 +4,9 @@
 //! OpenAI Chat Completions format.
 
 use crate::provider::{
-    check_http_response, parse_openai_finish_reason, ContentBlock, InferenceRequest,
-    InferenceResponse, MessageContent, ProviderError, Result, StreamChunk, TokenUsage, ToolCall,
-    ToolCallDelta,
+    ContentBlock, InferenceRequest, InferenceResponse, MessageContent, ProviderError, Result,
+    StreamChunk, TokenUsage, ToolCall, ToolCallDelta, check_http_response,
+    parse_openai_finish_reason,
 };
 use crate::rate_limit::RateLimiter;
 use futures_core::Stream;

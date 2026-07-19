@@ -101,7 +101,7 @@ pub async fn run_interactive_stage(
     executor: &mut ToolExecutorDyn<'_>,
 ) -> anyhow::Result<()> {
     use crate::interaction::{
-        make_interaction_id, request_interaction_async, response_as_text, InteractionRequest,
+        InteractionRequest, make_interaction_id, request_interaction_async, response_as_text,
     };
     use leviath_runtime::ContextWindow;
 
@@ -154,7 +154,7 @@ pub async fn run_interactive_stage(
                 "[Tokens: {} in, {} out]",
                 response.tokens_used.prompt_tokens, response.tokens_used.completion_tokens
             );
-            if let (Some(run_id), Some(ref m)) = (&run_id_owned, &meta_holder) {
+            if let (Some(run_id), Some(m)) = (&run_id_owned, &meta_holder) {
                 record_stage_output(run_id, m.stage_index, &response.content);
                 record_stage_log(run_id, m.stage_index, &token_line);
             }
@@ -243,7 +243,7 @@ pub async fn run_interactive_stage(
             false, // not required — empty ends the loop
         );
 
-        let input = if let (Some(run_id), Some(ref mut meta)) = (&run_id_owned, &mut meta_holder) {
+        let input = if let (Some(run_id), Some(meta)) = (&run_id_owned, &mut meta_holder) {
             let resp = request_interaction_async(run_id, meta, req, None).await?;
             response_as_text(&resp)
         } else {
@@ -360,8 +360,10 @@ pub async fn run_interactive_points_stage(
     // foreground mode (no run_context) it is required; background mode resolves
     // interaction points via IPC and never consults it, so a placeholder is
     // bound there.
-    let ask: &(dyn Fn(&crate::interaction::InteractionRequest) -> crate::interaction::InteractionResponse
-          + Sync) = match asker {
+    let ask: &(
+         dyn Fn(&crate::interaction::InteractionRequest) -> crate::interaction::InteractionResponse
+             + Sync
+     ) = match asker {
         Some(ref f) => f,
         // Background (IPC) mode and the empty-points autonomous fallback never
         // consult the asker, so bind the placeholder there rather than bailing.
@@ -403,12 +405,14 @@ async fn run_interactive_points_stage_with(
     run_context: Option<(&str, &mut RunMeta)>,
     io: &mut dyn RunIO,
     executor: &mut ToolExecutorDyn<'_>,
-    ask_foreground: &(dyn Fn(&crate::interaction::InteractionRequest) -> crate::interaction::InteractionResponse
-          + Sync),
+    ask_foreground: &(
+         dyn Fn(&crate::interaction::InteractionRequest) -> crate::interaction::InteractionResponse
+             + Sync
+     ),
 ) -> anyhow::Result<PointsOutcome> {
     use crate::interaction::{
-        make_interaction_id, request_interaction_async, response_as_choice, response_as_text,
-        InteractionRequest,
+        InteractionRequest, make_interaction_id, request_interaction_async, response_as_choice,
+        response_as_text,
     };
     use leviath_runtime::ContextWindow;
 
@@ -474,7 +478,7 @@ async fn run_interactive_points_stage_with(
                     if !resp.content.is_empty() {
                         io.on_output(&resp.content).await;
                         // Route agent response to the per-stage output file so the dashboard can display it
-                        if let (Some(run_id), Some(ref m)) = (&run_id_owned, &meta_holder) {
+                        if let (Some(run_id), Some(m)) = (&run_id_owned, &meta_holder) {
                             record_stage_output(run_id, m.stage_index, &resp.content);
                         }
                         last_output = Some(resp.content.clone());
@@ -522,9 +526,7 @@ async fn run_interactive_points_stage_with(
             };
 
             // Dispatch via file IPC or stdin
-            let user_text = if let (Some(run_id), Some(ref mut meta)) =
-                (&run_id_owned, &mut meta_holder)
-            {
+            let user_text = if let (Some(run_id), Some(meta)) = (&run_id_owned, &mut meta_holder) {
                 let resp = request_interaction_async(run_id, meta, ipc_req.clone(), None).await?;
                 match bp_style {
                     leviath_core::blueprint::InteractionStyle::MultipleChoice
@@ -567,12 +569,12 @@ async fn run_interactive_points_stage_with(
                 return Ok(PointsOutcome::Aborted);
             }
 
-            if !user_text.is_empty() {
-                if let Some(mut window) = engine.world_mut().get_mut::<ContextWindow>(entity) {
-                    let tokens = user_text.len() / 4 + 1;
-                    let content = format!("User [{}]: {}", point.name, user_text);
-                    let _ = window.add_to_region("conversation", content, tokens);
-                }
+            if !user_text.is_empty()
+                && let Some(mut window) = engine.world_mut().get_mut::<ContextWindow>(entity)
+            {
+                let tokens = user_text.len() / 4 + 1;
+                let content = format!("User [{}]: {}", point.name, user_text);
+                let _ = window.add_to_region("conversation", content, tokens);
             }
 
             // Deterministic direct-edit: if the selection is an edit option,
@@ -593,13 +595,12 @@ async fn run_interactive_points_stage_with(
                     &point.name,
                     seed,
                 );
-                let edited =
-                    if let (Some(run_id), Some(ref mut meta)) = (&run_id_owned, &mut meta_holder) {
-                        let resp = request_interaction_async(run_id, meta, edit_req, None).await?;
-                        response_as_text(&resp)
-                    } else {
-                        response_as_text(&ask_foreground(&edit_req))
-                    };
+                let edited = if let (Some(run_id), Some(meta)) = (&run_id_owned, &mut meta_holder) {
+                    let resp = request_interaction_async(run_id, meta, edit_req, None).await?;
+                    response_as_text(&resp)
+                } else {
+                    response_as_text(&ask_foreground(&edit_req))
+                };
                 if !edited.is_empty() {
                     if let Some(mut window) = engine.world_mut().get_mut::<ContextWindow>(entity) {
                         let content = format!(
@@ -669,7 +670,7 @@ async fn run_interactive_points_stage_with(
         if let Ok(resp) = response {
             if !resp.content.is_empty() {
                 io.on_output(&resp.content).await;
-                if let (Some(run_id), Some(ref m)) = (&run_id_owned, &meta_holder) {
+                if let (Some(run_id), Some(m)) = (&run_id_owned, &meta_holder) {
                     record_stage_output(run_id, m.stage_index, &resp.content);
                 }
             }
@@ -679,7 +680,7 @@ async fn run_interactive_points_stage_with(
                 resp.tokens_used.cached_tokens,
             )
             .await;
-            if let (Some(_), Some(ref m)) = (&run_id_owned, &meta_holder) {
+            if let (Some(_), Some(m)) = (&run_id_owned, &meta_holder) {
                 let token_line = format!(
                     "[Tokens used: {} input, {} output]",
                     resp.tokens_used.prompt_tokens, resp.tokens_used.completion_tokens
@@ -1213,9 +1214,11 @@ mod tests {
         assert_eq!(provider.count_tokens("abcd", "m"), 1);
         assert_eq!(provider.max_context_tokens("m"), 100_000);
         assert_eq!(provider.name(), "mock");
-        assert!(tokio_test_block_on(provider.list_models())
-            .unwrap()
-            .is_empty());
+        assert!(
+            tokio_test_block_on(provider.list_models())
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]
@@ -1226,9 +1229,11 @@ mod tests {
         assert_eq!(provider.count_tokens("abcd", "m"), 1);
         assert_eq!(provider.max_context_tokens("m"), 100_000);
         assert_eq!(provider.name(), "stream-failing-mock");
-        assert!(tokio_test_block_on(provider.list_models())
-            .unwrap()
-            .is_empty());
+        assert!(
+            tokio_test_block_on(provider.list_models())
+                .unwrap()
+                .is_empty()
+        );
     }
 
     fn tokio_test_block_on<F: std::future::Future>(fut: F) -> F::Output {
@@ -2380,10 +2385,12 @@ mod tests {
         )
         .await;
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("require an interaction asker"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("require an interaction asker")
+        );
     }
 
     #[tokio::test]

@@ -681,36 +681,35 @@ pub fn parse_manifest(content: &str) -> Result<Blueprint> {
     }
 
     // Parse file tracking config: [context.file_tracking]
-    if let Some(context_table) = parsed.get("context").and_then(|v| v.as_table()) {
-        if let Some(ft_table) = context_table
+    if let Some(context_table) = parsed.get("context").and_then(|v| v.as_table())
+        && let Some(ft_table) = context_table
             .get("file_tracking")
             .and_then(|v| v.as_table())
-        {
-            let region = ft_table
-                .get("region")
-                .and_then(|v| v.as_str())
-                .unwrap_or("files")
-                .to_string();
-            let track_reads = ft_table
-                .get("track_reads")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(true);
-            let track_writes = ft_table
-                .get("track_writes")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(true);
-            let max_file_tokens = ft_table
-                .get("max_file_tokens")
-                .and_then(|v| v.as_integer())
-                .map(|v| v as usize);
+    {
+        let region = ft_table
+            .get("region")
+            .and_then(|v| v.as_str())
+            .unwrap_or("files")
+            .to_string();
+        let track_reads = ft_table
+            .get("track_reads")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true);
+        let track_writes = ft_table
+            .get("track_writes")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true);
+        let max_file_tokens = ft_table
+            .get("max_file_tokens")
+            .and_then(|v| v.as_integer())
+            .map(|v| v as usize);
 
-            blueprint.file_tracking = Some(crate::FileTrackingConfig {
-                region,
-                track_reads,
-                track_writes,
-                max_file_tokens,
-            });
-        }
+        blueprint.file_tracking = Some(crate::FileTrackingConfig {
+            region,
+            track_reads,
+            track_writes,
+            max_file_tokens,
+        });
     }
 
     Ok(blueprint)
@@ -1673,10 +1672,12 @@ mode = "autonomous"
 "#;
         let result = parse_manifest(toml);
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("Missing [agent] section"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("Missing [agent] section")
+        );
     }
 
     #[test]
@@ -1848,10 +1849,12 @@ mode = "autonomous"
         let transitions = plan.transitions.as_ref().unwrap();
 
         // plan stage should route errors to error_recovery, like implement/review do.
-        assert!(transitions
-            .get("error_recovery")
-            .map(|e| e.condition == crate::blueprint::TransitionCondition::Error)
-            .unwrap_or(false));
+        assert!(
+            transitions
+                .get("error_recovery")
+                .map(|e| e.condition == crate::blueprint::TransitionCondition::Error)
+                .unwrap_or(false)
+        );
 
         // allow_complete lets the model respond DONE (e.g. when the user
         // chose "Abort") instead of being forced into 'implement' or 'plan'.
@@ -1910,10 +1913,12 @@ mode = "autonomous"
             .as_ref()
             .expect("review stage must declare transitions");
         // review stage should route errors to error_recovery, like implement does.
-        assert!(transitions
-            .get("error_recovery")
-            .map(|e| e.condition == crate::blueprint::TransitionCondition::Error)
-            .unwrap_or(false));
+        assert!(
+            transitions
+                .get("error_recovery")
+                .map(|e| e.condition == crate::blueprint::TransitionCondition::Error)
+                .unwrap_or(false)
+        );
     }
 
     #[test]
@@ -1935,17 +1940,22 @@ mode = "autonomous"
 
         let plan = bp.find_stage("plan").unwrap();
         assert!(plan.available_tools.contains(&"ask_user_text".to_string()));
-        assert!(plan
-            .available_tools
-            .contains(&"ask_user_choice".to_string()));
+        assert!(
+            plan.available_tools
+                .contains(&"ask_user_choice".to_string())
+        );
 
         let implement = bp.find_stage("implement").unwrap();
-        assert!(implement
-            .available_tools
-            .contains(&"ask_user_text".to_string()));
-        assert!(implement
-            .available_tools
-            .contains(&"ask_user_confirm".to_string()));
+        assert!(
+            implement
+                .available_tools
+                .contains(&"ask_user_text".to_string())
+        );
+        assert!(
+            implement
+                .available_tools
+                .contains(&"ask_user_confirm".to_string())
+        );
     }
 
     // ─── Production-code branch coverage: optional field None-paths ──────────

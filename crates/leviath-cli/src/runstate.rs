@@ -213,10 +213,10 @@ fn list_runs_in_dir(dir: PathBuf) -> Vec<RunMeta> {
     if let Ok(entries) = std::fs::read_dir(&dir) {
         for entry in entries.filter_map(|e| e.ok()) {
             let meta_path = entry.path().join("meta.json");
-            if let Ok(json) = std::fs::read_to_string(&meta_path) {
-                if let Ok(meta) = serde_json::from_str::<RunMeta>(&json) {
-                    runs.push(meta);
-                }
+            if let Ok(json) = std::fs::read_to_string(&meta_path)
+                && let Ok(meta) = serde_json::from_str::<RunMeta>(&json)
+            {
+                runs.push(meta);
             }
         }
     }

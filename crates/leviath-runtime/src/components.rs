@@ -3,8 +3,8 @@
 use bevy_ecs::prelude::*;
 use leviath_core::Region;
 use serde::{Deserialize, Serialize};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Agent execution state component.
 ///
@@ -285,25 +285,24 @@ impl ContextWindow {
             let mut evicted_any = false;
 
             for region in &mut self.regions {
-                if matches!(region.kind, RegionKind::Temporary) {
-                    if let Some(entry) = region.remove_oldest() {
-                        let freed = entry.tokens;
-                        self.current_tokens -= freed;
-                        evicted_any = true;
+                if matches!(region.kind, RegionKind::Temporary)
+                    && let Some(entry) = region.remove_oldest()
+                {
+                    let freed = entry.tokens;
+                    self.current_tokens -= freed;
+                    evicted_any = true;
 
-                        tracing::debug!(
-                            region = %region.name,
-                            tokens_freed = freed,
-                            "Evicted temporary region entry (oldest first)"
-                        );
+                    tracing::debug!(
+                        region = %region.name,
+                        tokens_freed = freed,
+                        "Evicted temporary region entry (oldest first)"
+                    );
 
-                        if self.max_tokens.saturating_sub(self.current_tokens) >= target_free_tokens
-                        {
-                            return Ok(EvictionResult {
-                                tokens_freed: initial_tokens - self.current_tokens,
-                                needs_compaction: Vec::new(),
-                            });
-                        }
+                    if self.max_tokens.saturating_sub(self.current_tokens) >= target_free_tokens {
+                        return Ok(EvictionResult {
+                            tokens_freed: initial_tokens - self.current_tokens,
+                            needs_compaction: Vec::new(),
+                        });
                     }
                 }
             }
@@ -1630,12 +1629,16 @@ mod tests {
 
         let summary = window.taint_summary();
         assert_eq!(summary.len(), 2);
-        assert!(summary
-            .iter()
-            .any(|(name, level)| name == "conv" && *level == leviath_core::TaintLevel::Private));
-        assert!(summary
-            .iter()
-            .any(|(name, level)| name == "tools" && *level == leviath_core::TaintLevel::Public));
+        assert!(
+            summary
+                .iter()
+                .any(|(name, level)| name == "conv" && *level == leviath_core::TaintLevel::Private)
+        );
+        assert!(
+            summary
+                .iter()
+                .any(|(name, level)| name == "tools" && *level == leviath_core::TaintLevel::Public)
+        );
     }
 
     #[test]
@@ -1730,10 +1733,12 @@ mod tests {
             }
         }
         // The assistant text should still be present
-        assert!(assembled
-            .messages
-            .iter()
-            .any(|m| m.role == "assistant" && m.content.as_text().contains("read that file")));
+        assert!(
+            assembled
+                .messages
+                .iter()
+                .any(|m| m.role == "assistant" && m.content.as_text().contains("read that file"))
+        );
     }
 
     #[test]
@@ -1976,10 +1981,12 @@ mod tests {
             }
         }
         // The assistant text should still be present
-        assert!(assembled
-            .messages
-            .iter()
-            .any(|m| m.role == "assistant" && m.content.as_text().contains("do both")));
+        assert!(
+            assembled
+                .messages
+                .iter()
+                .any(|m| m.role == "assistant" && m.content.as_text().contains("do both"))
+        );
     }
 
     #[test]

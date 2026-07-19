@@ -12,14 +12,14 @@ use std::collections::{HashMap, HashSet};
 use crate::config::{Config, ToolPolicy};
 use crate::interaction::{InteractionRequest, InteractionResponse};
 use crate::runstate::RunMeta;
-use crate::tools::{resolve_policy, ToolRegistry};
+use crate::tools::{ToolRegistry, resolve_policy};
 
-use super::executor::{run_stage_loop, StageCallbacks, StageContext};
+use super::RunArgs;
+use super::executor::{StageCallbacks, StageContext, run_stage_loop};
 use super::helpers::initialize_context_window;
 use super::io::{ConsoleIO, RunIO};
 use super::manifest::{find_manifest, parse_manifest};
 use super::session::{build_provider_registry_from_config, resolve_task};
-use super::RunArgs;
 
 /// Type-erased async buffered reader supplied by
 /// [`ForegroundIo::make_message_reader`].
@@ -178,7 +178,7 @@ async fn dispatch_tool_calls_foreground(
                 format!("[denied] Tool '{}' is not permitted for this run.", tc.name)
             }
             ToolPolicy::Ask => {
-                use crate::interaction::{response_approved, ApprovalScope};
+                use crate::interaction::{ApprovalScope, response_approved};
                 let req = InteractionRequest::tool_approval(
                     format!("fg-{}", tc.id),
                     &tc.name,

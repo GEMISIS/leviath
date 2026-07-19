@@ -627,10 +627,12 @@ mod tests {
     fn test_parse_malformed_json() {
         let result = parse_claude_response("not valid json at all");
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .starts_with("Invalid response:"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .starts_with("Invalid response:")
+        );
     }
 
     #[test]
@@ -1293,9 +1295,10 @@ mod tests {
             .await
             .expect("stream should yield an item")
             .expect_err("expected a read error from invalid UTF-8");
-        assert!(err
-            .to_string()
-            .contains("Failed to read Claude Code output"));
+        assert!(
+            err.to_string()
+                .contains("Failed to read Claude Code output")
+        );
         let _ = std::fs::remove_file(&script);
     }
 }

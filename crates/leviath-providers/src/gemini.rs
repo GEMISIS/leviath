@@ -1,7 +1,7 @@
 //! Google Gemini provider implementation (via OpenAI-compatible endpoint).
 
 use crate::openai_compat::{
-    build_openai_request_body, parse_openai_response, send_chat_request, OpenAiSseStream,
+    OpenAiSseStream, build_openai_request_body, parse_openai_response, send_chat_request,
 };
 #[cfg(test)]
 use crate::provider::FinishReason;
@@ -434,9 +434,11 @@ mod tests {
             request_timeout_secs: None,
         };
         let provider = GeminiProvider::with_config(config);
-        assert!(provider
-            .base_url
-            .contains("generativelanguage.googleapis.com"));
+        assert!(
+            provider
+                .base_url
+                .contains("generativelanguage.googleapis.com")
+        );
     }
 
     #[test]
@@ -703,11 +705,13 @@ mod tests {
     async fn infer_stream_connection_refused_returns_error() {
         let provider = provider_with_url("http://127.0.0.1:19997".to_string());
         let result = provider.infer_stream(simple_request()).await;
-        assert!(result
-            .err()
-            .unwrap()
-            .to_string()
-            .contains("Request failed:"));
+        assert!(
+            result
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("Request failed:")
+        );
     }
 
     #[tokio::test]

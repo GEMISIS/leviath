@@ -100,8 +100,8 @@ mod tests {
     use crate::{AgentEngine, AgentPool, ContextWindow, ProviderRegistry};
     use bevy_ecs::prelude::Entity;
     use leviath_core::{
-        blueprint::ModelConfig, layout::RegionDefinition, Blueprint, ContextLayout,
-        EvictionStrategy, RegionKind, Stage,
+        Blueprint, ContextLayout, EvictionStrategy, RegionKind, Stage, blueprint::ModelConfig,
+        layout::RegionDefinition,
     };
 
     fn blueprint_with(regions: Vec<RegionDefinition>) -> Blueprint {
@@ -141,12 +141,14 @@ mod tests {
 
         let window = engine.world().get::<ContextWindow>(entity).unwrap();
         // Task seeded into the explicitly-named "task" pinned region.
-        assert!(window
-            .get_region("task")
-            .unwrap()
-            .content
-            .iter()
-            .any(|e| e.content.contains("do the thing")));
+        assert!(
+            window
+                .get_region("task")
+                .unwrap()
+                .content
+                .iter()
+                .any(|e| e.content.contains("do the thing"))
+        );
         // Blueprint-declared tool_results / conversation are not duplicated.
         assert_eq!(
             window
@@ -182,12 +184,14 @@ mod tests {
         let window = engine.world().get::<ContextWindow>(entity).unwrap();
         assert!(window.get_region("tool_results").is_some());
         assert!(window.get_region("conversation").is_some());
-        assert!(window
-            .get_region("system")
-            .unwrap()
-            .content
-            .iter()
-            .any(|e| e.content.contains("seed task")));
+        assert!(
+            window
+                .get_region("system")
+                .unwrap()
+                .content
+                .iter()
+                .any(|e| e.content.contains("seed task"))
+        );
     }
 
     #[test]
@@ -227,12 +231,14 @@ mod tests {
         // The non-pinned "task" region is left empty...
         assert!(window.get_region("task").unwrap().content.is_empty());
         // ...and the seed lands in the first pinned region instead.
-        assert!(window
-            .get_region("system")
-            .unwrap()
-            .content
-            .iter()
-            .any(|e| e.content.contains("fallback seed")));
+        assert!(
+            window
+                .get_region("system")
+                .unwrap()
+                .content
+                .iter()
+                .any(|e| e.content.contains("fallback seed"))
+        );
     }
 
     #[test]
@@ -259,12 +265,14 @@ mod tests {
 
         let window = engine.world().get::<ContextWindow>(entity).unwrap();
         assert_eq!(window.regions.len(), 2);
-        assert!(window
-            .get_region("system")
-            .unwrap()
-            .content
-            .iter()
-            .any(|e| e.content.contains("carried content")));
+        assert!(
+            window
+                .get_region("system")
+                .unwrap()
+                .content
+                .iter()
+                .any(|e| e.content.contains("carried content"))
+        );
         assert!(window.get_region("scratch").unwrap().content.is_empty());
         // Token total recomputed from the surviving content.
         assert_eq!(window.current_tokens, window.calculate_tokens());

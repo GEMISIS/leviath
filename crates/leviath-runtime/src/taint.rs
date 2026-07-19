@@ -5,8 +5,8 @@
 //! level (determined by input mode) against the tool's clearance level.
 
 use leviath_core::taint::{
-    builtin_tool_classification, GateDecision, GateDecisionSource, GateEvent, InputMode,
-    SecurityConfig, TaintLevel, ToolClassification,
+    GateDecision, GateDecisionSource, GateEvent, InputMode, SecurityConfig, TaintLevel,
+    ToolClassification, builtin_tool_classification,
 };
 use std::collections::HashMap;
 
@@ -336,19 +336,19 @@ impl TaintGate {
         }
 
         // Check scripted rules
-        if let Some(checker) = script_checker {
-            if let Some(script_name) = checker(tool_name, target, taint) {
-                self.log_event(
-                    agent_id,
-                    tool_name,
-                    InputMode::Traditional,
-                    taint,
-                    clearance,
-                    true,
-                    GateDecisionSource::ScriptedRule { script_name },
-                );
-                return GateDecision::Allowed;
-            }
+        if let Some(checker) = script_checker
+            && let Some(script_name) = checker(tool_name, target, taint)
+        {
+            self.log_event(
+                agent_id,
+                tool_name,
+                InputMode::Traditional,
+                taint,
+                clearance,
+                true,
+                GateDecisionSource::ScriptedRule { script_name },
+            );
+            return GateDecision::Allowed;
         }
 
         decision
@@ -1283,16 +1283,22 @@ mod tests {
 
     #[test]
     fn filter_error_display() {
-        assert!(FilterError::RegionNotFound("r".into())
-            .to_string()
-            .contains("region not found"));
-        assert!(FilterError::TaintNotEnabled("r".into())
-            .to_string()
-            .contains("Taint tracking not enabled"));
+        assert!(
+            FilterError::RegionNotFound("r".into())
+                .to_string()
+                .contains("region not found")
+        );
+        assert!(
+            FilterError::TaintNotEnabled("r".into())
+                .to_string()
+                .contains("Taint tracking not enabled")
+        );
         assert!(FilterError::FilterDisabled.to_string().contains("disabled"));
-        assert!(FilterError::FreeformNotEnabled
-            .to_string()
-            .contains("Freeform"));
+        assert!(
+            FilterError::FreeformNotEnabled
+                .to_string()
+                .contains("Freeform")
+        );
     }
 
     // ─── DegradationEngine ──────────────────────────────────────────────────

@@ -150,9 +150,11 @@ mod tests {
         let script = r#"is_mermaid(content)"#;
 
         assert!(engine.validate(script, "graph TD\n  A --> B").unwrap());
-        assert!(engine
-            .validate(script, "sequenceDiagram\n  Alice->>Bob: Hello")
-            .unwrap());
+        assert!(
+            engine
+                .validate(script, "sequenceDiagram\n  Alice->>Bob: Hello")
+                .unwrap()
+        );
         assert!(!engine.validate(script, "just text").unwrap());
     }
 
@@ -237,10 +239,12 @@ mod tests {
         let script = "this is not valid rhai {{{";
         let result = engine.transform(script, input);
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .starts_with("Script execution failed:"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .starts_with("Script execution failed:")
+        );
     }
 
     #[test]
@@ -274,10 +278,12 @@ mod tests {
 
         let result = engine.execute("undefined_function_call()", &mut scope);
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .starts_with("Script execution failed:"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .starts_with("Script execution failed:")
+        );
     }
 
     #[test]

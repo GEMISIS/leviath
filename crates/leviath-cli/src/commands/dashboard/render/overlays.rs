@@ -1,10 +1,10 @@
 //! Toast notifications, help overlay, and confirmation popup rendering.
 
+use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Clear, Padding, Paragraph};
-use ratatui::Frame;
 
 use crate::commands::dashboard::helpers::truncate;
 use crate::commands::dashboard::state::Dashboard;
@@ -325,8 +325,8 @@ impl Dashboard {
 mod tests {
     use crate::commands::dashboard::test_support::make_test_dashboard;
     use crate::commands::dashboard::types::*;
-    use ratatui::backend::TestBackend;
     use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
 
     fn make_test_agent(id: &str, status: AgentDisplayStatus) -> DashboardAgent {
         DashboardAgent {

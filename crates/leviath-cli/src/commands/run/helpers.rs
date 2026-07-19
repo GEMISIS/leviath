@@ -113,11 +113,7 @@ pub async fn generate_title(
                 .trim_end_matches('\'')
                 .trim()
                 .to_string();
-            if title.is_empty() {
-                None
-            } else {
-                Some(title)
-            }
+            if title.is_empty() { None } else { Some(title) }
         }
         Err(e) => {
             println!("Warning: title generation failed ({})", e);
@@ -140,7 +136,7 @@ pub fn write_context_snapshot_if_bg(
     stage_name: &str,
     run_id: &Option<String>,
 ) {
-    let Some(ref rid) = run_id else { return };
+    let Some(rid) = run_id else { return };
     let Some(snap) = build_context_snapshot(engine, entity, stage_name) else {
         return;
     };

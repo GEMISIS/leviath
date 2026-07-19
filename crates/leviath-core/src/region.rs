@@ -1736,7 +1736,7 @@ mod tests {
         // include the extra tokens from the 2 ToolResult entries.
         assert_eq!(removed.content, "assistant");
         assert_eq!(removed.tokens, 100 + 30 + 20); // 150
-                                                   // Only the user message remains
+        // Only the user message remains
         assert_eq!(region.entry_count(), 1);
         assert_eq!(region.content[0].content, "user msg");
         assert_eq!(region.current_tokens, 10);

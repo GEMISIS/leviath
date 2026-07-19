@@ -1,7 +1,7 @@
 [package]
 name = "xtask"
 version = "0.1.0"
-edition = "2021"
+edition.workspace = true
 publish = false
 
 [[bin]]
@@ -22,3 +22,6 @@ tempfile = "3"
 # hook is a mandatory part of getting the project working locally rather
 # than a manual, easy-to-forget `git config core.hooksPath` step.
 cargo-husky = { version = "1", default-features = false, features = ["user-hooks"] }
+
+[lints]
+workspace = true

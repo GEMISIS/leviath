@@ -177,10 +177,10 @@ async fn execute_with_registry(
 
             for test_case in &test_file.test {
                 // Apply filter if provided
-                if let Some(ref filter) = args.filter {
-                    if !test_case.name.contains(filter.as_str()) {
-                        continue;
-                    }
+                if let Some(ref filter) = args.filter
+                    && !test_case.name.contains(filter.as_str())
+                {
+                    continue;
                 }
 
                 total += 1;
@@ -229,10 +229,10 @@ async fn execute_with_registry(
                 .unwrap_or("unknown");
 
             // Apply filter if provided
-            if let Some(ref filter) = args.filter {
-                if !file_name.contains(filter.as_str()) {
-                    continue;
-                }
+            if let Some(ref filter) = args.filter
+                && !file_name.contains(filter.as_str())
+            {
+                continue;
             }
 
             total += 1;
@@ -1298,7 +1298,7 @@ max_tokens = 5000
     /// Covers the `ok_or(anyhow!("Blueprint has no stages"))` path.
     #[tokio::test]
     async fn run_test_case_blueprint_with_no_stages_errors() {
-        use leviath_core::{layout::ContextLayout, Blueprint};
+        use leviath_core::{Blueprint, layout::ContextLayout};
         let blueprint = Blueprint::new(
             "no-stages".to_string(),
             "test".to_string(),
@@ -1528,8 +1528,8 @@ model = { provider = "anthropic", model = "claude-sonnet-4-6" }
     #[test]
     fn init_test_context_window_no_pinned_region_skips_input() {
         use bevy_ecs::world::World;
-        use leviath_core::layout::ContextLayout;
         use leviath_core::Blueprint;
+        use leviath_core::layout::ContextLayout;
         // Blueprint with no context regions → ContextLayout has no Pinned region.
         let blueprint = Blueprint::new(
             "no-regions".to_string(),
@@ -1855,10 +1855,12 @@ expect_contains = "world"
         };
         let result = execute_with_registry(args, Box::new(build_registry_from_config)).await;
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("No agent.leviath found"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("No agent.leviath found")
+        );
     }
 
     #[tokio::test]

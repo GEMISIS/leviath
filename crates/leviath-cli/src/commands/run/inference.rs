@@ -106,10 +106,11 @@ pub async fn stream_inference(
             if let Some(ref name) = tc_delta.name {
                 tc.name.clone_from(name);
             }
-            if !tc_delta.arguments_delta.is_empty() && tc.arguments.is_null() {
-                if let Ok(val) = serde_json::from_str(&tc_delta.arguments_delta) {
-                    tc.arguments = val;
-                }
+            if !tc_delta.arguments_delta.is_empty()
+                && tc.arguments.is_null()
+                && let Ok(val) = serde_json::from_str(&tc_delta.arguments_delta)
+            {
+                tc.arguments = val;
             }
         }
     }
@@ -712,10 +713,12 @@ mod tests {
         .await;
 
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("Stream chunk error"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("Stream chunk error")
+        );
     }
 
     #[tokio::test]
@@ -996,18 +999,20 @@ mod tests {
         assert_eq!(multi.name(), "multi-chunk");
         assert!(multi.list_models().await.unwrap().is_empty());
         // Cover the `infer()` fallback path (returns an error rather than panicking).
-        assert!(multi
-            .infer(InferenceRequest {
-                system: vec![],
-                messages: vec![],
-                model: "m".to_string(),
-                max_tokens: 1,
-                temperature: 0.0,
-                tools: vec![],
-                extra: serde_json::Value::Null,
-            })
-            .await
-            .is_err());
+        assert!(
+            multi
+                .infer(InferenceRequest {
+                    system: vec![],
+                    messages: vec![],
+                    model: "m".to_string(),
+                    max_tokens: 1,
+                    temperature: 0.0,
+                    tools: vec![],
+                    extra: serde_json::Value::Null,
+                })
+                .await
+                .is_err()
+        );
 
         let error_chunk = ErrorChunkStreamProvider;
         assert_eq!(error_chunk.count_tokens("abcd", "m"), 1);
@@ -1015,18 +1020,20 @@ mod tests {
         assert_eq!(error_chunk.name(), "error-chunk");
         assert!(error_chunk.list_models().await.unwrap().is_empty());
         // Cover the `infer()` fallback path (returns an error rather than panicking).
-        assert!(error_chunk
-            .infer(InferenceRequest {
-                system: vec![],
-                messages: vec![],
-                model: "m".to_string(),
-                max_tokens: 1,
-                temperature: 0.0,
-                tools: vec![],
-                extra: serde_json::Value::Null,
-            })
-            .await
-            .is_err());
+        assert!(
+            error_chunk
+                .infer(InferenceRequest {
+                    system: vec![],
+                    messages: vec![],
+                    model: "m".to_string(),
+                    max_tokens: 1,
+                    temperature: 0.0,
+                    tools: vec![],
+                    extra: serde_json::Value::Null,
+                })
+                .await
+                .is_err()
+        );
     }
 
     #[tokio::test]

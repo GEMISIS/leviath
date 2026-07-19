@@ -1296,11 +1296,13 @@ mod tests {
             extra: serde_json::Value::Null,
         };
         let result = provider.infer_stream(request).await;
-        assert!(result
-            .err()
-            .unwrap()
-            .to_string()
-            .contains("Request failed:"));
+        assert!(
+            result
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("Request failed:")
+        );
     }
 
     #[tokio::test]

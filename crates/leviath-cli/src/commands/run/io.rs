@@ -6,8 +6,8 @@
 //! - `MockIO` (testing) — captures all output for assertions
 
 use async_trait::async_trait;
-use leviath_core::blueprint::StageResult;
 use leviath_core::Stage;
+use leviath_core::blueprint::StageResult;
 
 use crate::runstate::RegionSnapshot;
 

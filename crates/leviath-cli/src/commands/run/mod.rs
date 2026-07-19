@@ -34,15 +34,15 @@ use crate::runstate;
 
 // Re-export public API used by other commands
 pub use session::{
-    build_provider_registry, build_provider_registry_from_config, provider_creds_from_config,
-    ProviderCreds,
+    ProviderCreds, build_provider_registry, build_provider_registry_from_config,
+    provider_creds_from_config,
 };
 
 // Foreground run entry points + the real-stdin dependency bundle the binary
 // injects. `foreground` is a private module, so these re-exports are how
 // `main.rs` names `ForegroundIo` and calls the foreground run with real stdin.
 pub use foreground::{
-    run_foreground, run_foreground_with_registry, BoxedAsyncBufRead, ForegroundIo,
+    BoxedAsyncBufRead, ForegroundIo, run_foreground, run_foreground_with_registry,
 };
 
 #[derive(Args)]

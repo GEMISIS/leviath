@@ -336,7 +336,7 @@ impl Renderer {
                         Some(None) | None => "● ".to_string(),
                     };
                     // Increment ordered list counter
-                    if let Some(Some(ref mut n)) = self.list_stack.last_mut() {
+                    if let Some(Some(n)) = self.list_stack.last_mut() {
                         *n += 1;
                     }
                     self.current_spans.push(Span::styled(
@@ -355,11 +355,7 @@ impl Renderer {
                     self.code_lang = match kind {
                         CodeBlockKind::Fenced(lang) => {
                             let s = lang.into_string();
-                            if s.is_empty() {
-                                None
-                            } else {
-                                Some(s)
-                            }
+                            if s.is_empty() { None } else { Some(s) }
                         }
                         CodeBlockKind::Indented => None,
                     };

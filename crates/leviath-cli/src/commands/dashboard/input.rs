@@ -331,91 +331,91 @@ impl Dashboard {
     }
 
     fn handle_yank_with_fn(&mut self, yank_fn: fn(&str) -> bool) {
-        if let Some(agent) = self.selected_agent() {
-            if agent.is_run_state {
-                let (content, label) = match self.stage_content_mode {
-                    StageContentMode::Output => (
-                        runstate::tail_stage_output(&agent.id, self.selected_stage, 524_288),
-                        "Output",
-                    ),
-                    StageContentMode::Logs => (
-                        runstate::tail_stage_log(&agent.id, self.selected_stage, 524_288),
-                        "Logs",
-                    ),
-                    StageContentMode::Context => {
-                        let json = std::fs::read_to_string(
-                            runstate::stage_dir(&agent.id, self.selected_stage)
-                                .join("context.json"),
-                        )
-                        .unwrap_or_default();
-                        (json, "Context JSON")
-                    }
-                };
-                if content.is_empty() {
-                    self.toasts.push(Toast {
-                        message: format!("No {} content to yank", label),
-                        remaining_ticks: 25,
-                        level: ToastLevel::Warning,
-                    });
-                } else if yank_fn(&content) {
-                    self.toasts.push(Toast {
-                        message: format!("{} yanked to clipboard", label),
-                        remaining_ticks: 25,
-                        level: ToastLevel::Info,
-                    });
-                } else {
-                    self.toasts.push(Toast {
-                        message: "Clipboard unavailable (no pbcopy/xclip/OSC52)".to_string(),
-                        remaining_ticks: 30,
-                        level: ToastLevel::Error,
-                    });
+        if let Some(agent) = self.selected_agent()
+            && agent.is_run_state
+        {
+            let (content, label) = match self.stage_content_mode {
+                StageContentMode::Output => (
+                    runstate::tail_stage_output(&agent.id, self.selected_stage, 524_288),
+                    "Output",
+                ),
+                StageContentMode::Logs => (
+                    runstate::tail_stage_log(&agent.id, self.selected_stage, 524_288),
+                    "Logs",
+                ),
+                StageContentMode::Context => {
+                    let json = std::fs::read_to_string(
+                        runstate::stage_dir(&agent.id, self.selected_stage).join("context.json"),
+                    )
+                    .unwrap_or_default();
+                    (json, "Context JSON")
                 }
+            };
+            if content.is_empty() {
+                self.toasts.push(Toast {
+                    message: format!("No {} content to yank", label),
+                    remaining_ticks: 25,
+                    level: ToastLevel::Warning,
+                });
+            } else if yank_fn(&content) {
+                self.toasts.push(Toast {
+                    message: format!("{} yanked to clipboard", label),
+                    remaining_ticks: 25,
+                    level: ToastLevel::Info,
+                });
+            } else {
+                self.toasts.push(Toast {
+                    message: "Clipboard unavailable (no pbcopy/xclip/OSC52)".to_string(),
+                    remaining_ticks: 30,
+                    level: ToastLevel::Error,
+                });
             }
         }
     }
 
     fn handle_kill_from_detail(&mut self) {
-        if let Some(agent) = self.selected_agent() {
-            if matches!(
+        if let Some(agent) = self.selected_agent()
+            && matches!(
                 agent.status,
                 AgentDisplayStatus::Active | AgentDisplayStatus::Waiting
-            ) {
-                let agent_id = agent.id.clone();
-                let _pid = agent.pid;
-                let is_run_state = agent.is_run_state;
-                let was_waiting = matches!(agent.status, AgentDisplayStatus::Waiting);
-                if is_run_state {
-                    leviath_sys::terminate(_pid);
-                    kill_write_cancelled(&agent_id);
-                    if was_waiting {
-                        interaction::clear_interaction(&agent_id);
-                    }
-                } else {
-                    let _ = self.cmd_tx.send(EngineCommand::CancelAgent {
-                        agent_id: agent_id.clone(),
-                    });
+            )
+        {
+            let agent_id = agent.id.clone();
+            let _pid = agent.pid;
+            let is_run_state = agent.is_run_state;
+            let was_waiting = matches!(agent.status, AgentDisplayStatus::Waiting);
+            if is_run_state {
+                leviath_sys::terminate(_pid);
+                kill_write_cancelled(&agent_id);
+                if was_waiting {
+                    interaction::clear_interaction(&agent_id);
                 }
-                // The index came from `display_indices`/`agents` just above,
-                // via the `self.selected_agent()` lookup that got us into
-                // this branch, and nothing in between (the OS kill signal,
-                // `kill_write_cancelled`, `clear_interaction`, or the
-                // `cmd_tx.send`) mutates either collection or `self.selected`
-                // -- so it's always still valid. An `if let` guard here would
-                // add an "index went stale" branch that can never actually be
-                // exercised.
-                let idx = self
-                    .selected_agent_raw_idx()
-                    .expect("selected_agent() returned Some above");
-                let a = self.agents.get_mut(idx).expect(
-                    "index snapshotted from the still-unchanged display_indices/agents above",
-                );
-                a.status = AgentDisplayStatus::Cancelled;
-                a.waiting_prompt = None;
-                a.pending_request = None;
-                self.input_mode = false;
-                self.input_textarea = tui_textarea::TextArea::default();
-                self.add_log(format!("{}: Killed", agent_id));
+            } else {
+                let _ = self.cmd_tx.send(EngineCommand::CancelAgent {
+                    agent_id: agent_id.clone(),
+                });
             }
+            // The index came from `display_indices`/`agents` just above,
+            // via the `self.selected_agent()` lookup that got us into
+            // this branch, and nothing in between (the OS kill signal,
+            // `kill_write_cancelled`, `clear_interaction`, or the
+            // `cmd_tx.send`) mutates either collection or `self.selected`
+            // -- so it's always still valid. An `if let` guard here would
+            // add an "index went stale" branch that can never actually be
+            // exercised.
+            let idx = self
+                .selected_agent_raw_idx()
+                .expect("selected_agent() returned Some above");
+            let a = self
+                .agents
+                .get_mut(idx)
+                .expect("index snapshotted from the still-unchanged display_indices/agents above");
+            a.status = AgentDisplayStatus::Cancelled;
+            a.waiting_prompt = None;
+            a.pending_request = None;
+            self.input_mode = false;
+            self.input_textarea = tui_textarea::TextArea::default();
+            self.add_log(format!("{}: Killed", agent_id));
         }
     }
 
@@ -491,61 +491,21 @@ impl Dashboard {
     }
 
     fn handle_cancel_from_list(&mut self) {
-        if let Some(agent) = self.selected_agent() {
-            if matches!(
+        if let Some(agent) = self.selected_agent()
+            && matches!(
                 agent.status,
                 AgentDisplayStatus::Active | AgentDisplayStatus::Waiting
-            ) {
-                let agent_id = agent.id.clone();
-                if agent.is_run_state {
-                    leviath_sys::terminate(agent.pid);
-                    kill_write_cancelled(&agent_id);
-                    if matches!(agent.status, AgentDisplayStatus::Waiting) {
-                        interaction::clear_interaction(&agent_id);
-                    }
-                    // See the comment in `handle_kill_from_detail` -- the
-                    // index is still valid because nothing since the
-                    // `self.selected_agent()` lookup above touches
-                    // `display_indices`/`agents`/`selected`.
-                    let idx = self
-                        .selected_agent_raw_idx()
-                        .expect("selected_agent() returned Some above");
-                    let a = self.agents.get_mut(idx).expect(
-                        "index snapshotted from the still-unchanged display_indices/agents above",
-                    );
-                    a.status = AgentDisplayStatus::Cancelled;
-                    a.waiting_prompt = None;
-                    a.pending_request = None;
-                } else {
-                    let _ = self.cmd_tx.send(EngineCommand::CancelAgent {
-                        agent_id: agent_id.clone(),
-                    });
+            )
+        {
+            let agent_id = agent.id.clone();
+            if agent.is_run_state {
+                leviath_sys::terminate(agent.pid);
+                kill_write_cancelled(&agent_id);
+                if matches!(agent.status, AgentDisplayStatus::Waiting) {
+                    interaction::clear_interaction(&agent_id);
                 }
-                self.add_log(format!("{}: Cancel requested", agent_id));
-            }
-        }
-    }
-
-    fn handle_kill_from_list(&mut self) {
-        if let Some(agent) = self.selected_agent() {
-            if matches!(
-                agent.status,
-                AgentDisplayStatus::Active | AgentDisplayStatus::Waiting
-            ) {
-                let agent_id = agent.id.clone();
-                if agent.is_run_state {
-                    leviath_sys::terminate(agent.pid);
-                    kill_write_cancelled(&agent_id);
-                    if matches!(agent.status, AgentDisplayStatus::Waiting) {
-                        interaction::clear_interaction(&agent_id);
-                    }
-                } else {
-                    let _ = self.cmd_tx.send(EngineCommand::CancelAgent {
-                        agent_id: agent_id.clone(),
-                    });
-                }
-                // See the comment in `handle_kill_from_detail` -- the index
-                // is still valid because nothing since the
+                // See the comment in `handle_kill_from_detail` -- the
+                // index is still valid because nothing since the
                 // `self.selected_agent()` lookup above touches
                 // `display_indices`/`agents`/`selected`.
                 let idx = self
@@ -557,8 +517,49 @@ impl Dashboard {
                 a.status = AgentDisplayStatus::Cancelled;
                 a.waiting_prompt = None;
                 a.pending_request = None;
-                self.add_log(format!("{}: Killed", agent_id));
+            } else {
+                let _ = self.cmd_tx.send(EngineCommand::CancelAgent {
+                    agent_id: agent_id.clone(),
+                });
             }
+            self.add_log(format!("{}: Cancel requested", agent_id));
+        }
+    }
+
+    fn handle_kill_from_list(&mut self) {
+        if let Some(agent) = self.selected_agent()
+            && matches!(
+                agent.status,
+                AgentDisplayStatus::Active | AgentDisplayStatus::Waiting
+            )
+        {
+            let agent_id = agent.id.clone();
+            if agent.is_run_state {
+                leviath_sys::terminate(agent.pid);
+                kill_write_cancelled(&agent_id);
+                if matches!(agent.status, AgentDisplayStatus::Waiting) {
+                    interaction::clear_interaction(&agent_id);
+                }
+            } else {
+                let _ = self.cmd_tx.send(EngineCommand::CancelAgent {
+                    agent_id: agent_id.clone(),
+                });
+            }
+            // See the comment in `handle_kill_from_detail` -- the index
+            // is still valid because nothing since the
+            // `self.selected_agent()` lookup above touches
+            // `display_indices`/`agents`/`selected`.
+            let idx = self
+                .selected_agent_raw_idx()
+                .expect("selected_agent() returned Some above");
+            let a = self
+                .agents
+                .get_mut(idx)
+                .expect("index snapshotted from the still-unchanged display_indices/agents above");
+            a.status = AgentDisplayStatus::Cancelled;
+            a.waiting_prompt = None;
+            a.pending_request = None;
+            self.add_log(format!("{}: Killed", agent_id));
         }
     }
 
@@ -757,13 +758,13 @@ impl Dashboard {
                     self.add_log(msg);
                 }
                 AgentEvent::AgentDone { agent_id } => {
-                    if let Some(agent) = self.agents.iter_mut().find(|a| a.id == agent_id) {
-                        if !matches!(
+                    if let Some(agent) = self.agents.iter_mut().find(|a| a.id == agent_id)
+                        && !matches!(
                             agent.status,
                             AgentDisplayStatus::Error(_) | AgentDisplayStatus::Cancelled
-                        ) {
-                            agent.status = AgentDisplayStatus::Complete;
-                        }
+                        )
+                    {
+                        agent.status = AgentDisplayStatus::Complete;
                     }
                     self.add_log(format!("{}: Done", agent_id));
                 }
@@ -2297,10 +2298,11 @@ mod tests {
 
             dash.handle_yank_with_fn(|_| true);
 
-            assert!(dash
-                .toasts
-                .iter()
-                .any(|t| t.message.contains("yanked to clipboard")));
+            assert!(
+                dash.toasts
+                    .iter()
+                    .any(|t| t.message.contains("yanked to clipboard"))
+            );
 
             let _ = std::fs::remove_dir_all(crate::runstate::run_dir(run_id));
         });
@@ -2331,10 +2333,11 @@ mod tests {
         dash.handle_key(key(KeyCode::Char('d')));
 
         assert!(!dash.confirm_delete);
-        assert!(dash
-            .log
-            .iter()
-            .any(|e| e.message.contains("Only background runs")));
+        assert!(
+            dash.log
+                .iter()
+                .any(|e| e.message.contains("Only background runs"))
+        );
     }
 
     // ─── input_mode_key: FreeText Enter submits ───────────────────────────
@@ -2845,10 +2848,11 @@ mod tests {
 
                 dash.handle_yank_with_fn(|_| false);
 
-                assert!(dash
-                    .toasts
-                    .iter()
-                    .any(|t| t.message.contains("Clipboard unavailable")));
+                assert!(
+                    dash.toasts
+                        .iter()
+                        .any(|t| t.message.contains("Clipboard unavailable"))
+                );
 
                 let _ = std::fs::remove_dir_all(runstate::run_dir(run_id));
             },

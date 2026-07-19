@@ -215,10 +215,10 @@ pub(super) async fn validate_blueprint(
 mod tests {
     use super::*;
     use crate::test_support::write_test_agent;
+    use axum::Router;
     use axum::body::Body;
     use axum::http::Request;
     use axum::routing::{get, post};
-    use axum::Router;
     use std::sync::Arc;
     use tokio::sync::broadcast;
     use tower::ServiceExt;
@@ -822,11 +822,13 @@ prompt = "Plan"
             .unwrap();
         let result: ValidateResponse = serde_json::from_slice(&bytes).unwrap();
         assert!(!result.valid);
-        assert!(result
-            .errors
-            .unwrap()
-            .iter()
-            .any(|e| e.contains("entry_stage")));
+        assert!(
+            result
+                .errors
+                .unwrap()
+                .iter()
+                .any(|e| e.contains("entry_stage"))
+        );
     }
 
     #[test]

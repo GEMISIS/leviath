@@ -296,7 +296,7 @@ impl SubAgentExecutor {
                     return format!(
                         "[error] Blueprint '{}' not found. Register it first.",
                         blueprint_name
-                    )
+                    );
                 }
             }
         };
@@ -960,19 +960,21 @@ mod subagent_tests {
         // Parent tracks the child (so the dashboard tree shows it).
         let children = eng.world().get::<SubAgentChildren>(root_entity).unwrap();
         assert!(children.children.contains(&child_entity));
-        assert!(eng
-            .world()
-            .get::<AgentState>(root_entity)
-            .unwrap()
-            .spawned_children_ids
-            .contains(&child_id));
+        assert!(
+            eng.world()
+                .get::<AgentState>(root_entity)
+                .unwrap()
+                .spawned_children_ids
+                .contains(&child_id)
+        );
         // Seed landed in the pinned region.
         let window = eng.world().get::<ContextWindow>(child_entity).unwrap();
         let sys = window.get_region("system").unwrap();
-        assert!(sys
-            .content
-            .iter()
-            .any(|e| e.content.contains("work item context")));
+        assert!(
+            sys.content
+                .iter()
+                .any(|e| e.content.contains("work item context"))
+        );
     }
 
     #[tokio::test]

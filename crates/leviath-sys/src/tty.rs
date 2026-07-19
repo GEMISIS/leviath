@@ -65,10 +65,11 @@ pub fn osc52_write_via(
     stdout_fallback: &mut dyn Write,
 ) -> bool {
     let osc = osc52_sequence(text);
-    if let Ok(mut tty) = open_tty() {
-        if tty.write_all(osc.as_bytes()).is_ok() && tty.flush().is_ok() {
-            return true;
-        }
+    if let Ok(mut tty) = open_tty()
+        && tty.write_all(osc.as_bytes()).is_ok()
+        && tty.flush().is_ok()
+    {
+        return true;
     }
     // Fallback: write to stdout. Report the real outcome so callers can show an
     // error when even this fails.
