@@ -620,7 +620,7 @@ pub struct StageInferences(pub Vec<StageInference>);
 #[derive(Component, Debug, Clone, Default)]
 pub struct VisitCounts(pub std::collections::HashMap<String, usize>);
 
-/// Pre-resolved per-stage setup, applied by [`enter_stage`] when an agent enters
+/// Pre-resolved per-stage setup, applied by `enter_stage` when an agent enters
 /// a stage: inference parameters, tool-result routing, whether the stage accepts
 /// live user input, an optional stage-specific context layout, and an optional
 /// system prompt. Built once per stage when the agent is spawned (mirrors
@@ -820,6 +820,15 @@ fn enter_stage(
     *progress = StageProgress::default();
     *visits.0.entry(name).or_insert(0) += 1;
 
+    apply_stage_context(setup, window)
+}
+
+/// Apply a stage's context setup to a window: swap to the stage's layout (if any)
+/// and (re)inject its system prompt as pinned `[Stage instructions: …]` context,
+/// clearing any previous stage's first. Returns `Err` only when the prompt
+/// doesn't fit its region. Shared by [`enter_stage`] (transitions) and
+/// [`build_agent`] (the first stage, at spawn).
+fn apply_stage_context(setup: &StageSetup, window: &mut ContextWindow) -> Result<(), String> {
     if let Some(layout) = &setup.context_layout {
         crate::context_setup::apply_layout(window, layout);
     }
@@ -873,6 +882,131 @@ fn attach_stage_components(
             entity.remove::<crate::components::ToolResultRoutingComponent>();
         }
     }
+}
+
+/// A blueprint stage resolved to a concrete provider, model, and effective tool
+/// set — the per-stage input to [`spawn_agent`]. The caller (CLI / daemon) owns
+/// the model-selection policy (overrides, availability, user defaults) and tool
+/// filtering; the runtime just turns the result into agent data.
+pub struct ResolvedStage {
+    /// The provider to call for this stage.
+    pub provider_name: String,
+    /// The resolved model name.
+    pub model: String,
+    /// The effective tool set for this stage (already filtered).
+    pub tools: Vec<Tool>,
+}
+
+/// Build a stage's [`StageSetup`] from its blueprint definition: inference config
+/// (from the model parameters), tool-result routing, accepts-messages, layout,
+/// and system prompt.
+fn stage_setup_from(stage: &leviath_core::Stage) -> StageSetup {
+    let temperature = stage
+        .model
+        .parameters
+        .get("temperature")
+        .and_then(|v| v.as_f64())
+        .map(|t| t as f32);
+    let max_output_tokens = stage
+        .model
+        .parameters
+        .get("max_output_tokens")
+        .and_then(|v| v.as_u64())
+        .map(|t| t as usize);
+    let system_prompt = stage
+        .config
+        .get("system_prompt")
+        .and_then(|v| v.as_str())
+        .map(String::from);
+    StageSetup {
+        inference_config: InferenceConfig {
+            temperature,
+            max_output_tokens,
+        },
+        routing: stage.tool_result_routing.clone(),
+        accepts_messages: stage.accepts_messages,
+        context_layout: stage.context_layout.clone(),
+        system_prompt,
+    }
+}
+
+/// Spawn a fully-formed agent into `world` from its blueprint, task, and
+/// per-stage resolution, and return its entity. Builds every stage's
+/// `StageInference`/`StageSetup` up front (so transitions are pure component
+/// swaps), seeds the context window, applies the **first** stage's setup (its
+/// layout and system prompt), pre-counts the first stage's visit, and marks the
+/// agent `ReadyToInfer`. Returns `Err` if the first stage's system prompt doesn't fit
+/// its region (the same hard failure the imperative loop raises at stage 0).
+///
+/// `stages` must be aligned with `blueprint.stages` (one [`ResolvedStage`] each).
+pub fn spawn_agent(
+    world: &mut World,
+    agent_id: String,
+    blueprint: leviath_core::Blueprint,
+    task: &str,
+    stages: Vec<ResolvedStage>,
+) -> Result<Entity, String> {
+    let stage_infs: Vec<StageInference> = stages
+        .into_iter()
+        .map(|rs| StageInference {
+            provider_name: rs.provider_name,
+            model: rs.model,
+            tools: rs.tools,
+            tool_filter: None, // tools already resolved to the effective set
+        })
+        .collect();
+    let setups: Vec<StageSetup> = blueprint.stages.iter().map(stage_setup_from).collect();
+
+    // Seed the window from the blueprint layout + task, then apply stage 0's
+    // context setup (layout swap + system-prompt injection) just as entering any
+    // later stage would.
+    let mut window = ContextWindow::new(blueprint.context_layout.total_budget_tokens);
+    crate::context_setup::init_window(&mut window, &blueprint, task);
+    apply_stage_context(&setups[0], &mut window)?;
+
+    let stage0_name = blueprint.stages[0].name.clone();
+    let stage0_inf = stage_infs[0].clone();
+    let setup0 = &setups[0];
+    let stage0_cfg = setup0.inference_config.clone();
+    let stage0_routing = setup0.routing.clone();
+    let accepts_messages = setup0.accepts_messages;
+
+    // Pre-count stage 0's visit: the imperative loop bumps a stage's visit after
+    // it runs and before resolving its transition, so stage 0 must read as
+    // visited once by the time its first transition resolves.
+    let mut visits = VisitCounts::default();
+    *visits.0.entry(stage0_name.clone()).or_insert(0) += 1;
+
+    let entity = world
+        .spawn((
+            AgentBlueprint(blueprint),
+            AgentState {
+                agent_id,
+                current_stage: stage0_name,
+                iteration: 0,
+                status: AgentStatus::Active,
+                spawned_children_ids: vec![],
+                pending_wait: None,
+                accepts_messages,
+            },
+            MessageInbox::default(),
+            StageCursor { index: 0 },
+            StageProgress::default(),
+            StageInferences(stage_infs),
+            StageSetups(setups),
+            visits,
+            window,
+            stage0_inf,
+            stage0_cfg,
+            ReadyToInfer,
+        ))
+        .id();
+    if let Some(routing) = stage0_routing {
+        world
+            .entity_mut(entity)
+            .insert(crate::components::ToolResultRoutingComponent { routing });
+    }
+    Ok(entity)
 }
 
 /// A transition-choice inference is in flight (an LLM is picking the next stage);
@@ -2495,6 +2629,132 @@ mod tests {
             })
         );
         assert!(world.get::<AwaitingTransitionResponse>(e).is_none());
+    }
+
+    // ── agent spawn (blueprint → components) ──
+
+    fn resolved(model: &str) -> ResolvedStage {
+        ResolvedStage {
+            provider_name: "p".to_string(),
+            model: model.to_string(),
+            tools: vec![],
+        }
+    }
+
+    #[test]
+    fn spawn_agent_builds_stage0_ready_with_config_and_routing() {
+        // A stage with model parameters, routing, and a system prompt should
+        // produce a ready agent carrying all of them.
+        let layout = leviath_core::layout::ContextLayout::new(
+            vec![leviath_core::layout::RegionDefinition::new(
+                "task".to_string(),
+                RegionKind::Pinned,
+                4000,
+            )],
+            8000,
+        );
+        let mut s = leviath_core::Stage::new(
+            "start".to_string(),
+            leviath_core::blueprint::ModelConfig::new("p".to_string(), "m".to_string()),
+        );
+        s.model
+            .parameters
+            .insert("temperature".to_string(), serde_json::json!(0.5));
+        s.model
+            .parameters
+            .insert("max_output_tokens".to_string(), serde_json::json!(128));
+        s.config.insert(
+            "system_prompt".to_string(),
+            serde_json::Value::String("be helpful".to_string()),
+        );
+        s.tool_result_routing = Some(leviath_core::ToolResultRouting {
+            default_region: "notes".to_string(),
+            ..Default::default()
+        });
+        let bp = leviath_core::Blueprint::new("t".to_string(), "d".to_string(), vec![s], layout);
+
+        let mut world = World::new();
+        let e = spawn_agent(
+            &mut world,
+            "agent-x".to_string(),
+            bp,
+            "the task",
+            vec![resolved("m")],
+        )
+        .unwrap();
+
+        assert!(world.get::<ReadyToInfer>(e).is_some());
+        assert_eq!(world.get::<StageCursor>(e).unwrap().index, 0);
+        let cfg = world.get::<InferenceConfig>(e).unwrap();
+        assert_eq!(cfg.temperature, Some(0.5));
+        assert_eq!(cfg.max_output_tokens, Some(128));
+        assert_eq!(
+            world
+                .get::<crate::components::ToolResultRoutingComponent>(e)
+                .unwrap()
+                .routing
+                .default_region,
+            "notes"
+        );
+        assert_eq!(world.get::<AgentState>(e).unwrap().agent_id, "agent-x");
+        // Stage 0's visit is pre-counted.
+        assert_eq!(
+            world.get::<VisitCounts>(e).unwrap().0.get("start"),
+            Some(&1)
+        );
+        // Task text + system prompt both seeded the pinned region.
+        assert!(
+            world
+                .get::<ContextWindow>(e)
+                .unwrap()
+                .get_region("task")
+                .unwrap()
+                .current_tokens
+                > 0
+        );
+    }
+
+    #[test]
+    fn spawn_agent_defaults_config_and_no_routing() {
+        // No parameters, no routing, no system prompt → default config, no
+        // routing component.
+        let bp = blueprint(vec![stage_named("only", None, false, None)]);
+        let mut world = World::new();
+        let e = spawn_agent(&mut world, "a".to_string(), bp, "t", vec![resolved("m")]).unwrap();
+
+        let cfg = world.get::<InferenceConfig>(e).unwrap();
+        assert_eq!(cfg.temperature, None);
+        assert_eq!(cfg.max_output_tokens, None);
+        assert!(
+            world
+                .get::<crate::components::ToolResultRoutingComponent>(e)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn spawn_agent_errors_on_oversized_system_prompt() {
+        let layout = leviath_core::layout::ContextLayout::new(
+            vec![leviath_core::layout::RegionDefinition::new(
+                "task".to_string(),
+                RegionKind::Pinned,
+                40,
+            )],
+            1000,
+        );
+        let mut s = leviath_core::Stage::new(
+            "only".to_string(),
+            leviath_core::blueprint::ModelConfig::new("p".to_string(), "m".to_string()),
+        );
+        s.config.insert(
+            "system_prompt".to_string(),
+            serde_json::Value::String("z".repeat(100_000)),
+        );
+        let bp = leviath_core::Blueprint::new("t".to_string(), "d".to_string(), vec![s], layout);
+
+        let mut world = World::new();
+        let err = spawn_agent(&mut world, "a".to_string(), bp, "t", vec![resolved("m")]);
+        assert!(err.is_err());
     }
 
     // ── async LLM-choice transition ──
