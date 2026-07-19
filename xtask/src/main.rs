@@ -3,9 +3,8 @@
 //! Run via: `cargo xtask <subcommand>`
 //!
 //! Subcommands:
-//!   coverage                    Compute all packages, aggregate, enforce a hard 100%.
-//!   coverage --package <pkg>    Compute just one package's coverage (CI fan-out).
-//!   coverage --gate             Aggregate collected per-package JSONs and enforce 100%.
+//!   coverage                    Gate every workspace package at a hard 100%.
+//!   coverage --package <pkg>    Gate just one package (the CI per-package fan-out).
 //!
 //! The zero-suppression policy (no `#[cfg(not(test))]`, no tarpaulin/lcov/grcov
 //! markers) is enforced separately by ast-grep — see `sgconfig.yml`/`.sgrules/`.
@@ -44,11 +43,8 @@ pub fn dispatch_with(
             println!("Usage: cargo xtask <subcommand>");
             println!();
             println!("Subcommands:");
-            println!("  coverage                  Compute all packages, aggregate, enforce 100%%");
-            println!("  coverage --package <pkg>  Compute one package's coverage (CI fan-out)");
-            println!(
-                "  coverage --gate           Aggregate collected per-package JSONs, gate 100%%"
-            );
+            println!("  coverage                  Gate every workspace package at 100%%");
+            println!("  coverage --package <pkg>  Gate one package (CI per-package fan-out)");
             Ok(())
         }
         other => anyhow::bail!("Unknown subcommand: '{other}'. Run `cargo xtask help` for usage."),
@@ -136,17 +132,6 @@ mod tests {
         })
         .unwrap();
         assert_eq!(got, Some(CoverageMode::All));
-    }
-
-    #[test]
-    fn dispatch_with_coverage_gate_parses_gate() {
-        let mut got = None;
-        dispatch_with(&args(&["coverage", "--gate"]), |mode| {
-            got = Some(mode);
-            Ok(())
-        })
-        .unwrap();
-        assert_eq!(got, Some(CoverageMode::Gate));
     }
 
     #[test]
