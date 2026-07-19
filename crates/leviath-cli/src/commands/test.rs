@@ -1383,18 +1383,23 @@ model = { provider = "anthropic", model = "claude-sonnet-4-6" }
         std::fs::create_dir_all(&tests_dir).unwrap();
 
         // Redirect Config::load() to a file with invalid TOML.
-        let guard = crate::config::isolate_config_path_for_test("test-cmd-config-fail");
-        let bad_config = guard.fake_dir.join("config.toml");
-        std::fs::write(&bad_config, "not valid toml {{{").unwrap();
+        crate::config::with_isolated_config_path_async(
+            "test-cmd-config-fail",
+            |fake_dir| async move {
+                let bad_config = fake_dir.join("config.toml");
+                std::fs::write(&bad_config, "not valid toml {{{").unwrap();
 
-        let args = TestArgs {
-            path: Some(project.to_str().unwrap().to_string()),
-            filter: None,
-            dry_run: false, // triggers Config::load()
-        };
-        let result = execute_with_registry(args, Box::new(build_registry_from_config)).await;
-        drop(guard);
-        assert!(result.is_err());
+                let args = TestArgs {
+                    path: Some(project.to_str().unwrap().to_string()),
+                    filter: None,
+                    dry_run: false, // triggers Config::load()
+                };
+                let result =
+                    execute_with_registry(args, Box::new(build_registry_from_config)).await;
+                assert!(result.is_err());
+            },
+        )
+        .await;
     }
 
     /// Covers the `parse_manifest(&manifest_content)?` error path
@@ -1801,34 +1806,38 @@ model = { provider = "anthropic", model = "claude-sonnet-4-6" }
 
     #[tokio::test]
     async fn execute_with_registry_non_dry_run_all_pass() {
-        let _config_guard =
-            crate::config::isolate_config_path_for_test("test-rs-non-dry-run-all-pass");
-        let dir = tempfile::tempdir().unwrap();
-        let project = dir.path();
-        write_project_with_test_file(
-            project,
-            r#"
+        crate::config::with_isolated_config_path_async(
+            "test-rs-non-dry-run-all-pass",
+            |_fake_dir| async move {
+                let dir = tempfile::tempdir().unwrap();
+                let project = dir.path();
+                write_project_with_test_file(
+                    project,
+                    r#"
 [[test]]
 name = "greeting"
 input = "say hello"
 expect_contains = "world"
 "#,
-        );
+                );
 
-        let args = TestArgs {
-            path: Some(project.to_str().unwrap().to_string()),
-            filter: None,
-            dry_run: false,
-        };
+                let args = TestArgs {
+                    path: Some(project.to_str().unwrap().to_string()),
+                    filter: None,
+                    dry_run: false,
+                };
 
-        let result = with_tracing(|| {
-            execute_with_registry(
-                args,
-                Box::new(mock_registry_builder("Hello, world!", vec![])),
-            )
-        })
+                let result = with_tracing(|| {
+                    execute_with_registry(
+                        args,
+                        Box::new(mock_registry_builder("Hello, world!", vec![])),
+                    )
+                })
+                .await;
+                assert!(result.is_ok());
+            },
+        )
         .await;
-        assert!(result.is_ok());
     }
 
     #[tokio::test]
@@ -1854,42 +1863,47 @@ expect_contains = "world"
 
     #[tokio::test]
     async fn execute_with_registry_non_dry_run_failure_bails_with_count() {
-        let _config_guard = crate::config::isolate_config_path_for_test(
+        crate::config::with_isolated_config_path_async(
             "test-rs-non-dry-run-failure-bails-with-count",
-        );
-        let dir = tempfile::tempdir().unwrap();
-        let project = dir.path();
-        write_project_with_test_file(
-            project,
-            r#"
+            |_fake_dir| async move {
+                let dir = tempfile::tempdir().unwrap();
+                let project = dir.path();
+                write_project_with_test_file(
+                    project,
+                    r#"
 [[test]]
 name = "greeting"
 input = "say hello"
 expect_contains = "world"
 "#,
-        );
+                );
 
-        let args = TestArgs {
-            path: Some(project.to_str().unwrap().to_string()),
-            filter: None,
-            dry_run: false,
-        };
+                let args = TestArgs {
+                    path: Some(project.to_str().unwrap().to_string()),
+                    filter: None,
+                    dry_run: false,
+                };
 
-        let result =
-            execute_with_registry(args, Box::new(mock_registry_builder("goodbye", vec![]))).await;
-        let err = result.unwrap_err().to_string();
-        assert!(err.contains("1 test(s) failed"));
+                let result =
+                    execute_with_registry(args, Box::new(mock_registry_builder("goodbye", vec![])))
+                        .await;
+                let err = result.unwrap_err().to_string();
+                assert!(err.contains("1 test(s) failed"));
+            },
+        )
+        .await;
     }
 
     #[tokio::test]
     async fn execute_with_registry_non_dry_run_applies_filter() {
-        let _config_guard =
-            crate::config::isolate_config_path_for_test("test-rs-non-dry-run-applies-filter");
-        let dir = tempfile::tempdir().unwrap();
-        let project = dir.path();
-        write_project_with_test_file(
-            project,
-            r#"
+        crate::config::with_isolated_config_path_async(
+            "test-rs-non-dry-run-applies-filter",
+            |_fake_dir| async move {
+                let dir = tempfile::tempdir().unwrap();
+                let project = dir.path();
+                write_project_with_test_file(
+                    project,
+                    r#"
 [[test]]
 name = "keep_me"
 input = "say hello"
@@ -1900,79 +1914,87 @@ name = "skip_me"
 input = "say hello"
 expect_contains = "unmatchable content"
 "#,
-        );
+                );
 
-        let args = TestArgs {
-            path: Some(project.to_str().unwrap().to_string()),
-            filter: Some("keep".to_string()),
-            dry_run: false,
-        };
+                let args = TestArgs {
+                    path: Some(project.to_str().unwrap().to_string()),
+                    filter: Some("keep".to_string()),
+                    dry_run: false,
+                };
 
-        // "skip_me" would fail (its expectation never matches the mock
-        // response), but the filter excludes it -- only "keep_me" runs, and
-        // it passes, so the whole run succeeds.
-        let result = execute_with_registry(
-            args,
-            Box::new(mock_registry_builder("Hello, world!", vec![])),
+                // "skip_me" would fail (its expectation never matches the mock
+                // response), but the filter excludes it -- only "keep_me" runs, and
+                // it passes, so the whole run succeeds.
+                let result = execute_with_registry(
+                    args,
+                    Box::new(mock_registry_builder("Hello, world!", vec![])),
+                )
+                .await;
+                assert!(result.is_ok());
+            },
         )
         .await;
-        assert!(result.is_ok());
     }
 
     #[tokio::test]
     async fn execute_with_registry_non_dry_run_tool_call_assertion() {
-        let _config_guard =
-            crate::config::isolate_config_path_for_test("test-rs-non-dry-run-tool-call-assertion");
-        let dir = tempfile::tempdir().unwrap();
-        let project = dir.path();
-        write_project_with_test_file(
-            project,
-            r#"
+        crate::config::with_isolated_config_path_async(
+            "test-rs-non-dry-run-tool-call-assertion",
+            |_fake_dir| async move {
+                let dir = tempfile::tempdir().unwrap();
+                let project = dir.path();
+                write_project_with_test_file(
+                    project,
+                    r#"
 [[test]]
 name = "tool_test"
 input = "run a command"
 expect_tool_call = "bash"
 "#,
-        );
+                );
 
-        let args = TestArgs {
-            path: Some(project.to_str().unwrap().to_string()),
-            filter: None,
-            dry_run: false,
-        };
+                let args = TestArgs {
+                    path: Some(project.to_str().unwrap().to_string()),
+                    filter: None,
+                    dry_run: false,
+                };
 
-        let tool_calls = vec![ToolCall {
-            id: "call_1".to_string(),
-            name: "bash".to_string(),
-            arguments: serde_json::json!({}),
-        }];
-        let result =
-            execute_with_registry(args, Box::new(mock_registry_builder("", tool_calls))).await;
-        assert!(result.is_ok());
+                let tool_calls = vec![ToolCall {
+                    id: "call_1".to_string(),
+                    name: "bash".to_string(),
+                    arguments: serde_json::json!({}),
+                }];
+                let result =
+                    execute_with_registry(args, Box::new(mock_registry_builder("", tool_calls)))
+                        .await;
+                assert!(result.is_ok());
+            },
+        )
+        .await;
     }
 
     #[tokio::test]
     async fn execute_with_registry_non_dry_run_provider_error_counts_as_failure() {
-        let _config_guard = crate::config::isolate_config_path_for_test(
+        crate::config::with_isolated_config_path_async(
             "test-rs-non-dry-run-provider-error-counts-as-failure",
-        );
-        let dir = tempfile::tempdir().unwrap();
-        let project = dir.path();
-        write_project_with_test_file(
-            project,
-            r#"
+            |_fake_dir| async move {
+                let dir = tempfile::tempdir().unwrap();
+                let project = dir.path();
+                write_project_with_test_file(
+                    project,
+                    r#"
 [[test]]
 name = "no_such_provider"
 input = "hi"
 expect_contains = "x"
 "#,
-        );
-        // Overwrite the manifest with a provider name the mock registry never
-        // registers, so `run_test_case`'s "not configured" error path fires
-        // (the `Err(e)` arm of `execute`'s match, not `Ok(false)`).
-        std::fs::write(
-            project.join("agent.leviath"),
-            r#"
+                );
+                // Overwrite the manifest with a provider name the mock registry never
+                // registers, so `run_test_case`'s "not configured" error path fires
+                // (the `Err(e)` arm of `execute`'s match, not `Ok(false)`).
+                std::fs::write(
+                    project.join("agent.leviath"),
+                    r#"
 [agent]
 name = "test-agent"
 version = "0.1.0"
@@ -1981,53 +2003,64 @@ description = "test"
 [stages.main]
 model = { provider = "nonexistent-provider", model = "x" }
 "#,
-        )
-        .unwrap();
+                )
+                .unwrap();
 
-        let args = TestArgs {
-            path: Some(project.to_str().unwrap().to_string()),
-            filter: None,
-            dry_run: false,
-        };
+                let args = TestArgs {
+                    path: Some(project.to_str().unwrap().to_string()),
+                    filter: None,
+                    dry_run: false,
+                };
 
-        let result =
-            execute_with_registry(args, Box::new(mock_registry_builder("irrelevant", vec![])))
+                let result = execute_with_registry(
+                    args,
+                    Box::new(mock_registry_builder("irrelevant", vec![])),
+                )
                 .await;
-        let err = result.unwrap_err().to_string();
-        assert!(err.contains("1 test(s) failed"));
+                let err = result.unwrap_err().to_string();
+                assert!(err.contains("1 test(s) failed"));
+            },
+        )
+        .await;
     }
 
     #[tokio::test]
     async fn execute_with_registry_non_dry_run_toml_malformed_errors() {
-        let _config_guard = crate::config::isolate_config_path_for_test(
+        crate::config::with_isolated_config_path_async(
             "test-rs-non-dry-run-toml-malformed-errors",
-        );
-        let dir = tempfile::tempdir().unwrap();
-        let project = dir.path();
-        write_project_with_test_file(project, "not valid {{{ toml");
+            |_fake_dir| async move {
+                let dir = tempfile::tempdir().unwrap();
+                let project = dir.path();
+                write_project_with_test_file(project, "not valid {{{ toml");
 
-        let args = TestArgs {
-            path: Some(project.to_str().unwrap().to_string()),
-            filter: None,
-            dry_run: false,
-        };
+                let args = TestArgs {
+                    path: Some(project.to_str().unwrap().to_string()),
+                    filter: None,
+                    dry_run: false,
+                };
 
-        let result =
-            execute_with_registry(args, Box::new(mock_registry_builder("irrelevant", vec![])))
+                let result = execute_with_registry(
+                    args,
+                    Box::new(mock_registry_builder("irrelevant", vec![])),
+                )
                 .await;
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("Failed to parse"));
+                assert!(result.is_err());
+                assert!(result.unwrap_err().to_string().contains("Failed to parse"));
+            },
+        )
+        .await;
     }
 
     // ─── rhai script execution path ──────────────────────────────────────────
 
     #[tokio::test]
     async fn execute_with_registry_rhai_script_passes() {
-        let _config_guard =
-            crate::config::isolate_config_path_for_test("test-rs-rhai-script-passes");
-        let dir = tempfile::tempdir().unwrap();
-        let project = dir.path();
-        let manifest = r#"
+        crate::config::with_isolated_config_path_async(
+            "test-rs-rhai-script-passes",
+            |_fake_dir| async move {
+                let dir = tempfile::tempdir().unwrap();
+                let project = dir.path();
+                let manifest = r#"
 [agent]
 name = "test-agent"
 version = "0.1.0"
@@ -2036,29 +2069,34 @@ description = "test"
 [stages.main]
 model = { provider = "anthropic", model = "claude-sonnet-4-6" }
 "#;
-        write_test_agent(project, manifest);
-        let tests_dir = project.join("tests");
-        std::fs::create_dir_all(&tests_dir).unwrap();
-        std::fs::write(tests_dir.join("script.rhai"), "true").unwrap();
+                write_test_agent(project, manifest);
+                let tests_dir = project.join("tests");
+                std::fs::create_dir_all(&tests_dir).unwrap();
+                std::fs::write(tests_dir.join("script.rhai"), "true").unwrap();
 
-        let args = TestArgs {
-            path: Some(project.to_str().unwrap().to_string()),
-            filter: None,
-            dry_run: false,
-        };
+                let args = TestArgs {
+                    path: Some(project.to_str().unwrap().to_string()),
+                    filter: None,
+                    dry_run: false,
+                };
 
-        let result =
-            execute_with_registry(args, Box::new(mock_registry_builder("unused", vec![]))).await;
-        assert!(result.is_ok());
+                let result =
+                    execute_with_registry(args, Box::new(mock_registry_builder("unused", vec![])))
+                        .await;
+                assert!(result.is_ok());
+            },
+        )
+        .await;
     }
 
     #[tokio::test]
     async fn execute_with_registry_rhai_script_returns_false_fails() {
-        let _config_guard =
-            crate::config::isolate_config_path_for_test("test-rs-rhai-script-returns-false-fails");
-        let dir = tempfile::tempdir().unwrap();
-        let project = dir.path();
-        let manifest = r#"
+        crate::config::with_isolated_config_path_async(
+            "test-rs-rhai-script-returns-false-fails",
+            |_fake_dir| async move {
+                let dir = tempfile::tempdir().unwrap();
+                let project = dir.path();
+                let manifest = r#"
 [agent]
 name = "test-agent"
 version = "0.1.0"
@@ -2067,30 +2105,35 @@ description = "test"
 [stages.main]
 model = { provider = "anthropic", model = "claude-sonnet-4-6" }
 "#;
-        write_test_agent(project, manifest);
-        let tests_dir = project.join("tests");
-        std::fs::create_dir_all(&tests_dir).unwrap();
-        std::fs::write(tests_dir.join("script.rhai"), "false").unwrap();
+                write_test_agent(project, manifest);
+                let tests_dir = project.join("tests");
+                std::fs::create_dir_all(&tests_dir).unwrap();
+                std::fs::write(tests_dir.join("script.rhai"), "false").unwrap();
 
-        let args = TestArgs {
-            path: Some(project.to_str().unwrap().to_string()),
-            filter: None,
-            dry_run: false,
-        };
+                let args = TestArgs {
+                    path: Some(project.to_str().unwrap().to_string()),
+                    filter: None,
+                    dry_run: false,
+                };
 
-        let result =
-            execute_with_registry(args, Box::new(mock_registry_builder("unused", vec![]))).await;
-        let err = result.unwrap_err().to_string();
-        assert!(err.contains("1 test(s) failed"));
+                let result =
+                    execute_with_registry(args, Box::new(mock_registry_builder("unused", vec![])))
+                        .await;
+                let err = result.unwrap_err().to_string();
+                assert!(err.contains("1 test(s) failed"));
+            },
+        )
+        .await;
     }
 
     #[tokio::test]
     async fn execute_with_registry_rhai_script_error_fails() {
-        let _config_guard =
-            crate::config::isolate_config_path_for_test("test-rs-rhai-script-error-fails");
-        let dir = tempfile::tempdir().unwrap();
-        let project = dir.path();
-        let manifest = r#"
+        crate::config::with_isolated_config_path_async(
+            "test-rs-rhai-script-error-fails",
+            |_fake_dir| async move {
+                let dir = tempfile::tempdir().unwrap();
+                let project = dir.path();
+                let manifest = r#"
 [agent]
 name = "test-agent"
 version = "0.1.0"
@@ -2099,30 +2142,35 @@ description = "test"
 [stages.main]
 model = { provider = "anthropic", model = "claude-sonnet-4-6" }
 "#;
-        write_test_agent(project, manifest);
-        let tests_dir = project.join("tests");
-        std::fs::create_dir_all(&tests_dir).unwrap();
-        std::fs::write(tests_dir.join("script.rhai"), "this is not valid rhai (((").unwrap();
+                write_test_agent(project, manifest);
+                let tests_dir = project.join("tests");
+                std::fs::create_dir_all(&tests_dir).unwrap();
+                std::fs::write(tests_dir.join("script.rhai"), "this is not valid rhai (((")
+                    .unwrap();
 
-        let args = TestArgs {
-            path: Some(project.to_str().unwrap().to_string()),
-            filter: None,
-            dry_run: false,
-        };
+                let args = TestArgs {
+                    path: Some(project.to_str().unwrap().to_string()),
+                    filter: None,
+                    dry_run: false,
+                };
 
-        let result =
-            execute_with_registry(args, Box::new(mock_registry_builder("unused", vec![]))).await;
-        assert!(result.is_err());
+                let result =
+                    execute_with_registry(args, Box::new(mock_registry_builder("unused", vec![])))
+                        .await;
+                assert!(result.is_err());
+            },
+        )
+        .await;
     }
 
     #[tokio::test]
     async fn execute_with_registry_rhai_script_non_bool_return_passes() {
-        let _config_guard = crate::config::isolate_config_path_for_test(
+        crate::config::with_isolated_config_path_async(
             "test-rs-rhai-script-non-bool-return-passes",
-        );
-        let dir = tempfile::tempdir().unwrap();
-        let project = dir.path();
-        let manifest = r#"
+            |_fake_dir| async move {
+                let dir = tempfile::tempdir().unwrap();
+                let project = dir.path();
+                let manifest = r#"
 [agent]
 name = "test-agent"
 version = "0.1.0"
@@ -2131,31 +2179,36 @@ description = "test"
 [stages.main]
 model = { provider = "anthropic", model = "claude-sonnet-4-6" }
 "#;
-        write_test_agent(project, manifest);
-        let tests_dir = project.join("tests");
-        std::fs::create_dir_all(&tests_dir).unwrap();
-        // Returns an integer, not a bool -- exercises the `else` arm of the
-        // `result.as_bool()` match (treated as an automatic pass).
-        std::fs::write(tests_dir.join("script.rhai"), "42").unwrap();
+                write_test_agent(project, manifest);
+                let tests_dir = project.join("tests");
+                std::fs::create_dir_all(&tests_dir).unwrap();
+                // Returns an integer, not a bool -- exercises the `else` arm of the
+                // `result.as_bool()` match (treated as an automatic pass).
+                std::fs::write(tests_dir.join("script.rhai"), "42").unwrap();
 
-        let args = TestArgs {
-            path: Some(project.to_str().unwrap().to_string()),
-            filter: None,
-            dry_run: false,
-        };
+                let args = TestArgs {
+                    path: Some(project.to_str().unwrap().to_string()),
+                    filter: None,
+                    dry_run: false,
+                };
 
-        let result =
-            execute_with_registry(args, Box::new(mock_registry_builder("unused", vec![]))).await;
-        assert!(result.is_ok());
+                let result =
+                    execute_with_registry(args, Box::new(mock_registry_builder("unused", vec![])))
+                        .await;
+                assert!(result.is_ok());
+            },
+        )
+        .await;
     }
 
     #[tokio::test]
     async fn execute_with_registry_rhai_script_filter_excludes_all() {
-        let _config_guard =
-            crate::config::isolate_config_path_for_test("test-rs-rhai-script-filter-excludes-all");
-        let dir = tempfile::tempdir().unwrap();
-        let project = dir.path();
-        let manifest = r#"
+        crate::config::with_isolated_config_path_async(
+            "test-rs-rhai-script-filter-excludes-all",
+            |_fake_dir| async move {
+                let dir = tempfile::tempdir().unwrap();
+                let project = dir.path();
+                let manifest = r#"
 [agent]
 name = "test-agent"
 version = "0.1.0"
@@ -2164,22 +2217,26 @@ description = "test"
 [stages.main]
 model = { provider = "anthropic", model = "claude-sonnet-4-6" }
 "#;
-        write_test_agent(project, manifest);
-        let tests_dir = project.join("tests");
-        std::fs::create_dir_all(&tests_dir).unwrap();
-        std::fs::write(tests_dir.join("script.rhai"), "false").unwrap();
+                write_test_agent(project, manifest);
+                let tests_dir = project.join("tests");
+                std::fs::create_dir_all(&tests_dir).unwrap();
+                std::fs::write(tests_dir.join("script.rhai"), "false").unwrap();
 
-        let args = TestArgs {
-            path: Some(project.to_str().unwrap().to_string()),
-            filter: Some("no-such-script".to_string()),
-            dry_run: false,
-        };
+                let args = TestArgs {
+                    path: Some(project.to_str().unwrap().to_string()),
+                    filter: Some("no-such-script".to_string()),
+                    dry_run: false,
+                };
 
-        // Filter excludes the only script -- 0 total, reports "no test files
-        // found" and succeeds (rather than failing on the script's `false`).
-        let result =
-            execute_with_registry(args, Box::new(mock_registry_builder("unused", vec![]))).await;
-        assert!(result.is_ok());
+                // Filter excludes the only script -- 0 total, reports "no test files
+                // found" and succeeds (rather than failing on the script's `false`).
+                let result =
+                    execute_with_registry(args, Box::new(mock_registry_builder("unused", vec![])))
+                        .await;
+                assert!(result.is_ok());
+            },
+        )
+        .await;
     }
 
     // ─── build_registry_from_config ──────────────────────────────────────────

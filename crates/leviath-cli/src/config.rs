@@ -375,43 +375,22 @@ fn set_dir_permissions_with(
     }
 }
 
-/// Serializes any test, in this file or elsewhere in the crate, that reads
-/// `Config::config_path()`'s default (unset-env) behavior or that
-/// temporarily overrides `LEVIATH_CONFIG_PATH`. This env var is
-/// process-global, so tests in different files/modules that don't share a
-/// lock can race — e.g. a test in `commands/run/worker.rs` redirecting
-/// `LEVIATH_CONFIG_PATH` while this file's `config_path_contains_leviath`
-/// concurrently asserts on the real default path. Declared here (not inside
-/// `mod tests`) so it's reachable crate-wide as `crate::config::CONFIG_PATH_ENV_LOCK`
-/// without needing to expose the whole test module.
-#[cfg(test)]
-pub(crate) static CONFIG_PATH_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-/// Serializes any test, anywhere in the crate, that mutates the
-/// process-global `PATH` env var (e.g. to starve editor/clipboard-tool
-/// resolution). Declared here for the same reason as `CONFIG_PATH_ENV_LOCK`
-/// above: a per-file lock (as in `commands/run/session.rs`'s `launch_editor`
-/// tests and `commands/dashboard/helpers.rs`'s clipboard-fallback test) does
-/// not serialize against another file's tests, since each is a distinct Rust
-/// item despite the shared name -- a real (if narrow) cross-file race window.
-#[cfg(test)]
-pub(crate) static PATH_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
 /// Serializes any test, anywhere in the crate, that mutates the process's
 /// current working directory (via `std::env::set_current_dir`) or whose
-/// assertions implicitly depend on it. Declared here for the same reason as
-/// `CONFIG_PATH_ENV_LOCK`/`PATH_ENV_LOCK` above: a per-file lock (as in
+/// assertions implicitly depend on it. Declared here (not inside `mod tests`)
+/// so it's reachable crate-wide: a per-file lock (as in
 /// `commands/run/manifest.rs`'s CWD-dependent `find_manifest` tests) would not
-/// serialize against a CWD-mutating test in a different file.
+/// serialize against a CWD-mutating test in a different file. (Env-var
+/// isolation, by contrast, goes through the `temp-env` crate's own global
+/// lock; `set_current_dir` is not an env var, so it keeps this dedicated lock.)
 #[cfg(test)]
 pub(crate) static CWD_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// RAII guard that releases [`CWD_LOCK`] and restores the process's
 /// original working directory on drop.
 ///
-/// Wraps the `MutexGuard` inside a private field (mirroring
-/// [`ConfigPathTestGuard`] below) specifically so it can be held across an
-/// `.await` in an async test without tripping clippy's
+/// Wraps the `MutexGuard` inside a private field specifically so it can be held
+/// across an `.await` in an async test without tripping clippy's
 /// `await_holding_lock` lint, which only looks for a directly-visible
 /// `MutexGuard` local -- not one hidden inside a wrapper struct's field.
 /// That's not working around a real risk: each `#[tokio::test]` gets its
@@ -456,7 +435,7 @@ pub(crate) fn isolate_cwd_for_test() -> CwdTestGuard {
 /// Provider API key env vars that `Config::load()` (via `dotenvy::dotenv()`)
 /// loads into the process env regardless of which config file path is used --
 /// so redirecting the config path alone isn't enough; these must be cleared
-/// too by [`isolate_config_path_for_test`].
+/// too by [`config_isolation_vars`].
 #[cfg(test)]
 const PROVIDER_KEY_ENV_VARS: &[&str] = &[
     "ANTHROPIC_API_KEY",
@@ -465,88 +444,69 @@ const PROVIDER_KEY_ENV_VARS: &[&str] = &[
     "OPENROUTER_API_KEY",
 ];
 
-/// RAII guard that restores `LEVIATH_CONFIG_PATH`, `LEVIATH_SKIP_DOTENV`, and
-/// the provider key env vars to their original values, and releases
-/// [`CONFIG_PATH_ENV_LOCK`], on drop.
+/// Create a fresh, empty temp directory to stand in for the config directory.
 #[cfg(test)]
-pub(crate) struct ConfigPathTestGuard {
-    original_config_path: Option<std::ffi::OsString>,
-    original_skip_dotenv: Option<std::ffi::OsString>,
-    original_keys: Vec<(&'static str, Option<std::ffi::OsString>)>,
-    pub(crate) fake_dir: std::path::PathBuf,
-    _lock: std::sync::MutexGuard<'static, ()>,
-}
-
-/// Restore one environment variable to a previously-snapshotted value:
-/// re-set it if it was present, or remove it if it was absent.
-///
-/// Extracted so both arms are exercised by a deterministic unit test
-/// ([`tests::restore_env_var_covers_both_arms`]) regardless of which provider
-/// keys happen to be set in the ambient test environment. Inline, the `Some`
-/// arm was only ever hit when a snapshotted var was actually set — never in a
-/// clean environment (a fresh CI runner, where none of the provider keys are
-/// exported), leaving the `Some` arm permanently uncovered there.
-#[cfg(test)]
-fn restore_env_var(key: &str, value: Option<&std::ffi::OsStr>) {
-    match value {
-        Some(v) => std::env::set_var(key, v),
-        None => std::env::remove_var(key),
-    }
-}
-
-#[cfg(test)]
-impl Drop for ConfigPathTestGuard {
-    fn drop(&mut self) {
-        restore_env_var(
-            "LEVIATH_CONFIG_PATH",
-            self.original_config_path.take().as_deref(),
-        );
-        restore_env_var(
-            "LEVIATH_SKIP_DOTENV",
-            self.original_skip_dotenv.take().as_deref(),
-        );
-        for (key, value) in self.original_keys.drain(..) {
-            restore_env_var(key, value.as_deref());
-        }
-        let _ = std::fs::remove_dir_all(&self.fake_dir);
-    }
-}
-
-/// Points `LEVIATH_CONFIG_PATH` at a nonexistent path inside a fresh temp
-/// directory, sets `LEVIATH_SKIP_DOTENV`, and clears `PROVIDER_KEY_ENV_VARS`,
-/// for the duration of the returned guard -- so `Config::load()` sees no
-/// config file and no real API keys, and falls back to defaults with no
-/// registered providers.
-///
-/// Shared across test modules (e.g. `commands/run/worker.rs`,
-/// `commands/run/foreground.rs`) that need to drive a real `Config::load()`
-/// without risking a real, billed inference call via a real API key found in
-/// `~/.leviath/config.toml` or a repo-root `.env`.
-#[cfg(test)]
-pub(crate) fn isolate_config_path_for_test(unique: &str) -> ConfigPathTestGuard {
-    let lock = CONFIG_PATH_ENV_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let original_config_path = std::env::var_os("LEVIATH_CONFIG_PATH");
-    let original_skip_dotenv = std::env::var_os("LEVIATH_SKIP_DOTENV");
-    let original_keys: Vec<_> = PROVIDER_KEY_ENV_VARS
-        .iter()
-        .map(|&key| (key, std::env::var_os(key)))
-        .collect();
-    for &key in PROVIDER_KEY_ENV_VARS {
-        std::env::remove_var(key);
-    }
-    let fake_dir = std::env::temp_dir().join(format!("lev-fake-config-{}", unique));
+fn make_fake_config_dir(unique: &str) -> std::path::PathBuf {
+    let fake_dir = std::env::temp_dir().join(format!("lev-fake-config-{unique}"));
     let _ = std::fs::create_dir_all(&fake_dir);
-    std::env::set_var("LEVIATH_CONFIG_PATH", fake_dir.join("config.toml"));
-    std::env::set_var("LEVIATH_SKIP_DOTENV", "1");
-    ConfigPathTestGuard {
-        original_config_path,
-        original_skip_dotenv,
-        original_keys,
-        fake_dir,
-        _lock: lock,
+    fake_dir
+}
+
+/// The env overrides that isolate `Config::load()` from the real environment:
+/// point `LEVIATH_CONFIG_PATH` at a nonexistent file in `fake_dir`, set
+/// `LEVIATH_SKIP_DOTENV`, and clear every provider API key (so no real, billed
+/// inference call can be made). Consumed by [`with_isolated_config_path`] and
+/// its async twin, which hand it to `temp_env` for scoped set-and-restore.
+#[cfg(test)]
+fn config_isolation_vars(
+    fake_dir: &std::path::Path,
+) -> Vec<(&'static str, Option<std::ffi::OsString>)> {
+    let mut vars: Vec<(&'static str, Option<std::ffi::OsString>)> = vec![
+        (
+            "LEVIATH_CONFIG_PATH",
+            Some(fake_dir.join("config.toml").into_os_string()),
+        ),
+        ("LEVIATH_SKIP_DOTENV", Some(std::ffi::OsString::from("1"))),
+    ];
+    for &key in PROVIDER_KEY_ENV_VARS {
+        vars.push((key, None));
     }
+    vars
+}
+
+/// Runs `f` with `Config::load()` isolated from the real environment (see
+/// [`config_isolation_vars`]), passing it the fake config directory so tests
+/// that need to plant a `config.toml` can. `temp_env::with_vars` sets the
+/// overrides, runs the closure, and restores the prior values afterwards --
+/// serialized process-wide against every other temp-env test, so no hand-rolled
+/// lock is needed. The closure-scoped form (not an RAII guard) is required
+/// because edition 2024 makes `set_var` `unsafe`, which the crate forbids.
+#[cfg(test)]
+pub(crate) fn with_isolated_config_path<R>(
+    unique: &str,
+    f: impl FnOnce(&std::path::Path) -> R,
+) -> R {
+    let fake_dir = make_fake_config_dir(unique);
+    let result = temp_env::with_vars(config_isolation_vars(&fake_dir), || f(&fake_dir));
+    let _ = std::fs::remove_dir_all(&fake_dir);
+    result
+}
+
+/// Async counterpart of [`with_isolated_config_path`] for `#[tokio::test]`s.
+/// The isolation env vars stay in place across every `.await` in `fut`.
+#[cfg(test)]
+pub(crate) async fn with_isolated_config_path_async<R, Fut>(
+    unique: &str,
+    f: impl FnOnce(std::path::PathBuf) -> Fut,
+) -> R
+where
+    Fut: std::future::Future<Output = R>,
+{
+    let fake_dir = make_fake_config_dir(unique);
+    let result =
+        temp_env::async_with_vars(config_isolation_vars(&fake_dir), f(fake_dir.clone())).await;
+    let _ = std::fs::remove_dir_all(&fake_dir);
+    result
 }
 
 #[cfg(test)]
@@ -554,128 +514,27 @@ mod tests {
     use super::*;
     use crate::test_support::with_tracing;
 
-    // ─── restore_env_var ─────────────────────────────────────────────────────
-
-    /// Exercises both arms of [`restore_env_var`] deterministically, so its
-    /// `Some` arm is covered even in a clean environment where none of the
-    /// provider keys the guards snapshot are set (the state on a fresh CI
-    /// runner). Uses a dedicated sentinel key no other code reads, and holds
-    /// `CONFIG_PATH_ENV_LOCK` to serialize with the crate's other
-    /// env-mutating tests.
-    #[test]
-    fn restore_env_var_covers_both_arms() {
-        let _lock = CONFIG_PATH_ENV_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let key = "LEVIATH_TEST_RESTORE_ENV_VAR_SENTINEL";
-        let original = std::env::var_os(key);
-
-        // `Some` arm: the var is (re)set to the given value.
-        restore_env_var(key, Some(std::ffi::OsStr::new("sentinel-value")));
-        assert_eq!(
-            std::env::var_os(key).as_deref(),
-            Some(std::ffi::OsStr::new("sentinel-value"))
-        );
-
-        // `None` arm: the var is removed.
-        restore_env_var(key, None);
-        assert!(std::env::var_os(key).is_none());
-
-        // Leave the ambient environment exactly as we found it.
-        restore_env_var(key, original.as_deref());
-    }
-
     // ─── leviath_home_dir ────────────────────────────────────────────────────
-
-    /// Restores `LEVIATH_HOME` to its pre-test value (or removes it if it
-    /// wasn't set), shared by every `leviath_home_dir_*` test below.
-    ///
-    /// A single shared implementation -- rather than each test inlining its
-    /// own copy of this match -- matters for coverage, not just brevity:
-    /// `original` is `None` in every test that doesn't deliberately seed a
-    /// sentinel first (realistic dev/CI environments never have
-    /// `LEVIATH_HOME` set), so a test-private copy of this restore logic
-    /// would leave its own `Some(v) => set_var(...)` arm permanently
-    /// uncovered -- `cargo-llvm-cov` counts coverage per exact source
-    /// location, so one test hitting the `Some` arm of a *different*
-    /// test's textually-identical-looking copy doesn't cover this one.
-    /// Routing every test through one shared function means any test that
-    /// happens to pass `Some(..)` (see
-    /// `leviath_home_dir_restore_preserves_previously_set_home`) covers the
-    /// `Some` arm for all callers at once.
-    fn restore_leviath_home(original: Option<std::ffi::OsString>) {
-        unsafe {
-            match original {
-                Some(v) => std::env::set_var("LEVIATH_HOME", v),
-                None => std::env::remove_var("LEVIATH_HOME"),
-            }
-        }
-    }
 
     #[test]
     fn leviath_home_dir_uses_override_when_set() {
-        let _lock = CONFIG_PATH_ENV_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let original = std::env::var_os("LEVIATH_HOME");
-        unsafe {
-            std::env::set_var("LEVIATH_HOME", "/tmp/leviath-home-override-test");
-        }
-        let result = leviath_home_dir();
-        restore_leviath_home(original);
-        assert_eq!(
-            result,
-            Some(std::path::PathBuf::from("/tmp/leviath-home-override-test"))
+        temp_env::with_var(
+            "LEVIATH_HOME",
+            Some("/tmp/leviath-home-override-test"),
+            || {
+                assert_eq!(
+                    leviath_home_dir(),
+                    Some(std::path::PathBuf::from("/tmp/leviath-home-override-test"))
+                );
+            },
         );
     }
 
     #[test]
     fn leviath_home_dir_falls_back_to_dirs_home_dir_when_unset() {
-        let _lock = CONFIG_PATH_ENV_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let original = std::env::var_os("LEVIATH_HOME");
-        unsafe {
-            std::env::remove_var("LEVIATH_HOME");
-        }
-        let result = leviath_home_dir();
-        restore_leviath_home(original);
-        assert_eq!(result, dirs::home_dir());
-    }
-
-    /// Covers `restore_leviath_home`'s `Some(v) => set_var(...)` arm, which
-    /// the two tests above never reach (both start from a realistic unset
-    /// `LEVIATH_HOME`): seeds a sentinel *before* capturing `original`, so
-    /// the shared restore step has something real to put back.
-    #[test]
-    fn leviath_home_dir_restore_preserves_previously_set_home() {
-        let _lock = CONFIG_PATH_ENV_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        unsafe {
-            std::env::set_var("LEVIATH_HOME", "/tmp/leviath-home-original-sentinel");
-        }
-        let original = std::env::var_os("LEVIATH_HOME");
-        unsafe {
-            std::env::set_var("LEVIATH_HOME", "/tmp/leviath-home-override-test-2");
-        }
-        let result = leviath_home_dir();
-        restore_leviath_home(original);
-        assert_eq!(
-            result,
-            Some(std::path::PathBuf::from(
-                "/tmp/leviath-home-override-test-2"
-            ))
-        );
-        assert_eq!(
-            std::env::var_os("LEVIATH_HOME"),
-            Some(std::ffi::OsString::from(
-                "/tmp/leviath-home-original-sentinel"
-            ))
-        );
-        unsafe {
-            std::env::remove_var("LEVIATH_HOME");
-        }
+        temp_env::with_var_unset("LEVIATH_HOME", || {
+            assert_eq!(leviath_home_dir(), dirs::home_dir());
+        });
     }
 
     // ─── load_from_path / save_to_path (path-parameterized for testability) ─
@@ -707,26 +566,20 @@ mod tests {
         // in `load_from_path` has only ever been exercised on its `true`
         // (field absent, fall back to env) arm elsewhere in this file --
         // never on the `false` (field already set from the TOML file, skip
-        // the env lookup) arm. Hold the shared lock while clearing these
-        // process-global env vars so a concurrently-running test elsewhere
-        // in the crate can't be mid-set when we read them.
-        let _lock = CONFIG_PATH_ENV_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let saved: Vec<_> = PROVIDER_KEY_ENV_VARS
+        // the env lookup) arm. `temp_env::with_vars` clears these process-global
+        // env vars for the closure (and serializes against every other temp-env
+        // test), so no concurrently-running test can be mid-set when we read.
+        let unset: Vec<(&str, Option<&str>)> = PROVIDER_KEY_ENV_VARS
             .iter()
             .chain(["OLLAMA_HOST"].iter())
-            .map(|&key| (key, std::env::var_os(key)))
+            .map(|&key| (key, None))
             .collect();
-        for &(key, _) in &saved {
-            std::env::remove_var(key);
-        }
-
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("config.toml");
-        std::fs::write(
-            &path,
-            r#"
+        temp_env::with_vars(unset, || {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("config.toml");
+            std::fs::write(
+                &path,
+                r#"
 default_provider = "anthropic"
 openrouter_api_key = "sk-or-existing"
 ollama_base_url = "http://existing-ollama:11434"
@@ -738,32 +591,29 @@ anthropic_api_key = "sk-ant-existing"
 openai_api_key = "sk-openai-existing"
 google_api_key = "AIza-existing"
 "#,
-        )
-        .unwrap();
+            )
+            .unwrap();
 
-        let config = with_tracing(|| Config::load_from_path(&path)).unwrap();
+            let config = with_tracing(|| Config::load_from_path(&path)).unwrap();
 
-        for (key, original) in saved {
-            restore_env_var(key, original.as_deref());
-        }
-
-        assert_eq!(
-            config.providers.anthropic_api_key.as_deref(),
-            Some("sk-ant-existing")
-        );
-        assert_eq!(
-            config.providers.openai_api_key.as_deref(),
-            Some("sk-openai-existing")
-        );
-        assert_eq!(
-            config.providers.google_api_key.as_deref(),
-            Some("AIza-existing")
-        );
-        assert_eq!(config.openrouter_api_key.as_deref(), Some("sk-or-existing"));
-        assert_eq!(
-            config.ollama_base_url.as_deref(),
-            Some("http://existing-ollama:11434")
-        );
+            assert_eq!(
+                config.providers.anthropic_api_key.as_deref(),
+                Some("sk-ant-existing")
+            );
+            assert_eq!(
+                config.providers.openai_api_key.as_deref(),
+                Some("sk-openai-existing")
+            );
+            assert_eq!(
+                config.providers.google_api_key.as_deref(),
+                Some("AIza-existing")
+            );
+            assert_eq!(config.openrouter_api_key.as_deref(), Some("sk-or-existing"));
+            assert_eq!(
+                config.ollama_base_url.as_deref(),
+                Some("http://existing-ollama:11434")
+            );
+        });
     }
 
     #[test]
@@ -869,16 +719,17 @@ google_api_key = "AIza-existing"
         // wrapper itself (every other test calls `save_to_path` directly),
         // using `LEVIATH_CONFIG_PATH` to redirect the "real" path to a
         // tempdir instead of the developer's actual `~/.leviath/config.toml`.
-        let _guard = isolate_config_path_for_test("save-wrapper");
-        let config = Config {
-            default_provider: "openai".to_string(),
-            ..Config::default()
-        };
+        with_isolated_config_path("save-wrapper", |_fake_dir| {
+            let config = Config {
+                default_provider: "openai".to_string(),
+                ..Config::default()
+            };
 
-        with_tracing(|| config.save()).unwrap();
+            with_tracing(|| config.save()).unwrap();
 
-        let loaded = with_tracing(|| Config::load_from_path(&Config::config_path())).unwrap();
-        assert_eq!(loaded.default_provider, "openai");
+            let loaded = with_tracing(|| Config::load_from_path(&Config::config_path())).unwrap();
+            assert_eq!(loaded.default_provider, "openai");
+        });
     }
 
     #[test]
@@ -887,12 +738,13 @@ google_api_key = "AIza-existing"
         // or a well-formed one, so `load()`'s `?` on `load_from_path(...)`
         // has never actually propagated an `Err`. Writing malformed TOML to
         // the guard's redirected `LEVIATH_CONFIG_PATH` forces that.
-        let guard = isolate_config_path_for_test("load-malformed");
-        std::fs::write(guard.fake_dir.join("config.toml"), "not valid toml [[[").unwrap();
+        with_isolated_config_path("load-malformed", |fake_dir| {
+            std::fs::write(fake_dir.join("config.toml"), "not valid toml [[[").unwrap();
 
-        let result = Config::load();
+            let result = Config::load();
 
-        assert!(result.is_err());
+            assert!(result.is_err());
+        });
     }
 
     // ─── check_permissions_at ────────────────────────────────────────────
@@ -1329,61 +1181,15 @@ max_output_tokens = 2048
 
     #[test]
     fn config_path_contains_leviath() {
-        // LEVIATH_CONFIG_PATH is process-global — hold the shared lock so a
-        // concurrently-running test elsewhere in the crate (e.g.
-        // commands/run/worker.rs's isolate_config_path) can't be mid-override
-        // when we read the real default here.
-        let _lock = CONFIG_PATH_ENV_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let path = Config::config_path();
-        assert!(path.to_str().unwrap().contains(".leviath"));
-        assert!(path.to_str().unwrap().ends_with("config.toml"));
-    }
-
-    #[test]
-    fn config_path_test_guard_drop_restores_previous_env_values() {
-        // Every other user of `isolate_config_path_for_test` starts from an
-        // *unset* `LEVIATH_CONFIG_PATH`/`LEVIATH_SKIP_DOTENV`, so the guard's
-        // `Drop` always takes the `None => remove_var(..)` arm. This test
-        // seeds both vars with sentinel values first, so `Drop` must take the
-        // `Some(path) => set_var(..)` arm instead, restoring them rather than
-        // removing them. The lock is held continuously (by the guard itself)
-        // so no concurrently-running test elsewhere in the crate can
-        // observe or clobber the sentinel values in between.
-        let lock = CONFIG_PATH_ENV_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        std::env::set_var("LEVIATH_CONFIG_PATH", "/sentinel/config-path");
-        std::env::set_var("LEVIATH_SKIP_DOTENV", "sentinel-value");
-
-        let original_config_path = std::env::var_os("LEVIATH_CONFIG_PATH");
-        let original_skip_dotenv = std::env::var_os("LEVIATH_SKIP_DOTENV");
-        let fake_dir =
-            std::env::temp_dir().join("lev-fake-config-drop-restore-previous-values-test");
-        let _ = std::fs::create_dir_all(&fake_dir);
-        std::env::set_var("LEVIATH_CONFIG_PATH", fake_dir.join("config.toml"));
-        std::env::set_var("LEVIATH_SKIP_DOTENV", "1");
-        let guard = ConfigPathTestGuard {
-            original_config_path,
-            original_skip_dotenv,
-            original_keys: vec![],
-            fake_dir: fake_dir.clone(),
-            _lock: lock,
-        };
-
-        drop(guard);
-
-        assert_eq!(
-            std::env::var("LEVIATH_CONFIG_PATH").unwrap(),
-            "/sentinel/config-path"
-        );
-        assert_eq!(
-            std::env::var("LEVIATH_SKIP_DOTENV").unwrap(),
-            "sentinel-value"
-        );
-        std::env::remove_var("LEVIATH_CONFIG_PATH");
-        std::env::remove_var("LEVIATH_SKIP_DOTENV");
+        // Force `LEVIATH_CONFIG_PATH` unset (via `temp_env::with_var_unset`,
+        // which also serializes against every other temp-env test) so
+        // `config_path()` resolves to the real default, not a concurrently-set
+        // override.
+        temp_env::with_var_unset("LEVIATH_CONFIG_PATH", || {
+            let path = Config::config_path();
+            assert!(path.to_str().unwrap().contains(".leviath"));
+            assert!(path.to_str().unwrap().ends_with("config.toml"));
+        });
     }
 
     // ─── Config save/load roundtrip ────────────────────────────────────────

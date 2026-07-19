@@ -54,3 +54,4 @@ tower = { version = "0.5", features = ["util"] }
 
 [dev-dependencies]
 tempfile = "3"
+temp-env = { workspace = true, features = ["async_closure"] }

@@ -1384,8 +1384,8 @@ mod tests {
     /// that drive a real config load (e.g. `execute_worker()` on a valid
     /// manifest) don't make a real, billed inference request via
     /// `generate_title()`. Shared with `commands/run/foreground.rs` — see
-    /// `crate::config::isolate_config_path_for_test` for the rationale.
-    use crate::config::isolate_config_path_for_test as isolate_config_path;
+    /// `crate::config::with_isolated_config_path_async` for the rationale.
+    use crate::config::with_isolated_config_path_async;
 
     fn make_meta(run_id: &str, num_stages: usize) -> RunMeta {
         RunMeta::new(
@@ -1575,125 +1575,133 @@ mod tests {
         // runs dir unless isolated -- caught missing this guard when a
         // leftover "test-complete-pos" dir turned up in the real
         // ~/.leviath/runs/ after a full-suite run.
-        let _guard = crate::runstate::isolate_runs_dir_for_test("worker-cb-complete-pos");
-        let mut meta = RunMeta::new(
-            "test-complete-pos".into(),
-            "agent".into(),
-            "/p".into(),
-            "t".into(),
-            None,
-            "/w".into(),
-            3,
-        );
-        let mut cb = WorkerCallbacks {
-            run_id: "test-complete-pos".to_string(),
-            meta: &mut meta,
-            blueprint_stages_len: 3,
-            tool_calls_counter: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-            taint_global: false,
-            taint_policy: leviath_core::PolicyConfig::default(),
-            context_window: Arc::new(Mutex::new(None)),
-        };
-        // Should not panic with positive stages
-        cb.on_complete(2).await;
+        crate::runstate::with_isolated_runs_dir_async("worker-cb-complete-pos", |_d| async move {
+            let mut meta = RunMeta::new(
+                "test-complete-pos".into(),
+                "agent".into(),
+                "/p".into(),
+                "t".into(),
+                None,
+                "/w".into(),
+                3,
+            );
+            let mut cb = WorkerCallbacks {
+                run_id: "test-complete-pos".to_string(),
+                meta: &mut meta,
+                blueprint_stages_len: 3,
+                tool_calls_counter: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+                taint_global: false,
+                taint_policy: leviath_core::PolicyConfig::default(),
+                context_window: Arc::new(Mutex::new(None)),
+            };
+            // Should not panic with positive stages
+            cb.on_complete(2).await;
+        })
+        .await;
     }
 
     #[tokio::test]
     async fn worker_callbacks_on_transition_does_not_panic() {
         // See the comment on `worker_callbacks_on_complete_with_positive_stages`
         // -- `on_transition` also calls `record_stage_log` for real.
-        let _guard = crate::runstate::isolate_runs_dir_for_test("worker-cb-transition");
-        let mut meta = RunMeta::new(
-            "test-trans".into(),
-            "agent".into(),
-            "/p".into(),
-            "t".into(),
-            None,
-            "/w".into(),
-            2,
-        );
-        let mut cb = WorkerCallbacks {
-            run_id: "test-trans".to_string(),
-            meta: &mut meta,
-            blueprint_stages_len: 2,
-            tool_calls_counter: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-            taint_global: false,
-            taint_policy: leviath_core::PolicyConfig::default(),
-            context_window: Arc::new(Mutex::new(None)),
-        };
-        cb.on_transition("plan", "code", 0).await;
+        crate::runstate::with_isolated_runs_dir_async("worker-cb-transition", |_d| async move {
+            let mut meta = RunMeta::new(
+                "test-trans".into(),
+                "agent".into(),
+                "/p".into(),
+                "t".into(),
+                None,
+                "/w".into(),
+                2,
+            );
+            let mut cb = WorkerCallbacks {
+                run_id: "test-trans".to_string(),
+                meta: &mut meta,
+                blueprint_stages_len: 2,
+                tool_calls_counter: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+                taint_global: false,
+                taint_policy: leviath_core::PolicyConfig::default(),
+                context_window: Arc::new(Mutex::new(None)),
+            };
+            cb.on_transition("plan", "code", 0).await;
+        })
+        .await;
     }
 
     #[tokio::test]
     async fn worker_callbacks_on_cancel_sets_cancelled_and_persists() {
-        let _guard = crate::runstate::isolate_runs_dir_for_test("worker-cb-cancel");
-        let mut meta = RunMeta::new(
-            "test-cancel".into(),
-            "agent".into(),
-            "/p".into(),
-            "t".into(),
-            None,
-            "/w".into(),
-            2,
-        );
-        runstate::create_run(&meta).unwrap();
-        let mut cb = WorkerCallbacks {
-            run_id: "test-cancel".to_string(),
-            meta: &mut meta,
-            blueprint_stages_len: 2,
-            tool_calls_counter: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-            taint_global: false,
-            taint_policy: leviath_core::PolicyConfig::default(),
-            context_window: Arc::new(Mutex::new(None)),
-        };
-        cb.on_cancel(0).await;
+        crate::runstate::with_isolated_runs_dir_async("worker-cb-cancel", |_d| async move {
+            let mut meta = RunMeta::new(
+                "test-cancel".into(),
+                "agent".into(),
+                "/p".into(),
+                "t".into(),
+                None,
+                "/w".into(),
+                2,
+            );
+            runstate::create_run(&meta).unwrap();
+            let mut cb = WorkerCallbacks {
+                run_id: "test-cancel".to_string(),
+                meta: &mut meta,
+                blueprint_stages_len: 2,
+                tool_calls_counter: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+                taint_global: false,
+                taint_policy: leviath_core::PolicyConfig::default(),
+                context_window: Arc::new(Mutex::new(None)),
+            };
+            cb.on_cancel(0).await;
 
-        assert_eq!(meta.status, RunStatus::Cancelled);
-        // Persisted to disk as well.
-        let persisted = runstate::read_meta("test-cancel").unwrap();
-        assert_eq!(persisted.status, RunStatus::Cancelled);
+            assert_eq!(meta.status, RunStatus::Cancelled);
+            // Persisted to disk as well.
+            let persisted = runstate::read_meta("test-cancel").unwrap();
+            assert_eq!(persisted.status, RunStatus::Cancelled);
+        })
+        .await;
     }
 
     #[tokio::test]
     async fn worker_on_taint_audit_persists_events() {
-        let _guard = crate::runstate::isolate_runs_dir_for_test("worker-cb-taint-audit");
-        let mut meta = RunMeta::new(
-            "test-taint-audit".into(),
-            "agent".into(),
-            "/p".into(),
-            "t".into(),
-            None,
-            "/w".into(),
-            1,
-        );
-        runstate::create_run(&meta).unwrap();
-        let mut cb = WorkerCallbacks {
-            run_id: "test-taint-audit".to_string(),
-            meta: &mut meta,
-            blueprint_stages_len: 1,
-            tool_calls_counter: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-            taint_global: true,
-            taint_policy: leviath_core::PolicyConfig::default(),
-            context_window: Arc::new(Mutex::new(None)),
-        };
-        let events = vec![leviath_core::taint::GateEvent {
-            timestamp: 0,
-            agent_id: "a".into(),
-            tool_name: "shell".into(),
-            input_mode: leviath_core::taint::InputMode::Traditional,
-            taint_level: leviath_core::TaintLevel::Private,
-            clearance: leviath_core::TaintLevel::Public,
-            allowed: false,
-            decision_source: leviath_core::taint::GateDecisionSource::UserDenied,
-        }];
-        cb.on_taint_audit(0, &events).await;
+        crate::runstate::with_isolated_runs_dir_async("worker-cb-taint-audit", |_d| async move {
+            let mut meta = RunMeta::new(
+                "test-taint-audit".into(),
+                "agent".into(),
+                "/p".into(),
+                "t".into(),
+                None,
+                "/w".into(),
+                1,
+            );
+            runstate::create_run(&meta).unwrap();
+            let mut cb = WorkerCallbacks {
+                run_id: "test-taint-audit".to_string(),
+                meta: &mut meta,
+                blueprint_stages_len: 1,
+                tool_calls_counter: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+                taint_global: true,
+                taint_policy: leviath_core::PolicyConfig::default(),
+                context_window: Arc::new(Mutex::new(None)),
+            };
+            let events = vec![leviath_core::taint::GateEvent {
+                timestamp: 0,
+                agent_id: "a".into(),
+                tool_name: "shell".into(),
+                input_mode: leviath_core::taint::InputMode::Traditional,
+                taint_level: leviath_core::TaintLevel::Private,
+                clearance: leviath_core::TaintLevel::Public,
+                allowed: false,
+                decision_source: leviath_core::taint::GateDecisionSource::UserDenied,
+            }];
+            cb.on_taint_audit(0, &events).await;
 
-        let path = runstate::stage_dir("test-taint-audit", 0).join("taint_audit.json");
-        assert!(path.exists());
-        let content = std::fs::read_to_string(path).unwrap();
-        assert!(content.contains("shell"));
-        // Trait accessors reflect the configured values.
-        assert!(cb.taint_global_enabled());
+            let path = runstate::stage_dir("test-taint-audit", 0).join("taint_audit.json");
+            assert!(path.exists());
+            let content = std::fs::read_to_string(path).unwrap();
+            assert!(content.contains("shell"));
+            // Trait accessors reflect the configured values.
+            assert!(cb.taint_global_enabled());
+        })
+        .await;
     }
 
     async fn resolve_gate_prompt_with(
@@ -1764,630 +1772,683 @@ mod tests {
 
     #[tokio::test]
     async fn worker_gate_prompt_maps_deny() {
-        let _guard = crate::runstate::isolate_runs_dir_for_test("worker-gate-prompt-deny");
-        let res =
-            resolve_gate_prompt_with("gp-deny", false, crate::interaction::ApprovalScope::Once)
-                .await;
-        assert_eq!(res, leviath_runtime::taint::GateResolution::Deny);
+        crate::runstate::with_isolated_runs_dir_async("worker-gate-prompt-deny", |_d| async move {
+            let res =
+                resolve_gate_prompt_with("gp-deny", false, crate::interaction::ApprovalScope::Once)
+                    .await;
+            assert_eq!(res, leviath_runtime::taint::GateResolution::Deny);
+        })
+        .await;
     }
 
     #[tokio::test]
     async fn worker_gate_prompt_maps_allow_once_and_session() {
-        let _guard = crate::runstate::isolate_runs_dir_for_test("worker-gate-prompt-allow");
-        let once =
-            resolve_gate_prompt_with("gp-once", true, crate::interaction::ApprovalScope::Once)
+        crate::runstate::with_isolated_runs_dir_async(
+            "worker-gate-prompt-allow",
+            |_d| async move {
+                let once = resolve_gate_prompt_with(
+                    "gp-once",
+                    true,
+                    crate::interaction::ApprovalScope::Once,
+                )
                 .await;
-        assert_eq!(once, leviath_runtime::taint::GateResolution::AllowOnce);
-        let session = resolve_gate_prompt_with(
-            "gp-session",
-            true,
-            crate::interaction::ApprovalScope::Session,
+                assert_eq!(once, leviath_runtime::taint::GateResolution::AllowOnce);
+                let session = resolve_gate_prompt_with(
+                    "gp-session",
+                    true,
+                    crate::interaction::ApprovalScope::Session,
+                )
+                .await;
+                assert_eq!(session, leviath_runtime::taint::GateResolution::AlwaysAllow);
+            },
         )
         .await;
-        assert_eq!(session, leviath_runtime::taint::GateResolution::AlwaysAllow);
     }
 
     #[tokio::test]
     async fn worker_callbacks_on_claude_code_warning_does_not_panic() {
         // See the comment on `worker_callbacks_on_complete_with_positive_stages`
         // -- `on_claude_code_warning` also calls `record_stage_log` for real.
-        let _guard = crate::runstate::isolate_runs_dir_for_test("worker-cb-ccw");
-        let mut meta = RunMeta::new(
-            "test-ccw".into(),
-            "agent".into(),
-            "/p".into(),
-            "t".into(),
-            None,
-            "/w".into(),
-            1,
-        );
-        let mut cb = WorkerCallbacks {
-            run_id: "test-ccw".to_string(),
-            meta: &mut meta,
-            blueprint_stages_len: 1,
-            tool_calls_counter: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-            taint_global: false,
-            taint_policy: leviath_core::PolicyConfig::default(),
-            context_window: Arc::new(Mutex::new(None)),
-        };
-        cb.on_claude_code_warning(0).await;
+        crate::runstate::with_isolated_runs_dir_async("worker-cb-ccw", |_d| async move {
+            let mut meta = RunMeta::new(
+                "test-ccw".into(),
+                "agent".into(),
+                "/p".into(),
+                "t".into(),
+                None,
+                "/w".into(),
+                1,
+            );
+            let mut cb = WorkerCallbacks {
+                run_id: "test-ccw".to_string(),
+                meta: &mut meta,
+                blueprint_stages_len: 1,
+                tool_calls_counter: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+                taint_global: false,
+                taint_policy: leviath_core::PolicyConfig::default(),
+                context_window: Arc::new(Mutex::new(None)),
+            };
+            cb.on_claude_code_warning(0).await;
+        })
+        .await;
     }
 
     #[tokio::test]
     async fn worker_callbacks_on_provider_missing_returns_true() {
-        let _guard = crate::runstate::isolate_runs_dir_for_test(
+        crate::runstate::with_isolated_runs_dir_async(
             "worker_callbacks_on_provider_missing_returns_true",
-        );
-        // Use a temp dir for run state
-        let run_id = "test-worker-prov-miss";
-        let dir = crate::runstate::run_dir(run_id);
-        let _ = std::fs::create_dir_all(&dir);
+            |_d| async move {
+                // Use a temp dir for run state
+                let run_id = "test-worker-prov-miss";
+                let dir = crate::runstate::run_dir(run_id);
+                let _ = std::fs::create_dir_all(&dir);
 
-        // Write initial stages index
-        let stages = vec![crate::runstate::StageRecord::new("main".to_string(), 0)];
-        let _ = crate::runstate::write_stages_index(run_id, &stages);
+                // Write initial stages index
+                let stages = vec![crate::runstate::StageRecord::new("main".to_string(), 0)];
+                let _ = crate::runstate::write_stages_index(run_id, &stages);
 
-        let mut meta = RunMeta::new(
-            run_id.into(),
-            "agent".into(),
-            "/p".into(),
-            "t".into(),
-            None,
-            "/w".into(),
-            1,
-        );
-        let mut cb = WorkerCallbacks {
-            run_id: run_id.to_string(),
-            meta: &mut meta,
-            blueprint_stages_len: 1,
-            tool_calls_counter: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-            taint_global: false,
-            taint_policy: leviath_core::PolicyConfig::default(),
-            context_window: Arc::new(Mutex::new(None)),
-        };
-        let result = cb.on_provider_missing("nonexistent", 0).await;
-        // on_provider_missing should return true (abort).
-        assert!(result);
-        assert_eq!(cb.meta.status, RunStatus::Error);
-        assert!(cb.meta.error.is_some());
-        assert!(cb.meta.error.as_ref().unwrap().contains("nonexistent"));
+                let mut meta = RunMeta::new(
+                    run_id.into(),
+                    "agent".into(),
+                    "/p".into(),
+                    "t".into(),
+                    None,
+                    "/w".into(),
+                    1,
+                );
+                let mut cb = WorkerCallbacks {
+                    run_id: run_id.to_string(),
+                    meta: &mut meta,
+                    blueprint_stages_len: 1,
+                    tool_calls_counter: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+                    taint_global: false,
+                    taint_policy: leviath_core::PolicyConfig::default(),
+                    context_window: Arc::new(Mutex::new(None)),
+                };
+                let result = cb.on_provider_missing("nonexistent", 0).await;
+                // on_provider_missing should return true (abort).
+                assert!(result);
+                assert_eq!(cb.meta.status, RunStatus::Error);
+                assert!(cb.meta.error.is_some());
+                assert!(cb.meta.error.as_ref().unwrap().contains("nonexistent"));
 
-        let _ = std::fs::remove_dir_all(crate::runstate::run_dir(run_id));
+                let _ = std::fs::remove_dir_all(crate::runstate::run_dir(run_id));
+            },
+        )
+        .await;
     }
 
     #[tokio::test]
     async fn worker_callbacks_on_stage_enter_updates_meta() {
-        let _guard = crate::runstate::isolate_runs_dir_for_test(
+        crate::runstate::with_isolated_runs_dir_async(
             "worker_callbacks_on_stage_enter_updates_meta",
-        );
-        let run_id = "test-worker-stage-enter";
-        let dir = crate::runstate::run_dir(run_id);
-        let _ = std::fs::create_dir_all(&dir);
+            |_d| async move {
+                let run_id = "test-worker-stage-enter";
+                let dir = crate::runstate::run_dir(run_id);
+                let _ = std::fs::create_dir_all(&dir);
 
-        let stages = vec![
-            crate::runstate::StageRecord::new("plan".to_string(), 0),
-            crate::runstate::StageRecord::new("code".to_string(), 1),
-        ];
-        let _ = crate::runstate::write_stages_index(run_id, &stages);
+                let stages = vec![
+                    crate::runstate::StageRecord::new("plan".to_string(), 0),
+                    crate::runstate::StageRecord::new("code".to_string(), 1),
+                ];
+                let _ = crate::runstate::write_stages_index(run_id, &stages);
 
-        let mut meta = RunMeta::new(
-            run_id.into(),
-            "agent".into(),
-            "/p".into(),
-            "t".into(),
-            None,
-            "/w".into(),
-            2,
-        );
-        let mut cb = WorkerCallbacks {
-            run_id: run_id.to_string(),
-            meta: &mut meta,
-            blueprint_stages_len: 2,
-            tool_calls_counter: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-            taint_global: false,
-            taint_policy: leviath_core::PolicyConfig::default(),
-            context_window: Arc::new(Mutex::new(None)),
-        };
-        cb.on_stage_enter("plan", 0, "anthropic", "claude-sonnet-4-6", "")
-            .await;
-        assert_eq!(cb.meta.current_stage, "plan");
-        assert_eq!(cb.meta.stage_index, 0);
-        assert_eq!(cb.meta.status, RunStatus::Running);
+                let mut meta = RunMeta::new(
+                    run_id.into(),
+                    "agent".into(),
+                    "/p".into(),
+                    "t".into(),
+                    None,
+                    "/w".into(),
+                    2,
+                );
+                let mut cb = WorkerCallbacks {
+                    run_id: run_id.to_string(),
+                    meta: &mut meta,
+                    blueprint_stages_len: 2,
+                    tool_calls_counter: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+                    taint_global: false,
+                    taint_policy: leviath_core::PolicyConfig::default(),
+                    context_window: Arc::new(Mutex::new(None)),
+                };
+                cb.on_stage_enter("plan", 0, "anthropic", "claude-sonnet-4-6", "")
+                    .await;
+                assert_eq!(cb.meta.current_stage, "plan");
+                assert_eq!(cb.meta.stage_index, 0);
+                assert_eq!(cb.meta.status, RunStatus::Running);
 
-        let _ = std::fs::remove_dir_all(crate::runstate::run_dir(run_id));
+                let _ = std::fs::remove_dir_all(crate::runstate::run_dir(run_id));
+            },
+        )
+        .await;
     }
 
     #[tokio::test]
     async fn worker_callbacks_on_stage_enter_with_visit_label() {
-        let _guard = crate::runstate::isolate_runs_dir_for_test(
+        crate::runstate::with_isolated_runs_dir_async(
             "worker_callbacks_on_stage_enter_with_visit_label",
-        );
-        let run_id = "test-worker-visit-label";
-        let dir = crate::runstate::run_dir(run_id);
-        let _ = std::fs::create_dir_all(&dir);
+            |_d| async move {
+                let run_id = "test-worker-visit-label";
+                let dir = crate::runstate::run_dir(run_id);
+                let _ = std::fs::create_dir_all(&dir);
 
-        let stages = vec![crate::runstate::StageRecord::new("code".to_string(), 0)];
-        let _ = crate::runstate::write_stages_index(run_id, &stages);
+                let stages = vec![crate::runstate::StageRecord::new("code".to_string(), 0)];
+                let _ = crate::runstate::write_stages_index(run_id, &stages);
 
-        let mut meta = RunMeta::new(
-            run_id.into(),
-            "agent".into(),
-            "/p".into(),
-            "t".into(),
-            None,
-            "/w".into(),
-            1,
-        );
-        let mut cb = WorkerCallbacks {
-            run_id: run_id.to_string(),
-            meta: &mut meta,
-            blueprint_stages_len: 1,
-            tool_calls_counter: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-            taint_global: false,
-            taint_policy: leviath_core::PolicyConfig::default(),
-            context_window: Arc::new(Mutex::new(None)),
-        };
-        cb.on_stage_enter("code", 0, "anthropic", "claude-sonnet-4-6", " (visit 2)")
-            .await;
-        assert_eq!(cb.meta.current_stage, "code");
+                let mut meta = RunMeta::new(
+                    run_id.into(),
+                    "agent".into(),
+                    "/p".into(),
+                    "t".into(),
+                    None,
+                    "/w".into(),
+                    1,
+                );
+                let mut cb = WorkerCallbacks {
+                    run_id: run_id.to_string(),
+                    meta: &mut meta,
+                    blueprint_stages_len: 1,
+                    tool_calls_counter: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+                    taint_global: false,
+                    taint_policy: leviath_core::PolicyConfig::default(),
+                    context_window: Arc::new(Mutex::new(None)),
+                };
+                cb.on_stage_enter("code", 0, "anthropic", "claude-sonnet-4-6", " (visit 2)")
+                    .await;
+                assert_eq!(cb.meta.current_stage, "code");
 
-        let _ = std::fs::remove_dir_all(crate::runstate::run_dir(run_id));
+                let _ = std::fs::remove_dir_all(crate::runstate::run_dir(run_id));
+            },
+        )
+        .await;
     }
 
     #[tokio::test]
     async fn worker_callbacks_on_stage_error_graph_mode() {
-        let _guard = crate::runstate::isolate_runs_dir_for_test(
+        crate::runstate::with_isolated_runs_dir_async(
             "worker_callbacks_on_stage_error_graph_mode",
-        );
-        let run_id = "test-worker-stage-err-graph";
-        let dir = crate::runstate::run_dir(run_id);
-        let _ = std::fs::create_dir_all(&dir);
+            |_d| async move {
+                let run_id = "test-worker-stage-err-graph";
+                let dir = crate::runstate::run_dir(run_id);
+                let _ = std::fs::create_dir_all(&dir);
 
-        let stages = vec![crate::runstate::StageRecord::new("main".to_string(), 0)];
-        let _ = crate::runstate::write_stages_index(run_id, &stages);
+                let stages = vec![crate::runstate::StageRecord::new("main".to_string(), 0)];
+                let _ = crate::runstate::write_stages_index(run_id, &stages);
 
-        let mut meta = RunMeta::new(
-            run_id.into(),
-            "agent".into(),
-            "/p".into(),
-            "t".into(),
-            None,
-            "/w".into(),
-            1,
-        );
-        let mut cb = WorkerCallbacks {
-            run_id: run_id.to_string(),
-            meta: &mut meta,
-            blueprint_stages_len: 1,
-            tool_calls_counter: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-            taint_global: false,
-            taint_policy: leviath_core::PolicyConfig::default(),
-            context_window: Arc::new(Mutex::new(None)),
-        };
+                let mut meta = RunMeta::new(
+                    run_id.into(),
+                    "agent".into(),
+                    "/p".into(),
+                    "t".into(),
+                    None,
+                    "/w".into(),
+                    1,
+                );
+                let mut cb = WorkerCallbacks {
+                    run_id: run_id.to_string(),
+                    meta: &mut meta,
+                    blueprint_stages_len: 1,
+                    tool_calls_counter: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+                    taint_global: false,
+                    taint_policy: leviath_core::PolicyConfig::default(),
+                    context_window: Arc::new(Mutex::new(None)),
+                };
 
-        let err = anyhow::anyhow!("test error");
-        let result = cb.on_stage_error("main", 0, &err, true).await;
-        assert_eq!(result, Some(leviath_core::blueprint::StageResult::Error));
+                let err = anyhow::anyhow!("test error");
+                let result = cb.on_stage_error("main", 0, &err, true).await;
+                assert_eq!(result, Some(leviath_core::blueprint::StageResult::Error));
 
-        let _ = std::fs::remove_dir_all(crate::runstate::run_dir(run_id));
+                let _ = std::fs::remove_dir_all(crate::runstate::run_dir(run_id));
+            },
+        )
+        .await;
     }
 
     #[tokio::test]
     async fn worker_callbacks_on_stage_error_linear_mode() {
-        let _guard = crate::runstate::isolate_runs_dir_for_test(
+        crate::runstate::with_isolated_runs_dir_async(
             "worker_callbacks_on_stage_error_linear_mode",
-        );
-        let run_id = "test-worker-stage-err-linear";
-        let dir = crate::runstate::run_dir(run_id);
-        let _ = std::fs::create_dir_all(&dir);
+            |_d| async move {
+                let run_id = "test-worker-stage-err-linear";
+                let dir = crate::runstate::run_dir(run_id);
+                let _ = std::fs::create_dir_all(&dir);
 
-        let stages = vec![crate::runstate::StageRecord::new("main".to_string(), 0)];
-        let _ = crate::runstate::write_stages_index(run_id, &stages);
+                let stages = vec![crate::runstate::StageRecord::new("main".to_string(), 0)];
+                let _ = crate::runstate::write_stages_index(run_id, &stages);
 
-        let mut meta = RunMeta::new(
-            run_id.into(),
-            "agent".into(),
-            "/p".into(),
-            "t".into(),
-            None,
-            "/w".into(),
-            1,
-        );
-        let mut cb = WorkerCallbacks {
-            run_id: run_id.to_string(),
-            meta: &mut meta,
-            blueprint_stages_len: 1,
-            tool_calls_counter: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-            taint_global: false,
-            taint_policy: leviath_core::PolicyConfig::default(),
-            context_window: Arc::new(Mutex::new(None)),
-        };
+                let mut meta = RunMeta::new(
+                    run_id.into(),
+                    "agent".into(),
+                    "/p".into(),
+                    "t".into(),
+                    None,
+                    "/w".into(),
+                    1,
+                );
+                let mut cb = WorkerCallbacks {
+                    run_id: run_id.to_string(),
+                    meta: &mut meta,
+                    blueprint_stages_len: 1,
+                    tool_calls_counter: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+                    taint_global: false,
+                    taint_policy: leviath_core::PolicyConfig::default(),
+                    context_window: Arc::new(Mutex::new(None)),
+                };
 
-        let err = anyhow::anyhow!("linear error");
-        let result = cb.on_stage_error("main", 0, &err, false).await;
-        assert!(result.is_none());
-        assert_eq!(cb.meta.status, RunStatus::Error);
-        assert!(cb.meta.error.as_ref().unwrap().contains("linear error"));
+                let err = anyhow::anyhow!("linear error");
+                let result = cb.on_stage_error("main", 0, &err, false).await;
+                assert!(result.is_none());
+                assert_eq!(cb.meta.status, RunStatus::Error);
+                assert!(cb.meta.error.as_ref().unwrap().contains("linear error"));
 
-        let _ = std::fs::remove_dir_all(crate::runstate::run_dir(run_id));
+                let _ = std::fs::remove_dir_all(crate::runstate::run_dir(run_id));
+            },
+        )
+        .await;
     }
 
     #[tokio::test]
     async fn worker_callbacks_on_stage_result_updates_stages() {
-        let _guard = crate::runstate::isolate_runs_dir_for_test(
+        crate::runstate::with_isolated_runs_dir_async(
             "worker_callbacks_on_stage_result_updates_stages",
-        );
-        let run_id = "test-worker-stage-result";
-        let dir = crate::runstate::run_dir(run_id);
-        let _ = std::fs::create_dir_all(&dir);
-        // Create stages dir for output
-        let stage_dir = crate::runstate::stage_dir(run_id, 0);
-        let _ = std::fs::create_dir_all(&stage_dir);
+            |_d| async move {
+                let run_id = "test-worker-stage-result";
+                let dir = crate::runstate::run_dir(run_id);
+                let _ = std::fs::create_dir_all(&dir);
+                // Create stages dir for output
+                let stage_dir = crate::runstate::stage_dir(run_id, 0);
+                let _ = std::fs::create_dir_all(&stage_dir);
 
-        let stages = vec![crate::runstate::StageRecord::new("main".to_string(), 0)];
-        let _ = crate::runstate::write_stages_index(run_id, &stages);
+                let stages = vec![crate::runstate::StageRecord::new("main".to_string(), 0)];
+                let _ = crate::runstate::write_stages_index(run_id, &stages);
 
-        let mut meta = RunMeta::new(
-            run_id.into(),
-            "agent".into(),
-            "/p".into(),
-            "t".into(),
-            None,
-            "/w".into(),
-            1,
-        );
-        let mut cb = WorkerCallbacks {
-            run_id: run_id.to_string(),
-            meta: &mut meta,
-            blueprint_stages_len: 1,
-            tool_calls_counter: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-            taint_global: false,
-            taint_policy: leviath_core::PolicyConfig::default(),
-            context_window: Arc::new(Mutex::new(None)),
-        };
+                let mut meta = RunMeta::new(
+                    run_id.into(),
+                    "agent".into(),
+                    "/p".into(),
+                    "t".into(),
+                    None,
+                    "/w".into(),
+                    1,
+                );
+                let mut cb = WorkerCallbacks {
+                    run_id: run_id.to_string(),
+                    meta: &mut meta,
+                    blueprint_stages_len: 1,
+                    tool_calls_counter: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+                    taint_global: false,
+                    taint_policy: leviath_core::PolicyConfig::default(),
+                    context_window: Arc::new(Mutex::new(None)),
+                };
 
-        let registry = leviath_runtime::ProviderRegistry::new();
-        let mut engine = leviath_runtime::AgentEngine::with_providers(registry);
-        let mut pool = leviath_runtime::AgentPool::new(leviath_core::Blueprint::new(
-            "test".to_string(),
-            "test".to_string(),
-            vec![],
-            leviath_core::ContextLayout::new(vec![], 0),
-        ));
-        let agent_id = pool.spawn_agent(engine.world_mut());
-        let entity = pool.get_agent(&agent_id).unwrap();
+                let registry = leviath_runtime::ProviderRegistry::new();
+                let mut engine = leviath_runtime::AgentEngine::with_providers(registry);
+                let mut pool = leviath_runtime::AgentPool::new(leviath_core::Blueprint::new(
+                    "test".to_string(),
+                    "test".to_string(),
+                    vec![],
+                    leviath_core::ContextLayout::new(vec![], 0),
+                ));
+                let agent_id = pool.spawn_agent(engine.world_mut());
+                let entity = pool.get_agent(&agent_id).unwrap();
 
-        // Test with a response
-        let response = leviath_providers::InferenceResponse {
-            content: "test output".to_string(),
-            tool_calls: vec![],
-            tokens_used: leviath_providers::TokenUsage {
-                prompt_tokens: 100,
-                completion_tokens: 50,
-                total_tokens: 150,
-                cached_tokens: 10,
-                cache_write_tokens: 0,
+                // Test with a response
+                let response = leviath_providers::InferenceResponse {
+                    content: "test output".to_string(),
+                    tool_calls: vec![],
+                    tokens_used: leviath_providers::TokenUsage {
+                        prompt_tokens: 100,
+                        completion_tokens: 50,
+                        total_tokens: 150,
+                        cached_tokens: 10,
+                        cache_write_tokens: 0,
+                    },
+                    finish_reason: leviath_providers::FinishReason::Complete,
+                };
+
+                cb.on_stage_result(
+                    "main",
+                    0,
+                    &leviath_core::blueprint::StageResult::Success,
+                    Some(&response),
+                    &mut engine,
+                    entity,
+                )
+                .await;
+
+                assert_eq!(cb.meta.prompt_tokens, 100);
+                assert_eq!(cb.meta.completion_tokens, 50);
+                assert_eq!(cb.meta.cached_tokens, 10);
+
+                let _ = std::fs::remove_dir_all(crate::runstate::run_dir(run_id));
             },
-            finish_reason: leviath_providers::FinishReason::Complete,
-        };
-
-        cb.on_stage_result(
-            "main",
-            0,
-            &leviath_core::blueprint::StageResult::Success,
-            Some(&response),
-            &mut engine,
-            entity,
         )
         .await;
-
-        assert_eq!(cb.meta.prompt_tokens, 100);
-        assert_eq!(cb.meta.completion_tokens, 50);
-        assert_eq!(cb.meta.cached_tokens, 10);
-
-        let _ = std::fs::remove_dir_all(crate::runstate::run_dir(run_id));
     }
 
     #[tokio::test]
     async fn worker_callbacks_on_stage_result_no_response() {
-        let _guard = crate::runstate::isolate_runs_dir_for_test(
+        crate::runstate::with_isolated_runs_dir_async(
             "worker_callbacks_on_stage_result_no_response",
-        );
-        let run_id = "test-worker-stage-result-none";
-        let dir = crate::runstate::run_dir(run_id);
-        let _ = std::fs::create_dir_all(&dir);
+            |_d| async move {
+                let run_id = "test-worker-stage-result-none";
+                let dir = crate::runstate::run_dir(run_id);
+                let _ = std::fs::create_dir_all(&dir);
 
-        let stages = vec![crate::runstate::StageRecord::new("main".to_string(), 0)];
-        let _ = crate::runstate::write_stages_index(run_id, &stages);
+                let stages = vec![crate::runstate::StageRecord::new("main".to_string(), 0)];
+                let _ = crate::runstate::write_stages_index(run_id, &stages);
 
-        let mut meta = RunMeta::new(
-            run_id.into(),
-            "agent".into(),
-            "/p".into(),
-            "t".into(),
-            None,
-            "/w".into(),
-            1,
-        );
-        let mut cb = WorkerCallbacks {
-            run_id: run_id.to_string(),
-            meta: &mut meta,
-            blueprint_stages_len: 1,
-            tool_calls_counter: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-            taint_global: false,
-            taint_policy: leviath_core::PolicyConfig::default(),
-            context_window: Arc::new(Mutex::new(None)),
-        };
+                let mut meta = RunMeta::new(
+                    run_id.into(),
+                    "agent".into(),
+                    "/p".into(),
+                    "t".into(),
+                    None,
+                    "/w".into(),
+                    1,
+                );
+                let mut cb = WorkerCallbacks {
+                    run_id: run_id.to_string(),
+                    meta: &mut meta,
+                    blueprint_stages_len: 1,
+                    tool_calls_counter: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+                    taint_global: false,
+                    taint_policy: leviath_core::PolicyConfig::default(),
+                    context_window: Arc::new(Mutex::new(None)),
+                };
 
-        let registry = leviath_runtime::ProviderRegistry::new();
-        let mut engine = leviath_runtime::AgentEngine::with_providers(registry);
-        let entity = bevy_ecs::prelude::Entity::from_raw(0);
+                let registry = leviath_runtime::ProviderRegistry::new();
+                let mut engine = leviath_runtime::AgentEngine::with_providers(registry);
+                let entity = bevy_ecs::prelude::Entity::from_raw(0);
 
-        // No response
-        cb.on_stage_result(
-            "main",
-            0,
-            &leviath_core::blueprint::StageResult::Success,
-            None,
-            &mut engine,
-            entity,
+                // No response
+                cb.on_stage_result(
+                    "main",
+                    0,
+                    &leviath_core::blueprint::StageResult::Success,
+                    None,
+                    &mut engine,
+                    entity,
+                )
+                .await;
+
+                // Tokens should remain zero
+                assert_eq!(cb.meta.prompt_tokens, 0);
+                assert_eq!(cb.meta.completion_tokens, 0);
+
+                let _ = std::fs::remove_dir_all(crate::runstate::run_dir(run_id));
+            },
         )
         .await;
-
-        // Tokens should remain zero
-        assert_eq!(cb.meta.prompt_tokens, 0);
-        assert_eq!(cb.meta.completion_tokens, 0);
-
-        let _ = std::fs::remove_dir_all(crate::runstate::run_dir(run_id));
     }
 
     // ─── on_stage_result with empty content ──────────────────────────────────
 
     #[tokio::test]
     async fn worker_callbacks_on_stage_result_empty_content_skips_context_window() {
-        let _guard = crate::runstate::isolate_runs_dir_for_test(
+        crate::runstate::with_isolated_runs_dir_async(
             "worker_callbacks_on_stage_result_empty_content_skips_context_window",
-        );
-        let run_id = "test-worker-stage-result-empty-content";
-        let dir = crate::runstate::run_dir(run_id);
-        let _ = std::fs::create_dir_all(&dir);
-        let stage_dir = crate::runstate::stage_dir(run_id, 0);
-        let _ = std::fs::create_dir_all(&stage_dir);
+            |_d| async move {
+                let run_id = "test-worker-stage-result-empty-content";
+                let dir = crate::runstate::run_dir(run_id);
+                let _ = std::fs::create_dir_all(&dir);
+                let stage_dir = crate::runstate::stage_dir(run_id, 0);
+                let _ = std::fs::create_dir_all(&stage_dir);
 
-        let stages = vec![crate::runstate::StageRecord::new("main".to_string(), 0)];
-        let _ = crate::runstate::write_stages_index(run_id, &stages);
+                let stages = vec![crate::runstate::StageRecord::new("main".to_string(), 0)];
+                let _ = crate::runstate::write_stages_index(run_id, &stages);
 
-        let mut meta = make_meta(run_id, 1);
-        let (mut engine, pool, agent_id, entity) = make_engine_with_agent(&mut meta);
-        let _ = (pool, agent_id); // keep alive
+                let mut meta = make_meta(run_id, 1);
+                let (mut engine, pool, agent_id, entity) = make_engine_with_agent(&mut meta);
+                let _ = (pool, agent_id); // keep alive
 
-        let mut cb = WorkerCallbacks {
-            run_id: run_id.to_string(),
-            meta: &mut meta,
-            blueprint_stages_len: 1,
-            tool_calls_counter: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-            taint_global: false,
-            taint_policy: leviath_core::PolicyConfig::default(),
-            context_window: Arc::new(Mutex::new(None)),
-        };
+                let mut cb = WorkerCallbacks {
+                    run_id: run_id.to_string(),
+                    meta: &mut meta,
+                    blueprint_stages_len: 1,
+                    tool_calls_counter: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+                    taint_global: false,
+                    taint_policy: leviath_core::PolicyConfig::default(),
+                    context_window: Arc::new(Mutex::new(None)),
+                };
 
-        // Empty content — the `add_to_region` branch is NOT taken
-        let response = make_response("");
-        cb.on_stage_result(
-            "main",
-            0,
-            &leviath_core::blueprint::StageResult::Success,
-            Some(&response),
-            &mut engine,
-            entity,
+                // Empty content — the `add_to_region` branch is NOT taken
+                let response = make_response("");
+                cb.on_stage_result(
+                    "main",
+                    0,
+                    &leviath_core::blueprint::StageResult::Success,
+                    Some(&response),
+                    &mut engine,
+                    entity,
+                )
+                .await;
+
+                // Token counts still updated even when content is empty
+                assert_eq!(cb.meta.prompt_tokens, 100);
+                assert_eq!(cb.meta.completion_tokens, 50);
+                assert_eq!(cb.meta.cached_tokens, 10);
+
+                let _ = std::fs::remove_dir_all(crate::runstate::run_dir(run_id));
+            },
         )
         .await;
-
-        // Token counts still updated even when content is empty
-        assert_eq!(cb.meta.prompt_tokens, 100);
-        assert_eq!(cb.meta.completion_tokens, 50);
-        assert_eq!(cb.meta.cached_tokens, 10);
-
-        let _ = std::fs::remove_dir_all(crate::runstate::run_dir(run_id));
     }
 
     // ─── on_stage_result with non-empty content adds to context window ────────
 
     #[tokio::test]
     async fn worker_callbacks_on_stage_result_non_empty_content_adds_to_window() {
-        let _guard = crate::runstate::isolate_runs_dir_for_test(
+        crate::runstate::with_isolated_runs_dir_async(
             "worker_callbacks_on_stage_result_non_empty_content_adds_to_window",
-        );
-        let run_id = "test-worker-stage-result-non-empty";
-        let dir = crate::runstate::run_dir(run_id);
-        let _ = std::fs::create_dir_all(&dir);
-        let stage_dir = crate::runstate::stage_dir(run_id, 0);
-        let _ = std::fs::create_dir_all(&stage_dir);
+            |_d| async move {
+                let run_id = "test-worker-stage-result-non-empty";
+                let dir = crate::runstate::run_dir(run_id);
+                let _ = std::fs::create_dir_all(&dir);
+                let stage_dir = crate::runstate::stage_dir(run_id, 0);
+                let _ = std::fs::create_dir_all(&stage_dir);
 
-        let stages = vec![crate::runstate::StageRecord::new("main".to_string(), 0)];
-        let _ = crate::runstate::write_stages_index(run_id, &stages);
+                let stages = vec![crate::runstate::StageRecord::new("main".to_string(), 0)];
+                let _ = crate::runstate::write_stages_index(run_id, &stages);
 
-        let mut meta = make_meta(run_id, 1);
-        let (mut engine, pool, agent_id, entity) = make_engine_with_agent(&mut meta);
-        let _ = (pool, agent_id);
+                let mut meta = make_meta(run_id, 1);
+                let (mut engine, pool, agent_id, entity) = make_engine_with_agent(&mut meta);
+                let _ = (pool, agent_id);
 
-        let mut cb = WorkerCallbacks {
-            run_id: run_id.to_string(),
-            meta: &mut meta,
-            blueprint_stages_len: 1,
-            tool_calls_counter: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-            taint_global: false,
-            taint_policy: leviath_core::PolicyConfig::default(),
-            context_window: Arc::new(Mutex::new(None)),
-        };
+                let mut cb = WorkerCallbacks {
+                    run_id: run_id.to_string(),
+                    meta: &mut meta,
+                    blueprint_stages_len: 1,
+                    tool_calls_counter: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+                    taint_global: false,
+                    taint_policy: leviath_core::PolicyConfig::default(),
+                    context_window: Arc::new(Mutex::new(None)),
+                };
 
-        // Non-empty content — `add_to_region` branch IS taken
-        let response = make_response("This is the assistant's output after completing the task.");
-        cb.on_stage_result(
-            "main",
-            0,
-            &leviath_core::blueprint::StageResult::Success,
-            Some(&response),
-            &mut engine,
-            entity,
+                // Non-empty content — `add_to_region` branch IS taken
+                let response =
+                    make_response("This is the assistant's output after completing the task.");
+                cb.on_stage_result(
+                    "main",
+                    0,
+                    &leviath_core::blueprint::StageResult::Success,
+                    Some(&response),
+                    &mut engine,
+                    entity,
+                )
+                .await;
+
+                assert_eq!(cb.meta.prompt_tokens, 100);
+                assert_eq!(cb.meta.completion_tokens, 50);
+
+                let _ = std::fs::remove_dir_all(crate::runstate::run_dir(run_id));
+            },
         )
         .await;
-
-        assert_eq!(cb.meta.prompt_tokens, 100);
-        assert_eq!(cb.meta.completion_tokens, 50);
-
-        let _ = std::fs::remove_dir_all(crate::runstate::run_dir(run_id));
     }
 
     // ─── on_post_stage ────────────────────────────────────────────────────────
 
     #[tokio::test]
     async fn worker_callbacks_on_post_stage_updates_meta_and_writes_snapshot() {
-        let _guard = crate::runstate::isolate_runs_dir_for_test(
+        crate::runstate::with_isolated_runs_dir_async(
             "worker_callbacks_on_post_stage_updates_meta_and_writes_snapshot",
-        );
-        let run_id = "test-worker-on-post-stage";
-        let dir = crate::runstate::run_dir(run_id);
-        let _ = std::fs::create_dir_all(&dir);
+            |_d| async move {
+                let run_id = "test-worker-on-post-stage";
+                let dir = crate::runstate::run_dir(run_id);
+                let _ = std::fs::create_dir_all(&dir);
 
-        let mut meta = make_meta(run_id, 1);
-        meta.stage_index = 0;
-        // Write initial meta so runstate can read it
-        let _ = crate::runstate::write_meta(&meta);
+                let mut meta = make_meta(run_id, 1);
+                meta.stage_index = 0;
+                // Write initial meta so runstate can read it
+                let _ = crate::runstate::write_meta(&meta);
 
-        let (engine, pool, agent_id, entity) = make_engine_with_agent(&mut meta);
-        let _ = (pool, agent_id);
+                let (engine, pool, agent_id, entity) = make_engine_with_agent(&mut meta);
+                let _ = (pool, agent_id);
 
-        let mut cb = WorkerCallbacks {
-            run_id: run_id.to_string(),
-            meta: &mut meta,
-            blueprint_stages_len: 1,
-            tool_calls_counter: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-            taint_global: false,
-            taint_policy: leviath_core::PolicyConfig::default(),
-            context_window: Arc::new(Mutex::new(None)),
-        };
+                let mut cb = WorkerCallbacks {
+                    run_id: run_id.to_string(),
+                    meta: &mut meta,
+                    blueprint_stages_len: 1,
+                    tool_calls_counter: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+                    taint_global: false,
+                    taint_policy: leviath_core::PolicyConfig::default(),
+                    context_window: Arc::new(Mutex::new(None)),
+                };
 
-        // Should not panic; updates meta.iteration from AgentState and writes meta
-        cb.on_post_stage(&engine, entity, "main").await;
+                // Should not panic; updates meta.iteration from AgentState and writes meta
+                cb.on_post_stage(&engine, entity, "main").await;
 
-        // Meta should have been written (no panic is the key assertion here)
-        let _ = std::fs::remove_dir_all(crate::runstate::run_dir(run_id));
+                // Meta should have been written (no panic is the key assertion here)
+                let _ = std::fs::remove_dir_all(crate::runstate::run_dir(run_id));
+            },
+        )
+        .await;
     }
 
     #[tokio::test]
     async fn worker_callbacks_on_post_stage_without_agent_state() {
-        let _guard = crate::runstate::isolate_runs_dir_for_test(
+        crate::runstate::with_isolated_runs_dir_async(
             "worker_callbacks_on_post_stage_without_agent_state",
-        );
-        let run_id = "test-worker-on-post-stage-no-state";
-        let dir = crate::runstate::run_dir(run_id);
-        let _ = std::fs::create_dir_all(&dir);
+            |_d| async move {
+                let run_id = "test-worker-on-post-stage-no-state";
+                let dir = crate::runstate::run_dir(run_id);
+                let _ = std::fs::create_dir_all(&dir);
 
-        let mut meta = make_meta(run_id, 1);
-        let _ = crate::runstate::write_meta(&meta);
+                let mut meta = make_meta(run_id, 1);
+                let _ = crate::runstate::write_meta(&meta);
 
-        let registry = leviath_runtime::ProviderRegistry::new();
-        let mut engine = leviath_runtime::AgentEngine::with_providers(registry);
-        // Spawn entity WITHOUT AgentState (bare entity) to test the `if let Some` branch
-        let entity = engine.world_mut().spawn(()).id();
+                let registry = leviath_runtime::ProviderRegistry::new();
+                let mut engine = leviath_runtime::AgentEngine::with_providers(registry);
+                // Spawn entity WITHOUT AgentState (bare entity) to test the `if let Some` branch
+                let entity = engine.world_mut().spawn(()).id();
 
-        let mut cb = WorkerCallbacks {
-            run_id: run_id.to_string(),
-            meta: &mut meta,
-            blueprint_stages_len: 1,
-            tool_calls_counter: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-            taint_global: false,
-            taint_policy: leviath_core::PolicyConfig::default(),
-            context_window: Arc::new(Mutex::new(None)),
-        };
+                let mut cb = WorkerCallbacks {
+                    run_id: run_id.to_string(),
+                    meta: &mut meta,
+                    blueprint_stages_len: 1,
+                    tool_calls_counter: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+                    taint_global: false,
+                    taint_policy: leviath_core::PolicyConfig::default(),
+                    context_window: Arc::new(Mutex::new(None)),
+                };
 
-        // on_post_stage with an entity that has no AgentState — should not panic
-        cb.on_post_stage(&engine, entity, "main").await;
+                // on_post_stage with an entity that has no AgentState — should not panic
+                cb.on_post_stage(&engine, entity, "main").await;
 
-        let _ = std::fs::remove_dir_all(crate::runstate::run_dir(run_id));
+                let _ = std::fs::remove_dir_all(crate::runstate::run_dir(run_id));
+            },
+        )
+        .await;
     }
 
     // ─── execute_worker error paths ───────────────────────────────────────────
 
     #[tokio::test]
     async fn execute_worker_fails_with_nonexistent_path() {
-        let _guard = crate::runstate::isolate_runs_dir_for_test(
+        crate::runstate::with_isolated_runs_dir_async(
             "execute_worker_fails_with_nonexistent_path",
-        );
-        let run_id = "test-execute-worker-bad-path";
-        let dir = crate::runstate::run_dir(run_id);
-        let _ = std::fs::create_dir_all(&dir);
+            |_d| async move {
+                let run_id = "test-execute-worker-bad-path";
+                let dir = crate::runstate::run_dir(run_id);
+                let _ = std::fs::create_dir_all(&dir);
 
-        // Write meta so execute_worker can read it
-        let meta = make_meta(run_id, 0);
-        let _ = crate::runstate::write_meta(&meta);
+                // Write meta so execute_worker can read it
+                let meta = make_meta(run_id, 0);
+                let _ = crate::runstate::write_meta(&meta);
 
-        let args = WorkerArgs {
-            path: "/nonexistent/path/to/nowhere".to_string(),
-            task: "do something".to_string(),
-            run_id: run_id.to_string(),
-            model: None,
-            yolo: false,
-            allow: vec![],
-            ask: vec![],
-            deny: vec![],
-            max_depth: None,
-        };
+                let args = WorkerArgs {
+                    path: "/nonexistent/path/to/nowhere".to_string(),
+                    task: "do something".to_string(),
+                    run_id: run_id.to_string(),
+                    model: None,
+                    yolo: false,
+                    allow: vec![],
+                    ask: vec![],
+                    deny: vec![],
+                    max_depth: None,
+                };
 
-        let result = execute_worker(args).await;
-        // Should fail because path doesn't exist
-        assert!(result.is_err());
-        let err_msg = result.unwrap_err().to_string();
-        let has_manifest_err = err_msg.contains("Could not find") | err_msg.contains("manifest");
-        // Expected manifest error.
-        assert!(has_manifest_err);
+                let result = execute_worker(args).await;
+                // Should fail because path doesn't exist
+                assert!(result.is_err());
+                let err_msg = result.unwrap_err().to_string();
+                let has_manifest_err =
+                    err_msg.contains("Could not find") | err_msg.contains("manifest");
+                // Expected manifest error.
+                assert!(has_manifest_err);
 
-        let _ = std::fs::remove_dir_all(crate::runstate::run_dir(run_id));
+                let _ = std::fs::remove_dir_all(crate::runstate::run_dir(run_id));
+            },
+        )
+        .await;
     }
 
     #[tokio::test]
     async fn execute_worker_creates_meta_when_missing() {
-        let _guard =
-            crate::runstate::isolate_runs_dir_for_test("execute_worker_creates_meta_when_missing");
-        let run_id = "test-execute-worker-no-meta";
-        // Do NOT pre-write meta — tests the fallback branch in execute_worker
-        let dir = crate::runstate::run_dir(run_id);
-        let _ = std::fs::create_dir_all(&dir);
+        crate::runstate::with_isolated_runs_dir_async(
+            "execute_worker_creates_meta_when_missing",
+            |_d| async move {
+                let run_id = "test-execute-worker-no-meta";
+                // Do NOT pre-write meta — tests the fallback branch in execute_worker
+                let dir = crate::runstate::run_dir(run_id);
+                let _ = std::fs::create_dir_all(&dir);
 
-        let args = WorkerArgs {
-            path: "/nonexistent/path".to_string(),
-            task: "test task".to_string(),
-            run_id: run_id.to_string(),
-            model: Some("claude-sonnet-4-6".to_string()),
-            yolo: false,
-            allow: vec![],
-            ask: vec![],
-            deny: vec![],
-            max_depth: None,
-        };
+                let args = WorkerArgs {
+                    path: "/nonexistent/path".to_string(),
+                    task: "test task".to_string(),
+                    run_id: run_id.to_string(),
+                    model: Some("claude-sonnet-4-6".to_string()),
+                    yolo: false,
+                    allow: vec![],
+                    ask: vec![],
+                    deny: vec![],
+                    max_depth: None,
+                };
 
-        // Will fail at manifest lookup, but the RunMeta creation fallback is exercised
-        let result = execute_worker(args).await;
-        assert!(result.is_err());
+                // Will fail at manifest lookup, but the RunMeta creation fallback is exercised
+                let result = execute_worker(args).await;
+                assert!(result.is_err());
 
-        let _ = std::fs::remove_dir_all(crate::runstate::run_dir(run_id));
+                let _ = std::fs::remove_dir_all(crate::runstate::run_dir(run_id));
+            },
+        )
+        .await;
     }
 
     #[tokio::test]
     async fn execute_worker_with_valid_manifest_fails_at_inference() {
-        let _guard = crate::runstate::isolate_runs_dir_for_test(
+        crate::runstate::with_isolated_runs_dir_async(
             "execute_worker_with_valid_manifest_fails_at_inference",
-        );
-        // Redirect $HOME so Config::load() can't see a real config/API key —
-        // otherwise this would make a real, billed inference call via
-        // generate_title(). See CONFIG_PATH_ENV_LOCK/isolate_config_path above.
-        let _config_guard = isolate_config_path("valid-manifest");
-
-        // Create a temp dir with a valid manifest
-        let temp_dir = std::env::temp_dir().join("lev-test-worker-valid-manifest");
-        let _ = std::fs::create_dir_all(&temp_dir);
-        let manifest_content = r#"
+            |_d| async move {
+                // Redirect $HOME so Config::load() can't see a real config/API key —
+                // otherwise this would make a real, billed inference call via
+                // generate_title(). See CONFIG_PATH_ENV_LOCK/isolate_config_path above.
+                with_isolated_config_path_async("valid-manifest", |_fake_dir| async move {
+                    // Create a temp dir with a valid manifest
+                    let temp_dir = std::env::temp_dir().join("lev-test-worker-valid-manifest");
+                    let _ = std::fs::create_dir_all(&temp_dir);
+                    let manifest_content = r#"
 [agent]
 name = "test-worker-agent"
 version = "1.0.0"
@@ -2401,43 +2462,48 @@ max_iterations = 1
 provider = "anthropic"
 model = "claude-sonnet-4-6"
 "#;
-        let manifest_path = temp_dir.join("agent.leviath");
-        std::fs::write(&manifest_path, manifest_content).unwrap();
+                    let manifest_path = temp_dir.join("agent.leviath");
+                    std::fs::write(&manifest_path, manifest_content).unwrap();
 
-        let run_id = "test-execute-worker-valid-manifest";
-        let dir = crate::runstate::run_dir(run_id);
-        let _ = std::fs::create_dir_all(&dir);
+                    let run_id = "test-execute-worker-valid-manifest";
+                    let dir = crate::runstate::run_dir(run_id);
+                    let _ = std::fs::create_dir_all(&dir);
 
-        let meta = make_meta(run_id, 1);
-        let _ = crate::runstate::write_meta(&meta);
+                    let meta = make_meta(run_id, 1);
+                    let _ = crate::runstate::write_meta(&meta);
 
-        let args = WorkerArgs {
-            path: temp_dir.to_string_lossy().to_string(),
-            task: "test task".to_string(),
-            run_id: run_id.to_string(),
-            model: None,
-            yolo: true, // tests the yolo → launch_overrides branch
-            allow: vec!["read_file".to_string()], // tests --allow branch
-            ask: vec!["bash".to_string()], // tests --ask branch
-            deny: vec!["write_file".to_string()], // tests --deny branch
-            max_depth: None,
-        };
+                    let args = WorkerArgs {
+                        path: temp_dir.to_string_lossy().to_string(),
+                        task: "test task".to_string(),
+                        run_id: run_id.to_string(),
+                        model: None,
+                        yolo: true, // tests the yolo → launch_overrides branch
+                        allow: vec!["read_file".to_string()], // tests --allow branch
+                        ask: vec!["bash".to_string()], // tests --ask branch
+                        deny: vec!["write_file".to_string()], // tests --deny branch
+                        max_depth: None,
+                    };
 
-        // This will fail because no real anthropic API key is configured,
-        // but it exercises manifest loading, blueprint parsing, config loading,
-        // provider registry building, engine setup, tool registry init,
-        // launch_overrides population, and stage loop entry (provider missing).
-        let result = execute_worker(args).await;
-        // We expect either an error (no API key / provider not found) or success.
-        // The key is that the code path runs without panicking.
-        let _ = result; // Accept any result
+                    // This will fail because no real anthropic API key is configured,
+                    // but it exercises manifest loading, blueprint parsing, config loading,
+                    // provider registry building, engine setup, tool registry init,
+                    // launch_overrides population, and stage loop entry (provider missing).
+                    let result = execute_worker(args).await;
+                    // We expect either an error (no API key / provider not found) or success.
+                    // The key is that the code path runs without panicking.
+                    let _ = result; // Accept any result
 
-        // Verify meta was written
-        let saved_meta = crate::runstate::read_meta(run_id);
-        saved_meta.expect("Meta should have been written by execute_worker");
+                    // Verify meta was written
+                    let saved_meta = crate::runstate::read_meta(run_id);
+                    saved_meta.expect("Meta should have been written by execute_worker");
 
-        let _ = std::fs::remove_dir_all(crate::runstate::run_dir(run_id));
-        let _ = std::fs::remove_dir_all(&temp_dir);
+                    let _ = std::fs::remove_dir_all(crate::runstate::run_dir(run_id));
+                    let _ = std::fs::remove_dir_all(&temp_dir);
+                })
+                .await;
+            },
+        )
+        .await;
     }
 
     // ─── run_worker_inner: read_to_string failure (line 549) ─────────────────
@@ -2450,99 +2516,108 @@ model = "claude-sonnet-4-6"
 
     #[tokio::test]
     async fn run_worker_inner_manifest_is_directory_returns_read_error() {
-        let _guard = crate::runstate::isolate_runs_dir_for_test(
+        crate::runstate::with_isolated_runs_dir_async(
             "run_worker_inner_manifest_is_directory_returns_read_error",
-        );
-        let pid = std::process::id();
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .subsec_nanos();
-        let agent_dir = std::env::temp_dir().join(format!("lev-test-manifest-is-dir-{pid}-{now}"));
-        let _ = std::fs::create_dir_all(&agent_dir);
-        // Create agent.leviath as a DIRECTORY (not a file).
-        let manifest_as_dir = agent_dir.join("agent.leviath");
-        let _ = std::fs::create_dir_all(&manifest_as_dir);
+            |_d| async move {
+                let pid = std::process::id();
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .subsec_nanos();
+                let agent_dir =
+                    std::env::temp_dir().join(format!("lev-test-manifest-is-dir-{pid}-{now}"));
+                let _ = std::fs::create_dir_all(&agent_dir);
+                // Create agent.leviath as a DIRECTORY (not a file).
+                let manifest_as_dir = agent_dir.join("agent.leviath");
+                let _ = std::fs::create_dir_all(&manifest_as_dir);
 
-        let run_id = format!("test-worker-manifest-dir-{pid}-{now}");
-        let args = WorkerArgs {
-            path: agent_dir.to_string_lossy().to_string(),
-            task: "task".to_string(),
-            run_id: run_id.clone(),
-            model: None,
-            yolo: false,
-            allow: vec![],
-            ask: vec![],
-            deny: vec![],
-            max_depth: None,
-        };
+                let run_id = format!("test-worker-manifest-dir-{pid}-{now}");
+                let args = WorkerArgs {
+                    path: agent_dir.to_string_lossy().to_string(),
+                    task: "task".to_string(),
+                    run_id: run_id.clone(),
+                    model: None,
+                    yolo: false,
+                    allow: vec![],
+                    ask: vec![],
+                    deny: vec![],
+                    max_depth: None,
+                };
 
-        let result = execute_worker(args).await;
-        // Expected read error for directory manifest.
-        assert!(result.is_err());
-        let err = result.unwrap_err().to_string();
-        assert!(err.contains("Failed to read manifest") | err.contains("directory"));
+                let result = execute_worker(args).await;
+                // Expected read error for directory manifest.
+                assert!(result.is_err());
+                let err = result.unwrap_err().to_string();
+                assert!(err.contains("Failed to read manifest") | err.contains("directory"));
 
-        let _ = std::fs::remove_dir_all(&agent_dir);
-        let _ = std::fs::remove_dir_all(crate::runstate::run_dir(&run_id));
+                let _ = std::fs::remove_dir_all(&agent_dir);
+                let _ = std::fs::remove_dir_all(crate::runstate::run_dir(&run_id));
+            },
+        )
+        .await;
     }
 
     // ─── run_worker_inner error paths ────────────────────────────────────────
 
     #[tokio::test]
     async fn run_worker_inner_invalid_manifest_toml_returns_error() {
-        let _guard = crate::runstate::isolate_runs_dir_for_test(
+        crate::runstate::with_isolated_runs_dir_async(
             "run_worker_inner_invalid_manifest_toml_returns_error",
-        );
-        // Covers the parse_manifest error path (parse_manifest fails on bad TOML).
-        // Uses execute_worker (which delegates to run_worker_inner with the real
-        // build_provider_registry named function) to avoid a never-called closure
-        // body in test infrastructure becoming a coverage gap.
-        let _config_guard = isolate_config_path("invalid-manifest-toml");
+            |_d| async move {
+                // Covers the parse_manifest error path (parse_manifest fails on bad TOML).
+                // Uses execute_worker (which delegates to run_worker_inner with the real
+                // build_provider_registry named function) to avoid a never-called closure
+                // body in test infrastructure becoming a coverage gap.
+                with_isolated_config_path_async("invalid-manifest-toml", |_fake_dir| async move {
+                    let temp_dir =
+                        std::env::temp_dir().join("lev-test-worker-invalid-manifest-toml");
+                    let _ = std::fs::create_dir_all(&temp_dir);
+                    let invalid_toml = "this is [not valid = toml at all {{{{";
+                    let manifest_path = temp_dir.join("agent.leviath");
+                    std::fs::write(&manifest_path, invalid_toml).unwrap();
 
-        let temp_dir = std::env::temp_dir().join("lev-test-worker-invalid-manifest-toml");
-        let _ = std::fs::create_dir_all(&temp_dir);
-        let invalid_toml = "this is [not valid = toml at all {{{{";
-        let manifest_path = temp_dir.join("agent.leviath");
-        std::fs::write(&manifest_path, invalid_toml).unwrap();
+                    let run_id = "test-execute-worker-invalid-toml";
 
-        let run_id = "test-execute-worker-invalid-toml";
+                    let args = WorkerArgs {
+                        path: temp_dir.to_string_lossy().to_string(),
+                        task: "test task".to_string(),
+                        run_id: run_id.to_string(),
+                        model: None,
+                        yolo: false,
+                        allow: vec![],
+                        ask: vec![],
+                        deny: vec![],
+                        max_depth: None,
+                    };
 
-        let args = WorkerArgs {
-            path: temp_dir.to_string_lossy().to_string(),
-            task: "test task".to_string(),
-            run_id: run_id.to_string(),
-            model: None,
-            yolo: false,
-            allow: vec![],
-            ask: vec![],
-            deny: vec![],
-            max_depth: None,
-        };
+                    let result = execute_worker(args).await;
+                    result.unwrap_err(); // just verify it errored (message varies by toml version)
 
-        let result = execute_worker(args).await;
-        result.unwrap_err(); // just verify it errored (message varies by toml version)
-
-        let _ = std::fs::remove_dir_all(crate::runstate::run_dir(run_id));
-        let _ = std::fs::remove_dir_all(&temp_dir);
+                    let _ = std::fs::remove_dir_all(crate::runstate::run_dir(run_id));
+                    let _ = std::fs::remove_dir_all(&temp_dir);
+                })
+                .await;
+            },
+        )
+        .await;
     }
 
     #[tokio::test]
     async fn run_worker_inner_invalid_config_toml_returns_error() {
-        let _guard = crate::runstate::isolate_runs_dir_for_test(
+        crate::runstate::with_isolated_runs_dir_async(
             "run_worker_inner_invalid_config_toml_returns_error",
-        );
-        // Covers the Config::load()? error path.
-        // Uses execute_worker (which calls run_worker_inner with the real
-        // build_provider_registry named function) to avoid a never-called closure
-        // body in test infrastructure becoming a coverage gap.
-        let _config_guard = isolate_config_path("invalid-config-toml");
+            |_d| async move {
+                // Covers the Config::load()? error path.
+                // Uses execute_worker (which calls run_worker_inner with the real
+                // build_provider_registry named function) to avoid a never-called closure
+                // body in test infrastructure becoming a coverage gap.
+                with_isolated_config_path_async("invalid-config-toml", |_fake_dir| async move {
+                    std::fs::write(Config::config_path(), "this is [not valid = toml {{{{")
+                        .unwrap();
 
-        std::fs::write(Config::config_path(), "this is [not valid = toml {{{{").unwrap();
-
-        let temp_dir = std::env::temp_dir().join("lev-test-worker-invalid-config");
-        let _ = std::fs::create_dir_all(&temp_dir);
-        let manifest_content = r#"
+                    let temp_dir = std::env::temp_dir().join("lev-test-worker-invalid-config");
+                    let _ = std::fs::create_dir_all(&temp_dir);
+                    let manifest_content = r#"
 [agent]
 name = "test-cfg-fail-agent"
 version = "1.0.0"
@@ -2556,41 +2631,46 @@ max_iterations = 1
 provider = "anthropic"
 model = "claude-sonnet-4-6"
 "#;
-        let manifest_path = temp_dir.join("agent.leviath");
-        std::fs::write(&manifest_path, manifest_content).unwrap();
+                    let manifest_path = temp_dir.join("agent.leviath");
+                    std::fs::write(&manifest_path, manifest_content).unwrap();
 
-        let run_id = "test-execute-worker-invalid-config";
+                    let run_id = "test-execute-worker-invalid-config";
 
-        let args = WorkerArgs {
-            path: temp_dir.to_string_lossy().to_string(),
-            task: "test task".to_string(),
-            run_id: run_id.to_string(),
-            model: None,
-            yolo: false,
-            allow: vec![],
-            ask: vec![],
-            deny: vec![],
-            max_depth: None,
-        };
+                    let args = WorkerArgs {
+                        path: temp_dir.to_string_lossy().to_string(),
+                        task: "test task".to_string(),
+                        run_id: run_id.to_string(),
+                        model: None,
+                        yolo: false,
+                        allow: vec![],
+                        ask: vec![],
+                        deny: vec![],
+                        max_depth: None,
+                    };
 
-        let result = execute_worker(args).await;
-        result.unwrap_err(); // verify it errored (message varies by toml version)
+                    let result = execute_worker(args).await;
+                    result.unwrap_err(); // verify it errored (message varies by toml version)
 
-        let _ = std::fs::remove_dir_all(crate::runstate::run_dir(run_id));
-        let _ = std::fs::remove_dir_all(&temp_dir);
+                    let _ = std::fs::remove_dir_all(crate::runstate::run_dir(run_id));
+                    let _ = std::fs::remove_dir_all(&temp_dir);
+                })
+                .await;
+            },
+        )
+        .await;
     }
 
     #[tokio::test]
     async fn run_worker_inner_blueprint_validation_failure_returns_error() {
-        let _guard = crate::runstate::isolate_runs_dir_for_test(
+        crate::runstate::with_isolated_runs_dir_async(
             "run_worker_inner_blueprint_validation_failure_returns_error",
-        );
-        // Parses cleanly, but `entry_stage` names a stage that doesn't exist, so
-        // `blueprint.validate()` fails — covering the validate() map_err/`?`.
-        // This error occurs before provider registration, so no network is hit.
-        let temp_dir = std::env::temp_dir().join("lev-test-worker-validate-fail");
-        let _ = std::fs::create_dir_all(&temp_dir);
-        let manifest_content = r#"
+            |_d| async move {
+                // Parses cleanly, but `entry_stage` names a stage that doesn't exist, so
+                // `blueprint.validate()` fails — covering the validate() map_err/`?`.
+                // This error occurs before provider registration, so no network is hit.
+                let temp_dir = std::env::temp_dir().join("lev-test-worker-validate-fail");
+                let _ = std::fs::create_dir_all(&temp_dir);
+                let manifest_content = r#"
 [agent]
 name = "test-validate-fail-agent"
 version = "1.0.0"
@@ -2601,30 +2681,33 @@ entry_stage = "does-not-exist"
 mode = "autonomous"
 max_iterations = 1
 "#;
-        std::fs::write(temp_dir.join("agent.leviath"), manifest_content).unwrap();
+                std::fs::write(temp_dir.join("agent.leviath"), manifest_content).unwrap();
 
-        let run_id = "test-execute-worker-validate-fail";
-        let args = WorkerArgs {
-            path: temp_dir.to_string_lossy().to_string(),
-            task: "test task".to_string(),
-            run_id: run_id.to_string(),
-            model: None,
-            yolo: false,
-            allow: vec![],
-            ask: vec![],
-            deny: vec![],
-            max_depth: None,
-        };
+                let run_id = "test-execute-worker-validate-fail";
+                let args = WorkerArgs {
+                    path: temp_dir.to_string_lossy().to_string(),
+                    task: "test task".to_string(),
+                    run_id: run_id.to_string(),
+                    model: None,
+                    yolo: false,
+                    allow: vec![],
+                    ask: vec![],
+                    deny: vec![],
+                    max_depth: None,
+                };
 
-        let result = execute_worker(args).await;
-        let err = result.unwrap_err().to_string();
-        assert!(
-            err.contains("blueprint validation failed"),
-            "unexpected error: {err}"
-        );
+                let result = execute_worker(args).await;
+                let err = result.unwrap_err().to_string();
+                assert!(
+                    err.contains("blueprint validation failed"),
+                    "unexpected error: {err}"
+                );
 
-        let _ = std::fs::remove_dir_all(crate::runstate::run_dir(run_id));
-        let _ = std::fs::remove_dir_all(&temp_dir);
+                let _ = std::fs::remove_dir_all(crate::runstate::run_dir(run_id));
+                let _ = std::fs::remove_dir_all(&temp_dir);
+            },
+        )
+        .await;
     }
 
     #[test]
@@ -2784,23 +2867,26 @@ max_iterations = 1
 
     #[tokio::test]
     async fn run_worker_inner_with_failing_provider_propagates_error() {
-        let _guard = crate::runstate::isolate_runs_dir_for_test(
+        crate::runstate::with_isolated_runs_dir_async(
             "run_worker_inner_with_failing_provider_propagates_error",
-        );
-        // Covers the `?` on `run_stage_loop` when run_stage_loop returns Err
-        // because the provider always fails.
-        let _config_guard = isolate_config_path("worker-failing-provider");
-        let mut fake_config = Config::default();
-        fake_config.title.enabled = false;
-        std::fs::write(
-            Config::config_path(),
-            toml::to_string(&fake_config).unwrap(),
-        )
-        .unwrap();
+            |_d| async move {
+                // Covers the `?` on `run_stage_loop` when run_stage_loop returns Err
+                // because the provider always fails.
+                with_isolated_config_path_async(
+                    "worker-failing-provider",
+                    |_fake_dir| async move {
+                        let mut fake_config = Config::default();
+                        fake_config.title.enabled = false;
+                        std::fs::write(
+                            Config::config_path(),
+                            toml::to_string(&fake_config).unwrap(),
+                        )
+                        .unwrap();
 
-        let temp_dir = std::env::temp_dir().join("lev-test-worker-failing-provider");
-        let _ = std::fs::create_dir_all(&temp_dir);
-        let manifest_content = r#"
+                        let temp_dir =
+                            std::env::temp_dir().join("lev-test-worker-failing-provider");
+                        let _ = std::fs::create_dir_all(&temp_dir);
+                        let manifest_content = r#"
 [agent]
 name = "test-worker-fail-agent"
 version = "1.0.0"
@@ -2814,73 +2900,82 @@ max_iterations = 1
 provider = "failing-mock"
 model = "fail-model"
 "#;
-        let manifest_path = temp_dir.join("agent.leviath");
-        std::fs::write(&manifest_path, manifest_content).unwrap();
+                        let manifest_path = temp_dir.join("agent.leviath");
+                        std::fs::write(&manifest_path, manifest_content).unwrap();
 
-        let run_id = "test-worker-inner-failing-provider";
-        let dir = crate::runstate::run_dir(run_id);
-        let _ = std::fs::create_dir_all(&dir);
-        let mut meta = make_meta(run_id, 1);
-        crate::runstate::create_run(&meta).unwrap();
+                        let run_id = "test-worker-inner-failing-provider";
+                        let dir = crate::runstate::run_dir(run_id);
+                        let _ = std::fs::create_dir_all(&dir);
+                        let mut meta = make_meta(run_id, 1);
+                        crate::runstate::create_run(&meta).unwrap();
 
-        let args = WorkerArgs {
-            path: temp_dir.to_string_lossy().to_string(),
-            task: "test task".to_string(),
-            run_id: run_id.to_string(),
-            model: None,
-            yolo: false,
-            allow: vec![],
-            ask: vec![],
-            deny: vec![],
-            max_depth: None,
-        };
+                        let args = WorkerArgs {
+                            path: temp_dir.to_string_lossy().to_string(),
+                            task: "test task".to_string(),
+                            run_id: run_id.to_string(),
+                            model: None,
+                            yolo: false,
+                            allow: vec![],
+                            ask: vec![],
+                            deny: vec![],
+                            max_depth: None,
+                        };
 
-        let result = run_worker_inner(&args, &mut meta, |_config| {
-            let mut registry = leviath_runtime::ProviderRegistry::new();
-            registry.register("failing-mock".to_string(), Arc::new(FailingMockProvider));
-            registry
-        })
+                        let result = run_worker_inner(&args, &mut meta, |_config| {
+                            let mut registry = leviath_runtime::ProviderRegistry::new();
+                            registry.register(
+                                "failing-mock".to_string(),
+                                Arc::new(FailingMockProvider),
+                            );
+                            registry
+                        })
+                        .await;
+
+                        // Expected error from failing provider.
+                        assert!(result.is_err());
+
+                        let _ = std::fs::remove_dir_all(&dir);
+                        let _ = std::fs::remove_dir_all(&temp_dir);
+                    },
+                )
+                .await;
+            },
+        )
         .await;
-
-        // Expected error from failing provider.
-        assert!(result.is_err());
-
-        let _ = std::fs::remove_dir_all(&dir);
-        let _ = std::fs::remove_dir_all(&temp_dir);
     }
 
     // ─── run_worker_inner: title None path (line 571) ────────────────────────
 
     #[tokio::test]
     async fn run_worker_inner_title_enabled_but_no_title_provider_skips_title_print() {
-        let _guard = crate::runstate::isolate_runs_dir_for_test(
+        crate::runstate::with_isolated_runs_dir_async(
             "run_worker_inner_title_enabled_but_no_title_provider_skips_title_print",
-        );
-        // Covers the None branch of `if let Some(ref t) = meta.title` (line 571):
-        // config.title.enabled = true, but config.title.provider is set to a name
-        // that is NOT registered in the provider registry. generate_title returns
-        // None → the `println!("Title: {}", t)` line is skipped; meta.title stays None.
-        let _config_guard = isolate_config_path("worker-title-none");
+            |_d| async move {
+                // Covers the None branch of `if let Some(ref t) = meta.title` (line 571):
+                // config.title.enabled = true, but config.title.provider is set to a name
+                // that is NOT registered in the provider registry. generate_title returns
+                // None → the `println!("Title: {}", t)` line is skipped; meta.title stays None.
+                with_isolated_config_path_async("worker-title-none", |_fake_dir| async move {
+                    let mut fake_config = Config::default();
+                    fake_config.title.enabled = true;
+                    fake_config.title.provider = Some("nonexistent-title-prov".to_string());
+                    std::fs::write(
+                        Config::config_path(),
+                        toml::to_string(&fake_config).unwrap(),
+                    )
+                    .unwrap();
 
-        let mut fake_config = Config::default();
-        fake_config.title.enabled = true;
-        fake_config.title.provider = Some("nonexistent-title-prov".to_string());
-        std::fs::write(
-            Config::config_path(),
-            toml::to_string(&fake_config).unwrap(),
-        )
-        .unwrap();
-
-        let pid = std::process::id();
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .subsec_nanos();
-        let temp_dir = std::env::temp_dir().join(format!("lev-test-worker-title-none-{pid}-{now}"));
-        let _ = std::fs::create_dir_all(&temp_dir);
-        // Use the "anthropic" provider in the manifest's stage so we register it
-        // below — the title provider ("nonexistent-title-prov") remains absent.
-        let manifest_content = r#"
+                    let pid = std::process::id();
+                    let now = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .subsec_nanos();
+                    let temp_dir = std::env::temp_dir()
+                        .join(format!("lev-test-worker-title-none-{pid}-{now}"));
+                    let _ = std::fs::create_dir_all(&temp_dir);
+                    // Use the "anthropic" provider in the manifest's stage so we register it
+                    // below — the title provider ("nonexistent-title-prov") remains absent.
+                    let manifest_content = r#"
 [agent]
 name = "test-title-none-agent"
 version = "1.0.0"
@@ -2894,71 +2989,76 @@ max_iterations = 1
 provider = "anthropic"
 model = "claude-sonnet-4-6"
 "#;
-        write_test_agent(&temp_dir, manifest_content);
+                    write_test_agent(&temp_dir, manifest_content);
 
-        let run_id = format!("test-worker-title-none-{pid}-{now}");
-        let dir = crate::runstate::run_dir(&run_id);
-        let _ = std::fs::create_dir_all(&dir);
+                    let run_id = format!("test-worker-title-none-{pid}-{now}");
+                    let dir = crate::runstate::run_dir(&run_id);
+                    let _ = std::fs::create_dir_all(&dir);
 
-        let args = WorkerArgs {
-            path: temp_dir.to_string_lossy().to_string(),
-            task: "test task for title none path".to_string(),
-            run_id: run_id.clone(),
-            model: None,
-            yolo: false,
-            allow: vec![],
-            ask: vec![],
-            deny: vec![],
-            max_depth: None,
-        };
+                    let args = WorkerArgs {
+                        path: temp_dir.to_string_lossy().to_string(),
+                        task: "test task for title none path".to_string(),
+                        run_id: run_id.clone(),
+                        model: None,
+                        yolo: false,
+                        allow: vec![],
+                        ask: vec![],
+                        deny: vec![],
+                        max_depth: None,
+                    };
 
-        let mut meta = make_meta(&run_id, 1);
-        let _result = run_worker_inner(&args, &mut meta, |_config| {
-            // Register "anthropic" but NOT "nonexistent-title-prov"
-            let mut registry = leviath_runtime::ProviderRegistry::new();
-            registry.register("anthropic".to_string(), Arc::new(MockProvider::new()));
-            registry
-        })
+                    let mut meta = make_meta(&run_id, 1);
+                    let _result = run_worker_inner(&args, &mut meta, |_config| {
+                        // Register "anthropic" but NOT "nonexistent-title-prov"
+                        let mut registry = leviath_runtime::ProviderRegistry::new();
+                        registry.register("anthropic".to_string(), Arc::new(MockProvider::new()));
+                        registry
+                    })
+                    .await;
+
+                    // generate_title returns None → meta.title stays None
+                    // Title should be None when provider is not registered.
+                    assert!(meta.title.is_none());
+
+                    let _ = std::fs::remove_dir_all(&dir);
+                    let _ = std::fs::remove_dir_all(&temp_dir);
+                })
+                .await;
+            },
+        )
         .await;
-
-        // generate_title returns None → meta.title stays None
-        // Title should be None when provider is not registered.
-        assert!(meta.title.is_none());
-
-        let _ = std::fs::remove_dir_all(&dir);
-        let _ = std::fs::remove_dir_all(&temp_dir);
     }
 
     #[tokio::test]
     async fn run_worker_inner_with_mock_provider_completes_full_round_trip() {
-        let _guard = crate::runstate::isolate_runs_dir_for_test(
+        crate::runstate::with_isolated_runs_dir_async(
             "run_worker_inner_with_mock_provider_completes_full_round_trip",
-        );
-        let _config_guard = isolate_config_path("worker-mock-provider");
-        // A malformed key still exercises the `validate_keys()` warning
-        // branch without being usable as a real credential -- and since the
-        // provider registry is fully mocked below, no real network call can
-        // happen regardless.
-        let mut fake_config = Config::default();
-        fake_config.providers.anthropic_api_key = Some("not-a-real-key".to_string());
-        // Title generation and the stage's own inference must use distinct
-        // registered providers: both draw from the same injected registry,
-        // and a single shared `MockProvider` instance's call-count-based
-        // "return a tool call on the first call" logic would otherwise be
-        // consumed by the title-generation call, leaving the stage's own
-        // first (real) call already past index 0 -- silently skipping the
-        // exec-closure tool-call round trip this test exists to cover.
-        fake_config.title.provider = Some("title-mock".to_string());
-        fake_config.title.model = Some("title-mock-model".to_string());
-        std::fs::write(
-            Config::config_path(),
-            toml::to_string(&fake_config).unwrap(),
-        )
-        .unwrap();
+            |_d| async move {
+                with_isolated_config_path_async("worker-mock-provider", |_fake_dir| async move {
+                    // A malformed key still exercises the `validate_keys()` warning
+                    // branch without being usable as a real credential -- and since the
+                    // provider registry is fully mocked below, no real network call can
+                    // happen regardless.
+                    let mut fake_config = Config::default();
+                    fake_config.providers.anthropic_api_key = Some("not-a-real-key".to_string());
+                    // Title generation and the stage's own inference must use distinct
+                    // registered providers: both draw from the same injected registry,
+                    // and a single shared `MockProvider` instance's call-count-based
+                    // "return a tool call on the first call" logic would otherwise be
+                    // consumed by the title-generation call, leaving the stage's own
+                    // first (real) call already past index 0 -- silently skipping the
+                    // exec-closure tool-call round trip this test exists to cover.
+                    fake_config.title.provider = Some("title-mock".to_string());
+                    fake_config.title.model = Some("title-mock-model".to_string());
+                    std::fs::write(
+                        Config::config_path(),
+                        toml::to_string(&fake_config).unwrap(),
+                    )
+                    .unwrap();
 
-        let temp_dir = std::env::temp_dir().join("lev-test-worker-mock-provider");
-        let _ = std::fs::create_dir_all(&temp_dir);
-        let manifest_content = r#"
+                    let temp_dir = std::env::temp_dir().join("lev-test-worker-mock-provider");
+                    let _ = std::fs::create_dir_all(&temp_dir);
+                    let manifest_content = r#"
 [agent]
 name = "test-worker-mock-agent"
 version = "1.0.0"
@@ -2975,40 +3075,45 @@ model = "mock-model"
 [tool_permissions]
 bash = "ask"
 "#;
-        write_test_agent(&temp_dir, manifest_content);
+                    write_test_agent(&temp_dir, manifest_content);
 
-        let run_id = "test-worker-mock-provider-round-trip";
-        let dir = crate::runstate::run_dir(run_id);
-        let _ = std::fs::create_dir_all(&dir);
-        let mut meta = make_meta(run_id, 1);
-        crate::runstate::create_run(&meta).unwrap();
+                    let run_id = "test-worker-mock-provider-round-trip";
+                    let dir = crate::runstate::run_dir(run_id);
+                    let _ = std::fs::create_dir_all(&dir);
+                    let mut meta = make_meta(run_id, 1);
+                    crate::runstate::create_run(&meta).unwrap();
 
-        let args = WorkerArgs {
-            path: temp_dir.to_string_lossy().to_string(),
-            task: "test task".to_string(),
-            run_id: run_id.to_string(),
-            model: None,
-            yolo: true,
-            allow: vec![],
-            ask: vec![],
-            deny: vec![],
-            max_depth: None,
-        };
+                    let args = WorkerArgs {
+                        path: temp_dir.to_string_lossy().to_string(),
+                        task: "test task".to_string(),
+                        run_id: run_id.to_string(),
+                        model: None,
+                        yolo: true,
+                        allow: vec![],
+                        ask: vec![],
+                        deny: vec![],
+                        max_depth: None,
+                    };
 
-        let result = run_worker_inner(&args, &mut meta, |_config| {
-            let mut registry = leviath_runtime::ProviderRegistry::new();
-            registry.register("anthropic".to_string(), Arc::new(MockProvider::new()));
-            registry.register("title-mock".to_string(), Arc::new(MockProvider::new()));
-            registry
-        })
+                    let result = run_worker_inner(&args, &mut meta, |_config| {
+                        let mut registry = leviath_runtime::ProviderRegistry::new();
+                        registry.register("anthropic".to_string(), Arc::new(MockProvider::new()));
+                        registry.register("title-mock".to_string(), Arc::new(MockProvider::new()));
+                        registry
+                    })
+                    .await;
+
+                    result.expect("expected clean completion from run_worker_inner");
+                    // generate_title should have produced a title via the mock provider.
+                    assert!(meta.title.is_some());
+
+                    let _ = std::fs::remove_dir_all(&dir);
+                    let _ = std::fs::remove_dir_all(&temp_dir);
+                })
+                .await;
+            },
+        )
         .await;
-
-        result.expect("expected clean completion from run_worker_inner");
-        // generate_title should have produced a title via the mock provider.
-        assert!(meta.title.is_some());
-
-        let _ = std::fs::remove_dir_all(&dir);
-        let _ = std::fs::remove_dir_all(&temp_dir);
     }
 
     #[test]
@@ -3023,18 +3128,17 @@ bash = "ask"
 
     #[tokio::test]
     async fn execute_worker_with_yolo_false_and_empty_overrides() {
-        let _guard = crate::runstate::isolate_runs_dir_for_test(
+        crate::runstate::with_isolated_runs_dir_async(
             "execute_worker_with_yolo_false_and_empty_overrides",
-        );
-        // Redirect $HOME so Config::load() can't see a real config/API key —
-        // otherwise this would make a real, billed inference call via
-        // generate_title(). See CONFIG_PATH_ENV_LOCK/isolate_config_path above.
-        let _config_guard = isolate_config_path("no-yolo");
-
-        // Valid manifest, yolo=false, no allow/ask/deny
-        let temp_dir = std::env::temp_dir().join("lev-test-worker-no-yolo");
-        let _ = std::fs::create_dir_all(&temp_dir);
-        let manifest_content = r#"
+            |_d| async move {
+                // Redirect $HOME so Config::load() can't see a real config/API key —
+                // otherwise this would make a real, billed inference call via
+                // generate_title(). See CONFIG_PATH_ENV_LOCK/isolate_config_path above.
+                with_isolated_config_path_async("no-yolo", |_fake_dir| async move {
+                    // Valid manifest, yolo=false, no allow/ask/deny
+                    let temp_dir = std::env::temp_dir().join("lev-test-worker-no-yolo");
+                    let _ = std::fs::create_dir_all(&temp_dir);
+                    let manifest_content = r#"
 [agent]
 name = "no-yolo-agent"
 version = "1.0.0"
@@ -3043,29 +3147,34 @@ description = "Test"
 [stages.main]
 mode = "autonomous"
 "#;
-        write_test_agent(&temp_dir, manifest_content);
+                    write_test_agent(&temp_dir, manifest_content);
 
-        let run_id = "test-execute-worker-no-yolo";
-        let dir = crate::runstate::run_dir(run_id);
-        let _ = std::fs::create_dir_all(&dir);
+                    let run_id = "test-execute-worker-no-yolo";
+                    let dir = crate::runstate::run_dir(run_id);
+                    let _ = std::fs::create_dir_all(&dir);
 
-        let args = WorkerArgs {
-            path: temp_dir.to_string_lossy().to_string(),
-            task: "minimal task".to_string(),
-            run_id: run_id.to_string(),
-            model: None,
-            yolo: false,
-            allow: vec![],
-            ask: vec![],
-            deny: vec![],
-            max_depth: None,
-        };
+                    let args = WorkerArgs {
+                        path: temp_dir.to_string_lossy().to_string(),
+                        task: "minimal task".to_string(),
+                        run_id: run_id.to_string(),
+                        model: None,
+                        yolo: false,
+                        allow: vec![],
+                        ask: vec![],
+                        deny: vec![],
+                        max_depth: None,
+                    };
 
-        let result = execute_worker(args).await;
-        let _ = result;
+                    let result = execute_worker(args).await;
+                    let _ = result;
 
-        let _ = std::fs::remove_dir_all(crate::runstate::run_dir(run_id));
-        let _ = std::fs::remove_dir_all(&temp_dir);
+                    let _ = std::fs::remove_dir_all(crate::runstate::run_dir(run_id));
+                    let _ = std::fs::remove_dir_all(&temp_dir);
+                })
+                .await;
+            },
+        )
+        .await;
     }
 
     // ─── WorkerCallbacks::run_autonomous ─────────────────────────────────────
@@ -3129,174 +3238,189 @@ mode = "autonomous"
 
     #[tokio::test]
     async fn worker_callbacks_on_stage_error_graph_mode_with_full_state() {
-        let _guard = crate::runstate::isolate_runs_dir_for_test(
+        crate::runstate::with_isolated_runs_dir_async(
             "worker_callbacks_on_stage_error_graph_mode_with_full_state",
-        );
-        let run_id = "test-worker-stage-err-graph2";
-        let dir = crate::runstate::run_dir(run_id);
-        let _ = std::fs::create_dir_all(&dir);
-        let stage_dir = crate::runstate::stage_dir(run_id, 0);
-        let _ = std::fs::create_dir_all(&stage_dir);
+            |_d| async move {
+                let run_id = "test-worker-stage-err-graph2";
+                let dir = crate::runstate::run_dir(run_id);
+                let _ = std::fs::create_dir_all(&dir);
+                let stage_dir = crate::runstate::stage_dir(run_id, 0);
+                let _ = std::fs::create_dir_all(&stage_dir);
 
-        let stages = vec![crate::runstate::StageRecord::new("main".to_string(), 0)];
-        let _ = crate::runstate::write_stages_index(run_id, &stages);
+                let stages = vec![crate::runstate::StageRecord::new("main".to_string(), 0)];
+                let _ = crate::runstate::write_stages_index(run_id, &stages);
 
-        let mut meta = make_meta(run_id, 2);
-        let mut cb = WorkerCallbacks {
-            run_id: run_id.to_string(),
-            meta: &mut meta,
-            blueprint_stages_len: 2,
-            tool_calls_counter: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-            taint_global: false,
-            taint_policy: leviath_core::PolicyConfig::default(),
-            context_window: Arc::new(Mutex::new(None)),
-        };
+                let mut meta = make_meta(run_id, 2);
+                let mut cb = WorkerCallbacks {
+                    run_id: run_id.to_string(),
+                    meta: &mut meta,
+                    blueprint_stages_len: 2,
+                    tool_calls_counter: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+                    taint_global: false,
+                    taint_policy: leviath_core::PolicyConfig::default(),
+                    context_window: Arc::new(Mutex::new(None)),
+                };
 
-        // graph mode → Some(StageResult::Error) returned; meta NOT set to Error
-        let err = anyhow::anyhow!("graph stage error");
-        let result = cb.on_stage_error("main", 0, &err, true).await;
-        assert_eq!(result, Some(leviath_core::blueprint::StageResult::Error));
-        // In graph mode, meta status is NOT changed to Error (unlike linear)
-        assert_ne!(cb.meta.status, RunStatus::Error);
+                // graph mode → Some(StageResult::Error) returned; meta NOT set to Error
+                let err = anyhow::anyhow!("graph stage error");
+                let result = cb.on_stage_error("main", 0, &err, true).await;
+                assert_eq!(result, Some(leviath_core::blueprint::StageResult::Error));
+                // In graph mode, meta status is NOT changed to Error (unlike linear)
+                assert_ne!(cb.meta.status, RunStatus::Error);
 
-        let _ = std::fs::remove_dir_all(crate::runstate::run_dir(run_id));
+                let _ = std::fs::remove_dir_all(crate::runstate::run_dir(run_id));
+            },
+        )
+        .await;
     }
 
     // ─── on_provider_missing: stages index has no entry at stage_idx ─────────
 
     #[tokio::test]
     async fn worker_callbacks_on_provider_missing_empty_stages() {
-        let _guard = crate::runstate::isolate_runs_dir_for_test(
+        crate::runstate::with_isolated_runs_dir_async(
             "worker_callbacks_on_provider_missing_empty_stages",
-        );
-        let run_id = "test-worker-prov-miss-empty";
-        let dir = crate::runstate::run_dir(run_id);
-        let _ = std::fs::create_dir_all(&dir);
+            |_d| async move {
+                let run_id = "test-worker-prov-miss-empty";
+                let dir = crate::runstate::run_dir(run_id);
+                let _ = std::fs::create_dir_all(&dir);
 
-        // Write empty stages index (stage_idx=0 won't match)
-        let stages: Vec<crate::runstate::StageRecord> = vec![];
-        let _ = crate::runstate::write_stages_index(run_id, &stages);
+                // Write empty stages index (stage_idx=0 won't match)
+                let stages: Vec<crate::runstate::StageRecord> = vec![];
+                let _ = crate::runstate::write_stages_index(run_id, &stages);
 
-        let mut meta = make_meta(run_id, 0);
-        let mut cb = WorkerCallbacks {
-            run_id: run_id.to_string(),
-            meta: &mut meta,
-            blueprint_stages_len: 0,
-            tool_calls_counter: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-            taint_global: false,
-            taint_policy: leviath_core::PolicyConfig::default(),
-            context_window: Arc::new(Mutex::new(None)),
-        };
+                let mut meta = make_meta(run_id, 0);
+                let mut cb = WorkerCallbacks {
+                    run_id: run_id.to_string(),
+                    meta: &mut meta,
+                    blueprint_stages_len: 0,
+                    tool_calls_counter: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+                    taint_global: false,
+                    taint_policy: leviath_core::PolicyConfig::default(),
+                    context_window: Arc::new(Mutex::new(None)),
+                };
 
-        let result = cb.on_provider_missing("missing-provider", 0).await;
-        // Should abort run.
-        assert!(result);
-        assert_eq!(cb.meta.status, RunStatus::Error);
+                let result = cb.on_provider_missing("missing-provider", 0).await;
+                // Should abort run.
+                assert!(result);
+                assert_eq!(cb.meta.status, RunStatus::Error);
 
-        let _ = std::fs::remove_dir_all(crate::runstate::run_dir(run_id));
+                let _ = std::fs::remove_dir_all(crate::runstate::run_dir(run_id));
+            },
+        )
+        .await;
     }
 
     // ─── on_complete with max stages, checks correct log path ────────────────
 
     #[tokio::test]
     async fn worker_callbacks_on_complete_logs_to_last_stage() {
-        let _guard = crate::runstate::isolate_runs_dir_for_test(
+        crate::runstate::with_isolated_runs_dir_async(
             "worker_callbacks_on_complete_logs_to_last_stage",
-        );
-        let run_id = "test-worker-complete-log";
-        let dir = crate::runstate::run_dir(run_id);
-        let _ = std::fs::create_dir_all(&dir);
-        // Create the stage log dir for stage 2 (last_stage_idx=2)
-        let stage_dir = crate::runstate::stage_dir(run_id, 2);
-        let _ = std::fs::create_dir_all(&stage_dir);
+            |_d| async move {
+                let run_id = "test-worker-complete-log";
+                let dir = crate::runstate::run_dir(run_id);
+                let _ = std::fs::create_dir_all(&dir);
+                // Create the stage log dir for stage 2 (last_stage_idx=2)
+                let stage_dir = crate::runstate::stage_dir(run_id, 2);
+                let _ = std::fs::create_dir_all(&stage_dir);
 
-        let mut meta = make_meta(run_id, 3);
-        let mut cb = WorkerCallbacks {
-            run_id: run_id.to_string(),
-            meta: &mut meta,
-            blueprint_stages_len: 3,
-            tool_calls_counter: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-            taint_global: false,
-            taint_policy: leviath_core::PolicyConfig::default(),
-            context_window: Arc::new(Mutex::new(None)),
-        };
+                let mut meta = make_meta(run_id, 3);
+                let mut cb = WorkerCallbacks {
+                    run_id: run_id.to_string(),
+                    meta: &mut meta,
+                    blueprint_stages_len: 3,
+                    tool_calls_counter: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+                    taint_global: false,
+                    taint_policy: leviath_core::PolicyConfig::default(),
+                    context_window: Arc::new(Mutex::new(None)),
+                };
 
-        // Should not panic even with stages > 0
-        cb.on_complete(2).await;
+                // Should not panic even with stages > 0
+                cb.on_complete(2).await;
 
-        let _ = std::fs::remove_dir_all(crate::runstate::run_dir(run_id));
+                let _ = std::fs::remove_dir_all(crate::runstate::run_dir(run_id));
+            },
+        )
+        .await;
     }
 
     // ─── on_stage_enter when stage index is out of bounds ────────────────────
 
     #[tokio::test]
     async fn worker_callbacks_on_stage_enter_out_of_bounds_stage_idx() {
-        let _guard = crate::runstate::isolate_runs_dir_for_test(
+        crate::runstate::with_isolated_runs_dir_async(
             "worker_callbacks_on_stage_enter_out_of_bounds_stage_idx",
-        );
-        let run_id = "test-worker-stage-enter-oob";
-        let dir = crate::runstate::run_dir(run_id);
-        let _ = std::fs::create_dir_all(&dir);
+            |_d| async move {
+                let run_id = "test-worker-stage-enter-oob";
+                let dir = crate::runstate::run_dir(run_id);
+                let _ = std::fs::create_dir_all(&dir);
 
-        // Only one stage in index but we request idx=5
-        let stages = vec![crate::runstate::StageRecord::new("main".to_string(), 0)];
-        let _ = crate::runstate::write_stages_index(run_id, &stages);
+                // Only one stage in index but we request idx=5
+                let stages = vec![crate::runstate::StageRecord::new("main".to_string(), 0)];
+                let _ = crate::runstate::write_stages_index(run_id, &stages);
 
-        let mut meta = make_meta(run_id, 1);
-        let _ = crate::runstate::write_meta(&meta);
+                let mut meta = make_meta(run_id, 1);
+                let _ = crate::runstate::write_meta(&meta);
 
-        let mut cb = WorkerCallbacks {
-            run_id: run_id.to_string(),
-            meta: &mut meta,
-            blueprint_stages_len: 1,
-            tool_calls_counter: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-            taint_global: false,
-            taint_policy: leviath_core::PolicyConfig::default(),
-            context_window: Arc::new(Mutex::new(None)),
-        };
+                let mut cb = WorkerCallbacks {
+                    run_id: run_id.to_string(),
+                    meta: &mut meta,
+                    blueprint_stages_len: 1,
+                    tool_calls_counter: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+                    taint_global: false,
+                    taint_policy: leviath_core::PolicyConfig::default(),
+                    context_window: Arc::new(Mutex::new(None)),
+                };
 
-        // stage_idx=5 but only 1 stage — the `if let Some(r)` guard handles this safely
-        cb.on_stage_enter("extra", 5, "anthropic", "claude-sonnet-4-6", "")
-            .await;
-        assert_eq!(cb.meta.current_stage, "extra");
-        assert_eq!(cb.meta.stage_index, 5);
+                // stage_idx=5 but only 1 stage — the `if let Some(r)` guard handles this safely
+                cb.on_stage_enter("extra", 5, "anthropic", "claude-sonnet-4-6", "")
+                    .await;
+                assert_eq!(cb.meta.current_stage, "extra");
+                assert_eq!(cb.meta.stage_index, 5);
 
-        let _ = std::fs::remove_dir_all(crate::runstate::run_dir(run_id));
+                let _ = std::fs::remove_dir_all(crate::runstate::run_dir(run_id));
+            },
+        )
+        .await;
     }
 
     // ─── on_stage_error linear mode when stages idx is out of bounds ──────────
 
     #[tokio::test]
     async fn worker_callbacks_on_stage_error_linear_out_of_bounds() {
-        let _guard = crate::runstate::isolate_runs_dir_for_test(
+        crate::runstate::with_isolated_runs_dir_async(
             "worker_callbacks_on_stage_error_linear_out_of_bounds",
-        );
-        let run_id = "test-worker-stage-err-linear-oob";
-        let dir = crate::runstate::run_dir(run_id);
-        let _ = std::fs::create_dir_all(&dir);
+            |_d| async move {
+                let run_id = "test-worker-stage-err-linear-oob";
+                let dir = crate::runstate::run_dir(run_id);
+                let _ = std::fs::create_dir_all(&dir);
 
-        // Empty stages index
-        let _ = crate::runstate::write_stages_index(run_id, &[]);
+                // Empty stages index
+                let _ = crate::runstate::write_stages_index(run_id, &[]);
 
-        let mut meta = make_meta(run_id, 0);
-        let _ = crate::runstate::write_meta(&meta);
+                let mut meta = make_meta(run_id, 0);
+                let _ = crate::runstate::write_meta(&meta);
 
-        let mut cb = WorkerCallbacks {
-            run_id: run_id.to_string(),
-            meta: &mut meta,
-            blueprint_stages_len: 0,
-            tool_calls_counter: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-            taint_global: false,
-            taint_policy: leviath_core::PolicyConfig::default(),
-            context_window: Arc::new(Mutex::new(None)),
-        };
+                let mut cb = WorkerCallbacks {
+                    run_id: run_id.to_string(),
+                    meta: &mut meta,
+                    blueprint_stages_len: 0,
+                    tool_calls_counter: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+                    taint_global: false,
+                    taint_policy: leviath_core::PolicyConfig::default(),
+                    context_window: Arc::new(Mutex::new(None)),
+                };
 
-        let err = anyhow::anyhow!("oob error");
-        let result = cb.on_stage_error("main", 99, &err, false).await;
-        assert!(result.is_none());
-        assert_eq!(cb.meta.status, RunStatus::Error);
+                let err = anyhow::anyhow!("oob error");
+                let result = cb.on_stage_error("main", 99, &err, false).await;
+                assert!(result.is_none());
+                assert_eq!(cb.meta.status, RunStatus::Error);
 
-        let _ = std::fs::remove_dir_all(crate::runstate::run_dir(run_id));
+                let _ = std::fs::remove_dir_all(crate::runstate::run_dir(run_id));
+            },
+        )
+        .await;
     }
 
     // ─── WorkerInteractionBackend ───────────────────────────────────────────
@@ -3305,82 +3429,93 @@ mode = "autonomous"
 
     #[tokio::test]
     async fn worker_interaction_backend_ask_delegates_to_bg_review() {
-        let _guard = crate::runstate::isolate_runs_dir_for_test(
+        crate::runstate::with_isolated_runs_dir_async(
             "worker_interaction_backend_ask_delegates_to_bg_review",
-        );
-        let run_id = "test-worker-backend-ask";
-        let dir = crate::runstate::run_dir(run_id);
-        std::fs::create_dir_all(&dir).unwrap();
-        let meta = make_meta(run_id, 1);
-        crate::runstate::create_run(&meta).unwrap();
+            |_d| async move {
+                let run_id = "test-worker-backend-ask";
+                let dir = crate::runstate::run_dir(run_id);
+                std::fs::create_dir_all(&dir).unwrap();
+                let meta = make_meta(run_id, 1);
+                crate::runstate::create_run(&meta).unwrap();
 
-        let run_id_clone = run_id.to_string();
-        tokio::spawn(async move {
-            tokio::time::sleep(std::time::Duration::from_millis(150)).await;
-            let resp = crate::interaction::InteractionResponse::text("ask-1", "the answer");
-            crate::interaction::write_response(&run_id_clone, &resp).ok();
-        });
+                let run_id_clone = run_id.to_string();
+                tokio::spawn(async move {
+                    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+                    let resp = crate::interaction::InteractionResponse::text("ask-1", "the answer");
+                    crate::interaction::write_response(&run_id_clone, &resp).ok();
+                });
 
-        let backend = WorkerInteractionBackend {
-            run_id,
-            stage_idx: 0,
-        };
-        let req =
-            crate::interaction::InteractionRequest::free_text("ask-1", "Question?", "main", true);
-        let resp = backend.ask(req).await;
-        assert_eq!(resp.value.as_deref(), Some("the answer"));
+                let backend = WorkerInteractionBackend {
+                    run_id,
+                    stage_idx: 0,
+                };
+                let req = crate::interaction::InteractionRequest::free_text(
+                    "ask-1",
+                    "Question?",
+                    "main",
+                    true,
+                );
+                let resp = backend.ask(req).await;
+                assert_eq!(resp.value.as_deref(), Some("the answer"));
 
-        let _ = std::fs::remove_dir_all(&dir);
+                let _ = std::fs::remove_dir_all(&dir);
+            },
+        )
+        .await;
     }
 
     #[test]
     fn worker_interaction_backend_log_writes_to_stage_log() {
-        let _guard = crate::runstate::isolate_runs_dir_for_test(
+        crate::runstate::with_isolated_runs_dir(
             "worker_interaction_backend_log_writes_to_stage_log",
+            |_d| {
+                let run_id = "test-worker-backend-log";
+                let dir = crate::runstate::run_dir(run_id);
+                std::fs::create_dir_all(&dir).unwrap();
+
+                let backend = WorkerInteractionBackend {
+                    run_id,
+                    stage_idx: 0,
+                };
+                backend.log("[tool] ask_user_text \u{2192} waiting: hello");
+
+                let log_contents = crate::runstate::tail_stage_log(run_id, 0, 65536);
+                assert!(log_contents.contains("ask_user_text"));
+                assert!(log_contents.contains("hello"));
+
+                let _ = std::fs::remove_dir_all(&dir);
+            },
         );
-        let run_id = "test-worker-backend-log";
-        let dir = crate::runstate::run_dir(run_id);
-        std::fs::create_dir_all(&dir).unwrap();
-
-        let backend = WorkerInteractionBackend {
-            run_id,
-            stage_idx: 0,
-        };
-        backend.log("[tool] ask_user_text \u{2192} waiting: hello");
-
-        let log_contents = crate::runstate::tail_stage_log(run_id, 0, 65536);
-        assert!(log_contents.contains("ask_user_text"));
-        assert!(log_contents.contains("hello"));
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn worker_interaction_backend_on_review_document_persists_artifact_and_output() {
-        let _guard = crate::runstate::isolate_runs_dir_for_test(
+        crate::runstate::with_isolated_runs_dir(
             "worker_interaction_backend_on_review_document_persists_artifact_and_output",
+            |_d| {
+                let run_id = "test-worker-backend-review-doc";
+                let dir = crate::runstate::run_dir(run_id);
+                std::fs::create_dir_all(&dir).unwrap();
+
+                let backend = WorkerInteractionBackend {
+                    run_id,
+                    stage_idx: 0,
+                };
+                backend.on_review_document("call-42", "My Title", "# Body\ncontent");
+
+                let artifact_path = crate::runstate::stage_dir(run_id, 0)
+                    .join("reviews")
+                    .join("review-call-42.md");
+                let artifact = std::fs::read_to_string(&artifact_path).unwrap();
+                assert_eq!(artifact, "# Body\ncontent");
+
+                let output = crate::runstate::tail_stage_output(run_id, 0, 65536);
+                assert!(output.contains("My Title"));
+                assert!(output.contains("# Body\ncontent"));
+
+                let _ = std::fs::remove_dir_all(&dir);
+            },
         );
-        let run_id = "test-worker-backend-review-doc";
-        let dir = crate::runstate::run_dir(run_id);
-        std::fs::create_dir_all(&dir).unwrap();
-
-        let backend = WorkerInteractionBackend {
-            run_id,
-            stage_idx: 0,
-        };
-        backend.on_review_document("call-42", "My Title", "# Body\ncontent");
-
-        let artifact_path = crate::runstate::stage_dir(run_id, 0)
-            .join("reviews")
-            .join("review-call-42.md");
-        let artifact = std::fs::read_to_string(&artifact_path).unwrap();
-        assert_eq!(artifact, "# Body\ncontent");
-
-        let output = crate::runstate::tail_stage_output(run_id, 0, 65536);
-        assert!(output.contains("My Title"));
-        assert!(output.contains("# Body\ncontent"));
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     // ─── dispatch_tool_calls ────────────────────────────────────────────────
@@ -3432,458 +3567,491 @@ mode = "autonomous"
 
     #[tokio::test]
     async fn dispatch_tool_calls_deny_policy_returns_denied_message() {
-        let _guard = crate::runstate::isolate_runs_dir_for_test(
+        crate::runstate::with_isolated_runs_dir_async(
             "dispatch_tool_calls_deny_policy_returns_denied_message",
-        );
-        let run_id = "test-dispatch-deny";
-        let dir = crate::runstate::run_dir(run_id);
-        std::fs::create_dir_all(&dir).unwrap();
+            |_d| async move {
+                let run_id = "test-dispatch-deny";
+                let dir = crate::runstate::run_dir(run_id);
+                std::fs::create_dir_all(&dir).unwrap();
 
-        let mut state = make_dispatch_state(run_id).await;
-        let mut global = std::collections::HashMap::new();
-        global.insert("bash".to_string(), ToolPolicy::Deny);
-        state.global_perms = Arc::new(global);
+                let mut state = make_dispatch_state(run_id).await;
+                let mut global = std::collections::HashMap::new();
+                global.insert("bash".to_string(), ToolPolicy::Deny);
+                state.global_perms = Arc::new(global);
 
-        let calls = vec![make_tool_call("bash", serde_json::json!({"command": "ls"}))];
-        let out = dispatch_tool_calls(&state, calls).await;
+                let calls = vec![make_tool_call("bash", serde_json::json!({"command": "ls"}))];
+                let out = dispatch_tool_calls(&state, calls).await;
 
-        assert_eq!(out.len(), 1);
-        assert_eq!(out[0].0, "call-bash");
-        assert!(out[0].1.contains("[denied]"));
-        assert!(out[0].1.contains("not permitted"));
+                assert_eq!(out.len(), 1);
+                assert_eq!(out[0].0, "call-bash");
+                assert!(out[0].1.contains("[denied]"));
+                assert!(out[0].1.contains("not permitted"));
 
-        let log = crate::runstate::tail_stage_log(run_id, 0, 65536);
-        assert!(log.contains("denied"));
+                let log = crate::runstate::tail_stage_log(run_id, 0, 65536);
+                assert!(log.contains("denied"));
 
-        let _ = std::fs::remove_dir_all(&dir);
+                let _ = std::fs::remove_dir_all(&dir);
+            },
+        )
+        .await;
     }
 
     #[tokio::test]
     async fn dispatch_tool_calls_allow_builtin_executes_and_logs() {
-        let _guard = crate::runstate::isolate_runs_dir_for_test(
+        crate::runstate::with_isolated_runs_dir_async(
             "dispatch_tool_calls_allow_builtin_executes_and_logs",
-        );
-        let run_id = "test-dispatch-allow-builtin";
-        let dir = crate::runstate::run_dir(run_id);
-        std::fs::create_dir_all(&dir).unwrap();
+            |_d| async move {
+                let run_id = "test-dispatch-allow-builtin";
+                let dir = crate::runstate::run_dir(run_id);
+                std::fs::create_dir_all(&dir).unwrap();
 
-        let mut state = make_dispatch_state(run_id).await;
-        let mut launch = std::collections::HashMap::new();
-        launch.insert("*".to_string(), ToolPolicy::Allow);
-        state.launch_overrides = Arc::new(launch);
+                let mut state = make_dispatch_state(run_id).await;
+                let mut launch = std::collections::HashMap::new();
+                launch.insert("*".to_string(), ToolPolicy::Allow);
+                state.launch_overrides = Arc::new(launch);
 
-        // read_file on a file that doesn't exist still returns a (tool-level)
-        // error string rather than panicking, which is enough to prove the
-        // builtin execution path ran.
-        let calls = vec![make_tool_call(
-            "read_file",
-            serde_json::json!({"path": "definitely-not-here.txt"}),
-        )];
-        let out = dispatch_tool_calls(&state, calls).await;
+                // read_file on a file that doesn't exist still returns a (tool-level)
+                // error string rather than panicking, which is enough to prove the
+                // builtin execution path ran.
+                let calls = vec![make_tool_call(
+                    "read_file",
+                    serde_json::json!({"path": "definitely-not-here.txt"}),
+                )];
+                let out = dispatch_tool_calls(&state, calls).await;
 
-        assert_eq!(out.len(), 1);
-        assert_eq!(out[0].0, "call-read_file");
+                assert_eq!(out.len(), 1);
+                assert_eq!(out[0].0, "call-read_file");
 
-        let log = crate::runstate::tail_stage_log(run_id, 0, 65536);
-        assert!(log.contains("read_file"));
+                let log = crate::runstate::tail_stage_log(run_id, 0, 65536);
+                assert!(log.contains("read_file"));
 
-        let _ = std::fs::remove_dir_all(&dir);
+                let _ = std::fs::remove_dir_all(&dir);
+            },
+        )
+        .await;
     }
 
     #[tokio::test]
     async fn dispatch_tool_calls_result_truncated_when_long() {
-        let _guard = crate::runstate::isolate_runs_dir_for_test(
+        crate::runstate::with_isolated_runs_dir_async(
             "dispatch_tool_calls_result_truncated_when_long",
-        );
-        let run_id = "test-dispatch-truncate";
-        let dir = crate::runstate::run_dir(run_id);
-        std::fs::create_dir_all(&dir).unwrap();
+            |_d| async move {
+                let run_id = "test-dispatch-truncate";
+                let dir = crate::runstate::run_dir(run_id);
+                std::fs::create_dir_all(&dir).unwrap();
 
-        // Write a file with content long enough that its read_file result
-        // exceeds 120 chars, exercising the truncation branch of the
-        // activity-log message (the returned tool result itself is never
-        // truncated -- only the short-form log line is).
-        let file_path = dir.join("big.txt");
-        let long_content = "x".repeat(500);
-        std::fs::write(&file_path, &long_content).unwrap();
+                // Write a file with content long enough that its read_file result
+                // exceeds 120 chars, exercising the truncation branch of the
+                // activity-log message (the returned tool result itself is never
+                // truncated -- only the short-form log line is).
+                let file_path = dir.join("big.txt");
+                let long_content = "x".repeat(500);
+                std::fs::write(&file_path, &long_content).unwrap();
 
-        let workdir = dir.clone();
-        let config = Config::default();
-        let tool_registry = ToolRegistry::build(workdir, &config).await;
-        let mut launch = std::collections::HashMap::new();
-        launch.insert("*".to_string(), ToolPolicy::Allow);
-        let state = ToolDispatchState {
-            builtins: tool_registry.builtins.clone(),
-            mcp: tool_registry.mcp.clone(),
-            builtin_names: tool_registry.builtin_names.clone(),
-            launch_overrides: Arc::new(launch),
-            session_allows: Arc::new(Mutex::new(std::collections::HashSet::new())),
-            stage_perms: Arc::new(Mutex::new(std::collections::HashMap::new())),
-            agent_perms: Arc::new(std::collections::HashMap::new()),
-            global_perms: Arc::new(std::collections::HashMap::new()),
-            run_id: Arc::new(run_id.to_string()),
-            stage_idx: Arc::new(Mutex::new(0usize)),
-            stage_name: Arc::new(Mutex::new("main".to_string())),
-            tool_calls_counter: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-            iteration_counter: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-            context_window: Arc::new(Mutex::new(None)),
-            file_tracking: None,
-        };
+                let workdir = dir.clone();
+                let config = Config::default();
+                let tool_registry = ToolRegistry::build(workdir, &config).await;
+                let mut launch = std::collections::HashMap::new();
+                launch.insert("*".to_string(), ToolPolicy::Allow);
+                let state = ToolDispatchState {
+                    builtins: tool_registry.builtins.clone(),
+                    mcp: tool_registry.mcp.clone(),
+                    builtin_names: tool_registry.builtin_names.clone(),
+                    launch_overrides: Arc::new(launch),
+                    session_allows: Arc::new(Mutex::new(std::collections::HashSet::new())),
+                    stage_perms: Arc::new(Mutex::new(std::collections::HashMap::new())),
+                    agent_perms: Arc::new(std::collections::HashMap::new()),
+                    global_perms: Arc::new(std::collections::HashMap::new()),
+                    run_id: Arc::new(run_id.to_string()),
+                    stage_idx: Arc::new(Mutex::new(0usize)),
+                    stage_name: Arc::new(Mutex::new("main".to_string())),
+                    tool_calls_counter: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+                    iteration_counter: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+                    context_window: Arc::new(Mutex::new(None)),
+                    file_tracking: None,
+                };
 
-        let calls = vec![make_tool_call(
-            "read_file",
-            serde_json::json!({"path": "big.txt"}),
-        )];
-        let out = dispatch_tool_calls(&state, calls).await;
+                let calls = vec![make_tool_call(
+                    "read_file",
+                    serde_json::json!({"path": "big.txt"}),
+                )];
+                let out = dispatch_tool_calls(&state, calls).await;
 
-        assert_eq!(out.len(), 1);
-        // Full (untruncated) result is returned to the model.
-        assert!(out[0].1.contains(&long_content));
+                assert_eq!(out.len(), 1);
+                // Full (untruncated) result is returned to the model.
+                assert!(out[0].1.contains(&long_content));
 
-        let _ = std::fs::remove_dir_all(&dir);
+                let _ = std::fs::remove_dir_all(&dir);
+            },
+        )
+        .await;
     }
 
     #[tokio::test]
     async fn dispatch_tool_calls_session_allow_short_circuits_policy_resolution() {
-        let _guard = crate::runstate::isolate_runs_dir_for_test(
+        crate::runstate::with_isolated_runs_dir_async(
             "dispatch_tool_calls_session_allow_short_circuits_policy_resolution",
-        );
-        let run_id = "test-dispatch-session-allow";
-        let dir = crate::runstate::run_dir(run_id);
-        std::fs::create_dir_all(&dir).unwrap();
+            |_d| async move {
+                let run_id = "test-dispatch-session-allow";
+                let dir = crate::runstate::run_dir(run_id);
+                std::fs::create_dir_all(&dir).unwrap();
 
-        let mut state = make_dispatch_state(run_id).await;
-        // Global policy says Deny, but session_allows already contains the
-        // tool, so it should be treated as Allow regardless.
-        let mut global = std::collections::HashMap::new();
-        global.insert("read_file".to_string(), ToolPolicy::Deny);
-        state.global_perms = Arc::new(global);
-        state
-            .session_allows
-            .lock()
-            .await
-            .insert("read_file".to_string());
+                let mut state = make_dispatch_state(run_id).await;
+                // Global policy says Deny, but session_allows already contains the
+                // tool, so it should be treated as Allow regardless.
+                let mut global = std::collections::HashMap::new();
+                global.insert("read_file".to_string(), ToolPolicy::Deny);
+                state.global_perms = Arc::new(global);
+                state
+                    .session_allows
+                    .lock()
+                    .await
+                    .insert("read_file".to_string());
 
-        let calls = vec![make_tool_call(
-            "read_file",
-            serde_json::json!({"path": "definitely-not-here.txt"}),
-        )];
-        let out = dispatch_tool_calls(&state, calls).await;
+                let calls = vec![make_tool_call(
+                    "read_file",
+                    serde_json::json!({"path": "definitely-not-here.txt"}),
+                )];
+                let out = dispatch_tool_calls(&state, calls).await;
 
-        assert_eq!(out.len(), 1);
-        // Not denied -- session allow overrode the global Deny.
-        assert!(!out[0].1.contains("[denied]"));
+                assert_eq!(out.len(), 1);
+                // Not denied -- session allow overrode the global Deny.
+                assert!(!out[0].1.contains("[denied]"));
 
-        let _ = std::fs::remove_dir_all(&dir);
+                let _ = std::fs::remove_dir_all(&dir);
+            },
+        )
+        .await;
     }
 
     #[tokio::test]
     async fn dispatch_tool_calls_ask_approved_executes_tool() {
-        let _guard = crate::runstate::isolate_runs_dir_for_test(
+        crate::runstate::with_isolated_runs_dir_async(
             "dispatch_tool_calls_ask_approved_executes_tool",
-        );
-        let run_id = "test-dispatch-ask-approved";
-        let dir = crate::runstate::run_dir(run_id);
-        std::fs::create_dir_all(&dir).unwrap();
-        let meta = make_meta(run_id, 1);
-        crate::runstate::create_run(&meta).unwrap();
+            |_d| async move {
+                let run_id = "test-dispatch-ask-approved";
+                let dir = crate::runstate::run_dir(run_id);
+                std::fs::create_dir_all(&dir).unwrap();
+                let meta = make_meta(run_id, 1);
+                crate::runstate::create_run(&meta).unwrap();
 
-        let mut state = make_dispatch_state(run_id).await;
-        let mut global = std::collections::HashMap::new();
-        global.insert("read_file".to_string(), ToolPolicy::Ask);
-        state.global_perms = Arc::new(global);
+                let mut state = make_dispatch_state(run_id).await;
+                let mut global = std::collections::HashMap::new();
+                global.insert("read_file".to_string(), ToolPolicy::Ask);
+                state.global_perms = Arc::new(global);
 
-        // Compute the request id the same way `request_tool_approval_background`
-        // does, so our canned response matches.
-        let tool_name = "read_file";
-        let hash = tool_name
-            .bytes()
-            .fold(0usize, |a, b| a.wrapping_add(b as usize));
-        let req_id = crate::interaction::make_interaction_id(hash, 0);
+                // Compute the request id the same way `request_tool_approval_background`
+                // does, so our canned response matches.
+                let tool_name = "read_file";
+                let hash = tool_name
+                    .bytes()
+                    .fold(0usize, |a, b| a.wrapping_add(b as usize));
+                let req_id = crate::interaction::make_interaction_id(hash, 0);
 
-        let run_id_clone = run_id.to_string();
-        let req_id_clone = req_id.clone();
-        tokio::spawn(async move {
-            tokio::time::sleep(std::time::Duration::from_millis(150)).await;
-            let resp = crate::interaction::InteractionResponse::approval(
-                &req_id_clone,
-                true,
-                crate::interaction::ApprovalScope::Session,
-            );
-            crate::interaction::write_response(&run_id_clone, &resp).ok();
-        });
+                let run_id_clone = run_id.to_string();
+                let req_id_clone = req_id.clone();
+                tokio::spawn(async move {
+                    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+                    let resp = crate::interaction::InteractionResponse::approval(
+                        &req_id_clone,
+                        true,
+                        crate::interaction::ApprovalScope::Session,
+                    );
+                    crate::interaction::write_response(&run_id_clone, &resp).ok();
+                });
 
-        let calls = vec![make_tool_call(
-            "read_file",
-            serde_json::json!({"path": "definitely-not-here.txt"}),
-        )];
-        let out = dispatch_tool_calls(&state, calls).await;
+                let calls = vec![make_tool_call(
+                    "read_file",
+                    serde_json::json!({"path": "definitely-not-here.txt"}),
+                )];
+                let out = dispatch_tool_calls(&state, calls).await;
 
-        assert_eq!(out.len(), 1);
-        // Session scope approval should have been recorded.
-        assert!(state.session_allows.lock().await.contains("read_file"));
+                assert_eq!(out.len(), 1);
+                // Session scope approval should have been recorded.
+                assert!(state.session_allows.lock().await.contains("read_file"));
 
-        let _ = std::fs::remove_dir_all(&dir);
+                let _ = std::fs::remove_dir_all(&dir);
+            },
+        )
+        .await;
     }
 
     #[tokio::test]
     async fn dispatch_tool_calls_ask_approved_mcp_tool_returns_error_text() {
-        let _guard = crate::runstate::isolate_runs_dir_for_test(
+        crate::runstate::with_isolated_runs_dir_async(
             "dispatch_tool_calls_ask_approved_mcp_tool_returns_error_text",
-        );
-        // Not a builtin name and no MCP server registered -> the MCP
-        // execute() path returns Err, exercising the `Err(e)` arm of the
-        // Ask-branch's MCP dispatch (as opposed to the builtin-execution arm
-        // already covered by `dispatch_tool_calls_ask_approved_executes_tool`).
-        let run_id = "test-dispatch-ask-approved-mcp";
-        let dir = crate::runstate::run_dir(run_id);
-        std::fs::create_dir_all(&dir).unwrap();
-        let meta = make_meta(run_id, 1);
-        crate::runstate::create_run(&meta).unwrap();
+            |_d| async move {
+                // Not a builtin name and no MCP server registered -> the MCP
+                // execute() path returns Err, exercising the `Err(e)` arm of the
+                // Ask-branch's MCP dispatch (as opposed to the builtin-execution arm
+                // already covered by `dispatch_tool_calls_ask_approved_executes_tool`).
+                let run_id = "test-dispatch-ask-approved-mcp";
+                let dir = crate::runstate::run_dir(run_id);
+                std::fs::create_dir_all(&dir).unwrap();
+                let meta = make_meta(run_id, 1);
+                crate::runstate::create_run(&meta).unwrap();
 
-        let mut state = make_dispatch_state(run_id).await;
-        let mut global = std::collections::HashMap::new();
-        global.insert("some_mcp_tool".to_string(), ToolPolicy::Ask);
-        state.global_perms = Arc::new(global);
+                let mut state = make_dispatch_state(run_id).await;
+                let mut global = std::collections::HashMap::new();
+                global.insert("some_mcp_tool".to_string(), ToolPolicy::Ask);
+                state.global_perms = Arc::new(global);
 
-        let tool_name = "some_mcp_tool";
-        let hash = tool_name
-            .bytes()
-            .fold(0usize, |a, b| a.wrapping_add(b as usize));
-        let req_id = crate::interaction::make_interaction_id(hash, 0);
+                let tool_name = "some_mcp_tool";
+                let hash = tool_name
+                    .bytes()
+                    .fold(0usize, |a, b| a.wrapping_add(b as usize));
+                let req_id = crate::interaction::make_interaction_id(hash, 0);
 
-        let run_id_clone = run_id.to_string();
-        let req_id_clone = req_id.clone();
-        tokio::spawn(async move {
-            tokio::time::sleep(std::time::Duration::from_millis(150)).await;
-            let resp = crate::interaction::InteractionResponse::approval(
-                &req_id_clone,
-                true,
-                crate::interaction::ApprovalScope::Once,
-            );
-            crate::interaction::write_response(&run_id_clone, &resp).ok();
-        });
+                let run_id_clone = run_id.to_string();
+                let req_id_clone = req_id.clone();
+                tokio::spawn(async move {
+                    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+                    let resp = crate::interaction::InteractionResponse::approval(
+                        &req_id_clone,
+                        true,
+                        crate::interaction::ApprovalScope::Once,
+                    );
+                    crate::interaction::write_response(&run_id_clone, &resp).ok();
+                });
 
-        let calls = vec![make_tool_call("some_mcp_tool", serde_json::json!({}))];
-        let out = dispatch_tool_calls(&state, calls).await;
+                let calls = vec![make_tool_call("some_mcp_tool", serde_json::json!({}))];
+                let out = dispatch_tool_calls(&state, calls).await;
 
-        assert_eq!(out.len(), 1);
-        assert!(out[0].1.contains("[error]"));
+                assert_eq!(out.len(), 1);
+                assert!(out[0].1.contains("[error]"));
 
-        let _ = std::fs::remove_dir_all(&dir);
+                let _ = std::fs::remove_dir_all(&dir);
+            },
+        )
+        .await;
     }
 
     #[tokio::test]
     async fn dispatch_tool_calls_allow_mcp_tool_returns_error_text() {
-        let _guard = crate::runstate::isolate_runs_dir_for_test(
+        crate::runstate::with_isolated_runs_dir_async(
             "dispatch_tool_calls_allow_mcp_tool_returns_error_text",
-        );
-        // Same as above but via the Allow branch's MCP dispatch (lines
-        // distinct from the Ask branch's identical match).
-        let run_id = "test-dispatch-allow-mcp";
-        let dir = crate::runstate::run_dir(run_id);
-        std::fs::create_dir_all(&dir).unwrap();
+            |_d| async move {
+                // Same as above but via the Allow branch's MCP dispatch (lines
+                // distinct from the Ask branch's identical match).
+                let run_id = "test-dispatch-allow-mcp";
+                let dir = crate::runstate::run_dir(run_id);
+                std::fs::create_dir_all(&dir).unwrap();
 
-        let mut state = make_dispatch_state(run_id).await;
-        let mut launch = std::collections::HashMap::new();
-        launch.insert("*".to_string(), ToolPolicy::Allow);
-        state.launch_overrides = Arc::new(launch);
+                let mut state = make_dispatch_state(run_id).await;
+                let mut launch = std::collections::HashMap::new();
+                launch.insert("*".to_string(), ToolPolicy::Allow);
+                state.launch_overrides = Arc::new(launch);
 
-        let calls = vec![make_tool_call("some_mcp_tool", serde_json::json!({}))];
-        let out = dispatch_tool_calls(&state, calls).await;
+                let calls = vec![make_tool_call("some_mcp_tool", serde_json::json!({}))];
+                let out = dispatch_tool_calls(&state, calls).await;
 
-        assert_eq!(out.len(), 1);
-        assert!(out[0].1.contains("[error]"));
+                assert_eq!(out.len(), 1);
+                assert!(out[0].1.contains("[error]"));
 
-        let _ = std::fs::remove_dir_all(&dir);
+                let _ = std::fs::remove_dir_all(&dir);
+            },
+        )
+        .await;
     }
 
     #[tokio::test]
     async fn dispatch_tool_calls_ask_approved_long_result_is_truncated_in_log() {
-        let _guard = crate::runstate::isolate_runs_dir_for_test(
+        crate::runstate::with_isolated_runs_dir_async(
             "dispatch_tool_calls_ask_approved_long_result_is_truncated_in_log",
-        );
-        // The Ask branch's own truncation computation (distinct from the
-        // Allow branch's, covered by `dispatch_tool_calls_result_truncated_when_long`)
-        // had no test driving a long result through an Ask-approved call.
-        let run_id = "test-dispatch-ask-truncate";
-        let dir = crate::runstate::run_dir(run_id);
-        std::fs::create_dir_all(&dir).unwrap();
-        let meta = make_meta(run_id, 1);
-        crate::runstate::create_run(&meta).unwrap();
+            |_d| async move {
+                // The Ask branch's own truncation computation (distinct from the
+                // Allow branch's, covered by `dispatch_tool_calls_result_truncated_when_long`)
+                // had no test driving a long result through an Ask-approved call.
+                let run_id = "test-dispatch-ask-truncate";
+                let dir = crate::runstate::run_dir(run_id);
+                std::fs::create_dir_all(&dir).unwrap();
+                let meta = make_meta(run_id, 1);
+                crate::runstate::create_run(&meta).unwrap();
 
-        let long_content = "y".repeat(500);
-        std::fs::write(dir.join("big.txt"), &long_content).unwrap();
+                let long_content = "y".repeat(500);
+                std::fs::write(dir.join("big.txt"), &long_content).unwrap();
 
-        let workdir = dir.clone();
-        let config = Config::default();
-        let tool_registry = ToolRegistry::build(workdir, &config).await;
-        let mut global = std::collections::HashMap::new();
-        global.insert("read_file".to_string(), ToolPolicy::Ask);
-        let state = ToolDispatchState {
-            builtins: tool_registry.builtins.clone(),
-            mcp: tool_registry.mcp.clone(),
-            builtin_names: tool_registry.builtin_names.clone(),
-            launch_overrides: Arc::new(std::collections::HashMap::new()),
-            session_allows: Arc::new(Mutex::new(std::collections::HashSet::new())),
-            stage_perms: Arc::new(Mutex::new(std::collections::HashMap::new())),
-            agent_perms: Arc::new(std::collections::HashMap::new()),
-            global_perms: Arc::new(global),
-            run_id: Arc::new(run_id.to_string()),
-            stage_idx: Arc::new(Mutex::new(0usize)),
-            stage_name: Arc::new(Mutex::new("main".to_string())),
-            tool_calls_counter: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-            iteration_counter: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-            context_window: Arc::new(Mutex::new(None)),
-            file_tracking: None,
-        };
+                let workdir = dir.clone();
+                let config = Config::default();
+                let tool_registry = ToolRegistry::build(workdir, &config).await;
+                let mut global = std::collections::HashMap::new();
+                global.insert("read_file".to_string(), ToolPolicy::Ask);
+                let state = ToolDispatchState {
+                    builtins: tool_registry.builtins.clone(),
+                    mcp: tool_registry.mcp.clone(),
+                    builtin_names: tool_registry.builtin_names.clone(),
+                    launch_overrides: Arc::new(std::collections::HashMap::new()),
+                    session_allows: Arc::new(Mutex::new(std::collections::HashSet::new())),
+                    stage_perms: Arc::new(Mutex::new(std::collections::HashMap::new())),
+                    agent_perms: Arc::new(std::collections::HashMap::new()),
+                    global_perms: Arc::new(global),
+                    run_id: Arc::new(run_id.to_string()),
+                    stage_idx: Arc::new(Mutex::new(0usize)),
+                    stage_name: Arc::new(Mutex::new("main".to_string())),
+                    tool_calls_counter: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+                    iteration_counter: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+                    context_window: Arc::new(Mutex::new(None)),
+                    file_tracking: None,
+                };
 
-        let tool_name = "read_file";
-        let hash = tool_name
-            .bytes()
-            .fold(0usize, |a, b| a.wrapping_add(b as usize));
-        let req_id = crate::interaction::make_interaction_id(hash, 0);
+                let tool_name = "read_file";
+                let hash = tool_name
+                    .bytes()
+                    .fold(0usize, |a, b| a.wrapping_add(b as usize));
+                let req_id = crate::interaction::make_interaction_id(hash, 0);
 
-        let run_id_clone = run_id.to_string();
-        let req_id_clone = req_id.clone();
-        tokio::spawn(async move {
-            tokio::time::sleep(std::time::Duration::from_millis(150)).await;
-            let resp = crate::interaction::InteractionResponse::approval(
-                &req_id_clone,
-                true,
-                crate::interaction::ApprovalScope::Once,
-            );
-            crate::interaction::write_response(&run_id_clone, &resp).ok();
-        });
+                let run_id_clone = run_id.to_string();
+                let req_id_clone = req_id.clone();
+                tokio::spawn(async move {
+                    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+                    let resp = crate::interaction::InteractionResponse::approval(
+                        &req_id_clone,
+                        true,
+                        crate::interaction::ApprovalScope::Once,
+                    );
+                    crate::interaction::write_response(&run_id_clone, &resp).ok();
+                });
 
-        let calls = vec![make_tool_call(
-            "read_file",
-            serde_json::json!({"path": "big.txt"}),
-        )];
-        let out = dispatch_tool_calls(&state, calls).await;
+                let calls = vec![make_tool_call(
+                    "read_file",
+                    serde_json::json!({"path": "big.txt"}),
+                )];
+                let out = dispatch_tool_calls(&state, calls).await;
 
-        assert_eq!(out.len(), 1);
-        // Full (untruncated) result is returned to the model.
-        assert!(out[0].1.contains(&long_content));
+                assert_eq!(out.len(), 1);
+                // Full (untruncated) result is returned to the model.
+                assert!(out[0].1.contains(&long_content));
 
-        let _ = std::fs::remove_dir_all(&dir);
+                let _ = std::fs::remove_dir_all(&dir);
+            },
+        )
+        .await;
     }
 
     #[tokio::test]
     async fn dispatch_tool_calls_ask_denied_returns_declined_message() {
-        let _guard = crate::runstate::isolate_runs_dir_for_test(
+        crate::runstate::with_isolated_runs_dir_async(
             "dispatch_tool_calls_ask_denied_returns_declined_message",
-        );
-        let run_id = "test-dispatch-ask-denied";
-        let dir = crate::runstate::run_dir(run_id);
-        std::fs::create_dir_all(&dir).unwrap();
-        let meta = make_meta(run_id, 1);
-        crate::runstate::create_run(&meta).unwrap();
+            |_d| async move {
+                let run_id = "test-dispatch-ask-denied";
+                let dir = crate::runstate::run_dir(run_id);
+                std::fs::create_dir_all(&dir).unwrap();
+                let meta = make_meta(run_id, 1);
+                crate::runstate::create_run(&meta).unwrap();
 
-        let mut state = make_dispatch_state(run_id).await;
-        let mut global = std::collections::HashMap::new();
-        global.insert("read_file".to_string(), ToolPolicy::Ask);
-        state.global_perms = Arc::new(global);
+                let mut state = make_dispatch_state(run_id).await;
+                let mut global = std::collections::HashMap::new();
+                global.insert("read_file".to_string(), ToolPolicy::Ask);
+                state.global_perms = Arc::new(global);
 
-        let tool_name = "read_file";
-        let hash = tool_name
-            .bytes()
-            .fold(0usize, |a, b| a.wrapping_add(b as usize));
-        let req_id = crate::interaction::make_interaction_id(hash, 0);
+                let tool_name = "read_file";
+                let hash = tool_name
+                    .bytes()
+                    .fold(0usize, |a, b| a.wrapping_add(b as usize));
+                let req_id = crate::interaction::make_interaction_id(hash, 0);
 
-        let run_id_clone = run_id.to_string();
-        let req_id_clone = req_id.clone();
-        tokio::spawn(async move {
-            tokio::time::sleep(std::time::Duration::from_millis(150)).await;
-            let resp = crate::interaction::InteractionResponse::approval(
-                &req_id_clone,
-                false,
-                crate::interaction::ApprovalScope::Once,
-            );
-            crate::interaction::write_response(&run_id_clone, &resp).ok();
-        });
+                let run_id_clone = run_id.to_string();
+                let req_id_clone = req_id.clone();
+                tokio::spawn(async move {
+                    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+                    let resp = crate::interaction::InteractionResponse::approval(
+                        &req_id_clone,
+                        false,
+                        crate::interaction::ApprovalScope::Once,
+                    );
+                    crate::interaction::write_response(&run_id_clone, &resp).ok();
+                });
 
-        let calls = vec![make_tool_call(
-            "read_file",
-            serde_json::json!({"path": "definitely-not-here.txt"}),
-        )];
-        let out = dispatch_tool_calls(&state, calls).await;
+                let calls = vec![make_tool_call(
+                    "read_file",
+                    serde_json::json!({"path": "definitely-not-here.txt"}),
+                )];
+                let out = dispatch_tool_calls(&state, calls).await;
 
-        assert_eq!(out.len(), 1);
-        assert!(out[0].1.contains("[denied]"));
-        assert!(out[0].1.contains("declined"));
-        assert!(!state.session_allows.lock().await.contains("read_file"));
+                assert_eq!(out.len(), 1);
+                assert!(out[0].1.contains("[denied]"));
+                assert!(out[0].1.contains("declined"));
+                assert!(!state.session_allows.lock().await.contains("read_file"));
 
-        let _ = std::fs::remove_dir_all(&dir);
+                let _ = std::fs::remove_dir_all(&dir);
+            },
+        )
+        .await;
     }
 
     #[tokio::test]
     async fn dispatch_tool_calls_dynamic_interaction_short_circuits() {
-        let _guard = crate::runstate::isolate_runs_dir_for_test(
+        crate::runstate::with_isolated_runs_dir_async(
             "dispatch_tool_calls_dynamic_interaction_short_circuits",
-        );
-        let run_id = "test-dispatch-dynamic-interaction";
-        let dir = crate::runstate::run_dir(run_id);
-        std::fs::create_dir_all(&dir).unwrap();
-        let meta = make_meta(run_id, 1);
-        crate::runstate::create_run(&meta).unwrap();
+            |_d| async move {
+                let run_id = "test-dispatch-dynamic-interaction";
+                let dir = crate::runstate::run_dir(run_id);
+                std::fs::create_dir_all(&dir).unwrap();
+                let meta = make_meta(run_id, 1);
+                crate::runstate::create_run(&meta).unwrap();
 
-        let state = make_dispatch_state(run_id).await;
+                let state = make_dispatch_state(run_id).await;
 
-        // `handle_ask_user_text` (via `dispatch_dynamic_interaction`) never
-        // times out -- it blocks on `request_interaction_bg_review` until a
-        // response is written. Its request id is deterministically
-        // `ask-<tool_call_id>` (see dynamic_interaction.rs), so we can
-        // pre-compute it and answer in the background.
-        let req_id = "ask-call-ask_user_text".to_string();
-        let run_id_clone = run_id.to_string();
-        tokio::spawn(async move {
-            tokio::time::sleep(std::time::Duration::from_millis(150)).await;
-            let resp = crate::interaction::InteractionResponse::text(&req_id, "hi there");
-            crate::interaction::write_response(&run_id_clone, &resp).ok();
-        });
+                // `handle_ask_user_text` (via `dispatch_dynamic_interaction`) never
+                // times out -- it blocks on `request_interaction_bg_review` until a
+                // response is written. Its request id is deterministically
+                // `ask-<tool_call_id>` (see dynamic_interaction.rs), so we can
+                // pre-compute it and answer in the background.
+                let req_id = "ask-call-ask_user_text".to_string();
+                let run_id_clone = run_id.to_string();
+                tokio::spawn(async move {
+                    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+                    let resp = crate::interaction::InteractionResponse::text(&req_id, "hi there");
+                    crate::interaction::write_response(&run_id_clone, &resp).ok();
+                });
 
-        let calls = vec![make_tool_call(
-            "ask_user_text",
-            serde_json::json!({"prompt": "What is your name?"}),
-        )];
-        let out = dispatch_tool_calls(&state, calls).await;
+                let calls = vec![make_tool_call(
+                    "ask_user_text",
+                    serde_json::json!({"prompt": "What is your name?"}),
+                )];
+                let out = dispatch_tool_calls(&state, calls).await;
 
-        assert_eq!(out.len(), 1);
-        assert_eq!(out[0].0, "call-ask_user_text");
-        assert!(out[0].1.contains("hi there"));
+                assert_eq!(out.len(), 1);
+                assert_eq!(out[0].0, "call-ask_user_text");
+                assert!(out[0].1.contains("hi there"));
 
-        let _ = std::fs::remove_dir_all(&dir);
+                let _ = std::fs::remove_dir_all(&dir);
+            },
+        )
+        .await;
     }
 
     #[tokio::test]
     async fn dispatch_tool_calls_multiple_calls_preserve_order() {
-        let _guard = crate::runstate::isolate_runs_dir_for_test(
+        crate::runstate::with_isolated_runs_dir_async(
             "dispatch_tool_calls_multiple_calls_preserve_order",
-        );
-        let run_id = "test-dispatch-multi";
-        let dir = crate::runstate::run_dir(run_id);
-        std::fs::create_dir_all(&dir).unwrap();
+            |_d| async move {
+                let run_id = "test-dispatch-multi";
+                let dir = crate::runstate::run_dir(run_id);
+                std::fs::create_dir_all(&dir).unwrap();
 
-        let mut state = make_dispatch_state(run_id).await;
-        let mut global = std::collections::HashMap::new();
-        global.insert("bash".to_string(), ToolPolicy::Deny);
-        global.insert("read_file".to_string(), ToolPolicy::Allow);
-        state.global_perms = Arc::new(global);
+                let mut state = make_dispatch_state(run_id).await;
+                let mut global = std::collections::HashMap::new();
+                global.insert("bash".to_string(), ToolPolicy::Deny);
+                global.insert("read_file".to_string(), ToolPolicy::Allow);
+                state.global_perms = Arc::new(global);
 
-        let calls = vec![
-            make_tool_call("bash", serde_json::json!({"command": "ls"})),
-            make_tool_call("read_file", serde_json::json!({"path": "nope.txt"})),
-        ];
-        let out = dispatch_tool_calls(&state, calls).await;
+                let calls = vec![
+                    make_tool_call("bash", serde_json::json!({"command": "ls"})),
+                    make_tool_call("read_file", serde_json::json!({"path": "nope.txt"})),
+                ];
+                let out = dispatch_tool_calls(&state, calls).await;
 
-        assert_eq!(out.len(), 2);
-        assert_eq!(out[0].0, "call-bash");
-        assert!(out[0].1.contains("[denied]"));
-        assert_eq!(out[1].0, "call-read_file");
-        assert!(!out[1].1.contains("[denied]"));
+                assert_eq!(out.len(), 2);
+                assert_eq!(out[0].0, "call-bash");
+                assert!(out[0].1.contains("[denied]"));
+                assert_eq!(out[1].0, "call-read_file");
+                assert!(!out[1].1.contains("[denied]"));
 
-        let _ = std::fs::remove_dir_all(&dir);
+                let _ = std::fs::remove_dir_all(&dir);
+            },
+        )
+        .await;
     }
 
     // ─── MCP Ok(r) arms: lines 132-133, 163-164 ──────────────────────────────
@@ -4002,144 +4170,165 @@ for line in sys.stdin:
 
     #[tokio::test]
     async fn dispatch_tool_calls_allow_mcp_ok_success_returns_text() {
-        let _guard = crate::runstate::isolate_runs_dir_for_test(
+        crate::runstate::with_isolated_runs_dir_async(
             "dispatch_tool_calls_allow_mcp_ok_success_returns_text",
-        );
-        // Covers line 163: `Ok(r) if r.success => r.text`
-        let run_id = "test-dispatch-allow-mcp-ok-success";
-        let dir = crate::runstate::run_dir(run_id);
-        std::fs::create_dir_all(&dir).unwrap();
-        let meta = make_meta(run_id, 1);
-        crate::runstate::create_run(&meta).unwrap();
+            |_d| async move {
+                // Covers line 163: `Ok(r) if r.success => r.text`
+                let run_id = "test-dispatch-allow-mcp-ok-success";
+                let dir = crate::runstate::run_dir(run_id);
+                std::fs::create_dir_all(&dir).unwrap();
+                let meta = make_meta(run_id, 1);
+                crate::runstate::create_run(&meta).unwrap();
 
-        let state =
-            make_dispatch_state_with_mcp_tool(run_id, MCP_STUB_SUCCESS, ToolPolicy::Allow).await;
+                let state =
+                    make_dispatch_state_with_mcp_tool(run_id, MCP_STUB_SUCCESS, ToolPolicy::Allow)
+                        .await;
 
-        let calls = vec![make_tool_call("stub_mcp_tool", serde_json::json!({}))];
-        let out = dispatch_tool_calls(&state, calls).await;
+                let calls = vec![make_tool_call("stub_mcp_tool", serde_json::json!({}))];
+                let out = dispatch_tool_calls(&state, calls).await;
 
-        assert_eq!(out.len(), 1);
-        assert_eq!(out[0].0, "call-stub_mcp_tool");
-        let has_ok_text = out[0].1.contains("ok result from stub");
-        // Expected success text.
-        assert!(has_ok_text);
+                assert_eq!(out.len(), 1);
+                assert_eq!(out[0].0, "call-stub_mcp_tool");
+                let has_ok_text = out[0].1.contains("ok result from stub");
+                // Expected success text.
+                assert!(has_ok_text);
 
-        let _ = std::fs::remove_dir_all(&dir);
+                let _ = std::fs::remove_dir_all(&dir);
+            },
+        )
+        .await;
     }
 
     #[tokio::test]
     async fn dispatch_tool_calls_allow_mcp_ok_error_result_returns_error_prefix() {
-        let _guard = crate::runstate::isolate_runs_dir_for_test(
+        crate::runstate::with_isolated_runs_dir_async(
             "dispatch_tool_calls_allow_mcp_ok_error_result_returns_error_prefix",
-        );
-        // Covers line 164: `Ok(r) => format!("[error] {}", r.text)` (isError: true)
-        let run_id = "test-dispatch-allow-mcp-ok-error-result";
-        let dir = crate::runstate::run_dir(run_id);
-        std::fs::create_dir_all(&dir).unwrap();
-        let meta = make_meta(run_id, 1);
-        crate::runstate::create_run(&meta).unwrap();
+            |_d| async move {
+                // Covers line 164: `Ok(r) => format!("[error] {}", r.text)` (isError: true)
+                let run_id = "test-dispatch-allow-mcp-ok-error-result";
+                let dir = crate::runstate::run_dir(run_id);
+                std::fs::create_dir_all(&dir).unwrap();
+                let meta = make_meta(run_id, 1);
+                crate::runstate::create_run(&meta).unwrap();
 
-        let state =
-            make_dispatch_state_with_mcp_tool(run_id, MCP_STUB_ERROR_RESULT, ToolPolicy::Allow)
+                let state = make_dispatch_state_with_mcp_tool(
+                    run_id,
+                    MCP_STUB_ERROR_RESULT,
+                    ToolPolicy::Allow,
+                )
                 .await;
 
-        let calls = vec![make_tool_call("stub_mcp_tool", serde_json::json!({}))];
-        let out = dispatch_tool_calls(&state, calls).await;
+                let calls = vec![make_tool_call("stub_mcp_tool", serde_json::json!({}))];
+                let out = dispatch_tool_calls(&state, calls).await;
 
-        assert_eq!(out.len(), 1);
-        assert_eq!(out[0].0, "call-stub_mcp_tool");
-        let has_error_prefix = out[0].1.starts_with("[error]");
-        // Expected [error] prefix.
-        assert!(has_error_prefix);
+                assert_eq!(out.len(), 1);
+                assert_eq!(out[0].0, "call-stub_mcp_tool");
+                let has_error_prefix = out[0].1.starts_with("[error]");
+                // Expected [error] prefix.
+                assert!(has_error_prefix);
 
-        let _ = std::fs::remove_dir_all(&dir);
+                let _ = std::fs::remove_dir_all(&dir);
+            },
+        )
+        .await;
     }
 
     // ─── Ask branch MCP Ok(r) arms (lines 132-133) ───────────────────────────
 
     #[tokio::test]
     async fn dispatch_tool_calls_ask_approved_mcp_ok_success_returns_text() {
-        let _guard = crate::runstate::isolate_runs_dir_for_test(
+        crate::runstate::with_isolated_runs_dir_async(
             "dispatch_tool_calls_ask_approved_mcp_ok_success_returns_text",
-        );
-        // Covers line 132: `Ok(r) if r.success => r.text` in the Ask branch
-        let run_id = "test-dispatch-ask-mcp-ok-success";
-        let dir = crate::runstate::run_dir(run_id);
-        std::fs::create_dir_all(&dir).unwrap();
-        let meta = make_meta(run_id, 1);
-        crate::runstate::create_run(&meta).unwrap();
+            |_d| async move {
+                // Covers line 132: `Ok(r) if r.success => r.text` in the Ask branch
+                let run_id = "test-dispatch-ask-mcp-ok-success";
+                let dir = crate::runstate::run_dir(run_id);
+                std::fs::create_dir_all(&dir).unwrap();
+                let meta = make_meta(run_id, 1);
+                crate::runstate::create_run(&meta).unwrap();
 
-        let state =
-            make_dispatch_state_with_mcp_tool(run_id, MCP_STUB_SUCCESS, ToolPolicy::Ask).await;
+                let state =
+                    make_dispatch_state_with_mcp_tool(run_id, MCP_STUB_SUCCESS, ToolPolicy::Ask)
+                        .await;
 
-        // Schedule approval response so the Ask branch doesn't block
-        let run_id_clone = run_id.to_string();
-        let tool_name = "stub_mcp_tool";
-        let hash = tool_name
-            .bytes()
-            .fold(0usize, |a, b| a.wrapping_add(b as usize));
-        let req_id = crate::interaction::make_interaction_id(hash, 0);
-        tokio::spawn(async move {
-            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-            let resp = crate::interaction::InteractionResponse::approval(
-                &req_id,
-                true,
-                crate::interaction::ApprovalScope::Once,
-            );
-            crate::interaction::write_response(&run_id_clone, &resp).ok();
-        });
+                // Schedule approval response so the Ask branch doesn't block
+                let run_id_clone = run_id.to_string();
+                let tool_name = "stub_mcp_tool";
+                let hash = tool_name
+                    .bytes()
+                    .fold(0usize, |a, b| a.wrapping_add(b as usize));
+                let req_id = crate::interaction::make_interaction_id(hash, 0);
+                tokio::spawn(async move {
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                    let resp = crate::interaction::InteractionResponse::approval(
+                        &req_id,
+                        true,
+                        crate::interaction::ApprovalScope::Once,
+                    );
+                    crate::interaction::write_response(&run_id_clone, &resp).ok();
+                });
 
-        let calls = vec![make_tool_call("stub_mcp_tool", serde_json::json!({}))];
-        let out = dispatch_tool_calls(&state, calls).await;
+                let calls = vec![make_tool_call("stub_mcp_tool", serde_json::json!({}))];
+                let out = dispatch_tool_calls(&state, calls).await;
 
-        assert_eq!(out.len(), 1);
-        let has_ok_text = out[0].1.contains("ok result from stub");
-        // Expected success text.
-        assert!(has_ok_text);
+                assert_eq!(out.len(), 1);
+                let has_ok_text = out[0].1.contains("ok result from stub");
+                // Expected success text.
+                assert!(has_ok_text);
 
-        let _ = std::fs::remove_dir_all(&dir);
+                let _ = std::fs::remove_dir_all(&dir);
+            },
+        )
+        .await;
     }
 
     #[tokio::test]
     async fn dispatch_tool_calls_ask_approved_mcp_ok_error_result_returns_error_prefix() {
-        let _guard = crate::runstate::isolate_runs_dir_for_test(
+        crate::runstate::with_isolated_runs_dir_async(
             "dispatch_tool_calls_ask_approved_mcp_ok_error_result_returns_error_prefix",
-        );
-        // Covers line 133: `Ok(r) => format!("[error] {}", r.text)` in the Ask branch
-        let run_id = "test-dispatch-ask-mcp-ok-error-result";
-        let dir = crate::runstate::run_dir(run_id);
-        std::fs::create_dir_all(&dir).unwrap();
-        let meta = make_meta(run_id, 1);
-        crate::runstate::create_run(&meta).unwrap();
+            |_d| async move {
+                // Covers line 133: `Ok(r) => format!("[error] {}", r.text)` in the Ask branch
+                let run_id = "test-dispatch-ask-mcp-ok-error-result";
+                let dir = crate::runstate::run_dir(run_id);
+                std::fs::create_dir_all(&dir).unwrap();
+                let meta = make_meta(run_id, 1);
+                crate::runstate::create_run(&meta).unwrap();
 
-        let state =
-            make_dispatch_state_with_mcp_tool(run_id, MCP_STUB_ERROR_RESULT, ToolPolicy::Ask).await;
+                let state = make_dispatch_state_with_mcp_tool(
+                    run_id,
+                    MCP_STUB_ERROR_RESULT,
+                    ToolPolicy::Ask,
+                )
+                .await;
 
-        let run_id_clone = run_id.to_string();
-        let tool_name = "stub_mcp_tool";
-        let hash = tool_name
-            .bytes()
-            .fold(0usize, |a, b| a.wrapping_add(b as usize));
-        let req_id = crate::interaction::make_interaction_id(hash, 0);
-        tokio::spawn(async move {
-            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-            let resp = crate::interaction::InteractionResponse::approval(
-                &req_id,
-                true,
-                crate::interaction::ApprovalScope::Once,
-            );
-            crate::interaction::write_response(&run_id_clone, &resp).ok();
-        });
+                let run_id_clone = run_id.to_string();
+                let tool_name = "stub_mcp_tool";
+                let hash = tool_name
+                    .bytes()
+                    .fold(0usize, |a, b| a.wrapping_add(b as usize));
+                let req_id = crate::interaction::make_interaction_id(hash, 0);
+                tokio::spawn(async move {
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                    let resp = crate::interaction::InteractionResponse::approval(
+                        &req_id,
+                        true,
+                        crate::interaction::ApprovalScope::Once,
+                    );
+                    crate::interaction::write_response(&run_id_clone, &resp).ok();
+                });
 
-        let calls = vec![make_tool_call("stub_mcp_tool", serde_json::json!({}))];
-        let out = dispatch_tool_calls(&state, calls).await;
+                let calls = vec![make_tool_call("stub_mcp_tool", serde_json::json!({}))];
+                let out = dispatch_tool_calls(&state, calls).await;
 
-        assert_eq!(out.len(), 1);
-        let has_error_prefix = out[0].1.starts_with("[error]");
-        // Expected [error] prefix.
-        assert!(has_error_prefix);
+                assert_eq!(out.len(), 1);
+                let has_error_prefix = out[0].1.starts_with("[error]");
+                // Expected [error] prefix.
+                assert!(has_error_prefix);
 
-        let _ = std::fs::remove_dir_all(&dir);
+                let _ = std::fs::remove_dir_all(&dir);
+            },
+        )
+        .await;
     }
 
     // ─── handle_context_tool tests ───────────────────────────────────────────
@@ -5474,34 +5663,37 @@ for line in sys.stdin:
     async fn dispatch_tool_calls_context_tool_routes_to_handler() {
         // A `context_*` tool call is routed to handle_context_tool and logged,
         // covering the `tc.name.starts_with("context_")` branch (lines 76-84).
-        let _guard = crate::runstate::isolate_runs_dir_for_test(
+        crate::runstate::with_isolated_runs_dir_async(
             "dispatch_tool_calls_context_tool_routes_to_handler",
-        );
-        let run_id = "test-dispatch-context-tool";
-        let dir = crate::runstate::run_dir(run_id);
-        std::fs::create_dir_all(&dir).unwrap();
+            |_d| async move {
+                let run_id = "test-dispatch-context-tool";
+                let dir = crate::runstate::run_dir(run_id);
+                std::fs::create_dir_all(&dir).unwrap();
 
-        let mut state = make_dispatch_state(run_id).await;
-        state.context_window = make_context_window_with_hashmap("notes");
+                let mut state = make_dispatch_state(run_id).await;
+                state.context_window = make_context_window_with_hashmap("notes");
 
-        let calls = vec![make_tool_call(
-            "context_write",
-            serde_json::json!({ "region": "notes", "key": "k", "content": "v" }),
-        )];
-        let out = dispatch_tool_calls(&state, calls).await;
+                let calls = vec![make_tool_call(
+                    "context_write",
+                    serde_json::json!({ "region": "notes", "key": "k", "content": "v" }),
+                )];
+                let out = dispatch_tool_calls(&state, calls).await;
 
-        assert_eq!(out.len(), 1);
-        assert_eq!(out[0].0, "call-context_write");
-        let write_result = &out[0].1;
-        assert!(
-            write_result.contains("Stored in 'notes'"),
-            "unexpected result: {write_result}",
-        );
+                assert_eq!(out.len(), 1);
+                assert_eq!(out[0].0, "call-context_write");
+                let write_result = &out[0].1;
+                assert!(
+                    write_result.contains("Stored in 'notes'"),
+                    "unexpected result: {write_result}",
+                );
 
-        let log = crate::runstate::tail_stage_log(run_id, 0, 65536);
-        assert!(log.contains("context_write"));
+                let log = crate::runstate::tail_stage_log(run_id, 0, 65536);
+                assert!(log.contains("context_write"));
 
-        let _ = std::fs::remove_dir_all(&dir);
+                let _ = std::fs::remove_dir_all(&dir);
+            },
+        )
+        .await;
     }
 
     #[tokio::test]
@@ -5509,61 +5701,63 @@ for line in sys.stdin:
         // With file tracking configured, `read_files` routes to
         // maybe_track_batch_read and other read/write tools route to
         // maybe_track_file, covering the file-tracking block (lines 201-221).
-        let _guard = crate::runstate::isolate_runs_dir_for_test(
+        crate::runstate::with_isolated_runs_dir_async(
             "dispatch_tool_calls_file_tracking_read_and_batch",
-        );
-        let run_id = "test-dispatch-file-tracking";
-        let dir = crate::runstate::run_dir(run_id);
-        std::fs::create_dir_all(&dir).unwrap();
+            |_d| async move {
+                let run_id = "test-dispatch-file-tracking";
+                let dir = crate::runstate::run_dir(run_id);
+                std::fs::create_dir_all(&dir).unwrap();
 
-        // Create real files under the dispatch state's workdir (temp_dir).
-        let workdir = std::env::temp_dir();
-        let pid = std::process::id();
-        let single = format!("lev-dispatch-ft-single-{pid}.txt");
-        let batch = format!("lev-dispatch-ft-batch-{pid}.txt");
-        std::fs::write(workdir.join(&single), "single file body").unwrap();
-        std::fs::write(workdir.join(&batch), "batch file body").unwrap();
+                // Create real files under the dispatch state's workdir (temp_dir).
+                let workdir = std::env::temp_dir();
+                let pid = std::process::id();
+                let single = format!("lev-dispatch-ft-single-{pid}.txt");
+                let batch = format!("lev-dispatch-ft-batch-{pid}.txt");
+                std::fs::write(workdir.join(&single), "single file body").unwrap();
+                std::fs::write(workdir.join(&batch), "batch file body").unwrap();
 
-        let mut state = make_dispatch_state(run_id).await;
-        let mut launch = std::collections::HashMap::new();
-        launch.insert("*".to_string(), ToolPolicy::Allow);
-        state.launch_overrides = Arc::new(launch);
-        state.context_window = make_context_window_with_hashmap("files");
-        state.file_tracking = Some(make_file_tracking_config("files", true, true));
+                let mut state = make_dispatch_state(run_id).await;
+                let mut launch = std::collections::HashMap::new();
+                launch.insert("*".to_string(), ToolPolicy::Allow);
+                state.launch_overrides = Arc::new(launch);
+                state.context_window = make_context_window_with_hashmap("files");
+                state.file_tracking = Some(make_file_tracking_config("files", true, true));
 
-        let calls = vec![
-            make_tool_call(
-                "read_files",
-                serde_json::json!({ "paths": [batch.clone()] }),
-            ),
-            make_tool_call("read_file", serde_json::json!({ "path": single.clone() })),
-        ];
-        let out = dispatch_tool_calls(&state, calls).await;
+                let calls = vec![
+                    make_tool_call(
+                        "read_files",
+                        serde_json::json!({ "paths": [batch.clone()] }),
+                    ),
+                    make_tool_call("read_file", serde_json::json!({ "path": single.clone() })),
+                ];
+                let out = dispatch_tool_calls(&state, calls).await;
 
-        assert_eq!(out.len(), 2);
-        // read_files result was replaced with the batch summary.
-        let batch_result = &out[0].1;
-        assert!(
-            batch_result.contains("stored in your system prompt under [files]"),
-            "unexpected batch result: {batch_result}",
-        );
-        // read_file result was replaced with the single-file reference message.
-        let single_result = &out[1].1;
-        assert!(
-            single_result.contains("[files]") && single_result.contains("### ["),
-            "unexpected single result: {single_result}",
-        );
+                assert_eq!(out.len(), 2);
+                // read_files result was replaced with the batch summary.
+                let batch_result = &out[0].1;
+                assert!(
+                    batch_result.contains("stored in your system prompt under [files]"),
+                    "unexpected batch result: {batch_result}",
+                );
+                // read_file result was replaced with the single-file reference message.
+                let single_result = &out[1].1;
+                assert!(
+                    single_result.contains("[files]") && single_result.contains("### ["),
+                    "unexpected single result: {single_result}",
+                );
 
-        // Both files ended up in the HashMap region.
-        let guard = state.context_window.lock().await;
-        let region = guard.as_ref().unwrap().get_region("files").unwrap();
-        assert!(region.get_by_key(&batch).is_some());
-        assert!(region.get_by_key(&single).is_some());
-        drop(guard);
+                // Both files ended up in the HashMap region.
+                let guard = state.context_window.lock().await;
+                let region = guard.as_ref().unwrap().get_region("files").unwrap();
+                assert!(region.get_by_key(&batch).is_some());
+                assert!(region.get_by_key(&single).is_some());
 
-        let _ = std::fs::remove_file(workdir.join(&single));
-        let _ = std::fs::remove_file(workdir.join(&batch));
-        let _ = std::fs::remove_dir_all(&dir);
+                let _ = std::fs::remove_file(workdir.join(&single));
+                let _ = std::fs::remove_file(workdir.join(&batch));
+                let _ = std::fs::remove_dir_all(&dir);
+            },
+        )
+        .await;
     }
 
     // ─── handle_context_tool: remaining error / branch coverage ──────────────

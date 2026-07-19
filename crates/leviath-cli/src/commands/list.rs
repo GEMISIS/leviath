@@ -478,14 +478,19 @@ system = { kind = "pinned", max_tokens = 1000 }
         // `load_propagates_error_when_real_config_file_is_malformed`)
         // forces that for real, and `execute` must still succeed by
         // falling back to `Config::default()`.
-        let guard = crate::config::isolate_config_path_for_test("list-execute-malformed-config");
-        std::fs::write(guard.fake_dir.join("config.toml"), "not valid toml [[[").unwrap();
+        crate::config::with_isolated_config_path_async(
+            "list-execute-malformed-config",
+            |fake_dir| async move {
+                std::fs::write(fake_dir.join("config.toml"), "not valid toml [[[").unwrap();
 
-        let args = ListArgs {
-            filter: "all".to_string(),
-        };
-        let result = execute(args).await;
-        assert!(result.is_ok());
+                let args = ListArgs {
+                    filter: "all".to_string(),
+                };
+                let result = execute(args).await;
+                assert!(result.is_ok());
+            },
+        )
+        .await;
     }
 
     #[tokio::test]

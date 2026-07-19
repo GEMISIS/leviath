@@ -367,14 +367,6 @@ pub fn build_provider_registry_from_config(config: &Config) -> ProviderRegistry 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
-
-    /// Serializes tests that mutate the process-wide `VISUAL`/`EDITOR` env
-    /// vars, since `cargo test` runs tests in parallel threads within the
-    /// same process. Shared across both the Unix and Windows `launch_editor`
-    /// test suites below (each platform mutates the same two env vars, just
-    /// with platform-appropriate script paths).
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     /// Shared "stdin is never a TTY" probe for the `resolve_task` tests whose
     /// argument is `Some(..)` (so the probe is never consulted) or that
@@ -383,18 +375,6 @@ mod tests {
     /// one instantiation and one covered region.
     fn never_a_tty() -> bool {
         false
-    }
-
-    /// RAII guard that clears `VISUAL`/`EDITOR` on drop, restoring a clean
-    /// environment for subsequent tests regardless of panics.
-    struct EnvGuard;
-    impl Drop for EnvGuard {
-        fn drop(&mut self) {
-            unsafe {
-                std::env::remove_var("VISUAL");
-                std::env::remove_var("EDITOR");
-            }
-        }
     }
 
     /// Shared `assert!`-with-dynamic-message helper: several `launch_editor`
@@ -874,21 +854,20 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn launch_editor_visual_env_success() {
-        let _lock = ENV_LOCK.lock().unwrap();
-        let _guard = EnvGuard;
-        unsafe {
-            std::env::set_var("VISUAL", "/usr/bin/true");
-            std::env::remove_var("EDITOR");
-        }
-        let dir = std::env::temp_dir().join("lev-test-launch-editor-visual");
-        let _ = std::fs::create_dir_all(&dir);
-        let file = dir.join("edit.txt");
-        std::fs::write(&file, "content").unwrap();
+        temp_env::with_vars(
+            [("VISUAL", Some("/usr/bin/true")), ("EDITOR", None)],
+            || {
+                let dir = std::env::temp_dir().join("lev-test-launch-editor-visual");
+                let _ = std::fs::create_dir_all(&dir);
+                let file = dir.join("edit.txt");
+                std::fs::write(&file, "content").unwrap();
 
-        let result = launch_editor(&file);
-        assert_launch_ok(&result);
+                let result = launch_editor(&file);
+                assert_launch_ok(&result);
 
-        let _ = std::fs::remove_dir_all(&dir);
+                let _ = std::fs::remove_dir_all(&dir);
+            },
+        );
     }
 
     // ─── launch_editor: EDITOR used when VISUAL unset ────────────────────
@@ -896,21 +875,20 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn launch_editor_editor_env_success() {
-        let _lock = ENV_LOCK.lock().unwrap();
-        let _guard = EnvGuard;
-        unsafe {
-            std::env::remove_var("VISUAL");
-            std::env::set_var("EDITOR", "/usr/bin/true");
-        }
-        let dir = std::env::temp_dir().join("lev-test-launch-editor-editor");
-        let _ = std::fs::create_dir_all(&dir);
-        let file = dir.join("edit.txt");
-        std::fs::write(&file, "content").unwrap();
+        temp_env::with_vars(
+            [("VISUAL", None), ("EDITOR", Some("/usr/bin/true"))],
+            || {
+                let dir = std::env::temp_dir().join("lev-test-launch-editor-editor");
+                let _ = std::fs::create_dir_all(&dir);
+                let file = dir.join("edit.txt");
+                std::fs::write(&file, "content").unwrap();
 
-        let result = launch_editor(&file);
-        assert_launch_ok(&result);
+                let result = launch_editor(&file);
+                assert_launch_ok(&result);
 
-        let _ = std::fs::remove_dir_all(&dir);
+                let _ = std::fs::remove_dir_all(&dir);
+            },
+        );
     }
 
     // ─── launch_editor: exit code (even non-zero) is treated as success ──
@@ -918,22 +896,22 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn launch_editor_nonzero_exit_still_ok() {
-        let _lock = ENV_LOCK.lock().unwrap();
-        let _guard = EnvGuard;
-        unsafe {
-            std::env::set_var("VISUAL", "/usr/bin/false");
-        }
-        let dir = std::env::temp_dir().join("lev-test-launch-editor-nonzero");
-        let _ = std::fs::create_dir_all(&dir);
-        let file = dir.join("edit.txt");
-        std::fs::write(&file, "content").unwrap();
+        temp_env::with_vars(
+            [("VISUAL", Some("/usr/bin/false")), ("EDITOR", None)],
+            || {
+                let dir = std::env::temp_dir().join("lev-test-launch-editor-nonzero");
+                let _ = std::fs::create_dir_all(&dir);
+                let file = dir.join("edit.txt");
+                std::fs::write(&file, "content").unwrap();
 
-        // A non-zero-but-present exit code is treated as the user having
-        // closed the editor -- not an error.
-        let result = launch_editor(&file);
-        assert_launch_ok(&result);
+                // A non-zero-but-present exit code is treated as the user having
+                // closed the editor -- not an error.
+                let result = launch_editor(&file);
+                assert_launch_ok(&result);
 
-        let _ = std::fs::remove_dir_all(&dir);
+                let _ = std::fs::remove_dir_all(&dir);
+            },
+        );
     }
 
     // ─── launch_editor: terminated by signal (no exit code) tries next ───
@@ -969,27 +947,26 @@ mod tests {
         // arm (try the next candidate) on every platform, without needing a real
         // signal-killed subprocess (which can't be fabricated on Windows). With
         // every candidate aborting, the loop exhausts them and bails.
-        let _lock = ENV_LOCK.lock().unwrap();
-        let _guard = EnvGuard;
-        unsafe {
-            std::env::set_var("VISUAL", "editor-a");
-            std::env::set_var("EDITOR", "editor-b");
-        }
-        let dir = std::env::temp_dir().join("lev-test-launch-editor-aborted");
-        let _ = std::fs::create_dir_all(&dir);
-        let file = dir.join("edit.txt");
-        std::fs::write(&file, "content").unwrap();
+        temp_env::with_vars(
+            [("VISUAL", Some("editor-a")), ("EDITOR", Some("editor-b"))],
+            || {
+                let dir = std::env::temp_dir().join("lev-test-launch-editor-aborted");
+                let _ = std::fs::create_dir_all(&dir);
+                let file = dir.join("edit.txt");
+                std::fs::write(&file, "content").unwrap();
 
-        let mut calls = 0;
-        let result = launch_editor_with(&file, &mut |_cmd| {
-            calls += 1;
-            Ok(EditorRunOutcome::Aborted)
-        });
-        // Every candidate "ran" but aborted, so it tried them all then bailed.
-        assert!(result.is_err());
-        assert!(calls >= 2, "expected multiple candidates to be tried");
+                let mut calls = 0;
+                let result = launch_editor_with(&file, &mut |_cmd| {
+                    calls += 1;
+                    Ok(EditorRunOutcome::Aborted)
+                });
+                // Every candidate "ran" but aborted, so it tried them all then bailed.
+                assert!(result.is_err());
+                assert!(calls >= 2, "expected multiple candidates to be tried");
 
-        let _ = std::fs::remove_dir_all(&dir);
+                let _ = std::fs::remove_dir_all(&dir);
+            },
+        );
     }
 
     // ─── launch_editor: command with flags is split correctly ────────────
@@ -997,24 +974,27 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn launch_editor_command_with_flags_splits_correctly() {
-        let _lock = ENV_LOCK.lock().unwrap();
-        let _guard = EnvGuard;
-        unsafe {
-            // `/usr/bin/true` ignores all arguments, so appending a flag
-            // and the file path is harmless; this exercises the
-            // whitespace-splitting logic for editor strings like
-            // "code --wait".
-            std::env::set_var("VISUAL", "/usr/bin/true --some-flag");
-        }
-        let dir = std::env::temp_dir().join("lev-test-launch-editor-flags");
-        let _ = std::fs::create_dir_all(&dir);
-        let file = dir.join("edit.txt");
-        std::fs::write(&file, "content").unwrap();
+        // `/usr/bin/true` ignores all arguments, so appending a flag
+        // and the file path is harmless; this exercises the
+        // whitespace-splitting logic for editor strings like
+        // "code --wait".
+        temp_env::with_vars(
+            [
+                ("VISUAL", Some("/usr/bin/true --some-flag")),
+                ("EDITOR", None),
+            ],
+            || {
+                let dir = std::env::temp_dir().join("lev-test-launch-editor-flags");
+                let _ = std::fs::create_dir_all(&dir);
+                let file = dir.join("edit.txt");
+                std::fs::write(&file, "content").unwrap();
 
-        let result = launch_editor(&file);
-        assert_launch_ok(&result);
+                let result = launch_editor(&file);
+                assert_launch_ok(&result);
 
-        let _ = std::fs::remove_dir_all(&dir);
+                let _ = std::fs::remove_dir_all(&dir);
+            },
+        );
     }
 
     // ─── launch_editor: whitespace-only VISUAL falls through, EDITOR used ─
@@ -1022,24 +1002,23 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn launch_editor_whitespace_only_visual_falls_through_to_editor() {
-        let _lock = ENV_LOCK.lock().unwrap();
-        let _guard = EnvGuard;
-        unsafe {
-            // Whitespace-only string is non-empty so it IS pushed as a
-            // candidate, but splitting on whitespace yields an empty parts
-            // vec, which triggers the `continue` branch.
-            std::env::set_var("VISUAL", "   ");
-            std::env::set_var("EDITOR", "/usr/bin/true");
-        }
-        let dir = std::env::temp_dir().join("lev-test-launch-editor-ws-visual");
-        let _ = std::fs::create_dir_all(&dir);
-        let file = dir.join("edit.txt");
-        std::fs::write(&file, "content").unwrap();
+        // Whitespace-only string is non-empty so it IS pushed as a
+        // candidate, but splitting on whitespace yields an empty parts
+        // vec, which triggers the `continue` branch.
+        temp_env::with_vars(
+            [("VISUAL", Some("   ")), ("EDITOR", Some("/usr/bin/true"))],
+            || {
+                let dir = std::env::temp_dir().join("lev-test-launch-editor-ws-visual");
+                let _ = std::fs::create_dir_all(&dir);
+                let file = dir.join("edit.txt");
+                std::fs::write(&file, "content").unwrap();
 
-        let result = launch_editor(&file);
-        assert_launch_ok(&result);
+                let result = launch_editor(&file);
+                assert_launch_ok(&result);
 
-        let _ = std::fs::remove_dir_all(&dir);
+                let _ = std::fs::remove_dir_all(&dir);
+            },
+        );
     }
 
     // ─── launch_editor_with: truly-empty VISUAL/EDITOR, injected (cross-platform) ─
@@ -1063,32 +1042,27 @@ mod tests {
     /// process without depending on what it actually does.
     #[test]
     fn launch_editor_with_empty_visual_and_editor_are_skipped() {
-        let _lock = ENV_LOCK.lock().unwrap();
-        let _guard = EnvGuard;
-        unsafe {
-            std::env::set_var("VISUAL", "");
-            std::env::set_var("EDITOR", "");
-        }
+        temp_env::with_vars([("VISUAL", Some("")), ("EDITOR", Some(""))], || {
+            let dir = std::env::temp_dir().join("lev-test-launch-editor-with-empty-skip");
+            let _ = std::fs::create_dir_all(&dir);
+            let file = dir.join("edit.txt");
+            std::fs::write(&file, "content").unwrap();
 
-        let dir = std::env::temp_dir().join("lev-test-launch-editor-with-empty-skip");
-        let _ = std::fs::create_dir_all(&dir);
-        let file = dir.join("edit.txt");
-        std::fs::write(&file, "content").unwrap();
+            let result = launch_editor_with(&file, &mut |_cmd| {
+                // Ignores the actual candidate `launch_editor_with` resolved to
+                // (the platform default, since VISUAL/EDITOR are both empty) and
+                // spawns the current test binary instead -- any exit status it
+                // produces (even a nonzero "unrecognized option" error) classifies
+                // as `Completed`.
+                std::process::Command::new(std::env::current_exe().unwrap())
+                    .arg("--this-flag-does-not-exist")
+                    .status()
+                    .map(|s| classify_editor_exit(s.success(), s.code()))
+            });
+            assert_launch_ok(&result);
 
-        let result = launch_editor_with(&file, &mut |_cmd| {
-            // Ignores the actual candidate `launch_editor_with` resolved to
-            // (the platform default, since VISUAL/EDITOR are both empty) and
-            // spawns the current test binary instead -- any exit status it
-            // produces (even a nonzero "unrecognized option" error) classifies
-            // as `Completed`.
-            std::process::Command::new(std::env::current_exe().unwrap())
-                .arg("--this-flag-does-not-exist")
-                .status()
-                .map(|s| classify_editor_exit(s.success(), s.code()))
+            let _ = std::fs::remove_dir_all(&dir);
         });
-        assert_launch_ok(&result);
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     // ─── launch_editor: truly-empty VISUAL/EDITOR are skipped entirely ────
@@ -1108,39 +1082,29 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn launch_editor_empty_visual_and_editor_are_skipped() {
-        let _lock = ENV_LOCK.lock().unwrap();
-        let _path_lock = crate::config::PATH_ENV_LOCK.lock().unwrap();
-        let _guard = EnvGuard;
+        temp_env::with_vars(
+            [
+                ("VISUAL", Some("")),
+                ("EDITOR", Some("")),
+                ("PATH", Some("/lev-definitely-empty-path-dir")),
+            ],
+            || {
+                let dir = std::env::temp_dir().join("lev-test-launch-editor-empty-visual-editor");
+                let _ = std::fs::create_dir_all(&dir);
+                let file = dir.join("edit.txt");
+                std::fs::write(&file, "content").unwrap();
 
-        struct PathGuard(std::ffi::OsString);
-        impl Drop for PathGuard {
-            fn drop(&mut self) {
-                unsafe {
-                    std::env::set_var("PATH", &self.0);
-                }
-            }
-        }
-        let _path_guard = PathGuard(std::env::var_os("PATH").unwrap_or_default());
+                // Neither empty var is pushed as a candidate, and PATH starvation
+                // means even the unix platform defaults (vim/nano/vi) fail to
+                // resolve -- so this deterministically reaches "no editor found"
+                // rather than ever spawning a real editor.
+                let result = launch_editor(&file);
+                assert!(result.is_err());
+                assert!(result.unwrap_err().to_string().contains("No editor found"));
 
-        unsafe {
-            std::env::set_var("VISUAL", "");
-            std::env::set_var("EDITOR", "");
-            std::env::set_var("PATH", "/lev-definitely-empty-path-dir");
-        }
-        let dir = std::env::temp_dir().join("lev-test-launch-editor-empty-visual-editor");
-        let _ = std::fs::create_dir_all(&dir);
-        let file = dir.join("edit.txt");
-        std::fs::write(&file, "content").unwrap();
-
-        // Neither empty var is pushed as a candidate, and PATH starvation
-        // means even the unix platform defaults (vim/nano/vi) fail to
-        // resolve -- so this deterministically reaches "no editor found"
-        // rather than ever spawning a real editor.
-        let result = launch_editor(&file);
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("No editor found"));
-
-        let _ = std::fs::remove_dir_all(&dir);
+                let _ = std::fs::remove_dir_all(&dir);
+            },
+        );
     }
 
     // ─── launch_editor: NotFound candidate is skipped, next one used ─────
@@ -1148,23 +1112,25 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn launch_editor_not_found_candidate_falls_through_to_next() {
-        let _lock = ENV_LOCK.lock().unwrap();
-        let _guard = EnvGuard;
-        unsafe {
-            // VISUAL points at a nonexistent binary, which should be
-            // skipped (NotFound branch, `continue`) in favor of EDITOR.
-            std::env::set_var("VISUAL", "lev-definitely-not-a-real-binary-xyz");
-            std::env::set_var("EDITOR", "/usr/bin/true");
-        }
-        let dir = std::env::temp_dir().join("lev-test-launch-editor-notfound");
-        let _ = std::fs::create_dir_all(&dir);
-        let file = dir.join("edit.txt");
-        std::fs::write(&file, "content").unwrap();
+        // VISUAL points at a nonexistent binary, which should be
+        // skipped (NotFound branch, `continue`) in favor of EDITOR.
+        temp_env::with_vars(
+            [
+                ("VISUAL", Some("lev-definitely-not-a-real-binary-xyz")),
+                ("EDITOR", Some("/usr/bin/true")),
+            ],
+            || {
+                let dir = std::env::temp_dir().join("lev-test-launch-editor-notfound");
+                let _ = std::fs::create_dir_all(&dir);
+                let file = dir.join("edit.txt");
+                std::fs::write(&file, "content").unwrap();
 
-        let result = launch_editor(&file);
-        assert_launch_ok(&result);
+                let result = launch_editor(&file);
+                assert_launch_ok(&result);
 
-        let _ = std::fs::remove_dir_all(&dir);
+                let _ = std::fs::remove_dir_all(&dir);
+            },
+        );
     }
 
     // ─── launch_editor: non-NotFound spawn error propagates ──────────────
@@ -1172,8 +1138,6 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn launch_editor_permission_denied_returns_error() {
-        let _lock = ENV_LOCK.lock().unwrap();
-        let _guard = EnvGuard;
         use std::os::unix::fs::PermissionsExt;
 
         let dir = std::env::temp_dir().join("lev-test-launch-editor-perm-denied");
@@ -1188,20 +1152,22 @@ mod tests {
         perms.set_mode(0o600);
         std::fs::set_permissions(&not_executable, perms).unwrap();
 
-        unsafe {
-            std::env::set_var("VISUAL", &not_executable);
-        }
-        let file = dir.join("edit.txt");
-        std::fs::write(&file, "content").unwrap();
+        temp_env::with_vars(
+            [("VISUAL", Some(&not_executable)), ("EDITOR", None)],
+            || {
+                let file = dir.join("edit.txt");
+                std::fs::write(&file, "content").unwrap();
 
-        let result = launch_editor(&file);
-        assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("Failed to launch editor"));
+                let result = launch_editor(&file);
+                assert!(result.is_err());
+                assert!(result
+                    .unwrap_err()
+                    .to_string()
+                    .contains("Failed to launch editor"));
 
-        let _ = std::fs::remove_dir_all(&dir);
+                let _ = std::fs::remove_dir_all(&dir);
+            },
+        );
     }
 
     // ─── launch_editor_with: no candidate resolves (injected, cross-platform) ─
@@ -1248,44 +1214,28 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn launch_editor_no_editor_found_when_path_has_no_candidates() {
-        let _lock = ENV_LOCK.lock().unwrap();
-        // `PATH` is process-global; this also serializes against any other
-        // test in the crate (e.g. `dashboard::helpers`'s clipboard-fallback
-        // test) that mutates it, since `ENV_LOCK` here only covers
-        // VISUAL/EDITOR, not PATH.
-        let _path_lock = crate::config::PATH_ENV_LOCK.lock().unwrap();
-        let _guard = EnvGuard;
+        // No VISUAL/EDITOR (both unset), and PATH points nowhere -- so even
+        // the unix platform-default candidates (vim/nano/vi) all fail to
+        // resolve.
+        temp_env::with_vars(
+            [
+                ("VISUAL", None),
+                ("EDITOR", None),
+                ("PATH", Some("/lev-definitely-empty-path-dir")),
+            ],
+            || {
+                let dir = std::env::temp_dir().join("lev-test-launch-editor-no-editor");
+                let _ = std::fs::create_dir_all(&dir);
+                let file = dir.join("edit.txt");
+                std::fs::write(&file, "content").unwrap();
 
-        /// Restores the real `PATH` on drop -- separate from `EnvGuard`
-        /// (which only handles `VISUAL`/`EDITOR`) since breaking `PATH` for
-        /// the rest of the test process would be far more disruptive than
-        /// leaving those two unset.
-        struct PathGuard(std::ffi::OsString);
-        impl Drop for PathGuard {
-            fn drop(&mut self) {
-                unsafe {
-                    std::env::set_var("PATH", &self.0);
-                }
-            }
-        }
-        let _path_guard = PathGuard(std::env::var_os("PATH").unwrap_or_default());
-        unsafe {
-            // No VISUAL/EDITOR (cleared by EnvGuard already), and PATH
-            // points nowhere -- so even the unix platform-default
-            // candidates (vim/nano/vi) all fail to resolve.
-            std::env::set_var("PATH", "/lev-definitely-empty-path-dir");
-        }
+                let result = launch_editor(&file);
+                assert!(result.is_err());
+                assert!(result.unwrap_err().to_string().contains("No editor found"));
 
-        let dir = std::env::temp_dir().join("lev-test-launch-editor-no-editor");
-        let _ = std::fs::create_dir_all(&dir);
-        let file = dir.join("edit.txt");
-        std::fs::write(&file, "content").unwrap();
-
-        let result = launch_editor(&file);
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("No editor found"));
-
-        let _ = std::fs::remove_dir_all(&dir);
+                let _ = std::fs::remove_dir_all(&dir);
+            },
+        );
     }
 
     // ─── launch_editor: Windows twin suite ────────────────────────────────
@@ -1331,156 +1281,154 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn launch_editor_visual_env_success() {
-        let _lock = ENV_LOCK.lock().unwrap();
-        let _guard = EnvGuard;
         let dir = std::env::temp_dir().join("lev-test-launch-editor-visual-win");
         let _ = std::fs::create_dir_all(&dir);
         let ok_bat = dir.join("ok.bat");
         write_bat(&ok_bat, "exit /b 0");
 
-        unsafe {
-            std::env::set_var("VISUAL", &ok_bat);
-            std::env::remove_var("EDITOR");
-        }
-        let file = dir.join("edit.txt");
-        std::fs::write(&file, "content").unwrap();
+        temp_env::with_vars([("VISUAL", Some(&ok_bat)), ("EDITOR", None)], || {
+            let file = dir.join("edit.txt");
+            std::fs::write(&file, "content").unwrap();
 
-        let result = launch_editor(&file);
-        assert_launch_ok(&result);
+            let result = launch_editor(&file);
+            assert_launch_ok(&result);
 
-        let _ = std::fs::remove_dir_all(&dir);
+            let _ = std::fs::remove_dir_all(&dir);
+        });
     }
 
     #[cfg(windows)]
     #[test]
     fn launch_editor_editor_env_success() {
-        let _lock = ENV_LOCK.lock().unwrap();
-        let _guard = EnvGuard;
         let dir = std::env::temp_dir().join("lev-test-launch-editor-editor-win");
         let _ = std::fs::create_dir_all(&dir);
         let ok_bat = dir.join("ok.bat");
         write_bat(&ok_bat, "exit /b 0");
 
-        unsafe {
-            std::env::remove_var("VISUAL");
-            std::env::set_var("EDITOR", &ok_bat);
-        }
-        let file = dir.join("edit.txt");
-        std::fs::write(&file, "content").unwrap();
+        temp_env::with_vars([("VISUAL", None), ("EDITOR", Some(&ok_bat))], || {
+            let file = dir.join("edit.txt");
+            std::fs::write(&file, "content").unwrap();
 
-        let result = launch_editor(&file);
-        assert_launch_ok(&result);
+            let result = launch_editor(&file);
+            assert_launch_ok(&result);
 
-        let _ = std::fs::remove_dir_all(&dir);
+            let _ = std::fs::remove_dir_all(&dir);
+        });
     }
 
     #[cfg(windows)]
     #[test]
     fn launch_editor_nonzero_exit_still_ok() {
-        let _lock = ENV_LOCK.lock().unwrap();
-        let _guard = EnvGuard;
         let dir = std::env::temp_dir().join("lev-test-launch-editor-nonzero-win");
         let _ = std::fs::create_dir_all(&dir);
         let fail_bat = dir.join("fail.bat");
         write_bat(&fail_bat, "exit /b 1");
 
-        unsafe {
-            std::env::set_var("VISUAL", &fail_bat);
-        }
-        let file = dir.join("edit.txt");
-        std::fs::write(&file, "content").unwrap();
+        temp_env::with_vars([("VISUAL", Some(&fail_bat)), ("EDITOR", None)], || {
+            let file = dir.join("edit.txt");
+            std::fs::write(&file, "content").unwrap();
 
-        // A non-zero-but-present exit code is treated as the user having
-        // closed the editor -- not an error.
-        let result = launch_editor(&file);
-        assert_launch_ok(&result);
+            // A non-zero-but-present exit code is treated as the user having
+            // closed the editor -- not an error.
+            let result = launch_editor(&file);
+            assert_launch_ok(&result);
 
-        let _ = std::fs::remove_dir_all(&dir);
+            let _ = std::fs::remove_dir_all(&dir);
+        });
     }
 
     #[cfg(windows)]
     #[test]
     fn launch_editor_command_with_flags_splits_correctly() {
-        let _lock = ENV_LOCK.lock().unwrap();
-        let _guard = EnvGuard;
         let dir = std::env::temp_dir().join("lev-test-launch-editor-flags-win");
         let _ = std::fs::create_dir_all(&dir);
         let ok_bat = dir.join("ok.bat");
         write_bat(&ok_bat, "exit /b 0");
 
-        unsafe {
-            // The batch file ignores all arguments, so appending a flag and
-            // the file path is harmless; this exercises the
-            // whitespace-splitting logic for editor strings like
-            // "code --wait".
-            std::env::set_var("VISUAL", format!("{} --some-flag", ok_bat.display()));
-        }
-        let file = dir.join("edit.txt");
-        std::fs::write(&file, "content").unwrap();
+        // The batch file ignores all arguments, so appending a flag and
+        // the file path is harmless; this exercises the
+        // whitespace-splitting logic for editor strings like
+        // "code --wait".
+        temp_env::with_vars(
+            [
+                ("VISUAL", Some(format!("{} --some-flag", ok_bat.display()))),
+                ("EDITOR", None),
+            ],
+            || {
+                let file = dir.join("edit.txt");
+                std::fs::write(&file, "content").unwrap();
 
-        let result = launch_editor(&file);
-        assert_launch_ok(&result);
+                let result = launch_editor(&file);
+                assert_launch_ok(&result);
 
-        let _ = std::fs::remove_dir_all(&dir);
+                let _ = std::fs::remove_dir_all(&dir);
+            },
+        );
     }
 
     #[cfg(windows)]
     #[test]
     fn launch_editor_whitespace_only_visual_falls_through_to_editor() {
-        let _lock = ENV_LOCK.lock().unwrap();
-        let _guard = EnvGuard;
         let dir = std::env::temp_dir().join("lev-test-launch-editor-ws-visual-win");
         let _ = std::fs::create_dir_all(&dir);
         let ok_bat = dir.join("ok.bat");
         write_bat(&ok_bat, "exit /b 0");
 
-        unsafe {
-            // Whitespace-only string is non-empty so it IS pushed as a
-            // candidate, but splitting on whitespace yields an empty parts
-            // vec, which triggers the `continue` branch.
-            std::env::set_var("VISUAL", "   ");
-            std::env::set_var("EDITOR", &ok_bat);
-        }
-        let file = dir.join("edit.txt");
-        std::fs::write(&file, "content").unwrap();
+        // Whitespace-only string is non-empty so it IS pushed as a
+        // candidate, but splitting on whitespace yields an empty parts
+        // vec, which triggers the `continue` branch.
+        temp_env::with_vars(
+            [
+                ("VISUAL", Some(std::ffi::OsString::from("   "))),
+                ("EDITOR", Some(ok_bat.clone().into_os_string())),
+            ],
+            || {
+                let file = dir.join("edit.txt");
+                std::fs::write(&file, "content").unwrap();
 
-        let result = launch_editor(&file);
-        assert_launch_ok(&result);
+                let result = launch_editor(&file);
+                assert_launch_ok(&result);
 
-        let _ = std::fs::remove_dir_all(&dir);
+                let _ = std::fs::remove_dir_all(&dir);
+            },
+        );
     }
 
     #[cfg(windows)]
     #[test]
     fn launch_editor_not_found_candidate_falls_through_to_next() {
-        let _lock = ENV_LOCK.lock().unwrap();
-        let _guard = EnvGuard;
         let dir = std::env::temp_dir().join("lev-test-launch-editor-notfound-win");
         let _ = std::fs::create_dir_all(&dir);
         let ok_bat = dir.join("ok.bat");
         write_bat(&ok_bat, "exit /b 0");
 
-        unsafe {
-            // VISUAL points at a nonexistent binary, which should be
-            // skipped (NotFound branch, `continue`) in favor of EDITOR.
-            std::env::set_var("VISUAL", "lev-definitely-not-a-real-binary-xyz");
-            std::env::set_var("EDITOR", &ok_bat);
-        }
-        let file = dir.join("edit.txt");
-        std::fs::write(&file, "content").unwrap();
+        // VISUAL points at a nonexistent binary, which should be
+        // skipped (NotFound branch, `continue`) in favor of EDITOR.
+        temp_env::with_vars(
+            [
+                (
+                    "VISUAL",
+                    Some(std::ffi::OsString::from(
+                        "lev-definitely-not-a-real-binary-xyz",
+                    )),
+                ),
+                ("EDITOR", Some(ok_bat.clone().into_os_string())),
+            ],
+            || {
+                let file = dir.join("edit.txt");
+                std::fs::write(&file, "content").unwrap();
 
-        let result = launch_editor(&file);
-        assert_launch_ok(&result);
+                let result = launch_editor(&file);
+                assert_launch_ok(&result);
 
-        let _ = std::fs::remove_dir_all(&dir);
+                let _ = std::fs::remove_dir_all(&dir);
+            },
+        );
     }
 
     #[cfg(windows)]
     #[test]
     fn launch_editor_permission_denied_returns_error() {
-        let _lock = ENV_LOCK.lock().unwrap();
-        let _guard = EnvGuard;
-
         let dir = std::env::temp_dir().join("lev-test-launch-editor-perm-denied-win");
         let _ = std::fs::create_dir_all(&dir);
         // A plain, non-executable text file: Windows' `CreateProcess` can't
@@ -1491,20 +1439,22 @@ mod tests {
         let not_executable = dir.join("not-executable.txt");
         std::fs::write(&not_executable, "not a script").unwrap();
 
-        unsafe {
-            std::env::set_var("VISUAL", &not_executable);
-        }
-        let file = dir.join("edit.txt");
-        std::fs::write(&file, "content").unwrap();
+        temp_env::with_vars(
+            [("VISUAL", Some(&not_executable)), ("EDITOR", None)],
+            || {
+                let file = dir.join("edit.txt");
+                std::fs::write(&file, "content").unwrap();
 
-        let result = launch_editor(&file);
-        assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("Failed to launch editor"));
+                let result = launch_editor(&file);
+                assert!(result.is_err());
+                assert!(result
+                    .unwrap_err()
+                    .to_string()
+                    .contains("Failed to launch editor"));
 
-        let _ = std::fs::remove_dir_all(&dir);
+                let _ = std::fs::remove_dir_all(&dir);
+            },
+        );
     }
 
     // ─── resolve_task_with: editor path (stdin is a TTY) ──────────────────
@@ -1512,8 +1462,6 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn resolve_task_with_editor_path_happy_case() {
-        let _lock = ENV_LOCK.lock().unwrap();
-        let _guard = EnvGuard;
         use std::os::unix::fs::PermissionsExt;
 
         // A tiny "editor" script that appends a non-comment line to
@@ -1531,35 +1479,32 @@ mod tests {
         perms.set_mode(0o700);
         std::fs::set_permissions(&script, perms).unwrap();
 
-        unsafe {
-            std::env::set_var("VISUAL", &script);
-        }
+        temp_env::with_vars([("VISUAL", Some(&script)), ("EDITOR", None)], || {
+            let result = resolve_task_with(
+                &None,
+                "test-agent",
+                Some("a non-empty description"),
+                &|| true,
+            );
+            assert_eq!(result.unwrap(), "task body from editor");
 
-        let result = resolve_task_with(
-            &None,
-            "test-agent",
-            Some("a non-empty description"),
-            &|| true,
-        );
-        assert_eq!(result.unwrap(), "task body from editor");
-
-        let _ = std::fs::remove_dir_all(&dir);
+            let _ = std::fs::remove_dir_all(&dir);
+        });
     }
 
     #[cfg(unix)]
     #[test]
     fn resolve_task_with_editor_path_empty_after_stripping_comments_errors() {
-        let _lock = ENV_LOCK.lock().unwrap();
-        let _guard = EnvGuard;
         // /usr/bin/true "opens" the file and does nothing to it, so only the
         // commented-out template remains -- stripped down to an empty task.
-        unsafe {
-            std::env::set_var("VISUAL", "/usr/bin/true");
-        }
-
-        let result = resolve_task_with(&None, "test-agent", None, &|| true);
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("Aborting run"));
+        temp_env::with_vars(
+            [("VISUAL", Some("/usr/bin/true")), ("EDITOR", None)],
+            || {
+                let result = resolve_task_with(&None, "test-agent", None, &|| true);
+                assert!(result.is_err());
+                assert!(result.unwrap_err().to_string().contains("Aborting run"));
+            },
+        );
     }
 
     // Same Windows PATH-starvation caveat as
@@ -1569,26 +1514,21 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn resolve_task_with_editor_path_propagates_launch_editor_error() {
-        let _lock = ENV_LOCK.lock().unwrap();
-        // See the comment in `launch_editor_no_editor_found_when_path_has_no_candidates`.
-        let _path_lock = crate::config::PATH_ENV_LOCK.lock().unwrap();
-        let _guard = EnvGuard;
-        struct PathGuard(std::ffi::OsString);
-        impl Drop for PathGuard {
-            fn drop(&mut self) {
-                unsafe {
-                    std::env::set_var("PATH", &self.0);
-                }
-            }
-        }
-        let _path_guard = PathGuard(std::env::var_os("PATH").unwrap_or_default());
-        unsafe {
-            std::env::set_var("PATH", "/lev-definitely-empty-path-dir");
-        }
-
-        let result = resolve_task_with(&None, "test-agent", None, &|| true);
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("No editor found"));
+        // No VISUAL/EDITOR (both unset), and PATH points nowhere -- so even
+        // the unix platform-default candidates (vim/nano/vi) all fail to
+        // resolve, propagating the "no editor found" error.
+        temp_env::with_vars(
+            [
+                ("VISUAL", None),
+                ("EDITOR", None),
+                ("PATH", Some("/lev-definitely-empty-path-dir")),
+            ],
+            || {
+                let result = resolve_task_with(&None, "test-agent", None, &|| true);
+                assert!(result.is_err());
+                assert!(result.unwrap_err().to_string().contains("No editor found"));
+            },
+        );
     }
 
     /// Shared stub editor-launcher used by both
@@ -1666,9 +1606,6 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn resolve_task_with_editor_path_happy_case() {
-        let _lock = ENV_LOCK.lock().unwrap();
-        let _guard = EnvGuard;
-
         // A tiny batch "editor" that appends a non-comment line to whatever
         // file it's invoked on (%~1) -- standing in for a real interactive
         // editor session. `%~1` strips any surrounding quotes Windows adds
@@ -1678,26 +1615,22 @@ mod tests {
         let script = dir.join("fake-editor.bat");
         write_bat(&script, "echo task body from editor>>\"%~1\"");
 
-        unsafe {
-            std::env::set_var("VISUAL", &script);
-        }
+        temp_env::with_vars([("VISUAL", Some(&script)), ("EDITOR", None)], || {
+            let result = resolve_task_with(
+                &None,
+                "test-agent",
+                Some("a non-empty description"),
+                &|| true,
+            );
+            assert_eq!(result.unwrap(), "task body from editor");
 
-        let result = resolve_task_with(
-            &None,
-            "test-agent",
-            Some("a non-empty description"),
-            &|| true,
-        );
-        assert_eq!(result.unwrap(), "task body from editor");
-
-        let _ = std::fs::remove_dir_all(&dir);
+            let _ = std::fs::remove_dir_all(&dir);
+        });
     }
 
     #[cfg(windows)]
     #[test]
     fn resolve_task_with_editor_path_empty_after_stripping_comments_errors() {
-        let _lock = ENV_LOCK.lock().unwrap();
-        let _guard = EnvGuard;
         // A no-op batch file "opens" the file and does nothing to it, so
         // only the commented-out template remains -- stripped down to an
         // empty task.
@@ -1706,15 +1639,13 @@ mod tests {
         let ok_bat = dir.join("ok.bat");
         write_bat(&ok_bat, "exit /b 0");
 
-        unsafe {
-            std::env::set_var("VISUAL", &ok_bat);
-        }
+        temp_env::with_vars([("VISUAL", Some(&ok_bat)), ("EDITOR", None)], || {
+            let result = resolve_task_with(&None, "test-agent", None, &|| true);
+            assert!(result.is_err());
+            assert!(result.unwrap_err().to_string().contains("Aborting run"));
 
-        let result = resolve_task_with(&None, "test-agent", None, &|| true);
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("Aborting run"));
-
-        let _ = std::fs::remove_dir_all(&dir);
+            let _ = std::fs::remove_dir_all(&dir);
+        });
     }
 
     // ─── build_task_template: description branch ──────────────────────────

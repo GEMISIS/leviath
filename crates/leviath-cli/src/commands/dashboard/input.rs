@@ -1388,25 +1388,28 @@ mod tests {
 
     #[test]
     fn cancel_from_list_waiting_agent_clears_interaction() {
-        let _guard = crate::runstate::isolate_runs_dir_for_test(
+        crate::runstate::with_isolated_runs_dir(
             "cancel_from_list_waiting_agent_clears_interaction",
+            |_d| {
+                let run_id = "test-cancel-list-waiting-clears";
+                std::fs::create_dir_all(crate::runstate::run_dir(run_id)).unwrap();
+                let req =
+                    crate::interaction::InteractionRequest::free_text("q1", "?", "main", true);
+                let _ = crate::interaction::write_request(run_id, &req);
+
+                let mut dash = make_test_dashboard();
+                let mut agent = make_test_agent(run_id, AgentDisplayStatus::Waiting);
+                agent.waiting_prompt = Some("?".to_string());
+                dash.agents.push(agent);
+                dash.update_display_indices();
+                dash.handle_key(key(KeyCode::Char('c')));
+
+                assert_cancelled(&dash.agents[0].status);
+                assert!(crate::interaction::read_request(run_id).is_none());
+
+                let _ = std::fs::remove_dir_all(crate::runstate::run_dir(run_id));
+            },
         );
-        let run_id = "test-cancel-list-waiting-clears";
-        std::fs::create_dir_all(crate::runstate::run_dir(run_id)).unwrap();
-        let req = crate::interaction::InteractionRequest::free_text("q1", "?", "main", true);
-        let _ = crate::interaction::write_request(run_id, &req);
-
-        let mut dash = make_test_dashboard();
-        let mut agent = make_test_agent(run_id, AgentDisplayStatus::Waiting);
-        agent.waiting_prompt = Some("?".to_string());
-        dash.agents.push(agent);
-        dash.update_display_indices();
-        dash.handle_key(key(KeyCode::Char('c')));
-
-        assert_cancelled(&dash.agents[0].status);
-        assert!(crate::interaction::read_request(run_id).is_none());
-
-        let _ = std::fs::remove_dir_all(crate::runstate::run_dir(run_id));
     }
 
     #[test]
@@ -1563,27 +1566,30 @@ mod tests {
 
     #[test]
     fn kill_from_detail_waiting_agent_clears_interaction() {
-        let _guard = crate::runstate::isolate_runs_dir_for_test(
+        crate::runstate::with_isolated_runs_dir(
             "kill_from_detail_waiting_agent_clears_interaction",
+            |_d| {
+                let run_id = "test-kill-waiting-clears";
+                std::fs::create_dir_all(crate::runstate::run_dir(run_id)).unwrap();
+                let req =
+                    crate::interaction::InteractionRequest::free_text("q1", "?", "main", true);
+                let _ = crate::interaction::write_request(run_id, &req);
+                assert!(crate::interaction::read_request(run_id).is_some());
+
+                let mut dash = make_test_dashboard();
+                let mut agent = make_test_agent(run_id, AgentDisplayStatus::Waiting);
+                agent.waiting_prompt = Some("?".to_string());
+                dash.agents.push(agent);
+                dash.update_display_indices();
+                dash.detail_view = true;
+                dash.handle_key(key(KeyCode::Char('k')));
+
+                assert_cancelled(&dash.agents[0].status);
+                assert!(crate::interaction::read_request(run_id).is_none());
+
+                let _ = std::fs::remove_dir_all(crate::runstate::run_dir(run_id));
+            },
         );
-        let run_id = "test-kill-waiting-clears";
-        std::fs::create_dir_all(crate::runstate::run_dir(run_id)).unwrap();
-        let req = crate::interaction::InteractionRequest::free_text("q1", "?", "main", true);
-        let _ = crate::interaction::write_request(run_id, &req);
-        assert!(crate::interaction::read_request(run_id).is_some());
-
-        let mut dash = make_test_dashboard();
-        let mut agent = make_test_agent(run_id, AgentDisplayStatus::Waiting);
-        agent.waiting_prompt = Some("?".to_string());
-        dash.agents.push(agent);
-        dash.update_display_indices();
-        dash.detail_view = true;
-        dash.handle_key(key(KeyCode::Char('k')));
-
-        assert_cancelled(&dash.agents[0].status);
-        assert!(crate::interaction::read_request(run_id).is_none());
-
-        let _ = std::fs::remove_dir_all(crate::runstate::run_dir(run_id));
     }
 
     // ─── detail view: search n/N ──────────────────────────────────────────
@@ -2278,26 +2284,26 @@ mod tests {
         // `make_test_dashboard`; the native-tool-vs-OSC52 branches live in
         // `helpers::yank_to_clipboard_via`'s own tests, and the real OSC52
         // write in `leviath_sys::tty`.)
-        let _guard =
-            crate::runstate::isolate_runs_dir_for_test("yank_with_real_content_reports_success");
-        let run_id = "test-yank-real-content";
-        crate::runstate::append_stage_output(run_id, 0, "some real output");
+        crate::runstate::with_isolated_runs_dir("yank_with_real_content_reports_success", |_d| {
+            let run_id = "test-yank-real-content";
+            crate::runstate::append_stage_output(run_id, 0, "some real output");
 
-        let mut dash = make_test_dashboard();
-        let agent = make_test_agent(run_id, AgentDisplayStatus::Active);
-        dash.agents.push(agent);
-        dash.update_display_indices();
-        dash.detail_view = true;
-        dash.stage_content_mode = StageContentMode::Output;
+            let mut dash = make_test_dashboard();
+            let agent = make_test_agent(run_id, AgentDisplayStatus::Active);
+            dash.agents.push(agent);
+            dash.update_display_indices();
+            dash.detail_view = true;
+            dash.stage_content_mode = StageContentMode::Output;
 
-        dash.handle_yank_with_fn(|_| true);
+            dash.handle_yank_with_fn(|_| true);
 
-        assert!(dash
-            .toasts
-            .iter()
-            .any(|t| t.message.contains("yanked to clipboard")));
+            assert!(dash
+                .toasts
+                .iter()
+                .any(|t| t.message.contains("yanked to clipboard")));
 
-        let _ = std::fs::remove_dir_all(crate::runstate::run_dir(run_id));
+            let _ = std::fs::remove_dir_all(crate::runstate::run_dir(run_id));
+        });
     }
 
     #[test]
@@ -2357,32 +2363,32 @@ mod tests {
 
     #[test]
     fn input_mode_multiple_choice_enter_submits() {
-        let _guard =
-            crate::runstate::isolate_runs_dir_for_test("input_mode_multiple_choice_enter_submits");
-        let run_id = format!("test-mc-enter-{}", std::process::id());
-        let mut dash = make_test_dashboard();
-        let mut agent = make_test_agent(&run_id, AgentDisplayStatus::Waiting);
-        agent.pending_request = Some(crate::interaction::InteractionRequest::multiple_choice(
-            "mc1",
-            "Pick",
-            vec!["A".into(), "B".into()],
-            "main",
-        ));
-        agent.waiting_prompt = Some("Pick".to_string());
-        dash.agents.push(agent);
-        dash.update_display_indices();
-        dash.detail_view = true;
-        dash.input_mode = true;
-        dash.choice_selected = 0;
+        crate::runstate::with_isolated_runs_dir("input_mode_multiple_choice_enter_submits", |_d| {
+            let run_id = format!("test-mc-enter-{}", std::process::id());
+            let mut dash = make_test_dashboard();
+            let mut agent = make_test_agent(&run_id, AgentDisplayStatus::Waiting);
+            agent.pending_request = Some(crate::interaction::InteractionRequest::multiple_choice(
+                "mc1",
+                "Pick",
+                vec!["A".into(), "B".into()],
+                "main",
+            ));
+            agent.waiting_prompt = Some("Pick".to_string());
+            dash.agents.push(agent);
+            dash.update_display_indices();
+            dash.detail_view = true;
+            dash.input_mode = true;
+            dash.choice_selected = 0;
 
-        // Ensure the run directory exists so write_response succeeds
-        let _ = std::fs::create_dir_all(crate::runstate::run_dir(&run_id));
+            // Ensure the run directory exists so write_response succeeds
+            let _ = std::fs::create_dir_all(crate::runstate::run_dir(&run_id));
 
-        dash.handle_key(key(KeyCode::Enter));
-        assert!(!dash.input_mode);
-        assert!(dash.log.iter().any(|e| e.message.contains("A")));
+            dash.handle_key(key(KeyCode::Enter));
+            assert!(!dash.input_mode);
+            assert!(dash.log.iter().any(|e| e.message.contains("A")));
 
-        let _ = std::fs::remove_dir_all(crate::runstate::run_dir(&run_id));
+            let _ = std::fs::remove_dir_all(crate::runstate::run_dir(&run_id));
+        });
     }
 
     // ─── Multiple events processed in sequence ────────────────────────────
@@ -2820,30 +2826,32 @@ mod tests {
 
     #[test]
     fn yank_clipboard_unavailable_shows_error_toast() {
-        let _guard = crate::runstate::isolate_runs_dir_for_test(
+        crate::runstate::with_isolated_runs_dir(
             "yank_clipboard_unavailable_shows_error_toast",
+            |_d| {
+                use crate::runstate;
+                let run_id = "test-yank-clipboard-unavailable-x7z9";
+                let stage_path = runstate::stage_dir(run_id, 0);
+                std::fs::create_dir_all(&stage_path).ok();
+                std::fs::write(stage_path.join("context.json"), r#"{"test":true}"#).ok();
+
+                let mut dash = make_test_dashboard();
+                let agent = make_test_agent(run_id, AgentDisplayStatus::Active);
+                dash.agents.push(agent);
+                dash.update_display_indices();
+                dash.detail_view = true;
+                dash.stage_content_mode = StageContentMode::Context;
+                dash.selected_stage = 0;
+
+                dash.handle_yank_with_fn(|_| false);
+
+                assert!(dash
+                    .toasts
+                    .iter()
+                    .any(|t| t.message.contains("Clipboard unavailable")));
+
+                let _ = std::fs::remove_dir_all(runstate::run_dir(run_id));
+            },
         );
-        use crate::runstate;
-        let run_id = "test-yank-clipboard-unavailable-x7z9";
-        let stage_path = runstate::stage_dir(run_id, 0);
-        std::fs::create_dir_all(&stage_path).ok();
-        std::fs::write(stage_path.join("context.json"), r#"{"test":true}"#).ok();
-
-        let mut dash = make_test_dashboard();
-        let agent = make_test_agent(run_id, AgentDisplayStatus::Active);
-        dash.agents.push(agent);
-        dash.update_display_indices();
-        dash.detail_view = true;
-        dash.stage_content_mode = StageContentMode::Context;
-        dash.selected_stage = 0;
-
-        dash.handle_yank_with_fn(|_| false);
-
-        assert!(dash
-            .toasts
-            .iter()
-            .any(|t| t.message.contains("Clipboard unavailable")));
-
-        let _ = std::fs::remove_dir_all(runstate::run_dir(run_id));
     }
 }

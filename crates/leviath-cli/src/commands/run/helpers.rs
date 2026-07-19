@@ -1036,21 +1036,23 @@ mod tests {
 
     #[test]
     fn record_stage_output_and_log_write_through_to_runstate() {
-        let _guard = crate::runstate::isolate_runs_dir_for_test(
+        crate::runstate::with_isolated_runs_dir(
             "record_stage_output_and_log_write_through_to_runstate",
+            |_d| {
+                let run_id = "test-helpers-record-stage";
+                let dir = runstate::run_dir(run_id);
+                let _ = std::fs::create_dir_all(&dir);
+
+                record_stage_output(run_id, 0, "some output line");
+                record_stage_log(run_id, 0, "some log line");
+
+                let output = runstate::tail_stage_output(run_id, 0, 65536);
+                let log = runstate::tail_stage_log(run_id, 0, 65536);
+                assert!(output.contains("some output line"));
+                assert!(log.contains("some log line"));
+
+                let _ = std::fs::remove_dir_all(&dir);
+            },
         );
-        let run_id = "test-helpers-record-stage";
-        let dir = runstate::run_dir(run_id);
-        let _ = std::fs::create_dir_all(&dir);
-
-        record_stage_output(run_id, 0, "some output line");
-        record_stage_log(run_id, 0, "some log line");
-
-        let output = runstate::tail_stage_output(run_id, 0, 65536);
-        let log = runstate::tail_stage_log(run_id, 0, 65536);
-        assert!(output.contains("some output line"));
-        assert!(log.contains("some log line"));
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 }

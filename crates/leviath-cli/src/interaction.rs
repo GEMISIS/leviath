@@ -532,27 +532,27 @@ mod tests {
 
     #[test]
     fn poll_step_answer_when_matching_response() {
-        let _guard =
-            crate::runstate::isolate_runs_dir_for_test("poll_step_answer_when_matching_response");
-        let run_id = "poll-step-answer";
-        let dir = crate::runstate::run_dir(run_id);
-        std::fs::create_dir_all(&dir).unwrap();
+        crate::runstate::with_isolated_runs_dir("poll_step_answer_when_matching_response", |_d| {
+            let run_id = "poll-step-answer";
+            let dir = crate::runstate::run_dir(run_id);
+            std::fs::create_dir_all(&dir).unwrap();
 
-        write_response(run_id, &InteractionResponse::text("req-A", "the answer")).unwrap();
+            write_response(run_id, &InteractionResponse::text("req-A", "the answer")).unwrap();
 
-        let (tag, resp) = poll_step(
-            run_id,
-            "req-A",
-            Instant::now(),
-            Some(Duration::from_secs(60)),
-        )
-        .parts();
-        assert_eq!(tag, "answer");
-        assert_eq!(resp.unwrap().value.as_deref(), Some("the answer"));
-        // The response file was consumed by take_response.
-        assert!(take_response(run_id).is_none());
+            let (tag, resp) = poll_step(
+                run_id,
+                "req-A",
+                Instant::now(),
+                Some(Duration::from_secs(60)),
+            )
+            .parts();
+            assert_eq!(tag, "answer");
+            assert_eq!(resp.unwrap().value.as_deref(), Some("the answer"));
+            // The response file was consumed by take_response.
+            assert!(take_response(run_id).is_none());
 
-        let _ = std::fs::remove_dir_all(&dir);
+            let _ = std::fs::remove_dir_all(&dir);
+        });
     }
 
     #[test]
@@ -560,249 +560,269 @@ mod tests {
         // An empty `request_id` short-circuits the staleness check (the
         // `!resp.request_id.is_empty()` operand is false), so the response is
         // accepted even though it doesn't equal `req_id`.
-        let _guard = crate::runstate::isolate_runs_dir_for_test(
+        crate::runstate::with_isolated_runs_dir(
             "poll_step_answer_when_response_has_empty_request_id",
+            |_d| {
+                let run_id = "poll-step-answer-empty-id";
+                let dir = crate::runstate::run_dir(run_id);
+                std::fs::create_dir_all(&dir).unwrap();
+
+                write_response(run_id, &InteractionResponse::text("", "empty-id answer")).unwrap();
+
+                let (tag, resp) = poll_step(
+                    run_id,
+                    "req-A",
+                    Instant::now(),
+                    Some(Duration::from_secs(60)),
+                )
+                .parts();
+                assert_eq!(tag, "answer");
+                assert_eq!(resp.unwrap().value.as_deref(), Some("empty-id answer"));
+
+                let _ = std::fs::remove_dir_all(&dir);
+            },
         );
-        let run_id = "poll-step-answer-empty-id";
-        let dir = crate::runstate::run_dir(run_id);
-        std::fs::create_dir_all(&dir).unwrap();
-
-        write_response(run_id, &InteractionResponse::text("", "empty-id answer")).unwrap();
-
-        let (tag, resp) = poll_step(
-            run_id,
-            "req-A",
-            Instant::now(),
-            Some(Duration::from_secs(60)),
-        )
-        .parts();
-        assert_eq!(tag, "answer");
-        assert_eq!(resp.unwrap().value.as_deref(), Some("empty-id answer"));
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn poll_step_keep_waiting_when_stale_response() {
         // A response whose request_id differs is stale: discarded (consumed off
         // disk) and reported as KeepWaiting.
-        let _guard = crate::runstate::isolate_runs_dir_for_test(
+        crate::runstate::with_isolated_runs_dir(
             "poll_step_keep_waiting_when_stale_response",
+            |_d| {
+                let run_id = "poll-step-stale";
+                let dir = crate::runstate::run_dir(run_id);
+                std::fs::create_dir_all(&dir).unwrap();
+
+                write_response(run_id, &InteractionResponse::text("other-req", "stale")).unwrap();
+
+                let (tag, resp) = poll_step(
+                    run_id,
+                    "req-A",
+                    Instant::now(),
+                    Some(Duration::from_secs(60)),
+                )
+                .parts();
+                assert_eq!(tag, "keep_waiting");
+                assert!(resp.is_none());
+                // The stale response was consumed, so a follow-up poll sees nothing.
+                assert!(take_response(run_id).is_none());
+
+                let _ = std::fs::remove_dir_all(&dir);
+            },
         );
-        let run_id = "poll-step-stale";
-        let dir = crate::runstate::run_dir(run_id);
-        std::fs::create_dir_all(&dir).unwrap();
-
-        write_response(run_id, &InteractionResponse::text("other-req", "stale")).unwrap();
-
-        let (tag, resp) = poll_step(
-            run_id,
-            "req-A",
-            Instant::now(),
-            Some(Duration::from_secs(60)),
-        )
-        .parts();
-        assert_eq!(tag, "keep_waiting");
-        assert!(resp.is_none());
-        // The stale response was consumed, so a follow-up poll sees nothing.
-        assert!(take_response(run_id).is_none());
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn poll_step_keep_waiting_when_no_response_and_timeout_not_elapsed() {
         // No response on disk and the timeout hasn't elapsed → keep waiting.
         // Covers the `started.elapsed() >= t` FALSE branch.
-        let _guard = crate::runstate::isolate_runs_dir_for_test(
+        crate::runstate::with_isolated_runs_dir(
             "poll_step_keep_waiting_when_no_response_and_timeout_not_elapsed",
+            |_d| {
+                let run_id = "poll-step-no-response";
+                // Deliberately no dir/file: take_response returns None.
+                let (tag, resp) = poll_step(
+                    run_id,
+                    "req-A",
+                    Instant::now(),
+                    Some(Duration::from_secs(60)),
+                )
+                .parts();
+                assert_eq!(tag, "keep_waiting");
+                assert!(resp.is_none());
+            },
         );
-        let run_id = "poll-step-no-response";
-        // Deliberately no dir/file: take_response returns None.
-        let (tag, resp) = poll_step(
-            run_id,
-            "req-A",
-            Instant::now(),
-            Some(Duration::from_secs(60)),
-        )
-        .parts();
-        assert_eq!(tag, "keep_waiting");
-        assert!(resp.is_none());
     }
 
     #[test]
     fn poll_step_keep_waiting_when_no_response_and_no_timeout() {
         // `timeout == None` (wait indefinitely) with no response → keep waiting;
         // covers the `if let Some(t) = timeout` None arm.
-        let _guard = crate::runstate::isolate_runs_dir_for_test(
+        crate::runstate::with_isolated_runs_dir(
             "poll_step_keep_waiting_when_no_response_and_no_timeout",
+            |_d| {
+                let run_id = "poll-step-no-timeout";
+                let (tag, _resp) = poll_step(run_id, "req-A", Instant::now(), None).parts();
+                assert_eq!(tag, "keep_waiting");
+            },
         );
-        let run_id = "poll-step-no-timeout";
-        let (tag, _resp) = poll_step(run_id, "req-A", Instant::now(), None).parts();
-        assert_eq!(tag, "keep_waiting");
     }
 
     #[test]
     fn poll_step_timed_out_when_elapsed() {
         // No response and `started` far enough in the past that
         // `started.elapsed() >= timeout` is deterministically true — no sleeping.
-        let _guard = crate::runstate::isolate_runs_dir_for_test("poll_step_timed_out_when_elapsed");
-        let run_id = "poll-step-timeout";
-        let timeout = Duration::from_millis(50);
-        let started = Instant::now() - Duration::from_millis(500);
-        let (tag, resp) = poll_step(run_id, "req-A", started, Some(timeout)).parts();
-        assert_eq!(tag, "timed_out");
-        assert!(resp.is_none());
+        crate::runstate::with_isolated_runs_dir("poll_step_timed_out_when_elapsed", |_d| {
+            let run_id = "poll-step-timeout";
+            let timeout = Duration::from_millis(50);
+            let started = Instant::now() - Duration::from_millis(500);
+            let (tag, resp) = poll_step(run_id, "req-A", started, Some(timeout)).parts();
+            assert_eq!(tag, "timed_out");
+            assert!(resp.is_none());
+        });
     }
 
     // ─── File I/O roundtrip (write_request, read_request, etc.) ────────────
 
     #[test]
     fn test_write_and_read_request() {
-        let _guard = crate::runstate::isolate_runs_dir_for_test("test_write_and_read_request");
-        let run_id = "test-interaction-rw-req";
-        let dir = crate::runstate::run_dir(run_id);
-        std::fs::create_dir_all(&dir).unwrap();
+        crate::runstate::with_isolated_runs_dir("test_write_and_read_request", |_d| {
+            let run_id = "test-interaction-rw-req";
+            let dir = crate::runstate::run_dir(run_id);
+            std::fs::create_dir_all(&dir).unwrap();
 
-        let req = InteractionRequest::free_text("rw1", "What now?", "plan", true);
-        write_request(run_id, &req).unwrap();
+            let req = InteractionRequest::free_text("rw1", "What now?", "plan", true);
+            write_request(run_id, &req).unwrap();
 
-        let back = read_request(run_id);
-        assert!(back.is_some());
-        let back = back.unwrap();
-        assert_eq!(back.id, "rw1");
-        assert_eq!(back.prompt, "What now?");
-        assert_eq!(back.kind, InteractionKind::FreeText);
+            let back = read_request(run_id);
+            assert!(back.is_some());
+            let back = back.unwrap();
+            assert_eq!(back.id, "rw1");
+            assert_eq!(back.prompt, "What now?");
+            assert_eq!(back.kind, InteractionKind::FreeText);
 
-        let _ = std::fs::remove_dir_all(crate::runstate::run_dir(run_id));
+            let _ = std::fs::remove_dir_all(crate::runstate::run_dir(run_id));
+        });
     }
 
     #[test]
     fn test_write_request_rename_fails_when_target_is_a_directory() {
-        let _guard = crate::runstate::isolate_runs_dir_for_test(
+        crate::runstate::with_isolated_runs_dir(
             "test_write_request_rename_fails_when_target_is_a_directory",
+            |_d| {
+                let run_id = "test-write-request-target-is-dir";
+                let dir = crate::runstate::run_dir(run_id);
+                std::fs::create_dir_all(&dir).unwrap();
+                // Pre-create the target path as a directory: the tmp-file write
+                // succeeds, but `fs::rename` onto an existing directory fails,
+                // exercising `write_request`'s rename `?`.
+                std::fs::create_dir_all(pending_path(run_id)).unwrap();
+
+                let req = InteractionRequest::free_text("rw1", "What now?", "plan", true);
+                let result = write_request(run_id, &req);
+                assert!(result.is_err());
+
+                let _ = std::fs::remove_dir_all(&dir);
+            },
         );
-        let run_id = "test-write-request-target-is-dir";
-        let dir = crate::runstate::run_dir(run_id);
-        std::fs::create_dir_all(&dir).unwrap();
-        // Pre-create the target path as a directory: the tmp-file write
-        // succeeds, but `fs::rename` onto an existing directory fails,
-        // exercising `write_request`'s rename `?`.
-        std::fs::create_dir_all(pending_path(run_id)).unwrap();
-
-        let req = InteractionRequest::free_text("rw1", "What now?", "plan", true);
-        let result = write_request(run_id, &req);
-        assert!(result.is_err());
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn test_write_request_tmp_write_fails_when_target_is_a_directory() {
-        let _guard = crate::runstate::isolate_runs_dir_for_test(
+        crate::runstate::with_isolated_runs_dir(
             "test_write_request_tmp_write_fails_when_target_is_a_directory",
+            |_d| {
+                let run_id = "test-write-request-tmp-is-dir";
+                let dir = crate::runstate::run_dir(run_id);
+                std::fs::create_dir_all(&dir).unwrap();
+                // Pre-create the *tmp* path (not the final path, covered by
+                // `test_write_request_rename_fails_when_target_is_a_directory` above)
+                // as a directory: `std::fs::write(&tmp, &json)` itself fails with
+                // EISDIR before `fs::rename` is ever reached, exercising
+                // `write_request`'s tmp-file-write `?` -- a distinct branch from the
+                // rename failure, since a well-formed JSON body is never itself
+                // capable of making `serde_json::to_string_pretty` fail.
+                std::fs::create_dir_all(pending_path(run_id).with_extension("json.tmp")).unwrap();
+
+                let req = InteractionRequest::free_text("rw1", "What now?", "plan", true);
+                let result = write_request(run_id, &req);
+                assert!(result.is_err());
+
+                let _ = std::fs::remove_dir_all(&dir);
+            },
         );
-        let run_id = "test-write-request-tmp-is-dir";
-        let dir = crate::runstate::run_dir(run_id);
-        std::fs::create_dir_all(&dir).unwrap();
-        // Pre-create the *tmp* path (not the final path, covered by
-        // `test_write_request_rename_fails_when_target_is_a_directory` above)
-        // as a directory: `std::fs::write(&tmp, &json)` itself fails with
-        // EISDIR before `fs::rename` is ever reached, exercising
-        // `write_request`'s tmp-file-write `?` -- a distinct branch from the
-        // rename failure, since a well-formed JSON body is never itself
-        // capable of making `serde_json::to_string_pretty` fail.
-        std::fs::create_dir_all(pending_path(run_id).with_extension("json.tmp")).unwrap();
-
-        let req = InteractionRequest::free_text("rw1", "What now?", "plan", true);
-        let result = write_request(run_id, &req);
-        assert!(result.is_err());
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn test_write_and_read_response() {
-        let _guard = crate::runstate::isolate_runs_dir_for_test("test_write_and_read_response");
-        let run_id = "test-interaction-rw-resp";
-        let dir = crate::runstate::run_dir(run_id);
-        std::fs::create_dir_all(&dir).unwrap();
+        crate::runstate::with_isolated_runs_dir("test_write_and_read_response", |_d| {
+            let run_id = "test-interaction-rw-resp";
+            let dir = crate::runstate::run_dir(run_id);
+            std::fs::create_dir_all(&dir).unwrap();
 
-        let resp = InteractionResponse::text("rw2", "my answer");
-        write_response(run_id, &resp).unwrap();
+            let resp = InteractionResponse::text("rw2", "my answer");
+            write_response(run_id, &resp).unwrap();
 
-        let back = take_response(run_id);
-        assert!(back.is_some());
-        let back = back.unwrap();
-        assert_eq!(back.request_id, "rw2");
-        assert_eq!(back.value.as_deref(), Some("my answer"));
+            let back = take_response(run_id);
+            assert!(back.is_some());
+            let back = back.unwrap();
+            assert_eq!(back.request_id, "rw2");
+            assert_eq!(back.value.as_deref(), Some("my answer"));
 
-        // take_response should have removed the file
-        assert!(take_response(run_id).is_none());
+            // take_response should have removed the file
+            assert!(take_response(run_id).is_none());
 
-        let _ = std::fs::remove_dir_all(crate::runstate::run_dir(run_id));
+            let _ = std::fs::remove_dir_all(crate::runstate::run_dir(run_id));
+        });
     }
 
     #[test]
     fn test_write_response_rename_fails_when_target_is_a_directory() {
-        let _guard = crate::runstate::isolate_runs_dir_for_test(
+        crate::runstate::with_isolated_runs_dir(
             "test_write_response_rename_fails_when_target_is_a_directory",
+            |_d| {
+                let run_id = "test-write-response-target-is-dir";
+                let dir = crate::runstate::run_dir(run_id);
+                std::fs::create_dir_all(&dir).unwrap();
+                // Pre-create the target path as a directory: the tmp-file write
+                // succeeds, but `fs::rename` onto an existing directory fails,
+                // exercising `write_response`'s rename `?`.
+                std::fs::create_dir_all(response_path(run_id)).unwrap();
+
+                let resp = InteractionResponse::text("rw2", "my answer");
+                let result = write_response(run_id, &resp);
+                assert!(result.is_err());
+
+                let _ = std::fs::remove_dir_all(&dir);
+            },
         );
-        let run_id = "test-write-response-target-is-dir";
-        let dir = crate::runstate::run_dir(run_id);
-        std::fs::create_dir_all(&dir).unwrap();
-        // Pre-create the target path as a directory: the tmp-file write
-        // succeeds, but `fs::rename` onto an existing directory fails,
-        // exercising `write_response`'s rename `?`.
-        std::fs::create_dir_all(response_path(run_id)).unwrap();
-
-        let resp = InteractionResponse::text("rw2", "my answer");
-        let result = write_response(run_id, &resp);
-        assert!(result.is_err());
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn test_write_response_tmp_write_fails_when_target_is_a_directory() {
-        let _guard = crate::runstate::isolate_runs_dir_for_test(
+        crate::runstate::with_isolated_runs_dir(
             "test_write_response_tmp_write_fails_when_target_is_a_directory",
+            |_d| {
+                let run_id = "test-write-response-tmp-is-dir";
+                let dir = crate::runstate::run_dir(run_id);
+                std::fs::create_dir_all(&dir).unwrap();
+                // See `test_write_request_tmp_write_fails_when_target_is_a_directory`
+                // -- same distinction, for `write_response`'s own tmp-file write.
+                std::fs::create_dir_all(response_path(run_id).with_extension("json.tmp")).unwrap();
+
+                let resp = InteractionResponse::text("rw2", "my answer");
+                let result = write_response(run_id, &resp);
+                assert!(result.is_err());
+
+                let _ = std::fs::remove_dir_all(&dir);
+            },
         );
-        let run_id = "test-write-response-tmp-is-dir";
-        let dir = crate::runstate::run_dir(run_id);
-        std::fs::create_dir_all(&dir).unwrap();
-        // See `test_write_request_tmp_write_fails_when_target_is_a_directory`
-        // -- same distinction, for `write_response`'s own tmp-file write.
-        std::fs::create_dir_all(response_path(run_id).with_extension("json.tmp")).unwrap();
-
-        let resp = InteractionResponse::text("rw2", "my answer");
-        let result = write_response(run_id, &resp);
-        assert!(result.is_err());
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn test_clear_interaction() {
-        let _guard = crate::runstate::isolate_runs_dir_for_test("test_clear_interaction");
-        let run_id = "test-interaction-clear";
-        let dir = crate::runstate::run_dir(run_id);
-        std::fs::create_dir_all(&dir).unwrap();
+        crate::runstate::with_isolated_runs_dir("test_clear_interaction", |_d| {
+            let run_id = "test-interaction-clear";
+            let dir = crate::runstate::run_dir(run_id);
+            std::fs::create_dir_all(&dir).unwrap();
 
-        let req = InteractionRequest::free_text("c1", "prompt", "stage", true);
-        write_request(run_id, &req).unwrap();
-        let resp = InteractionResponse::text("c1", "answer");
-        write_response(run_id, &resp).unwrap();
+            let req = InteractionRequest::free_text("c1", "prompt", "stage", true);
+            write_request(run_id, &req).unwrap();
+            let resp = InteractionResponse::text("c1", "answer");
+            write_response(run_id, &resp).unwrap();
 
-        assert!(pending_path(run_id).exists());
-        assert!(response_path(run_id).exists());
+            assert!(pending_path(run_id).exists());
+            assert!(response_path(run_id).exists());
 
-        clear_interaction(run_id);
+            clear_interaction(run_id);
 
-        assert!(!pending_path(run_id).exists());
-        assert!(!response_path(run_id).exists());
+            assert!(!pending_path(run_id).exists());
+            assert!(!response_path(run_id).exists());
 
-        let _ = std::fs::remove_dir_all(crate::runstate::run_dir(run_id));
+            let _ = std::fs::remove_dir_all(crate::runstate::run_dir(run_id));
+        });
     }
 
     #[test]
@@ -835,129 +855,132 @@ mod tests {
 
     #[test]
     fn test_write_read_request_tool_approval() {
-        let _guard =
-            crate::runstate::isolate_runs_dir_for_test("test_write_read_request_tool_approval");
-        let run_id = "test-interaction-rw-ta";
-        let dir = crate::runstate::run_dir(run_id);
-        std::fs::create_dir_all(&dir).unwrap();
+        crate::runstate::with_isolated_runs_dir("test_write_read_request_tool_approval", |_d| {
+            let run_id = "test-interaction-rw-ta";
+            let dir = crate::runstate::run_dir(run_id);
+            std::fs::create_dir_all(&dir).unwrap();
 
-        let req = InteractionRequest::tool_approval(
-            "ta1",
-            "bash",
-            serde_json::json!({"command": "rm -rf /", "cwd": "/tmp"}),
-            "code",
-        );
-        write_request(run_id, &req).unwrap();
+            let req = InteractionRequest::tool_approval(
+                "ta1",
+                "bash",
+                serde_json::json!({"command": "rm -rf /", "cwd": "/tmp"}),
+                "code",
+            );
+            write_request(run_id, &req).unwrap();
 
-        let back = read_request(run_id).unwrap();
-        assert_eq!(back.kind, InteractionKind::ToolApproval);
-        assert_eq!(back.tool_name.as_deref(), Some("bash"));
-        assert!(back.tool_arguments.is_some());
-        assert_eq!(back.options.len(), 3);
+            let back = read_request(run_id).unwrap();
+            assert_eq!(back.kind, InteractionKind::ToolApproval);
+            assert_eq!(back.tool_name.as_deref(), Some("bash"));
+            assert!(back.tool_arguments.is_some());
+            assert_eq!(back.options.len(), 3);
 
-        let _ = std::fs::remove_dir_all(crate::runstate::run_dir(run_id));
+            let _ = std::fs::remove_dir_all(crate::runstate::run_dir(run_id));
+        });
     }
 
     #[test]
     fn test_write_read_request_multiple_choice() {
-        let _guard =
-            crate::runstate::isolate_runs_dir_for_test("test_write_read_request_multiple_choice");
-        let run_id = "test-interaction-rw-mc";
-        let dir = crate::runstate::run_dir(run_id);
-        std::fs::create_dir_all(&dir).unwrap();
+        crate::runstate::with_isolated_runs_dir("test_write_read_request_multiple_choice", |_d| {
+            let run_id = "test-interaction-rw-mc";
+            let dir = crate::runstate::run_dir(run_id);
+            std::fs::create_dir_all(&dir).unwrap();
 
-        let req = InteractionRequest::multiple_choice(
-            "mc1",
-            "Pick approach",
-            vec!["Fast".into(), "Thorough".into(), "Cancel".into()],
-            "plan",
-        );
-        write_request(run_id, &req).unwrap();
+            let req = InteractionRequest::multiple_choice(
+                "mc1",
+                "Pick approach",
+                vec!["Fast".into(), "Thorough".into(), "Cancel".into()],
+                "plan",
+            );
+            write_request(run_id, &req).unwrap();
 
-        let back = read_request(run_id).unwrap();
-        assert_eq!(back.kind, InteractionKind::MultipleChoice);
-        assert_eq!(back.options.len(), 3);
-        assert_eq!(back.options[0], "Fast");
+            let back = read_request(run_id).unwrap();
+            assert_eq!(back.kind, InteractionKind::MultipleChoice);
+            assert_eq!(back.options.len(), 3);
+            assert_eq!(back.options[0], "Fast");
 
-        let _ = std::fs::remove_dir_all(crate::runstate::run_dir(run_id));
+            let _ = std::fs::remove_dir_all(crate::runstate::run_dir(run_id));
+        });
     }
 
     #[test]
     fn test_write_read_request_confirm() {
-        let _guard = crate::runstate::isolate_runs_dir_for_test("test_write_read_request_confirm");
-        let run_id = "test-interaction-rw-confirm";
-        let dir = crate::runstate::run_dir(run_id);
-        std::fs::create_dir_all(&dir).unwrap();
+        crate::runstate::with_isolated_runs_dir("test_write_read_request_confirm", |_d| {
+            let run_id = "test-interaction-rw-confirm";
+            let dir = crate::runstate::run_dir(run_id);
+            std::fs::create_dir_all(&dir).unwrap();
 
-        let req = InteractionRequest::confirm("cf1", "Deploy to prod?", "deploy");
-        write_request(run_id, &req).unwrap();
+            let req = InteractionRequest::confirm("cf1", "Deploy to prod?", "deploy");
+            write_request(run_id, &req).unwrap();
 
-        let back = read_request(run_id).unwrap();
-        assert_eq!(back.kind, InteractionKind::Confirm);
-        assert_eq!(back.options, vec!["Yes", "No"]);
+            let back = read_request(run_id).unwrap();
+            assert_eq!(back.kind, InteractionKind::Confirm);
+            assert_eq!(back.options, vec!["Yes", "No"]);
 
-        let _ = std::fs::remove_dir_all(crate::runstate::run_dir(run_id));
+            let _ = std::fs::remove_dir_all(crate::runstate::run_dir(run_id));
+        });
     }
 
     #[test]
     fn test_write_read_request_review() {
-        let _guard = crate::runstate::isolate_runs_dir_for_test("test_write_read_request_review");
-        let run_id = "test-interaction-rw-review";
-        let dir = crate::runstate::run_dir(run_id);
-        std::fs::create_dir_all(&dir).unwrap();
+        crate::runstate::with_isolated_runs_dir("test_write_read_request_review", |_d| {
+            let run_id = "test-interaction-rw-review";
+            let dir = crate::runstate::run_dir(run_id);
+            std::fs::create_dir_all(&dir).unwrap();
 
-        let req = InteractionRequest::review(
-            "rev1",
-            "Architecture Review",
-            "# Architecture\n\n- Component A\n- Component B",
-            "plan",
-        );
-        write_request(run_id, &req).unwrap();
+            let req = InteractionRequest::review(
+                "rev1",
+                "Architecture Review",
+                "# Architecture\n\n- Component A\n- Component B",
+                "plan",
+            );
+            write_request(run_id, &req).unwrap();
 
-        let back = read_request(run_id).unwrap();
-        assert_eq!(back.body_format, BodyFormat::Markdown);
-        assert!(back.body.as_deref().unwrap().contains("Component A"));
+            let back = read_request(run_id).unwrap();
+            assert_eq!(back.body_format, BodyFormat::Markdown);
+            assert!(back.body.as_deref().unwrap().contains("Component A"));
 
-        let _ = std::fs::remove_dir_all(crate::runstate::run_dir(run_id));
+            let _ = std::fs::remove_dir_all(crate::runstate::run_dir(run_id));
+        });
     }
 
     // ─── write_response/take_response approval ────────────────────────────
 
     #[test]
     fn test_write_take_response_approval() {
-        let _guard =
-            crate::runstate::isolate_runs_dir_for_test("test_write_take_response_approval");
-        let run_id = "test-interaction-rw-approval";
-        let dir = crate::runstate::run_dir(run_id);
-        std::fs::create_dir_all(&dir).unwrap();
+        crate::runstate::with_isolated_runs_dir("test_write_take_response_approval", |_d| {
+            let run_id = "test-interaction-rw-approval";
+            let dir = crate::runstate::run_dir(run_id);
+            std::fs::create_dir_all(&dir).unwrap();
 
-        let resp = InteractionResponse::approval("ap1", true, ApprovalScope::Session);
-        write_response(run_id, &resp).unwrap();
+            let resp = InteractionResponse::approval("ap1", true, ApprovalScope::Session);
+            write_response(run_id, &resp).unwrap();
 
-        let back = take_response(run_id).unwrap();
-        assert_eq!(back.approved, Some(true));
-        assert_eq!(back.scope, Some(ApprovalScope::Session));
+            let back = take_response(run_id).unwrap();
+            assert_eq!(back.approved, Some(true));
+            assert_eq!(back.scope, Some(ApprovalScope::Session));
 
-        // Should be consumed
-        assert!(take_response(run_id).is_none());
+            // Should be consumed
+            assert!(take_response(run_id).is_none());
 
-        let _ = std::fs::remove_dir_all(crate::runstate::run_dir(run_id));
+            let _ = std::fs::remove_dir_all(crate::runstate::run_dir(run_id));
+        });
     }
 
     #[test]
     fn test_write_take_response_choice() {
-        let _guard = crate::runstate::isolate_runs_dir_for_test("test_write_take_response_choice");
-        let run_id = "test-interaction-rw-choice";
-        let dir = crate::runstate::run_dir(run_id);
-        std::fs::create_dir_all(&dir).unwrap();
+        crate::runstate::with_isolated_runs_dir("test_write_take_response_choice", |_d| {
+            let run_id = "test-interaction-rw-choice";
+            let dir = crate::runstate::run_dir(run_id);
+            std::fs::create_dir_all(&dir).unwrap();
 
-        let resp = InteractionResponse::choice("ch1", 2);
-        write_response(run_id, &resp).unwrap();
+            let resp = InteractionResponse::choice("ch1", 2);
+            write_response(run_id, &resp).unwrap();
 
-        let back = take_response(run_id).unwrap();
-        assert_eq!(back.choice_index, Some(2));
+            let back = take_response(run_id).unwrap();
+            assert_eq!(back.choice_index, Some(2));
 
-        let _ = std::fs::remove_dir_all(crate::runstate::run_dir(run_id));
+            let _ = std::fs::remove_dir_all(crate::runstate::run_dir(run_id));
+        });
     }
 
     // ─── clear_interaction on nonexistent is safe ─────────────────────────
@@ -971,131 +994,141 @@ mod tests {
 
     #[test]
     fn test_write_read_response_choice_roundtrip() {
-        let _guard =
-            crate::runstate::isolate_runs_dir_for_test("test_write_read_response_choice_roundtrip");
-        let run_id = "test-interaction-rw-choice-rt";
-        let dir = crate::runstate::run_dir(run_id);
-        std::fs::create_dir_all(&dir).unwrap();
+        crate::runstate::with_isolated_runs_dir(
+            "test_write_read_response_choice_roundtrip",
+            |_d| {
+                let run_id = "test-interaction-rw-choice-rt";
+                let dir = crate::runstate::run_dir(run_id);
+                std::fs::create_dir_all(&dir).unwrap();
 
-        let resp = InteractionResponse::choice("ch-rt", 1);
-        write_response(run_id, &resp).unwrap();
+                let resp = InteractionResponse::choice("ch-rt", 1);
+                write_response(run_id, &resp).unwrap();
 
-        let back = take_response(run_id).unwrap();
-        assert_eq!(back.request_id, "ch-rt");
-        assert_eq!(back.choice_index, Some(1));
-        assert!(back.value.is_none());
+                let back = take_response(run_id).unwrap();
+                assert_eq!(back.request_id, "ch-rt");
+                assert_eq!(back.choice_index, Some(1));
+                assert!(back.value.is_none());
 
-        let _ = std::fs::remove_dir_all(dir);
+                let _ = std::fs::remove_dir_all(dir);
+            },
+        );
     }
 
     // ─── clear_interaction after only writing request ─────────────────────
 
     #[test]
     fn test_clear_interaction_only_request() {
-        let _guard =
-            crate::runstate::isolate_runs_dir_for_test("test_clear_interaction_only_request");
-        let run_id = "test-interaction-clear-req-only";
-        let dir = crate::runstate::run_dir(run_id);
-        std::fs::create_dir_all(&dir).unwrap();
+        crate::runstate::with_isolated_runs_dir("test_clear_interaction_only_request", |_d| {
+            let run_id = "test-interaction-clear-req-only";
+            let dir = crate::runstate::run_dir(run_id);
+            std::fs::create_dir_all(&dir).unwrap();
 
-        let req = InteractionRequest::free_text("cr1", "prompt", "stage", true);
-        write_request(run_id, &req).unwrap();
-        assert!(pending_path(run_id).exists());
+            let req = InteractionRequest::free_text("cr1", "prompt", "stage", true);
+            write_request(run_id, &req).unwrap();
+            assert!(pending_path(run_id).exists());
 
-        clear_interaction(run_id);
-        assert!(!pending_path(run_id).exists());
-        assert!(!response_path(run_id).exists());
+            clear_interaction(run_id);
+            assert!(!pending_path(run_id).exists());
+            assert!(!response_path(run_id).exists());
 
-        let _ = std::fs::remove_dir_all(dir);
+            let _ = std::fs::remove_dir_all(dir);
+        });
     }
 
     // ─── read_request returns None for corrupted JSON ─────────────────────
 
     #[test]
     fn test_read_request_corrupted_json_returns_none() {
-        let _guard = crate::runstate::isolate_runs_dir_for_test(
+        crate::runstate::with_isolated_runs_dir(
             "test_read_request_corrupted_json_returns_none",
+            |_d| {
+                let run_id = "test-interaction-corrupt-req";
+                let dir = crate::runstate::run_dir(run_id);
+                std::fs::create_dir_all(&dir).unwrap();
+
+                std::fs::write(pending_path(run_id), "not valid json {{{").unwrap();
+                assert!(read_request(run_id).is_none());
+
+                let _ = std::fs::remove_dir_all(dir);
+            },
         );
-        let run_id = "test-interaction-corrupt-req";
-        let dir = crate::runstate::run_dir(run_id);
-        std::fs::create_dir_all(&dir).unwrap();
-
-        std::fs::write(pending_path(run_id), "not valid json {{{").unwrap();
-        assert!(read_request(run_id).is_none());
-
-        let _ = std::fs::remove_dir_all(dir);
     }
 
     // ─── take_response returns None for corrupted JSON ────────────────────
 
     #[test]
     fn test_take_response_corrupted_json_returns_none() {
-        let _guard = crate::runstate::isolate_runs_dir_for_test(
+        crate::runstate::with_isolated_runs_dir(
             "test_take_response_corrupted_json_returns_none",
+            |_d| {
+                let run_id = "test-interaction-corrupt-resp";
+                let dir = crate::runstate::run_dir(run_id);
+                std::fs::create_dir_all(&dir).unwrap();
+
+                std::fs::write(response_path(run_id), "garbage").unwrap();
+                assert!(take_response(run_id).is_none());
+
+                let _ = std::fs::remove_dir_all(dir);
+            },
         );
-        let run_id = "test-interaction-corrupt-resp";
-        let dir = crate::runstate::run_dir(run_id);
-        std::fs::create_dir_all(&dir).unwrap();
-
-        std::fs::write(response_path(run_id), "garbage").unwrap();
-        assert!(take_response(run_id).is_none());
-
-        let _ = std::fs::remove_dir_all(dir);
     }
 
     // ─── request_id matching in write/read ─────────────────────────────────
 
     #[test]
     fn test_request_id_preserved_through_write_read() {
-        let _guard = crate::runstate::isolate_runs_dir_for_test(
+        crate::runstate::with_isolated_runs_dir(
             "test_request_id_preserved_through_write_read",
+            |_d| {
+                let run_id = "test-interaction-reqid";
+                let dir = crate::runstate::run_dir(run_id);
+                std::fs::create_dir_all(&dir).unwrap();
+
+                let req = InteractionRequest::tool_approval(
+                    "unique-req-42",
+                    "write_file",
+                    serde_json::json!({"path": "/tmp/foo"}),
+                    "code",
+                );
+                write_request(run_id, &req).unwrap();
+
+                let back = read_request(run_id).unwrap();
+                assert_eq!(back.id, "unique-req-42");
+
+                // Write response with matching request_id
+                let resp =
+                    InteractionResponse::approval("unique-req-42", true, ApprovalScope::Once);
+                write_response(run_id, &resp).unwrap();
+
+                let back_resp = take_response(run_id).unwrap();
+                assert_eq!(back_resp.request_id, "unique-req-42");
+
+                let _ = std::fs::remove_dir_all(dir);
+            },
         );
-        let run_id = "test-interaction-reqid";
-        let dir = crate::runstate::run_dir(run_id);
-        std::fs::create_dir_all(&dir).unwrap();
-
-        let req = InteractionRequest::tool_approval(
-            "unique-req-42",
-            "write_file",
-            serde_json::json!({"path": "/tmp/foo"}),
-            "code",
-        );
-        write_request(run_id, &req).unwrap();
-
-        let back = read_request(run_id).unwrap();
-        assert_eq!(back.id, "unique-req-42");
-
-        // Write response with matching request_id
-        let resp = InteractionResponse::approval("unique-req-42", true, ApprovalScope::Once);
-        write_response(run_id, &resp).unwrap();
-
-        let back_resp = take_response(run_id).unwrap();
-        assert_eq!(back_resp.request_id, "unique-req-42");
-
-        let _ = std::fs::remove_dir_all(dir);
     }
 
     // ─── Multiple write_request overwrites previous ───────────────────────
 
     #[test]
     fn test_write_request_overwrites_previous() {
-        let _guard =
-            crate::runstate::isolate_runs_dir_for_test("test_write_request_overwrites_previous");
-        let run_id = "test-interaction-overwrite";
-        let dir = crate::runstate::run_dir(run_id);
-        std::fs::create_dir_all(&dir).unwrap();
+        crate::runstate::with_isolated_runs_dir("test_write_request_overwrites_previous", |_d| {
+            let run_id = "test-interaction-overwrite";
+            let dir = crate::runstate::run_dir(run_id);
+            std::fs::create_dir_all(&dir).unwrap();
 
-        let req1 = InteractionRequest::free_text("first", "First?", "stage", true);
-        write_request(run_id, &req1).unwrap();
+            let req1 = InteractionRequest::free_text("first", "First?", "stage", true);
+            write_request(run_id, &req1).unwrap();
 
-        let req2 = InteractionRequest::free_text("second", "Second?", "stage", true);
-        write_request(run_id, &req2).unwrap();
+            let req2 = InteractionRequest::free_text("second", "Second?", "stage", true);
+            write_request(run_id, &req2).unwrap();
 
-        let back = read_request(run_id).unwrap();
-        assert_eq!(back.id, "second");
-        assert_eq!(back.prompt, "Second?");
+            let back = read_request(run_id).unwrap();
+            assert_eq!(back.id, "second");
+            assert_eq!(back.prompt, "Second?");
 
-        let _ = std::fs::remove_dir_all(dir);
+            let _ = std::fs::remove_dir_all(dir);
+        });
     }
 
     // ─── request_interaction (synchronous) ───────────────────────────────
@@ -1103,770 +1136,849 @@ mod tests {
 
     #[test]
     fn test_request_interaction_sync_success() {
-        let _guard =
-            crate::runstate::isolate_runs_dir_for_test("test_request_interaction_sync_success");
-        let run_id = "test-sync-request-ok";
-        let dir = crate::runstate::run_dir(run_id);
-        std::fs::create_dir_all(&dir).unwrap();
+        crate::runstate::with_isolated_runs_dir("test_request_interaction_sync_success", |_d| {
+            let run_id = "test-sync-request-ok";
+            let dir = crate::runstate::run_dir(run_id);
+            std::fs::create_dir_all(&dir).unwrap();
 
-        // Create meta.json so write_meta succeeds
-        let mut meta = crate::runstate::RunMeta::new(
-            run_id.to_string(),
-            "agent".to_string(),
-            "/tmp/agent.toml".to_string(),
-            "task".to_string(),
-            None,
-            "/tmp".to_string(),
-            1,
-        );
-        crate::runstate::create_run(&meta).unwrap();
+            // Create meta.json so write_meta succeeds
+            let mut meta = crate::runstate::RunMeta::new(
+                run_id.to_string(),
+                "agent".to_string(),
+                "/tmp/agent.toml".to_string(),
+                "task".to_string(),
+                None,
+                "/tmp".to_string(),
+                1,
+            );
+            crate::runstate::create_run(&meta).unwrap();
 
-        let req_id = "sync-req-1".to_string();
-        let run_id_clone = run_id.to_string();
-        let req_id_clone = req_id.clone();
+            let req_id = "sync-req-1".to_string();
+            let run_id_clone = run_id.to_string();
+            let req_id_clone = req_id.clone();
 
-        // Spawn thread that writes the response after 150ms
-        std::thread::spawn(move || {
-            std::thread::sleep(std::time::Duration::from_millis(150));
-            let resp = InteractionResponse::text(&req_id_clone, "the answer");
-            write_response(&run_id_clone, &resp).ok();
+            // Spawn thread that writes the response after 150ms
+            std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_millis(150));
+                let resp = InteractionResponse::text(&req_id_clone, "the answer");
+                write_response(&run_id_clone, &resp).ok();
+            });
+
+            let req = InteractionRequest::free_text(&req_id, "What?", "plan", true);
+            let result = request_interaction(run_id, &mut meta, req, Some(Duration::from_secs(5)));
+            assert!(result.is_ok());
+            let resp = result.unwrap();
+            assert_eq!(resp.value.as_deref(), Some("the answer"));
+
+            let _ = std::fs::remove_dir_all(&dir);
         });
-
-        let req = InteractionRequest::free_text(&req_id, "What?", "plan", true);
-        let result = request_interaction(run_id, &mut meta, req, Some(Duration::from_secs(5)));
-        assert!(result.is_ok());
-        let resp = result.unwrap();
-        assert_eq!(resp.value.as_deref(), Some("the answer"));
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn test_request_interaction_sync_no_timeout_waits_indefinitely_for_response() {
         // `timeout: None` means the poll loop never checks elapsed time — cover
         // that branch explicitly so it isn't left to the `Some(t)` tests.
-        let _guard = crate::runstate::isolate_runs_dir_for_test(
+        crate::runstate::with_isolated_runs_dir(
             "test_request_interaction_sync_no_timeout_waits_indefinitely_for_response",
+            |_d| {
+                let run_id = "test-sync-request-no-timeout";
+                let dir = crate::runstate::run_dir(run_id);
+                std::fs::create_dir_all(&dir).unwrap();
+
+                let mut meta = crate::runstate::RunMeta::new(
+                    run_id.to_string(),
+                    "agent".to_string(),
+                    "/tmp/agent.toml".to_string(),
+                    "task".to_string(),
+                    None,
+                    "/tmp".to_string(),
+                    1,
+                );
+                crate::runstate::create_run(&meta).unwrap();
+
+                let req_id = "sync-no-timeout-1".to_string();
+                let run_id_clone = run_id.to_string();
+                let req_id_clone = req_id.clone();
+
+                // Spawn thread that writes the response after a couple of poll cycles.
+                std::thread::spawn(move || {
+                    std::thread::sleep(std::time::Duration::from_millis(150));
+                    let resp = InteractionResponse::text(&req_id_clone, "no-timeout answer");
+                    write_response(&run_id_clone, &resp).ok();
+                });
+
+                let req = InteractionRequest::free_text(&req_id, "What?", "plan", true);
+                let result = request_interaction(run_id, &mut meta, req, None);
+                assert!(result.is_ok());
+                let resp = result.unwrap();
+                assert_eq!(resp.value.as_deref(), Some("no-timeout answer"));
+
+                let _ = std::fs::remove_dir_all(&dir);
+            },
         );
-        let run_id = "test-sync-request-no-timeout";
-        let dir = crate::runstate::run_dir(run_id);
-        std::fs::create_dir_all(&dir).unwrap();
-
-        let mut meta = crate::runstate::RunMeta::new(
-            run_id.to_string(),
-            "agent".to_string(),
-            "/tmp/agent.toml".to_string(),
-            "task".to_string(),
-            None,
-            "/tmp".to_string(),
-            1,
-        );
-        crate::runstate::create_run(&meta).unwrap();
-
-        let req_id = "sync-no-timeout-1".to_string();
-        let run_id_clone = run_id.to_string();
-        let req_id_clone = req_id.clone();
-
-        // Spawn thread that writes the response after a couple of poll cycles.
-        std::thread::spawn(move || {
-            std::thread::sleep(std::time::Duration::from_millis(150));
-            let resp = InteractionResponse::text(&req_id_clone, "no-timeout answer");
-            write_response(&run_id_clone, &resp).ok();
-        });
-
-        let req = InteractionRequest::free_text(&req_id, "What?", "plan", true);
-        let result = request_interaction(run_id, &mut meta, req, None);
-        assert!(result.is_ok());
-        let resp = result.unwrap();
-        assert_eq!(resp.value.as_deref(), Some("no-timeout answer"));
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn test_request_interaction_sync_timeout() {
-        let _guard =
-            crate::runstate::isolate_runs_dir_for_test("test_request_interaction_sync_timeout");
-        let run_id = "test-sync-request-timeout";
-        let dir = crate::runstate::run_dir(run_id);
-        std::fs::create_dir_all(&dir).unwrap();
+        crate::runstate::with_isolated_runs_dir("test_request_interaction_sync_timeout", |_d| {
+            let run_id = "test-sync-request-timeout";
+            let dir = crate::runstate::run_dir(run_id);
+            std::fs::create_dir_all(&dir).unwrap();
 
-        let mut meta = crate::runstate::RunMeta::new(
-            run_id.to_string(),
-            "agent".to_string(),
-            "/tmp/agent.toml".to_string(),
-            "task".to_string(),
-            None,
-            "/tmp".to_string(),
-            1,
-        );
-        crate::runstate::create_run(&meta).unwrap();
+            let mut meta = crate::runstate::RunMeta::new(
+                run_id.to_string(),
+                "agent".to_string(),
+                "/tmp/agent.toml".to_string(),
+                "task".to_string(),
+                None,
+                "/tmp".to_string(),
+                1,
+            );
+            crate::runstate::create_run(&meta).unwrap();
 
-        let req = InteractionRequest::free_text("sync-timeout", "What?", "plan", true);
-        // Timeout of 200ms — no response will be written
-        let result = request_interaction(run_id, &mut meta, req, Some(Duration::from_millis(200)));
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("timed out"));
+            let req = InteractionRequest::free_text("sync-timeout", "What?", "plan", true);
+            // Timeout of 200ms — no response will be written
+            let result =
+                request_interaction(run_id, &mut meta, req, Some(Duration::from_millis(200)));
+            assert!(result.is_err());
+            assert!(result.unwrap_err().to_string().contains("timed out"));
 
-        let _ = std::fs::remove_dir_all(&dir);
+            let _ = std::fs::remove_dir_all(&dir);
+        });
     }
 
     #[test]
     fn test_request_interaction_sync_not_required_status() {
-        let _guard = crate::runstate::isolate_runs_dir_for_test(
+        crate::runstate::with_isolated_runs_dir(
             "test_request_interaction_sync_not_required_status",
+            |_d| {
+                let run_id = "test-sync-request-not-required";
+                let dir = crate::runstate::run_dir(run_id);
+                std::fs::create_dir_all(&dir).unwrap();
+
+                let mut meta = crate::runstate::RunMeta::new(
+                    run_id.to_string(),
+                    "agent".to_string(),
+                    "/tmp/agent.toml".to_string(),
+                    "task".to_string(),
+                    None,
+                    "/tmp".to_string(),
+                    1,
+                );
+                crate::runstate::create_run(&meta).unwrap();
+
+                let run_id_clone = run_id.to_string();
+                // Spawn thread that writes the response immediately
+                std::thread::spawn(move || {
+                    std::thread::sleep(std::time::Duration::from_millis(150));
+                    let resp = InteractionResponse::text("not-req-1", "ok");
+                    write_response(&run_id_clone, &resp).ok();
+                });
+
+                // required: false → CompleteInteractive status branch
+                let req = InteractionRequest::free_text("not-req-1", "Optional?", "plan", false);
+                let result =
+                    request_interaction(run_id, &mut meta, req, Some(Duration::from_secs(5)));
+                assert!(result.is_ok());
+
+                let _ = std::fs::remove_dir_all(&dir);
+            },
         );
-        let run_id = "test-sync-request-not-required";
-        let dir = crate::runstate::run_dir(run_id);
-        std::fs::create_dir_all(&dir).unwrap();
-
-        let mut meta = crate::runstate::RunMeta::new(
-            run_id.to_string(),
-            "agent".to_string(),
-            "/tmp/agent.toml".to_string(),
-            "task".to_string(),
-            None,
-            "/tmp".to_string(),
-            1,
-        );
-        crate::runstate::create_run(&meta).unwrap();
-
-        let run_id_clone = run_id.to_string();
-        // Spawn thread that writes the response immediately
-        std::thread::spawn(move || {
-            std::thread::sleep(std::time::Duration::from_millis(150));
-            let resp = InteractionResponse::text("not-req-1", "ok");
-            write_response(&run_id_clone, &resp).ok();
-        });
-
-        // required: false → CompleteInteractive status branch
-        let req = InteractionRequest::free_text("not-req-1", "Optional?", "plan", false);
-        let result = request_interaction(run_id, &mut meta, req, Some(Duration::from_secs(5)));
-        assert!(result.is_ok());
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn test_request_interaction_sync_stale_response_then_correct() {
-        let _guard = crate::runstate::isolate_runs_dir_for_test(
+        crate::runstate::with_isolated_runs_dir(
             "test_request_interaction_sync_stale_response_then_correct",
+            |_d| {
+                let run_id = "test-sync-stale-then-correct";
+                let dir = crate::runstate::run_dir(run_id);
+                std::fs::create_dir_all(&dir).unwrap();
+
+                let mut meta = crate::runstate::RunMeta::new(
+                    run_id.to_string(),
+                    "agent".to_string(),
+                    "/tmp/agent.toml".to_string(),
+                    "task".to_string(),
+                    None,
+                    "/tmp".to_string(),
+                    1,
+                );
+                crate::runstate::create_run(&meta).unwrap();
+
+                let run_id_clone = run_id.to_string();
+                // Write a stale response first (different request_id), then the correct one
+                std::thread::spawn(move || {
+                    std::thread::sleep(std::time::Duration::from_millis(120));
+                    // Stale response
+                    let stale = InteractionResponse::text("other-req", "stale answer");
+                    write_response(&run_id_clone, &stale).ok();
+                    // Give time for it to be consumed, then write correct one
+                    std::thread::sleep(std::time::Duration::from_millis(150));
+                    let correct = InteractionResponse::text("target-req", "correct answer");
+                    write_response(&run_id_clone, &correct).ok();
+                });
+
+                let req = InteractionRequest::free_text("target-req", "What?", "plan", true);
+                let result =
+                    request_interaction(run_id, &mut meta, req, Some(Duration::from_secs(5)));
+                assert!(result.is_ok());
+                let resp = result.unwrap();
+                assert_eq!(resp.value.as_deref(), Some("correct answer"));
+
+                let _ = std::fs::remove_dir_all(&dir);
+            },
         );
-        let run_id = "test-sync-stale-then-correct";
-        let dir = crate::runstate::run_dir(run_id);
-        std::fs::create_dir_all(&dir).unwrap();
-
-        let mut meta = crate::runstate::RunMeta::new(
-            run_id.to_string(),
-            "agent".to_string(),
-            "/tmp/agent.toml".to_string(),
-            "task".to_string(),
-            None,
-            "/tmp".to_string(),
-            1,
-        );
-        crate::runstate::create_run(&meta).unwrap();
-
-        let run_id_clone = run_id.to_string();
-        // Write a stale response first (different request_id), then the correct one
-        std::thread::spawn(move || {
-            std::thread::sleep(std::time::Duration::from_millis(120));
-            // Stale response
-            let stale = InteractionResponse::text("other-req", "stale answer");
-            write_response(&run_id_clone, &stale).ok();
-            // Give time for it to be consumed, then write correct one
-            std::thread::sleep(std::time::Duration::from_millis(150));
-            let correct = InteractionResponse::text("target-req", "correct answer");
-            write_response(&run_id_clone, &correct).ok();
-        });
-
-        let req = InteractionRequest::free_text("target-req", "What?", "plan", true);
-        let result = request_interaction(run_id, &mut meta, req, Some(Duration::from_secs(5)));
-        assert!(result.is_ok());
-        let resp = result.unwrap();
-        assert_eq!(resp.value.as_deref(), Some("correct answer"));
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
     fn test_request_interaction_sync_write_request_fails_when_run_dir_missing() {
-        let _guard = crate::runstate::isolate_runs_dir_for_test(
+        crate::runstate::with_isolated_runs_dir(
             "test_request_interaction_sync_write_request_fails_when_run_dir_missing",
-        );
-        let run_id = "test-sync-request-no-dir";
-        // Deliberately skip creating the run directory, so `write_request`'s
-        // tmp-file write fails immediately, exercising this function's own
-        // `write_request(...)?` propagation.
-        let mut meta = crate::runstate::RunMeta::new(
-            run_id.to_string(),
-            "agent".to_string(),
-            "/tmp/agent.toml".to_string(),
-            "task".to_string(),
-            None,
-            "/tmp".to_string(),
-            1,
-        );
+            |_d| {
+                let run_id = "test-sync-request-no-dir";
+                // Deliberately skip creating the run directory, so `write_request`'s
+                // tmp-file write fails immediately, exercising this function's own
+                // `write_request(...)?` propagation.
+                let mut meta = crate::runstate::RunMeta::new(
+                    run_id.to_string(),
+                    "agent".to_string(),
+                    "/tmp/agent.toml".to_string(),
+                    "task".to_string(),
+                    None,
+                    "/tmp".to_string(),
+                    1,
+                );
 
-        let req = InteractionRequest::free_text("no-dir-req", "What?", "plan", true);
-        let result = request_interaction(run_id, &mut meta, req, Some(Duration::from_secs(5)));
-        assert!(result.is_err());
+                let req = InteractionRequest::free_text("no-dir-req", "What?", "plan", true);
+                let result =
+                    request_interaction(run_id, &mut meta, req, Some(Duration::from_secs(5)));
+                assert!(result.is_err());
+            },
+        );
     }
 
     #[test]
     fn test_request_interaction_sync_write_meta_fails_when_target_is_a_directory() {
-        let _guard = crate::runstate::isolate_runs_dir_for_test(
+        crate::runstate::with_isolated_runs_dir(
             "test_request_interaction_sync_write_meta_fails_when_target_is_a_directory",
+            |_d| {
+                let run_id = "test-sync-request-meta-target-is-dir";
+                let dir = crate::runstate::run_dir(run_id);
+                std::fs::create_dir_all(&dir).unwrap();
+                // Pre-create meta.json as a directory: write_request succeeds (it
+                // touches a different filename), but the subsequent `write_meta`'s
+                // rename onto "meta.json" fails, exercising this function's own
+                // `write_meta(...)?` propagation.
+                std::fs::create_dir_all(dir.join("meta.json")).unwrap();
+
+                let mut meta = crate::runstate::RunMeta::new(
+                    run_id.to_string(),
+                    "agent".to_string(),
+                    "/tmp/agent.toml".to_string(),
+                    "task".to_string(),
+                    None,
+                    "/tmp".to_string(),
+                    1,
+                );
+
+                let req = InteractionRequest::free_text("meta-fail-req", "What?", "plan", true);
+                let result =
+                    request_interaction(run_id, &mut meta, req, Some(Duration::from_secs(5)));
+                assert!(result.is_err());
+
+                let _ = std::fs::remove_dir_all(&dir);
+            },
         );
-        let run_id = "test-sync-request-meta-target-is-dir";
-        let dir = crate::runstate::run_dir(run_id);
-        std::fs::create_dir_all(&dir).unwrap();
-        // Pre-create meta.json as a directory: write_request succeeds (it
-        // touches a different filename), but the subsequent `write_meta`'s
-        // rename onto "meta.json" fails, exercising this function's own
-        // `write_meta(...)?` propagation.
-        std::fs::create_dir_all(dir.join("meta.json")).unwrap();
-
-        let mut meta = crate::runstate::RunMeta::new(
-            run_id.to_string(),
-            "agent".to_string(),
-            "/tmp/agent.toml".to_string(),
-            "task".to_string(),
-            None,
-            "/tmp".to_string(),
-            1,
-        );
-
-        let req = InteractionRequest::free_text("meta-fail-req", "What?", "plan", true);
-        let result = request_interaction(run_id, &mut meta, req, Some(Duration::from_secs(5)));
-        assert!(result.is_err());
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     // ─── request_interaction_async ────────────────────────────────────────
 
     #[tokio::test]
     async fn test_request_interaction_async_success() {
-        let _guard =
-            crate::runstate::isolate_runs_dir_for_test("test_request_interaction_async_success");
-        let run_id = "test-async-request-ok";
-        let dir = crate::runstate::run_dir(run_id);
-        std::fs::create_dir_all(&dir).unwrap();
+        crate::runstate::with_isolated_runs_dir_async(
+            "test_request_interaction_async_success",
+            |_d| async move {
+                let run_id = "test-async-request-ok";
+                let dir = crate::runstate::run_dir(run_id);
+                std::fs::create_dir_all(&dir).unwrap();
 
-        let mut meta = crate::runstate::RunMeta::new(
-            run_id.to_string(),
-            "agent".to_string(),
-            "/tmp/agent.toml".to_string(),
-            "task".to_string(),
-            None,
-            "/tmp".to_string(),
-            1,
-        );
-        crate::runstate::create_run(&meta).unwrap();
+                let mut meta = crate::runstate::RunMeta::new(
+                    run_id.to_string(),
+                    "agent".to_string(),
+                    "/tmp/agent.toml".to_string(),
+                    "task".to_string(),
+                    None,
+                    "/tmp".to_string(),
+                    1,
+                );
+                crate::runstate::create_run(&meta).unwrap();
 
-        let run_id_clone = run_id.to_string();
-        tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_millis(150)).await;
-            let resp = InteractionResponse::text("async-req-1", "async answer");
-            write_response(&run_id_clone, &resp).ok();
-        });
+                let run_id_clone = run_id.to_string();
+                tokio::spawn(async move {
+                    tokio::time::sleep(Duration::from_millis(150)).await;
+                    let resp = InteractionResponse::text("async-req-1", "async answer");
+                    write_response(&run_id_clone, &resp).ok();
+                });
 
-        let req = InteractionRequest::free_text("async-req-1", "Async?", "plan", true);
-        let result =
-            request_interaction_async(run_id, &mut meta, req, Some(Duration::from_secs(5))).await;
-        assert!(result.is_ok());
-        assert_eq!(result.unwrap().value.as_deref(), Some("async answer"));
+                let req = InteractionRequest::free_text("async-req-1", "Async?", "plan", true);
+                let result =
+                    request_interaction_async(run_id, &mut meta, req, Some(Duration::from_secs(5)))
+                        .await;
+                assert!(result.is_ok());
+                assert_eq!(result.unwrap().value.as_deref(), Some("async answer"));
 
-        let _ = std::fs::remove_dir_all(&dir);
+                let _ = std::fs::remove_dir_all(&dir);
+            },
+        )
+        .await;
     }
 
     #[tokio::test]
     async fn test_request_interaction_async_timeout() {
-        let _guard =
-            crate::runstate::isolate_runs_dir_for_test("test_request_interaction_async_timeout");
-        let run_id = "test-async-request-timeout";
-        let dir = crate::runstate::run_dir(run_id);
-        std::fs::create_dir_all(&dir).unwrap();
+        crate::runstate::with_isolated_runs_dir_async(
+            "test_request_interaction_async_timeout",
+            |_d| async move {
+                let run_id = "test-async-request-timeout";
+                let dir = crate::runstate::run_dir(run_id);
+                std::fs::create_dir_all(&dir).unwrap();
 
-        let mut meta = crate::runstate::RunMeta::new(
-            run_id.to_string(),
-            "agent".to_string(),
-            "/tmp/agent.toml".to_string(),
-            "task".to_string(),
-            None,
-            "/tmp".to_string(),
-            1,
-        );
-        crate::runstate::create_run(&meta).unwrap();
+                let mut meta = crate::runstate::RunMeta::new(
+                    run_id.to_string(),
+                    "agent".to_string(),
+                    "/tmp/agent.toml".to_string(),
+                    "task".to_string(),
+                    None,
+                    "/tmp".to_string(),
+                    1,
+                );
+                crate::runstate::create_run(&meta).unwrap();
 
-        let req = InteractionRequest::free_text("async-timeout", "Async?", "plan", true);
-        let result =
-            request_interaction_async(run_id, &mut meta, req, Some(Duration::from_millis(200)))
+                let req = InteractionRequest::free_text("async-timeout", "Async?", "plan", true);
+                let result = request_interaction_async(
+                    run_id,
+                    &mut meta,
+                    req,
+                    Some(Duration::from_millis(200)),
+                )
                 .await;
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("timed out"));
+                assert!(result.is_err());
+                assert!(result.unwrap_err().to_string().contains("timed out"));
 
-        let _ = std::fs::remove_dir_all(&dir);
+                let _ = std::fs::remove_dir_all(&dir);
+            },
+        )
+        .await;
     }
 
     #[tokio::test]
     async fn test_request_interaction_async_not_required() {
-        let _guard = crate::runstate::isolate_runs_dir_for_test(
+        crate::runstate::with_isolated_runs_dir_async(
             "test_request_interaction_async_not_required",
-        );
-        let run_id = "test-async-request-not-req";
-        let dir = crate::runstate::run_dir(run_id);
-        std::fs::create_dir_all(&dir).unwrap();
+            |_d| async move {
+                let run_id = "test-async-request-not-req";
+                let dir = crate::runstate::run_dir(run_id);
+                std::fs::create_dir_all(&dir).unwrap();
 
-        let mut meta = crate::runstate::RunMeta::new(
-            run_id.to_string(),
-            "agent".to_string(),
-            "/tmp/agent.toml".to_string(),
-            "task".to_string(),
-            None,
-            "/tmp".to_string(),
-            1,
-        );
-        crate::runstate::create_run(&meta).unwrap();
+                let mut meta = crate::runstate::RunMeta::new(
+                    run_id.to_string(),
+                    "agent".to_string(),
+                    "/tmp/agent.toml".to_string(),
+                    "task".to_string(),
+                    None,
+                    "/tmp".to_string(),
+                    1,
+                );
+                crate::runstate::create_run(&meta).unwrap();
 
-        let run_id_clone = run_id.to_string();
-        tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_millis(150)).await;
-            let resp = InteractionResponse::text("async-not-req", "ok");
-            write_response(&run_id_clone, &resp).ok();
-        });
+                let run_id_clone = run_id.to_string();
+                tokio::spawn(async move {
+                    tokio::time::sleep(Duration::from_millis(150)).await;
+                    let resp = InteractionResponse::text("async-not-req", "ok");
+                    write_response(&run_id_clone, &resp).ok();
+                });
 
-        // required: false → CompleteInteractive status branch
-        let req = InteractionRequest::free_text("async-not-req", "Optional?", "plan", false);
-        let result =
-            request_interaction_async(run_id, &mut meta, req, Some(Duration::from_secs(5))).await;
-        assert!(result.is_ok());
+                // required: false → CompleteInteractive status branch
+                let req =
+                    InteractionRequest::free_text("async-not-req", "Optional?", "plan", false);
+                let result =
+                    request_interaction_async(run_id, &mut meta, req, Some(Duration::from_secs(5)))
+                        .await;
+                assert!(result.is_ok());
 
-        let _ = std::fs::remove_dir_all(&dir);
+                let _ = std::fs::remove_dir_all(&dir);
+            },
+        )
+        .await;
     }
 
     #[tokio::test]
     async fn test_request_interaction_async_write_meta_fails_when_target_is_a_directory() {
-        let _guard = crate::runstate::isolate_runs_dir_for_test(
+        crate::runstate::with_isolated_runs_dir_async(
             "test_request_interaction_async_write_meta_fails_when_target_is_a_directory",
-        );
-        let run_id = "test-async-request-meta-target-is-dir";
-        let dir = crate::runstate::run_dir(run_id);
-        std::fs::create_dir_all(&dir).unwrap();
-        // Pre-create meta.json as a directory: write_request succeeds (it
-        // touches a different filename), but the subsequent `write_meta`'s
-        // rename onto "meta.json" fails, exercising this function's own
-        // `write_meta(...)?` propagation.
-        std::fs::create_dir_all(dir.join("meta.json")).unwrap();
+            |_d| async move {
+                let run_id = "test-async-request-meta-target-is-dir";
+                let dir = crate::runstate::run_dir(run_id);
+                std::fs::create_dir_all(&dir).unwrap();
+                // Pre-create meta.json as a directory: write_request succeeds (it
+                // touches a different filename), but the subsequent `write_meta`'s
+                // rename onto "meta.json" fails, exercising this function's own
+                // `write_meta(...)?` propagation.
+                std::fs::create_dir_all(dir.join("meta.json")).unwrap();
 
-        let mut meta = crate::runstate::RunMeta::new(
-            run_id.to_string(),
-            "agent".to_string(),
-            "/tmp/agent.toml".to_string(),
-            "task".to_string(),
-            None,
-            "/tmp".to_string(),
-            1,
-        );
+                let mut meta = crate::runstate::RunMeta::new(
+                    run_id.to_string(),
+                    "agent".to_string(),
+                    "/tmp/agent.toml".to_string(),
+                    "task".to_string(),
+                    None,
+                    "/tmp".to_string(),
+                    1,
+                );
 
-        let req = InteractionRequest::free_text("async-meta-fail-req", "What?", "plan", true);
-        let result =
-            request_interaction_async(run_id, &mut meta, req, Some(Duration::from_secs(5))).await;
-        assert!(result.is_err());
+                let req =
+                    InteractionRequest::free_text("async-meta-fail-req", "What?", "plan", true);
+                let result =
+                    request_interaction_async(run_id, &mut meta, req, Some(Duration::from_secs(5)))
+                        .await;
+                assert!(result.is_err());
 
-        let _ = std::fs::remove_dir_all(&dir);
+                let _ = std::fs::remove_dir_all(&dir);
+            },
+        )
+        .await;
     }
 
     #[tokio::test]
     async fn test_request_interaction_async_stale_then_correct() {
-        let _guard = crate::runstate::isolate_runs_dir_for_test(
+        crate::runstate::with_isolated_runs_dir_async(
             "test_request_interaction_async_stale_then_correct",
-        );
-        let run_id = "test-async-stale-then-correct";
-        let dir = crate::runstate::run_dir(run_id);
-        std::fs::create_dir_all(&dir).unwrap();
+            |_d| async move {
+                let run_id = "test-async-stale-then-correct";
+                let dir = crate::runstate::run_dir(run_id);
+                std::fs::create_dir_all(&dir).unwrap();
 
-        let mut meta = crate::runstate::RunMeta::new(
-            run_id.to_string(),
-            "agent".to_string(),
-            "/tmp/agent.toml".to_string(),
-            "task".to_string(),
-            None,
-            "/tmp".to_string(),
-            1,
-        );
-        crate::runstate::create_run(&meta).unwrap();
+                let mut meta = crate::runstate::RunMeta::new(
+                    run_id.to_string(),
+                    "agent".to_string(),
+                    "/tmp/agent.toml".to_string(),
+                    "task".to_string(),
+                    None,
+                    "/tmp".to_string(),
+                    1,
+                );
+                crate::runstate::create_run(&meta).unwrap();
 
-        let run_id_clone = run_id.to_string();
-        tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_millis(120)).await;
-            // Stale response
-            let stale = InteractionResponse::text("wrong-id", "stale");
-            write_response(&run_id_clone, &stale).ok();
-            tokio::time::sleep(Duration::from_millis(200)).await;
-            // Correct response
-            let correct = InteractionResponse::text("async-stale-target", "correct");
-            write_response(&run_id_clone, &correct).ok();
-        });
+                let run_id_clone = run_id.to_string();
+                tokio::spawn(async move {
+                    tokio::time::sleep(Duration::from_millis(120)).await;
+                    // Stale response
+                    let stale = InteractionResponse::text("wrong-id", "stale");
+                    write_response(&run_id_clone, &stale).ok();
+                    tokio::time::sleep(Duration::from_millis(200)).await;
+                    // Correct response
+                    let correct = InteractionResponse::text("async-stale-target", "correct");
+                    write_response(&run_id_clone, &correct).ok();
+                });
 
-        let req = InteractionRequest::free_text("async-stale-target", "Async?", "plan", true);
-        let result =
-            request_interaction_async(run_id, &mut meta, req, Some(Duration::from_secs(5))).await;
-        assert!(result.is_ok());
-        assert_eq!(result.unwrap().value.as_deref(), Some("correct"));
+                let req =
+                    InteractionRequest::free_text("async-stale-target", "Async?", "plan", true);
+                let result =
+                    request_interaction_async(run_id, &mut meta, req, Some(Duration::from_secs(5)))
+                        .await;
+                assert!(result.is_ok());
+                assert_eq!(result.unwrap().value.as_deref(), Some("correct"));
 
-        let _ = std::fs::remove_dir_all(&dir);
+                let _ = std::fs::remove_dir_all(&dir);
+            },
+        )
+        .await;
     }
 
     // ─── request_interaction_bg_review ────────────────────────────────────
 
     #[tokio::test]
     async fn test_request_interaction_bg_review_responds() {
-        let _guard = crate::runstate::isolate_runs_dir_for_test(
+        crate::runstate::with_isolated_runs_dir_async(
             "test_request_interaction_bg_review_responds",
-        );
-        let run_id = "test-bg-review-ok";
-        let dir = crate::runstate::run_dir(run_id);
-        std::fs::create_dir_all(&dir).unwrap();
+            |_d| async move {
+                let run_id = "test-bg-review-ok";
+                let dir = crate::runstate::run_dir(run_id);
+                std::fs::create_dir_all(&dir).unwrap();
 
-        // Create meta so the meta-update path succeeds
-        let meta = crate::runstate::RunMeta::new(
-            run_id.to_string(),
-            "agent".to_string(),
-            "/tmp/agent.toml".to_string(),
-            "task".to_string(),
-            None,
-            "/tmp".to_string(),
-            1,
-        );
-        crate::runstate::create_run(&meta).unwrap();
+                // Create meta so the meta-update path succeeds
+                let meta = crate::runstate::RunMeta::new(
+                    run_id.to_string(),
+                    "agent".to_string(),
+                    "/tmp/agent.toml".to_string(),
+                    "task".to_string(),
+                    None,
+                    "/tmp".to_string(),
+                    1,
+                );
+                crate::runstate::create_run(&meta).unwrap();
 
-        let run_id_clone = run_id.to_string();
-        tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_millis(150)).await;
-            let resp = InteractionResponse::text("bg-rev-1", "reviewed");
-            write_response(&run_id_clone, &resp).ok();
-        });
+                let run_id_clone = run_id.to_string();
+                tokio::spawn(async move {
+                    tokio::time::sleep(Duration::from_millis(150)).await;
+                    let resp = InteractionResponse::text("bg-rev-1", "reviewed");
+                    write_response(&run_id_clone, &resp).ok();
+                });
 
-        let req =
-            InteractionRequest::review("bg-rev-1", "Review this", "# Plan\n\nDetails here", "plan");
-        let resp = request_interaction_bg_review(run_id, req).await;
-        assert_eq!(resp.value.as_deref(), Some("reviewed"));
-        assert_eq!(resp.request_id, "bg-rev-1");
+                let req = InteractionRequest::review(
+                    "bg-rev-1",
+                    "Review this",
+                    "# Plan\n\nDetails here",
+                    "plan",
+                );
+                let resp = request_interaction_bg_review(run_id, req).await;
+                assert_eq!(resp.value.as_deref(), Some("reviewed"));
+                assert_eq!(resp.request_id, "bg-rev-1");
 
-        let _ = std::fs::remove_dir_all(&dir);
+                let _ = std::fs::remove_dir_all(&dir);
+            },
+        )
+        .await;
     }
 
     #[tokio::test]
     async fn test_request_interaction_bg_review_no_meta() {
-        let _guard = crate::runstate::isolate_runs_dir_for_test(
+        crate::runstate::with_isolated_runs_dir_async(
             "test_request_interaction_bg_review_no_meta",
-        );
-        // bg_review should work even when meta.json doesn't exist
-        let run_id = "test-bg-review-no-meta";
-        let dir = crate::runstate::run_dir(run_id);
-        std::fs::create_dir_all(&dir).unwrap();
-        // No meta.json created
+            |_d| async move {
+                // bg_review should work even when meta.json doesn't exist
+                let run_id = "test-bg-review-no-meta";
+                let dir = crate::runstate::run_dir(run_id);
+                std::fs::create_dir_all(&dir).unwrap();
+                // No meta.json created
 
-        let run_id_clone = run_id.to_string();
-        tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_millis(150)).await;
-            let resp = InteractionResponse::text("bg-rev-no-meta", "answer");
-            write_response(&run_id_clone, &resp).ok();
-        });
+                let run_id_clone = run_id.to_string();
+                tokio::spawn(async move {
+                    tokio::time::sleep(Duration::from_millis(150)).await;
+                    let resp = InteractionResponse::text("bg-rev-no-meta", "answer");
+                    write_response(&run_id_clone, &resp).ok();
+                });
 
-        let req = InteractionRequest::free_text("bg-rev-no-meta", "Review?", "plan", true);
-        let resp = request_interaction_bg_review(run_id, req).await;
-        assert_eq!(resp.request_id, "bg-rev-no-meta");
+                let req = InteractionRequest::free_text("bg-rev-no-meta", "Review?", "plan", true);
+                let resp = request_interaction_bg_review(run_id, req).await;
+                assert_eq!(resp.request_id, "bg-rev-no-meta");
 
-        let _ = std::fs::remove_dir_all(&dir);
+                let _ = std::fs::remove_dir_all(&dir);
+            },
+        )
+        .await;
     }
 
     #[tokio::test]
     async fn test_request_interaction_bg_review_stale_then_correct() {
-        let _guard = crate::runstate::isolate_runs_dir_for_test(
+        crate::runstate::with_isolated_runs_dir_async(
             "test_request_interaction_bg_review_stale_then_correct",
-        );
-        let run_id = "test-bg-review-stale";
-        let dir = crate::runstate::run_dir(run_id);
-        std::fs::create_dir_all(&dir).unwrap();
+            |_d| async move {
+                let run_id = "test-bg-review-stale";
+                let dir = crate::runstate::run_dir(run_id);
+                std::fs::create_dir_all(&dir).unwrap();
 
-        let run_id_clone = run_id.to_string();
-        tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_millis(120)).await;
-            // Stale response
-            let stale = InteractionResponse::text("wrong", "stale");
-            write_response(&run_id_clone, &stale).ok();
-            tokio::time::sleep(Duration::from_millis(200)).await;
-            // Correct response
-            let correct = InteractionResponse::text("bg-rev-target", "ok");
-            write_response(&run_id_clone, &correct).ok();
-        });
+                let run_id_clone = run_id.to_string();
+                tokio::spawn(async move {
+                    tokio::time::sleep(Duration::from_millis(120)).await;
+                    // Stale response
+                    let stale = InteractionResponse::text("wrong", "stale");
+                    write_response(&run_id_clone, &stale).ok();
+                    tokio::time::sleep(Duration::from_millis(200)).await;
+                    // Correct response
+                    let correct = InteractionResponse::text("bg-rev-target", "ok");
+                    write_response(&run_id_clone, &correct).ok();
+                });
 
-        let req = InteractionRequest::free_text("bg-rev-target", "Review?", "plan", true);
-        let resp = request_interaction_bg_review(run_id, req).await;
-        assert_eq!(resp.value.as_deref(), Some("ok"));
+                let req = InteractionRequest::free_text("bg-rev-target", "Review?", "plan", true);
+                let resp = request_interaction_bg_review(run_id, req).await;
+                assert_eq!(resp.value.as_deref(), Some("ok"));
 
-        let _ = std::fs::remove_dir_all(&dir);
+                let _ = std::fs::remove_dir_all(&dir);
+            },
+        )
+        .await;
     }
 
     // ─── request_tool_approval_background ────────────────────────────────
 
     #[tokio::test]
     async fn test_request_tool_approval_background_approved() {
-        let _guard = crate::runstate::isolate_runs_dir_for_test(
+        crate::runstate::with_isolated_runs_dir_async(
             "test_request_tool_approval_background_approved",
-        );
-        let run_id = "test-tool-approval-bg-ok";
-        let dir = crate::runstate::run_dir(run_id);
-        std::fs::create_dir_all(&dir).unwrap();
+            |_d| async move {
+                let run_id = "test-tool-approval-bg-ok";
+                let dir = crate::runstate::run_dir(run_id);
+                std::fs::create_dir_all(&dir).unwrap();
 
-        let meta = crate::runstate::RunMeta::new(
-            run_id.to_string(),
-            "agent".to_string(),
-            "/tmp/agent.toml".to_string(),
-            "task".to_string(),
-            None,
-            "/tmp".to_string(),
-            1,
-        );
-        crate::runstate::create_run(&meta).unwrap();
+                let meta = crate::runstate::RunMeta::new(
+                    run_id.to_string(),
+                    "agent".to_string(),
+                    "/tmp/agent.toml".to_string(),
+                    "task".to_string(),
+                    None,
+                    "/tmp".to_string(),
+                    1,
+                );
+                crate::runstate::create_run(&meta).unwrap();
 
-        // Calculate the expected request ID (same hash as the function uses)
-        let tool_name = "bash";
-        let hash = tool_name
-            .bytes()
-            .fold(0usize, |a, b| a.wrapping_add(b as usize));
-        let req_id = make_interaction_id(hash, 0);
+                // Calculate the expected request ID (same hash as the function uses)
+                let tool_name = "bash";
+                let hash = tool_name
+                    .bytes()
+                    .fold(0usize, |a, b| a.wrapping_add(b as usize));
+                let req_id = make_interaction_id(hash, 0);
 
-        let resp_path = response_path(run_id);
-        let req_id_clone = req_id.clone();
-        tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_millis(150)).await;
-            let resp = InteractionResponse::approval(&req_id_clone, true, ApprovalScope::Once);
-            let json = serde_json::to_string_pretty(&resp).unwrap();
-            std::fs::write(&resp_path, json).ok();
-        });
+                let resp_path = response_path(run_id);
+                let req_id_clone = req_id.clone();
+                tokio::spawn(async move {
+                    tokio::time::sleep(Duration::from_millis(150)).await;
+                    let resp =
+                        InteractionResponse::approval(&req_id_clone, true, ApprovalScope::Once);
+                    let json = serde_json::to_string_pretty(&resp).unwrap();
+                    std::fs::write(&resp_path, json).ok();
+                });
 
-        let args = serde_json::json!({"command": "ls"});
-        let (approved, scope) = request_tool_approval_background(
-            run_id,
-            tool_name,
-            &args,
-            "code",
-            Duration::from_secs(10),
+                let args = serde_json::json!({"command": "ls"});
+                let (approved, scope) = request_tool_approval_background(
+                    run_id,
+                    tool_name,
+                    &args,
+                    "code",
+                    Duration::from_secs(10),
+                )
+                .await;
+                assert!(approved);
+                assert_eq!(scope, ApprovalScope::Once);
+
+                let _ = std::fs::remove_dir_all(&dir);
+            },
         )
         .await;
-        assert!(approved);
-        assert_eq!(scope, ApprovalScope::Once);
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]
     async fn test_request_tool_approval_background_denied() {
-        let _guard = crate::runstate::isolate_runs_dir_for_test(
+        crate::runstate::with_isolated_runs_dir_async(
             "test_request_tool_approval_background_denied",
-        );
-        let run_id = "test-tool-approval-bg-denied";
-        let dir = crate::runstate::run_dir(run_id);
-        std::fs::create_dir_all(&dir).unwrap();
+            |_d| async move {
+                let run_id = "test-tool-approval-bg-denied";
+                let dir = crate::runstate::run_dir(run_id);
+                std::fs::create_dir_all(&dir).unwrap();
 
-        // No meta.json — exercises the else branch
-        let tool_name = "write_file";
-        let hash = tool_name
-            .bytes()
-            .fold(0usize, |a, b| a.wrapping_add(b as usize));
-        let req_id = make_interaction_id(hash, 0);
+                // No meta.json — exercises the else branch
+                let tool_name = "write_file";
+                let hash = tool_name
+                    .bytes()
+                    .fold(0usize, |a, b| a.wrapping_add(b as usize));
+                let req_id = make_interaction_id(hash, 0);
 
-        let resp_path = response_path(run_id);
-        let req_id_clone = req_id.clone();
-        tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_millis(150)).await;
-            let resp = InteractionResponse::approval(&req_id_clone, false, ApprovalScope::Once);
-            let json = serde_json::to_string_pretty(&resp).unwrap();
-            std::fs::write(&resp_path, json).ok();
-        });
+                let resp_path = response_path(run_id);
+                let req_id_clone = req_id.clone();
+                tokio::spawn(async move {
+                    tokio::time::sleep(Duration::from_millis(150)).await;
+                    let resp =
+                        InteractionResponse::approval(&req_id_clone, false, ApprovalScope::Once);
+                    let json = serde_json::to_string_pretty(&resp).unwrap();
+                    std::fs::write(&resp_path, json).ok();
+                });
 
-        let args = serde_json::json!({"path": "/tmp/f.txt"});
-        let (approved, scope) = request_tool_approval_background(
-            run_id,
-            tool_name,
-            &args,
-            "code",
-            Duration::from_secs(10),
+                let args = serde_json::json!({"path": "/tmp/f.txt"});
+                let (approved, scope) = request_tool_approval_background(
+                    run_id,
+                    tool_name,
+                    &args,
+                    "code",
+                    Duration::from_secs(10),
+                )
+                .await;
+                assert!(!approved);
+                assert_eq!(scope, ApprovalScope::Once);
+
+                let _ = std::fs::remove_dir_all(&dir);
+            },
         )
         .await;
-        assert!(!approved);
-        assert_eq!(scope, ApprovalScope::Once);
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]
     async fn test_request_tool_approval_background_session_scope() {
-        let _guard = crate::runstate::isolate_runs_dir_for_test(
+        crate::runstate::with_isolated_runs_dir_async(
             "test_request_tool_approval_background_session_scope",
-        );
-        let run_id = "test-tool-approval-bg-session";
-        let dir = crate::runstate::run_dir(run_id);
-        std::fs::create_dir_all(&dir).unwrap();
+            |_d| async move {
+                let run_id = "test-tool-approval-bg-session";
+                let dir = crate::runstate::run_dir(run_id);
+                std::fs::create_dir_all(&dir).unwrap();
 
-        let meta = crate::runstate::RunMeta::new(
-            run_id.to_string(),
-            "agent".to_string(),
-            "/tmp/agent.toml".to_string(),
-            "task".to_string(),
-            None,
-            "/tmp".to_string(),
-            1,
-        );
-        crate::runstate::create_run(&meta).unwrap();
+                let meta = crate::runstate::RunMeta::new(
+                    run_id.to_string(),
+                    "agent".to_string(),
+                    "/tmp/agent.toml".to_string(),
+                    "task".to_string(),
+                    None,
+                    "/tmp".to_string(),
+                    1,
+                );
+                crate::runstate::create_run(&meta).unwrap();
 
-        let tool_name = "edit_file";
-        let hash = tool_name
-            .bytes()
-            .fold(0usize, |a, b| a.wrapping_add(b as usize));
-        let req_id = make_interaction_id(hash, 0);
+                let tool_name = "edit_file";
+                let hash = tool_name
+                    .bytes()
+                    .fold(0usize, |a, b| a.wrapping_add(b as usize));
+                let req_id = make_interaction_id(hash, 0);
 
-        // Capture the response path NOW (before spawning) so the spawned task
-        // doesn't re-read LEVIATH_RUNS_DIR at execution time — a concurrent test
-        // in commands/run/mod.rs temporarily sets LEVIATH_RUNS_DIR to a
-        // read-only dir, which would silently break write_response.
-        let resp_path = response_path(run_id);
-        let req_id_clone = req_id.clone();
-        tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_millis(150)).await;
-            let resp = InteractionResponse::approval(&req_id_clone, true, ApprovalScope::Session);
-            let json = serde_json::to_string_pretty(&resp).unwrap();
-            std::fs::write(&resp_path, json).ok();
-        });
+                // Capture the response path NOW (before spawning) so the spawned task
+                // doesn't re-read LEVIATH_RUNS_DIR at execution time — a concurrent test
+                // in commands/run/mod.rs temporarily sets LEVIATH_RUNS_DIR to a
+                // read-only dir, which would silently break write_response.
+                let resp_path = response_path(run_id);
+                let req_id_clone = req_id.clone();
+                tokio::spawn(async move {
+                    tokio::time::sleep(Duration::from_millis(150)).await;
+                    let resp =
+                        InteractionResponse::approval(&req_id_clone, true, ApprovalScope::Session);
+                    let json = serde_json::to_string_pretty(&resp).unwrap();
+                    std::fs::write(&resp_path, json).ok();
+                });
 
-        let args = serde_json::json!({});
-        let (approved, scope) = request_tool_approval_background(
-            run_id,
-            tool_name,
-            &args,
-            "impl",
-            Duration::from_secs(10),
+                let args = serde_json::json!({});
+                let (approved, scope) = request_tool_approval_background(
+                    run_id,
+                    tool_name,
+                    &args,
+                    "impl",
+                    Duration::from_secs(10),
+                )
+                .await;
+                assert!(approved);
+                assert_eq!(scope, ApprovalScope::Session);
+
+                let _ = std::fs::remove_dir_all(&dir);
+            },
         )
         .await;
-        assert!(approved);
-        assert_eq!(scope, ApprovalScope::Session);
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]
     async fn test_request_tool_approval_background_stale_then_correct() {
-        let _guard = crate::runstate::isolate_runs_dir_for_test(
+        crate::runstate::with_isolated_runs_dir_async(
             "test_request_tool_approval_background_stale_then_correct",
-        );
-        let run_id = "test-tool-approval-bg-stale";
-        let dir = crate::runstate::run_dir(run_id);
-        std::fs::create_dir_all(&dir).unwrap();
+            |_d| async move {
+                let run_id = "test-tool-approval-bg-stale";
+                let dir = crate::runstate::run_dir(run_id);
+                std::fs::create_dir_all(&dir).unwrap();
 
-        let tool_name = "bash";
-        let hash = tool_name
-            .bytes()
-            .fold(0usize, |a, b| a.wrapping_add(b as usize));
-        let req_id = make_interaction_id(hash, 0);
+                let tool_name = "bash";
+                let hash = tool_name
+                    .bytes()
+                    .fold(0usize, |a, b| a.wrapping_add(b as usize));
+                let req_id = make_interaction_id(hash, 0);
 
-        let resp_path = response_path(run_id);
-        let req_id_clone = req_id.clone();
-        tokio::spawn(async move {
-            tokio::time::sleep(Duration::from_millis(120)).await;
-            // Write a stale response first
-            let stale = InteractionResponse::approval("wrong-id", true, ApprovalScope::Once);
-            let json = serde_json::to_string_pretty(&stale).unwrap();
-            std::fs::write(&resp_path, json).ok();
-            tokio::time::sleep(Duration::from_millis(200)).await;
-            // Write the correct response
-            let correct = InteractionResponse::approval(&req_id_clone, false, ApprovalScope::Once);
-            let json = serde_json::to_string_pretty(&correct).unwrap();
-            std::fs::write(&resp_path, json).ok();
-        });
+                let resp_path = response_path(run_id);
+                let req_id_clone = req_id.clone();
+                tokio::spawn(async move {
+                    tokio::time::sleep(Duration::from_millis(120)).await;
+                    // Write a stale response first
+                    let stale =
+                        InteractionResponse::approval("wrong-id", true, ApprovalScope::Once);
+                    let json = serde_json::to_string_pretty(&stale).unwrap();
+                    std::fs::write(&resp_path, json).ok();
+                    tokio::time::sleep(Duration::from_millis(200)).await;
+                    // Write the correct response
+                    let correct =
+                        InteractionResponse::approval(&req_id_clone, false, ApprovalScope::Once);
+                    let json = serde_json::to_string_pretty(&correct).unwrap();
+                    std::fs::write(&resp_path, json).ok();
+                });
 
-        let args = serde_json::json!({"command": "rm -rf"});
-        let (approved, _scope) = request_tool_approval_background(
-            run_id,
-            tool_name,
-            &args,
-            "code",
-            Duration::from_secs(10),
+                let args = serde_json::json!({"command": "rm -rf"});
+                let (approved, _scope) = request_tool_approval_background(
+                    run_id,
+                    tool_name,
+                    &args,
+                    "code",
+                    Duration::from_secs(10),
+                )
+                .await;
+                assert!(!approved);
+
+                let _ = std::fs::remove_dir_all(&dir);
+            },
         )
         .await;
-        assert!(!approved);
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]
     async fn test_request_tool_approval_background_timeout_auto_denies() {
-        let _guard = crate::runstate::isolate_runs_dir_for_test(
+        crate::runstate::with_isolated_runs_dir_async(
             "test_request_tool_approval_background_timeout_auto_denies",
-        );
-        let run_id = "test-tool-approval-timeout";
-        let dir = crate::runstate::run_dir(run_id);
-        std::fs::create_dir_all(&dir).unwrap();
+            |_d| async move {
+                let run_id = "test-tool-approval-timeout";
+                let dir = crate::runstate::run_dir(run_id);
+                std::fs::create_dir_all(&dir).unwrap();
 
-        let meta = crate::runstate::RunMeta::new(
-            run_id.to_string(),
-            "agent".to_string(),
-            "/tmp/agent.toml".to_string(),
-            "task".to_string(),
-            None,
-            "/tmp".to_string(),
-            1,
-        );
-        crate::runstate::create_run(&meta).unwrap();
+                let meta = crate::runstate::RunMeta::new(
+                    run_id.to_string(),
+                    "agent".to_string(),
+                    "/tmp/agent.toml".to_string(),
+                    "task".to_string(),
+                    None,
+                    "/tmp".to_string(),
+                    1,
+                );
+                crate::runstate::create_run(&meta).unwrap();
 
-        // No responder — the short timeout should fire the auto-deny path.
-        let args = serde_json::json!({"command": "rm -rf /"});
-        let (approved, scope) = request_tool_approval_background(
-            run_id,
-            "bash",
-            &args,
-            "code",
-            Duration::from_millis(150),
+                // No responder — the short timeout should fire the auto-deny path.
+                let args = serde_json::json!({"command": "rm -rf /"});
+                let (approved, scope) = request_tool_approval_background(
+                    run_id,
+                    "bash",
+                    &args,
+                    "code",
+                    Duration::from_millis(150),
+                )
+                .await;
+                assert!(!approved);
+                assert_eq!(scope, ApprovalScope::Once);
+
+                // Status should be restored to Running (not left stuck WaitingInput).
+                let meta_after = crate::runstate::read_meta(run_id).unwrap();
+                assert_eq!(meta_after.status, RunStatus::Running);
+
+                let _ = std::fs::remove_dir_all(&dir);
+            },
         )
         .await;
-        assert!(!approved);
-        assert_eq!(scope, ApprovalScope::Once);
-
-        // Status should be restored to Running (not left stuck WaitingInput).
-        let meta_after = crate::runstate::read_meta(run_id).unwrap();
-        assert_eq!(meta_after.status, RunStatus::Running);
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]
     async fn test_request_tool_approval_background_timeout_with_no_meta_file() {
-        let _guard = crate::runstate::isolate_runs_dir_for_test(
+        crate::runstate::with_isolated_runs_dir_async(
             "test_request_tool_approval_background_timeout_with_no_meta_file",
-        );
-        let run_id = "test-tool-approval-timeout-no-meta";
-        let dir = crate::runstate::run_dir(run_id);
-        // Deliberately skip `create_run` — no meta.json ever exists, so every
-        // `read_meta` call (including the one on the timeout path) fails,
-        // exercising the `if let Ok(...)` else arm at the timeout branch.
-        std::fs::create_dir_all(&dir).unwrap();
+            |_d| async move {
+                let run_id = "test-tool-approval-timeout-no-meta";
+                let dir = crate::runstate::run_dir(run_id);
+                // Deliberately skip `create_run` — no meta.json ever exists, so every
+                // `read_meta` call (including the one on the timeout path) fails,
+                // exercising the `if let Ok(...)` else arm at the timeout branch.
+                std::fs::create_dir_all(&dir).unwrap();
 
-        let args = serde_json::json!({"command": "rm -rf /"});
-        let (approved, scope) = request_tool_approval_background(
-            run_id,
-            "bash",
-            &args,
-            "code",
-            Duration::from_millis(150),
+                let args = serde_json::json!({"command": "rm -rf /"});
+                let (approved, scope) = request_tool_approval_background(
+                    run_id,
+                    "bash",
+                    &args,
+                    "code",
+                    Duration::from_millis(150),
+                )
+                .await;
+                assert!(!approved);
+                assert_eq!(scope, ApprovalScope::Once);
+
+                let _ = std::fs::remove_dir_all(&dir);
+            },
         )
         .await;
-        assert!(!approved);
-        assert_eq!(scope, ApprovalScope::Once);
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     // ─── Deterministic loop-arm coverage (pre-written stale response) ──────
@@ -1883,108 +1995,121 @@ mod tests {
 
     #[test]
     fn test_request_interaction_sync_stale_prewritten_then_timeout_is_deterministic() {
-        let _guard = crate::runstate::isolate_runs_dir_for_test(
+        crate::runstate::with_isolated_runs_dir(
             "test_request_interaction_sync_stale_prewritten_then_timeout_is_deterministic",
+            |_d| {
+                let run_id = "test-sync-stale-prewritten-timeout";
+                let dir = crate::runstate::run_dir(run_id);
+                std::fs::create_dir_all(&dir).unwrap();
+
+                let mut meta = crate::runstate::RunMeta::new(
+                    run_id.to_string(),
+                    "agent".to_string(),
+                    "/tmp/agent.toml".to_string(),
+                    "task".to_string(),
+                    None,
+                    "/tmp".to_string(),
+                    1,
+                );
+                crate::runstate::create_run(&meta).unwrap();
+
+                write_response(run_id, &InteractionResponse::text("stale-id", "stale")).unwrap();
+
+                let req = InteractionRequest::free_text("target-req", "What?", "plan", true);
+                let result =
+                    request_interaction(run_id, &mut meta, req, Some(Duration::from_millis(50)));
+                assert!(result.is_err());
+                assert!(result.unwrap_err().to_string().contains("timed out"));
+
+                let _ = std::fs::remove_dir_all(&dir);
+            },
         );
-        let run_id = "test-sync-stale-prewritten-timeout";
-        let dir = crate::runstate::run_dir(run_id);
-        std::fs::create_dir_all(&dir).unwrap();
-
-        let mut meta = crate::runstate::RunMeta::new(
-            run_id.to_string(),
-            "agent".to_string(),
-            "/tmp/agent.toml".to_string(),
-            "task".to_string(),
-            None,
-            "/tmp".to_string(),
-            1,
-        );
-        crate::runstate::create_run(&meta).unwrap();
-
-        write_response(run_id, &InteractionResponse::text("stale-id", "stale")).unwrap();
-
-        let req = InteractionRequest::free_text("target-req", "What?", "plan", true);
-        let result = request_interaction(run_id, &mut meta, req, Some(Duration::from_millis(50)));
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("timed out"));
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]
     async fn test_request_interaction_async_stale_prewritten_then_timeout_is_deterministic() {
-        let _guard = crate::runstate::isolate_runs_dir_for_test(
+        crate::runstate::with_isolated_runs_dir_async(
             "test_request_interaction_async_stale_prewritten_then_timeout_is_deterministic",
-        );
-        let run_id = "test-async-stale-prewritten-timeout";
-        let dir = crate::runstate::run_dir(run_id);
-        std::fs::create_dir_all(&dir).unwrap();
+            |_d| async move {
+                let run_id = "test-async-stale-prewritten-timeout";
+                let dir = crate::runstate::run_dir(run_id);
+                std::fs::create_dir_all(&dir).unwrap();
 
-        let mut meta = crate::runstate::RunMeta::new(
-            run_id.to_string(),
-            "agent".to_string(),
-            "/tmp/agent.toml".to_string(),
-            "task".to_string(),
-            None,
-            "/tmp".to_string(),
-            1,
-        );
-        crate::runstate::create_run(&meta).unwrap();
+                let mut meta = crate::runstate::RunMeta::new(
+                    run_id.to_string(),
+                    "agent".to_string(),
+                    "/tmp/agent.toml".to_string(),
+                    "task".to_string(),
+                    None,
+                    "/tmp".to_string(),
+                    1,
+                );
+                crate::runstate::create_run(&meta).unwrap();
 
-        write_response(run_id, &InteractionResponse::text("stale-id", "stale")).unwrap();
+                write_response(run_id, &InteractionResponse::text("stale-id", "stale")).unwrap();
 
-        let req = InteractionRequest::free_text("target-req", "What?", "plan", true);
-        let result =
-            request_interaction_async(run_id, &mut meta, req, Some(Duration::from_millis(50)))
+                let req = InteractionRequest::free_text("target-req", "What?", "plan", true);
+                let result = request_interaction_async(
+                    run_id,
+                    &mut meta,
+                    req,
+                    Some(Duration::from_millis(50)),
+                )
                 .await;
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("timed out"));
+                assert!(result.is_err());
+                assert!(result.unwrap_err().to_string().contains("timed out"));
 
-        let _ = std::fs::remove_dir_all(&dir);
+                let _ = std::fs::remove_dir_all(&dir);
+            },
+        )
+        .await;
     }
 
     #[tokio::test]
     async fn test_request_tool_approval_background_stale_prewritten_then_timeout_is_deterministic()
     {
-        let _guard = crate::runstate::isolate_runs_dir_for_test(
+        crate::runstate::with_isolated_runs_dir_async(
             "test_request_tool_approval_background_stale_prewritten_then_timeout_is_deterministic",
-        );
-        let run_id = "test-tool-approval-stale-prewritten-timeout";
-        let dir = crate::runstate::run_dir(run_id);
-        std::fs::create_dir_all(&dir).unwrap();
+            |_d| async move {
+                let run_id = "test-tool-approval-stale-prewritten-timeout";
+                let dir = crate::runstate::run_dir(run_id);
+                std::fs::create_dir_all(&dir).unwrap();
 
-        let meta = crate::runstate::RunMeta::new(
-            run_id.to_string(),
-            "agent".to_string(),
-            "/tmp/agent.toml".to_string(),
-            "task".to_string(),
-            None,
-            "/tmp".to_string(),
-            1,
-        );
-        crate::runstate::create_run(&meta).unwrap();
+                let meta = crate::runstate::RunMeta::new(
+                    run_id.to_string(),
+                    "agent".to_string(),
+                    "/tmp/agent.toml".to_string(),
+                    "task".to_string(),
+                    None,
+                    "/tmp".to_string(),
+                    1,
+                );
+                crate::runstate::create_run(&meta).unwrap();
 
-        // Stale approval (different request_id) is discarded on the first poll.
-        write_response(
-            run_id,
-            &InteractionResponse::approval("stale-id", true, ApprovalScope::Session),
-        )
-        .unwrap();
+                // Stale approval (different request_id) is discarded on the first poll.
+                write_response(
+                    run_id,
+                    &InteractionResponse::approval("stale-id", true, ApprovalScope::Session),
+                )
+                .unwrap();
 
-        let args = serde_json::json!({"command": "ls"});
-        let (approved, scope) = request_tool_approval_background(
-            run_id,
-            "bash",
-            &args,
-            "code",
-            Duration::from_millis(50),
+                let args = serde_json::json!({"command": "ls"});
+                let (approved, scope) = request_tool_approval_background(
+                    run_id,
+                    "bash",
+                    &args,
+                    "code",
+                    Duration::from_millis(50),
+                )
+                .await;
+                // Stale response ignored → falls through to the timeout auto-deny.
+                assert!(!approved);
+                assert_eq!(scope, ApprovalScope::Once);
+
+                let _ = std::fs::remove_dir_all(&dir);
+            },
         )
         .await;
-        // Stale response ignored → falls through to the timeout auto-deny.
-        assert!(!approved);
-        assert_eq!(scope, ApprovalScope::Once);
-
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]
@@ -1997,48 +2122,52 @@ mod tests {
         // The file disappears exactly when the worker's poll took the stale one
         // and continued — i.e. exercised the KeepWaiting arm — so ordering is
         // guaranteed regardless of scheduling.
-        let _guard = crate::runstate::isolate_runs_dir_for_test(
+        crate::runstate::with_isolated_runs_dir_async(
             "test_request_interaction_bg_review_keep_waiting_arm_is_deterministic",
-        );
-        let run_id = "test-bg-review-keepwaiting-det";
-        let dir = crate::runstate::run_dir(run_id);
-        std::fs::create_dir_all(&dir).unwrap();
+            |_d| async move {
+                let run_id = "test-bg-review-keepwaiting-det";
+                let dir = crate::runstate::run_dir(run_id);
+                std::fs::create_dir_all(&dir).unwrap();
 
-        let meta = crate::runstate::RunMeta::new(
-            run_id.to_string(),
-            "agent".to_string(),
-            "/tmp/agent.toml".to_string(),
-            "task".to_string(),
-            None,
-            "/tmp".to_string(),
-            1,
-        );
-        crate::runstate::create_run(&meta).unwrap();
+                let meta = crate::runstate::RunMeta::new(
+                    run_id.to_string(),
+                    "agent".to_string(),
+                    "/tmp/agent.toml".to_string(),
+                    "task".to_string(),
+                    None,
+                    "/tmp".to_string(),
+                    1,
+                );
+                crate::runstate::create_run(&meta).unwrap();
 
-        // Stale response present before the first poll → guaranteed KeepWaiting.
-        write_response(run_id, &InteractionResponse::text("stale-id", "stale")).unwrap();
-        // Capture the response path now so the responder doesn't re-resolve
-        // LEVIATH_RUNS_DIR later (mirrors the tool-approval tests' guard).
-        let resp_path = response_path(run_id);
+                // Stale response present before the first poll → guaranteed KeepWaiting.
+                write_response(run_id, &InteractionResponse::text("stale-id", "stale")).unwrap();
+                // Capture the response path now so the responder doesn't re-resolve
+                // LEVIATH_RUNS_DIR later (mirrors the tool-approval tests' guard).
+                let resp_path = response_path(run_id);
 
-        let resp_path_responder = resp_path.clone();
-        tokio::spawn(async move {
-            // Wait until the worker consumes the stale response (file vanishes),
-            // which only happens on the KeepWaiting/continue path.
-            while resp_path_responder.exists() {
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
-            let correct = InteractionResponse::text("bg-rev-det", "final answer");
-            let json = serde_json::to_string_pretty(&correct).unwrap();
-            std::fs::write(&resp_path_responder, json).ok();
-        });
+                let resp_path_responder = resp_path.clone();
+                tokio::spawn(async move {
+                    // Wait until the worker consumes the stale response (file vanishes),
+                    // which only happens on the KeepWaiting/continue path.
+                    while resp_path_responder.exists() {
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                    }
+                    let correct = InteractionResponse::text("bg-rev-det", "final answer");
+                    let json = serde_json::to_string_pretty(&correct).unwrap();
+                    std::fs::write(&resp_path_responder, json).ok();
+                });
 
-        let req = InteractionRequest::review("bg-rev-det", "Review", "# Plan\n\nDetails", "plan");
-        let resp = request_interaction_bg_review(run_id, req).await;
-        assert_eq!(resp.value.as_deref(), Some("final answer"));
-        assert_eq!(resp.request_id, "bg-rev-det");
+                let req =
+                    InteractionRequest::review("bg-rev-det", "Review", "# Plan\n\nDetails", "plan");
+                let resp = request_interaction_bg_review(run_id, req).await;
+                assert_eq!(resp.value.as_deref(), Some("final answer"));
+                assert_eq!(resp.request_id, "bg-rev-det");
 
-        let _ = std::fs::remove_dir_all(&dir);
+                let _ = std::fs::remove_dir_all(&dir);
+            },
+        )
+        .await;
     }
 
     // ─── request_interaction_from_reader (mocked stdin) ────────────────────
@@ -2101,18 +2230,19 @@ mod tests {
 
     #[test]
     fn test_edit_text_request_ipc_roundtrip() {
-        let _guard =
-            crate::runstate::isolate_runs_dir_for_test("test_edit_text_request_ipc_roundtrip");
-        let run_id = "edit-ipc-run";
-        let dir = crate::runstate::run_dir(run_id);
-        std::fs::create_dir_all(&dir).unwrap();
-        let req = InteractionRequest::edit_text("er1", "Edit the plan", "plan", "line 1\nline 2");
-        write_request(run_id, &req).unwrap();
-        let back = read_request(run_id).expect("request should round-trip");
-        assert_eq!(back.kind, InteractionKind::EditText);
-        assert_eq!(back.body.as_deref(), Some("line 1\nline 2"));
-        assert_eq!(back.id, "er1");
-        let _ = std::fs::remove_dir_all(&dir);
+        crate::runstate::with_isolated_runs_dir("test_edit_text_request_ipc_roundtrip", |_d| {
+            let run_id = "edit-ipc-run";
+            let dir = crate::runstate::run_dir(run_id);
+            std::fs::create_dir_all(&dir).unwrap();
+            let req =
+                InteractionRequest::edit_text("er1", "Edit the plan", "plan", "line 1\nline 2");
+            write_request(run_id, &req).unwrap();
+            let back = read_request(run_id).expect("request should round-trip");
+            assert_eq!(back.kind, InteractionKind::EditText);
+            assert_eq!(back.body.as_deref(), Some("line 1\nline 2"));
+            assert_eq!(back.id, "er1");
+            let _ = std::fs::remove_dir_all(&dir);
+        });
     }
 
     #[test]

@@ -607,57 +607,57 @@ mod tests {
 
     #[test]
     fn polling_loop_emits_context_update() {
-        let _guard =
-            crate::runstate::isolate_runs_dir_for_test("polling_loop_emits_context_update");
-        use crate::runstate::{create_run, write_context_snapshot, ContextSnapshot, RunMeta};
+        crate::runstate::with_isolated_runs_dir("polling_loop_emits_context_update", |_d| {
+            use crate::runstate::{create_run, write_context_snapshot, ContextSnapshot, RunMeta};
 
-        let (state, mut rx) = make_test_state();
-        let mut poll = PollState {
-            last_status: HashMap::new(),
-            last_context_tokens: HashMap::new(),
-            last_pending: HashMap::new(),
-            callback_fired: HashMap::new(),
-        };
-        let client = reqwest::Client::new();
+            let (state, mut rx) = make_test_state();
+            let mut poll = PollState {
+                last_status: HashMap::new(),
+                last_context_tokens: HashMap::new(),
+                last_pending: HashMap::new(),
+                callback_fired: HashMap::new(),
+            };
+            let client = reqwest::Client::new();
 
-        let run_id = format!(
-            "test-poll-ctx-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .subsec_nanos()
-        );
-        let meta = RunMeta::new(
-            run_id.clone(),
-            "agent".into(),
-            "/p".into(),
-            "task".into(),
-            None,
-            "/tmp".into(),
-            1,
-        );
-        create_run(&meta).unwrap();
+            let run_id = format!(
+                "test-poll-ctx-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .subsec_nanos()
+            );
+            let meta = RunMeta::new(
+                run_id.clone(),
+                "agent".into(),
+                "/p".into(),
+                "task".into(),
+                None,
+                "/tmp".into(),
+                1,
+            );
+            create_run(&meta).unwrap();
 
-        let snap = ContextSnapshot {
-            stage_name: "plan".to_string(),
-            total_tokens: 7500,
-            max_tokens: 200000,
-            regions: vec![],
-        };
-        write_context_snapshot(&run_id, &snap).unwrap();
+            let snap = ContextSnapshot {
+                stage_name: "plan".to_string(),
+                total_tokens: 7500,
+                max_tokens: 200000,
+                regions: vec![],
+            };
+            write_context_snapshot(&run_id, &snap).unwrap();
 
-        poll_once(&state, &mut poll, &client, &[meta]);
+            poll_once(&state, &mut poll, &client, &[meta]);
 
-        let mut got_context = false;
-        while let Ok(ev) = rx.try_recv() {
-            if matches!(&ev, ServerEvent::ContextUpdate { run_id: eid, total_tokens, .. } if eid == &run_id && *total_tokens == 7500)
-            {
-                got_context = true;
+            let mut got_context = false;
+            while let Ok(ev) = rx.try_recv() {
+                if matches!(&ev, ServerEvent::ContextUpdate { run_id: eid, total_tokens, .. } if eid == &run_id && *total_tokens == 7500)
+                {
+                    got_context = true;
+                }
             }
-        }
-        let _ = std::fs::remove_dir_all(crate::runstate::run_dir(&run_id));
-        assert_got_context_update(got_context);
+            let _ = std::fs::remove_dir_all(crate::runstate::run_dir(&run_id));
+            assert_got_context_update(got_context);
+        });
     }
 
     fn assert_got_context_update(got_context: bool) {
@@ -678,93 +678,97 @@ mod tests {
     /// ContextUpdate event is emitted on the second call.
     #[test]
     fn poll_once_no_context_update_when_tokens_unchanged() {
-        let _guard = crate::runstate::isolate_runs_dir_for_test(
+        crate::runstate::with_isolated_runs_dir(
             "poll_once_no_context_update_when_tokens_unchanged",
-        );
-        use crate::runstate::{create_run, write_context_snapshot, ContextSnapshot, RunMeta};
+            |_d| {
+                use crate::runstate::{
+                    create_run, write_context_snapshot, ContextSnapshot, RunMeta,
+                };
 
-        let (state, mut rx) = make_test_state();
-        let mut poll = PollState {
-            last_status: HashMap::new(),
-            last_context_tokens: HashMap::new(),
-            last_pending: HashMap::new(),
-            callback_fired: HashMap::new(),
-        };
-        let client = reqwest::Client::new();
+                let (state, mut rx) = make_test_state();
+                let mut poll = PollState {
+                    last_status: HashMap::new(),
+                    last_context_tokens: HashMap::new(),
+                    last_pending: HashMap::new(),
+                    callback_fired: HashMap::new(),
+                };
+                let client = reqwest::Client::new();
 
-        let run_id = format!(
-            "test-poll-ctx-same-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .subsec_nanos()
-        );
-        let meta = RunMeta::new(
-            run_id.clone(),
-            "agent".into(),
-            "/p".into(),
-            "task".into(),
-            None,
-            "/tmp".into(),
-            1,
-        );
-        create_run(&meta).unwrap();
+                let run_id = format!(
+                    "test-poll-ctx-same-{}-{}",
+                    std::process::id(),
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap()
+                        .subsec_nanos()
+                );
+                let meta = RunMeta::new(
+                    run_id.clone(),
+                    "agent".into(),
+                    "/p".into(),
+                    "task".into(),
+                    None,
+                    "/tmp".into(),
+                    1,
+                );
+                create_run(&meta).unwrap();
 
-        let snap = ContextSnapshot {
-            stage_name: "plan".to_string(),
-            total_tokens: 5000,
-            max_tokens: 200000,
-            regions: vec![],
-        };
-        write_context_snapshot(&run_id, &snap).unwrap();
+                let snap = ContextSnapshot {
+                    stage_name: "plan".to_string(),
+                    total_tokens: 5000,
+                    max_tokens: 200000,
+                    regions: vec![],
+                };
+                write_context_snapshot(&run_id, &snap).unwrap();
 
-        // First call: tokens change (prev = None → 5000), should emit event.
-        poll_once(&state, &mut poll, &client, std::slice::from_ref(&meta));
-        while rx.try_recv().is_ok() {} // drain events
+                // First call: tokens change (prev = None → 5000), should emit event.
+                poll_once(&state, &mut poll, &client, std::slice::from_ref(&meta));
+                while rx.try_recv().is_ok() {} // drain events
 
-        // Second call: tokens unchanged (prev = 5000, current = 5000), no event.
-        poll_once(&state, &mut poll, &client, &[meta]);
+                // Second call: tokens unchanged (prev = 5000, current = 5000), no event.
+                poll_once(&state, &mut poll, &client, &[meta]);
 
-        // Inject events to exercise all branches of the drain loop below:
-        // 1. A non-ContextUpdate (Tokens) so the outer `if let ContextUpdate` fails
-        //    → covers the implicit else-path of the if-let (line 648 col 13).
-        // 2. A ContextUpdate for a different run → outer matches, inner eid!=run_id.
-        // 3. A ContextUpdate for our run → outer matches, inner eid==run_id.
-        // We count only #3 to verify poll_once emitted 0 for run_id (total = 1).
-        let _ = state.event_tx.send(ServerEvent::Tokens {
-            agent_id: "noise-agent".to_string(),
-            run_id: "noise-run".to_string(),
-            prompt_tokens: 0,
-            completion_tokens: 0,
-            cached_tokens: 0,
-            cache_write_tokens: 0,
-        });
-        let _ = state.event_tx.send(ServerEvent::ContextUpdate {
-            agent_id: "other-agent".to_string(),
-            run_id: "other-run-ctx".to_string(),
-            total_tokens: 100,
-            max_tokens: 200000,
-        });
-        let _ = state.event_tx.send(ServerEvent::ContextUpdate {
-            agent_id: "our-agent".to_string(),
-            run_id: run_id.clone(),
-            total_tokens: 9999,
-            max_tokens: 200000,
-        });
-        let mut ctx_updates_for_run = 0u32;
-        while let Ok(ev) = rx.try_recv() {
-            if let ServerEvent::ContextUpdate { run_id: eid, .. } = &ev {
-                if eid == &run_id {
-                    ctx_updates_for_run += 1;
+                // Inject events to exercise all branches of the drain loop below:
+                // 1. A non-ContextUpdate (Tokens) so the outer `if let ContextUpdate` fails
+                //    → covers the implicit else-path of the if-let (line 648 col 13).
+                // 2. A ContextUpdate for a different run → outer matches, inner eid!=run_id.
+                // 3. A ContextUpdate for our run → outer matches, inner eid==run_id.
+                // We count only #3 to verify poll_once emitted 0 for run_id (total = 1).
+                let _ = state.event_tx.send(ServerEvent::Tokens {
+                    agent_id: "noise-agent".to_string(),
+                    run_id: "noise-run".to_string(),
+                    prompt_tokens: 0,
+                    completion_tokens: 0,
+                    cached_tokens: 0,
+                    cache_write_tokens: 0,
+                });
+                let _ = state.event_tx.send(ServerEvent::ContextUpdate {
+                    agent_id: "other-agent".to_string(),
+                    run_id: "other-run-ctx".to_string(),
+                    total_tokens: 100,
+                    max_tokens: 200000,
+                });
+                let _ = state.event_tx.send(ServerEvent::ContextUpdate {
+                    agent_id: "our-agent".to_string(),
+                    run_id: run_id.clone(),
+                    total_tokens: 9999,
+                    max_tokens: 200000,
+                });
+                let mut ctx_updates_for_run = 0u32;
+                while let Ok(ev) = rx.try_recv() {
+                    if let ServerEvent::ContextUpdate { run_id: eid, .. } = &ev {
+                        if eid == &run_id {
+                            ctx_updates_for_run += 1;
+                        }
+                    }
                 }
-            }
-        }
-        // poll_once emitted 0 ContextUpdates for run_id (unchanged tokens);
-        // we manually injected exactly 1. Total must be exactly 1.
-        assert_ctx_updates_for_run(ctx_updates_for_run);
+                // poll_once emitted 0 ContextUpdates for run_id (unchanged tokens);
+                // we manually injected exactly 1. Total must be exactly 1.
+                assert_ctx_updates_for_run(ctx_updates_for_run);
 
-        let _ = std::fs::remove_dir_all(crate::runstate::run_dir(&run_id));
+                let _ = std::fs::remove_dir_all(crate::runstate::run_dir(&run_id));
+            },
+        );
     }
 
     fn assert_ctx_updates_for_run(ctx_updates_for_run: u32) {
@@ -782,52 +786,53 @@ mod tests {
 
     #[test]
     fn polling_loop_emits_interaction_needed() {
-        let _guard =
-            crate::runstate::isolate_runs_dir_for_test("polling_loop_emits_interaction_needed");
-        use crate::interaction::{self, InteractionRequest};
-        use crate::runstate::{create_run, RunMeta};
+        crate::runstate::with_isolated_runs_dir("polling_loop_emits_interaction_needed", |_d| {
+            use crate::interaction::{self, InteractionRequest};
+            use crate::runstate::{create_run, RunMeta};
 
-        let (state, mut rx) = make_test_state();
-        let mut poll = PollState {
-            last_status: HashMap::new(),
-            last_context_tokens: HashMap::new(),
-            last_pending: HashMap::new(),
-            callback_fired: HashMap::new(),
-        };
-        let client = reqwest::Client::new();
+            let (state, mut rx) = make_test_state();
+            let mut poll = PollState {
+                last_status: HashMap::new(),
+                last_context_tokens: HashMap::new(),
+                last_pending: HashMap::new(),
+                callback_fired: HashMap::new(),
+            };
+            let client = reqwest::Client::new();
 
-        let run_id = format!(
-            "test-poll-int-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .subsec_nanos()
-        );
-        let meta = RunMeta::new(
-            run_id.clone(),
-            "agent".into(),
-            "/p".into(),
-            "task".into(),
-            None,
-            "/tmp".into(),
-            1,
-        );
-        create_run(&meta).unwrap();
+            let run_id = format!(
+                "test-poll-int-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .subsec_nanos()
+            );
+            let meta = RunMeta::new(
+                run_id.clone(),
+                "agent".into(),
+                "/p".into(),
+                "task".into(),
+                None,
+                "/tmp".into(),
+                1,
+            );
+            create_run(&meta).unwrap();
 
-        let req = InteractionRequest::free_text("req-001", "What next?", "plan", true);
-        interaction::write_request(&run_id, &req).unwrap();
+            let req = InteractionRequest::free_text("req-001", "What next?", "plan", true);
+            interaction::write_request(&run_id, &req).unwrap();
 
-        poll_once(&state, &mut poll, &client, &[meta]);
+            poll_once(&state, &mut poll, &client, &[meta]);
 
-        let mut got_interaction = false;
-        while let Ok(ev) = rx.try_recv() {
-            if matches!(&ev, ServerEvent::InteractionNeeded { run_id: eid, .. } if eid == &run_id) {
-                got_interaction = true;
+            let mut got_interaction = false;
+            while let Ok(ev) = rx.try_recv() {
+                if matches!(&ev, ServerEvent::InteractionNeeded { run_id: eid, .. } if eid == &run_id)
+                {
+                    got_interaction = true;
+                }
             }
-        }
-        let _ = std::fs::remove_dir_all(crate::runstate::run_dir(&run_id));
-        assert_got_interaction_needed(got_interaction);
+            let _ = std::fs::remove_dir_all(crate::runstate::run_dir(&run_id));
+            assert_got_interaction_needed(got_interaction);
+        });
     }
 
     fn assert_got_interaction_needed(got_interaction: bool) {

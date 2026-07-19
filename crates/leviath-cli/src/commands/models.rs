@@ -871,117 +871,138 @@ mod tests {
 
     #[tokio::test]
     async fn execute_list_command_runs_without_error() {
-        let _guard = crate::config::isolate_config_path_for_test(
+        crate::config::with_isolated_config_path_async(
             "models-execute_list_command_runs_without_error",
-        );
-        let args = ModelsArgs {
-            command: ModelsCommand::List(ListArgs {
-                provider: None,
-                remote: false,
-            }),
-        };
-        // Should succeed: prints the builtin table
-        let result = execute(args).await;
-        assert!(result.is_ok());
+            |_fake_dir| async move {
+                let args = ModelsArgs {
+                    command: ModelsCommand::List(ListArgs {
+                        provider: None,
+                        remote: false,
+                    }),
+                };
+                // Should succeed: prints the builtin table
+                let result = execute(args).await;
+                assert!(result.is_ok());
+            },
+        )
+        .await;
     }
 
     #[tokio::test]
     async fn execute_list_with_provider_filter_runs_without_error() {
-        let _guard = crate::config::isolate_config_path_for_test(
+        crate::config::with_isolated_config_path_async(
             "models-execute_list_with_provider_filter_runs_without_error",
-        );
-        let args = ModelsArgs {
-            command: ModelsCommand::List(ListArgs {
-                provider: Some("anthropic".to_string()),
-                remote: false,
-            }),
-        };
-        let result = execute(args).await;
-        assert!(result.is_ok());
+            |_fake_dir| async move {
+                let args = ModelsArgs {
+                    command: ModelsCommand::List(ListArgs {
+                        provider: Some("anthropic".to_string()),
+                        remote: false,
+                    }),
+                };
+                let result = execute(args).await;
+                assert!(result.is_ok());
+            },
+        )
+        .await;
     }
 
     #[tokio::test]
     async fn execute_list_with_nonexistent_provider_filter() {
-        let _guard = crate::config::isolate_config_path_for_test(
+        crate::config::with_isolated_config_path_async(
             "models-execute_list_with_nonexistent_provider_filter",
-        );
-        let args = ModelsArgs {
-            command: ModelsCommand::List(ListArgs {
-                provider: Some("nonexistent_provider".to_string()),
-                remote: false,
-            }),
-        };
-        // Should succeed but print "No models found."
-        let result = execute(args).await;
-        assert!(result.is_ok());
+            |_fake_dir| async move {
+                let args = ModelsArgs {
+                    command: ModelsCommand::List(ListArgs {
+                        provider: Some("nonexistent_provider".to_string()),
+                        remote: false,
+                    }),
+                };
+                // Should succeed but print "No models found."
+                let result = execute(args).await;
+                assert!(result.is_ok());
+            },
+        )
+        .await;
     }
 
     #[tokio::test]
     async fn execute_show_known_model_runs_without_error() {
-        let _guard = crate::config::isolate_config_path_for_test(
+        crate::config::with_isolated_config_path_async(
             "models-execute_show_known_model_runs_without_error",
-        );
-        let args = ModelsArgs {
-            command: ModelsCommand::Show(ShowArgs {
-                model: "claude-sonnet-4-6".to_string(),
-                provider: None,
-                remote: false,
-            }),
-        };
-        // Should find model in builtin table and print details
-        let result = execute(args).await;
-        assert!(result.is_ok());
+            |_fake_dir| async move {
+                let args = ModelsArgs {
+                    command: ModelsCommand::Show(ShowArgs {
+                        model: "claude-sonnet-4-6".to_string(),
+                        provider: None,
+                        remote: false,
+                    }),
+                };
+                // Should find model in builtin table and print details
+                let result = execute(args).await;
+                assert!(result.is_ok());
+            },
+        )
+        .await;
     }
 
     #[tokio::test]
     async fn execute_show_unknown_model_runs_without_error() {
-        let _guard = crate::config::isolate_config_path_for_test(
+        crate::config::with_isolated_config_path_async(
             "models-execute_show_unknown_model_runs_without_error",
-        );
-        let args = ModelsArgs {
-            command: ModelsCommand::Show(ShowArgs {
-                model: "totally-unknown-model-xyz".to_string(),
-                provider: None,
-                remote: false,
-            }),
-        };
-        // Should print "Model not found" message without error
-        let result = execute(args).await;
-        assert!(result.is_ok());
+            |_fake_dir| async move {
+                let args = ModelsArgs {
+                    command: ModelsCommand::Show(ShowArgs {
+                        model: "totally-unknown-model-xyz".to_string(),
+                        provider: None,
+                        remote: false,
+                    }),
+                };
+                // Should print "Model not found" message without error
+                let result = execute(args).await;
+                assert!(result.is_ok());
+            },
+        )
+        .await;
     }
 
     #[tokio::test]
     async fn execute_show_unknown_model_with_remote_no_provider() {
-        let _guard = crate::config::isolate_config_path_for_test(
+        crate::config::with_isolated_config_path_async(
             "models-execute_show_unknown_model_with_remote_no_provider",
-        );
-        let args = ModelsArgs {
-            command: ModelsCommand::Show(ShowArgs {
-                model: "totally-unknown-model-xyz".to_string(),
-                provider: None,
-                remote: true, // remote but no provider = skips remote lookup
-            }),
-        };
-        let result = execute(args).await;
-        assert!(result.is_ok());
+            |_fake_dir| async move {
+                let args = ModelsArgs {
+                    command: ModelsCommand::Show(ShowArgs {
+                        model: "totally-unknown-model-xyz".to_string(),
+                        provider: None,
+                        remote: true, // remote but no provider = skips remote lookup
+                    }),
+                };
+                let result = execute(args).await;
+                assert!(result.is_ok());
+            },
+        )
+        .await;
     }
 
     #[tokio::test]
     async fn execute_show_unknown_model_with_remote_unconfigured_provider() {
-        let _guard = crate::config::isolate_config_path_for_test(
+        crate::config::with_isolated_config_path_async(
             "models-execute_show_unknown_model_with_remote_unconfigured_provider",
-        );
-        let args = ModelsArgs {
-            command: ModelsCommand::Show(ShowArgs {
-                model: "totally-unknown-model-xyz".to_string(),
-                provider: Some("anthropic".to_string()),
-                remote: true,
-                // Provider won't be configured in test env (no API key)
-            }),
-        };
-        // Should warn about unconfigured provider and then show not-found message
-        let result = execute(args).await;
-        assert!(result.is_ok());
+            |_fake_dir| async move {
+                let args = ModelsArgs {
+                    command: ModelsCommand::Show(ShowArgs {
+                        model: "totally-unknown-model-xyz".to_string(),
+                        provider: Some("anthropic".to_string()),
+                        remote: true,
+                        // Provider won't be configured in test env (no API key)
+                    }),
+                };
+                // Should warn about unconfigured provider and then show not-found message
+                let result = execute(args).await;
+                assert!(result.is_ok());
+            },
+        )
+        .await;
     }
 
     // ─── list() with builtin model having overrides in config ─────────────
@@ -995,78 +1016,103 @@ mod tests {
         // list_with_registry_propagates_config_load_error) can make this
         // test observe that torn state and fail nondeterministically --
         // exactly what happened on CI.
-        let _guard = crate::config::isolate_config_path_for_test("models-list-openrouter-filter");
-        let args = ModelsArgs {
-            command: ModelsCommand::List(ListArgs {
-                provider: Some("openrouter".to_string()),
-                remote: false,
-            }),
-        };
-        let result = execute(args).await;
-        assert!(result.is_ok());
+        crate::config::with_isolated_config_path_async(
+            "models-list-openrouter-filter",
+            |_fake_dir| async move {
+                let args = ModelsArgs {
+                    command: ModelsCommand::List(ListArgs {
+                        provider: Some("openrouter".to_string()),
+                        remote: false,
+                    }),
+                };
+                let result = execute(args).await;
+                assert!(result.is_ok());
+            },
+        )
+        .await;
     }
 
     #[tokio::test]
     async fn list_with_openai_filter() {
         // See the comment on list_with_openrouter_filter -- same real
         // Config::load() race.
-        let _guard = crate::config::isolate_config_path_for_test("models-list-openai-filter");
-        let args = ModelsArgs {
-            command: ModelsCommand::List(ListArgs {
-                provider: Some("openai".to_string()),
-                remote: false,
-            }),
-        };
-        let result = execute(args).await;
-        assert!(result.is_ok());
+        crate::config::with_isolated_config_path_async(
+            "models-list-openai-filter",
+            |_fake_dir| async move {
+                let args = ModelsArgs {
+                    command: ModelsCommand::List(ListArgs {
+                        provider: Some("openai".to_string()),
+                        remote: false,
+                    }),
+                };
+                let result = execute(args).await;
+                assert!(result.is_ok());
+            },
+        )
+        .await;
     }
 
     #[tokio::test]
     async fn show_builtin_anthropic_opus() {
         // See the comment on list_with_openrouter_filter -- same real
         // Config::load() race.
-        let _guard = crate::config::isolate_config_path_for_test("models-show-anthropic-opus");
-        let args = ModelsArgs {
-            command: ModelsCommand::Show(ShowArgs {
-                model: "claude-opus-4-6".to_string(),
-                provider: None,
-                remote: false,
-            }),
-        };
-        let result = execute(args).await;
-        assert!(result.is_ok());
+        crate::config::with_isolated_config_path_async(
+            "models-show-anthropic-opus",
+            |_fake_dir| async move {
+                let args = ModelsArgs {
+                    command: ModelsCommand::Show(ShowArgs {
+                        model: "claude-opus-4-6".to_string(),
+                        provider: None,
+                        remote: false,
+                    }),
+                };
+                let result = execute(args).await;
+                assert!(result.is_ok());
+            },
+        )
+        .await;
     }
 
     #[tokio::test]
     async fn show_builtin_openai_model() {
         // See the comment on list_with_openrouter_filter -- same real
         // Config::load() race.
-        let _guard = crate::config::isolate_config_path_for_test("models-show-openai-model");
-        let args = ModelsArgs {
-            command: ModelsCommand::Show(ShowArgs {
-                model: "gpt-5.5".to_string(),
-                provider: None,
-                remote: false,
-            }),
-        };
-        let result = execute(args).await;
-        assert!(result.is_ok());
+        crate::config::with_isolated_config_path_async(
+            "models-show-openai-model",
+            |_fake_dir| async move {
+                let args = ModelsArgs {
+                    command: ModelsCommand::Show(ShowArgs {
+                        model: "gpt-5.5".to_string(),
+                        provider: None,
+                        remote: false,
+                    }),
+                };
+                let result = execute(args).await;
+                assert!(result.is_ok());
+            },
+        )
+        .await;
     }
 
     #[tokio::test]
     async fn show_builtin_deepseek_r1() {
         // See the comment on list_with_openrouter_filter -- same real
         // Config::load() race.
-        let _guard = crate::config::isolate_config_path_for_test("models-show-deepseek-r1");
-        let args = ModelsArgs {
-            command: ModelsCommand::Show(ShowArgs {
-                model: "deepseek/deepseek-r1".to_string(),
-                provider: None,
-                remote: false,
-            }),
-        };
-        let result = execute(args).await;
-        assert!(result.is_ok());
+        crate::config::with_isolated_config_path_async(
+            "models-show-deepseek-r1",
+            |_fake_dir| async move {
+                let args = ModelsArgs {
+                    command: ModelsCommand::Show(ShowArgs {
+                        model: "deepseek/deepseek-r1".to_string(),
+                        provider: None,
+                        remote: false,
+                    }),
+                };
+                let result = execute(args).await;
+                assert!(result.is_ok());
+            },
+        )
+        .await;
     }
 
     // ─── builtin_table as ModelInfo conversion ──────────────────────────
@@ -1154,87 +1200,107 @@ mod tests {
 
     #[tokio::test]
     async fn list_builtin_no_filter_succeeds() {
-        let _guard =
-            crate::config::isolate_config_path_for_test("models-list_builtin_no_filter_succeeds");
-        let args = ListArgs {
-            remote: false,
-            provider: None,
-        };
-        let result = list_with_registry(args, &build_provider_registry_from_config).await;
-        assert!(result.is_ok());
+        crate::config::with_isolated_config_path_async(
+            "models-list_builtin_no_filter_succeeds",
+            |_fake_dir| async move {
+                let args = ListArgs {
+                    remote: false,
+                    provider: None,
+                };
+                let result = list_with_registry(args, &build_provider_registry_from_config).await;
+                assert!(result.is_ok());
+            },
+        )
+        .await;
     }
 
     #[tokio::test]
     async fn list_builtin_with_provider_filter_succeeds() {
-        let _guard = crate::config::isolate_config_path_for_test(
+        crate::config::with_isolated_config_path_async(
             "models-list_builtin_with_provider_filter_succeeds",
-        );
-        let args = ListArgs {
-            remote: false,
-            provider: Some("anthropic".to_string()),
-        };
-        let result = list_with_registry(args, &build_provider_registry_from_config).await;
-        assert!(result.is_ok());
+            |_fake_dir| async move {
+                let args = ListArgs {
+                    remote: false,
+                    provider: Some("anthropic".to_string()),
+                };
+                let result = list_with_registry(args, &build_provider_registry_from_config).await;
+                assert!(result.is_ok());
+            },
+        )
+        .await;
     }
 
     #[tokio::test]
     async fn list_unknown_provider_filter_finds_nothing() {
-        let _guard = crate::config::isolate_config_path_for_test(
+        crate::config::with_isolated_config_path_async(
             "models-list_unknown_provider_filter_finds_nothing",
-        );
-        let args = ListArgs {
-            remote: false,
-            provider: Some("no-such-provider".to_string()),
-        };
-        // Should print "No models found." and still succeed, not error.
-        let result = list_with_registry(args, &build_provider_registry_from_config).await;
-        assert!(result.is_ok());
+            |_fake_dir| async move {
+                let args = ListArgs {
+                    remote: false,
+                    provider: Some("no-such-provider".to_string()),
+                };
+                // Should print "No models found." and still succeed, not error.
+                let result = list_with_registry(args, &build_provider_registry_from_config).await;
+                assert!(result.is_ok());
+            },
+        )
+        .await;
     }
 
     #[tokio::test]
     async fn show_builtin_model_succeeds() {
-        let _guard =
-            crate::config::isolate_config_path_for_test("models-show_builtin_model_succeeds");
-        // Use a model ID guaranteed to be in the builtin table.
-        let known_id = builtin_table()[0].model_id.to_string();
-        let args = ShowArgs {
-            model: known_id,
-            remote: false,
-            provider: None,
-        };
-        let result = show_with_registry(args, &build_provider_registry_from_config).await;
-        assert!(result.is_ok());
+        crate::config::with_isolated_config_path_async(
+            "models-show_builtin_model_succeeds",
+            |_fake_dir| async move {
+                // Use a model ID guaranteed to be in the builtin table.
+                let known_id = builtin_table()[0].model_id.to_string();
+                let args = ShowArgs {
+                    model: known_id,
+                    remote: false,
+                    provider: None,
+                };
+                let result = show_with_registry(args, &build_provider_registry_from_config).await;
+                assert!(result.is_ok());
+            },
+        )
+        .await;
     }
 
     #[tokio::test]
     async fn show_unknown_model_without_remote_succeeds_with_warning() {
-        let _guard = crate::config::isolate_config_path_for_test(
+        crate::config::with_isolated_config_path_async(
             "models-show_unknown_model_without_remote_succeeds_with_warning",
-        );
-        let args = ShowArgs {
-            model: "totally-unknown-model-xyz".to_string(),
-            remote: false,
-            provider: None,
-        };
-        // Falls through all lookup tiers; must not error even when not found.
-        let result = show_with_registry(args, &build_provider_registry_from_config).await;
-        assert!(result.is_ok());
+            |_fake_dir| async move {
+                let args = ShowArgs {
+                    model: "totally-unknown-model-xyz".to_string(),
+                    remote: false,
+                    provider: None,
+                };
+                // Falls through all lookup tiers; must not error even when not found.
+                let result = show_with_registry(args, &build_provider_registry_from_config).await;
+                assert!(result.is_ok());
+            },
+        )
+        .await;
     }
 
     #[tokio::test]
     async fn show_remote_without_provider_falls_through_gracefully() {
-        let _guard = crate::config::isolate_config_path_for_test(
+        crate::config::with_isolated_config_path_async(
             "models-show_remote_without_provider_falls_through_gracefully",
-        );
-        // args.remote = true but no --provider given -> the remote-fetch
-        // branch's inner `if let Some(ref provider_name)` is skipped.
-        let args = ShowArgs {
-            model: "totally-unknown-model-xyz".to_string(),
-            remote: true,
-            provider: None,
-        };
-        let result = show_with_registry(args, &build_provider_registry_from_config).await;
-        assert!(result.is_ok());
+            |_fake_dir| async move {
+                // args.remote = true but no --provider given -> the remote-fetch
+                // branch's inner `if let Some(ref provider_name)` is skipped.
+                let args = ShowArgs {
+                    model: "totally-unknown-model-xyz".to_string(),
+                    remote: true,
+                    provider: None,
+                };
+                let result = show_with_registry(args, &build_provider_registry_from_config).await;
+                assert!(result.is_ok());
+            },
+        )
+        .await;
     }
 
     // ─── list()/show() --remote paths, with a mock provider ────────────────
@@ -1318,21 +1384,25 @@ mod tests {
 
     #[tokio::test]
     async fn list_remote_merges_new_model_from_provider() {
-        let _guard = crate::config::isolate_config_path_for_test(
+        crate::config::with_isolated_config_path_async(
             "models-list_remote_merges_new_model_from_provider",
-        );
-        let args = ListArgs {
-            remote: true,
-            provider: Some("mock".to_string()),
-        };
-        let new_model = ModelInfo {
-            id: "mock-brand-new-model".to_string(),
-            display_name: Some("Mock Brand New Model".to_string()),
-            provider: "mock".to_string(),
-            capabilities: ModelCapabilities::default(),
-        };
-        let result = list_with_registry(args, &mock_registry("mock", vec![new_model], false)).await;
-        assert!(result.is_ok());
+            |_fake_dir| async move {
+                let args = ListArgs {
+                    remote: true,
+                    provider: Some("mock".to_string()),
+                };
+                let new_model = ModelInfo {
+                    id: "mock-brand-new-model".to_string(),
+                    display_name: Some("Mock Brand New Model".to_string()),
+                    provider: "mock".to_string(),
+                    capabilities: ModelCapabilities::default(),
+                };
+                let result =
+                    list_with_registry(args, &mock_registry("mock", vec![new_model], false)).await;
+                assert!(result.is_ok());
+            },
+        )
+        .await;
     }
 
     #[tokio::test]
@@ -1341,136 +1411,163 @@ mod tests {
         // be queried for remote models (the `if let Some(ref filter) = ...`
         // pattern-doesn't-match arm, never exercised by the other
         // `list_remote_*` tests below, which all pass a provider filter).
-        let _guard = crate::config::isolate_config_path_for_test(
+        crate::config::with_isolated_config_path_async(
             "models-list_remote_without_provider_filter_queries_all_providers",
-        );
-        let args = ListArgs {
-            remote: true,
-            provider: None,
-        };
-        let new_model = ModelInfo {
-            id: "mock-brand-new-model".to_string(),
-            display_name: Some("Mock Brand New Model".to_string()),
-            provider: "mock".to_string(),
-            capabilities: ModelCapabilities::default(),
-        };
-        let result = list_with_registry(args, &mock_registry("mock", vec![new_model], false)).await;
-        assert!(result.is_ok());
+            |_fake_dir| async move {
+                let args = ListArgs {
+                    remote: true,
+                    provider: None,
+                };
+                let new_model = ModelInfo {
+                    id: "mock-brand-new-model".to_string(),
+                    display_name: Some("Mock Brand New Model".to_string()),
+                    provider: "mock".to_string(),
+                    capabilities: ModelCapabilities::default(),
+                };
+                let result =
+                    list_with_registry(args, &mock_registry("mock", vec![new_model], false)).await;
+                assert!(result.is_ok());
+            },
+        )
+        .await;
     }
 
     #[tokio::test]
     async fn list_remote_overrides_builtin_entry_with_same_id() {
-        let _guard = crate::config::isolate_config_path_for_test(
+        crate::config::with_isolated_config_path_async(
             "models-list_remote_overrides_builtin_entry_with_same_id",
-        );
-        let known_id = builtin_table()[0].model_id.to_string();
-        let args = ListArgs {
-            remote: true,
-            provider: Some("mock".to_string()),
-        };
-        let overriding_model = ModelInfo {
-            id: known_id,
-            display_name: Some("Overridden".to_string()),
-            provider: "mock".to_string(),
-            capabilities: ModelCapabilities::default(),
-        };
-        let result =
-            list_with_registry(args, &mock_registry("mock", vec![overriding_model], false)).await;
-        assert!(result.is_ok());
+            |_fake_dir| async move {
+                let known_id = builtin_table()[0].model_id.to_string();
+                let args = ListArgs {
+                    remote: true,
+                    provider: Some("mock".to_string()),
+                };
+                let overriding_model = ModelInfo {
+                    id: known_id,
+                    display_name: Some("Overridden".to_string()),
+                    provider: "mock".to_string(),
+                    capabilities: ModelCapabilities::default(),
+                };
+                let result =
+                    list_with_registry(args, &mock_registry("mock", vec![overriding_model], false))
+                        .await;
+                assert!(result.is_ok());
+            },
+        )
+        .await;
     }
 
     #[tokio::test]
     async fn list_remote_provider_error_warns_and_continues() {
-        let _guard = crate::config::isolate_config_path_for_test(
+        crate::config::with_isolated_config_path_async(
             "models-list_remote_provider_error_warns_and_continues",
-        );
-        let args = ListArgs {
-            remote: true,
-            provider: Some("mock".to_string()),
-        };
-        let result = list_with_registry(args, &mock_registry("mock", vec![], true)).await;
-        assert!(result.is_ok());
+            |_fake_dir| async move {
+                let args = ListArgs {
+                    remote: true,
+                    provider: Some("mock".to_string()),
+                };
+                let result = list_with_registry(args, &mock_registry("mock", vec![], true)).await;
+                assert!(result.is_ok());
+            },
+        )
+        .await;
     }
 
     #[tokio::test]
     async fn list_remote_skips_providers_not_matching_filter() {
-        let _guard = crate::config::isolate_config_path_for_test(
+        crate::config::with_isolated_config_path_async(
             "models-list_remote_skips_providers_not_matching_filter",
-        );
-        // provider filter is "mock-other", but the registry only has "mock"
-        // registered -> the `if filter != provider_name { continue; }`
-        // branch is exercised, and the mock is never queried.
-        let args = ListArgs {
-            remote: true,
-            provider: Some("mock-other".to_string()),
-        };
-        let result = list_with_registry(args, &mock_registry("mock", vec![], false)).await;
-        assert!(result.is_ok());
+            |_fake_dir| async move {
+                // provider filter is "mock-other", but the registry only has "mock"
+                // registered -> the `if filter != provider_name { continue; }`
+                // branch is exercised, and the mock is never queried.
+                let args = ListArgs {
+                    remote: true,
+                    provider: Some("mock-other".to_string()),
+                };
+                let result = list_with_registry(args, &mock_registry("mock", vec![], false)).await;
+                assert!(result.is_ok());
+            },
+        )
+        .await;
     }
 
     #[tokio::test]
     async fn show_remote_finds_model_from_provider() {
-        let _guard = crate::config::isolate_config_path_for_test(
+        crate::config::with_isolated_config_path_async(
             "models-show_remote_finds_model_from_provider",
-        );
-        let args = ShowArgs {
-            model: "mock-remote-model".to_string(),
-            remote: true,
-            provider: Some("mock".to_string()),
-        };
-        let remote_model = ModelInfo {
-            id: "mock-remote-model".to_string(),
-            display_name: Some("Mock Remote Model".to_string()),
-            provider: "mock".to_string(),
-            capabilities: ModelCapabilities::default(),
-        };
-        let result =
-            show_with_registry(args, &mock_registry("mock", vec![remote_model], false)).await;
-        assert!(result.is_ok());
+            |_fake_dir| async move {
+                let args = ShowArgs {
+                    model: "mock-remote-model".to_string(),
+                    remote: true,
+                    provider: Some("mock".to_string()),
+                };
+                let remote_model = ModelInfo {
+                    id: "mock-remote-model".to_string(),
+                    display_name: Some("Mock Remote Model".to_string()),
+                    provider: "mock".to_string(),
+                    capabilities: ModelCapabilities::default(),
+                };
+                let result =
+                    show_with_registry(args, &mock_registry("mock", vec![remote_model], false))
+                        .await;
+                assert!(result.is_ok());
+            },
+        )
+        .await;
     }
 
     #[tokio::test]
     async fn show_remote_model_not_found_in_provider_list_falls_through() {
-        let _guard = crate::config::isolate_config_path_for_test(
+        crate::config::with_isolated_config_path_async(
             "models-show_remote_model_not_found_in_provider_list_falls_through",
-        );
-        let args = ShowArgs {
-            model: "totally-unknown-model-xyz".to_string(),
-            remote: true,
-            provider: Some("mock".to_string()),
-        };
-        let result = show_with_registry(args, &mock_registry("mock", vec![], false)).await;
-        assert!(result.is_ok());
+            |_fake_dir| async move {
+                let args = ShowArgs {
+                    model: "totally-unknown-model-xyz".to_string(),
+                    remote: true,
+                    provider: Some("mock".to_string()),
+                };
+                let result = show_with_registry(args, &mock_registry("mock", vec![], false)).await;
+                assert!(result.is_ok());
+            },
+        )
+        .await;
     }
 
     #[tokio::test]
     async fn show_remote_provider_error_warns_and_falls_through() {
-        let _guard = crate::config::isolate_config_path_for_test(
+        crate::config::with_isolated_config_path_async(
             "models-show_remote_provider_error_warns_and_falls_through",
-        );
-        let args = ShowArgs {
-            model: "totally-unknown-model-xyz".to_string(),
-            remote: true,
-            provider: Some("mock".to_string()),
-        };
-        let result = show_with_registry(args, &mock_registry("mock", vec![], true)).await;
-        assert!(result.is_ok());
+            |_fake_dir| async move {
+                let args = ShowArgs {
+                    model: "totally-unknown-model-xyz".to_string(),
+                    remote: true,
+                    provider: Some("mock".to_string()),
+                };
+                let result = show_with_registry(args, &mock_registry("mock", vec![], true)).await;
+                assert!(result.is_ok());
+            },
+        )
+        .await;
     }
 
     #[tokio::test]
     async fn show_remote_unconfigured_provider_warns_and_falls_through() {
-        let _guard = crate::config::isolate_config_path_for_test(
+        crate::config::with_isolated_config_path_async(
             "models-show_remote_unconfigured_provider_warns_and_falls_through",
-        );
-        // provider filter names a provider that isn't in the registry at all
-        // -> the `if let Some(provider) = registry.get(...)` else branch.
-        let args = ShowArgs {
-            model: "totally-unknown-model-xyz".to_string(),
-            remote: true,
-            provider: Some("nonexistent-provider".to_string()),
-        };
-        let result = show_with_registry(args, &mock_registry("mock", vec![], false)).await;
-        assert!(result.is_ok());
+            |_fake_dir| async move {
+                // provider filter names a provider that isn't in the registry at all
+                // -> the `if let Some(provider) = registry.get(...)` else branch.
+                let args = ShowArgs {
+                    model: "totally-unknown-model-xyz".to_string(),
+                    remote: true,
+                    provider: Some("nonexistent-provider".to_string()),
+                };
+                let result = show_with_registry(args, &mock_registry("mock", vec![], false)).await;
+                assert!(result.is_ok());
+            },
+        )
+        .await;
     }
 
     // ─── validate_keys() warnings + [model_capabilities] overrides ─────────
@@ -1483,65 +1580,75 @@ mod tests {
 
     #[tokio::test]
     async fn list_prints_warning_and_applies_model_capabilities_override() {
-        let _guard = crate::config::isolate_config_path_for_test("models-list-override");
-        let known_id = builtin_table()[0].model_id.to_string();
-        let mut fake_config = Config::default();
-        fake_config.providers.anthropic_api_key = Some("not-a-real-key".to_string());
-        fake_config.model_capabilities.insert(
-            known_id,
-            ModelCapabilities {
-                supports_temperature: false,
-                supports_streaming: false,
-                supports_tools: false,
-                supports_system_prompt: false,
-                max_context_tokens: 1,
-                max_output_tokens: 1,
-            },
-        );
-        std::fs::write(
-            Config::config_path(),
-            toml::to_string(&fake_config).unwrap(),
-        )
-        .unwrap();
+        crate::config::with_isolated_config_path_async(
+            "models-list-override",
+            |_fake_dir| async move {
+                let known_id = builtin_table()[0].model_id.to_string();
+                let mut fake_config = Config::default();
+                fake_config.providers.anthropic_api_key = Some("not-a-real-key".to_string());
+                fake_config.model_capabilities.insert(
+                    known_id,
+                    ModelCapabilities {
+                        supports_temperature: false,
+                        supports_streaming: false,
+                        supports_tools: false,
+                        supports_system_prompt: false,
+                        max_context_tokens: 1,
+                        max_output_tokens: 1,
+                    },
+                );
+                std::fs::write(
+                    Config::config_path(),
+                    toml::to_string(&fake_config).unwrap(),
+                )
+                .unwrap();
 
-        let args = ListArgs {
-            remote: false,
-            provider: None,
-        };
-        let result = list_with_registry(args, &mock_registry("mock", vec![], false)).await;
-        assert!(result.is_ok());
+                let args = ListArgs {
+                    remote: false,
+                    provider: None,
+                };
+                let result = list_with_registry(args, &mock_registry("mock", vec![], false)).await;
+                assert!(result.is_ok());
+            },
+        )
+        .await;
     }
 
     #[tokio::test]
     async fn show_prints_warning_and_uses_model_capabilities_override() {
-        let _guard = crate::config::isolate_config_path_for_test("models-show-override");
-        let known_id = builtin_table()[0].model_id.to_string();
-        let mut fake_config = Config::default();
-        fake_config.providers.anthropic_api_key = Some("not-a-real-key".to_string());
-        fake_config.model_capabilities.insert(
-            known_id.clone(),
-            ModelCapabilities {
-                supports_temperature: false,
-                supports_streaming: false,
-                supports_tools: false,
-                supports_system_prompt: false,
-                max_context_tokens: 1,
-                max_output_tokens: 1,
-            },
-        );
-        std::fs::write(
-            Config::config_path(),
-            toml::to_string(&fake_config).unwrap(),
-        )
-        .unwrap();
+        crate::config::with_isolated_config_path_async(
+            "models-show-override",
+            |_fake_dir| async move {
+                let known_id = builtin_table()[0].model_id.to_string();
+                let mut fake_config = Config::default();
+                fake_config.providers.anthropic_api_key = Some("not-a-real-key".to_string());
+                fake_config.model_capabilities.insert(
+                    known_id.clone(),
+                    ModelCapabilities {
+                        supports_temperature: false,
+                        supports_streaming: false,
+                        supports_tools: false,
+                        supports_system_prompt: false,
+                        max_context_tokens: 1,
+                        max_output_tokens: 1,
+                    },
+                );
+                std::fs::write(
+                    Config::config_path(),
+                    toml::to_string(&fake_config).unwrap(),
+                )
+                .unwrap();
 
-        let args = ShowArgs {
-            model: known_id,
-            remote: false,
-            provider: None,
-        };
-        let result = show_with_registry(args, &mock_registry("mock", vec![], false)).await;
-        assert!(result.is_ok());
+                let args = ShowArgs {
+                    model: known_id,
+                    remote: false,
+                    provider: None,
+                };
+                let result = show_with_registry(args, &mock_registry("mock", vec![], false)).await;
+                assert!(result.is_ok());
+            },
+        )
+        .await;
     }
 
     #[tokio::test]
@@ -1579,16 +1686,19 @@ mod tests {
 
     #[tokio::test]
     async fn list_with_registry_propagates_config_load_error() {
-        let guard = crate::config::isolate_config_path_for_test(
+        crate::config::with_isolated_config_path_async(
             "models-list_with_registry_propagates_config_load_error",
-        );
-        std::fs::write(guard.fake_dir.join("config.toml"), "not valid toml [[[").unwrap();
-        let args = ListArgs {
-            remote: false,
-            provider: None,
-        };
-        let result = list_with_registry(args, &mock_registry("mock", vec![], false)).await;
-        assert!(result.is_err());
+            |fake_dir| async move {
+                std::fs::write(fake_dir.join("config.toml"), "not valid toml [[[").unwrap();
+                let args = ListArgs {
+                    remote: false,
+                    provider: None,
+                };
+                let result = list_with_registry(args, &mock_registry("mock", vec![], false)).await;
+                assert!(result.is_err());
+            },
+        )
+        .await;
     }
 
     // ─── CLI argument parsing (clap derive) ────────────────────────────────
@@ -1717,16 +1827,19 @@ mod tests {
 
     #[tokio::test]
     async fn show_with_registry_propagates_config_load_error() {
-        let guard = crate::config::isolate_config_path_for_test(
+        crate::config::with_isolated_config_path_async(
             "models-show_with_registry_propagates_config_load_error",
-        );
-        std::fs::write(guard.fake_dir.join("config.toml"), "not valid toml [[[").unwrap();
-        let args = ShowArgs {
-            model: "any-model".to_string(),
-            remote: false,
-            provider: None,
-        };
-        let result = show_with_registry(args, &mock_registry("mock", vec![], false)).await;
-        assert!(result.is_err());
+            |fake_dir| async move {
+                std::fs::write(fake_dir.join("config.toml"), "not valid toml [[[").unwrap();
+                let args = ShowArgs {
+                    model: "any-model".to_string(),
+                    remote: false,
+                    provider: None,
+                };
+                let result = show_with_registry(args, &mock_registry("mock", vec![], false)).await;
+                assert!(result.is_err());
+            },
+        )
+        .await;
     }
 }

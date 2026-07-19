@@ -283,16 +283,17 @@ mod tests {
 
     #[tokio::test]
     async fn dispatch_models_variant_is_routed() {
-        let guard = crate::config::isolate_config_path_for_test("dispatch-models");
-        let args = commands::models::ModelsArgs {
-            command: commands::models::ModelsCommand::List(commands::models::ListArgs {
-                provider: None,
-                remote: false,
-            }),
-        };
-        let result = dispatch(Commands::Models(args), &MockRisky).await;
-        drop(guard);
-        assert!(result.is_ok());
+        crate::config::with_isolated_config_path_async("dispatch-models", |_fake_dir| async move {
+            let args = commands::models::ModelsArgs {
+                command: commands::models::ModelsCommand::List(commands::models::ListArgs {
+                    provider: None,
+                    remote: false,
+                }),
+            };
+            let result = dispatch(Commands::Models(args), &MockRisky).await;
+            assert!(result.is_ok());
+        })
+        .await;
     }
 
     #[tokio::test]

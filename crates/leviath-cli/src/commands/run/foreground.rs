@@ -1431,11 +1431,12 @@ mod tests {
 
     #[tokio::test]
     async fn run_foreground_with_valid_manifest_aborts_at_missing_provider() {
-        let _config_guard = crate::config::isolate_config_path_for_test("fg-valid-manifest");
-
-        let temp_dir = std::env::temp_dir().join("lev-test-foreground-valid-manifest");
-        let _ = std::fs::create_dir_all(&temp_dir);
-        let manifest_content = r#"
+        crate::config::with_isolated_config_path_async(
+            "fg-valid-manifest",
+            |_fake_dir| async move {
+                let temp_dir = std::env::temp_dir().join("lev-test-foreground-valid-manifest");
+                let _ = std::fs::create_dir_all(&temp_dir);
+                let manifest_content = r#"
 [agent]
 name = "test-foreground-agent"
 version = "1.0.0"
@@ -1452,31 +1453,34 @@ model = "claude-sonnet-4-6"
 [tool_permissions]
 bash = "ask"
 "#;
-        write_test_agent(&temp_dir, manifest_content);
+                write_test_agent(&temp_dir, manifest_content);
 
-        let args = RunArgs {
-            path: Some(temp_dir.to_string_lossy().to_string()),
-            task: Some("test task".to_string()),
-            model: None,
-            foreground: true,
-            yolo: true,
-            allow: vec!["read_file".to_string()],
-            ask: vec!["bash".to_string()],
-            deny: vec!["write_file".to_string()],
-            max_depth: None,
-            count: 1,
-        };
+                let args = RunArgs {
+                    path: Some(temp_dir.to_string_lossy().to_string()),
+                    task: Some("test task".to_string()),
+                    model: None,
+                    foreground: true,
+                    yolo: true,
+                    allow: vec!["read_file".to_string()],
+                    ask: vec!["bash".to_string()],
+                    deny: vec!["write_file".to_string()],
+                    max_depth: None,
+                    count: 1,
+                };
 
-        // No provider is configured (config isolated above), so this should
-        // abort cleanly via `on_provider_missing` returning `true` -- which
-        // `run_stage_loop` surfaces as `Ok(())`, not an error. Wrapped in
-        // `with_tracing` because this path reaches the `tracing::info!` at
-        // the top of `run_foreground_with_registry`.
-        with_tracing(|| run_foreground(args, test_foreground_io()))
-            .await
-            .unwrap();
+                // No provider is configured (config isolated above), so this should
+                // abort cleanly via `on_provider_missing` returning `true` -- which
+                // `run_stage_loop` surfaces as `Ok(())`, not an error. Wrapped in
+                // `with_tracing` because this path reaches the `tracing::info!` at
+                // the top of `run_foreground_with_registry`.
+                with_tracing(|| run_foreground(args, test_foreground_io()))
+                    .await
+                    .unwrap();
 
-        let _ = std::fs::remove_dir_all(&temp_dir);
+                let _ = std::fs::remove_dir_all(&temp_dir);
+            },
+        )
+        .await;
     }
 
     // ─── run_foreground_with_registry (mock provider, no network) ───────────
@@ -1558,22 +1562,24 @@ bash = "ask"
 
     #[tokio::test]
     async fn run_foreground_with_mock_provider_completes_full_round_trip() {
-        let _config_guard = crate::config::isolate_config_path_for_test("fg-mock-provider");
-        // A malformed key still exercises the `validate_keys()` warning
-        // branch without being usable as a real credential -- and since the
-        // provider registry is fully mocked below, no real network call can
-        // happen regardless.
-        let mut fake_config = Config::default();
-        fake_config.providers.anthropic_api_key = Some("not-a-real-key".to_string());
-        std::fs::write(
-            Config::config_path(),
-            toml::to_string(&fake_config).unwrap(),
-        )
-        .unwrap();
+        crate::config::with_isolated_config_path_async(
+            "fg-mock-provider",
+            |_fake_dir| async move {
+                // A malformed key still exercises the `validate_keys()` warning
+                // branch without being usable as a real credential -- and since the
+                // provider registry is fully mocked below, no real network call can
+                // happen regardless.
+                let mut fake_config = Config::default();
+                fake_config.providers.anthropic_api_key = Some("not-a-real-key".to_string());
+                std::fs::write(
+                    Config::config_path(),
+                    toml::to_string(&fake_config).unwrap(),
+                )
+                .unwrap();
 
-        let temp_dir = std::env::temp_dir().join("lev-test-foreground-mock-provider");
-        let _ = std::fs::create_dir_all(&temp_dir);
-        let manifest_content = r#"
+                let temp_dir = std::env::temp_dir().join("lev-test-foreground-mock-provider");
+                let _ = std::fs::create_dir_all(&temp_dir);
+                let manifest_content = r#"
 [agent]
 name = "test-foreground-mock-agent"
 version = "1.0.0"
@@ -1587,46 +1593,49 @@ max_iterations = 2
 provider = "mock"
 model = "mock-model"
 "#;
-        write_test_agent(&temp_dir, manifest_content);
+                write_test_agent(&temp_dir, manifest_content);
 
-        let args = RunArgs {
-            path: Some(temp_dir.to_string_lossy().to_string()),
-            task: Some("test task".to_string()),
-            model: None,
-            foreground: true,
-            yolo: true,
-            allow: vec![],
-            ask: vec![],
-            deny: vec![],
-            max_depth: None,
-            count: 1,
-        };
+                let args = RunArgs {
+                    path: Some(temp_dir.to_string_lossy().to_string()),
+                    task: Some("test task".to_string()),
+                    model: None,
+                    foreground: true,
+                    yolo: true,
+                    allow: vec![],
+                    ask: vec![],
+                    deny: vec![],
+                    max_depth: None,
+                    count: 1,
+                };
 
-        // Wrapped in `with_tracing` because this path reaches the
-        // `tracing::info!` at the top of `run_foreground_with_registry`.
-        with_tracing(|| {
-            run_foreground_with_registry(
-                args,
-                |_config| {
-                    let mut registry = leviath_runtime::ProviderRegistry::new();
-                    registry.register("mock".to_string(), Arc::new(MockProvider::new()));
-                    registry
-                },
-                test_foreground_io(),
-            )
-        })
-        .await
-        .unwrap();
+                // Wrapped in `with_tracing` because this path reaches the
+                // `tracing::info!` at the top of `run_foreground_with_registry`.
+                with_tracing(|| {
+                    run_foreground_with_registry(
+                        args,
+                        |_config| {
+                            let mut registry = leviath_runtime::ProviderRegistry::new();
+                            registry.register("mock".to_string(), Arc::new(MockProvider::new()));
+                            registry
+                        },
+                        test_foreground_io(),
+                    )
+                })
+                .await
+                .unwrap();
 
-        // Cover the remaining `Provider` trait methods that this particular
-        // run never exercises through the engine.
-        let provider = MockProvider::new();
-        assert_eq!(provider.count_tokens("abcd", "mock-model"), 1);
-        assert_eq!(provider.max_context_tokens("mock-model"), 100_000);
-        assert_eq!(provider.name(), "mock");
-        assert!(provider.list_models().await.unwrap().is_empty());
+                // Cover the remaining `Provider` trait methods that this particular
+                // run never exercises through the engine.
+                let provider = MockProvider::new();
+                assert_eq!(provider.count_tokens("abcd", "mock-model"), 1);
+                assert_eq!(provider.max_context_tokens("mock-model"), 100_000);
+                assert_eq!(provider.name(), "mock");
+                assert!(provider.list_models().await.unwrap().is_empty());
 
-        let _ = std::fs::remove_dir_all(&temp_dir);
+                let _ = std::fs::remove_dir_all(&temp_dir);
+            },
+        )
+        .await;
     }
 
     struct InferFailProvider;
@@ -1672,11 +1681,10 @@ model = "mock-model"
     /// a provider whose `infer` always fails.
     #[tokio::test]
     async fn run_foreground_with_registry_propagates_inference_error() {
-        let _config_guard = crate::config::isolate_config_path_for_test("fg-infer-fail");
-
-        let temp_dir = std::env::temp_dir().join("lev-test-foreground-infer-fail");
-        let _ = std::fs::create_dir_all(&temp_dir);
-        let manifest_content = r#"
+        crate::config::with_isolated_config_path_async("fg-infer-fail", |_fake_dir| async move {
+            let temp_dir = std::env::temp_dir().join("lev-test-foreground-infer-fail");
+            let _ = std::fs::create_dir_all(&temp_dir);
+            let manifest_content = r#"
 [agent]
 name = "test-foreground-infer-fail"
 version = "1.0.0"
@@ -1690,44 +1698,46 @@ max_iterations = 2
 provider = "mock"
 model = "mock-model"
 "#;
-        write_test_agent(&temp_dir, manifest_content);
+            write_test_agent(&temp_dir, manifest_content);
 
-        let args = RunArgs {
-            path: Some(temp_dir.to_string_lossy().to_string()),
-            task: Some("test task".to_string()),
-            model: None,
-            foreground: true,
-            yolo: true,
-            allow: vec![],
-            ask: vec![],
-            deny: vec![],
-            max_depth: None,
-            count: 1,
-        };
+            let args = RunArgs {
+                path: Some(temp_dir.to_string_lossy().to_string()),
+                task: Some("test task".to_string()),
+                model: None,
+                foreground: true,
+                yolo: true,
+                allow: vec![],
+                ask: vec![],
+                deny: vec![],
+                max_depth: None,
+                count: 1,
+            };
 
-        let result = with_tracing(|| {
-            run_foreground_with_registry(
-                args,
-                |_config| {
-                    let mut registry = leviath_runtime::ProviderRegistry::new();
-                    registry.register("mock".to_string(), Arc::new(InferFailProvider));
-                    registry
-                },
-                test_foreground_io(),
-            )
+            let result = with_tracing(|| {
+                run_foreground_with_registry(
+                    args,
+                    |_config| {
+                        let mut registry = leviath_runtime::ProviderRegistry::new();
+                        registry.register("mock".to_string(), Arc::new(InferFailProvider));
+                        registry
+                    },
+                    test_foreground_io(),
+                )
+            })
+            .await;
+            assert!(result.is_err());
+
+            // Cover the `Provider` trait methods the failing run never exercises.
+            let provider = InferFailProvider;
+            assert_eq!(provider.count_tokens("abcd", "mock-model"), 1);
+            assert_eq!(provider.max_context_tokens("mock-model"), 100_000);
+            assert_eq!(provider.name(), "mock");
+            let _ = provider.capabilities("mock-model");
+            assert!(provider.list_models().await.unwrap().is_empty());
+
+            let _ = std::fs::remove_dir_all(&temp_dir);
         })
         .await;
-        assert!(result.is_err());
-
-        // Cover the `Provider` trait methods the failing run never exercises.
-        let provider = InferFailProvider;
-        assert_eq!(provider.count_tokens("abcd", "mock-model"), 1);
-        assert_eq!(provider.max_context_tokens("mock-model"), 100_000);
-        assert_eq!(provider.name(), "mock");
-        let _ = provider.capabilities("mock-model");
-        assert!(provider.list_models().await.unwrap().is_empty());
-
-        let _ = std::fs::remove_dir_all(&temp_dir);
     }
 
     #[tokio::test]
@@ -1777,37 +1787,41 @@ model = "mock-model"
     /// real inference needed.
     #[tokio::test]
     async fn run_foreground_with_registry_reaches_registry_build_when_provider_missing() {
-        let _config_guard =
-            crate::config::isolate_config_path_for_test("fg-registry-build-provider-missing");
+        crate::config::with_isolated_config_path_async(
+            "fg-registry-build-provider-missing",
+            |_fake_dir| async move {
+                let temp_dir =
+                    std::env::temp_dir().join("lev-test-fg-registry-build-provider-missing");
+                let _ = std::fs::create_dir_all(&temp_dir);
+                std::fs::write(
+                    temp_dir.join("agent.leviath"),
+                    "[agent]\nname = \"x\"\nversion = \"1.0.0\"\ndescription = \"x\"\n",
+                )
+                .unwrap();
 
-        let temp_dir = std::env::temp_dir().join("lev-test-fg-registry-build-provider-missing");
-        let _ = std::fs::create_dir_all(&temp_dir);
-        std::fs::write(
-            temp_dir.join("agent.leviath"),
-            "[agent]\nname = \"x\"\nversion = \"1.0.0\"\ndescription = \"x\"\n",
+                let args = RunArgs {
+                    path: Some(temp_dir.to_string_lossy().to_string()),
+                    task: Some("test task".to_string()),
+                    model: None,
+                    foreground: true,
+                    yolo: false,
+                    allow: vec![],
+                    ask: vec![],
+                    deny: vec![],
+                    max_depth: None,
+                    count: 1,
+                };
+
+                let result = with_tracing(|| {
+                    run_foreground_with_registry(args, empty_registry, test_foreground_io())
+                })
+                .await;
+                assert!(result.is_ok());
+
+                let _ = std::fs::remove_dir_all(&temp_dir);
+            },
         )
-        .unwrap();
-
-        let args = RunArgs {
-            path: Some(temp_dir.to_string_lossy().to_string()),
-            task: Some("test task".to_string()),
-            model: None,
-            foreground: true,
-            yolo: false,
-            allow: vec![],
-            ask: vec![],
-            deny: vec![],
-            max_depth: None,
-            count: 1,
-        };
-
-        let result = with_tracing(|| {
-            run_foreground_with_registry(args, empty_registry, test_foreground_io())
-        })
         .await;
-        assert!(result.is_ok());
-
-        let _ = std::fs::remove_dir_all(&temp_dir);
     }
 
     /// Covers the `args.path = None` → `unwrap_or_else(|| ".".to_string())`
@@ -1816,33 +1830,35 @@ model = "mock-model"
     /// (with any result).
     #[tokio::test]
     async fn run_foreground_with_registry_path_none_uses_dot() {
-        let _config_guard = crate::config::isolate_config_path_for_test("fg-path-none");
+        crate::config::with_isolated_config_path_async("fg-path-none", |_fake_dir| async move {
+            let temp_dir = std::env::temp_dir().join("lev-test-fg-path-none");
+            let _ = std::fs::create_dir_all(&temp_dir);
+            // Write a manifest so find_manifest("." relative to temp_dir) works.
+            // We can't change cwd reliably in a test, so use an explicit path
+            // instead — but we DO pass path: None to exercise the else branch.
+            // Since the working directory during tests is the workspace root and
+            // likely has no agent.leviath, the call will fail at find_manifest,
+            // which is fine — we only need to cover the unwrap_or_else closure.
+            let args = RunArgs {
+                path: None, // ← exercises unwrap_or_else(|| ".".to_string())
+                task: Some("test".to_string()),
+                model: None,
+                foreground: true,
+                yolo: false,
+                allow: vec![],
+                ask: vec![],
+                deny: vec![],
+                max_depth: None,
+                count: 1,
+            };
 
-        let temp_dir = std::env::temp_dir().join("lev-test-fg-path-none");
-        let _ = std::fs::create_dir_all(&temp_dir);
-        // Write a manifest so find_manifest("." relative to temp_dir) works.
-        // We can't change cwd reliably in a test, so use an explicit path
-        // instead — but we DO pass path: None to exercise the else branch.
-        // Since the working directory during tests is the workspace root and
-        // likely has no agent.leviath, the call will fail at find_manifest,
-        // which is fine — we only need to cover the unwrap_or_else closure.
-        let args = RunArgs {
-            path: None, // ← exercises unwrap_or_else(|| ".".to_string())
-            task: Some("test".to_string()),
-            model: None,
-            foreground: true,
-            yolo: false,
-            allow: vec![],
-            ask: vec![],
-            deny: vec![],
-            max_depth: None,
-            count: 1,
-        };
-
-        // find_manifest(".") will fail unless there's an agent.leviath in cwd
-        let result = run_foreground_with_registry(args, empty_registry, test_foreground_io()).await;
-        // Accept either Ok or Err — we just need the unwrap_or_else to fire.
-        let _ = result;
+            // find_manifest(".") will fail unless there's an agent.leviath in cwd
+            let result =
+                run_foreground_with_registry(args, empty_registry, test_foreground_io()).await;
+            // Accept either Ok or Err — we just need the unwrap_or_else to fire.
+            let _ = result;
+        })
+        .await;
     }
 
     /// Covers `read_to_string(...).map_err(...)` error branch and the
@@ -1851,60 +1867,71 @@ model = "mock-model"
     /// it via `.exists()` yet `read_to_string` fails on every platform.
     #[tokio::test]
     async fn run_foreground_with_registry_fails_on_manifest_read_error() {
-        let _config_guard = crate::config::isolate_config_path_for_test("fg-manifest-read-error");
+        crate::config::with_isolated_config_path_async(
+            "fg-manifest-read-error",
+            |_fake_dir| async move {
+                let temp_dir = std::env::temp_dir().join("lev-test-fg-manifest-read");
+                let _ = std::fs::remove_dir_all(&temp_dir);
+                let _ = std::fs::create_dir_all(&temp_dir);
+                // agent.leviath is a directory: found via exists(), unreadable as a file.
+                std::fs::create_dir_all(temp_dir.join("agent.leviath")).unwrap();
 
-        let temp_dir = std::env::temp_dir().join("lev-test-fg-manifest-read");
-        let _ = std::fs::remove_dir_all(&temp_dir);
-        let _ = std::fs::create_dir_all(&temp_dir);
-        // agent.leviath is a directory: found via exists(), unreadable as a file.
-        std::fs::create_dir_all(temp_dir.join("agent.leviath")).unwrap();
+                let args = RunArgs {
+                    path: Some(temp_dir.to_string_lossy().to_string()),
+                    task: Some("test".to_string()),
+                    model: None,
+                    foreground: true,
+                    yolo: false, // ← exercises the yolo=false path
+                    allow: vec![],
+                    ask: vec![],
+                    deny: vec![],
+                    max_depth: None,
+                    count: 1,
+                };
 
-        let args = RunArgs {
-            path: Some(temp_dir.to_string_lossy().to_string()),
-            task: Some("test".to_string()),
-            model: None,
-            foreground: true,
-            yolo: false, // ← exercises the yolo=false path
-            allow: vec![],
-            ask: vec![],
-            deny: vec![],
-            max_depth: None,
-            count: 1,
-        };
+                let result =
+                    run_foreground_with_registry(args, empty_registry, test_foreground_io()).await;
+                assert!(result.is_err());
 
-        let result = run_foreground_with_registry(args, empty_registry, test_foreground_io()).await;
-        assert!(result.is_err());
-
-        let _ = std::fs::remove_dir_all(&temp_dir);
+                let _ = std::fs::remove_dir_all(&temp_dir);
+            },
+        )
+        .await;
     }
 
     /// Covers `parse_manifest(...)? ` error branch (line 386) — the manifest
     /// file exists and is readable but contains invalid TOML / bad structure.
     #[tokio::test]
     async fn run_foreground_with_registry_fails_on_invalid_manifest() {
-        let _config_guard = crate::config::isolate_config_path_for_test("fg-invalid-manifest");
+        crate::config::with_isolated_config_path_async(
+            "fg-invalid-manifest",
+            |_fake_dir| async move {
+                let temp_dir = std::env::temp_dir().join("lev-test-fg-invalid-manifest");
+                let _ = std::fs::create_dir_all(&temp_dir);
+                std::fs::write(temp_dir.join("agent.leviath"), "this is not valid toml }{")
+                    .unwrap();
 
-        let temp_dir = std::env::temp_dir().join("lev-test-fg-invalid-manifest");
-        let _ = std::fs::create_dir_all(&temp_dir);
-        std::fs::write(temp_dir.join("agent.leviath"), "this is not valid toml }{").unwrap();
+                let args = RunArgs {
+                    path: Some(temp_dir.to_string_lossy().to_string()),
+                    task: Some("test".to_string()),
+                    model: None,
+                    foreground: true,
+                    yolo: false,
+                    allow: vec![],
+                    ask: vec![],
+                    deny: vec![],
+                    max_depth: None,
+                    count: 1,
+                };
 
-        let args = RunArgs {
-            path: Some(temp_dir.to_string_lossy().to_string()),
-            task: Some("test".to_string()),
-            model: None,
-            foreground: true,
-            yolo: false,
-            allow: vec![],
-            ask: vec![],
-            deny: vec![],
-            max_depth: None,
-            count: 1,
-        };
+                let result =
+                    run_foreground_with_registry(args, empty_registry, test_foreground_io()).await;
+                assert!(result.is_err());
 
-        let result = run_foreground_with_registry(args, empty_registry, test_foreground_io()).await;
-        assert!(result.is_err());
-
-        let _ = std::fs::remove_dir_all(&temp_dir);
+                let _ = std::fs::remove_dir_all(&temp_dir);
+            },
+        )
+        .await;
     }
 
     /// Covers the `blueprint.validate().map_err(|e| ... "blueprint validation
@@ -1912,13 +1939,12 @@ model = "mock-model"
     /// `validate()` because `entry_stage` names a nonexistent stage.
     #[tokio::test]
     async fn run_foreground_with_registry_fails_on_blueprint_validation() {
-        let _config_guard = crate::config::isolate_config_path_for_test("fg-invalid-bp");
-
-        let temp_dir = std::env::temp_dir().join("lev-test-fg-invalid-bp");
-        let _ = std::fs::create_dir_all(&temp_dir);
-        std::fs::write(
-            temp_dir.join("agent.leviath"),
-            r#"
+        crate::config::with_isolated_config_path_async("fg-invalid-bp", |_fake_dir| async move {
+            let temp_dir = std::env::temp_dir().join("lev-test-fg-invalid-bp");
+            let _ = std::fs::create_dir_all(&temp_dir);
+            std::fs::write(
+                temp_dir.join("agent.leviath"),
+                r#"
 [agent]
 name = "invalid-bp"
 version = "1.0.0"
@@ -1929,31 +1955,34 @@ entry_stage = "does-not-exist"
 mode = "autonomous"
 prompt = "Do the thing"
 "#,
-        )
-        .unwrap();
+            )
+            .unwrap();
 
-        let args = RunArgs {
-            path: Some(temp_dir.to_string_lossy().to_string()),
-            task: Some("test".to_string()),
-            model: None,
-            foreground: true,
-            yolo: false,
-            allow: vec![],
-            ask: vec![],
-            deny: vec![],
-            max_depth: None,
-            count: 1,
-        };
+            let args = RunArgs {
+                path: Some(temp_dir.to_string_lossy().to_string()),
+                task: Some("test".to_string()),
+                model: None,
+                foreground: true,
+                yolo: false,
+                allow: vec![],
+                ask: vec![],
+                deny: vec![],
+                max_depth: None,
+                count: 1,
+            };
 
-        let result = run_foreground_with_registry(args, empty_registry, test_foreground_io()).await;
-        assert!(result.is_err());
-        let err = format!("{:#}", result.unwrap_err());
-        assert!(
-            err.contains("blueprint validation failed"),
-            "expected validation-failure error, got: {err}"
-        );
+            let result =
+                run_foreground_with_registry(args, empty_registry, test_foreground_io()).await;
+            assert!(result.is_err());
+            let err = format!("{:#}", result.unwrap_err());
+            assert!(
+                err.contains("blueprint validation failed"),
+                "expected validation-failure error, got: {err}"
+            );
 
-        let _ = std::fs::remove_dir_all(&temp_dir);
+            let _ = std::fs::remove_dir_all(&temp_dir);
+        })
+        .await;
     }
 
     /// Covers `resolve_task(...)? ` error branch (line 389) via the "empty
@@ -1968,37 +1997,39 @@ prompt = "Do the thing"
     /// environment, without depending on whether stdin happens to be a TTY.
     #[tokio::test]
     async fn run_foreground_with_registry_fails_when_task_file_is_empty() {
-        let _config_guard = crate::config::isolate_config_path_for_test("fg-no-task");
+        crate::config::with_isolated_config_path_async("fg-no-task", |_fake_dir| async move {
+            let temp_dir = std::env::temp_dir().join("lev-test-fg-no-task");
+            let _ = std::fs::create_dir_all(&temp_dir);
+            std::fs::write(
+                temp_dir.join("agent.leviath"),
+                "[agent]\nname = \"x\"\nversion = \"1.0.0\"\ndescription = \"x\"\n",
+            )
+            .unwrap();
+            let empty_task_file = temp_dir.join("empty-task.txt");
+            std::fs::write(&empty_task_file, "").unwrap();
 
-        let temp_dir = std::env::temp_dir().join("lev-test-fg-no-task");
-        let _ = std::fs::create_dir_all(&temp_dir);
-        std::fs::write(
-            temp_dir.join("agent.leviath"),
-            "[agent]\nname = \"x\"\nversion = \"1.0.0\"\ndescription = \"x\"\n",
-        )
-        .unwrap();
-        let empty_task_file = temp_dir.join("empty-task.txt");
-        std::fs::write(&empty_task_file, "").unwrap();
+            let args = RunArgs {
+                path: Some(temp_dir.to_string_lossy().to_string()),
+                task: Some(empty_task_file.to_string_lossy().to_string()),
+                model: None,
+                foreground: true,
+                yolo: false,
+                allow: vec![],
+                ask: vec![],
+                deny: vec![],
+                max_depth: None,
+                count: 1,
+            };
 
-        let args = RunArgs {
-            path: Some(temp_dir.to_string_lossy().to_string()),
-            task: Some(empty_task_file.to_string_lossy().to_string()),
-            model: None,
-            foreground: true,
-            yolo: false,
-            allow: vec![],
-            ask: vec![],
-            deny: vec![],
-            max_depth: None,
-            count: 1,
-        };
+            let result =
+                run_foreground_with_registry(args, empty_registry, test_foreground_io()).await;
+            assert!(result.is_err());
+            let err_msg = result.unwrap_err().to_string();
+            assert_contains_display(err_msg.contains("is empty"), "unexpected error", &err_msg);
 
-        let result = run_foreground_with_registry(args, empty_registry, test_foreground_io()).await;
-        assert!(result.is_err());
-        let err_msg = result.unwrap_err().to_string();
-        assert_contains_display(err_msg.contains("is empty"), "unexpected error", &err_msg);
-
-        let _ = std::fs::remove_dir_all(&temp_dir);
+            let _ = std::fs::remove_dir_all(&temp_dir);
+        })
+        .await;
     }
 
     /// Covers `Config::load()?`'s error branch — a manifest and task both
@@ -2008,50 +2039,55 @@ prompt = "Do the thing"
     /// ever reaching provider-registry construction.
     #[tokio::test]
     async fn run_foreground_with_registry_fails_on_invalid_config() {
-        let _config_guard = crate::config::isolate_config_path_for_test("fg-invalid-config");
-        std::fs::write(
-            crate::config::Config::config_path(),
-            "this is not valid toml }{",
+        crate::config::with_isolated_config_path_async(
+            "fg-invalid-config",
+            |_fake_dir| async move {
+                std::fs::write(
+                    crate::config::Config::config_path(),
+                    "this is not valid toml }{",
+                )
+                .unwrap();
+
+                let temp_dir = std::env::temp_dir().join("lev-test-fg-invalid-config");
+                let _ = std::fs::create_dir_all(&temp_dir);
+                std::fs::write(
+                    temp_dir.join("agent.leviath"),
+                    "[agent]\nname = \"x\"\nversion = \"1.0.0\"\ndescription = \"x\"\n",
+                )
+                .unwrap();
+
+                let args = RunArgs {
+                    path: Some(temp_dir.to_string_lossy().to_string()),
+                    task: Some("test task".to_string()),
+                    model: None,
+                    foreground: true,
+                    yolo: false,
+                    allow: vec![],
+                    ask: vec![],
+                    deny: vec![],
+                    max_depth: None,
+                    count: 1,
+                };
+
+                // Wrapped in `with_tracing` because this path reaches the
+                // `tracing::info!` at the top of `run_foreground_with_registry`
+                // (after manifest parsing, before `Config::load()` fails).
+                let result = with_tracing(|| {
+                    run_foreground_with_registry(args, empty_registry, test_foreground_io())
+                })
+                .await;
+                assert!(result.is_err());
+                let err_msg = result.unwrap_err().to_string();
+                assert_contains_display(
+                    err_msg.contains("Failed to parse config"),
+                    "unexpected error",
+                    &err_msg,
+                );
+
+                let _ = std::fs::remove_dir_all(&temp_dir);
+            },
         )
-        .unwrap();
-
-        let temp_dir = std::env::temp_dir().join("lev-test-fg-invalid-config");
-        let _ = std::fs::create_dir_all(&temp_dir);
-        std::fs::write(
-            temp_dir.join("agent.leviath"),
-            "[agent]\nname = \"x\"\nversion = \"1.0.0\"\ndescription = \"x\"\n",
-        )
-        .unwrap();
-
-        let args = RunArgs {
-            path: Some(temp_dir.to_string_lossy().to_string()),
-            task: Some("test task".to_string()),
-            model: None,
-            foreground: true,
-            yolo: false,
-            allow: vec![],
-            ask: vec![],
-            deny: vec![],
-            max_depth: None,
-            count: 1,
-        };
-
-        // Wrapped in `with_tracing` because this path reaches the
-        // `tracing::info!` at the top of `run_foreground_with_registry`
-        // (after manifest parsing, before `Config::load()` fails).
-        let result = with_tracing(|| {
-            run_foreground_with_registry(args, empty_registry, test_foreground_io())
-        })
         .await;
-        assert!(result.is_err());
-        let err_msg = result.unwrap_err().to_string();
-        assert_contains_display(
-            err_msg.contains("Failed to parse config"),
-            "unexpected error",
-            &err_msg,
-        );
-
-        let _ = std::fs::remove_dir_all(&temp_dir);
     }
 
     /// Covers the `if args.yolo { ... }` false arm (the "skip" branch) in a
@@ -2063,11 +2099,10 @@ prompt = "Do the thing"
     /// `run_foreground_with_valid_manifest_aborts_at_missing_provider`.
     #[tokio::test]
     async fn run_foreground_with_registry_yolo_false_reaches_provider_missing() {
-        let _config_guard = crate::config::isolate_config_path_for_test("fg-yolo-false");
-
-        let temp_dir = std::env::temp_dir().join("lev-test-fg-yolo-false");
-        let _ = std::fs::create_dir_all(&temp_dir);
-        let manifest_content = r#"
+        crate::config::with_isolated_config_path_async("fg-yolo-false", |_fake_dir| async move {
+            let temp_dir = std::env::temp_dir().join("lev-test-fg-yolo-false");
+            let _ = std::fs::create_dir_all(&temp_dir);
+            let manifest_content = r#"
 [agent]
 name = "test-fg-yolo-false-agent"
 version = "1.0.0"
@@ -2081,28 +2116,30 @@ max_iterations = 1
 provider = "anthropic"
 model = "claude-sonnet-4-6"
 "#;
-        write_test_agent(&temp_dir, manifest_content);
+            write_test_agent(&temp_dir, manifest_content);
 
-        let args = RunArgs {
-            path: Some(temp_dir.to_string_lossy().to_string()),
-            task: Some("test task".to_string()),
-            model: None,
-            foreground: true,
-            yolo: false, // ← exercises the `if args.yolo` false/skip branch
-            allow: vec![],
-            ask: vec![],
-            deny: vec![],
-            max_depth: None,
-            count: 1,
-        };
+            let args = RunArgs {
+                path: Some(temp_dir.to_string_lossy().to_string()),
+                task: Some("test task".to_string()),
+                model: None,
+                foreground: true,
+                yolo: false, // ← exercises the `if args.yolo` false/skip branch
+                allow: vec![],
+                ask: vec![],
+                deny: vec![],
+                max_depth: None,
+                count: 1,
+            };
 
-        // No provider configured (config isolated above) → aborts cleanly at
-        // `on_provider_missing`, same as the yolo:true counterpart above.
-        with_tracing(|| run_foreground(args, test_foreground_io()))
-            .await
-            .unwrap();
+            // No provider configured (config isolated above) → aborts cleanly at
+            // `on_provider_missing`, same as the yolo:true counterpart above.
+            with_tracing(|| run_foreground(args, test_foreground_io()))
+                .await
+                .unwrap();
 
-        let _ = std::fs::remove_dir_all(&temp_dir);
+            let _ = std::fs::remove_dir_all(&temp_dir);
+        })
+        .await;
     }
 
     /// Covers `run_stage_loop(...)?.await` error branch (line 507) — a
@@ -2113,14 +2150,13 @@ model = "claude-sonnet-4-6"
     /// `run_foreground_with_registry` returns Err.
     #[tokio::test]
     async fn run_foreground_with_registry_propagates_stage_error() {
-        let _config_guard = crate::config::isolate_config_path_for_test("fg-stage-error");
-
-        let temp_dir = std::env::temp_dir().join("lev-test-fg-stage-error");
-        let _ = std::fs::create_dir_all(&temp_dir);
-        // mode = "interactive" with tools: the has_tools=true path inside
-        // run_interactive_stage propagates inference errors rather than
-        // swallowing them.
-        let manifest_content = r#"
+        crate::config::with_isolated_config_path_async("fg-stage-error", |_fake_dir| async move {
+            let temp_dir = std::env::temp_dir().join("lev-test-fg-stage-error");
+            let _ = std::fs::create_dir_all(&temp_dir);
+            // mode = "interactive" with tools: the has_tools=true path inside
+            // run_interactive_stage propagates inference errors rather than
+            // swallowing them.
+            let manifest_content = r#"
 [agent]
 name = "test-fg-error-agent"
 version = "1.0.0"
@@ -2137,86 +2173,88 @@ model = "error-model"
 [stages.main.tools]
 allowed = ["read_file"]
 "#;
-        write_test_agent(&temp_dir, manifest_content);
+            write_test_agent(&temp_dir, manifest_content);
 
-        struct ErrorProvider;
+            struct ErrorProvider;
 
-        #[async_trait]
-        impl leviath_providers::Provider for ErrorProvider {
-            async fn infer(
-                &self,
-                _request: leviath_providers::InferenceRequest,
-            ) -> Result<leviath_providers::InferenceResponse, leviath_providers::ProviderError>
-            {
-                Err(leviath_providers::ProviderError::ApiError(
-                    "intentional test error".to_string(),
-                ))
+            #[async_trait]
+            impl leviath_providers::Provider for ErrorProvider {
+                async fn infer(
+                    &self,
+                    _request: leviath_providers::InferenceRequest,
+                ) -> Result<leviath_providers::InferenceResponse, leviath_providers::ProviderError>
+                {
+                    Err(leviath_providers::ProviderError::ApiError(
+                        "intentional test error".to_string(),
+                    ))
+                }
+
+                fn count_tokens(&self, _text: &str, _model: &str) -> usize {
+                    0
+                }
+
+                fn max_context_tokens(&self, _model: &str) -> usize {
+                    100_000
+                }
+
+                fn name(&self) -> &str {
+                    "error-mock"
+                }
+
+                fn capabilities(&self, _model: &str) -> leviath_providers::ModelCapabilities {
+                    leviath_providers::ModelCapabilities::default()
+                }
+
+                async fn list_models(
+                    &self,
+                ) -> Result<Vec<leviath_providers::ModelInfo>, leviath_providers::ProviderError>
+                {
+                    Ok(vec![])
+                }
             }
 
-            fn count_tokens(&self, _text: &str, _model: &str) -> usize {
-                0
-            }
+            let args = RunArgs {
+                path: Some(temp_dir.to_string_lossy().to_string()),
+                task: Some("test task".to_string()),
+                model: None,
+                foreground: true,
+                yolo: true,
+                allow: vec![],
+                ask: vec![],
+                deny: vec![],
+                max_depth: None,
+                count: 1,
+            };
 
-            fn max_context_tokens(&self, _model: &str) -> usize {
-                100_000
-            }
+            // Exercise the trivial trait methods so their bodies are covered.
+            let probe = ErrorProvider;
+            assert_eq!(probe.count_tokens("hello", "model"), 0);
+            assert_eq!(probe.max_context_tokens("model"), 100_000);
+            assert_eq!(probe.name(), "error-mock");
+            let _ = probe.capabilities("model");
+            let _ = probe.list_models().await;
 
-            fn name(&self) -> &str {
-                "error-mock"
-            }
+            // Wrapped in `with_tracing` because this path reaches the
+            // `tracing::info!` at the top of `run_foreground_with_registry`.
+            let result = with_tracing(|| {
+                run_foreground_with_registry(
+                    args,
+                    |_config| {
+                        let mut registry = leviath_runtime::ProviderRegistry::new();
+                        registry.register("error-mock".to_string(), Arc::new(ErrorProvider));
+                        registry
+                    },
+                    test_foreground_io(),
+                )
+            })
+            .await;
 
-            fn capabilities(&self, _model: &str) -> leviath_providers::ModelCapabilities {
-                leviath_providers::ModelCapabilities::default()
-            }
+            // The stage loop propagates the provider error in linear mode
+            assert!(result.is_err());
 
-            async fn list_models(
-                &self,
-            ) -> Result<Vec<leviath_providers::ModelInfo>, leviath_providers::ProviderError>
-            {
-                Ok(vec![])
-            }
-        }
-
-        let args = RunArgs {
-            path: Some(temp_dir.to_string_lossy().to_string()),
-            task: Some("test task".to_string()),
-            model: None,
-            foreground: true,
-            yolo: true,
-            allow: vec![],
-            ask: vec![],
-            deny: vec![],
-            max_depth: None,
-            count: 1,
-        };
-
-        // Exercise the trivial trait methods so their bodies are covered.
-        let probe = ErrorProvider;
-        assert_eq!(probe.count_tokens("hello", "model"), 0);
-        assert_eq!(probe.max_context_tokens("model"), 100_000);
-        assert_eq!(probe.name(), "error-mock");
-        let _ = probe.capabilities("model");
-        let _ = probe.list_models().await;
-
-        // Wrapped in `with_tracing` because this path reaches the
-        // `tracing::info!` at the top of `run_foreground_with_registry`.
-        let result = with_tracing(|| {
-            run_foreground_with_registry(
-                args,
-                |_config| {
-                    let mut registry = leviath_runtime::ProviderRegistry::new();
-                    registry.register("error-mock".to_string(), Arc::new(ErrorProvider));
-                    registry
-                },
-                test_foreground_io(),
-            )
+            let _ = std::fs::remove_dir_all(&temp_dir);
         })
         .await;
-
-        // The stage loop propagates the provider error in linear mode
-        assert!(result.is_err());
-
-        let _ = std::fs::remove_dir_all(&temp_dir);
     }
 
     #[tokio::test]

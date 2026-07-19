@@ -515,36 +515,41 @@ prompt = "Implement"
         // happy-path siblings) so a concurrent test can't swap LEVIATH_RUNS_DIR
         // between `create_run` and `open_log_file` and delete the dir underneath
         // us — a race llvm-cov's slower timing reliably exposed.
-        let _guard = crate::runstate::isolate_runs_dir_for_test(
+        crate::runstate::with_isolated_runs_dir_async(
             "execute_background_bad_exe_returns_spawn_error",
-        );
-        let agent_name = "test-execute-bg-bad-exe";
-        let _cleanup = RunPrefixCleanup(agent_name);
-        let temp_dir = std::env::temp_dir().join(agent_name);
-        let _ = std::fs::create_dir_all(&temp_dir);
-        write_valid_manifest(&temp_dir, agent_name);
+            |_d| async move {
+                let agent_name = "test-execute-bg-bad-exe";
+                let _cleanup = RunPrefixCleanup(agent_name);
+                let temp_dir = std::env::temp_dir().join(agent_name);
+                let _ = std::fs::create_dir_all(&temp_dir);
+                write_valid_manifest(&temp_dir, agent_name);
 
-        let args = RunArgs {
-            path: Some(temp_dir.to_string_lossy().to_string()),
-            task: Some("test task".to_string()),
-            model: None,
-            foreground: false,
-            yolo: false,
-            allow: vec![],
-            ask: vec![],
-            deny: vec![],
-            max_depth: None,
-            count: 1,
-        };
+                let args = RunArgs {
+                    path: Some(temp_dir.to_string_lossy().to_string()),
+                    task: Some("test task".to_string()),
+                    model: None,
+                    foreground: false,
+                    yolo: false,
+                    allow: vec![],
+                    ask: vec![],
+                    deny: vec![],
+                    max_depth: None,
+                    count: 1,
+                };
 
-        let bad_exe = std::path::Path::new("/nonexistent/executable/path/leviath-cli");
-        let result = super::execute_background(args, bad_exe, foreground::test_not_a_tty).await;
-        // Expected spawn error.
-        assert!(result.is_err());
-        let err = result.unwrap_err().to_string();
-        let has_spawn_err =
-            err.contains("Failed to spawn") | err.contains("spawn") | err.contains("No such file");
-        assert!(has_spawn_err);
+                let bad_exe = std::path::Path::new("/nonexistent/executable/path/leviath-cli");
+                let result =
+                    super::execute_background(args, bad_exe, foreground::test_not_a_tty).await;
+                // Expected spawn error.
+                assert!(result.is_err());
+                let err = result.unwrap_err().to_string();
+                let has_spawn_err = err.contains("Failed to spawn")
+                    | err.contains("spawn")
+                    | err.contains("No such file");
+                assert!(has_spawn_err);
+            },
+        )
+        .await;
     }
 
     // ─── WorkerArgs: more coverage ─────────────────────────────────────────
@@ -654,76 +659,82 @@ prompt = "Do the thing"
     #[cfg(unix)]
     #[tokio::test]
     async fn execute_background_happy_path_spawns_single_worker() {
-        let _guard = crate::runstate::isolate_runs_dir_for_test(
+        crate::runstate::with_isolated_runs_dir_async(
             "execute_background_happy_path_spawns_single_worker",
-        );
-        let agent_name = "test-execute-bg-happy-single";
-        let _cleanup = RunPrefixCleanup(agent_name);
-        let temp_dir = std::env::temp_dir().join(agent_name);
-        let _ = std::fs::create_dir_all(&temp_dir);
-        write_valid_manifest(&temp_dir, agent_name);
+            |_d| async move {
+                let agent_name = "test-execute-bg-happy-single";
+                let _cleanup = RunPrefixCleanup(agent_name);
+                let temp_dir = std::env::temp_dir().join(agent_name);
+                let _ = std::fs::create_dir_all(&temp_dir);
+                write_valid_manifest(&temp_dir, agent_name);
 
-        let args = RunArgs {
-            path: Some(temp_dir.to_string_lossy().to_string()),
-            task: Some("test task".to_string()),
-            model: Some("claude-sonnet-4-6".to_string()),
-            foreground: false,
-            yolo: true,
-            allow: vec!["read_file".to_string()],
-            ask: vec!["bash".to_string()],
-            deny: vec!["write_file".to_string()],
-            max_depth: Some(2),
-            count: 1,
-        };
+                let args = RunArgs {
+                    path: Some(temp_dir.to_string_lossy().to_string()),
+                    task: Some("test task".to_string()),
+                    model: Some("claude-sonnet-4-6".to_string()),
+                    foreground: false,
+                    yolo: true,
+                    allow: vec!["read_file".to_string()],
+                    ask: vec!["bash".to_string()],
+                    deny: vec!["write_file".to_string()],
+                    max_depth: Some(2),
+                    count: 1,
+                };
 
-        let harmless_exe = std::path::Path::new("/usr/bin/true");
-        super::execute_background(args, harmless_exe, foreground::test_not_a_tty)
-            .await
-            .expect("expected background execute to succeed");
+                let harmless_exe = std::path::Path::new("/usr/bin/true");
+                super::execute_background(args, harmless_exe, foreground::test_not_a_tty)
+                    .await
+                    .expect("expected background execute to succeed");
 
-        let runs = runstate::list_runs();
-        let run_was_created = runs.iter().any(|m| m.agent_name == agent_name);
-        // Expected a run to have been created.
-        assert!(run_was_created);
+                let runs = runstate::list_runs();
+                let run_was_created = runs.iter().any(|m| m.agent_name == agent_name);
+                // Expected a run to have been created.
+                assert!(run_was_created);
 
-        let _ = std::fs::remove_dir_all(&temp_dir);
+                let _ = std::fs::remove_dir_all(&temp_dir);
+            },
+        )
+        .await;
     }
 
     #[cfg(unix)]
     #[tokio::test]
     async fn execute_background_happy_path_spawns_multiple_workers() {
-        let _guard = crate::runstate::isolate_runs_dir_for_test(
+        crate::runstate::with_isolated_runs_dir_async(
             "execute_background_happy_path_spawns_multiple_workers",
-        );
-        let agent_name = "test-execute-bg-happy-multi";
-        let _cleanup = RunPrefixCleanup(agent_name);
-        let temp_dir = std::env::temp_dir().join(agent_name);
-        let _ = std::fs::create_dir_all(&temp_dir);
-        write_valid_manifest(&temp_dir, agent_name);
+            |_d| async move {
+                let agent_name = "test-execute-bg-happy-multi";
+                let _cleanup = RunPrefixCleanup(agent_name);
+                let temp_dir = std::env::temp_dir().join(agent_name);
+                let _ = std::fs::create_dir_all(&temp_dir);
+                write_valid_manifest(&temp_dir, agent_name);
 
-        let args = RunArgs {
-            path: Some(temp_dir.to_string_lossy().to_string()),
-            task: Some("test task".to_string()),
-            model: None,
-            foreground: false,
-            yolo: false,
-            allow: vec![],
-            ask: vec![],
-            deny: vec![],
-            max_depth: None,
-            count: 3,
-        };
+                let args = RunArgs {
+                    path: Some(temp_dir.to_string_lossy().to_string()),
+                    task: Some("test task".to_string()),
+                    model: None,
+                    foreground: false,
+                    yolo: false,
+                    allow: vec![],
+                    ask: vec![],
+                    deny: vec![],
+                    max_depth: None,
+                    count: 3,
+                };
 
-        let harmless_exe = std::path::Path::new("/usr/bin/true");
-        super::execute_background(args, harmless_exe, foreground::test_not_a_tty)
-            .await
-            .expect("expected multi-count background execute to succeed");
+                let harmless_exe = std::path::Path::new("/usr/bin/true");
+                super::execute_background(args, harmless_exe, foreground::test_not_a_tty)
+                    .await
+                    .expect("expected multi-count background execute to succeed");
 
-        let runs = runstate::list_runs();
-        let matching = runs.iter().filter(|m| m.agent_name == agent_name).count();
-        assert_eq!(matching, 3);
+                let runs = runstate::list_runs();
+                let matching = runs.iter().filter(|m| m.agent_name == agent_name).count();
+                assert_eq!(matching, 3);
 
-        let _ = std::fs::remove_dir_all(&temp_dir);
+                let _ = std::fs::remove_dir_all(&temp_dir);
+            },
+        )
+        .await;
     }
 
     // Windows twins of the two tests above: there's no `/usr/bin/true` on
@@ -744,102 +755,112 @@ prompt = "Do the thing"
     #[cfg(windows)]
     #[tokio::test]
     async fn execute_background_happy_path_spawns_single_worker() {
-        let _guard = crate::runstate::isolate_runs_dir_for_test(
+        crate::runstate::with_isolated_runs_dir_async(
             "execute_background_happy_path_spawns_single_worker",
-        );
-        let agent_name = "test-execute-bg-happy-single-win";
-        let _cleanup = RunPrefixCleanup(agent_name);
-        let temp_dir = std::env::temp_dir().join(agent_name);
-        let _ = std::fs::create_dir_all(&temp_dir);
-        write_valid_manifest(&temp_dir, agent_name);
+            |_d| async move {
+                let agent_name = "test-execute-bg-happy-single-win";
+                let _cleanup = RunPrefixCleanup(agent_name);
+                let temp_dir = std::env::temp_dir().join(agent_name);
+                let _ = std::fs::create_dir_all(&temp_dir);
+                write_valid_manifest(&temp_dir, agent_name);
 
-        let args = RunArgs {
-            path: Some(temp_dir.to_string_lossy().to_string()),
-            task: Some("test task".to_string()),
-            model: Some("claude-sonnet-4-6".to_string()),
-            foreground: false,
-            yolo: true,
-            allow: vec!["read_file".to_string()],
-            ask: vec!["bash".to_string()],
-            deny: vec!["write_file".to_string()],
-            max_depth: Some(2),
-            count: 1,
-        };
+                let args = RunArgs {
+                    path: Some(temp_dir.to_string_lossy().to_string()),
+                    task: Some("test task".to_string()),
+                    model: Some("claude-sonnet-4-6".to_string()),
+                    foreground: false,
+                    yolo: true,
+                    allow: vec!["read_file".to_string()],
+                    ask: vec!["bash".to_string()],
+                    deny: vec!["write_file".to_string()],
+                    max_depth: Some(2),
+                    count: 1,
+                };
 
-        let harmless_exe = temp_dir.join("harmless.bat");
-        write_harmless_bat(&harmless_exe);
-        super::execute_background(args, &harmless_exe, foreground::test_not_a_tty)
-            .await
-            .expect("expected background execute to succeed");
+                let harmless_exe = temp_dir.join("harmless.bat");
+                write_harmless_bat(&harmless_exe);
+                super::execute_background(args, &harmless_exe, foreground::test_not_a_tty)
+                    .await
+                    .expect("expected background execute to succeed");
 
-        let runs = runstate::list_runs();
-        let run_was_created = runs.iter().any(|m| m.agent_name == agent_name);
-        assert!(run_was_created);
+                let runs = runstate::list_runs();
+                let run_was_created = runs.iter().any(|m| m.agent_name == agent_name);
+                assert!(run_was_created);
 
-        let _ = std::fs::remove_dir_all(&temp_dir);
+                let _ = std::fs::remove_dir_all(&temp_dir);
+            },
+        )
+        .await;
     }
 
     #[cfg(windows)]
     #[tokio::test]
     async fn execute_background_happy_path_spawns_multiple_workers() {
-        let _guard = crate::runstate::isolate_runs_dir_for_test(
+        crate::runstate::with_isolated_runs_dir_async(
             "execute_background_happy_path_spawns_multiple_workers",
-        );
-        let agent_name = "test-execute-bg-happy-multi-win";
-        let _cleanup = RunPrefixCleanup(agent_name);
-        let temp_dir = std::env::temp_dir().join(agent_name);
-        let _ = std::fs::create_dir_all(&temp_dir);
-        write_valid_manifest(&temp_dir, agent_name);
+            |_d| async move {
+                let agent_name = "test-execute-bg-happy-multi-win";
+                let _cleanup = RunPrefixCleanup(agent_name);
+                let temp_dir = std::env::temp_dir().join(agent_name);
+                let _ = std::fs::create_dir_all(&temp_dir);
+                write_valid_manifest(&temp_dir, agent_name);
 
-        let args = RunArgs {
-            path: Some(temp_dir.to_string_lossy().to_string()),
-            task: Some("test task".to_string()),
-            model: None,
-            foreground: false,
-            yolo: false,
-            allow: vec![],
-            ask: vec![],
-            deny: vec![],
-            max_depth: None,
-            count: 3,
-        };
+                let args = RunArgs {
+                    path: Some(temp_dir.to_string_lossy().to_string()),
+                    task: Some("test task".to_string()),
+                    model: None,
+                    foreground: false,
+                    yolo: false,
+                    allow: vec![],
+                    ask: vec![],
+                    deny: vec![],
+                    max_depth: None,
+                    count: 3,
+                };
 
-        let harmless_exe = temp_dir.join("harmless.bat");
-        write_harmless_bat(&harmless_exe);
-        super::execute_background(args, &harmless_exe, foreground::test_not_a_tty)
-            .await
-            .expect("expected multi-count background execute to succeed");
+                let harmless_exe = temp_dir.join("harmless.bat");
+                write_harmless_bat(&harmless_exe);
+                super::execute_background(args, &harmless_exe, foreground::test_not_a_tty)
+                    .await
+                    .expect("expected multi-count background execute to succeed");
 
-        let runs = runstate::list_runs();
-        let matching = runs.iter().filter(|m| m.agent_name == agent_name).count();
-        assert_eq!(matching, 3);
+                let runs = runstate::list_runs();
+                let matching = runs.iter().filter(|m| m.agent_name == agent_name).count();
+                assert_eq!(matching, 3);
 
-        let _ = std::fs::remove_dir_all(&temp_dir);
+                let _ = std::fs::remove_dir_all(&temp_dir);
+            },
+        )
+        .await;
     }
 
     #[tokio::test]
     async fn execute_worker_thin_wrapper_delegates_to_worker_module() {
-        let _guard = crate::runstate::isolate_runs_dir_for_test(
+        crate::runstate::with_isolated_runs_dir_async(
             "execute_worker_thin_wrapper_delegates_to_worker_module",
-        );
-        // `execute_worker` (the public re-export) is a one-line delegation to
-        // `worker::execute_worker` -- exercised end-to-end (not mocked) by
-        // `worker.rs`'s own test suite. This just proves the delegation
-        // itself runs without panicking, using a path that fails fast.
-        let args = WorkerArgs {
-            path: "/nonexistent/path/for/mod-rs-delegation-test".to_string(),
-            task: "task".to_string(),
-            run_id: "test-execute-worker-delegation".to_string(),
-            model: None,
-            yolo: false,
-            allow: vec![],
-            ask: vec![],
-            deny: vec![],
-            max_depth: None,
-        };
-        let result = execute_worker(args).await;
-        assert!(result.is_err());
-        let _ = std::fs::remove_dir_all(runstate::run_dir("test-execute-worker-delegation"));
+            |_d| async move {
+                // `execute_worker` (the public re-export) is a one-line delegation to
+                // `worker::execute_worker` -- exercised end-to-end (not mocked) by
+                // `worker.rs`'s own test suite. This just proves the delegation
+                // itself runs without panicking, using a path that fails fast.
+                let args = WorkerArgs {
+                    path: "/nonexistent/path/for/mod-rs-delegation-test".to_string(),
+                    task: "task".to_string(),
+                    run_id: "test-execute-worker-delegation".to_string(),
+                    model: None,
+                    yolo: false,
+                    allow: vec![],
+                    ask: vec![],
+                    deny: vec![],
+                    max_depth: None,
+                };
+                let result = execute_worker(args).await;
+                assert!(result.is_err());
+                let _ =
+                    std::fs::remove_dir_all(runstate::run_dir("test-execute-worker-delegation"));
+            },
+        )
+        .await;
     }
 
     // ─── RunArgs: more coverage ────────────────────────────────────────────

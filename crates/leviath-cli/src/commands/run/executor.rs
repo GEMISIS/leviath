@@ -2922,94 +2922,97 @@ mod tests {
         // Selecting an abort option must call on_cancel and end the run
         // terminally: NO transition resolution, NO on_stage_result, and
         // on_complete must NOT fire (the run is cancelled, not completed).
-        let _guard = crate::runstate::isolate_runs_dir_for_test(
+        crate::runstate::with_isolated_runs_dir_async(
             "interactive_points_abort_cancels_run_and_skips_transition",
-        );
-        use crate::runstate::{self, RunMeta};
-        use leviath_core::blueprint::InteractionPoint;
+            |_d| async move {
+                use crate::runstate::{self, RunMeta};
+                use leviath_core::blueprint::InteractionPoint;
 
-        let mut stage = make_stage("plan");
-        stage.mode = StageMode::InteractivePoints {
-            points: vec![InteractionPoint {
-                name: "plan_approval".to_string(),
-                prompt: "Approve?".to_string(),
-                required: false,
-                style: leviath_core::blueprint::InteractionStyle::MultipleChoice,
-                options: vec!["Approve".to_string(), "Abort".to_string()],
-                directives: Default::default(),
-                abort_options: vec!["Abort".to_string()],
-                edit_options: Default::default(),
-            }],
-        };
-        stage.max_iterations = Some(2);
-        stage.accepts_messages = false;
-        let bp = make_blueprint(vec![stage]);
-        let (engine, mut pool, entity) = make_engine_and_entity_with_provider(&bp);
-        let tool_registry = make_tool_registry().await;
+                let mut stage = make_stage("plan");
+                stage.mode = StageMode::InteractivePoints {
+                    points: vec![InteractionPoint {
+                        name: "plan_approval".to_string(),
+                        prompt: "Approve?".to_string(),
+                        required: false,
+                        style: leviath_core::blueprint::InteractionStyle::MultipleChoice,
+                        options: vec!["Approve".to_string(), "Abort".to_string()],
+                        directives: Default::default(),
+                        abort_options: vec!["Abort".to_string()],
+                        edit_options: Default::default(),
+                    }],
+                };
+                stage.max_iterations = Some(2);
+                stage.accepts_messages = false;
+                let bp = make_blueprint(vec![stage]);
+                let (engine, mut pool, entity) = make_engine_and_entity_with_provider(&bp);
+                let tool_registry = make_tool_registry().await;
 
-        let run_id = "exec-abort-run".to_string();
-        let meta = RunMeta::new(
-            run_id.clone(),
-            "test".into(),
-            "/p".into(),
-            "t".into(),
-            None,
-            "/tmp".into(),
-            1,
-        );
-        runstate::create_run(&meta).unwrap();
+                let run_id = "exec-abort-run".to_string();
+                let meta = RunMeta::new(
+                    run_id.clone(),
+                    "test".into(),
+                    "/p".into(),
+                    "t".into(),
+                    None,
+                    "/tmp".into(),
+                    1,
+                );
+                runstate::create_run(&meta).unwrap();
 
-        let mut cb = MockCallbacks::new();
-        cb.run_context = Some((run_id.clone(), meta));
+                let mut cb = MockCallbacks::new();
+                cb.run_context = Some((run_id.clone(), meta));
 
-        // Answer the plan_approval choice with "Abort" (index 1).
-        let responder_run_id = run_id.clone();
-        let responder = tokio::spawn(async move {
-            // The stage posts its interaction request before awaiting the
-            // response, so the request is present once this task is scheduled.
-            tokio::time::sleep(std::time::Duration::from_millis(30)).await;
-            let req = crate::interaction::read_request(&responder_run_id)
-                .expect("stage posts its interaction request before awaiting a response");
-            let mut resp = crate::interaction::InteractionResponse::choice("", 1);
-            resp.request_id = req.id.clone();
-            crate::interaction::write_response(&responder_run_id, &resp).unwrap();
-        });
+                // Answer the plan_approval choice with "Abort" (index 1).
+                let responder_run_id = run_id.clone();
+                let responder = tokio::spawn(async move {
+                    // The stage posts its interaction request before awaiting the
+                    // response, so the request is present once this task is scheduled.
+                    tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+                    let req = crate::interaction::read_request(&responder_run_id)
+                        .expect("stage posts its interaction request before awaiting a response");
+                    let mut resp = crate::interaction::InteractionResponse::choice("", 1);
+                    resp.request_id = req.id.clone();
+                    crate::interaction::write_response(&responder_run_id, &resp).unwrap();
+                });
 
-        let mut ctx = StageContext {
-            blueprint: &bp,
-            engine: engine.clone(),
-            entity,
-            pool: &mut pool,
-            tool_source: tool_registry.as_ref(),
-            current_stage_name: Arc::new(Mutex::new(String::new())),
-            current_stage_perms: Arc::new(Mutex::new(HashMap::new())),
-            current_stage_idx: Arc::new(Mutex::new(0)),
-            model_override: None,
-            user_default_model: None,
-            compaction_ref: None,
-            agent_registry: std::sync::Arc::new(std::collections::HashMap::new()),
-        };
+                let mut ctx = StageContext {
+                    blueprint: &bp,
+                    engine: engine.clone(),
+                    entity,
+                    pool: &mut pool,
+                    tool_source: tool_registry.as_ref(),
+                    current_stage_name: Arc::new(Mutex::new(String::new())),
+                    current_stage_perms: Arc::new(Mutex::new(HashMap::new())),
+                    current_stage_idx: Arc::new(Mutex::new(0)),
+                    model_override: None,
+                    user_default_model: None,
+                    compaction_ref: None,
+                    agent_registry: std::sync::Arc::new(std::collections::HashMap::new()),
+                };
 
-        run_stage_loop(
-            &mut ctx,
-            &mut cb,
-            "agent-1",
-            &mut MockIO::new(),
-            &mut noop_exec,
+                run_stage_loop(
+                    &mut ctx,
+                    &mut cb,
+                    "agent-1",
+                    &mut MockIO::new(),
+                    &mut noop_exec,
+                )
+                .await
+                .unwrap();
+
+                let _ = responder.await;
+
+                // on_cancel fired for stage 0; the run did NOT complete or transition,
+                // and no stage_result was recorded (the stage was aborted, not run).
+                assert_eq!(cb.cancelled_at, Some(0));
+                assert_eq!(cb.completed_at, None);
+                assert!(cb.transitions.is_empty());
+                assert!(cb.stage_results.is_empty());
+
+                let _ = std::fs::remove_dir_all(runstate::run_dir(&run_id));
+            },
         )
-        .await
-        .unwrap();
-
-        let _ = responder.await;
-
-        // on_cancel fired for stage 0; the run did NOT complete or transition,
-        // and no stage_result was recorded (the stage was aborted, not run).
-        assert_eq!(cb.cancelled_at, Some(0));
-        assert_eq!(cb.completed_at, None);
-        assert!(cb.transitions.is_empty());
-        assert!(cb.stage_results.is_empty());
-
-        let _ = std::fs::remove_dir_all(runstate::run_dir(&run_id));
+        .await;
     }
 
     // ─── Interactive/InteractivePoints error propagation ────────────────────
@@ -3057,74 +3060,78 @@ mod tests {
 
     #[tokio::test]
     async fn interactive_points_stage_ipc_write_failure_propagates_error() {
-        let _guard = crate::runstate::isolate_runs_dir_for_test(
+        crate::runstate::with_isolated_runs_dir_async(
             "interactive_points_stage_ipc_write_failure_propagates_error",
-        );
-        // InteractivePoints with a non-empty points slice and a run_context whose
-        // run_dir doesn't exist → write_request fails inside request_interaction_async
-        // → Err propagates via the ? at the InteractivePoints match arm.
-        use crate::runstate::RunMeta;
-        use leviath_core::blueprint::InteractionPoint;
+            |_d| async move {
+                // InteractivePoints with a non-empty points slice and a run_context whose
+                // run_dir doesn't exist → write_request fails inside request_interaction_async
+                // → Err propagates via the ? at the InteractivePoints match arm.
+                use crate::runstate::RunMeta;
+                use leviath_core::blueprint::InteractionPoint;
 
-        let mut stage = make_stage("main");
-        stage.mode = StageMode::InteractivePoints {
-            points: vec![InteractionPoint {
-                name: "confirm".to_string(),
-                prompt: "Continue?".to_string(),
-                required: false,
-                style: Default::default(),
-                options: vec![],
-                directives: Default::default(),
-                abort_options: Default::default(),
-                edit_options: Default::default(),
-            }],
-        };
-        stage.accepts_messages = false;
-        let bp = make_blueprint(vec![stage]);
-        let (engine, mut pool, entity) = make_engine_and_entity(&bp);
-        let tool_registry = make_tool_registry().await;
-        let _ = std::fs::remove_dir_all(crate::runstate::run_dir("executor-test-no-dir-ipc"));
+                let mut stage = make_stage("main");
+                stage.mode = StageMode::InteractivePoints {
+                    points: vec![InteractionPoint {
+                        name: "confirm".to_string(),
+                        prompt: "Continue?".to_string(),
+                        required: false,
+                        style: Default::default(),
+                        options: vec![],
+                        directives: Default::default(),
+                        abort_options: Default::default(),
+                        edit_options: Default::default(),
+                    }],
+                };
+                stage.accepts_messages = false;
+                let bp = make_blueprint(vec![stage]);
+                let (engine, mut pool, entity) = make_engine_and_entity(&bp);
+                let tool_registry = make_tool_registry().await;
+                let _ =
+                    std::fs::remove_dir_all(crate::runstate::run_dir("executor-test-no-dir-ipc"));
 
-        let mut cb = MockCallbacks::new();
-        cb.run_context = Some((
-            "executor-test-no-dir-ipc".to_string(),
-            RunMeta::new(
-                "executor-test-no-dir-ipc".to_string(),
-                "test-agent".to_string(),
-                "/path".to_string(),
-                "task".to_string(),
-                None,
-                "/tmp".to_string(),
-                1,
-            ),
-        ));
+                let mut cb = MockCallbacks::new();
+                cb.run_context = Some((
+                    "executor-test-no-dir-ipc".to_string(),
+                    RunMeta::new(
+                        "executor-test-no-dir-ipc".to_string(),
+                        "test-agent".to_string(),
+                        "/path".to_string(),
+                        "task".to_string(),
+                        None,
+                        "/tmp".to_string(),
+                        1,
+                    ),
+                ));
 
-        let mut ctx = StageContext {
-            blueprint: &bp,
-            engine: engine.clone(),
-            entity,
-            pool: &mut pool,
-            tool_source: tool_registry.as_ref(),
-            current_stage_name: Arc::new(Mutex::new(String::new())),
-            current_stage_perms: Arc::new(Mutex::new(HashMap::new())),
-            current_stage_idx: Arc::new(Mutex::new(0)),
-            model_override: None,
-            user_default_model: None,
-            compaction_ref: None,
-            agent_registry: std::sync::Arc::new(std::collections::HashMap::new()),
-        };
+                let mut ctx = StageContext {
+                    blueprint: &bp,
+                    engine: engine.clone(),
+                    entity,
+                    pool: &mut pool,
+                    tool_source: tool_registry.as_ref(),
+                    current_stage_name: Arc::new(Mutex::new(String::new())),
+                    current_stage_perms: Arc::new(Mutex::new(HashMap::new())),
+                    current_stage_idx: Arc::new(Mutex::new(0)),
+                    model_override: None,
+                    user_default_model: None,
+                    compaction_ref: None,
+                    agent_registry: std::sync::Arc::new(std::collections::HashMap::new()),
+                };
 
-        let result = run_stage_loop(
-            &mut ctx,
-            &mut cb,
-            "agent-1",
-            &mut MockIO::new(),
-            &mut noop_exec,
+                let result = run_stage_loop(
+                    &mut ctx,
+                    &mut cb,
+                    "agent-1",
+                    &mut MockIO::new(),
+                    &mut noop_exec,
+                )
+                .await;
+
+                // IPC write failure should propagate Err from InteractivePoints.
+                assert!(result.is_err());
+            },
         )
         .await;
-
-        // IPC write failure should propagate Err from InteractivePoints.
-        assert!(result.is_err());
     }
 
     // ─── Models list priority tests ──────────────────────────────────────
@@ -4081,91 +4088,94 @@ mod tests {
 
     #[tokio::test]
     async fn interactive_points_abort_aborts_active_stdin_reader() {
-        let _guard = crate::runstate::isolate_runs_dir_for_test(
+        crate::runstate::with_isolated_runs_dir_async(
             "interactive_points_abort_aborts_active_stdin_reader",
-        );
-        use crate::runstate::{self, RunMeta};
-        use leviath_core::blueprint::InteractionPoint;
+            |_d| async move {
+                use crate::runstate::{self, RunMeta};
+                use leviath_core::blueprint::InteractionPoint;
 
-        // accepts_messages = true makes start_message_reader return Some, so the
-        // abort path's `handle.abort()` (stdin-reader cleanup) is exercised.
-        let mut stage = make_stage("plan");
-        stage.mode = StageMode::InteractivePoints {
-            points: vec![InteractionPoint {
-                name: "plan_approval".to_string(),
-                prompt: "Approve?".to_string(),
-                required: false,
-                style: leviath_core::blueprint::InteractionStyle::MultipleChoice,
-                options: vec!["Approve".to_string(), "Abort".to_string()],
-                directives: Default::default(),
-                abort_options: vec!["Abort".to_string()],
-                edit_options: Default::default(),
-            }],
-        };
-        stage.max_iterations = Some(2);
-        stage.accepts_messages = true;
-        let bp = make_blueprint(vec![stage]);
-        let (engine, mut pool, entity) = make_engine_and_entity_with_provider(&bp);
-        let tool_registry = make_tool_registry().await;
+                // accepts_messages = true makes start_message_reader return Some, so the
+                // abort path's `handle.abort()` (stdin-reader cleanup) is exercised.
+                let mut stage = make_stage("plan");
+                stage.mode = StageMode::InteractivePoints {
+                    points: vec![InteractionPoint {
+                        name: "plan_approval".to_string(),
+                        prompt: "Approve?".to_string(),
+                        required: false,
+                        style: leviath_core::blueprint::InteractionStyle::MultipleChoice,
+                        options: vec!["Approve".to_string(), "Abort".to_string()],
+                        directives: Default::default(),
+                        abort_options: vec!["Abort".to_string()],
+                        edit_options: Default::default(),
+                    }],
+                };
+                stage.max_iterations = Some(2);
+                stage.accepts_messages = true;
+                let bp = make_blueprint(vec![stage]);
+                let (engine, mut pool, entity) = make_engine_and_entity_with_provider(&bp);
+                let tool_registry = make_tool_registry().await;
 
-        let run_id = "exec-abort-reader-run".to_string();
-        let meta = RunMeta::new(
-            run_id.clone(),
-            "test".into(),
-            "/p".into(),
-            "t".into(),
-            None,
-            "/tmp".into(),
-            1,
-        );
-        runstate::create_run(&meta).unwrap();
+                let run_id = "exec-abort-reader-run".to_string();
+                let meta = RunMeta::new(
+                    run_id.clone(),
+                    "test".into(),
+                    "/p".into(),
+                    "t".into(),
+                    None,
+                    "/tmp".into(),
+                    1,
+                );
+                runstate::create_run(&meta).unwrap();
 
-        let mut cb = MockCallbacks::new();
-        cb.run_context = Some((run_id.clone(), meta));
+                let mut cb = MockCallbacks::new();
+                cb.run_context = Some((run_id.clone(), meta));
 
-        let responder_run_id = run_id.clone();
-        let responder = tokio::spawn(async move {
-            // The stage posts its interaction request before awaiting the
-            // response, so the request is present once this task is scheduled.
-            tokio::time::sleep(std::time::Duration::from_millis(30)).await;
-            let req = crate::interaction::read_request(&responder_run_id)
-                .expect("stage posts its interaction request before awaiting a response");
-            let mut resp = crate::interaction::InteractionResponse::choice("", 1);
-            resp.request_id = req.id.clone();
-            crate::interaction::write_response(&responder_run_id, &resp).unwrap();
-        });
+                let responder_run_id = run_id.clone();
+                let responder = tokio::spawn(async move {
+                    // The stage posts its interaction request before awaiting the
+                    // response, so the request is present once this task is scheduled.
+                    tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+                    let req = crate::interaction::read_request(&responder_run_id)
+                        .expect("stage posts its interaction request before awaiting a response");
+                    let mut resp = crate::interaction::InteractionResponse::choice("", 1);
+                    resp.request_id = req.id.clone();
+                    crate::interaction::write_response(&responder_run_id, &resp).unwrap();
+                });
 
-        let mut ctx = StageContext {
-            blueprint: &bp,
-            engine: engine.clone(),
-            entity,
-            pool: &mut pool,
-            tool_source: tool_registry.as_ref(),
-            current_stage_name: Arc::new(Mutex::new(String::new())),
-            current_stage_perms: Arc::new(Mutex::new(HashMap::new())),
-            current_stage_idx: Arc::new(Mutex::new(0)),
-            model_override: None,
-            user_default_model: None,
-            compaction_ref: None,
-            agent_registry: std::sync::Arc::new(std::collections::HashMap::new()),
-        };
+                let mut ctx = StageContext {
+                    blueprint: &bp,
+                    engine: engine.clone(),
+                    entity,
+                    pool: &mut pool,
+                    tool_source: tool_registry.as_ref(),
+                    current_stage_name: Arc::new(Mutex::new(String::new())),
+                    current_stage_perms: Arc::new(Mutex::new(HashMap::new())),
+                    current_stage_idx: Arc::new(Mutex::new(0)),
+                    model_override: None,
+                    user_default_model: None,
+                    compaction_ref: None,
+                    agent_registry: std::sync::Arc::new(std::collections::HashMap::new()),
+                };
 
-        run_stage_loop(
-            &mut ctx,
-            &mut cb,
-            "agent-1",
-            &mut MockIO::new(),
-            &mut noop_exec,
+                run_stage_loop(
+                    &mut ctx,
+                    &mut cb,
+                    "agent-1",
+                    &mut MockIO::new(),
+                    &mut noop_exec,
+                )
+                .await
+                .unwrap();
+
+                let _ = responder.await;
+
+                assert_eq!(cb.cancelled_at, Some(0));
+                assert_eq!(cb.completed_at, None);
+                assert!(cb.transitions.is_empty());
+
+                let _ = std::fs::remove_dir_all(runstate::run_dir(&run_id));
+            },
         )
-        .await
-        .unwrap();
-
-        let _ = responder.await;
-
-        assert_eq!(cb.cancelled_at, Some(0));
-        assert_eq!(cb.completed_at, None);
-        assert!(cb.transitions.is_empty());
-
-        let _ = std::fs::remove_dir_all(runstate::run_dir(&run_id));
+        .await;
     }
 }
