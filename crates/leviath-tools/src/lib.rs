@@ -1699,10 +1699,6 @@ mod tests {
 
     // ── detect_shell ──────────────────────────────────────────────────────
 
-    // Serialize tests that read or write $SHELL to prevent races.
-    #[cfg(not(windows))]
-    static SHELL_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
     /// Windows' `detect_shell()` branch is a plain, unconditional constant
     /// return (no env/filesystem dependence to inject) -- the
     /// platform-agnostic `detect_shell_returns_valid_shell` test below
@@ -1718,8 +1714,9 @@ mod tests {
 
     #[test]
     fn detect_shell_returns_valid_shell() {
-        #[cfg(not(windows))]
-        let _g = SHELL_ENV_LOCK.lock().unwrap();
+        // Pure reader: `detect_shell()` always returns a non-empty shell (and the
+        // "-c" flag on non-Windows) regardless of $SHELL, so it is robust to a
+        // concurrent temp-env writer and needs no serialization of its own.
         let (shell, flag) = BuiltinTools::detect_shell();
         assert!(!shell.is_empty());
         assert!(!flag.is_empty());
@@ -1729,19 +1726,16 @@ mod tests {
 
     /// Forces `detect_shell()` to exercise the real `shell_exists` closure by
     /// temporarily setting $SHELL to an unrecognized path, causing the candidate
-    /// loop (and the closure) to be reached.
+    /// loop (and the closure) to be reached. `temp_env::with_var` sets the var,
+    /// runs the closure, and restores it -- serialized against every other
+    /// temp-env test process-wide, so no hand-rolled lock is needed.
     #[cfg(not(windows))]
     #[test]
     fn detect_shell_queries_real_filesystem_for_unrecognized_shell() {
-        let _g = SHELL_ENV_LOCK.lock().unwrap();
-        unsafe {
-            std::env::set_var("SHELL", "/opt/not-a-recognized-shell");
-        }
-        let (shell, flag) = BuiltinTools::detect_shell();
-        // Restore: set SHELL to the found shell (always a valid shell on Unix)
-        unsafe {
-            std::env::set_var("SHELL", shell);
-        }
+        let (shell, flag) =
+            temp_env::with_var("SHELL", Some("/opt/not-a-recognized-shell"), || {
+                BuiltinTools::detect_shell()
+            });
         assert_eq!(flag, "-c");
         assert!([
             "/bin/bash",

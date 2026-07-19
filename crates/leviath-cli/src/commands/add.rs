@@ -704,37 +704,44 @@ description = "test"
                 // same `LEVIATH_CONFIG_PATH` seam to point it at a
                 // deliberately-malformed file -- without this, this test can
                 // flakily observe that other test's mid-flight override.
-                let _guard = crate::config::isolate_config_path_for_test("add-registry-installs");
-                let project_dir = tempfile::tempdir().unwrap();
-                std::fs::write(
+                crate::config::with_isolated_config_path_async(
+                    "add-registry-installs",
+                    |_fake_dir| async move {
+                        let project_dir = tempfile::tempdir().unwrap();
+                        std::fs::write(
                     project_dir.path().join("agent.leviath"),
                     "[agent]\nname = \"reg-pkg\"\nversion = \"1.0.0\"\ndescription = \"d\"\n",
                 )
                 .unwrap();
-                let bundle_bytes = leviath_package::AgentBundler::new()
-                    .bundle(project_dir.path())
-                    .unwrap();
+                        let bundle_bytes = leviath_package::AgentBundler::new()
+                            .bundle(project_dir.path())
+                            .unwrap();
 
-                let info_json =
+                        let info_json =
                     br#"{"name":"reg-pkg","version":"1.0.0","description":"A registry package"}"#;
-                let url =
-                    spawn_mock_registry(info_json, Box::leak(bundle_bytes.into_boxed_slice()))
+                        let url = spawn_mock_registry(
+                            info_json,
+                            Box::leak(bundle_bytes.into_boxed_slice()),
+                        )
                         .await;
 
-                let agents_dir = tempfile::tempdir().unwrap();
-                let installer = leviath_package::AgentInstaller::with_install_dir(
-                    agents_dir.path().to_path_buf(),
-                );
-                let args = AddArgs {
-                    package: "reg-pkg".to_string(),
-                    registry: Some(url),
-                };
+                        let agents_dir = tempfile::tempdir().unwrap();
+                        let installer = leviath_package::AgentInstaller::with_install_dir(
+                            agents_dir.path().to_path_buf(),
+                        );
+                        let args = AddArgs {
+                            package: "reg-pkg".to_string(),
+                            registry: Some(url),
+                        };
 
-                execute_with(&args, &installer, agents_dir.path())
-                    .await
-                    .unwrap();
+                        execute_with(&args, &installer, agents_dir.path())
+                            .await
+                            .unwrap();
 
-                assert!(agents_dir.path().join("reg-pkg").exists());
+                        assert!(agents_dir.path().join("reg-pkg").exists());
+                    },
+                )
+                .await;
             })
         });
     }
@@ -777,21 +784,25 @@ description = "test"
         let rt = tokio::runtime::Runtime::new().unwrap();
         with_tracing(|| {
             rt.block_on(async {
-                let guard =
-                    crate::config::isolate_config_path_for_test("add-registry-config-error");
-                std::fs::write(guard.fake_dir.join("config.toml"), "not valid toml [[[").unwrap();
+                crate::config::with_isolated_config_path_async(
+                    "add-registry-config-error",
+                    |fake_dir| async move {
+                        std::fs::write(fake_dir.join("config.toml"), "not valid toml [[[").unwrap();
 
-                let agents_dir = tempfile::tempdir().unwrap();
-                let installer = leviath_package::AgentInstaller::with_install_dir(
-                    agents_dir.path().to_path_buf(),
-                );
-                let args = AddArgs {
-                    package: "some-registry-package".to_string(),
-                    registry: None,
-                };
+                        let agents_dir = tempfile::tempdir().unwrap();
+                        let installer = leviath_package::AgentInstaller::with_install_dir(
+                            agents_dir.path().to_path_buf(),
+                        );
+                        let args = AddArgs {
+                            package: "some-registry-package".to_string(),
+                            registry: None,
+                        };
 
-                let result = execute_with(&args, &installer, agents_dir.path()).await;
-                assert!(result.is_err());
+                        let result = execute_with(&args, &installer, agents_dir.path()).await;
+                        assert!(result.is_err());
+                    },
+                )
+                .await;
             })
         });
     }
@@ -804,25 +815,29 @@ description = "test"
                 // See `execute_with_registry_package_installs` for why this
                 // guard is needed even though this test never writes a
                 // config file of its own.
-                let _guard =
-                    crate::config::isolate_config_path_for_test("add-registry-get-info-refused");
-                // Fixed, never-bound high port (same pattern used in
-                // leviath-package's own connection-refused tests) --
-                // deterministic, unlike bind-then-drop which races against
-                // other parallel tests' ephemeral-port allocations.
-                let agents_dir = tempfile::tempdir().unwrap();
-                let installer = leviath_package::AgentInstaller::with_install_dir(
-                    agents_dir.path().to_path_buf(),
-                );
-                let args = AddArgs {
-                    package: "some-registry-package".to_string(),
-                    registry: Some("http://127.0.0.1:19999".to_string()),
-                };
+                crate::config::with_isolated_config_path_async(
+                    "add-registry-get-info-refused",
+                    |_fake_dir| async move {
+                        // Fixed, never-bound high port (same pattern used in
+                        // leviath-package's own connection-refused tests) --
+                        // deterministic, unlike bind-then-drop which races against
+                        // other parallel tests' ephemeral-port allocations.
+                        let agents_dir = tempfile::tempdir().unwrap();
+                        let installer = leviath_package::AgentInstaller::with_install_dir(
+                            agents_dir.path().to_path_buf(),
+                        );
+                        let args = AddArgs {
+                            package: "some-registry-package".to_string(),
+                            registry: Some("http://127.0.0.1:19999".to_string()),
+                        };
 
-                let err = execute_with(&args, &installer, agents_dir.path())
-                    .await
-                    .unwrap_err();
-                assert!(err.to_string().contains("Failed to get package info"));
+                        let err = execute_with(&args, &installer, agents_dir.path())
+                            .await
+                            .unwrap_err();
+                        assert!(err.to_string().contains("Failed to get package info"));
+                    },
+                )
+                .await;
             })
         });
     }
@@ -835,25 +850,29 @@ description = "test"
                 // See `execute_with_registry_package_installs` for why this
                 // guard is needed even though this test never writes a
                 // config file of its own.
-                let _guard =
-                    crate::config::isolate_config_path_for_test("add-registry-download-failure");
-                let info_json =
-                    br#"{"name":"reg-pkg-dl-fail","version":"1.0.0","description":"d"}"#;
-                let url = spawn_mock_registry_download_error(info_json).await;
+                crate::config::with_isolated_config_path_async(
+                    "add-registry-download-failure",
+                    |_fake_dir| async move {
+                        let info_json =
+                            br#"{"name":"reg-pkg-dl-fail","version":"1.0.0","description":"d"}"#;
+                        let url = spawn_mock_registry_download_error(info_json).await;
 
-                let agents_dir = tempfile::tempdir().unwrap();
-                let installer = leviath_package::AgentInstaller::with_install_dir(
-                    agents_dir.path().to_path_buf(),
-                );
-                let args = AddArgs {
-                    package: "reg-pkg-dl-fail".to_string(),
-                    registry: Some(url),
-                };
+                        let agents_dir = tempfile::tempdir().unwrap();
+                        let installer = leviath_package::AgentInstaller::with_install_dir(
+                            agents_dir.path().to_path_buf(),
+                        );
+                        let args = AddArgs {
+                            package: "reg-pkg-dl-fail".to_string(),
+                            registry: Some(url),
+                        };
 
-                let err = execute_with(&args, &installer, agents_dir.path())
-                    .await
-                    .unwrap_err();
-                assert!(err.to_string().contains("Package download failed"));
+                        let err = execute_with(&args, &installer, agents_dir.path())
+                            .await
+                            .unwrap_err();
+                        assert!(err.to_string().contains("Package download failed"));
+                    },
+                )
+                .await;
             })
         });
     }
@@ -866,25 +885,29 @@ description = "test"
                 // See `execute_with_registry_package_installs` for why this
                 // guard is needed even though this test never writes a
                 // config file of its own.
-                let _guard =
-                    crate::config::isolate_config_path_for_test("add-registry-invalid-data");
-                let info_json =
-                    br#"{"name":"reg-pkg-bad-data","version":"1.0.0","description":"d"}"#;
-                let url = spawn_mock_registry(info_json, b"not a valid gzip archive").await;
+                crate::config::with_isolated_config_path_async(
+                    "add-registry-invalid-data",
+                    |_fake_dir| async move {
+                        let info_json =
+                            br#"{"name":"reg-pkg-bad-data","version":"1.0.0","description":"d"}"#;
+                        let url = spawn_mock_registry(info_json, b"not a valid gzip archive").await;
 
-                let agents_dir = tempfile::tempdir().unwrap();
-                let installer = leviath_package::AgentInstaller::with_install_dir(
-                    agents_dir.path().to_path_buf(),
-                );
-                let args = AddArgs {
-                    package: "reg-pkg-bad-data".to_string(),
-                    registry: Some(url),
-                };
+                        let agents_dir = tempfile::tempdir().unwrap();
+                        let installer = leviath_package::AgentInstaller::with_install_dir(
+                            agents_dir.path().to_path_buf(),
+                        );
+                        let args = AddArgs {
+                            package: "reg-pkg-bad-data".to_string(),
+                            registry: Some(url),
+                        };
 
-                let err = execute_with(&args, &installer, agents_dir.path())
-                    .await
-                    .unwrap_err();
-                assert!(err.to_string().contains("Failed to extract package"));
+                        let err = execute_with(&args, &installer, agents_dir.path())
+                            .await
+                            .unwrap_err();
+                        assert!(err.to_string().contains("Failed to extract package"));
+                    },
+                )
+                .await;
             })
         });
     }

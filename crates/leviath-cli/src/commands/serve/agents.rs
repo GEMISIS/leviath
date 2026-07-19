@@ -527,167 +527,177 @@ prompt = "Plan the work"
     #[tokio::test]
     async fn spawn_agent_valid_blueprint_creates_run_and_returns_ok() {
         with_tracing(|| {});
-        let _guard = crate::runstate::isolate_runs_dir_for_test(
+        crate::runstate::with_isolated_runs_dir_async(
             "spawn_agent_valid_blueprint_creates_run_and_returns_ok",
-        );
-        let dir = tempfile::tempdir().unwrap();
-        let bp_name = format!("spawnable-{}", std::process::id());
-        write_test_blueprint(&dir.path().join(&bp_name), &bp_name);
+            |_d| async move {
+                let dir = tempfile::tempdir().unwrap();
+                let bp_name = format!("spawnable-{}", std::process::id());
+                write_test_blueprint(&dir.path().join(&bp_name), &bp_name);
 
-        let state = test_state_with_agent_paths(vec![dir.path().to_path_buf()]);
-        let mut rx = state.event_tx.subscribe();
-        // Pre-broadcast a non-AgentSpawned event so the drain loop below sees
-        // it and exercises the `if let` non-matching branch (line 536 else-path).
-        let _ = state.event_tx.send(ServerEvent::Tokens {
-            agent_id: "pre-event".to_string(),
-            run_id: "pre-event-run".to_string(),
-            prompt_tokens: 0,
-            completion_tokens: 0,
-            cached_tokens: 0,
-            cache_write_tokens: 0,
-        });
-        let app = Router::new()
-            .route("/api/agents", axum::routing::post(spawn_agent))
-            .with_state(state);
+                let state = test_state_with_agent_paths(vec![dir.path().to_path_buf()]);
+                let mut rx = state.event_tx.subscribe();
+                // Pre-broadcast a non-AgentSpawned event so the drain loop below sees
+                // it and exercises the `if let` non-matching branch (line 536 else-path).
+                let _ = state.event_tx.send(ServerEvent::Tokens {
+                    agent_id: "pre-event".to_string(),
+                    run_id: "pre-event-run".to_string(),
+                    prompt_tokens: 0,
+                    completion_tokens: 0,
+                    cached_tokens: 0,
+                    cache_write_tokens: 0,
+                });
+                let app = Router::new()
+                    .route("/api/agents", axum::routing::post(spawn_agent))
+                    .with_state(state);
 
-        let workdir = tempfile::tempdir().unwrap();
-        let body = serde_json::json!({
-            "blueprint": bp_name,
-            "task": "do the thing",
-            "workdir": workdir.path().to_string_lossy(),
-        });
-        let req = Request::builder()
-            .method("POST")
-            .uri("/api/agents")
-            .header("content-type", "application/json")
-            .body(Body::from(serde_json::to_string(&body).unwrap()))
-            .unwrap();
-        let resp = app.oneshot(req).await.unwrap();
-        assert_eq!(resp.status(), axum::http::StatusCode::OK);
+                let workdir = tempfile::tempdir().unwrap();
+                let body = serde_json::json!({
+                    "blueprint": bp_name,
+                    "task": "do the thing",
+                    "workdir": workdir.path().to_string_lossy(),
+                });
+                let req = Request::builder()
+                    .method("POST")
+                    .uri("/api/agents")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_string(&body).unwrap()))
+                    .unwrap();
+                let resp = app.oneshot(req).await.unwrap();
+                assert_eq!(resp.status(), axum::http::StatusCode::OK);
 
-        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
-            .await
-            .unwrap();
-        let spawn_resp: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-        let agent_id = spawn_resp["agent_id"].as_str().unwrap().to_string();
-        let run_id = spawn_resp["run_id"].as_str().unwrap().to_string();
-        assert_eq!(agent_id, bp_name);
-        assert!(run_id.contains(&bp_name));
+                let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+                    .await
+                    .unwrap();
+                let spawn_resp: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+                let agent_id = spawn_resp["agent_id"].as_str().unwrap().to_string();
+                let run_id = spawn_resp["run_id"].as_str().unwrap().to_string();
+                assert_eq!(agent_id, bp_name);
+                assert!(run_id.contains(&bp_name));
 
-        // The run should have been persisted to disk.
-        let meta = runstate::read_meta(&run_id).expect("run meta should exist");
-        assert_eq!(meta.agent_name, bp_name);
+                // The run should have been persisted to disk.
+                let meta = runstate::read_meta(&run_id).expect("run meta should exist");
+                assert_eq!(meta.agent_name, bp_name);
 
-        // Drain all events: the pre-broadcast Tokens event exercises the
-        // `if let ServerEvent::AgentSpawned` else-path; the real AgentSpawned
-        // event exercises the if-branch.
-        let mut spawned_events: Vec<String> = Vec::new();
-        while let Ok(ev) = rx.try_recv() {
-            if let ServerEvent::AgentSpawned { run_id: ev_rid, .. } = ev {
-                spawned_events.push(ev_rid);
-            }
-        }
-        assert_broadcast_agent_spawned(&spawned_events, &run_id);
+                // Drain all events: the pre-broadcast Tokens event exercises the
+                // `if let ServerEvent::AgentSpawned` else-path; the real AgentSpawned
+                // event exercises the if-branch.
+                let mut spawned_events: Vec<String> = Vec::new();
+                while let Ok(ev) = rx.try_recv() {
+                    if let ServerEvent::AgentSpawned { run_id: ev_rid, .. } = ev {
+                        spawned_events.push(ev_rid);
+                    }
+                }
+                assert_broadcast_agent_spawned(&spawned_events, &run_id);
 
-        // Give the (doomed) child process a moment to exit on its own so we
-        // don't leave a zombie process behind, then clean up run state.
-        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-        let _ = std::fs::remove_dir_all(runstate::run_dir(&run_id));
+                // Give the (doomed) child process a moment to exit on its own so we
+                // don't leave a zombie process behind, then clean up run state.
+                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                let _ = std::fs::remove_dir_all(runstate::run_dir(&run_id));
+            },
+        )
+        .await;
     }
 
     #[tokio::test]
     async fn spawn_agent_with_full_options_creates_run() {
-        let _guard =
-            crate::runstate::isolate_runs_dir_for_test("spawn_agent_with_full_options_creates_run");
-        let dir = tempfile::tempdir().unwrap();
-        let bp_name = format!("spawnable-full-{}", std::process::id());
-        write_test_blueprint(&dir.path().join(&bp_name), &bp_name);
+        crate::runstate::with_isolated_runs_dir_async(
+            "spawn_agent_with_full_options_creates_run",
+            |_d| async move {
+                let dir = tempfile::tempdir().unwrap();
+                let bp_name = format!("spawnable-full-{}", std::process::id());
+                write_test_blueprint(&dir.path().join(&bp_name), &bp_name);
 
-        let state = test_state_with_agent_paths(vec![dir.path().to_path_buf()]);
-        let app = Router::new()
-            .route("/api/agents", axum::routing::post(spawn_agent))
-            .with_state(state);
+                let state = test_state_with_agent_paths(vec![dir.path().to_path_buf()]);
+                let app = Router::new()
+                    .route("/api/agents", axum::routing::post(spawn_agent))
+                    .with_state(state);
 
-        let workdir = tempfile::tempdir().unwrap();
-        let body = serde_json::json!({
-            "blueprint": bp_name,
-            "task": "do the thing",
-            "workdir": workdir.path().to_string_lossy(),
-            "model": "claude-sonnet-4-6",
-            "yolo": true,
-            "allow": ["read_file"],
-            "max_depth": 2,
-            "metadata": {"k": "v"},
-            "callback_url": "https://example.com/hook",
-        });
-        let req = Request::builder()
-            .method("POST")
-            .uri("/api/agents")
-            .header("content-type", "application/json")
-            .body(Body::from(serde_json::to_string(&body).unwrap()))
-            .unwrap();
-        let resp = app.oneshot(req).await.unwrap();
-        assert_eq!(resp.status(), axum::http::StatusCode::OK);
+                let workdir = tempfile::tempdir().unwrap();
+                let body = serde_json::json!({
+                    "blueprint": bp_name,
+                    "task": "do the thing",
+                    "workdir": workdir.path().to_string_lossy(),
+                    "model": "claude-sonnet-4-6",
+                    "yolo": true,
+                    "allow": ["read_file"],
+                    "max_depth": 2,
+                    "metadata": {"k": "v"},
+                    "callback_url": "https://example.com/hook",
+                });
+                let req = Request::builder()
+                    .method("POST")
+                    .uri("/api/agents")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_string(&body).unwrap()))
+                    .unwrap();
+                let resp = app.oneshot(req).await.unwrap();
+                assert_eq!(resp.status(), axum::http::StatusCode::OK);
 
-        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
-            .await
-            .unwrap();
-        let spawn_resp: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-        let run_id = spawn_resp["run_id"].as_str().unwrap().to_string();
-        let meta = runstate::read_meta(&run_id).expect("run meta should exist");
-        assert_eq!(
-            meta.callback_url.as_deref(),
-            Some("https://example.com/hook")
-        );
-        assert_eq!(meta.metadata.get("k").map(|v| v.as_str()), Some("v"));
+                let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+                    .await
+                    .unwrap();
+                let spawn_resp: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+                let run_id = spawn_resp["run_id"].as_str().unwrap().to_string();
+                let meta = runstate::read_meta(&run_id).expect("run meta should exist");
+                assert_eq!(
+                    meta.callback_url.as_deref(),
+                    Some("https://example.com/hook")
+                );
+                assert_eq!(meta.metadata.get("k").map(|v| v.as_str()), Some("v"));
 
-        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-        let _ = std::fs::remove_dir_all(runstate::run_dir(&run_id));
+                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                let _ = std::fs::remove_dir_all(runstate::run_dir(&run_id));
+            },
+        )
+        .await;
     }
 
     #[tokio::test]
     async fn spawn_agent_without_workdir_falls_back_to_current_dir() {
-        let _guard = crate::runstate::isolate_runs_dir_for_test(
+        crate::runstate::with_isolated_runs_dir_async(
             "spawn_agent_without_workdir_falls_back_to_current_dir",
-        );
-        // Every other spawn_agent test supplies `workdir` explicitly; this
-        // exercises the `body.workdir.unwrap_or_else(|| current_dir())`
-        // fallback branch specifically.
-        let dir = tempfile::tempdir().unwrap();
-        let bp_name = format!("spawnable-no-workdir-{}", std::process::id());
-        write_test_blueprint(&dir.path().join(&bp_name), &bp_name);
+            |_d| async move {
+                // Every other spawn_agent test supplies `workdir` explicitly; this
+                // exercises the `body.workdir.unwrap_or_else(|| current_dir())`
+                // fallback branch specifically.
+                let dir = tempfile::tempdir().unwrap();
+                let bp_name = format!("spawnable-no-workdir-{}", std::process::id());
+                write_test_blueprint(&dir.path().join(&bp_name), &bp_name);
 
-        let state = test_state_with_agent_paths(vec![dir.path().to_path_buf()]);
-        let app = Router::new()
-            .route("/api/agents", axum::routing::post(spawn_agent))
-            .with_state(state);
+                let state = test_state_with_agent_paths(vec![dir.path().to_path_buf()]);
+                let app = Router::new()
+                    .route("/api/agents", axum::routing::post(spawn_agent))
+                    .with_state(state);
 
-        let body = serde_json::json!({
-            "blueprint": bp_name,
-            "task": "do the thing",
-        });
-        let req = Request::builder()
-            .method("POST")
-            .uri("/api/agents")
-            .header("content-type", "application/json")
-            .body(Body::from(serde_json::to_string(&body).unwrap()))
-            .unwrap();
-        let resp = app.oneshot(req).await.unwrap();
-        assert_eq!(resp.status(), axum::http::StatusCode::OK);
+                let body = serde_json::json!({
+                    "blueprint": bp_name,
+                    "task": "do the thing",
+                });
+                let req = Request::builder()
+                    .method("POST")
+                    .uri("/api/agents")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_string(&body).unwrap()))
+                    .unwrap();
+                let resp = app.oneshot(req).await.unwrap();
+                assert_eq!(resp.status(), axum::http::StatusCode::OK);
 
-        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
-            .await
-            .unwrap();
-        let spawn_resp: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-        let run_id = spawn_resp["run_id"].as_str().unwrap().to_string();
-        let meta = runstate::read_meta(&run_id).expect("run meta should exist");
-        let expected_workdir = std::env::current_dir()
-            .map(|p| p.to_string_lossy().to_string())
-            .expect("current_dir should succeed in test");
-        assert_eq!(meta.workdir, expected_workdir);
+                let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+                    .await
+                    .unwrap();
+                let spawn_resp: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+                let run_id = spawn_resp["run_id"].as_str().unwrap().to_string();
+                let meta = runstate::read_meta(&run_id).expect("run meta should exist");
+                let expected_workdir = std::env::current_dir()
+                    .map(|p| p.to_string_lossy().to_string())
+                    .expect("current_dir should succeed in test");
+                assert_eq!(meta.workdir, expected_workdir);
 
-        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-        let _ = std::fs::remove_dir_all(runstate::run_dir(&run_id));
+                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                let _ = std::fs::remove_dir_all(runstate::run_dir(&run_id));
+            },
+        )
+        .await;
     }
 
     #[tokio::test]
@@ -883,19 +893,24 @@ prompt = "Plan the work"
         // a concurrently-running isolated test on another thread could flip
         // the env var between this helper's create_run and open_log_files
         // steps, resolving to two different directories.
-        let _guard = crate::runstate::isolate_runs_dir_for_test("assert_spawn_agent_fails_on");
-        let dir = tempfile::tempdir().unwrap();
-        let bp_name = format!("spawn-fail-{:?}-{}", fail_on as u8, std::process::id());
-        write_test_blueprint(&dir.path().join(&bp_name), &bp_name);
-        let state = test_state_with_agent_paths(vec![dir.path().to_path_buf()]);
-        let workdir = tempfile::tempdir().unwrap();
-        let body = make_spawn_req(&bp_name, workdir.path());
-        let io = MockSpawnAgentIo { fail_on };
+        crate::runstate::with_isolated_runs_dir_async(
+            "assert_spawn_agent_fails_on",
+            |_d| async move {
+                let dir = tempfile::tempdir().unwrap();
+                let bp_name = format!("spawn-fail-{:?}-{}", fail_on as u8, std::process::id());
+                write_test_blueprint(&dir.path().join(&bp_name), &bp_name);
+                let state = test_state_with_agent_paths(vec![dir.path().to_path_buf()]);
+                let workdir = tempfile::tempdir().unwrap();
+                let body = make_spawn_req(&bp_name, workdir.path());
+                let io = MockSpawnAgentIo { fail_on };
 
-        let result = spawn_agent_with(state, body, &io).await;
-        cleanup_runs_with_prefix(&bp_name);
-        let (status, _) = result.expect_err("expected spawn_agent_with to fail");
-        assert_eq!(status, expected_status);
+                let result = spawn_agent_with(state, body, &io).await;
+                cleanup_runs_with_prefix(&bp_name);
+                let (status, _) = result.expect_err("expected spawn_agent_with to fail");
+                assert_eq!(status, expected_status);
+            },
+        )
+        .await;
     }
 
     #[tokio::test]
@@ -935,31 +950,34 @@ prompt = "Plan the work"
 
     #[tokio::test]
     async fn spawn_agent_with_no_failure_succeeds_via_mock() {
-        let _guard = crate::runstate::isolate_runs_dir_for_test(
+        crate::runstate::with_isolated_runs_dir_async(
             "spawn_agent_with_no_failure_succeeds_via_mock",
-        );
-        // Exercises MockSpawnAgentIo::spawn's `cmd.spawn()` path (FailOn::None
-        // means no mock fails, so the real spawn is called). The spawned
-        // process exits quickly (test harness binary + unknown args).
-        let dir = tempfile::tempdir().unwrap();
-        let bp_name = format!("spawn-mock-ok-{}", std::process::id());
-        write_test_blueprint(&dir.path().join(&bp_name), &bp_name);
-        let state = test_state_with_agent_paths(vec![dir.path().to_path_buf()]);
-        let workdir = tempfile::tempdir().unwrap();
-        let body = make_spawn_req(&bp_name, workdir.path());
-        let io = MockSpawnAgentIo {
-            fail_on: FailOn::None,
-        };
-        let result = spawn_agent_with(state, body, &io).await;
-        let run_id = result
-            .expect("expected spawn_agent_with to succeed")
-            .0
-            .run_id
-            .clone();
-        cleanup_runs_with_prefix(&bp_name);
-        // Give the spawned child a moment to exit cleanly.
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-        let _ = std::fs::remove_dir_all(runstate::run_dir(&run_id));
+            |_d| async move {
+                // Exercises MockSpawnAgentIo::spawn's `cmd.spawn()` path (FailOn::None
+                // means no mock fails, so the real spawn is called). The spawned
+                // process exits quickly (test harness binary + unknown args).
+                let dir = tempfile::tempdir().unwrap();
+                let bp_name = format!("spawn-mock-ok-{}", std::process::id());
+                write_test_blueprint(&dir.path().join(&bp_name), &bp_name);
+                let state = test_state_with_agent_paths(vec![dir.path().to_path_buf()]);
+                let workdir = tempfile::tempdir().unwrap();
+                let body = make_spawn_req(&bp_name, workdir.path());
+                let io = MockSpawnAgentIo {
+                    fail_on: FailOn::None,
+                };
+                let result = spawn_agent_with(state, body, &io).await;
+                let run_id = result
+                    .expect("expected spawn_agent_with to succeed")
+                    .0
+                    .run_id
+                    .clone();
+                cleanup_runs_with_prefix(&bp_name);
+                // Give the spawned child a moment to exit cleanly.
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                let _ = std::fs::remove_dir_all(runstate::run_dir(&run_id));
+            },
+        )
+        .await;
     }
 
     /// Exercises the `?` error propagation in `MockSpawnAgentIo::parse_manifest`
@@ -991,32 +1009,36 @@ prompt = "Plan the work"
 
     #[tokio::test]
     async fn list_agents_with_status_filter_running() {
-        let _guard =
-            crate::runstate::isolate_runs_dir_for_test("list_agents_with_status_filter_running");
-        let run_id = unique_run_id("list-filter");
-        let mut meta = make_run(&run_id);
-        meta.status = RunStatus::Running;
-        create_run(&meta).unwrap();
+        crate::runstate::with_isolated_runs_dir_async(
+            "list_agents_with_status_filter_running",
+            |_d| async move {
+                let run_id = unique_run_id("list-filter");
+                let mut meta = make_run(&run_id);
+                meta.status = RunStatus::Running;
+                create_run(&meta).unwrap();
 
-        let app = Router::new()
-            .route("/api/agents", get(list_agents))
-            .with_state(test_state());
-        let req = Request::builder()
-            .uri("/api/agents?status=running")
-            .body(Body::empty())
-            .unwrap();
-        let resp = app.oneshot(req).await.unwrap();
-        assert_eq!(resp.status(), axum::http::StatusCode::OK);
-        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
-            .await
-            .unwrap();
-        let runs: Vec<RunMeta> = serde_json::from_slice(&body).unwrap();
-        // The run we created has Running status
-        let found = runs.iter().any(|r| r.run_id == run_id);
-        assert_found_running_run(found);
+                let app = Router::new()
+                    .route("/api/agents", get(list_agents))
+                    .with_state(test_state());
+                let req = Request::builder()
+                    .uri("/api/agents?status=running")
+                    .body(Body::empty())
+                    .unwrap();
+                let resp = app.oneshot(req).await.unwrap();
+                assert_eq!(resp.status(), axum::http::StatusCode::OK);
+                let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+                    .await
+                    .unwrap();
+                let runs: Vec<RunMeta> = serde_json::from_slice(&body).unwrap();
+                // The run we created has Running status
+                let found = runs.iter().any(|r| r.run_id == run_id);
+                assert_found_running_run(found);
 
-        // Cleanup
-        let _ = std::fs::remove_dir_all(runstate::run_dir(&run_id));
+                // Cleanup
+                let _ = std::fs::remove_dir_all(runstate::run_dir(&run_id));
+            },
+        )
+        .await;
     }
 
     fn assert_found_running_run(found: bool) {
@@ -1031,44 +1053,47 @@ prompt = "Plan the work"
 
     #[tokio::test]
     async fn list_agents_with_status_filter_excludes_others() {
-        let _guard = crate::runstate::isolate_runs_dir_for_test(
+        crate::runstate::with_isolated_runs_dir_async(
             "list_agents_with_status_filter_excludes_others",
-        );
-        let run_id = unique_run_id("list-filter-excl");
-        let mut meta = make_run(&run_id);
-        meta.status = RunStatus::Complete;
-        create_run(&meta).unwrap();
+            |_d| async move {
+                let run_id = unique_run_id("list-filter-excl");
+                let mut meta = make_run(&run_id);
+                meta.status = RunStatus::Complete;
+                create_run(&meta).unwrap();
 
-        // Create a second run with Running status so the filtered list is
-        // non-empty — this makes the map/any closure in the assertion actually
-        // execute, covering the closure body in LLVM's instrumentation.
-        let run_id2 = unique_run_id("list-filter-excl-running");
-        let mut meta2 = make_run(&run_id2);
-        meta2.status = RunStatus::Running;
-        create_run(&meta2).unwrap();
+                // Create a second run with Running status so the filtered list is
+                // non-empty — this makes the map/any closure in the assertion actually
+                // execute, covering the closure body in LLVM's instrumentation.
+                let run_id2 = unique_run_id("list-filter-excl-running");
+                let mut meta2 = make_run(&run_id2);
+                meta2.status = RunStatus::Running;
+                create_run(&meta2).unwrap();
 
-        let app = Router::new()
-            .route("/api/agents", get(list_agents))
-            .with_state(test_state());
-        let req = Request::builder()
-            .uri("/api/agents?status=running")
-            .body(Body::empty())
-            .unwrap();
-        let resp = app.oneshot(req).await.unwrap();
-        assert_eq!(resp.status(), axum::http::StatusCode::OK);
-        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
-            .await
-            .unwrap();
-        let runs: Vec<RunMeta> = serde_json::from_slice(&body).unwrap();
-        // The complete run should not appear in the 'running' filter.
-        let found = runs.iter().any(|r| r.run_id == run_id);
-        assert_complete_run_excluded(found);
-        // The running run should appear.
-        let found2 = runs.iter().any(|r| r.run_id == run_id2);
-        assert_running_run_included(found2);
+                let app = Router::new()
+                    .route("/api/agents", get(list_agents))
+                    .with_state(test_state());
+                let req = Request::builder()
+                    .uri("/api/agents?status=running")
+                    .body(Body::empty())
+                    .unwrap();
+                let resp = app.oneshot(req).await.unwrap();
+                assert_eq!(resp.status(), axum::http::StatusCode::OK);
+                let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+                    .await
+                    .unwrap();
+                let runs: Vec<RunMeta> = serde_json::from_slice(&body).unwrap();
+                // The complete run should not appear in the 'running' filter.
+                let found = runs.iter().any(|r| r.run_id == run_id);
+                assert_complete_run_excluded(found);
+                // The running run should appear.
+                let found2 = runs.iter().any(|r| r.run_id == run_id2);
+                assert_running_run_included(found2);
 
-        let _ = std::fs::remove_dir_all(runstate::run_dir(&run_id));
-        let _ = std::fs::remove_dir_all(runstate::run_dir(&run_id2));
+                let _ = std::fs::remove_dir_all(runstate::run_dir(&run_id));
+                let _ = std::fs::remove_dir_all(runstate::run_dir(&run_id2));
+            },
+        )
+        .await;
     }
 
     fn assert_complete_run_excluded(found: bool) {
@@ -1093,29 +1118,34 @@ prompt = "Plan the work"
 
     #[tokio::test]
     async fn list_agents_multi_status_filter() {
-        let _guard = crate::runstate::isolate_runs_dir_for_test("list_agents_multi_status_filter");
-        let run_id = unique_run_id("list-multi");
-        let mut meta = make_run(&run_id);
-        meta.status = RunStatus::Error;
-        create_run(&meta).unwrap();
+        crate::runstate::with_isolated_runs_dir_async(
+            "list_agents_multi_status_filter",
+            |_d| async move {
+                let run_id = unique_run_id("list-multi");
+                let mut meta = make_run(&run_id);
+                meta.status = RunStatus::Error;
+                create_run(&meta).unwrap();
 
-        let app = Router::new()
-            .route("/api/agents", get(list_agents))
-            .with_state(test_state());
-        let req = Request::builder()
-            .uri("/api/agents?status=running,error")
-            .body(Body::empty())
-            .unwrap();
-        let resp = app.oneshot(req).await.unwrap();
-        assert_eq!(resp.status(), axum::http::StatusCode::OK);
-        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
-            .await
-            .unwrap();
-        let runs: Vec<RunMeta> = serde_json::from_slice(&body).unwrap();
-        let found = runs.iter().any(|r| r.run_id == run_id);
-        assert_error_run_included(found);
+                let app = Router::new()
+                    .route("/api/agents", get(list_agents))
+                    .with_state(test_state());
+                let req = Request::builder()
+                    .uri("/api/agents?status=running,error")
+                    .body(Body::empty())
+                    .unwrap();
+                let resp = app.oneshot(req).await.unwrap();
+                assert_eq!(resp.status(), axum::http::StatusCode::OK);
+                let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+                    .await
+                    .unwrap();
+                let runs: Vec<RunMeta> = serde_json::from_slice(&body).unwrap();
+                let found = runs.iter().any(|r| r.run_id == run_id);
+                assert_error_run_included(found);
 
-        let _ = std::fs::remove_dir_all(runstate::run_dir(&run_id));
+                let _ = std::fs::remove_dir_all(runstate::run_dir(&run_id));
+            },
+        )
+        .await;
     }
 
     fn assert_error_run_included(found: bool) {
@@ -1132,28 +1162,32 @@ prompt = "Plan the work"
 
     #[tokio::test]
     async fn get_agent_existing_run_returns_ok() {
-        let _guard =
-            crate::runstate::isolate_runs_dir_for_test("get_agent_existing_run_returns_ok");
-        let run_id = unique_run_id("get-agent");
-        let meta = make_run(&run_id);
-        create_run(&meta).unwrap();
+        crate::runstate::with_isolated_runs_dir_async(
+            "get_agent_existing_run_returns_ok",
+            |_d| async move {
+                let run_id = unique_run_id("get-agent");
+                let meta = make_run(&run_id);
+                create_run(&meta).unwrap();
 
-        let app = Router::new()
-            .route("/api/agents/{id}", get(get_agent))
-            .with_state(test_state());
-        let req = Request::builder()
-            .uri(format!("/api/agents/{}", run_id))
-            .body(Body::empty())
-            .unwrap();
-        let resp = app.oneshot(req).await.unwrap();
-        assert_eq!(resp.status(), axum::http::StatusCode::OK);
-        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
-            .await
-            .unwrap();
-        let got: RunMeta = serde_json::from_slice(&body).unwrap();
-        assert_eq!(got.run_id, run_id);
+                let app = Router::new()
+                    .route("/api/agents/{id}", get(get_agent))
+                    .with_state(test_state());
+                let req = Request::builder()
+                    .uri(format!("/api/agents/{}", run_id))
+                    .body(Body::empty())
+                    .unwrap();
+                let resp = app.oneshot(req).await.unwrap();
+                assert_eq!(resp.status(), axum::http::StatusCode::OK);
+                let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+                    .await
+                    .unwrap();
+                let got: RunMeta = serde_json::from_slice(&body).unwrap();
+                assert_eq!(got.run_id, run_id);
 
-        let _ = std::fs::remove_dir_all(runstate::run_dir(&run_id));
+                let _ = std::fs::remove_dir_all(runstate::run_dir(&run_id));
+            },
+        )
+        .await;
     }
 
     #[tokio::test]
@@ -1173,35 +1207,39 @@ prompt = "Plan the work"
 
     #[tokio::test]
     async fn agent_children_with_children_found() {
-        let _guard =
-            crate::runstate::isolate_runs_dir_for_test("agent_children_with_children_found");
-        let parent_id = unique_run_id("parent");
-        let child_id = unique_run_id("child");
+        crate::runstate::with_isolated_runs_dir_async(
+            "agent_children_with_children_found",
+            |_d| async move {
+                let parent_id = unique_run_id("parent");
+                let child_id = unique_run_id("child");
 
-        let parent = make_run(&parent_id);
-        create_run(&parent).unwrap();
+                let parent = make_run(&parent_id);
+                create_run(&parent).unwrap();
 
-        let mut child = make_run(&child_id);
-        child.parent_run_id = Some(parent_id.clone());
-        create_run(&child).unwrap();
+                let mut child = make_run(&child_id);
+                child.parent_run_id = Some(parent_id.clone());
+                create_run(&child).unwrap();
 
-        let app = Router::new()
-            .route("/api/agents/{id}/children", get(agent_children))
-            .with_state(test_state());
-        let req = Request::builder()
-            .uri(format!("/api/agents/{}/children", parent_id))
-            .body(Body::empty())
-            .unwrap();
-        let resp = app.oneshot(req).await.unwrap();
-        assert_eq!(resp.status(), axum::http::StatusCode::OK);
-        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
-            .await
-            .unwrap();
-        let children: Vec<RunMeta> = serde_json::from_slice(&body).unwrap();
-        assert_child_run_appears(children.iter().any(|c| c.run_id == child_id));
+                let app = Router::new()
+                    .route("/api/agents/{id}/children", get(agent_children))
+                    .with_state(test_state());
+                let req = Request::builder()
+                    .uri(format!("/api/agents/{}/children", parent_id))
+                    .body(Body::empty())
+                    .unwrap();
+                let resp = app.oneshot(req).await.unwrap();
+                assert_eq!(resp.status(), axum::http::StatusCode::OK);
+                let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+                    .await
+                    .unwrap();
+                let children: Vec<RunMeta> = serde_json::from_slice(&body).unwrap();
+                assert_child_run_appears(children.iter().any(|c| c.run_id == child_id));
 
-        let _ = std::fs::remove_dir_all(runstate::run_dir(&parent_id));
-        let _ = std::fs::remove_dir_all(runstate::run_dir(&child_id));
+                let _ = std::fs::remove_dir_all(runstate::run_dir(&parent_id));
+                let _ = std::fs::remove_dir_all(runstate::run_dir(&child_id));
+            },
+        )
+        .await;
     }
 
     fn assert_child_run_appears(found: bool) {
@@ -1216,28 +1254,32 @@ prompt = "Plan the work"
 
     #[tokio::test]
     async fn agent_children_no_children_returns_empty() {
-        let _guard =
-            crate::runstate::isolate_runs_dir_for_test("agent_children_no_children_returns_empty");
-        let run_id = unique_run_id("no-children");
-        let meta = make_run(&run_id);
-        create_run(&meta).unwrap();
+        crate::runstate::with_isolated_runs_dir_async(
+            "agent_children_no_children_returns_empty",
+            |_d| async move {
+                let run_id = unique_run_id("no-children");
+                let meta = make_run(&run_id);
+                create_run(&meta).unwrap();
 
-        let app = Router::new()
-            .route("/api/agents/{id}/children", get(agent_children))
-            .with_state(test_state());
-        let req = Request::builder()
-            .uri(format!("/api/agents/{}/children", run_id))
-            .body(Body::empty())
-            .unwrap();
-        let resp = app.oneshot(req).await.unwrap();
-        assert_eq!(resp.status(), axum::http::StatusCode::OK);
-        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
-            .await
-            .unwrap();
-        let children: Vec<RunMeta> = serde_json::from_slice(&body).unwrap();
-        assert_no_self_in_children(&children);
+                let app = Router::new()
+                    .route("/api/agents/{id}/children", get(agent_children))
+                    .with_state(test_state());
+                let req = Request::builder()
+                    .uri(format!("/api/agents/{}/children", run_id))
+                    .body(Body::empty())
+                    .unwrap();
+                let resp = app.oneshot(req).await.unwrap();
+                assert_eq!(resp.status(), axum::http::StatusCode::OK);
+                let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+                    .await
+                    .unwrap();
+                let children: Vec<RunMeta> = serde_json::from_slice(&body).unwrap();
+                assert_no_self_in_children(&children);
 
-        let _ = std::fs::remove_dir_all(runstate::run_dir(&run_id));
+                let _ = std::fs::remove_dir_all(runstate::run_dir(&run_id));
+            },
+        )
+        .await;
     }
 
     fn assert_no_self_in_children(children: &[RunMeta]) {
@@ -1257,108 +1299,125 @@ prompt = "Plan the work"
 
     #[tokio::test]
     async fn agent_context_with_snapshot_returns_ok() {
-        let _guard =
-            crate::runstate::isolate_runs_dir_for_test("agent_context_with_snapshot_returns_ok");
-        let run_id = unique_run_id("ctx-snap");
-        let meta = make_run(&run_id);
-        create_run(&meta).unwrap();
+        crate::runstate::with_isolated_runs_dir_async(
+            "agent_context_with_snapshot_returns_ok",
+            |_d| async move {
+                let run_id = unique_run_id("ctx-snap");
+                let meta = make_run(&run_id);
+                create_run(&meta).unwrap();
 
-        // Write a context snapshot
-        let snap = runstate::ContextSnapshot {
-            stage_name: "plan".to_string(),
-            total_tokens: 5000,
-            max_tokens: 200000,
-            regions: vec![],
-        };
-        runstate::write_context_snapshot(&run_id, &snap).unwrap();
+                // Write a context snapshot
+                let snap = runstate::ContextSnapshot {
+                    stage_name: "plan".to_string(),
+                    total_tokens: 5000,
+                    max_tokens: 200000,
+                    regions: vec![],
+                };
+                runstate::write_context_snapshot(&run_id, &snap).unwrap();
 
-        let app = Router::new()
-            .route("/api/agents/{id}/context", get(agent_context))
-            .with_state(test_state());
-        let req = Request::builder()
-            .uri(format!("/api/agents/{}/context", run_id))
-            .body(Body::empty())
-            .unwrap();
-        let resp = app.oneshot(req).await.unwrap();
-        assert_eq!(resp.status(), axum::http::StatusCode::OK);
-        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
-            .await
-            .unwrap();
-        let got: runstate::ContextSnapshot = serde_json::from_slice(&body).unwrap();
-        assert_eq!(got.total_tokens, 5000);
+                let app = Router::new()
+                    .route("/api/agents/{id}/context", get(agent_context))
+                    .with_state(test_state());
+                let req = Request::builder()
+                    .uri(format!("/api/agents/{}/context", run_id))
+                    .body(Body::empty())
+                    .unwrap();
+                let resp = app.oneshot(req).await.unwrap();
+                assert_eq!(resp.status(), axum::http::StatusCode::OK);
+                let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+                    .await
+                    .unwrap();
+                let got: runstate::ContextSnapshot = serde_json::from_slice(&body).unwrap();
+                assert_eq!(got.total_tokens, 5000);
 
-        let _ = std::fs::remove_dir_all(runstate::run_dir(&run_id));
+                let _ = std::fs::remove_dir_all(runstate::run_dir(&run_id));
+            },
+        )
+        .await;
     }
 
     #[tokio::test]
     async fn agent_context_no_snapshot_returns_404() {
-        let _guard =
-            crate::runstate::isolate_runs_dir_for_test("agent_context_no_snapshot_returns_404");
-        let run_id = unique_run_id("ctx-none");
-        let meta = make_run(&run_id);
-        create_run(&meta).unwrap();
+        crate::runstate::with_isolated_runs_dir_async(
+            "agent_context_no_snapshot_returns_404",
+            |_d| async move {
+                let run_id = unique_run_id("ctx-none");
+                let meta = make_run(&run_id);
+                create_run(&meta).unwrap();
 
-        let app = Router::new()
-            .route("/api/agents/{id}/context", get(agent_context))
-            .with_state(test_state());
-        let req = Request::builder()
-            .uri(format!("/api/agents/{}/context", run_id))
-            .body(Body::empty())
-            .unwrap();
-        let resp = app.oneshot(req).await.unwrap();
-        assert_eq!(resp.status(), axum::http::StatusCode::NOT_FOUND);
+                let app = Router::new()
+                    .route("/api/agents/{id}/context", get(agent_context))
+                    .with_state(test_state());
+                let req = Request::builder()
+                    .uri(format!("/api/agents/{}/context", run_id))
+                    .body(Body::empty())
+                    .unwrap();
+                let resp = app.oneshot(req).await.unwrap();
+                assert_eq!(resp.status(), axum::http::StatusCode::NOT_FOUND);
 
-        let _ = std::fs::remove_dir_all(runstate::run_dir(&run_id));
+                let _ = std::fs::remove_dir_all(runstate::run_dir(&run_id));
+            },
+        )
+        .await;
     }
 
     // ─── agent_logs ───────────────────────────────────────────────────────────
 
     #[tokio::test]
     async fn agent_logs_existing_run_returns_ok() {
-        let _guard =
-            crate::runstate::isolate_runs_dir_for_test("agent_logs_existing_run_returns_ok");
-        let run_id = unique_run_id("logs-ok");
-        let meta = make_run(&run_id);
-        create_run(&meta).unwrap();
+        crate::runstate::with_isolated_runs_dir_async(
+            "agent_logs_existing_run_returns_ok",
+            |_d| async move {
+                let run_id = unique_run_id("logs-ok");
+                let meta = make_run(&run_id);
+                create_run(&meta).unwrap();
 
-        // Write something to output.log
-        let log_path = runstate::run_dir(&run_id).join("output.log");
-        std::fs::write(&log_path, "hello log\n").unwrap();
+                // Write something to output.log
+                let log_path = runstate::run_dir(&run_id).join("output.log");
+                std::fs::write(&log_path, "hello log\n").unwrap();
 
-        let app = Router::new()
-            .route("/api/agents/{id}/logs", get(agent_logs))
-            .with_state(test_state());
-        let req = Request::builder()
-            .uri(format!("/api/agents/{}/logs", run_id))
-            .body(Body::empty())
-            .unwrap();
-        let resp = app.oneshot(req).await.unwrap();
-        assert_eq!(resp.status(), axum::http::StatusCode::OK);
+                let app = Router::new()
+                    .route("/api/agents/{id}/logs", get(agent_logs))
+                    .with_state(test_state());
+                let req = Request::builder()
+                    .uri(format!("/api/agents/{}/logs", run_id))
+                    .body(Body::empty())
+                    .unwrap();
+                let resp = app.oneshot(req).await.unwrap();
+                assert_eq!(resp.status(), axum::http::StatusCode::OK);
 
-        let _ = std::fs::remove_dir_all(runstate::run_dir(&run_id));
+                let _ = std::fs::remove_dir_all(runstate::run_dir(&run_id));
+            },
+        )
+        .await;
     }
 
     #[tokio::test]
     async fn agent_logs_with_tail_param() {
-        let _guard = crate::runstate::isolate_runs_dir_for_test("agent_logs_with_tail_param");
-        let run_id = unique_run_id("logs-tail");
-        let meta = make_run(&run_id);
-        create_run(&meta).unwrap();
+        crate::runstate::with_isolated_runs_dir_async(
+            "agent_logs_with_tail_param",
+            |_d| async move {
+                let run_id = unique_run_id("logs-tail");
+                let meta = make_run(&run_id);
+                create_run(&meta).unwrap();
 
-        let log_path = runstate::run_dir(&run_id).join("output.log");
-        std::fs::write(&log_path, "line1\nline2\nline3\n").unwrap();
+                let log_path = runstate::run_dir(&run_id).join("output.log");
+                std::fs::write(&log_path, "line1\nline2\nline3\n").unwrap();
 
-        let app = Router::new()
-            .route("/api/agents/{id}/logs", get(agent_logs))
-            .with_state(test_state());
-        let req = Request::builder()
-            .uri(format!("/api/agents/{}/logs?tail=100", run_id))
-            .body(Body::empty())
-            .unwrap();
-        let resp = app.oneshot(req).await.unwrap();
-        assert_eq!(resp.status(), axum::http::StatusCode::OK);
+                let app = Router::new()
+                    .route("/api/agents/{id}/logs", get(agent_logs))
+                    .with_state(test_state());
+                let req = Request::builder()
+                    .uri(format!("/api/agents/{}/logs?tail=100", run_id))
+                    .body(Body::empty())
+                    .unwrap();
+                let resp = app.oneshot(req).await.unwrap();
+                assert_eq!(resp.status(), axum::http::StatusCode::OK);
 
-        let _ = std::fs::remove_dir_all(runstate::run_dir(&run_id));
+                let _ = std::fs::remove_dir_all(runstate::run_dir(&run_id));
+            },
+        )
+        .await;
     }
 
     #[tokio::test]
@@ -1378,69 +1437,77 @@ prompt = "Plan the work"
 
     #[tokio::test]
     async fn agent_result_existing_run_no_stages() {
-        let _guard =
-            crate::runstate::isolate_runs_dir_for_test("agent_result_existing_run_no_stages");
-        let run_id = unique_run_id("result-no-stages");
-        let mut meta = make_run(&run_id);
-        meta.status = RunStatus::Complete;
-        create_run(&meta).unwrap();
+        crate::runstate::with_isolated_runs_dir_async(
+            "agent_result_existing_run_no_stages",
+            |_d| async move {
+                let run_id = unique_run_id("result-no-stages");
+                let mut meta = make_run(&run_id);
+                meta.status = RunStatus::Complete;
+                create_run(&meta).unwrap();
 
-        // Write some output.log content
-        let log_path = runstate::run_dir(&run_id).join("output.log");
-        std::fs::write(&log_path, "task complete\n").unwrap();
+                // Write some output.log content
+                let log_path = runstate::run_dir(&run_id).join("output.log");
+                std::fs::write(&log_path, "task complete\n").unwrap();
 
-        let app = Router::new()
-            .route("/api/agents/{id}/result", get(agent_result))
-            .with_state(test_state());
-        let req = Request::builder()
-            .uri(format!("/api/agents/{}/result", run_id))
-            .body(Body::empty())
-            .unwrap();
-        let resp = app.oneshot(req).await.unwrap();
-        assert_eq!(resp.status(), axum::http::StatusCode::OK);
-        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
-            .await
-            .unwrap();
-        let result: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(result["run_id"].as_str().unwrap(), run_id);
-        assert_eq!(result["status"].as_str().unwrap(), "Complete");
+                let app = Router::new()
+                    .route("/api/agents/{id}/result", get(agent_result))
+                    .with_state(test_state());
+                let req = Request::builder()
+                    .uri(format!("/api/agents/{}/result", run_id))
+                    .body(Body::empty())
+                    .unwrap();
+                let resp = app.oneshot(req).await.unwrap();
+                assert_eq!(resp.status(), axum::http::StatusCode::OK);
+                let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+                    .await
+                    .unwrap();
+                let result: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                assert_eq!(result["run_id"].as_str().unwrap(), run_id);
+                assert_eq!(result["status"].as_str().unwrap(), "Complete");
 
-        let _ = std::fs::remove_dir_all(runstate::run_dir(&run_id));
+                let _ = std::fs::remove_dir_all(runstate::run_dir(&run_id));
+            },
+        )
+        .await;
     }
 
     #[tokio::test]
     async fn agent_result_existing_run_with_stages() {
-        let _guard =
-            crate::runstate::isolate_runs_dir_for_test("agent_result_existing_run_with_stages");
-        let run_id = unique_run_id("result-stages");
-        let meta = make_run(&run_id);
-        create_run(&meta).unwrap();
+        crate::runstate::with_isolated_runs_dir_async(
+            "agent_result_existing_run_with_stages",
+            |_d| async move {
+                let run_id = unique_run_id("result-stages");
+                let meta = make_run(&run_id);
+                create_run(&meta).unwrap();
 
-        // Write a stages index and stage output
-        let stages = vec![runstate::StageRecord::new("plan".to_string(), 0)];
-        runstate::write_stages_index(&run_id, &stages).unwrap();
-        runstate::append_stage_output(&run_id, 0, "stage output here");
+                // Write a stages index and stage output
+                let stages = vec![runstate::StageRecord::new("plan".to_string(), 0)];
+                runstate::write_stages_index(&run_id, &stages).unwrap();
+                runstate::append_stage_output(&run_id, 0, "stage output here");
 
-        let app = Router::new()
-            .route("/api/agents/{id}/result", get(agent_result))
-            .with_state(test_state());
-        let req = Request::builder()
-            .uri(format!("/api/agents/{}/result", run_id))
-            .body(Body::empty())
-            .unwrap();
-        let resp = app.oneshot(req).await.unwrap();
-        assert_eq!(resp.status(), axum::http::StatusCode::OK);
-        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
-            .await
-            .unwrap();
-        let result: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(result["run_id"].as_str().unwrap(), run_id);
-        assert!(result["output"]
-            .as_str()
-            .unwrap()
-            .contains("stage output here"));
+                let app = Router::new()
+                    .route("/api/agents/{id}/result", get(agent_result))
+                    .with_state(test_state());
+                let req = Request::builder()
+                    .uri(format!("/api/agents/{}/result", run_id))
+                    .body(Body::empty())
+                    .unwrap();
+                let resp = app.oneshot(req).await.unwrap();
+                assert_eq!(resp.status(), axum::http::StatusCode::OK);
+                let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+                    .await
+                    .unwrap();
+                let result: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                assert_eq!(result["run_id"].as_str().unwrap(), run_id);
+                assert!(result["output"]
+                    .as_str()
+                    .unwrap()
+                    .contains("stage output here"));
 
-        let _ = std::fs::remove_dir_all(runstate::run_dir(&run_id));
+                let _ = std::fs::remove_dir_all(runstate::run_dir(&run_id));
+            },
+        )
+        .await;
     }
 
     #[tokio::test]
@@ -1470,31 +1537,34 @@ prompt = "Plan the work"
 
     #[tokio::test]
     async fn kill_agent_existing_run_returns_no_content() {
-        let _guard = crate::runstate::isolate_runs_dir_for_test(
+        crate::runstate::with_isolated_runs_dir_async(
             "kill_agent_existing_run_returns_no_content",
-        );
-        use axum::routing::delete;
+            |_d| async move {
+                use axum::routing::delete;
 
-        let run_id = unique_run_id("kill-agent");
-        let meta = make_run_with_safe_pid(&run_id);
-        create_run(&meta).unwrap();
+                let run_id = unique_run_id("kill-agent");
+                let meta = make_run_with_safe_pid(&run_id);
+                create_run(&meta).unwrap();
 
-        let app = Router::new()
-            .route("/api/agents/{id}", delete(kill_agent))
-            .with_state(test_state());
-        let req = Request::builder()
-            .method("DELETE")
-            .uri(format!("/api/agents/{}", run_id))
-            .body(Body::empty())
-            .unwrap();
-        let resp = app.oneshot(req).await.unwrap();
-        assert_eq!(resp.status(), axum::http::StatusCode::NO_CONTENT);
+                let app = Router::new()
+                    .route("/api/agents/{id}", delete(kill_agent))
+                    .with_state(test_state());
+                let req = Request::builder()
+                    .method("DELETE")
+                    .uri(format!("/api/agents/{}", run_id))
+                    .body(Body::empty())
+                    .unwrap();
+                let resp = app.oneshot(req).await.unwrap();
+                assert_eq!(resp.status(), axum::http::StatusCode::NO_CONTENT);
 
-        // Verify status was updated to Cancelled
-        let updated = runstate::read_meta(&run_id).unwrap();
-        assert_eq!(updated.status, RunStatus::Cancelled);
+                // Verify status was updated to Cancelled
+                let updated = runstate::read_meta(&run_id).unwrap();
+                assert_eq!(updated.status, RunStatus::Cancelled);
 
-        let _ = std::fs::remove_dir_all(runstate::run_dir(&run_id));
+                let _ = std::fs::remove_dir_all(runstate::run_dir(&run_id));
+            },
+        )
+        .await;
     }
 
     #[tokio::test]
@@ -1515,38 +1585,43 @@ prompt = "Plan the work"
 
     #[tokio::test]
     async fn kill_agent_cascades_to_children() {
-        let _guard = crate::runstate::isolate_runs_dir_for_test("kill_agent_cascades_to_children");
-        use axum::routing::delete;
+        crate::runstate::with_isolated_runs_dir_async(
+            "kill_agent_cascades_to_children",
+            |_d| async move {
+                use axum::routing::delete;
 
-        let parent_id = unique_run_id("kill-parent");
-        let child_id = unique_run_id("kill-child");
+                let parent_id = unique_run_id("kill-parent");
+                let child_id = unique_run_id("kill-child");
 
-        let parent = make_run_with_safe_pid(&parent_id);
-        create_run(&parent).unwrap();
+                let parent = make_run_with_safe_pid(&parent_id);
+                create_run(&parent).unwrap();
 
-        let mut child = make_run_with_safe_pid(&child_id);
-        child.parent_run_id = Some(parent_id.clone());
-        create_run(&child).unwrap();
+                let mut child = make_run_with_safe_pid(&child_id);
+                child.parent_run_id = Some(parent_id.clone());
+                create_run(&child).unwrap();
 
-        let app = Router::new()
-            .route("/api/agents/{id}", delete(kill_agent))
-            .with_state(test_state());
-        let req = Request::builder()
-            .method("DELETE")
-            .uri(format!("/api/agents/{}", parent_id))
-            .body(Body::empty())
-            .unwrap();
-        let resp = app.oneshot(req).await.unwrap();
-        assert_eq!(resp.status(), axum::http::StatusCode::NO_CONTENT);
+                let app = Router::new()
+                    .route("/api/agents/{id}", delete(kill_agent))
+                    .with_state(test_state());
+                let req = Request::builder()
+                    .method("DELETE")
+                    .uri(format!("/api/agents/{}", parent_id))
+                    .body(Body::empty())
+                    .unwrap();
+                let resp = app.oneshot(req).await.unwrap();
+                assert_eq!(resp.status(), axum::http::StatusCode::NO_CONTENT);
 
-        // Both parent and child should be Cancelled
-        let parent_meta = runstate::read_meta(&parent_id).unwrap();
-        let child_meta = runstate::read_meta(&child_id).unwrap();
-        assert_eq!(parent_meta.status, RunStatus::Cancelled);
-        assert_eq!(child_meta.status, RunStatus::Cancelled);
+                // Both parent and child should be Cancelled
+                let parent_meta = runstate::read_meta(&parent_id).unwrap();
+                let child_meta = runstate::read_meta(&child_id).unwrap();
+                assert_eq!(parent_meta.status, RunStatus::Cancelled);
+                assert_eq!(child_meta.status, RunStatus::Cancelled);
 
-        let _ = std::fs::remove_dir_all(runstate::run_dir(&parent_id));
-        let _ = std::fs::remove_dir_all(runstate::run_dir(&child_id));
+                let _ = std::fs::remove_dir_all(runstate::run_dir(&parent_id));
+                let _ = std::fs::remove_dir_all(runstate::run_dir(&child_id));
+            },
+        )
+        .await;
     }
 
     #[test]

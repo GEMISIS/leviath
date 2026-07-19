@@ -1068,135 +1068,143 @@ mod tests {
 
     #[tokio::test]
     async fn interactive_stage_with_run_context_and_tools_records_meta_and_output() {
-        let _guard = crate::runstate::isolate_runs_dir_for_test(
+        crate::runstate::with_isolated_runs_dir_async(
             "interactive_stage_with_run_context_and_tools_records_meta_and_output",
-        );
-        let bp = make_blueprint(vec![make_stage("main")]);
-        let (mut engine, _pool, entity) = make_engine_and_entity(&bp, "Agent reply with tools");
-        let mut io = MockIO::new();
+            |_d| async move {
+                let bp = make_blueprint(vec![make_stage("main")]);
+                let (mut engine, _pool, entity) =
+                    make_engine_and_entity(&bp, "Agent reply with tools");
+                let mut io = MockIO::new();
 
-        let run_id = format!(
-            "test-is-tools-ctx-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .subsec_nanos()
-        );
-        let mut meta = RunMeta::new(
-            run_id.clone(),
-            "test".into(),
-            "/p".into(),
-            "t".into(),
-            None,
-            "/tmp".into(),
-            1,
-        );
-        runstate::create_run(&meta).unwrap();
+                let run_id = format!(
+                    "test-is-tools-ctx-{}-{}",
+                    std::process::id(),
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap()
+                        .subsec_nanos()
+                );
+                let mut meta = RunMeta::new(
+                    run_id.clone(),
+                    "test".into(),
+                    "/p".into(),
+                    "t".into(),
+                    None,
+                    "/tmp".into(),
+                    1,
+                );
+                runstate::create_run(&meta).unwrap();
 
-        let responder = spawn_interaction_responder(
-            run_id.clone(),
-            vec![crate::interaction::InteractionResponse::text("", "")],
-        );
+                let responder = spawn_interaction_responder(
+                    run_id.clone(),
+                    vec![crate::interaction::InteractionResponse::text("", "")],
+                );
 
-        run_interactive_stage(
-            &mut engine,
-            entity,
-            "mock",
-            "test-model",
-            10,
-            &[leviath_providers::Tool {
-                name: "noop".to_string(),
-                description: "does nothing".to_string(),
-                parameters: serde_json::json!({"type": "object", "properties": {}}),
-            }],
-            Some((&run_id, &mut meta)),
-            "main",
-            &mut io,
-            &mut noop_exec,
+                run_interactive_stage(
+                    &mut engine,
+                    entity,
+                    "mock",
+                    "test-model",
+                    10,
+                    &[leviath_providers::Tool {
+                        name: "noop".to_string(),
+                        description: "does nothing".to_string(),
+                        parameters: serde_json::json!({"type": "object", "properties": {}}),
+                    }],
+                    Some((&run_id, &mut meta)),
+                    "main",
+                    &mut io,
+                    &mut noop_exec,
+                )
+                .await
+                .unwrap();
+
+                responder.abort();
+
+                // Tokens are now cumulative across all inference calls in the loop.
+                // The mock returns 10 prompt / 5 completion per call; the exact total
+                // depends on how many iterations the loop runs.
+                assert!(
+                    meta.prompt_tokens >= 10,
+                    "expected cumulative prompt tokens >= 10, got {}",
+                    meta.prompt_tokens
+                );
+                assert!(
+                    meta.completion_tokens >= 5,
+                    "expected cumulative completion tokens >= 5, got {}",
+                    meta.completion_tokens
+                );
+                let output = crate::runstate::tail_stage_output(&run_id, meta.stage_index, 65536);
+                assert_contains_display(
+                    output.contains("Agent reply with tools"),
+                    "expected stage output to be recorded, got",
+                    &output,
+                );
+
+                let _ = std::fs::remove_dir_all(runstate::run_dir(&run_id));
+            },
         )
-        .await
-        .unwrap();
-
-        responder.abort();
-
-        // Tokens are now cumulative across all inference calls in the loop.
-        // The mock returns 10 prompt / 5 completion per call; the exact total
-        // depends on how many iterations the loop runs.
-        assert!(
-            meta.prompt_tokens >= 10,
-            "expected cumulative prompt tokens >= 10, got {}",
-            meta.prompt_tokens
-        );
-        assert!(
-            meta.completion_tokens >= 5,
-            "expected cumulative completion tokens >= 5, got {}",
-            meta.completion_tokens
-        );
-        let output = crate::runstate::tail_stage_output(&run_id, meta.stage_index, 65536);
-        assert_contains_display(
-            output.contains("Agent reply with tools"),
-            "expected stage output to be recorded, got",
-            &output,
-        );
-
-        let _ = std::fs::remove_dir_all(runstate::run_dir(&run_id));
+        .await;
     }
 
     #[tokio::test]
     async fn interactive_stage_with_run_context_no_tools_records_meta() {
-        let _guard = crate::runstate::isolate_runs_dir_for_test(
+        crate::runstate::with_isolated_runs_dir_async(
             "interactive_stage_with_run_context_no_tools_records_meta",
-        );
-        let bp = make_blueprint(vec![make_stage("main")]);
-        let (mut engine, _pool, entity) = make_engine_and_entity(&bp, "Streamed agent reply");
-        let mut io = MockIO::new();
+            |_d| async move {
+                let bp = make_blueprint(vec![make_stage("main")]);
+                let (mut engine, _pool, entity) =
+                    make_engine_and_entity(&bp, "Streamed agent reply");
+                let mut io = MockIO::new();
 
-        let run_id = format!(
-            "test-is-notools-ctx-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .subsec_nanos()
-        );
-        let mut meta = RunMeta::new(
-            run_id.clone(),
-            "test".into(),
-            "/p".into(),
-            "t".into(),
-            None,
-            "/tmp".into(),
-            1,
-        );
-        runstate::create_run(&meta).unwrap();
+                let run_id = format!(
+                    "test-is-notools-ctx-{}-{}",
+                    std::process::id(),
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap()
+                        .subsec_nanos()
+                );
+                let mut meta = RunMeta::new(
+                    run_id.clone(),
+                    "test".into(),
+                    "/p".into(),
+                    "t".into(),
+                    None,
+                    "/tmp".into(),
+                    1,
+                );
+                runstate::create_run(&meta).unwrap();
 
-        let responder = spawn_interaction_responder(
-            run_id.clone(),
-            vec![crate::interaction::InteractionResponse::text("", "")],
-        );
+                let responder = spawn_interaction_responder(
+                    run_id.clone(),
+                    vec![crate::interaction::InteractionResponse::text("", "")],
+                );
 
-        run_interactive_stage(
-            &mut engine,
-            entity,
-            "mock",
-            "test-model",
-            10,
-            &[], // no tools → tool-less streaming path, background run_context
-            Some((&run_id, &mut meta)),
-            "main",
-            &mut io,
-            &mut noop_exec,
+                run_interactive_stage(
+                    &mut engine,
+                    entity,
+                    "mock",
+                    "test-model",
+                    10,
+                    &[], // no tools → tool-less streaming path, background run_context
+                    Some((&run_id, &mut meta)),
+                    "main",
+                    &mut io,
+                    &mut noop_exec,
+                )
+                .await
+                .unwrap();
+
+                responder.abort();
+
+                assert_eq!(meta.prompt_tokens, 10);
+                assert_eq!(meta.completion_tokens, 5);
+
+                let _ = std::fs::remove_dir_all(runstate::run_dir(&run_id));
+            },
         )
-        .await
-        .unwrap();
-
-        responder.abort();
-
-        assert_eq!(meta.prompt_tokens, 10);
-        assert_eq!(meta.completion_tokens, 5);
-
-        let _ = std::fs::remove_dir_all(runstate::run_dir(&run_id));
+        .await;
     }
 
     #[test]
@@ -1653,120 +1661,129 @@ mod tests {
 
     #[tokio::test]
     async fn interactive_points_single_free_text_point_stdin() {
-        let _guard = crate::runstate::isolate_runs_dir_for_test(
+        crate::runstate::with_isolated_runs_dir_async(
             "interactive_points_single_free_text_point_stdin",
-        );
-        use crate::interaction::InteractionResponse;
+            |_d| async move {
+                use crate::interaction::InteractionResponse;
 
-        let bp = make_blueprint(vec![make_stage("main")]);
-        let (mut engine, _pool, entity) = make_engine_and_entity(&bp, "Agent answer");
-        let mut io = MockIO::new();
+                let bp = make_blueprint(vec![make_stage("main")]);
+                let (mut engine, _pool, entity) = make_engine_and_entity(&bp, "Agent answer");
+                let mut io = MockIO::new();
 
-        let run_id = format!(
-            "test-ip-ft-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .subsec_nanos()
-        );
-        let mut meta = RunMeta::new(
-            run_id.clone(),
-            "test".into(),
-            "/p".into(),
-            "t".into(),
-            None,
-            "/tmp".into(),
-            1,
-        );
-        runstate::create_run(&meta).unwrap();
+                let run_id = format!(
+                    "test-ip-ft-{}-{}",
+                    std::process::id(),
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap()
+                        .subsec_nanos()
+                );
+                let mut meta = RunMeta::new(
+                    run_id.clone(),
+                    "test".into(),
+                    "/p".into(),
+                    "t".into(),
+                    None,
+                    "/tmp".into(),
+                    1,
+                );
+                runstate::create_run(&meta).unwrap();
 
-        let points = vec![make_free_text_point("feedback", "What do you think?")];
+                let points = vec![make_free_text_point("feedback", "What do you think?")];
 
-        let responder = spawn_interaction_responder(
-            run_id.clone(),
-            vec![InteractionResponse::text("", "my feedback")],
-        );
+                let responder = spawn_interaction_responder(
+                    run_id.clone(),
+                    vec![InteractionResponse::text("", "my feedback")],
+                );
 
-        run_interactive_points_stage(
-            &mut engine,
-            entity,
-            "mock",
-            "test-model",
-            4,
-            &[],
-            None,
-            &points,
-            Some((&run_id, &mut meta)),
-            &mut io,
-            &mut noop_exec,
-            None,
+                run_interactive_points_stage(
+                    &mut engine,
+                    entity,
+                    "mock",
+                    "test-model",
+                    4,
+                    &[],
+                    None,
+                    &points,
+                    Some((&run_id, &mut meta)),
+                    &mut io,
+                    &mut noop_exec,
+                    None,
+                )
+                .await
+                .unwrap();
+
+                responder.abort();
+                let _ = std::fs::remove_dir_all(runstate::run_dir(&run_id));
+            },
         )
-        .await
-        .unwrap();
-
-        responder.abort();
-        let _ = std::fs::remove_dir_all(runstate::run_dir(&run_id));
+        .await;
     }
 
     #[tokio::test]
     async fn interactive_points_multiple_choice_stdin() {
-        let _guard =
-            crate::runstate::isolate_runs_dir_for_test("interactive_points_multiple_choice_stdin");
-        use crate::interaction::InteractionResponse;
+        crate::runstate::with_isolated_runs_dir_async(
+            "interactive_points_multiple_choice_stdin",
+            |_d| async move {
+                use crate::interaction::InteractionResponse;
 
-        let bp = make_blueprint(vec![make_stage("main")]);
-        let (mut engine, _pool, entity) = make_engine_and_entity(&bp, "Agent response");
-        let mut io = MockIO::new();
+                let bp = make_blueprint(vec![make_stage("main")]);
+                let (mut engine, _pool, entity) = make_engine_and_entity(&bp, "Agent response");
+                let mut io = MockIO::new();
 
-        let run_id = format!(
-            "test-ip-mc-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .subsec_nanos()
-        );
-        let mut meta = RunMeta::new(
-            run_id.clone(),
-            "test".into(),
-            "/p".into(),
-            "t".into(),
-            None,
-            "/tmp".into(),
-            1,
-        );
-        runstate::create_run(&meta).unwrap();
+                let run_id = format!(
+                    "test-ip-mc-{}-{}",
+                    std::process::id(),
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap()
+                        .subsec_nanos()
+                );
+                let mut meta = RunMeta::new(
+                    run_id.clone(),
+                    "test".into(),
+                    "/p".into(),
+                    "t".into(),
+                    None,
+                    "/tmp".into(),
+                    1,
+                );
+                runstate::create_run(&meta).unwrap();
 
-        let points = vec![make_multiple_choice_point(
-            "pick_one",
-            "Choose an option",
-            vec!["Option A".to_string(), "Option B".to_string()],
-        )];
+                let points = vec![make_multiple_choice_point(
+                    "pick_one",
+                    "Choose an option",
+                    vec!["Option A".to_string(), "Option B".to_string()],
+                )];
 
-        // choice_index 1 = "Option B" (0-based)
-        let responder =
-            spawn_interaction_responder(run_id.clone(), vec![InteractionResponse::choice("", 1)]);
+                // choice_index 1 = "Option B" (0-based)
+                let responder = spawn_interaction_responder(
+                    run_id.clone(),
+                    vec![InteractionResponse::choice("", 1)],
+                );
 
-        run_interactive_points_stage(
-            &mut engine,
-            entity,
-            "mock",
-            "test-model",
-            4,
-            &[],
-            None,
-            &points,
-            Some((&run_id, &mut meta)),
-            &mut io,
-            &mut noop_exec,
-            None,
+                run_interactive_points_stage(
+                    &mut engine,
+                    entity,
+                    "mock",
+                    "test-model",
+                    4,
+                    &[],
+                    None,
+                    &points,
+                    Some((&run_id, &mut meta)),
+                    &mut io,
+                    &mut noop_exec,
+                    None,
+                )
+                .await
+                .unwrap();
+
+                responder.abort();
+                let _ = std::fs::remove_dir_all(runstate::run_dir(&run_id));
+            },
         )
-        .await
-        .unwrap();
-
-        responder.abort();
-        let _ = std::fs::remove_dir_all(runstate::run_dir(&run_id));
+        .await;
     }
 
     // ─── Regression: a choice with a configured followup must ask for ─────
@@ -1775,102 +1792,105 @@ mod tests {
     // ever reaches the model.
     #[tokio::test]
     async fn interactive_points_directive_option_stays_in_stage_and_injects_directive() {
-        let _guard = crate::runstate::isolate_runs_dir_for_test(
+        crate::runstate::with_isolated_runs_dir_async(
             "interactive_points_directive_option_stays_in_stage_and_injects_directive",
-        );
-        use crate::interaction::InteractionResponse;
+            |_d| async move {
+                use crate::interaction::InteractionResponse;
 
-        let bp = make_blueprint(vec![make_stage("main")]);
-        let (mut engine, _pool, entity) = make_engine_and_entity(&bp, "Agent response");
-        let mut io = MockIO::new();
+                let bp = make_blueprint(vec![make_stage("main")]);
+                let (mut engine, _pool, entity) = make_engine_and_entity(&bp, "Agent response");
+                let mut io = MockIO::new();
 
-        let run_id = format!(
-            "test-ip-mc-followup-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .subsec_nanos()
-        );
-        let mut meta = RunMeta::new(
-            run_id.clone(),
-            "test".into(),
-            "/p".into(),
-            "t".into(),
-            None,
-            "/tmp".into(),
-            1,
-        );
-        runstate::create_run(&meta).unwrap();
+                let run_id = format!(
+                    "test-ip-mc-followup-{}-{}",
+                    std::process::id(),
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap()
+                        .subsec_nanos()
+                );
+                let mut meta = RunMeta::new(
+                    run_id.clone(),
+                    "test".into(),
+                    "/p".into(),
+                    "t".into(),
+                    None,
+                    "/tmp".into(),
+                    1,
+                );
+                runstate::create_run(&meta).unwrap();
 
-        let mut directives = std::collections::HashMap::new();
-        directives.insert(
-            "Revise".to_string(),
-            "Call ask_user_text to learn what to change, then re-plan.".to_string(),
-        );
-        let points = vec![make_multiple_choice_point_with_directives(
-            "plan_approval",
-            "Approve the plan?",
-            vec!["Approve".to_string(), "Revise".to_string()],
-            directives,
-        )];
+                let mut directives = std::collections::HashMap::new();
+                directives.insert(
+                    "Revise".to_string(),
+                    "Call ask_user_text to learn what to change, then re-plan.".to_string(),
+                );
+                let points = vec![make_multiple_choice_point_with_directives(
+                    "plan_approval",
+                    "Approve the plan?",
+                    vec!["Approve".to_string(), "Revise".to_string()],
+                    directives,
+                )];
 
-        // Round 1: pick "Revise" (choice_index 1) → must inject the directive
-        // and loop back IN-STAGE (no second free-text request is issued — the
-        // agent drives the next step itself). Round 2: pick "Approve"
-        // (choice_index 0, no directive) → the point loop ends.
-        let responder = spawn_interaction_responder(
-            run_id.clone(),
-            vec![
-                InteractionResponse::choice("", 1),
-                InteractionResponse::choice("", 0),
-            ],
-        );
+                // Round 1: pick "Revise" (choice_index 1) → must inject the directive
+                // and loop back IN-STAGE (no second free-text request is issued — the
+                // agent drives the next step itself). Round 2: pick "Approve"
+                // (choice_index 0, no directive) → the point loop ends.
+                let responder = spawn_interaction_responder(
+                    run_id.clone(),
+                    vec![
+                        InteractionResponse::choice("", 1),
+                        InteractionResponse::choice("", 0),
+                    ],
+                );
 
-        let outcome = run_interactive_points_stage(
-            &mut engine,
-            entity,
-            "mock",
-            "test-model",
-            8,
-            &[],
-            None,
-            &points,
-            Some((&run_id, &mut meta)),
-            &mut io,
-            &mut noop_exec,
-            None,
+                let outcome = run_interactive_points_stage(
+                    &mut engine,
+                    entity,
+                    "mock",
+                    "test-model",
+                    8,
+                    &[],
+                    None,
+                    &points,
+                    Some((&run_id, &mut meta)),
+                    &mut io,
+                    &mut noop_exec,
+                    None,
+                )
+                .await
+                .unwrap();
+
+                responder.abort();
+
+                // Completed (not aborted) after the revision loop.
+                assert_eq!(outcome, PointsOutcome::Completed);
+
+                // The directive text must have been injected into the agent's context,
+                // proving the run stayed in-stage and told the agent what to do next.
+                let window = engine
+                    .world()
+                    .get::<leviath_runtime::ContextWindow>(entity)
+                    .unwrap();
+                let conversation = window.get_region("conversation").unwrap();
+                let all_content: String = conversation
+                    .content
+                    .iter()
+                    .map(|e| e.content.as_str())
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                assert_contains_display(
+                    all_content.contains("directive: Call ask_user_text"),
+                    "expected the injected directive in context, got",
+                    &all_content,
+                );
+                assert!(all_content.contains("Revise"));
+                assert!(all_content.contains("Approve"));
+
+                let _ = std::fs::remove_dir_all(runstate::run_dir(&run_id));
+            },
         )
-        .await
-        .unwrap();
-
-        responder.abort();
-
-        // Completed (not aborted) after the revision loop.
-        assert_eq!(outcome, PointsOutcome::Completed);
-
-        // The directive text must have been injected into the agent's context,
-        // proving the run stayed in-stage and told the agent what to do next.
-        let window = engine
-            .world()
-            .get::<leviath_runtime::ContextWindow>(entity)
-            .unwrap();
-        let conversation = window.get_region("conversation").unwrap();
-        let all_content: String = conversation
-            .content
-            .iter()
-            .map(|e| e.content.as_str())
-            .collect::<Vec<_>>()
-            .join("\n");
-        assert_contains_display(
-            all_content.contains("directive: Call ask_user_text"),
-            "expected the injected directive in context, got",
-            &all_content,
-        );
-        assert!(all_content.contains("Revise"));
-        assert!(all_content.contains("Approve"));
-
-        let _ = std::fs::remove_dir_all(runstate::run_dir(&run_id));
+        .await;
     }
 
     #[tokio::test]
@@ -1878,82 +1898,87 @@ mod tests {
         // Selecting an abort option must short-circuit the stage with
         // PointsOutcome::Aborted — no directive, no fall-through — so the
         // executor can cancel the run deterministically.
-        let _guard = crate::runstate::isolate_runs_dir_for_test(
+        crate::runstate::with_isolated_runs_dir_async(
             "interactive_points_abort_option_returns_aborted",
-        );
-        use crate::interaction::InteractionResponse;
+            |_d| async move {
+                use crate::interaction::InteractionResponse;
 
-        let bp = make_blueprint(vec![make_stage("main")]);
-        let (mut engine, _pool, entity) = make_engine_and_entity(&bp, "Agent response");
-        let mut io = MockIO::new();
+                let bp = make_blueprint(vec![make_stage("main")]);
+                let (mut engine, _pool, entity) = make_engine_and_entity(&bp, "Agent response");
+                let mut io = MockIO::new();
 
-        let run_id = format!(
-            "test-ip-abort-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .subsec_nanos()
-        );
-        let mut meta = RunMeta::new(
-            run_id.clone(),
-            "test".into(),
-            "/p".into(),
-            "t".into(),
-            None,
-            "/tmp".into(),
-            1,
-        );
-        runstate::create_run(&meta).unwrap();
+                let run_id = format!(
+                    "test-ip-abort-{}-{}",
+                    std::process::id(),
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap()
+                        .subsec_nanos()
+                );
+                let mut meta = RunMeta::new(
+                    run_id.clone(),
+                    "test".into(),
+                    "/p".into(),
+                    "t".into(),
+                    None,
+                    "/tmp".into(),
+                    1,
+                );
+                runstate::create_run(&meta).unwrap();
 
-        let points = vec![make_multiple_choice_point_with_abort(
-            "plan_approval",
-            "Approve the plan?",
-            vec!["Approve".to_string(), "Abort".to_string()],
-            vec!["Abort".to_string()],
-        )];
+                let points = vec![make_multiple_choice_point_with_abort(
+                    "plan_approval",
+                    "Approve the plan?",
+                    vec!["Approve".to_string(), "Abort".to_string()],
+                    vec!["Abort".to_string()],
+                )];
 
-        // Pick "Abort" (choice_index 1).
-        let responder =
-            spawn_interaction_responder(run_id.clone(), vec![InteractionResponse::choice("", 1)]);
+                // Pick "Abort" (choice_index 1).
+                let responder = spawn_interaction_responder(
+                    run_id.clone(),
+                    vec![InteractionResponse::choice("", 1)],
+                );
 
-        let outcome = run_interactive_points_stage(
-            &mut engine,
-            entity,
-            "mock",
-            "test-model",
-            8,
-            &[],
-            None,
-            &points,
-            Some((&run_id, &mut meta)),
-            &mut io,
-            &mut noop_exec,
-            None,
+                let outcome = run_interactive_points_stage(
+                    &mut engine,
+                    entity,
+                    "mock",
+                    "test-model",
+                    8,
+                    &[],
+                    None,
+                    &points,
+                    Some((&run_id, &mut meta)),
+                    &mut io,
+                    &mut noop_exec,
+                    None,
+                )
+                .await
+                .unwrap();
+
+                responder.abort();
+
+                assert_eq!(outcome, PointsOutcome::Aborted);
+
+                // The abort short-circuits before the option label is injected, so the
+                // conversation region must NOT carry an "Abort" acknowledgement line.
+                let window = engine
+                    .world()
+                    .get::<leviath_runtime::ContextWindow>(entity)
+                    .unwrap();
+                let conversation = window.get_region("conversation").unwrap();
+                let all_content: String = conversation
+                    .content
+                    .iter()
+                    .map(|e| e.content.as_str())
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                assert!(!all_content.contains("User [plan_approval]: Abort"));
+
+                let _ = std::fs::remove_dir_all(runstate::run_dir(&run_id));
+            },
         )
-        .await
-        .unwrap();
-
-        responder.abort();
-
-        assert_eq!(outcome, PointsOutcome::Aborted);
-
-        // The abort short-circuits before the option label is injected, so the
-        // conversation region must NOT carry an "Abort" acknowledgement line.
-        let window = engine
-            .world()
-            .get::<leviath_runtime::ContextWindow>(entity)
-            .unwrap();
-        let conversation = window.get_region("conversation").unwrap();
-        let all_content: String = conversation
-            .content
-            .iter()
-            .map(|e| e.content.as_str())
-            .collect::<Vec<_>>()
-            .join("\n");
-        assert!(!all_content.contains("User [plan_approval]: Abort"));
-
-        let _ = std::fs::remove_dir_all(runstate::run_dir(&run_id));
+        .await;
     }
 
     #[tokio::test]
@@ -1967,77 +1992,80 @@ mod tests {
         // platform.
         use crate::interaction::InteractionResponse;
 
-        let _guard = crate::runstate::isolate_runs_dir_for_test(
+        crate::runstate::with_isolated_runs_dir_async(
             "interactive_points_edit_ipc_request_write_error",
-        );
-        let bp = make_blueprint(vec![make_stage("main")]);
-        let (mut engine, _pool, entity) = make_engine_and_entity(&bp, "Agent response");
-        let mut io = MockIO::new();
+            |_d| async move {
+                let bp = make_blueprint(vec![make_stage("main")]);
+                let (mut engine, _pool, entity) = make_engine_and_entity(&bp, "Agent response");
+                let mut io = MockIO::new();
 
-        let run_id = format!(
-            "test-ip-edit-werr-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .subsec_nanos()
-        );
-        let mut meta = RunMeta::new(
-            run_id.clone(),
-            "test".into(),
-            "/p".into(),
-            "t".into(),
-            None,
-            "/tmp".into(),
-            1,
-        );
-        runstate::create_run(&meta).unwrap();
+                let run_id = format!(
+                    "test-ip-edit-werr-{}-{}",
+                    std::process::id(),
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap()
+                        .subsec_nanos()
+                );
+                let mut meta = RunMeta::new(
+                    run_id.clone(),
+                    "test".into(),
+                    "/p".into(),
+                    "t".into(),
+                    None,
+                    "/tmp".into(),
+                    1,
+                );
+                runstate::create_run(&meta).unwrap();
 
-        let points = vec![make_multiple_choice_point_with_edit(
-            "plan_approval",
-            "Approve the plan?",
-            vec!["Approve".to_string(), "Add detail".to_string()],
-            vec!["Add detail".to_string()],
-        )];
+                let points = vec![make_multiple_choice_point_with_edit(
+                    "plan_approval",
+                    "Approve the plan?",
+                    vec!["Approve".to_string(), "Add detail".to_string()],
+                    vec!["Add detail".to_string()],
+                )];
 
-        let rid = run_id.clone();
-        let responder = tokio::spawn(async move {
-            // The stage posts its (choice) request before awaiting a response,
-            // so it is present once this task is scheduled.
-            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-            let req = crate::interaction::read_request(&rid)
-                .expect("stage posts its interaction request before awaiting a response");
-            let mut resp = InteractionResponse::choice("", 1); // "Add detail" (edit)
-            resp.request_id = req.id.clone();
-            crate::interaction::write_response(&rid, &resp).unwrap();
-            // Block the next atomic write: the choice response above is still
-            // readable, but the edit request's write_request writes to
-            // `pending.json.tmp`, which we replace with a *directory* so that
-            // write fails on every platform.
-            let dir = runstate::run_dir(&rid);
-            std::fs::create_dir_all(dir.join("pending.json.tmp")).unwrap();
-        });
+                let rid = run_id.clone();
+                let responder = tokio::spawn(async move {
+                    // The stage posts its (choice) request before awaiting a response,
+                    // so it is present once this task is scheduled.
+                    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                    let req = crate::interaction::read_request(&rid)
+                        .expect("stage posts its interaction request before awaiting a response");
+                    let mut resp = InteractionResponse::choice("", 1); // "Add detail" (edit)
+                    resp.request_id = req.id.clone();
+                    crate::interaction::write_response(&rid, &resp).unwrap();
+                    // Block the next atomic write: the choice response above is still
+                    // readable, but the edit request's write_request writes to
+                    // `pending.json.tmp`, which we replace with a *directory* so that
+                    // write fails on every platform.
+                    let dir = runstate::run_dir(&rid);
+                    std::fs::create_dir_all(dir.join("pending.json.tmp")).unwrap();
+                });
 
-        let result = run_interactive_points_stage(
-            &mut engine,
-            entity,
-            "mock",
-            "test-model",
-            8,
-            &[],
-            None,
-            &points,
-            Some((&run_id, &mut meta)),
-            &mut io,
-            &mut noop_exec,
-            None,
+                let result = run_interactive_points_stage(
+                    &mut engine,
+                    entity,
+                    "mock",
+                    "test-model",
+                    8,
+                    &[],
+                    None,
+                    &points,
+                    Some((&run_id, &mut meta)),
+                    &mut io,
+                    &mut noop_exec,
+                    None,
+                )
+                .await;
+
+                let _ = responder.await;
+                let dir = runstate::run_dir(&run_id);
+                assert!(result.is_err());
+                let _ = std::fs::remove_dir_all(&dir);
+            },
         )
         .await;
-
-        let _ = responder.await;
-        let dir = runstate::run_dir(&run_id);
-        assert!(result.is_err());
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]
@@ -2045,86 +2073,90 @@ mod tests {
         // Edit option over the background file-IPC path: the engine issues an
         // EditText request, the user's edited text is injected, then the point
         // is re-presented. (The foreground path is covered separately.)
-        let _guard =
-            crate::runstate::isolate_runs_dir_for_test("interactive_points_edit_option_ipc_path");
-        use crate::interaction::InteractionResponse;
+        crate::runstate::with_isolated_runs_dir_async(
+            "interactive_points_edit_option_ipc_path",
+            |_d| async move {
+                use crate::interaction::InteractionResponse;
 
-        let bp = make_blueprint(vec![make_stage("main")]);
-        let (mut engine, _pool, entity) = make_engine_and_entity(&bp, "Agent response");
-        let mut io = MockIO::new();
+                let bp = make_blueprint(vec![make_stage("main")]);
+                let (mut engine, _pool, entity) = make_engine_and_entity(&bp, "Agent response");
+                let mut io = MockIO::new();
 
-        let run_id = format!(
-            "test-ip-edit-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .subsec_nanos()
-        );
-        let mut meta = RunMeta::new(
-            run_id.clone(),
-            "test".into(),
-            "/p".into(),
-            "t".into(),
-            None,
-            "/tmp".into(),
-            1,
-        );
-        runstate::create_run(&meta).unwrap();
+                let run_id = format!(
+                    "test-ip-edit-{}-{}",
+                    std::process::id(),
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap()
+                        .subsec_nanos()
+                );
+                let mut meta = RunMeta::new(
+                    run_id.clone(),
+                    "test".into(),
+                    "/p".into(),
+                    "t".into(),
+                    None,
+                    "/tmp".into(),
+                    1,
+                );
+                runstate::create_run(&meta).unwrap();
 
-        let points = vec![make_multiple_choice_point_with_edit(
-            "plan_approval",
-            "Approve the plan?",
-            vec!["Approve".to_string(), "Add detail".to_string()],
-            vec!["Add detail".to_string()],
-        )];
+                let points = vec![make_multiple_choice_point_with_edit(
+                    "plan_approval",
+                    "Approve the plan?",
+                    vec!["Approve".to_string(), "Add detail".to_string()],
+                    vec!["Add detail".to_string()],
+                )];
 
-        // Round 1: "Add detail" (index 1) → engine issues EditText → user
-        // submits edited text → Round 2: "Approve" (index 0) → complete.
-        let responder = spawn_interaction_responder(
-            run_id.clone(),
-            vec![
-                InteractionResponse::choice("", 1),
-                InteractionResponse::text("", "EDITED VIA IPC"),
-                InteractionResponse::choice("", 0),
-            ],
-        );
+                // Round 1: "Add detail" (index 1) → engine issues EditText → user
+                // submits edited text → Round 2: "Approve" (index 0) → complete.
+                let responder = spawn_interaction_responder(
+                    run_id.clone(),
+                    vec![
+                        InteractionResponse::choice("", 1),
+                        InteractionResponse::text("", "EDITED VIA IPC"),
+                        InteractionResponse::choice("", 0),
+                    ],
+                );
 
-        let outcome = run_interactive_points_stage(
-            &mut engine,
-            entity,
-            "mock",
-            "test-model",
-            8,
-            &[],
-            None,
-            &points,
-            Some((&run_id, &mut meta)),
-            &mut io,
-            &mut noop_exec,
-            None,
+                let outcome = run_interactive_points_stage(
+                    &mut engine,
+                    entity,
+                    "mock",
+                    "test-model",
+                    8,
+                    &[],
+                    None,
+                    &points,
+                    Some((&run_id, &mut meta)),
+                    &mut io,
+                    &mut noop_exec,
+                    None,
+                )
+                .await
+                .unwrap();
+
+                responder.abort();
+                assert_eq!(outcome, PointsOutcome::Completed);
+
+                let window = engine
+                    .world()
+                    .get::<leviath_runtime::ContextWindow>(entity)
+                    .unwrap();
+                let conversation = window.get_region("conversation").unwrap();
+                let all_content: String = conversation
+                    .content
+                    .iter()
+                    .map(|e| e.content.as_str())
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                assert!(all_content.contains("edited the output directly"));
+                assert!(all_content.contains("EDITED VIA IPC"));
+
+                let _ = std::fs::remove_dir_all(runstate::run_dir(&run_id));
+            },
         )
-        .await
-        .unwrap();
-
-        responder.abort();
-        assert_eq!(outcome, PointsOutcome::Completed);
-
-        let window = engine
-            .world()
-            .get::<leviath_runtime::ContextWindow>(entity)
-            .unwrap();
-        let conversation = window.get_region("conversation").unwrap();
-        let all_content: String = conversation
-            .content
-            .iter()
-            .map(|e| e.content.as_str())
-            .collect::<Vec<_>>()
-            .join("\n");
-        assert!(all_content.contains("edited the output directly"));
-        assert!(all_content.contains("EDITED VIA IPC"));
-
-        let _ = std::fs::remove_dir_all(runstate::run_dir(&run_id));
+        .await;
     }
 
     #[tokio::test]
@@ -2592,245 +2624,268 @@ mod tests {
 
     #[tokio::test]
     async fn interactive_points_confirm_stdin() {
-        let _guard = crate::runstate::isolate_runs_dir_for_test("interactive_points_confirm_stdin");
-        use crate::interaction::InteractionResponse;
+        crate::runstate::with_isolated_runs_dir_async(
+            "interactive_points_confirm_stdin",
+            |_d| async move {
+                use crate::interaction::InteractionResponse;
 
-        let bp = make_blueprint(vec![make_stage("main")]);
-        let (mut engine, _pool, entity) = make_engine_and_entity(&bp, "Agent response");
-        let mut io = MockIO::new();
+                let bp = make_blueprint(vec![make_stage("main")]);
+                let (mut engine, _pool, entity) = make_engine_and_entity(&bp, "Agent response");
+                let mut io = MockIO::new();
 
-        let run_id = format!(
-            "test-ip-cf-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .subsec_nanos()
-        );
-        let mut meta = RunMeta::new(
-            run_id.clone(),
-            "test".into(),
-            "/p".into(),
-            "t".into(),
-            None,
-            "/tmp".into(),
-            1,
-        );
-        runstate::create_run(&meta).unwrap();
+                let run_id = format!(
+                    "test-ip-cf-{}-{}",
+                    std::process::id(),
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap()
+                        .subsec_nanos()
+                );
+                let mut meta = RunMeta::new(
+                    run_id.clone(),
+                    "test".into(),
+                    "/p".into(),
+                    "t".into(),
+                    None,
+                    "/tmp".into(),
+                    1,
+                );
+                runstate::create_run(&meta).unwrap();
 
-        let points = vec![make_confirm_point("confirm_step", "Are you sure?")];
+                let points = vec![make_confirm_point("confirm_step", "Are you sure?")];
 
-        let responder =
-            spawn_interaction_responder(run_id.clone(), vec![InteractionResponse::text("", "yes")]);
+                let responder = spawn_interaction_responder(
+                    run_id.clone(),
+                    vec![InteractionResponse::text("", "yes")],
+                );
 
-        run_interactive_points_stage(
-            &mut engine,
-            entity,
-            "mock",
-            "test-model",
-            4,
-            &[],
-            None,
-            &points,
-            Some((&run_id, &mut meta)),
-            &mut io,
-            &mut noop_exec,
-            None,
+                run_interactive_points_stage(
+                    &mut engine,
+                    entity,
+                    "mock",
+                    "test-model",
+                    4,
+                    &[],
+                    None,
+                    &points,
+                    Some((&run_id, &mut meta)),
+                    &mut io,
+                    &mut noop_exec,
+                    None,
+                )
+                .await
+                .unwrap();
+
+                responder.abort();
+                let _ = std::fs::remove_dir_all(runstate::run_dir(&run_id));
+            },
         )
-        .await
-        .unwrap();
-
-        responder.abort();
-        let _ = std::fs::remove_dir_all(runstate::run_dir(&run_id));
+        .await;
     }
 
     #[tokio::test]
     async fn interactive_points_multiple_points_all_visited() {
-        let _guard = crate::runstate::isolate_runs_dir_for_test(
+        crate::runstate::with_isolated_runs_dir_async(
             "interactive_points_multiple_points_all_visited",
-        );
-        use crate::interaction::InteractionResponse;
+            |_d| async move {
+                use crate::interaction::InteractionResponse;
 
-        let bp = make_blueprint(vec![make_stage("main")]);
-        let (mut engine, _pool, entity) = make_engine_and_entity(&bp, "Mid-stage response");
-        let mut io = MockIO::new();
+                let bp = make_blueprint(vec![make_stage("main")]);
+                let (mut engine, _pool, entity) = make_engine_and_entity(&bp, "Mid-stage response");
+                let mut io = MockIO::new();
 
-        let run_id = format!(
-            "test-ip-mp-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .subsec_nanos()
-        );
-        let mut meta = RunMeta::new(
-            run_id.clone(),
-            "test".into(),
-            "/p".into(),
-            "t".into(),
-            None,
-            "/tmp".into(),
-            1,
-        );
-        runstate::create_run(&meta).unwrap();
+                let run_id = format!(
+                    "test-ip-mp-{}-{}",
+                    std::process::id(),
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap()
+                        .subsec_nanos()
+                );
+                let mut meta = RunMeta::new(
+                    run_id.clone(),
+                    "test".into(),
+                    "/p".into(),
+                    "t".into(),
+                    None,
+                    "/tmp".into(),
+                    1,
+                );
+                runstate::create_run(&meta).unwrap();
 
-        let points = vec![
-            make_free_text_point("step1", "Tell me about step 1"),
-            make_multiple_choice_point("step2", "Pick one", vec!["A".to_string(), "B".to_string()]),
-            make_confirm_point("step3", "Confirm?"),
-        ];
+                let points = vec![
+                    make_free_text_point("step1", "Tell me about step 1"),
+                    make_multiple_choice_point(
+                        "step2",
+                        "Pick one",
+                        vec!["A".to_string(), "B".to_string()],
+                    ),
+                    make_confirm_point("step3", "Confirm?"),
+                ];
 
-        let responder = spawn_interaction_responder(
-            run_id.clone(),
-            vec![
-                InteractionResponse::text("", "first input"),
-                InteractionResponse::choice("", 0),
-                InteractionResponse::text("", "yes"),
-            ],
-        );
+                let responder = spawn_interaction_responder(
+                    run_id.clone(),
+                    vec![
+                        InteractionResponse::text("", "first input"),
+                        InteractionResponse::choice("", 0),
+                        InteractionResponse::text("", "yes"),
+                    ],
+                );
 
-        run_interactive_points_stage(
-            &mut engine,
-            entity,
-            "mock",
-            "test-model",
-            9,
-            &[],
-            None,
-            &points,
-            Some((&run_id, &mut meta)),
-            &mut io,
-            &mut noop_exec,
-            None,
+                run_interactive_points_stage(
+                    &mut engine,
+                    entity,
+                    "mock",
+                    "test-model",
+                    9,
+                    &[],
+                    None,
+                    &points,
+                    Some((&run_id, &mut meta)),
+                    &mut io,
+                    &mut noop_exec,
+                    None,
+                )
+                .await
+                .unwrap();
+
+                responder.abort();
+                let _ = std::fs::remove_dir_all(runstate::run_dir(&run_id));
+            },
         )
-        .await
-        .unwrap();
-
-        responder.abort();
-        let _ = std::fs::remove_dir_all(runstate::run_dir(&run_id));
+        .await;
     }
 
     #[tokio::test]
     async fn interactive_points_with_zero_remaining_iterations() {
-        let _guard = crate::runstate::isolate_runs_dir_for_test(
+        crate::runstate::with_isolated_runs_dir_async(
             "interactive_points_with_zero_remaining_iterations",
-        );
-        use crate::interaction::InteractionResponse;
+            |_d| async move {
+                use crate::interaction::InteractionResponse;
 
-        // max_iterations = 1, points = 2 → iterations_per_segment rounds down to 0
-        // The stage should still run (just skips inference) and ask interaction points
-        let bp = make_blueprint(vec![make_stage("main")]);
-        let (mut engine, _pool, entity) = make_engine_and_entity(&bp, "Response");
-        let mut io = MockIO::new();
+                // max_iterations = 1, points = 2 → iterations_per_segment rounds down to 0
+                // The stage should still run (just skips inference) and ask interaction points
+                let bp = make_blueprint(vec![make_stage("main")]);
+                let (mut engine, _pool, entity) = make_engine_and_entity(&bp, "Response");
+                let mut io = MockIO::new();
 
-        let run_id = format!(
-            "test-ip-zero-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .subsec_nanos()
-        );
-        let mut meta = RunMeta::new(
-            run_id.clone(),
-            "test".into(),
-            "/p".into(),
-            "t".into(),
-            None,
-            "/tmp".into(),
-            1,
-        );
-        runstate::create_run(&meta).unwrap();
+                let run_id = format!(
+                    "test-ip-zero-{}-{}",
+                    std::process::id(),
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap()
+                        .subsec_nanos()
+                );
+                let mut meta = RunMeta::new(
+                    run_id.clone(),
+                    "test".into(),
+                    "/p".into(),
+                    "t".into(),
+                    None,
+                    "/tmp".into(),
+                    1,
+                );
+                runstate::create_run(&meta).unwrap();
 
-        let points = vec![
-            make_free_text_point("p1", "Point 1"),
-            make_free_text_point("p2", "Point 2"),
-        ];
+                let points = vec![
+                    make_free_text_point("p1", "Point 1"),
+                    make_free_text_point("p2", "Point 2"),
+                ];
 
-        let responder = spawn_interaction_responder(
-            run_id.clone(),
-            vec![
-                InteractionResponse::text("", "a"),
-                InteractionResponse::text("", "b"),
-            ],
-        );
+                let responder = spawn_interaction_responder(
+                    run_id.clone(),
+                    vec![
+                        InteractionResponse::text("", "a"),
+                        InteractionResponse::text("", "b"),
+                    ],
+                );
 
-        run_interactive_points_stage(
-            &mut engine,
-            entity,
-            "mock",
-            "test-model",
-            1, // small max_iterations
-            &[],
-            None,
-            &points,
-            Some((&run_id, &mut meta)),
-            &mut io,
-            &mut noop_exec,
-            None,
+                run_interactive_points_stage(
+                    &mut engine,
+                    entity,
+                    "mock",
+                    "test-model",
+                    1, // small max_iterations
+                    &[],
+                    None,
+                    &points,
+                    Some((&run_id, &mut meta)),
+                    &mut io,
+                    &mut noop_exec,
+                    None,
+                )
+                .await
+                .unwrap();
+
+                responder.abort();
+                let _ = std::fs::remove_dir_all(runstate::run_dir(&run_id));
+            },
         )
-        .await
-        .unwrap();
-
-        responder.abort();
-        let _ = std::fs::remove_dir_all(runstate::run_dir(&run_id));
+        .await;
     }
 
     #[tokio::test]
     async fn interactive_points_empty_user_input_is_ok() {
-        let _guard =
-            crate::runstate::isolate_runs_dir_for_test("interactive_points_empty_user_input_is_ok");
-        use crate::interaction::InteractionResponse;
+        crate::runstate::with_isolated_runs_dir_async(
+            "interactive_points_empty_user_input_is_ok",
+            |_d| async move {
+                use crate::interaction::InteractionResponse;
 
-        // Empty answer → nothing injected into context window (branch coverage)
-        let bp = make_blueprint(vec![make_stage("main")]);
-        let (mut engine, _pool, entity) = make_engine_and_entity(&bp, "Response");
-        let mut io = MockIO::new();
+                // Empty answer → nothing injected into context window (branch coverage)
+                let bp = make_blueprint(vec![make_stage("main")]);
+                let (mut engine, _pool, entity) = make_engine_and_entity(&bp, "Response");
+                let mut io = MockIO::new();
 
-        let run_id = format!(
-            "test-ip-empty-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .subsec_nanos()
-        );
-        let mut meta = RunMeta::new(
-            run_id.clone(),
-            "test".into(),
-            "/p".into(),
-            "t".into(),
-            None,
-            "/tmp".into(),
-            1,
-        );
-        runstate::create_run(&meta).unwrap();
+                let run_id = format!(
+                    "test-ip-empty-{}-{}",
+                    std::process::id(),
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap()
+                        .subsec_nanos()
+                );
+                let mut meta = RunMeta::new(
+                    run_id.clone(),
+                    "test".into(),
+                    "/p".into(),
+                    "t".into(),
+                    None,
+                    "/tmp".into(),
+                    1,
+                );
+                runstate::create_run(&meta).unwrap();
 
-        let points = vec![make_free_text_point("ask", "Say something")];
+                let points = vec![make_free_text_point("ask", "Say something")];
 
-        // Respond with empty text
-        let responder =
-            spawn_interaction_responder(run_id.clone(), vec![InteractionResponse::text("", "")]);
+                // Respond with empty text
+                let responder = spawn_interaction_responder(
+                    run_id.clone(),
+                    vec![InteractionResponse::text("", "")],
+                );
 
-        run_interactive_points_stage(
-            &mut engine,
-            entity,
-            "mock",
-            "test-model",
-            2,
-            &[],
-            None,
-            &points,
-            Some((&run_id, &mut meta)),
-            &mut io,
-            &mut noop_exec,
-            None,
+                run_interactive_points_stage(
+                    &mut engine,
+                    entity,
+                    "mock",
+                    "test-model",
+                    2,
+                    &[],
+                    None,
+                    &points,
+                    Some((&run_id, &mut meta)),
+                    &mut io,
+                    &mut noop_exec,
+                    None,
+                )
+                .await
+                .unwrap();
+
+                responder.abort();
+                let _ = std::fs::remove_dir_all(runstate::run_dir(&run_id));
+            },
         )
-        .await
-        .unwrap();
-
-        responder.abort();
-        let _ = std::fs::remove_dir_all(runstate::run_dir(&run_id));
+        .await;
     }
 
     #[tokio::test]
@@ -3151,113 +3206,119 @@ mod tests {
 
     #[tokio::test]
     async fn interactive_stage_tools_request_interaction_async_error() {
-        let _guard = crate::runstate::isolate_runs_dir_for_test(
+        crate::runstate::with_isolated_runs_dir_async(
             "interactive_stage_tools_request_interaction_async_error",
-        );
-        // Covers the `?` on `request_interaction_async`: write_request's atomic
-        // write targets `pending.json.tmp`, which we replace with a *directory*
-        // so the write fails and the Err propagates -- on every platform.
-        let bp = make_blueprint(vec![make_stage("main")]);
-        let (mut engine, _pool, entity) = make_engine_and_entity(&bp, "Response");
-        let mut io = MockIO::new();
+            |_d| async move {
+                // Covers the `?` on `request_interaction_async`: write_request's atomic
+                // write targets `pending.json.tmp`, which we replace with a *directory*
+                // so the write fails and the Err propagates -- on every platform.
+                let bp = make_blueprint(vec![make_stage("main")]);
+                let (mut engine, _pool, entity) = make_engine_and_entity(&bp, "Response");
+                let mut io = MockIO::new();
 
-        let run_id = format!(
-            "test-rdonly-tools-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .subsec_nanos()
-        );
-        let mut meta = RunMeta::new(
-            run_id.clone(),
-            "test".into(),
-            "/p".into(),
-            "t".into(),
-            None,
-            "/tmp".into(),
-            1,
-        );
-        // Create the run directory, then block the atomic write's tmp target
-        // with a directory so write_request fails.
-        runstate::create_run(&meta).unwrap();
-        let dir = runstate::run_dir(&run_id);
-        std::fs::create_dir_all(dir.join("pending.json.tmp")).unwrap();
+                let run_id = format!(
+                    "test-rdonly-tools-{}-{}",
+                    std::process::id(),
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap()
+                        .subsec_nanos()
+                );
+                let mut meta = RunMeta::new(
+                    run_id.clone(),
+                    "test".into(),
+                    "/p".into(),
+                    "t".into(),
+                    None,
+                    "/tmp".into(),
+                    1,
+                );
+                // Create the run directory, then block the atomic write's tmp target
+                // with a directory so write_request fails.
+                runstate::create_run(&meta).unwrap();
+                let dir = runstate::run_dir(&run_id);
+                std::fs::create_dir_all(dir.join("pending.json.tmp")).unwrap();
 
-        let tools = vec![leviath_providers::Tool {
-            name: "t".to_string(),
-            description: "t".to_string(),
-            parameters: serde_json::json!({}),
-        }];
+                let tools = vec![leviath_providers::Tool {
+                    name: "t".to_string(),
+                    description: "t".to_string(),
+                    parameters: serde_json::json!({}),
+                }];
 
-        let result = run_interactive_stage(
-            &mut engine,
-            entity,
-            "mock",
-            "test-model",
-            5,
-            &tools,
-            Some((&run_id, &mut meta)),
-            "main",
-            &mut io,
-            &mut noop_exec,
+                let result = run_interactive_stage(
+                    &mut engine,
+                    entity,
+                    "mock",
+                    "test-model",
+                    5,
+                    &tools,
+                    Some((&run_id, &mut meta)),
+                    "main",
+                    &mut io,
+                    &mut noop_exec,
+                )
+                .await;
+
+                let _ = std::fs::remove_dir_all(&dir);
+
+                assert!(result.is_err());
+            },
         )
         .await;
-
-        let _ = std::fs::remove_dir_all(&dir);
-
-        assert!(result.is_err());
     }
 
     #[tokio::test]
     async fn interactive_stage_no_tools_request_interaction_async_error() {
-        let _guard = crate::runstate::isolate_runs_dir_for_test(
+        crate::runstate::with_isolated_runs_dir_async(
             "interactive_stage_no_tools_request_interaction_async_error",
-        );
-        // Same as above but no-tools path (streaming). Covers the same `?` via
-        // the else branch (no tools).
-        let bp = make_blueprint(vec![make_stage("main")]);
-        let (mut engine, _pool, entity) = make_engine_and_entity(&bp, "Response");
-        let mut io = MockIO::new();
+            |_d| async move {
+                // Same as above but no-tools path (streaming). Covers the same `?` via
+                // the else branch (no tools).
+                let bp = make_blueprint(vec![make_stage("main")]);
+                let (mut engine, _pool, entity) = make_engine_and_entity(&bp, "Response");
+                let mut io = MockIO::new();
 
-        let run_id = format!(
-            "test-rdonly-notools-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .subsec_nanos()
-        );
-        let mut meta = RunMeta::new(
-            run_id.clone(),
-            "test".into(),
-            "/p".into(),
-            "t".into(),
-            None,
-            "/tmp".into(),
-            1,
-        );
-        runstate::create_run(&meta).unwrap();
-        let dir = runstate::run_dir(&run_id);
-        std::fs::create_dir_all(dir.join("pending.json.tmp")).unwrap();
+                let run_id = format!(
+                    "test-rdonly-notools-{}-{}",
+                    std::process::id(),
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap()
+                        .subsec_nanos()
+                );
+                let mut meta = RunMeta::new(
+                    run_id.clone(),
+                    "test".into(),
+                    "/p".into(),
+                    "t".into(),
+                    None,
+                    "/tmp".into(),
+                    1,
+                );
+                runstate::create_run(&meta).unwrap();
+                let dir = runstate::run_dir(&run_id);
+                std::fs::create_dir_all(dir.join("pending.json.tmp")).unwrap();
 
-        let result = run_interactive_stage(
-            &mut engine,
-            entity,
-            "mock",
-            "test-model",
-            5,
-            &[], // no tools → streaming path
-            Some((&run_id, &mut meta)),
-            "main",
-            &mut io,
-            &mut noop_exec,
+                let result = run_interactive_stage(
+                    &mut engine,
+                    entity,
+                    "mock",
+                    "test-model",
+                    5,
+                    &[], // no tools → streaming path
+                    Some((&run_id, &mut meta)),
+                    "main",
+                    &mut io,
+                    &mut noop_exec,
+                )
+                .await;
+
+                let _ = std::fs::remove_dir_all(&dir);
+
+                assert!(result.is_err());
+            },
         )
         .await;
-
-        let _ = std::fs::remove_dir_all(&dir);
-
-        assert!(result.is_err());
     }
 
     // ─── Coverage: interactive_points None run_context (lines 374:21, 388:17) ─
@@ -3348,65 +3409,68 @@ mod tests {
 
     #[tokio::test]
     async fn interactive_points_out_of_range_choice_falls_back_to_text_background() {
-        let _guard = crate::runstate::isolate_runs_dir_for_test(
+        crate::runstate::with_isolated_runs_dir_async(
             "interactive_points_out_of_range_choice_falls_back_to_text_background",
-        );
-        // Covers line 421:96: background (IPC) path, choice_index out of range →
-        // unwrap_or_else closure called.
-        use crate::interaction::InteractionResponse;
+            |_d| async move {
+                // Covers line 421:96: background (IPC) path, choice_index out of range →
+                // unwrap_or_else closure called.
+                use crate::interaction::InteractionResponse;
 
-        let bp = make_blueprint(vec![make_stage("main")]);
-        let (mut engine, _pool, entity) = make_engine_and_entity(&bp, "Agent response");
-        let mut io = MockIO::new();
+                let bp = make_blueprint(vec![make_stage("main")]);
+                let (mut engine, _pool, entity) = make_engine_and_entity(&bp, "Agent response");
+                let mut io = MockIO::new();
 
-        let run_id = format!(
-            "test-ip-oob-bg-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .subsec_nanos()
-        );
-        let mut meta = RunMeta::new(
-            run_id.clone(),
-            "test".into(),
-            "/p".into(),
-            "t".into(),
-            None,
-            "/tmp".into(),
-            1,
-        );
-        runstate::create_run(&meta).unwrap();
+                let run_id = format!(
+                    "test-ip-oob-bg-{}-{}",
+                    std::process::id(),
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap()
+                        .subsec_nanos()
+                );
+                let mut meta = RunMeta::new(
+                    run_id.clone(),
+                    "test".into(),
+                    "/p".into(),
+                    "t".into(),
+                    None,
+                    "/tmp".into(),
+                    1,
+                );
+                runstate::create_run(&meta).unwrap();
 
-        let points = vec![make_multiple_choice_point(
-            "pick",
-            "Choose",
-            vec!["X".to_string(), "Y".to_string()],
-        )];
+                let points = vec![make_multiple_choice_point(
+                    "pick",
+                    "Choose",
+                    vec!["X".to_string(), "Y".to_string()],
+                )];
 
-        let mut oob_resp = InteractionResponse::choice("", 99);
-        oob_resp.value = Some("fallback-text".to_string());
-        let responder = spawn_interaction_responder(run_id.clone(), vec![oob_resp]);
+                let mut oob_resp = InteractionResponse::choice("", 99);
+                oob_resp.value = Some("fallback-text".to_string());
+                let responder = spawn_interaction_responder(run_id.clone(), vec![oob_resp]);
 
-        run_interactive_points_stage(
-            &mut engine,
-            entity,
-            "mock",
-            "test-model",
-            4,
-            &[],
-            None,
-            &points,
-            Some((&run_id, &mut meta)),
-            &mut io,
-            &mut noop_exec,
-            None,
+                run_interactive_points_stage(
+                    &mut engine,
+                    entity,
+                    "mock",
+                    "test-model",
+                    4,
+                    &[],
+                    None,
+                    &points,
+                    Some((&run_id, &mut meta)),
+                    &mut io,
+                    &mut noop_exec,
+                    None,
+                )
+                .await
+                .unwrap();
+
+                responder.abort();
+                let _ = std::fs::remove_dir_all(runstate::run_dir(&run_id));
+            },
         )
-        .await
-        .unwrap();
-
-        responder.abort();
-        let _ = std::fs::remove_dir_all(runstate::run_dir(&run_id));
+        .await;
     }
 
     // ─── Coverage: empty user_text with no ContextWindow (line 455:17) ───────
@@ -3637,76 +3701,79 @@ mod tests {
 
     #[tokio::test]
     async fn spawn_interaction_responder_exhausts_and_exits_loop() {
-        let _guard = crate::runstate::isolate_runs_dir_for_test(
+        crate::runstate::with_isolated_runs_dir_async(
             "spawn_interaction_responder_exhausts_and_exits_loop",
-        );
-        // Covers lines 1382:25, 1384:17, 1386:9: the `else { break; }` branch in
-        // spawn_interaction_responder when resp_iter is exhausted.
-        //
-        // We provide 1 response for 2 interaction points. The responder handles
-        // point-1, exhausts its iterator, then when point-2's request appears it
-        // takes the `else { break }` path. The stage will be waiting on point-2
-        // forever — we use a timeout to avoid blocking.
-        use crate::interaction::InteractionResponse;
+            |_d| async move {
+                // Covers lines 1382:25, 1384:17, 1386:9: the `else { break; }` branch in
+                // spawn_interaction_responder when resp_iter is exhausted.
+                //
+                // We provide 1 response for 2 interaction points. The responder handles
+                // point-1, exhausts its iterator, then when point-2's request appears it
+                // takes the `else { break }` path. The stage will be waiting on point-2
+                // forever — we use a timeout to avoid blocking.
+                use crate::interaction::InteractionResponse;
 
-        let bp = make_blueprint(vec![make_stage("main")]);
-        let (mut engine, _pool, entity) = make_engine_and_entity(&bp, "Agent response");
-        let mut io = MockIO::new();
+                let bp = make_blueprint(vec![make_stage("main")]);
+                let (mut engine, _pool, entity) = make_engine_and_entity(&bp, "Agent response");
+                let mut io = MockIO::new();
 
-        let run_id = format!(
-            "test-responder-exhaust-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .subsec_nanos()
-        );
-        let mut meta = RunMeta::new(
-            run_id.clone(),
-            "test".into(),
-            "/p".into(),
-            "t".into(),
-            None,
-            "/tmp".into(),
-            1,
-        );
-        runstate::create_run(&meta).unwrap();
+                let run_id = format!(
+                    "test-responder-exhaust-{}-{}",
+                    std::process::id(),
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap()
+                        .subsec_nanos()
+                );
+                let mut meta = RunMeta::new(
+                    run_id.clone(),
+                    "test".into(),
+                    "/p".into(),
+                    "t".into(),
+                    None,
+                    "/tmp".into(),
+                    1,
+                );
+                runstate::create_run(&meta).unwrap();
 
-        let points = vec![
-            make_free_text_point("p1", "First question"),
-            make_free_text_point("p2", "Second question"),
-        ];
+                let points = vec![
+                    make_free_text_point("p1", "First question"),
+                    make_free_text_point("p2", "Second question"),
+                ];
 
-        // 1 response for 2 points → iterator exhausted when p2 arrives
-        let responder = spawn_interaction_responder(
-            run_id.clone(),
-            vec![InteractionResponse::text("", "answer to p1")],
-        );
+                // 1 response for 2 points → iterator exhausted when p2 arrives
+                let responder = spawn_interaction_responder(
+                    run_id.clone(),
+                    vec![InteractionResponse::text("", "answer to p1")],
+                );
 
-        let mut exec_binding = noop_exec;
-        let stage_fut = run_interactive_points_stage(
-            &mut engine,
-            entity,
-            "mock",
-            "test-model",
-            4,
-            &[],
-            None,
-            &points,
-            Some((&run_id, &mut meta)),
-            &mut io,
-            &mut exec_binding,
-            None,
-        );
-        // Stage will block on p2 forever; we cancel it after a timeout
-        let _ = tokio::time::timeout(std::time::Duration::from_secs(5), stage_fut).await;
+                let mut exec_binding = noop_exec;
+                let stage_fut = run_interactive_points_stage(
+                    &mut engine,
+                    entity,
+                    "mock",
+                    "test-model",
+                    4,
+                    &[],
+                    None,
+                    &points,
+                    Some((&run_id, &mut meta)),
+                    &mut io,
+                    &mut exec_binding,
+                    None,
+                );
+                // Stage will block on p2 forever; we cancel it after a timeout
+                let _ = tokio::time::timeout(std::time::Duration::from_secs(5), stage_fut).await;
 
-        // The responder should have broken out of its loop when p2 arrived
-        let responder_result =
-            tokio::time::timeout(std::time::Duration::from_secs(5), responder).await;
-        assert!(responder_result.is_ok());
+                // The responder should have broken out of its loop when p2 arrived
+                let responder_result =
+                    tokio::time::timeout(std::time::Duration::from_secs(5), responder).await;
+                assert!(responder_result.is_ok());
 
-        let _ = std::fs::remove_dir_all(runstate::run_dir(&run_id));
+                let _ = std::fs::remove_dir_all(runstate::run_dir(&run_id));
+            },
+        )
+        .await;
     }
 
     // ─── Coverage: spawn_interaction_responder None arm ─────────────────────────
@@ -3742,229 +3809,238 @@ mod tests {
 
     #[tokio::test]
     async fn interactive_points_request_interaction_async_error_propagates() {
-        let _guard = crate::runstate::isolate_runs_dir_for_test(
+        crate::runstate::with_isolated_runs_dir_async(
             "interactive_points_request_interaction_async_error_propagates",
-        );
-        // Covers the `?` on `request_interaction_async` in the background path.
-        //
-        // We respond to the first choice with "Revise" (which has a directive),
-        // then immediately block the atomic write's tmp target with a directory
-        // so:
-        //   1) response.json is readable (already written)
-        //   2) the directive is injected and the loop re-runs inference
-        //   3) round 2's choice request → write_request fails → Err via `?`
-        // Blocking the tmp path fails on every platform.
-        use crate::interaction::InteractionResponse;
+            |_d| async move {
+                // Covers the `?` on `request_interaction_async` in the background path.
+                //
+                // We respond to the first choice with "Revise" (which has a directive),
+                // then immediately block the atomic write's tmp target with a directory
+                // so:
+                //   1) response.json is readable (already written)
+                //   2) the directive is injected and the loop re-runs inference
+                //   3) round 2's choice request → write_request fails → Err via `?`
+                // Blocking the tmp path fails on every platform.
+                use crate::interaction::InteractionResponse;
 
-        let bp = make_blueprint(vec![make_stage("main")]);
-        let (mut engine, _pool, entity) = make_engine_and_entity(&bp, "Agent response");
-        let mut io = MockIO::new();
+                let bp = make_blueprint(vec![make_stage("main")]);
+                let (mut engine, _pool, entity) = make_engine_and_entity(&bp, "Agent response");
+                let mut io = MockIO::new();
 
-        let run_id = format!(
-            "test-ip-followup-err-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .subsec_nanos()
-        );
-        let mut meta = RunMeta::new(
-            run_id.clone(),
-            "test".into(),
-            "/p".into(),
-            "t".into(),
-            None,
-            "/tmp".into(),
-            1,
-        );
-        runstate::create_run(&meta).unwrap();
+                let run_id = format!(
+                    "test-ip-followup-err-{}-{}",
+                    std::process::id(),
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap()
+                        .subsec_nanos()
+                );
+                let mut meta = RunMeta::new(
+                    run_id.clone(),
+                    "test".into(),
+                    "/p".into(),
+                    "t".into(),
+                    None,
+                    "/tmp".into(),
+                    1,
+                );
+                runstate::create_run(&meta).unwrap();
 
-        let mut directives = std::collections::HashMap::new();
-        directives.insert("Revise".to_string(), "Ask what to change.".to_string());
-        let points = vec![make_multiple_choice_point_with_directives(
-            "plan",
-            "Pick",
-            vec!["Approve".to_string(), "Revise".to_string()],
-            directives,
-        )];
+                let mut directives = std::collections::HashMap::new();
+                directives.insert("Revise".to_string(), "Ask what to change.".to_string());
+                let points = vec![make_multiple_choice_point_with_directives(
+                    "plan",
+                    "Pick",
+                    vec!["Approve".to_string(), "Revise".to_string()],
+                    directives,
+                )];
 
-        let run_id_for_responder = run_id.clone();
-        let responder: tokio::task::JoinHandle<()> = tokio::spawn(async move {
-            // Poll immediately — request not yet written (main task hasn't yielded
-            // to run_interactive_points_stage yet), so this returns None on the
-            // first iteration. This exercises the while-loop-body (true) path.
-            while crate::interaction::read_request(&run_id_for_responder).is_none() {
-                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-            }
-            // Now read_request returned Some — retrieve and handle the request.
-            let req = crate::interaction::read_request(&run_id_for_responder).unwrap();
-            let mut resp = InteractionResponse::choice("", 1); // "Revise"
-            resp.request_id = req.id.clone();
-            crate::interaction::write_response(&run_id_for_responder, &resp).unwrap();
-            // Immediately block the next atomic write: response.json is on disk
-            // so take_response can still read it, but the followup's
-            // write_request writes `pending.json.tmp`, which we replace with a
-            // directory so that write fails.
-            let dir = runstate::run_dir(&run_id_for_responder);
-            let _ = std::fs::create_dir_all(dir.join("pending.json.tmp"));
-        });
-        // Yield so the spawned task runs its first read_request check (returns None)
-        // before we start run_interactive_points_stage (which writes the request).
-        tokio::task::yield_now().await;
+                let run_id_for_responder = run_id.clone();
+                let responder: tokio::task::JoinHandle<()> = tokio::spawn(async move {
+                    // Poll immediately — request not yet written (main task hasn't yielded
+                    // to run_interactive_points_stage yet), so this returns None on the
+                    // first iteration. This exercises the while-loop-body (true) path.
+                    while crate::interaction::read_request(&run_id_for_responder).is_none() {
+                        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                    }
+                    // Now read_request returned Some — retrieve and handle the request.
+                    let req = crate::interaction::read_request(&run_id_for_responder).unwrap();
+                    let mut resp = InteractionResponse::choice("", 1); // "Revise"
+                    resp.request_id = req.id.clone();
+                    crate::interaction::write_response(&run_id_for_responder, &resp).unwrap();
+                    // Immediately block the next atomic write: response.json is on disk
+                    // so take_response can still read it, but the followup's
+                    // write_request writes `pending.json.tmp`, which we replace with a
+                    // directory so that write fails.
+                    let dir = runstate::run_dir(&run_id_for_responder);
+                    let _ = std::fs::create_dir_all(dir.join("pending.json.tmp"));
+                });
+                // Yield so the spawned task runs its first read_request check (returns None)
+                // before we start run_interactive_points_stage (which writes the request).
+                tokio::task::yield_now().await;
 
-        let result = run_interactive_points_stage(
-            &mut engine,
-            entity,
-            "mock",
-            "test-model",
-            8,
-            &[],
-            None,
-            &points,
-            Some((&run_id, &mut meta)),
-            &mut io,
-            &mut noop_exec,
-            None,
+                let result = run_interactive_points_stage(
+                    &mut engine,
+                    entity,
+                    "mock",
+                    "test-model",
+                    8,
+                    &[],
+                    None,
+                    &points,
+                    Some((&run_id, &mut meta)),
+                    &mut io,
+                    &mut noop_exec,
+                    None,
+                )
+                .await;
+
+                let _ = responder.await;
+
+                let dir = runstate::run_dir(&run_id);
+                let _ = std::fs::remove_dir_all(&dir);
+
+                // The error from the failed write_request propagates via `?`.
+                assert!(result.is_err());
+            },
         )
         .await;
-
-        let _ = responder.await;
-
-        let dir = runstate::run_dir(&run_id);
-        let _ = std::fs::remove_dir_all(&dir);
-
-        // The error from the failed write_request propagates via `?`.
-        assert!(result.is_err());
     }
 
     // ─── Coverage: empty inference content with run context (lines 374:21, 513:13) ─
 
     #[tokio::test]
     async fn interactive_points_empty_content_with_run_context() {
-        let _guard = crate::runstate::isolate_runs_dir_for_test(
+        crate::runstate::with_isolated_runs_dir_async(
             "interactive_points_empty_content_with_run_context",
-        );
-        // Covers lines 374:21 and 513:13: `}` of `if !resp.content.is_empty()` when
-        // the provider returns empty content ("") AND run_context is Some.
-        // The if-block is skipped (false branch), producing the uncovered segment.
-        use crate::interaction::InteractionResponse;
+            |_d| async move {
+                // Covers lines 374:21 and 513:13: `}` of `if !resp.content.is_empty()` when
+                // the provider returns empty content ("") AND run_context is Some.
+                // The if-block is skipped (false branch), producing the uncovered segment.
+                use crate::interaction::InteractionResponse;
 
-        let bp = make_blueprint(vec![make_stage("main")]);
-        // MockProvider with empty string → resp.content.is_empty() == true
-        let (mut engine, _pool, entity) = make_engine_and_entity(&bp, "");
-        let mut io = MockIO::new();
+                let bp = make_blueprint(vec![make_stage("main")]);
+                // MockProvider with empty string → resp.content.is_empty() == true
+                let (mut engine, _pool, entity) = make_engine_and_entity(&bp, "");
+                let mut io = MockIO::new();
 
-        let run_id = format!(
-            "test-ip-empty-content-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .subsec_nanos()
-        );
-        let mut meta = RunMeta::new(
-            run_id.clone(),
-            "test".into(),
-            "/p".into(),
-            "t".into(),
-            None,
-            "/tmp".into(),
-            1,
-        );
-        runstate::create_run(&meta).unwrap();
+                let run_id = format!(
+                    "test-ip-empty-content-{}-{}",
+                    std::process::id(),
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap()
+                        .subsec_nanos()
+                );
+                let mut meta = RunMeta::new(
+                    run_id.clone(),
+                    "test".into(),
+                    "/p".into(),
+                    "t".into(),
+                    None,
+                    "/tmp".into(),
+                    1,
+                );
+                runstate::create_run(&meta).unwrap();
 
-        let points = vec![make_free_text_point("q", "Any thoughts?")];
-        let responder = spawn_interaction_responder(
-            run_id.clone(),
-            vec![InteractionResponse::text("", "my answer")],
-        );
+                let points = vec![make_free_text_point("q", "Any thoughts?")];
+                let responder = spawn_interaction_responder(
+                    run_id.clone(),
+                    vec![InteractionResponse::text("", "my answer")],
+                );
 
-        run_interactive_points_stage(
-            &mut engine,
-            entity,
-            "mock",
-            "test-model",
-            4,
-            &[],
-            None,
-            &points,
-            Some((&run_id, &mut meta)),
-            &mut io,
-            &mut noop_exec,
-            None,
+                run_interactive_points_stage(
+                    &mut engine,
+                    entity,
+                    "mock",
+                    "test-model",
+                    4,
+                    &[],
+                    None,
+                    &points,
+                    Some((&run_id, &mut meta)),
+                    &mut io,
+                    &mut noop_exec,
+                    None,
+                )
+                .await
+                .unwrap();
+
+                responder.abort();
+                let _ = std::fs::remove_dir_all(runstate::run_dir(&run_id));
+
+                // When content is empty, io.on_output was NOT called
+                assert!(io.outputs.is_empty());
+            },
         )
-        .await
-        .unwrap();
-
-        responder.abort();
-        let _ = std::fs::remove_dir_all(runstate::run_dir(&run_id));
-
-        // When content is empty, io.on_output was NOT called
-        assert!(io.outputs.is_empty());
+        .await;
     }
 
     // ─── Coverage: first request_interaction_async fails (line 421:96) ─────────
 
     #[tokio::test]
     async fn interactive_points_first_request_interaction_async_error() {
-        let _guard = crate::runstate::isolate_runs_dir_for_test(
+        crate::runstate::with_isolated_runs_dir_async(
             "interactive_points_first_request_interaction_async_error",
-        );
-        // Covers the `?` on `request_interaction_async` for the initial
-        // (non-followup) interaction point when `write_request` fails because
-        // the atomic write's tmp target is blocked before the stage starts.
+            |_d| async move {
+                // Covers the `?` on `request_interaction_async` for the initial
+                // (non-followup) interaction point when `write_request` fails because
+                // the atomic write's tmp target is blocked before the stage starts.
 
-        let bp = make_blueprint(vec![make_stage("main")]);
-        let (mut engine, _pool, entity) = make_engine_and_entity(&bp, "Agent response");
-        let mut io = MockIO::new();
+                let bp = make_blueprint(vec![make_stage("main")]);
+                let (mut engine, _pool, entity) = make_engine_and_entity(&bp, "Agent response");
+                let mut io = MockIO::new();
 
-        let run_id = format!(
-            "test-ip-first-req-err-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .subsec_nanos()
-        );
-        let mut meta = RunMeta::new(
-            run_id.clone(),
-            "test".into(),
-            "/p".into(),
-            "t".into(),
-            None,
-            "/tmp".into(),
-            1,
-        );
-        runstate::create_run(&meta).unwrap();
+                let run_id = format!(
+                    "test-ip-first-req-err-{}-{}",
+                    std::process::id(),
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap()
+                        .subsec_nanos()
+                );
+                let mut meta = RunMeta::new(
+                    run_id.clone(),
+                    "test".into(),
+                    "/p".into(),
+                    "t".into(),
+                    None,
+                    "/tmp".into(),
+                    1,
+                );
+                runstate::create_run(&meta).unwrap();
 
-        // Block the atomic write's tmp target BEFORE calling the stage so that
-        // `write_request` (called by `request_interaction_async`) fails
-        // immediately → propagates via `?`. A directory at `pending.json.tmp`
-        // makes the write fail on every platform.
-        let dir = runstate::run_dir(&run_id);
-        std::fs::create_dir_all(dir.join("pending.json.tmp")).unwrap();
+                // Block the atomic write's tmp target BEFORE calling the stage so that
+                // `write_request` (called by `request_interaction_async`) fails
+                // immediately → propagates via `?`. A directory at `pending.json.tmp`
+                // makes the write fail on every platform.
+                let dir = runstate::run_dir(&run_id);
+                std::fs::create_dir_all(dir.join("pending.json.tmp")).unwrap();
 
-        let points = vec![make_free_text_point("q", "What now?")];
+                let points = vec![make_free_text_point("q", "What now?")];
 
-        let result = run_interactive_points_stage(
-            &mut engine,
-            entity,
-            "mock",
-            "test-model",
-            4,
-            &[],
-            None,
-            &points,
-            Some((&run_id, &mut meta)),
-            &mut io,
-            &mut noop_exec,
-            None,
+                let result = run_interactive_points_stage(
+                    &mut engine,
+                    entity,
+                    "mock",
+                    "test-model",
+                    4,
+                    &[],
+                    None,
+                    &points,
+                    Some((&run_id, &mut meta)),
+                    &mut io,
+                    &mut noop_exec,
+                    None,
+                )
+                .await;
+
+                let _ = std::fs::remove_dir_all(&dir);
+
+                assert!(result.is_err());
+            },
         )
         .await;
-
-        let _ = std::fs::remove_dir_all(&dir);
-
-        assert!(result.is_err());
     }
 
     // ─── normalize_for_followup + lookup_directive tests ──────────────────

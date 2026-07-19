@@ -171,39 +171,6 @@ fn yank_to_clipboard_with(
 mod tests {
     use super::*;
 
-    // ─── PATH env var save/restore helper for clipboard tests ────────────────
-    //
-    // Several tests below shadow `PATH` with a directory of fake clipboard
-    // binaries and must restore the original value afterwards -- or, if
-    // `PATH` was unset beforehand, remove it again rather than setting it to
-    // an empty string. Shared here (both branches covered: the `Some` arm by
-    // every call site below, the `None` arm by
-    // `test_restore_path_removes_path_when_originally_unset`) so the "was
-    // originally unset" branch only needs covering once instead of at every
-    // call site.
-    fn restore_path(original: Option<std::ffi::OsString>) {
-        unsafe {
-            match original {
-                Some(p) => std::env::set_var("PATH", p),
-                None => std::env::remove_var("PATH"),
-            }
-        }
-    }
-
-    #[test]
-    fn test_restore_path_removes_path_when_originally_unset() {
-        let _lock = crate::config::PATH_ENV_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let real_original_path = std::env::var_os("PATH");
-
-        restore_path(None);
-        assert!(std::env::var_os("PATH").is_none());
-
-        // Put the real PATH back so no other test in this process is affected.
-        restore_path(real_original_path);
-    }
-
     #[test]
     fn test_truncate_short() {
         assert_eq!(truncate("hello", 10), "hello");
@@ -500,18 +467,12 @@ mod tests {
         // regardless of which native clipboard tools happen to be installed
         // on the machine `cargo test` runs on (see the ambient-`PATH`
         // rationale above for why ambient-`PATH` smoke tests are avoided here).
-        let _lock = crate::config::PATH_ENV_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
         fn fake_osc52_fallback(_text: &str) -> bool {
             true
         }
-        let original_path = std::env::var_os("PATH");
-        unsafe {
-            std::env::set_var("PATH", "/lev-definitely-empty-path-dir");
-        }
-        let result = yank_to_clipboard_via("", fake_osc52_fallback);
-        restore_path(original_path);
+        let result = temp_env::with_var("PATH", Some("/lev-definitely-empty-path-dir"), || {
+            yank_to_clipboard_via("", fake_osc52_fallback)
+        });
         assert!(result);
     }
 
@@ -559,17 +520,17 @@ mod tests {
         // A guaranteed-present command that exits 0 exercises the native-tool
         // success path (the `return true` inside the spawn loop) on every
         // platform, without depending on a real clipboard tool being installed.
-        // Holds PATH_ENV_LOCK because this depends on an intact `PATH` (to
-        // resolve `true`/`cmd`) and must not race a PATH-starving test.
-        let _lock = crate::config::PATH_ENV_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // This only *reads* `PATH` (to resolve `true`/`cmd`), so it takes
+        // temp-env's exclusive lock without changing any var -- serializing it
+        // against the PATH-starving tests so it never observes a starved PATH.
         let (cmd, args) = exit_cmd(true);
-        let result = yank_to_clipboard_with(
-            "native tool success test",
-            &[(cmd, args)],
-            unreachable_osc52_fallback,
-        );
+        let result = temp_env::with_vars_unset(Vec::<&str>::new(), || {
+            yank_to_clipboard_with(
+                "native tool success test",
+                &[(cmd, args)],
+                unreachable_osc52_fallback,
+            )
+        });
         assert!(result);
     }
 
@@ -578,14 +539,14 @@ mod tests {
         // A guaranteed-present command that exits non-zero makes
         // `child.wait().map(|s| s.success())` false, so the loop falls through
         // to the OSC52 fallback -- the branch the success test doesn't reach.
-        let _lock = crate::config::PATH_ENV_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        // Reads `PATH` only, so serialize via temp-env's lock without mutating.
         fn fallback_reached(_text: &str) -> bool {
             true
         }
         let (cmd, args) = exit_cmd(false);
-        let result = yank_to_clipboard_with("nonzero exit test", &[(cmd, args)], fallback_reached);
+        let result = temp_env::with_vars_unset(Vec::<&str>::new(), || {
+            yank_to_clipboard_with("nonzero exit test", &[(cmd, args)], fallback_reached)
+        });
         // The native tool "ran" but failed, so control reached the fallback.
         assert!(result);
     }
@@ -594,27 +555,29 @@ mod tests {
 
     #[test]
     fn test_kill_write_cancelled_updates_existing_meta() {
-        let _guard = crate::runstate::isolate_runs_dir_for_test(
+        crate::runstate::with_isolated_runs_dir(
             "test_kill_write_cancelled_updates_existing_meta",
+            |_d| {
+                let run_id = "test-kill-write-cancelled";
+                let meta = runstate::RunMeta::new(
+                    run_id.to_string(),
+                    "agent".to_string(),
+                    "/tmp/agent.toml".to_string(),
+                    "task".to_string(),
+                    None,
+                    "/tmp".to_string(),
+                    1,
+                );
+                runstate::create_run(&meta).unwrap();
+
+                kill_write_cancelled(run_id);
+
+                let after = runstate::read_meta(run_id).unwrap();
+                assert_eq!(after.status, runstate::RunStatus::Cancelled);
+
+                let _ = std::fs::remove_dir_all(runstate::run_dir(run_id));
+            },
         );
-        let run_id = "test-kill-write-cancelled";
-        let meta = runstate::RunMeta::new(
-            run_id.to_string(),
-            "agent".to_string(),
-            "/tmp/agent.toml".to_string(),
-            "task".to_string(),
-            None,
-            "/tmp".to_string(),
-            1,
-        );
-        runstate::create_run(&meta).unwrap();
-
-        kill_write_cancelled(run_id);
-
-        let after = runstate::read_meta(run_id).unwrap();
-        assert_eq!(after.status, runstate::RunStatus::Cancelled);
-
-        let _ = std::fs::remove_dir_all(runstate::run_dir(run_id));
     }
 
     #[test]
@@ -638,28 +601,21 @@ mod tests {
 
     #[test]
     fn test_yank_to_clipboard_falls_back_to_osc52_when_no_native_tool_on_path() {
-        // `PATH` is process-global; `crate::config::PATH_ENV_LOCK` serializes
-        // against `commands/run/session.rs`'s PATH-mutating `launch_editor`
-        // tests too (a per-file lock would not serialize across files despite
-        // the shared name).
-        let _lock = crate::config::PATH_ENV_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
         // Starve PATH so `Command::new("pbcopy"/"xclip"/"wl-copy").spawn()`
         // fails with NotFound for all three -- the `if let Ok(mut child) = `
         // guard is simply false each time (no external process is ever
         // launched), falling through to the OSC52 fallback. That fallback is
         // injected as a fn pointer that never touches the real TTY (unlike
         // the real `osc52_yank_raw`, which would open `/dev/tty` here).
+        // `temp_env::with_var` (serialized process-wide, then restored) also
+        // serializes against `commands/run/session.rs`'s PATH-mutating
+        // `launch_editor` tests, which share the same global temp-env lock.
         fn fake_osc52_fallback(_text: &str) -> bool {
             true
         }
-        let original_path = std::env::var_os("PATH");
-        unsafe {
-            std::env::set_var("PATH", "/lev-definitely-empty-path-dir");
-        }
-        let result = yank_to_clipboard_via("fallback path test content", fake_osc52_fallback);
-        restore_path(original_path);
+        let result = temp_env::with_var("PATH", Some("/lev-definitely-empty-path-dir"), || {
+            yank_to_clipboard_via("fallback path test content", fake_osc52_fallback)
+        });
         // The point of this test is proving the native-tool loop was skipped
         // entirely and control reached the injected OSC52 fallback -- not
         // exercising the real `osc52_yank_raw` (see its own tests above).

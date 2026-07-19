@@ -333,27 +333,30 @@ mod tests {
 
     #[tokio::test]
     async fn init_dashboard_seeds_startup_log_and_starts_background_loop() {
-        let _guard = crate::runstate::isolate_runs_dir_for_test(
+        crate::runstate::with_isolated_runs_dir_async(
             "init_dashboard_seeds_startup_log_and_starts_background_loop",
-        );
-        let config = Config::default();
-        let (dashboard, engine) = init_dashboard(&config, |_| false).await;
+            |_d| async move {
+                let config = Config::default();
+                let (dashboard, engine) = init_dashboard(&config, |_| false).await;
 
-        assert!(dashboard
-            .log
-            .iter()
-            .any(|entry| entry.message.contains("Dashboard started")));
+                assert!(dashboard
+                    .log
+                    .iter()
+                    .any(|entry| entry.message.contains("Dashboard started")));
 
-        // The background loop is live: a CancelAgent command sent on
-        // dashboard's own cmd_tx should be processed without panicking.
-        dashboard
-            .cmd_tx
-            .send(EngineCommand::CancelAgent {
-                agent_id: "nonexistent".to_string(),
-            })
-            .unwrap();
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        let _ = engine.try_read();
+                // The background loop is live: a CancelAgent command sent on
+                // dashboard's own cmd_tx should be processed without panicking.
+                dashboard
+                    .cmd_tx
+                    .send(EngineCommand::CancelAgent {
+                        agent_id: "nonexistent".to_string(),
+                    })
+                    .unwrap();
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                let _ = engine.try_read();
+            },
+        )
+        .await;
     }
 
     // ─── engine_background_loop: CancelAgent command ─────────────────────
@@ -854,9 +857,6 @@ mod tests {
         )
         .await;
 
-        // Release the lock explicitly (drop order is otherwise unspecified).
-        drop(_guard);
-
         assert!(result.is_ok());
         assert!(dashboard.should_quit);
     }
@@ -986,15 +986,19 @@ mod tests {
 
     #[tokio::test]
     async fn execute_core_happy_path_quits_on_esc() {
-        let _guard =
-            crate::runstate::isolate_runs_dir_for_test("execute_core_happy_path_quits_on_esc");
-        let config = Config::default();
-        let (mut dashboard, engine) = init_dashboard(&config, |_| false).await;
-        let mut setup = TestSetup::new();
-        let mut events = TestEventSource::new(vec![key(KeyCode::Esc)]);
-        let result = execute_core(&mut dashboard, &engine, &mut setup, &mut events).await;
-        assert!(result.is_ok());
-        assert!(dashboard.should_quit);
+        crate::runstate::with_isolated_runs_dir_async(
+            "execute_core_happy_path_quits_on_esc",
+            |_d| async move {
+                let config = Config::default();
+                let (mut dashboard, engine) = init_dashboard(&config, |_| false).await;
+                let mut setup = TestSetup::new();
+                let mut events = TestEventSource::new(vec![key(KeyCode::Esc)]);
+                let result = execute_core(&mut dashboard, &engine, &mut setup, &mut events).await;
+                assert!(result.is_ok());
+                assert!(dashboard.should_quit);
+            },
+        )
+        .await;
     }
 
     #[tokio::test]
@@ -1003,12 +1007,22 @@ mod tests {
         // init_dashboard + execute_core) against the test terminal doubles,
         // with both the config path and the dashboard log path isolated so
         // nothing touches the developer's real ~/.leviath.
-        let _cfg = crate::config::isolate_config_path_for_test("execute_with_dashboard");
-        let _runs = crate::runstate::isolate_runs_dir_for_test("execute_with_dashboard");
-        let mut setup = TestSetup::new();
-        let mut events = TestEventSource::new(vec![key(KeyCode::Esc)]);
-        let result = execute_with(&mut setup, &mut events, |_| false).await;
-        assert!(result.is_ok());
+        crate::config::with_isolated_config_path_async(
+            "execute_with_dashboard",
+            |_fake_dir| async move {
+                crate::runstate::with_isolated_runs_dir_async(
+                    "execute_with_dashboard",
+                    |_d| async move {
+                        let mut setup = TestSetup::new();
+                        let mut events = TestEventSource::new(vec![key(KeyCode::Esc)]);
+                        let result = execute_with(&mut setup, &mut events, |_| false).await;
+                        assert!(result.is_ok());
+                    },
+                )
+                .await;
+            },
+        )
+        .await;
     }
 
     #[tokio::test]
@@ -1018,62 +1032,78 @@ mod tests {
         // `?` propagates before the dashboard/engine are ever built.
         // `isolate_config_path_for_test` creates the fake config dir, so the
         // path's parent already exists — write the malformed file directly.
-        let _cfg = crate::config::isolate_config_path_for_test("execute_with_dashboard_bad_config");
-        std::fs::write(
-            crate::config::Config::config_path(),
-            b"this is not valid toml ][ = =",
+        crate::config::with_isolated_config_path_async(
+            "execute_with_dashboard_bad_config",
+            |_fake_dir| async move {
+                std::fs::write(
+                    crate::config::Config::config_path(),
+                    b"this is not valid toml ][ = =",
+                )
+                .unwrap();
+                let mut setup = TestSetup::new();
+                let mut events = TestEventSource::new(vec![]);
+                let result = execute_with(&mut setup, &mut events, |_| false).await;
+                assert!(result.is_err());
+            },
         )
-        .unwrap();
-        let mut setup = TestSetup::new();
-        let mut events = TestEventSource::new(vec![]);
-        let result = execute_with(&mut setup, &mut events, |_| false).await;
-        assert!(result.is_err());
+        .await;
     }
 
     #[tokio::test]
     async fn execute_core_enable_error_propagates() {
-        let _guard =
-            crate::runstate::isolate_runs_dir_for_test("execute_core_enable_error_propagates");
-        let config = Config::default();
-        let (mut dashboard, engine) = init_dashboard(&config, |_| false).await;
-        // `setup.enable()?` fails first, so the loop is never reached.
-        let mut setup = TestSetup {
-            enable_should_fail: true,
-            create_should_fail: false,
-        };
-        let mut events = TestEventSource::new(vec![]);
-        let result = execute_core(&mut dashboard, &engine, &mut setup, &mut events).await;
-        assert!(result.is_err());
+        crate::runstate::with_isolated_runs_dir_async(
+            "execute_core_enable_error_propagates",
+            |_d| async move {
+                let config = Config::default();
+                let (mut dashboard, engine) = init_dashboard(&config, |_| false).await;
+                // `setup.enable()?` fails first, so the loop is never reached.
+                let mut setup = TestSetup {
+                    enable_should_fail: true,
+                    create_should_fail: false,
+                };
+                let mut events = TestEventSource::new(vec![]);
+                let result = execute_core(&mut dashboard, &engine, &mut setup, &mut events).await;
+                assert!(result.is_err());
+            },
+        )
+        .await;
     }
 
     #[tokio::test]
     async fn execute_core_create_terminal_error_propagates() {
-        let _guard = crate::runstate::isolate_runs_dir_for_test(
+        crate::runstate::with_isolated_runs_dir_async(
             "execute_core_create_terminal_error_propagates",
-        );
-        let config = Config::default();
-        let (mut dashboard, engine) = init_dashboard(&config, |_| false).await;
-        // `enable()` succeeds, then `create_terminal()?` fails -- deterministic
-        // (no real backend / TTY involved), so this can never hang.
-        let mut setup = TestSetup {
-            enable_should_fail: false,
-            create_should_fail: true,
-        };
-        let mut events = TestEventSource::new(vec![]);
-        let result = execute_core(&mut dashboard, &engine, &mut setup, &mut events).await;
-        assert!(result.is_err());
+            |_d| async move {
+                let config = Config::default();
+                let (mut dashboard, engine) = init_dashboard(&config, |_| false).await;
+                // `enable()` succeeds, then `create_terminal()?` fails -- deterministic
+                // (no real backend / TTY involved), so this can never hang.
+                let mut setup = TestSetup {
+                    enable_should_fail: false,
+                    create_should_fail: true,
+                };
+                let mut events = TestEventSource::new(vec![]);
+                let result = execute_core(&mut dashboard, &engine, &mut setup, &mut events).await;
+                assert!(result.is_err());
+            },
+        )
+        .await;
     }
 
     #[tokio::test]
     async fn execute_core_loop_error_propagates() {
-        let _guard =
-            crate::runstate::isolate_runs_dir_for_test("execute_core_loop_error_propagates");
-        let config = Config::default();
-        let (mut dashboard, engine) = init_dashboard(&config, |_| false).await;
-        let mut setup = TestSetup::new();
-        let mut events = TestEventSource::failing();
-        let result = execute_core(&mut dashboard, &engine, &mut setup, &mut events).await;
-        assert!(result.is_err());
+        crate::runstate::with_isolated_runs_dir_async(
+            "execute_core_loop_error_propagates",
+            |_d| async move {
+                let config = Config::default();
+                let (mut dashboard, engine) = init_dashboard(&config, |_| false).await;
+                let mut setup = TestSetup::new();
+                let mut events = TestEventSource::failing();
+                let result = execute_core(&mut dashboard, &engine, &mut setup, &mut events).await;
+                assert!(result.is_err());
+            },
+        )
+        .await;
     }
 
     // The real `lev dash` wiring (the crossterm `CrosstermSetup` + the real

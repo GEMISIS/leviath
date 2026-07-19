@@ -763,45 +763,49 @@ prompt = "Run"
 
     #[tokio::test]
     async fn test_submit_interaction_full_router() {
-        let _guard =
-            crate::runstate::isolate_runs_dir_for_test("test_submit_interaction_full_router");
-        use crate::runstate::{create_run, RunMeta};
+        crate::runstate::with_isolated_runs_dir_async(
+            "test_submit_interaction_full_router",
+            |_d| async move {
+                use crate::runstate::{create_run, RunMeta};
 
-        let run_id = format!(
-            "test-modrs-int-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .subsec_nanos()
-        );
-        let meta = RunMeta::new(
-            run_id.clone(),
-            "test-agent".to_string(),
-            "/path".to_string(),
-            "task".to_string(),
-            None,
-            "/tmp".to_string(),
-            1,
-        );
-        create_run(&meta).unwrap();
+                let run_id = format!(
+                    "test-modrs-int-{}-{}",
+                    std::process::id(),
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap()
+                        .subsec_nanos()
+                );
+                let meta = RunMeta::new(
+                    run_id.clone(),
+                    "test-agent".to_string(),
+                    "/path".to_string(),
+                    "task".to_string(),
+                    None,
+                    "/tmp".to_string(),
+                    1,
+                );
+                create_run(&meta).unwrap();
 
-        let app = full_app();
-        let body = serde_json::json!({
-            "request_id": "req-full-001",
-            "value": "do it",
-            "scope": "once"
-        });
-        let req = Request::builder()
-            .method("POST")
-            .uri(format!("/api/agents/{}/interaction", run_id))
-            .header("content-type", "application/json")
-            .body(Body::from(serde_json::to_string(&body).unwrap()))
-            .unwrap();
-        let resp = app.oneshot(req).await.unwrap();
-        assert_eq!(resp.status(), StatusCode::ACCEPTED);
+                let app = full_app();
+                let body = serde_json::json!({
+                    "request_id": "req-full-001",
+                    "value": "do it",
+                    "scope": "once"
+                });
+                let req = Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/agents/{}/interaction", run_id))
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_string(&body).unwrap()))
+                    .unwrap();
+                let resp = app.oneshot(req).await.unwrap();
+                assert_eq!(resp.status(), StatusCode::ACCEPTED);
 
-        let _ = std::fs::remove_dir_all(crate::runstate::run_dir(&run_id));
+                let _ = std::fs::remove_dir_all(crate::runstate::run_dir(&run_id));
+            },
+        )
+        .await;
     }
 
     // ─── execute() — real server bootstrap ─────────────────────────────────
@@ -825,67 +829,79 @@ prompt = "Run"
 
     #[tokio::test]
     async fn execute_binds_and_serves_with_wildcard_cors() {
-        let _guard = crate::config::isolate_config_path_for_test("serve-mod-wildcard-cors");
-        with_tracing(|| {});
-        // port: 0 lets the OS assign a genuinely free ephemeral port at bind
-        // time; execute_with_shutdown reports the real bound SocketAddr back
-        // via `ready` the instant it's bound, so there's no
-        // probe-bind-drop-rebind gap for another process/test to race into
-        // (that gap is a real, CI-reproducing TOCTOU -- see
-        // execute_with_shutdown's doc comment). Exercises the exact same
-        // production code path execute() does (its own body is just this
-        // call with `ready: None`), so this remains a real end-to-end test
-        // of execute()'s bootstrap logic.
-        let args = ServeArgs {
-            port: 0,
-            host: "127.0.0.1".to_string(),
-            cors: "*".to_string(),
-        };
-        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
-        let handle = tokio::spawn(execute_with_shutdown(
-            args,
-            Box::pin(std::future::pending()),
-            Some(ready_tx),
-        ));
-        let addr = ready_rx
-            .await
-            .expect("server should report its bound address");
+        crate::config::with_isolated_config_path_async(
+            "serve-mod-wildcard-cors",
+            |_fake_dir| async move {
+                with_tracing(|| {});
+                // port: 0 lets the OS assign a genuinely free ephemeral port at bind
+                // time; execute_with_shutdown reports the real bound SocketAddr back
+                // via `ready` the instant it's bound, so there's no
+                // probe-bind-drop-rebind gap for another process/test to race into
+                // (that gap is a real, CI-reproducing TOCTOU -- see
+                // execute_with_shutdown's doc comment). Exercises the exact same
+                // production code path execute() does (its own body is just this
+                // call with `ready: None`), so this remains a real end-to-end test
+                // of execute()'s bootstrap logic.
+                let args = ServeArgs {
+                    port: 0,
+                    host: "127.0.0.1".to_string(),
+                    cors: "*".to_string(),
+                };
+                let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+                let handle = tokio::spawn(execute_with_shutdown(
+                    args,
+                    Box::pin(std::future::pending()),
+                    Some(ready_tx),
+                ));
+                let addr = ready_rx
+                    .await
+                    .expect("server should report its bound address");
 
-        // Sanity-check a real request round trip through the full app.
-        let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
-        stream
-            .write_all(b"GET /api/config HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
-            .await
-            .unwrap();
-        let mut resp = Vec::new();
-        stream.read_to_end(&mut resp).await.unwrap();
-        let resp_str = String::from_utf8_lossy(&resp);
-        assert_response_ok(&resp_str);
+                // Sanity-check a real request round trip through the full app.
+                let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+                use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                stream
+                    .write_all(
+                        b"GET /api/config HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+                    )
+                    .await
+                    .unwrap();
+                let mut resp = Vec::new();
+                stream.read_to_end(&mut resp).await.unwrap();
+                let resp_str = String::from_utf8_lossy(&resp);
+                assert_response_ok(&resp_str);
 
-        handle.abort();
+                handle.abort();
+            },
+        )
+        .await;
     }
 
     #[tokio::test]
     async fn execute_with_specific_cors_origin_serves() {
-        let _guard = crate::config::isolate_config_path_for_test("serve-mod-specific-cors");
-        let args = ServeArgs {
-            port: 0,
-            host: "127.0.0.1".to_string(),
-            cors: "https://example.com".to_string(),
-        };
-        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
-        let handle = tokio::spawn(execute_with_shutdown(
-            args,
-            Box::pin(std::future::pending()),
-            Some(ready_tx),
-        ));
-        let addr = ready_rx
-            .await
-            .expect("server should report its bound address");
-        assert!(tokio::net::TcpStream::connect(addr).await.is_ok());
+        crate::config::with_isolated_config_path_async(
+            "serve-mod-specific-cors",
+            |_fake_dir| async move {
+                let args = ServeArgs {
+                    port: 0,
+                    host: "127.0.0.1".to_string(),
+                    cors: "https://example.com".to_string(),
+                };
+                let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+                let handle = tokio::spawn(execute_with_shutdown(
+                    args,
+                    Box::pin(std::future::pending()),
+                    Some(ready_tx),
+                ));
+                let addr = ready_rx
+                    .await
+                    .expect("server should report its bound address");
+                assert!(tokio::net::TcpStream::connect(addr).await.is_ok());
 
-        handle.abort();
+                handle.abort();
+            },
+        )
+        .await;
     }
 
     #[tokio::test]
@@ -916,17 +932,22 @@ prompt = "Run"
     /// `LEVIATH_CONFIG_PATH` at a file containing invalid TOML.
     #[tokio::test]
     async fn execute_with_malformed_config_returns_err() {
-        let _guard = crate::config::isolate_config_path_for_test("serve-mod-malformed");
-        // After isolate_config_path_for_test, Config::config_path() returns the temp path.
-        std::fs::write(Config::config_path(), "not valid toml [[[").unwrap();
+        crate::config::with_isolated_config_path_async(
+            "serve-mod-malformed",
+            |_fake_dir| async move {
+                // After isolate_config_path_for_test, Config::config_path() returns the temp path.
+                std::fs::write(Config::config_path(), "not valid toml [[[").unwrap();
 
-        let args = ServeArgs {
-            port: 0,
-            host: "127.0.0.1".to_string(),
-            cors: "*".to_string(),
-        };
-        let result = execute(args).await;
-        assert_execute_failed_on_malformed_config(&result);
+                let args = ServeArgs {
+                    port: 0,
+                    host: "127.0.0.1".to_string(),
+                    cors: "*".to_string(),
+                };
+                let result = execute(args).await;
+                assert_execute_failed_on_malformed_config(&result);
+            },
+        )
+        .await;
     }
 
     /// Covers the `for warning in cfg.validate_keys()` loop body (lines 32-33)
@@ -935,7 +956,7 @@ prompt = "Run"
     #[tokio::test]
     async fn execute_with_bad_api_key_logs_warning_and_serves() {
         with_tracing(|| {});
-        let guard = crate::config::isolate_config_path_for_test("serve-mod-badkey");
+        crate::config::with_isolated_config_path_async("serve-mod-badkey", |_fake_dir| async move {
         // Write a config with an anthropic key that fails validate_keys().
         std::fs::write(
             Config::config_path(),
@@ -964,7 +985,6 @@ prompt = "Run"
             .await
             .expect("server should report its bound address");
         let connected = tokio::net::TcpStream::connect(addr).await.is_ok();
-        drop(guard);
         assert_connected_with_bad_api_key(connected);
 
         // Trigger graceful shutdown so execute_with_shutdown returns Ok(()).
@@ -974,6 +994,7 @@ prompt = "Run"
             .expect("timed out waiting for execute to return")
             .expect("task panicked");
         assert_execute_returned_ok_after_shutdown(&result);
+    }).await;
     }
 
     /// Covers `TcpListener::bind(addr).await?` error path (line 116 gap) by
@@ -998,35 +1019,40 @@ prompt = "Run"
     /// `execute_with_shutdown` and sending a graceful-shutdown signal.
     #[tokio::test]
     async fn execute_with_shutdown_signal_returns_ok() {
-        let _guard = crate::config::isolate_config_path_for_test("serve-mod-shutdown-signal");
-        let args = ServeArgs {
-            port: 0,
-            host: "127.0.0.1".to_string(),
-            cors: "*".to_string(),
-        };
+        crate::config::with_isolated_config_path_async(
+            "serve-mod-shutdown-signal",
+            |_fake_dir| async move {
+                let args = ServeArgs {
+                    port: 0,
+                    host: "127.0.0.1".to_string(),
+                    cors: "*".to_string(),
+                };
 
-        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
-        let shutdown_fut = async move {
-            let _ = shutdown_rx.await;
-        };
-        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+                let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+                let shutdown_fut = async move {
+                    let _ = shutdown_rx.await;
+                };
+                let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
 
-        let handle = tokio::spawn(execute_with_shutdown(
-            args,
-            Box::pin(shutdown_fut),
-            Some(ready_tx),
-        ));
-        ready_rx
-            .await
-            .expect("server should report its bound address");
+                let handle = tokio::spawn(execute_with_shutdown(
+                    args,
+                    Box::pin(shutdown_fut),
+                    Some(ready_tx),
+                ));
+                ready_rx
+                    .await
+                    .expect("server should report its bound address");
 
-        // Send shutdown signal and wait for execute to return Ok.
-        let _ = shutdown_tx.send(());
-        let result = tokio::time::timeout(std::time::Duration::from_secs(5), handle)
-            .await
-            .expect("timed out waiting for execute_with_shutdown to return")
-            .expect("task panicked");
-        assert_execute_with_shutdown_returned_ok(&result);
+                // Send shutdown signal and wait for execute to return Ok.
+                let _ = shutdown_tx.send(());
+                let result = tokio::time::timeout(std::time::Duration::from_secs(5), handle)
+                    .await
+                    .expect("timed out waiting for execute_with_shutdown to return")
+                    .expect("task panicked");
+                assert_execute_with_shutdown_returned_ok(&result);
+            },
+        )
+        .await;
     }
 
     /// Covers the `ready: None` fall-through of the `if let Some(ready)` block
@@ -1036,26 +1062,32 @@ prompt = "Run"
     /// is the only path that reaches the block's None continuation.
     #[tokio::test]
     async fn execute_with_shutdown_no_ready_observer_returns_ok() {
-        let _guard = crate::config::isolate_config_path_for_test("serve-mod-no-ready");
-        let args = ServeArgs {
-            port: 0,
-            host: "127.0.0.1".to_string(),
-            cors: "*".to_string(),
-        };
+        crate::config::with_isolated_config_path_async(
+            "serve-mod-no-ready",
+            |_fake_dir| async move {
+                let args = ServeArgs {
+                    port: 0,
+                    host: "127.0.0.1".to_string(),
+                    cors: "*".to_string(),
+                };
 
-        let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
-        let shutdown_fut = async move {
-            let _ = shutdown_rx.await;
-        };
+                let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+                let shutdown_fut = async move {
+                    let _ = shutdown_rx.await;
+                };
 
-        let handle = tokio::spawn(execute_with_shutdown(args, Box::pin(shutdown_fut), None));
-        // Give the server a moment to bind before shutting down.
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-        let _ = shutdown_tx.send(());
-        let result = tokio::time::timeout(std::time::Duration::from_secs(5), handle)
-            .await
-            .expect("timed out waiting for execute_with_shutdown to return")
-            .expect("task panicked");
-        assert_execute_with_shutdown_returned_ok(&result);
+                let handle =
+                    tokio::spawn(execute_with_shutdown(args, Box::pin(shutdown_fut), None));
+                // Give the server a moment to bind before shutting down.
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                let _ = shutdown_tx.send(());
+                let result = tokio::time::timeout(std::time::Duration::from_secs(5), handle)
+                    .await
+                    .expect("timed out waiting for execute_with_shutdown to return")
+                    .expect("task panicked");
+                assert_execute_with_shutdown_returned_ok(&result);
+            },
+        )
+        .await;
     }
 }

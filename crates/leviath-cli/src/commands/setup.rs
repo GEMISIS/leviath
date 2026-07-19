@@ -947,29 +947,28 @@ mod tests {
 
     #[test]
     fn run_non_interactive_setup_writes_through_config_path() {
-        let _guard =
-            crate::config::isolate_config_path_for_test("setup-non-interactive-configpath");
+        crate::config::with_isolated_config_path("setup-non-interactive-configpath", |_fake_dir| {
+            let mut config = Config::load().unwrap_or_default();
+            let args = SetupArgs {
+                non_interactive: true,
+                anthropic_key: Some("sk-ant-execute-test".to_string()),
+                openai_key: None,
+                google_key: None,
+                openrouter_key: None,
+                ollama_url: None,
+                default_model: None,
+            };
 
-        let mut config = Config::load().unwrap_or_default();
-        let args = SetupArgs {
-            non_interactive: true,
-            anthropic_key: Some("sk-ant-execute-test".to_string()),
-            openai_key: None,
-            google_key: None,
-            openrouter_key: None,
-            ollama_url: None,
-            default_model: None,
-        };
+            run_non_interactive_setup(&mut config, &args, &Config::config_path()).unwrap();
 
-        run_non_interactive_setup(&mut config, &args, &Config::config_path()).unwrap();
-
-        // Config::load() re-reads via the same (isolated) LEVIATH_CONFIG_PATH,
-        // proving the setup core wrote through Config::config_path().
-        let reloaded = Config::load().unwrap();
-        assert_eq!(
-            reloaded.providers.anthropic_api_key.as_deref(),
-            Some("sk-ant-execute-test")
-        );
+            // Config::load() re-reads via the same (isolated) LEVIATH_CONFIG_PATH,
+            // proving the setup core wrote through Config::config_path().
+            let reloaded = Config::load().unwrap();
+            assert_eq!(
+                reloaded.providers.anthropic_api_key.as_deref(),
+                Some("sk-ant-execute-test")
+            );
+        });
     }
 
     /// Reader factory shared by both `execute_with` tests below: 7 empty lines,
@@ -983,41 +982,45 @@ mod tests {
 
     #[test]
     fn execute_with_non_interactive_applies_flags_and_never_builds_the_reader() {
-        let _guard =
-            crate::config::isolate_config_path_for_test("setup-execute-with-noninteractive");
-        let args = SetupArgs {
-            non_interactive: true,
-            anthropic_key: Some("sk-ant-ew".to_string()),
-            openai_key: None,
-            google_key: None,
-            openrouter_key: None,
-            ollama_url: None,
-            default_model: None,
-        };
-        // `--non-interactive` short-circuits before the reader factory runs.
-        execute_with(&args, seven_blank_lines).unwrap();
-        assert_eq!(
-            Config::load()
-                .unwrap()
-                .providers
-                .anthropic_api_key
-                .as_deref(),
-            Some("sk-ant-ew")
+        crate::config::with_isolated_config_path(
+            "setup-execute-with-noninteractive",
+            |_fake_dir| {
+                let args = SetupArgs {
+                    non_interactive: true,
+                    anthropic_key: Some("sk-ant-ew".to_string()),
+                    openai_key: None,
+                    google_key: None,
+                    openrouter_key: None,
+                    ollama_url: None,
+                    default_model: None,
+                };
+                // `--non-interactive` short-circuits before the reader factory runs.
+                execute_with(&args, seven_blank_lines).unwrap();
+                assert_eq!(
+                    Config::load()
+                        .unwrap()
+                        .providers
+                        .anthropic_api_key
+                        .as_deref(),
+                    Some("sk-ant-ew")
+                );
+            },
         );
     }
 
     #[test]
     fn execute_with_interactive_reads_from_the_injected_factory() {
-        let _guard = crate::config::isolate_config_path_for_test("setup-execute-with-interactive");
-        let args = SetupArgs {
-            non_interactive: false,
-            anthropic_key: None,
-            openai_key: None,
-            google_key: None,
-            openrouter_key: None,
-            ollama_url: None,
-            default_model: None,
-        };
-        execute_with(&args, seven_blank_lines).unwrap();
+        crate::config::with_isolated_config_path("setup-execute-with-interactive", |_fake_dir| {
+            let args = SetupArgs {
+                non_interactive: false,
+                anthropic_key: None,
+                openai_key: None,
+                google_key: None,
+                openrouter_key: None,
+                ollama_url: None,
+                default_model: None,
+            };
+            execute_with(&args, seven_blank_lines).unwrap();
+        });
     }
 }

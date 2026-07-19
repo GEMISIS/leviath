@@ -238,14 +238,19 @@ mod tests {
 
     #[tokio::test]
     async fn agents_tree_includes_created_run() {
-        let _guard = crate::runstate::isolate_runs_dir_for_test("agents_tree_includes_created_run");
-        let run_id = "test-tree-agents-tree-1";
-        let _cleanup = RunCleanup(&[run_id]);
-        let meta = make_meta(run_id, "agent-tree-test", None);
-        runstate::create_run(&meta).unwrap();
+        crate::runstate::with_isolated_runs_dir_async(
+            "agents_tree_includes_created_run",
+            |_d| async move {
+                let run_id = "test-tree-agents-tree-1";
+                let _cleanup = RunCleanup(&[run_id]);
+                let meta = make_meta(run_id, "agent-tree-test", None);
+                runstate::create_run(&meta).unwrap();
 
-        let Json(tree) = agents_tree().await;
-        assert!(tree.iter().any(|n| n.run_id == run_id));
+                let Json(tree) = agents_tree().await;
+                assert!(tree.iter().any(|n| n.run_id == run_id));
+            },
+        )
+        .await;
     }
 
     #[tokio::test]
@@ -260,30 +265,33 @@ mod tests {
 
     #[tokio::test]
     async fn agent_tree_status_returns_tree_with_subtree_totals() {
-        let _guard = crate::runstate::isolate_runs_dir_for_test(
+        crate::runstate::with_isolated_runs_dir_async(
             "agent_tree_status_returns_tree_with_subtree_totals",
-        );
-        let run_id = "test-tree-status-root";
-        let child_id = "test-tree-status-child";
-        let _cleanup = RunCleanup(&[run_id, child_id]);
+            |_d| async move {
+                let run_id = "test-tree-status-root";
+                let child_id = "test-tree-status-child";
+                let _cleanup = RunCleanup(&[run_id, child_id]);
 
-        let mut root = make_meta(run_id, "root-agent", None);
-        root.prompt_tokens = 10;
-        root.completion_tokens = 2;
-        runstate::create_run(&root).unwrap();
+                let mut root = make_meta(run_id, "root-agent", None);
+                root.prompt_tokens = 10;
+                root.completion_tokens = 2;
+                runstate::create_run(&root).unwrap();
 
-        let mut child = make_meta(child_id, "child-agent", Some(run_id));
-        child.prompt_tokens = 20;
-        child.completion_tokens = 3;
-        runstate::create_run(&child).unwrap();
+                let mut child = make_meta(child_id, "child-agent", Some(run_id));
+                child.prompt_tokens = 20;
+                child.completion_tokens = 3;
+                runstate::create_run(&child).unwrap();
 
-        let Json(node) = agent_tree_status(AxumPath(run_id.to_string()))
-            .await
-            .unwrap();
-        assert_eq!(node.run_id, run_id);
-        assert_eq!(node.subtree_prompt_tokens, 30);
-        assert_eq!(node.subtree_completion_tokens, 5);
-        assert_eq!(node.children.len(), 1);
-        assert_eq!(node.children[0].run_id, child_id);
+                let Json(node) = agent_tree_status(AxumPath(run_id.to_string()))
+                    .await
+                    .unwrap();
+                assert_eq!(node.run_id, run_id);
+                assert_eq!(node.subtree_prompt_tokens, 30);
+                assert_eq!(node.subtree_completion_tokens, 5);
+                assert_eq!(node.children.len(), 1);
+                assert_eq!(node.children[0].run_id, child_id);
+            },
+        )
+        .await;
     }
 }

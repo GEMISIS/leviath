@@ -170,54 +170,62 @@ mod tests {
 
     #[tokio::test]
     async fn get_interaction_no_pending_returns_404() {
-        let _guard =
-            crate::runstate::isolate_runs_dir_for_test("get_interaction_no_pending_returns_404");
-        let run_id = unique_run_id("get-int-none");
-        let meta = make_run(&run_id);
-        create_run(&meta).unwrap();
+        crate::runstate::with_isolated_runs_dir_async(
+            "get_interaction_no_pending_returns_404",
+            |_d| async move {
+                let run_id = unique_run_id("get-int-none");
+                let meta = make_run(&run_id);
+                create_run(&meta).unwrap();
 
-        let app = Router::new().route("/api/agents/{id}/interaction", get(get_interaction));
-        let req = Request::builder()
-            .uri(format!("/api/agents/{}/interaction", run_id))
-            .body(Body::empty())
-            .unwrap();
-        let resp = app.oneshot(req).await.unwrap();
-        assert_eq!(resp.status(), axum::http::StatusCode::NOT_FOUND);
+                let app = Router::new().route("/api/agents/{id}/interaction", get(get_interaction));
+                let req = Request::builder()
+                    .uri(format!("/api/agents/{}/interaction", run_id))
+                    .body(Body::empty())
+                    .unwrap();
+                let resp = app.oneshot(req).await.unwrap();
+                assert_eq!(resp.status(), axum::http::StatusCode::NOT_FOUND);
 
-        let _ = std::fs::remove_dir_all(runstate::run_dir(&run_id));
+                let _ = std::fs::remove_dir_all(runstate::run_dir(&run_id));
+            },
+        )
+        .await;
     }
 
     #[tokio::test]
     async fn get_interaction_with_pending_returns_ok() {
-        let _guard =
-            crate::runstate::isolate_runs_dir_for_test("get_interaction_with_pending_returns_ok");
-        let run_id = unique_run_id("get-int-ok");
-        let meta = make_run(&run_id);
-        create_run(&meta).unwrap();
+        crate::runstate::with_isolated_runs_dir_async(
+            "get_interaction_with_pending_returns_ok",
+            |_d| async move {
+                let run_id = unique_run_id("get-int-ok");
+                let meta = make_run(&run_id);
+                create_run(&meta).unwrap();
 
-        // Write a pending interaction request
-        let req_val = interaction::InteractionRequest::free_text(
-            "req-001",
-            "What should I do?",
-            "plan",
-            true,
-        );
-        interaction::write_request(&run_id, &req_val).unwrap();
+                // Write a pending interaction request
+                let req_val = interaction::InteractionRequest::free_text(
+                    "req-001",
+                    "What should I do?",
+                    "plan",
+                    true,
+                );
+                interaction::write_request(&run_id, &req_val).unwrap();
 
-        let app = Router::new().route("/api/agents/{id}/interaction", get(get_interaction));
-        let req = Request::builder()
-            .uri(format!("/api/agents/{}/interaction", run_id))
-            .body(Body::empty())
-            .unwrap();
-        let resp = app.oneshot(req).await.unwrap();
-        assert_eq!(resp.status(), axum::http::StatusCode::OK);
-        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
-            .await
-            .unwrap();
-        let val: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(val["id"], "req-001");
+                let app = Router::new().route("/api/agents/{id}/interaction", get(get_interaction));
+                let req = Request::builder()
+                    .uri(format!("/api/agents/{}/interaction", run_id))
+                    .body(Body::empty())
+                    .unwrap();
+                let resp = app.oneshot(req).await.unwrap();
+                assert_eq!(resp.status(), axum::http::StatusCode::OK);
+                let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+                    .await
+                    .unwrap();
+                let val: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                assert_eq!(val["id"], "req-001");
 
-        let _ = std::fs::remove_dir_all(runstate::run_dir(&run_id));
+                let _ = std::fs::remove_dir_all(runstate::run_dir(&run_id));
+            },
+        )
+        .await;
     }
 
     // ─── submit_interaction ───────────────────────────────────────────────────
@@ -238,120 +246,136 @@ mod tests {
 
     #[tokio::test]
     async fn submit_interaction_once_scope_returns_accepted() {
-        let _guard = crate::runstate::isolate_runs_dir_for_test(
+        crate::runstate::with_isolated_runs_dir_async(
             "submit_interaction_once_scope_returns_accepted",
-        );
-        let run_id = unique_run_id("submit-once");
-        let meta = make_run(&run_id);
-        create_run(&meta).unwrap();
+            |_d| async move {
+                let run_id = unique_run_id("submit-once");
+                let meta = make_run(&run_id);
+                create_run(&meta).unwrap();
 
-        let app = Router::new().route("/api/agents/{id}/interaction", post(submit_interaction));
-        let body = serde_json::json!({
-            "request_id": "req-001",
-            "value": "yes",
-            "approved": true,
-            "scope": "once"
-        });
-        let req = Request::builder()
-            .method("POST")
-            .uri(format!("/api/agents/{}/interaction", run_id))
-            .header("content-type", "application/json")
-            .body(Body::from(serde_json::to_string(&body).unwrap()))
-            .unwrap();
-        let resp = app.oneshot(req).await.unwrap();
-        assert_eq!(resp.status(), axum::http::StatusCode::ACCEPTED);
+                let app =
+                    Router::new().route("/api/agents/{id}/interaction", post(submit_interaction));
+                let body = serde_json::json!({
+                    "request_id": "req-001",
+                    "value": "yes",
+                    "approved": true,
+                    "scope": "once"
+                });
+                let req = Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/agents/{}/interaction", run_id))
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_string(&body).unwrap()))
+                    .unwrap();
+                let resp = app.oneshot(req).await.unwrap();
+                assert_eq!(resp.status(), axum::http::StatusCode::ACCEPTED);
 
-        let _ = std::fs::remove_dir_all(runstate::run_dir(&run_id));
+                let _ = std::fs::remove_dir_all(runstate::run_dir(&run_id));
+            },
+        )
+        .await;
     }
 
     #[tokio::test]
     async fn submit_interaction_session_scope_returns_accepted() {
-        let _guard = crate::runstate::isolate_runs_dir_for_test(
+        crate::runstate::with_isolated_runs_dir_async(
             "submit_interaction_session_scope_returns_accepted",
-        );
-        let run_id = unique_run_id("submit-session");
-        let meta = make_run(&run_id);
-        create_run(&meta).unwrap();
+            |_d| async move {
+                let run_id = unique_run_id("submit-session");
+                let meta = make_run(&run_id);
+                create_run(&meta).unwrap();
 
-        let app = Router::new().route("/api/agents/{id}/interaction", post(submit_interaction));
-        let body = serde_json::json!({
-            "request_id": "req-002",
-            "approved": true,
-            "scope": "session"
-        });
-        let req = Request::builder()
-            .method("POST")
-            .uri(format!("/api/agents/{}/interaction", run_id))
-            .header("content-type", "application/json")
-            .body(Body::from(serde_json::to_string(&body).unwrap()))
-            .unwrap();
-        let resp = app.oneshot(req).await.unwrap();
-        assert_eq!(resp.status(), axum::http::StatusCode::ACCEPTED);
+                let app =
+                    Router::new().route("/api/agents/{id}/interaction", post(submit_interaction));
+                let body = serde_json::json!({
+                    "request_id": "req-002",
+                    "approved": true,
+                    "scope": "session"
+                });
+                let req = Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/agents/{}/interaction", run_id))
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_string(&body).unwrap()))
+                    .unwrap();
+                let resp = app.oneshot(req).await.unwrap();
+                assert_eq!(resp.status(), axum::http::StatusCode::ACCEPTED);
 
-        let _ = std::fs::remove_dir_all(runstate::run_dir(&run_id));
+                let _ = std::fs::remove_dir_all(runstate::run_dir(&run_id));
+            },
+        )
+        .await;
     }
 
     #[tokio::test]
     async fn submit_interaction_no_scope_returns_accepted() {
-        let _guard = crate::runstate::isolate_runs_dir_for_test(
+        crate::runstate::with_isolated_runs_dir_async(
             "submit_interaction_no_scope_returns_accepted",
-        );
-        let run_id = unique_run_id("submit-noscope");
-        let meta = make_run(&run_id);
-        create_run(&meta).unwrap();
+            |_d| async move {
+                let run_id = unique_run_id("submit-noscope");
+                let meta = make_run(&run_id);
+                create_run(&meta).unwrap();
 
-        let app = Router::new().route("/api/agents/{id}/interaction", post(submit_interaction));
-        let body = serde_json::json!({
-            "request_id": "req-003",
-            "value": "do it"
-        });
-        let req = Request::builder()
-            .method("POST")
-            .uri(format!("/api/agents/{}/interaction", run_id))
-            .header("content-type", "application/json")
-            .body(Body::from(serde_json::to_string(&body).unwrap()))
-            .unwrap();
-        let resp = app.oneshot(req).await.unwrap();
-        assert_eq!(resp.status(), axum::http::StatusCode::ACCEPTED);
+                let app =
+                    Router::new().route("/api/agents/{id}/interaction", post(submit_interaction));
+                let body = serde_json::json!({
+                    "request_id": "req-003",
+                    "value": "do it"
+                });
+                let req = Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/agents/{}/interaction", run_id))
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_string(&body).unwrap()))
+                    .unwrap();
+                let resp = app.oneshot(req).await.unwrap();
+                assert_eq!(resp.status(), axum::http::StatusCode::ACCEPTED);
 
-        let _ = std::fs::remove_dir_all(runstate::run_dir(&run_id));
+                let _ = std::fs::remove_dir_all(runstate::run_dir(&run_id));
+            },
+        )
+        .await;
     }
 
     #[tokio::test]
     async fn submit_interaction_write_failure_returns_500() {
-        let _guard = crate::runstate::isolate_runs_dir_for_test(
+        crate::runstate::with_isolated_runs_dir_async(
             "submit_interaction_write_failure_returns_500",
-        );
-        let run_id = unique_run_id("submit-write-fail");
-        let meta = make_run(&run_id);
-        create_run(&meta).unwrap();
+            |_d| async move {
+                let run_id = unique_run_id("submit-write-fail");
+                let meta = make_run(&run_id);
+                create_run(&meta).unwrap();
 
-        // Force `interaction::write_response`'s `std::fs::write(&tmp, ...)` to
-        // fail with EISDIR by pre-creating a directory at the exact
-        // `response.json.tmp` path it would otherwise write a file to.
-        let tmp_path = interaction::response_path(&run_id).with_extension("json.tmp");
-        std::fs::create_dir_all(&tmp_path).unwrap();
+                // Force `interaction::write_response`'s `std::fs::write(&tmp, ...)` to
+                // fail with EISDIR by pre-creating a directory at the exact
+                // `response.json.tmp` path it would otherwise write a file to.
+                let tmp_path = interaction::response_path(&run_id).with_extension("json.tmp");
+                std::fs::create_dir_all(&tmp_path).unwrap();
 
-        let app = Router::new().route("/api/agents/{id}/interaction", post(submit_interaction));
-        let body = serde_json::json!({"request_id": "req-fail", "approved": true});
-        let req = Request::builder()
-            .method("POST")
-            .uri(format!("/api/agents/{}/interaction", run_id))
-            .header("content-type", "application/json")
-            .body(Body::from(serde_json::to_string(&body).unwrap()))
-            .unwrap();
-        let resp = app.oneshot(req).await.unwrap();
-        assert_eq!(resp.status(), axum::http::StatusCode::INTERNAL_SERVER_ERROR);
-        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
-            .await
-            .unwrap();
-        let val: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert!(val["error"]
-            .as_str()
-            .unwrap()
-            .contains("Failed to write interaction response"));
+                let app =
+                    Router::new().route("/api/agents/{id}/interaction", post(submit_interaction));
+                let body = serde_json::json!({"request_id": "req-fail", "approved": true});
+                let req = Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/agents/{}/interaction", run_id))
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_string(&body).unwrap()))
+                    .unwrap();
+                let resp = app.oneshot(req).await.unwrap();
+                assert_eq!(resp.status(), axum::http::StatusCode::INTERNAL_SERVER_ERROR);
+                let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+                    .await
+                    .unwrap();
+                let val: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                assert!(val["error"]
+                    .as_str()
+                    .unwrap()
+                    .contains("Failed to write interaction response"));
 
-        let _ = std::fs::remove_dir_all(runstate::run_dir(&run_id));
+                let _ = std::fs::remove_dir_all(runstate::run_dir(&run_id));
+            },
+        )
+        .await;
     }
 
     // ─── send_message ─────────────────────────────────────────────────────────
@@ -372,166 +396,182 @@ mod tests {
 
     #[tokio::test]
     async fn send_message_running_agent_appends_to_log() {
-        let _guard =
-            crate::runstate::isolate_runs_dir_for_test("send_message_running_agent_appends_to_log");
-        let run_id = unique_run_id("msg-running");
-        let mut meta = make_run(&run_id);
-        meta.status = RunStatus::Running;
-        create_run(&meta).unwrap();
+        crate::runstate::with_isolated_runs_dir_async(
+            "send_message_running_agent_appends_to_log",
+            |_d| async move {
+                let run_id = unique_run_id("msg-running");
+                let mut meta = make_run(&run_id);
+                meta.status = RunStatus::Running;
+                create_run(&meta).unwrap();
 
-        let app = Router::new().route("/api/agents/{id}/message", post(send_message));
-        let body = serde_json::json!({"message": "keep going"});
-        let req = Request::builder()
-            .method("POST")
-            .uri(format!("/api/agents/{}/message", run_id))
-            .header("content-type", "application/json")
-            .body(Body::from(serde_json::to_string(&body).unwrap()))
-            .unwrap();
-        let resp = app.oneshot(req).await.unwrap();
-        assert_eq!(resp.status(), axum::http::StatusCode::ACCEPTED);
+                let app = Router::new().route("/api/agents/{id}/message", post(send_message));
+                let body = serde_json::json!({"message": "keep going"});
+                let req = Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/agents/{}/message", run_id))
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_string(&body).unwrap()))
+                    .unwrap();
+                let resp = app.oneshot(req).await.unwrap();
+                assert_eq!(resp.status(), axum::http::StatusCode::ACCEPTED);
 
-        let _ = std::fs::remove_dir_all(runstate::run_dir(&run_id));
+                let _ = std::fs::remove_dir_all(runstate::run_dir(&run_id));
+            },
+        )
+        .await;
     }
 
     #[tokio::test]
     async fn send_message_waiting_input_with_pending_writes_response() {
-        let _guard = crate::runstate::isolate_runs_dir_for_test(
+        crate::runstate::with_isolated_runs_dir_async(
             "send_message_waiting_input_with_pending_writes_response",
-        );
-        let run_id = unique_run_id("msg-waiting");
-        let mut meta = make_run(&run_id);
-        meta.status = RunStatus::WaitingInput;
-        create_run(&meta).unwrap();
+            |_d| async move {
+                let run_id = unique_run_id("msg-waiting");
+                let mut meta = make_run(&run_id);
+                meta.status = RunStatus::WaitingInput;
+                create_run(&meta).unwrap();
 
-        // Create a pending interaction request
-        let req_val = interaction::InteractionRequest::free_text(
-            "req-wait-001",
-            "What should I do?",
-            "plan",
-            true,
-        );
-        interaction::write_request(&run_id, &req_val).unwrap();
+                // Create a pending interaction request
+                let req_val = interaction::InteractionRequest::free_text(
+                    "req-wait-001",
+                    "What should I do?",
+                    "plan",
+                    true,
+                );
+                interaction::write_request(&run_id, &req_val).unwrap();
 
-        let app = Router::new().route("/api/agents/{id}/message", post(send_message));
-        let body = serde_json::json!({"message": "do the thing"});
-        let req = Request::builder()
-            .method("POST")
-            .uri(format!("/api/agents/{}/message", run_id))
-            .header("content-type", "application/json")
-            .body(Body::from(serde_json::to_string(&body).unwrap()))
-            .unwrap();
-        let resp = app.oneshot(req).await.unwrap();
-        assert_eq!(resp.status(), axum::http::StatusCode::ACCEPTED);
+                let app = Router::new().route("/api/agents/{id}/message", post(send_message));
+                let body = serde_json::json!({"message": "do the thing"});
+                let req = Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/agents/{}/message", run_id))
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_string(&body).unwrap()))
+                    .unwrap();
+                let resp = app.oneshot(req).await.unwrap();
+                assert_eq!(resp.status(), axum::http::StatusCode::ACCEPTED);
 
-        // Verify a response was written
-        let response = interaction::take_response(&run_id);
-        assert_response_was_written(&response);
-        assert_eq!(response.unwrap().value.as_deref(), Some("do the thing"));
+                // Verify a response was written
+                let response = interaction::take_response(&run_id);
+                assert_response_was_written(&response);
+                assert_eq!(response.unwrap().value.as_deref(), Some("do the thing"));
 
-        let _ = std::fs::remove_dir_all(runstate::run_dir(&run_id));
+                let _ = std::fs::remove_dir_all(runstate::run_dir(&run_id));
+            },
+        )
+        .await;
     }
 
     #[tokio::test]
     async fn send_message_complete_interactive_with_pending_writes_response() {
-        let _guard = crate::runstate::isolate_runs_dir_for_test(
+        crate::runstate::with_isolated_runs_dir_async(
             "send_message_complete_interactive_with_pending_writes_response",
-        );
-        let run_id = unique_run_id("msg-complete-interactive");
-        let mut meta = make_run(&run_id);
-        meta.status = RunStatus::CompleteInteractive;
-        create_run(&meta).unwrap();
+            |_d| async move {
+                let run_id = unique_run_id("msg-complete-interactive");
+                let mut meta = make_run(&run_id);
+                meta.status = RunStatus::CompleteInteractive;
+                create_run(&meta).unwrap();
 
-        // Create a pending interaction request
-        let req_val = interaction::InteractionRequest::free_text(
-            "req-ci-001",
-            "Optional follow-up?",
-            "result",
-            false,
-        );
-        interaction::write_request(&run_id, &req_val).unwrap();
+                // Create a pending interaction request
+                let req_val = interaction::InteractionRequest::free_text(
+                    "req-ci-001",
+                    "Optional follow-up?",
+                    "result",
+                    false,
+                );
+                interaction::write_request(&run_id, &req_val).unwrap();
 
-        let app = Router::new().route("/api/agents/{id}/message", post(send_message));
-        let body = serde_json::json!({"message": "no thanks"});
-        let req = Request::builder()
-            .method("POST")
-            .uri(format!("/api/agents/{}/message", run_id))
-            .header("content-type", "application/json")
-            .body(Body::from(serde_json::to_string(&body).unwrap()))
-            .unwrap();
-        let resp = app.oneshot(req).await.unwrap();
-        assert_eq!(resp.status(), axum::http::StatusCode::ACCEPTED);
+                let app = Router::new().route("/api/agents/{id}/message", post(send_message));
+                let body = serde_json::json!({"message": "no thanks"});
+                let req = Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/agents/{}/message", run_id))
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_string(&body).unwrap()))
+                    .unwrap();
+                let resp = app.oneshot(req).await.unwrap();
+                assert_eq!(resp.status(), axum::http::StatusCode::ACCEPTED);
 
-        let _ = std::fs::remove_dir_all(runstate::run_dir(&run_id));
+                let _ = std::fs::remove_dir_all(runstate::run_dir(&run_id));
+            },
+        )
+        .await;
     }
 
     #[tokio::test]
     async fn send_message_waiting_input_no_pending_appends_to_log() {
-        let _guard = crate::runstate::isolate_runs_dir_for_test(
+        crate::runstate::with_isolated_runs_dir_async(
             "send_message_waiting_input_no_pending_appends_to_log",
-        );
-        let run_id = unique_run_id("msg-waiting-nopend");
-        let mut meta = make_run(&run_id);
-        meta.status = RunStatus::WaitingInput;
-        // No pending request written
-        create_run(&meta).unwrap();
+            |_d| async move {
+                let run_id = unique_run_id("msg-waiting-nopend");
+                let mut meta = make_run(&run_id);
+                meta.status = RunStatus::WaitingInput;
+                // No pending request written
+                create_run(&meta).unwrap();
 
-        let app = Router::new().route("/api/agents/{id}/message", post(send_message));
-        let body = serde_json::json!({"message": "hello there"});
-        let req = Request::builder()
-            .method("POST")
-            .uri(format!("/api/agents/{}/message", run_id))
-            .header("content-type", "application/json")
-            .body(Body::from(serde_json::to_string(&body).unwrap()))
-            .unwrap();
-        let resp = app.oneshot(req).await.unwrap();
-        assert_eq!(resp.status(), axum::http::StatusCode::ACCEPTED);
+                let app = Router::new().route("/api/agents/{id}/message", post(send_message));
+                let body = serde_json::json!({"message": "hello there"});
+                let req = Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/agents/{}/message", run_id))
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_string(&body).unwrap()))
+                    .unwrap();
+                let resp = app.oneshot(req).await.unwrap();
+                assert_eq!(resp.status(), axum::http::StatusCode::ACCEPTED);
 
-        let _ = std::fs::remove_dir_all(runstate::run_dir(&run_id));
+                let _ = std::fs::remove_dir_all(runstate::run_dir(&run_id));
+            },
+        )
+        .await;
     }
 
     #[tokio::test]
     async fn send_message_waiting_input_write_failure_returns_500() {
-        let _guard = crate::runstate::isolate_runs_dir_for_test(
+        crate::runstate::with_isolated_runs_dir_async(
             "send_message_waiting_input_write_failure_returns_500",
-        );
-        let run_id = unique_run_id("msg-write-fail");
-        let mut meta = make_run(&run_id);
-        meta.status = RunStatus::WaitingInput;
-        create_run(&meta).unwrap();
+            |_d| async move {
+                let run_id = unique_run_id("msg-write-fail");
+                let mut meta = make_run(&run_id);
+                meta.status = RunStatus::WaitingInput;
+                create_run(&meta).unwrap();
 
-        let req_val = interaction::InteractionRequest::free_text(
-            "req-wait-fail",
-            "What should I do?",
-            "plan",
-            true,
-        );
-        interaction::write_request(&run_id, &req_val).unwrap();
+                let req_val = interaction::InteractionRequest::free_text(
+                    "req-wait-fail",
+                    "What should I do?",
+                    "plan",
+                    true,
+                );
+                interaction::write_request(&run_id, &req_val).unwrap();
 
-        // Same EISDIR trick as submit_interaction_write_failure_returns_500,
-        // forcing send_message's own write_response call to fail.
-        let tmp_path = interaction::response_path(&run_id).with_extension("json.tmp");
-        std::fs::create_dir_all(&tmp_path).unwrap();
+                // Same EISDIR trick as submit_interaction_write_failure_returns_500,
+                // forcing send_message's own write_response call to fail.
+                let tmp_path = interaction::response_path(&run_id).with_extension("json.tmp");
+                std::fs::create_dir_all(&tmp_path).unwrap();
 
-        let app = Router::new().route("/api/agents/{id}/message", post(send_message));
-        let body = serde_json::json!({"message": "do the thing"});
-        let req = Request::builder()
-            .method("POST")
-            .uri(format!("/api/agents/{}/message", run_id))
-            .header("content-type", "application/json")
-            .body(Body::from(serde_json::to_string(&body).unwrap()))
-            .unwrap();
-        let resp = app.oneshot(req).await.unwrap();
-        assert_eq!(resp.status(), axum::http::StatusCode::INTERNAL_SERVER_ERROR);
-        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
-            .await
-            .unwrap();
-        let val: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert!(val["error"]
-            .as_str()
-            .unwrap()
-            .contains("Failed to write response"));
+                let app = Router::new().route("/api/agents/{id}/message", post(send_message));
+                let body = serde_json::json!({"message": "do the thing"});
+                let req = Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/agents/{}/message", run_id))
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_string(&body).unwrap()))
+                    .unwrap();
+                let resp = app.oneshot(req).await.unwrap();
+                assert_eq!(resp.status(), axum::http::StatusCode::INTERNAL_SERVER_ERROR);
+                let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+                    .await
+                    .unwrap();
+                let val: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                assert!(val["error"]
+                    .as_str()
+                    .unwrap()
+                    .contains("Failed to write response"));
 
-        let _ = std::fs::remove_dir_all(runstate::run_dir(&run_id));
+                let _ = std::fs::remove_dir_all(runstate::run_dir(&run_id));
+            },
+        )
+        .await;
     }
 
     #[test]

@@ -1522,9 +1522,9 @@ model = { models = [{ provider = "mock", model = "m" }] }
         // registers.
         let tmp = std::env::temp_dir().join(format!("lev-fanout-home-{}", std::process::id()));
         std::fs::create_dir_all(&tmp).unwrap();
-        std::env::set_var("LEVIATH_HOME", &tmp);
-        let registry = load_agent_registry(&bp("solo-agent"));
-        std::env::remove_var("LEVIATH_HOME");
+        let registry = temp_env::with_var("LEVIATH_HOME", Some(&tmp), || {
+            load_agent_registry(&bp("solo-agent"))
+        });
         assert!(registry.contains_key("solo-agent"));
         let _ = std::fs::remove_dir_all(&tmp);
     }

@@ -1054,68 +1054,72 @@ mod tests {
 
     #[test]
     fn render_content_pane_logs_mode_shows_tool_count_badge() {
-        let _guard = crate::runstate::isolate_runs_dir_for_test(
+        crate::runstate::with_isolated_runs_dir(
             "render_content_pane_logs_mode_shows_tool_count_badge",
+            |_d| {
+                let run_id = "test-content-tool-badge";
+                let agent = setup_run_state_agent_with_logs(
+                    run_id,
+                    &["[tool] read_file(x.rs)", "[tool] write_file(y.rs)"],
+                    None,
+                );
+
+                let backend = TestBackend::new(120, 40);
+                let mut terminal = Terminal::new(backend).unwrap();
+                let mut dash = make_test_dashboard();
+                dash.stage_content_mode = StageContentMode::Logs;
+                terminal
+                    .draw(|f| {
+                        let area = Rect::new(0, 0, 100, 20);
+                        dash.render_content_pane(f, area, &agent, 100);
+                    })
+                    .unwrap();
+
+                let content: String = terminal
+                    .backend()
+                    .buffer()
+                    .content()
+                    .iter()
+                    .map(|c| c.symbol())
+                    .collect();
+                assert!(content.contains("2 tools"));
+
+                let _ = std::fs::remove_dir_all(runstate::run_dir(run_id));
+            },
         );
-        let run_id = "test-content-tool-badge";
-        let agent = setup_run_state_agent_with_logs(
-            run_id,
-            &["[tool] read_file(x.rs)", "[tool] write_file(y.rs)"],
-            None,
-        );
-
-        let backend = TestBackend::new(120, 40);
-        let mut terminal = Terminal::new(backend).unwrap();
-        let mut dash = make_test_dashboard();
-        dash.stage_content_mode = StageContentMode::Logs;
-        terminal
-            .draw(|f| {
-                let area = Rect::new(0, 0, 100, 20);
-                dash.render_content_pane(f, area, &agent, 100);
-            })
-            .unwrap();
-
-        let content: String = terminal
-            .backend()
-            .buffer()
-            .content()
-            .iter()
-            .map(|c| c.symbol())
-            .collect();
-        assert!(content.contains("2 tools"));
-
-        let _ = std::fs::remove_dir_all(runstate::run_dir(run_id));
     }
 
     #[test]
     fn render_content_pane_output_mode_run_state_shows_file_path_hint() {
-        let _guard = crate::runstate::isolate_runs_dir_for_test(
+        crate::runstate::with_isolated_runs_dir(
             "render_content_pane_output_mode_run_state_shows_file_path_hint",
+            |_d| {
+                let run_id = "test-content-output-hint";
+                let agent = setup_run_state_agent_with_logs(run_id, &[], Some("hello output"));
+
+                let backend = TestBackend::new(120, 40);
+                let mut terminal = Terminal::new(backend).unwrap();
+                let mut dash = make_test_dashboard();
+                dash.stage_content_mode = StageContentMode::Output;
+                terminal
+                    .draw(|f| {
+                        let area = Rect::new(0, 0, 100, 20);
+                        dash.render_content_pane(f, area, &agent, 100);
+                    })
+                    .unwrap();
+
+                let content: String = terminal
+                    .backend()
+                    .buffer()
+                    .content()
+                    .iter()
+                    .map(|c| c.symbol())
+                    .collect();
+                assert!(content.contains("output.log"));
+
+                let _ = std::fs::remove_dir_all(runstate::run_dir(run_id));
+            },
         );
-        let run_id = "test-content-output-hint";
-        let agent = setup_run_state_agent_with_logs(run_id, &[], Some("hello output"));
-
-        let backend = TestBackend::new(120, 40);
-        let mut terminal = Terminal::new(backend).unwrap();
-        let mut dash = make_test_dashboard();
-        dash.stage_content_mode = StageContentMode::Output;
-        terminal
-            .draw(|f| {
-                let area = Rect::new(0, 0, 100, 20);
-                dash.render_content_pane(f, area, &agent, 100);
-            })
-            .unwrap();
-
-        let content: String = terminal
-            .backend()
-            .buffer()
-            .content()
-            .iter()
-            .map(|c| c.symbol())
-            .collect();
-        assert!(content.contains("output.log"));
-
-        let _ = std::fs::remove_dir_all(runstate::run_dir(run_id));
     }
 
     // The file-path hint's home-shortening logic is exercised directly against
@@ -1151,60 +1155,65 @@ mod tests {
 
     #[test]
     fn build_output_lines_logs_mode_colors_by_line_prefix() {
-        let _guard = crate::runstate::isolate_runs_dir_for_test(
+        crate::runstate::with_isolated_runs_dir(
             "build_output_lines_logs_mode_colors_by_line_prefix",
-        );
-        let run_id = "test-content-log-prefixes";
-        let agent = setup_run_state_agent_with_logs(
-            run_id,
-            &[
-                "[tool] did a thing",
-                "[error] it broke",
-                "[denied] not allowed",
-                "--- separator ---",
-                "[All stages complete]",
-                "a plain message",
-            ],
-            None,
-        );
+            |_d| {
+                let run_id = "test-content-log-prefixes";
+                let agent = setup_run_state_agent_with_logs(
+                    run_id,
+                    &[
+                        "[tool] did a thing",
+                        "[error] it broke",
+                        "[denied] not allowed",
+                        "--- separator ---",
+                        "[All stages complete]",
+                        "a plain message",
+                    ],
+                    None,
+                );
 
-        let dash = make_test_dashboard();
-        let lines = dash.build_output_lines(&agent, false, 100);
-        let text: String = lines
-            .iter()
-            .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
-            .collect::<Vec<_>>()
-            .join("\n");
-        assert!(text.contains("did a thing"));
-        assert!(text.contains("it broke"));
-        assert!(text.contains("not allowed"));
-        assert!(text.contains("separator"));
-        assert!(text.contains("All stages complete"));
-        assert!(text.contains("a plain message"));
+                let dash = make_test_dashboard();
+                let lines = dash.build_output_lines(&agent, false, 100);
+                let text: String = lines
+                    .iter()
+                    .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                assert!(text.contains("did a thing"));
+                assert!(text.contains("it broke"));
+                assert!(text.contains("not allowed"));
+                assert!(text.contains("separator"));
+                assert!(text.contains("All stages complete"));
+                assert!(text.contains("a plain message"));
 
-        let _ = std::fs::remove_dir_all(runstate::run_dir(run_id));
+                let _ = std::fs::remove_dir_all(runstate::run_dir(run_id));
+            },
+        );
     }
 
     #[test]
     fn build_output_lines_output_mode_renders_markdown_when_non_empty() {
-        let _guard = crate::runstate::isolate_runs_dir_for_test(
+        crate::runstate::with_isolated_runs_dir(
             "build_output_lines_output_mode_renders_markdown_when_non_empty",
+            |_d| {
+                let run_id = "test-content-output-markdown";
+                let agent =
+                    setup_run_state_agent_with_logs(run_id, &[], Some("# Heading\n\nbody text"));
+
+                let dash = make_test_dashboard();
+                let lines = dash.build_output_lines(&agent, true, 100);
+                assert!(!lines.is_empty());
+                let text: String = lines
+                    .iter()
+                    .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                assert!(text.contains("Heading"));
+                assert!(text.contains("body text"));
+
+                let _ = std::fs::remove_dir_all(runstate::run_dir(run_id));
+            },
         );
-        let run_id = "test-content-output-markdown";
-        let agent = setup_run_state_agent_with_logs(run_id, &[], Some("# Heading\n\nbody text"));
-
-        let dash = make_test_dashboard();
-        let lines = dash.build_output_lines(&agent, true, 100);
-        assert!(!lines.is_empty());
-        let text: String = lines
-            .iter()
-            .flat_map(|l| l.spans.iter().map(|s| s.content.as_ref()))
-            .collect::<Vec<_>>()
-            .join("\n");
-        assert!(text.contains("Heading"));
-        assert!(text.contains("body text"));
-
-        let _ = std::fs::remove_dir_all(runstate::run_dir(run_id));
     }
 
     #[test]
