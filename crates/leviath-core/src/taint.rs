@@ -36,11 +36,7 @@ impl TaintLevel {
 
     /// Returns the maximum of two taint levels.
     pub fn max(self, other: TaintLevel) -> TaintLevel {
-        if self >= other {
-            self
-        } else {
-            other
-        }
+        if self >= other { self } else { other }
     }
 
     /// Parse a taint level from a string (case-insensitive).

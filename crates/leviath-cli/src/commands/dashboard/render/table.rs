@@ -1,10 +1,10 @@
 //! Agent table, log panel, and help bar rendering.
 
+use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Cell, Paragraph, Row, Table};
-use ratatui::Frame;
 
 use crate::commands::dashboard::helpers::{format_tokens, relative_time, truncate};
 use crate::commands::dashboard::state::Dashboard;
@@ -442,8 +442,8 @@ impl Dashboard {
 mod tests {
     use super::*;
     use crate::commands::dashboard::test_support::make_test_dashboard;
-    use ratatui::backend::TestBackend;
     use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
 
     fn make_test_agent(id: &str, status: AgentDisplayStatus) -> DashboardAgent {
         DashboardAgent {

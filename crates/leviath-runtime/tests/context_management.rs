@@ -125,9 +125,11 @@ fn test_schema_validation_mermaid() {
 
     // Valid mermaid should pass
     assert!(schema.validate("graph TD\n  A --> B").is_ok());
-    assert!(schema
-        .validate("sequenceDiagram\n  Alice->>Bob: Hello")
-        .is_ok());
+    assert!(
+        schema
+            .validate("sequenceDiagram\n  Alice->>Bob: Hello")
+            .is_ok()
+    );
 
     // Invalid mermaid should fail
     assert!(schema.validate("just plain text").is_err());
@@ -206,15 +208,19 @@ fn test_context_window_add_to_region() {
     window.add_region(region);
 
     // Add content to existing region
-    assert!(window
-        .add_to_region("system", "Hello".to_string(), 10)
-        .is_ok());
+    assert!(
+        window
+            .add_to_region("system", "Hello".to_string(), 10)
+            .is_ok()
+    );
     assert_eq!(window.current_tokens, 10);
 
     // Add content to non-existent region should fail
-    assert!(window
-        .add_to_region("nonexistent", "test".to_string(), 5)
-        .is_err());
+    assert!(
+        window
+            .add_to_region("nonexistent", "test".to_string(), 5)
+            .is_err()
+    );
 }
 
 #[test]
@@ -505,9 +511,11 @@ fn test_child_completion_notifies_parent() {
 
     // Simulate what child_completion_system does: inject result into parent
     let parent_state = world.get::<AgentState>(parent).unwrap();
-    assert!(parent_state
-        .spawned_children_ids
-        .contains(&"child-01".to_string()));
+    assert!(
+        parent_state
+            .spawned_children_ids
+            .contains(&"child-01".to_string())
+    );
     assert_eq!(parent_state.pending_wait, Some("child-01".to_string()));
 
     // After processing, parent should have the child removed and pending_wait cleared
@@ -578,23 +586,23 @@ async fn test_file_tracking_sync_assembly_integration() {
     // 3. Simulate file tracking: upsert into shared CW's HashMap region
     {
         let mut guard = shared_cw.lock().await;
-        if let Some(window) = guard.as_mut() {
-            if let Some(region) = window.get_region_mut("files") {
-                region
-                    .upsert_by_key(
-                        "src/main.py",
-                        "def main():\n    print('hello')".to_string(),
-                        10,
-                    )
-                    .unwrap();
-                region
-                    .upsert_by_key(
-                        "src/utils.py",
-                        "def helper():\n    return 42".to_string(),
-                        8,
-                    )
-                    .unwrap();
-            }
+        if let Some(window) = guard.as_mut()
+            && let Some(region) = window.get_region_mut("files")
+        {
+            region
+                .upsert_by_key(
+                    "src/main.py",
+                    "def main():\n    print('hello')".to_string(),
+                    10,
+                )
+                .unwrap();
+            region
+                .upsert_by_key(
+                    "src/utils.py",
+                    "def helper():\n    return 42".to_string(),
+                    8,
+                )
+                .unwrap();
         }
     }
 

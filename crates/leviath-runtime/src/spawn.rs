@@ -131,8 +131,8 @@ mod tests {
         ProviderRegistry, SubAgentChildren,
     };
     use leviath_core::{
-        blueprint::ModelConfig, layout::RegionDefinition, Blueprint, ContextLayout, RegionKind,
-        Stage,
+        Blueprint, ContextLayout, RegionKind, Stage, blueprint::ModelConfig,
+        layout::RegionDefinition,
     };
     use std::sync::Arc;
     use tokio::sync::RwLock;
@@ -200,20 +200,22 @@ mod tests {
         let children = eng.world().get::<SubAgentChildren>(root_entity).unwrap();
         assert!(children.children.contains(&child_entity));
         assert_eq!(children.max_child_depth, 3);
-        assert!(eng
-            .world()
-            .get::<AgentState>(root_entity)
-            .unwrap()
-            .spawned_children_ids
-            .contains(&child_id));
+        assert!(
+            eng.world()
+                .get::<AgentState>(root_entity)
+                .unwrap()
+                .spawned_children_ids
+                .contains(&child_id)
+        );
 
         // Seed landed in the pinned region.
         let window = eng.world().get::<ContextWindow>(child_entity).unwrap();
         let sys = window.get_region("system").unwrap();
-        assert!(sys
-            .content
-            .iter()
-            .any(|e| e.content.contains("work item context")));
+        assert!(
+            sys.content
+                .iter()
+                .any(|e| e.content.contains("work item context"))
+        );
         // Default conversation region was auto-added.
         assert!(window.get_region("conversation").is_some());
     }

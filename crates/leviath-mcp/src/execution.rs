@@ -546,9 +546,11 @@ for line in sys.stdin:
             .execute_on("server1", "echo", serde_json::json!({}))
             .await;
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("tool execution failed"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("tool execution failed")
+        );
     }
 }

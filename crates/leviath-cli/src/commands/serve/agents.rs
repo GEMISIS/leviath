@@ -374,16 +374,16 @@ mod tests {
     use super::*;
     use std::collections::HashMap;
 
+    use axum::Router;
     use axum::body::Body;
     use axum::http::Request;
     use axum::routing::get;
-    use axum::Router;
     use std::sync::Arc;
     use tokio::sync::broadcast;
     use tower::ServiceExt;
 
     use crate::config::Config;
-    use crate::runstate::{create_run, RunMeta, RunStatus};
+    use crate::runstate::{RunMeta, RunStatus, create_run};
     use crate::test_support::with_tracing;
 
     fn test_state() -> AppState {
@@ -1499,10 +1499,12 @@ prompt = "Plan the work"
                     .unwrap();
                 let result: serde_json::Value = serde_json::from_slice(&body).unwrap();
                 assert_eq!(result["run_id"].as_str().unwrap(), run_id);
-                assert!(result["output"]
-                    .as_str()
-                    .unwrap()
-                    .contains("stage output here"));
+                assert!(
+                    result["output"]
+                        .as_str()
+                        .unwrap()
+                        .contains("stage output here")
+                );
 
                 let _ = std::fs::remove_dir_all(runstate::run_dir(&run_id));
             },

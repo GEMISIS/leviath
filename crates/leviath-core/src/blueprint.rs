@@ -135,13 +135,13 @@ impl Blueprint {
             self.stages.iter().map(|s| s.name.as_str()).collect();
 
         // Entry stage must exist if set
-        if let Some(ref entry) = self.entry_stage {
-            if !stage_names.contains(entry.as_str()) {
-                return Err(ValidationError::Graph(format!(
-                    "entry_stage '{}' does not match any defined stage",
-                    entry
-                )));
-            }
+        if let Some(entry) = &self.entry_stage
+            && !stage_names.contains(entry.as_str())
+        {
+            return Err(ValidationError::Graph(format!(
+                "entry_stage '{}' does not match any defined stage",
+                entry
+            )));
         }
 
         // Fan-out stages reference a worker source + optional merge stage. These
@@ -173,7 +173,7 @@ impl Blueprint {
                             return Err(ValidationError::Stage {
                                 stage: stage.name.clone(),
                                 message: format!("fan_out worker_stage '{}' does not exist", ws),
-                            })
+                            });
                         }
                         Some(target) if !target.allow_as_worker => {
                             return Err(ValidationError::Stage {
@@ -182,18 +182,18 @@ impl Blueprint {
                                     "fan_out worker_stage '{}' must set allow_as_worker = true",
                                     ws
                                 ),
-                            })
+                            });
                         }
                         Some(_) => {}
                     }
                 }
-                if let Some(ms) = &config.merge_stage {
-                    if !stage_names.contains(ms.as_str()) {
-                        return Err(ValidationError::Stage {
-                            stage: stage.name.clone(),
-                            message: format!("fan_out merge_stage '{}' does not exist", ms),
-                        });
-                    }
+                if let Some(ms) = &config.merge_stage
+                    && !stage_names.contains(ms.as_str())
+                {
+                    return Err(ValidationError::Stage {
+                        stage: stage.name.clone(),
+                        message: format!("fan_out merge_stage '{}' does not exist", ms),
+                    });
                 }
             }
         }
@@ -310,14 +310,13 @@ impl Blueprint {
                 }
                 // If all targets are exhaustible (already visited + have max_revisits),
                 // the stage will eventually have zero available edges → terminal
-                let all_exhaustible = transitions.keys().all(|target| {
+                transitions.keys().all(|target| {
                     self.stages
                         .iter()
                         .find(|s| s.name == *target)
                         .map(|s| s.max_revisits.is_some())
                         .unwrap_or(false)
-                });
-                all_exhaustible
+                })
             }
         }
     }

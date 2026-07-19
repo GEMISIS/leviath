@@ -226,9 +226,10 @@ mod tests {
     #[test]
     fn agents_dir_from_home_none_returns_error() {
         let err = agents_dir_from_home(None).unwrap_err();
-        assert!(err
-            .to_string()
-            .contains("Could not determine home directory"));
+        assert!(
+            err.to_string()
+                .contains("Could not determine home directory")
+        );
     }
 
     // ─── parse_agent_name ──────────────────────────────────────────────────
@@ -770,8 +771,7 @@ description = "test"
             let (mut socket, _) = listener.accept().await.unwrap();
             let mut buf = [0u8; 8192];
             let _ = socket.read(&mut buf).await;
-            let resp =
-                "HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+            let resp = "HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
             let _ = socket.write_all(resp.as_bytes()).await;
             let _ = socket.shutdown().await;
         });
@@ -1026,9 +1026,10 @@ name = "second"
         FORCE_AGENTS_DIR_ERROR.with(|f| f.set(false));
 
         let err = result.unwrap_err();
-        assert!(err
-            .to_string()
-            .contains("Could not determine home directory"));
+        assert!(
+            err.to_string()
+                .contains("Could not determine home directory")
+        );
     }
 
     // ─── install_from_dir with valid manifest ─────────────────────────────

@@ -296,12 +296,12 @@ pub fn cascade_kill_system(
     // Pass 2: cancel each child
     let mut cancel_query = queries.p1();
     for child_entity in to_cancel {
-        if let Ok((mut state, token)) = cancel_query.get_mut(child_entity) {
-            if !matches!(state.status, AgentStatus::Cancelled) {
-                token.cancel();
-                state.status = AgentStatus::Cancelled;
-                tracing::info!(agent_id = %state.agent_id, "Cascade-cancelled child agent");
-            }
+        if let Ok((mut state, token)) = cancel_query.get_mut(child_entity)
+            && !matches!(state.status, AgentStatus::Cancelled)
+        {
+            token.cancel();
+            state.status = AgentStatus::Cancelled;
+            tracing::info!(agent_id = %state.agent_id, "Cascade-cancelled child agent");
         }
     }
 }
@@ -337,8 +337,8 @@ pub fn stage_gating_system(mut query: Query<&mut AgentState>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::with_tracing;
     use crate::AgentMessage;
+    use crate::test_support::with_tracing;
     use leviath_core::{EvictionStrategy, Region, RegionKind};
 
     #[test]
@@ -983,10 +983,11 @@ mod tests {
 
         let parent_window = world.get::<ContextWindow>(parent_entity).unwrap();
         let conv = parent_window.get_region("conversation").unwrap();
-        assert!(conv
-            .content
-            .iter()
-            .any(|e| e.content.contains("error") && e.content.contains("something went wrong")));
+        assert!(
+            conv.content
+                .iter()
+                .any(|e| e.content.contains("error") && e.content.contains("something went wrong"))
+        );
     }
 
     #[test]
@@ -1085,10 +1086,11 @@ mod tests {
 
         let window = world.get::<ContextWindow>(entity).unwrap();
         let conv = window.get_region("conversation").unwrap();
-        assert!(conv
-            .content
-            .iter()
-            .any(|e| e.content.contains("Hello from user")));
+        assert!(
+            conv.content
+                .iter()
+                .any(|e| e.content.contains("Hello from user"))
+        );
     }
 
     #[test]
@@ -1161,10 +1163,11 @@ mod tests {
 
         let window = world.get::<ContextWindow>(entity).unwrap();
         let conv = window.get_region("conversation").unwrap();
-        assert!(conv
-            .content
-            .iter()
-            .any(|e| e.content.contains("Test message")));
+        assert!(
+            conv.content
+                .iter()
+                .any(|e| e.content.contains("Test message"))
+        );
     }
 
     // ─── child_completion with despawned parent entity ────────────────────

@@ -248,8 +248,8 @@ impl Default for AgentInstaller {
 mod tests {
     use super::*;
     use crate::test_support::with_tracing;
-    use flate2::write::GzEncoder;
     use flate2::Compression;
+    use flate2::write::GzEncoder;
 
     /// Create a minimal tar.gz bundle with an agent.leviath manifest.
     fn make_bundle(name: &str, version: &str, description: &str) -> Vec<u8> {
@@ -499,9 +499,10 @@ description = "{}"
         let err = installer
             .install_from_bytes("blocked", &bundle)
             .unwrap_err();
-        assert!(err
-            .to_string()
-            .contains("Failed to create install directory"));
+        assert!(
+            err.to_string()
+                .contains("Failed to create install directory")
+        );
     }
 
     #[test]
@@ -541,9 +542,11 @@ description = "{}"
         let result = installer.uninstall("not-a-dir");
 
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("Failed to remove agent"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("Failed to remove agent")
+        );
     }
 }

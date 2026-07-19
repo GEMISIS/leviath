@@ -9,8 +9,8 @@ mod overlays;
 mod stages;
 mod table;
 
-use ratatui::layout::{Constraint, Direction, Layout};
 use ratatui::Frame;
+use ratatui::layout::{Constraint, Direction, Layout};
 
 use super::state::Dashboard;
 use super::types::*;
@@ -223,8 +223,8 @@ mod tests {
     use super::*;
     use crate::commands::dashboard::test_support::make_test_dashboard;
     use crate::commands::dashboard::types::{Toast, ToastLevel};
-    use ratatui::backend::TestBackend;
     use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
 
     fn make_test_agent(id: &str, status: AgentDisplayStatus) -> DashboardAgent {
         DashboardAgent {

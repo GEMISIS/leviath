@@ -39,10 +39,10 @@ fn scan_directory_for_agents(dir: &Path) -> Vec<(PathBuf, AgentInfo)> {
 
     // Check if this directory itself has an agent.leviath
     let direct_manifest = dir.join("agent.leviath");
-    if direct_manifest.exists() {
-        if let Some(info) = read_agent_info(&direct_manifest) {
-            agents.push((dir.to_path_buf(), info));
-        }
+    if direct_manifest.exists()
+        && let Some(info) = read_agent_info(&direct_manifest)
+    {
+        agents.push((dir.to_path_buf(), info));
     }
 
     // Check subdirectories
@@ -51,10 +51,10 @@ fn scan_directory_for_agents(dir: &Path) -> Vec<(PathBuf, AgentInfo)> {
             let path = entry.path();
             if path.is_dir() {
                 let manifest_path = path.join("agent.leviath");
-                if manifest_path.exists() {
-                    if let Some(info) = read_agent_info(&manifest_path) {
-                        agents.push((path, info));
-                    }
+                if manifest_path.exists()
+                    && let Some(info) = read_agent_info(&manifest_path)
+                {
+                    agents.push((path, info));
                 }
             }
         }
@@ -126,18 +126,18 @@ fn print_agent_listing(
 
     // 2. Local (current directory)
     let local_manifest = cwd.join("agent.leviath");
-    if local_manifest.exists() {
-        if let Some(info) = read_agent_info(&local_manifest) {
-            found_anything = true;
-            let desc = if info.description.is_empty() {
-                String::new()
-            } else {
-                format!(" — {}", info.description)
-            };
-            println!("Local (current directory):");
-            println!("  {} (v{}){}", info.name, info.version, desc);
-            println!();
-        }
+    if local_manifest.exists()
+        && let Some(info) = read_agent_info(&local_manifest)
+    {
+        found_anything = true;
+        let desc = if info.description.is_empty() {
+            String::new()
+        } else {
+            format!(" — {}", info.description)
+        };
+        println!("Local (current directory):");
+        println!("  {} (v{}){}", info.name, info.version, desc);
+        println!();
     }
 
     // 3. Config's agent_paths directories
@@ -425,9 +425,10 @@ system = {{ kind = "pinned", max_tokens = 1000 }}
     #[test]
     fn get_agents_dir_from_home_none_returns_error() {
         let err = get_agents_dir_from_home(None).unwrap_err();
-        assert!(err
-            .to_string()
-            .contains("Could not determine home directory"));
+        assert!(
+            err.to_string()
+                .contains("Could not determine home directory")
+        );
     }
 
     // ─── read_agent_info: minimal manifest ──────────────────────────────
@@ -507,9 +508,10 @@ system = { kind = "pinned", max_tokens = 1000 }
         FORCE_AGENTS_DIR_ERROR.with(|f| f.set(false));
 
         let err = result.unwrap_err();
-        assert!(err
-            .to_string()
-            .contains("Could not determine home directory"));
+        assert!(
+            err.to_string()
+                .contains("Could not determine home directory")
+        );
     }
 
     // `execute`'s `std::env::current_dir().unwrap_or_default()` can only take

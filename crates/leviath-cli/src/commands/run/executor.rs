@@ -5,9 +5,9 @@
 //! `foreground.rs` and `worker.rs`.
 
 use async_trait::async_trait;
+use leviath_core::Blueprint;
 use leviath_core::blueprint::{StageMode, StageResult};
 use leviath_core::lifecycle::CompactionConfig;
-use leviath_core::Blueprint;
 use leviath_providers::InferenceResponse;
 use leviath_runtime::{
     AgentEngine, AgentPool, AgentState, ContextWindow, EngineHandle, InferenceConfig,
@@ -21,11 +21,11 @@ use super::tool_source::StageToolSource;
 use super::graph::{apply_edge_transform, is_graph_mode, resolve_transition};
 use super::helpers::swap_context_layout;
 use super::io::RunIO;
-use super::stages::{run_interactive_points_stage, run_interactive_stage, PointsOutcome};
-use leviath_core::taint::{
-    resolve_security, resolve_taint_enabled, SecurityConfig, ToolClassification, ToolDirection,
-};
+use super::stages::{PointsOutcome, run_interactive_points_stage, run_interactive_stage};
 use leviath_core::PolicyConfig;
+use leviath_core::taint::{
+    SecurityConfig, ToolClassification, ToolDirection, resolve_security, resolve_taint_enabled,
+};
 use leviath_runtime::taint::TaintGate;
 
 /// Inject a stage's `system_prompt` into `target_region` as pinned
@@ -550,7 +550,9 @@ pub async fn run_stage_loop(
             .accepts_messages = stage.accepts_messages;
 
         if stage.accepts_messages {
-            println!("\u{1f4ac} Type a message and press Enter to send input to the agent while it runs.");
+            println!(
+                "\u{1f4ac} Type a message and press Enter to send input to the agent while it runs."
+            );
         }
 
         // Stage layout swap
@@ -1581,10 +1583,11 @@ mod tests {
         .unwrap();
 
         // The loop visited the fan_out stage then jumped to the merge stage.
-        assert!(cb
-            .transitions
-            .iter()
-            .any(|(f, t)| f == "parallel" && t == "merge"));
+        assert!(
+            cb.transitions
+                .iter()
+                .any(|(f, t)| f == "parallel" && t == "merge")
+        );
         // Two workers were spawned as children of the root.
         let eng = engine.read().await;
         let children = eng
@@ -1733,10 +1736,11 @@ mod tests {
         )
         .await
         .unwrap();
-        assert!(cb
-            .transitions
-            .iter()
-            .any(|(f, t)| f == "parallel" && t == "done"));
+        assert!(
+            cb.transitions
+                .iter()
+                .any(|(f, t)| f == "parallel" && t == "done")
+        );
     }
 
     #[tokio::test]
@@ -1809,10 +1813,11 @@ mod tests {
         .await
         .unwrap();
         // No workers spawned (split failed), and the error edge was taken.
-        assert!(cb
-            .transitions
-            .iter()
-            .any(|(f, t)| f == "parallel" && t == "recover"));
+        assert!(
+            cb.transitions
+                .iter()
+                .any(|(f, t)| f == "parallel" && t == "recover")
+        );
     }
 
     struct CannedProvider;
@@ -2210,10 +2215,12 @@ mod tests {
 
         // Linear mode must propagate the error.
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("simulated autonomous failure"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("simulated autonomous failure")
+        );
         assert_eq!(cb.errors.len(), 1);
         // on_complete is never reached when the error propagates.
         assert!(cb.completed_at.is_none());
@@ -2632,14 +2639,16 @@ mod tests {
         // reaches on its own -- the same production behavior for each is
         // already covered via `MockCallbacks` elsewhere in this file.
         cb.on_claude_code_warning(0).await;
-        assert!(cb
-            .start_message_reader(&*engine.read().await, "agent-1", false)
-            .is_none());
+        assert!(
+            cb.start_message_reader(&*engine.read().await, "agent-1", false)
+                .is_none()
+        );
         assert!(cb.get_run_context().is_none());
-        assert!(cb
-            .on_stage_error("main", 0, &anyhow::anyhow!("e"), false)
-            .await
-            .is_none());
+        assert!(
+            cb.on_stage_error("main", 0, &anyhow::anyhow!("e"), false)
+                .await
+                .is_none()
+        );
         cb.on_transition("a", "b", 0).await;
         cb.on_complete(0).await;
         cb.on_post_stage(&*engine.read().await, entity, "main")
@@ -2805,9 +2814,10 @@ mod tests {
         // its own -- the same production behavior for each is already
         // covered via `MockCallbacks` elsewhere in this file.
         cb.on_claude_code_warning(0).await;
-        assert!(cb
-            .start_message_reader(&*engine.read().await, "agent-1", false)
-            .is_none());
+        assert!(
+            cb.start_message_reader(&*engine.read().await, "agent-1", false)
+                .is_none()
+        );
         assert!(cb.get_run_context().is_none());
         assert_eq!(
             cb.on_stage_error("a", 0, &anyhow::anyhow!("e"), true).await,
@@ -3808,12 +3818,14 @@ mod tests {
         );
 
         // Sanity: confirm it's there before the loop.
-        assert!(engine
-            .read()
-            .await
-            .world()
-            .get::<leviath_runtime::ToolResultRoutingComponent>(entity)
-            .is_some());
+        assert!(
+            engine
+                .read()
+                .await
+                .world()
+                .get::<leviath_runtime::ToolResultRoutingComponent>(entity)
+                .is_some()
+        );
 
         let mut ctx = StageContext {
             blueprint: &bp,
@@ -3842,13 +3854,14 @@ mod tests {
 
         // After running a stage with tool_result_routing = None, the
         // component must have been removed.
-        assert!(ctx
-            .engine
-            .read()
-            .await
-            .world()
-            .get::<leviath_runtime::ToolResultRoutingComponent>(ctx.entity)
-            .is_none());
+        assert!(
+            ctx.engine
+                .read()
+                .await
+                .world()
+                .get::<leviath_runtime::ToolResultRoutingComponent>(ctx.entity)
+                .is_none()
+        );
     }
 
     #[tokio::test]

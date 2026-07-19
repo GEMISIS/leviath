@@ -12,8 +12,8 @@
 
 use async_trait::async_trait;
 
-use leviath_core::interaction::{response_approved, response_as_choice, response_as_text};
 use leviath_core::interaction::{ApprovalScope, InteractionRequest, InteractionResponse};
+use leviath_core::interaction::{response_approved, response_as_choice, response_as_text};
 
 // ─── Shared taint-gate prompt helpers ──────────────────────────────────────
 // Used by both the worker (IPC) and foreground (stdin) GatePrompt impls so the

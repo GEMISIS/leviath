@@ -31,11 +31,11 @@ pub use components::{
     TaskAssignment, ToolResultRoutingComponent,
 };
 pub use engine::{
-    run_inference_loop_shared, AgentEngine, EngineHandle, ProviderRegistry, ToolExecutorDyn,
-    ToolResultsFuture,
+    AgentEngine, EngineHandle, ProviderRegistry, ToolExecutorDyn, ToolResultsFuture,
+    run_inference_loop_shared,
 };
 pub use pool::AgentPool;
-pub use provider_creds::{build_provider_registry, ProviderCreds};
+pub use provider_creds::{ProviderCreds, build_provider_registry};
 pub use run_io::RunIO;
 pub use scheduler::TaskScheduler;
 pub use spawn::spawn_child_agent;

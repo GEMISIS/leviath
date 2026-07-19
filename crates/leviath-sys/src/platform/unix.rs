@@ -23,7 +23,7 @@ pub(crate) fn terminate(pid: u32) -> bool {
     if pid == 0 {
         return false;
     }
-    use nix::sys::signal::{kill, Signal};
+    use nix::sys::signal::{Signal, kill};
     use nix::unistd::Pid;
     // Best-effort: any error (e.g. `ESRCH` when the process has already exited)
     // is intentionally ignored.

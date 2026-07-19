@@ -12,16 +12,16 @@ use std::fs::File;
 use std::io;
 
 use clap::Parser;
-use crossterm::terminal::{
-    disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
-};
 use crossterm::ExecutableCommand;
+use crossterm::terminal::{
+    EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
+};
 use ratatui::{Terminal, TerminalOptions, Viewport};
 use tracing::info;
 
 use leviath_cli::commands;
 use leviath_cli::commands::dashboard::{CrosstermEventSource, DashboardArgs, TerminalSetup};
-use leviath_cli::dispatch::{dispatch, Commands, RiskyExecutors};
+use leviath_cli::dispatch::{Commands, RiskyExecutors, dispatch};
 
 /// Leviath CLI - Agent framework with structured context windows
 #[derive(Parser)]

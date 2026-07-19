@@ -1,10 +1,10 @@
 //! Stage tab bar and graph view rendering.
 
+use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Paragraph, Tabs};
-use ratatui::Frame;
 
 use crate::commands::dashboard::graph::{GraphEdge, GraphTransitionInfo};
 use crate::commands::dashboard::helpers::truncate;
@@ -518,9 +518,9 @@ mod tests {
     use super::*;
     use crate::commands::dashboard::test_support::make_test_dashboard;
     use crate::runstate::{StageRecord, StageRunStatus};
+    use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use ratatui::layout::Rect;
-    use ratatui::Terminal;
     use std::collections::HashMap;
 
     fn make_test_agent(id: &str, status: AgentDisplayStatus) -> DashboardAgent {
@@ -1149,9 +1149,9 @@ mod tests {
         let dash = make_test_dashboard();
         let mut agent = make_test_agent("run-stale", AgentDisplayStatus::Active);
         agent.stage_index = 1; // run has moved on to stage 1 ("implement")
-                               // Stage 0 ("plan") record is stuck Active — simulating the bug where
-                               // on_stage_result was never called for an Interactive/InteractivePoints
-                               // stage.
+        // Stage 0 ("plan") record is stuck Active — simulating the bug where
+        // on_stage_result was never called for an Interactive/InteractivePoints
+        // stage.
         let stale_plan = make_stage_record("plan", StageRunStatus::Active);
         let line = dash.build_stage_tab_title(0, &stale_plan, &agent);
 

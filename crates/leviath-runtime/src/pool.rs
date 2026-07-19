@@ -103,7 +103,7 @@ mod tests {
     use crate::test_support::with_tracing;
     use leviath_core::blueprint::ModelConfig;
     use leviath_core::{
-        layout::RegionDefinition, region::RegionKind, Blueprint, ContextLayout, Stage,
+        Blueprint, ContextLayout, Stage, layout::RegionDefinition, region::RegionKind,
     };
 
     fn create_test_blueprint() -> Blueprint {

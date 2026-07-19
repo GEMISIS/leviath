@@ -3,12 +3,12 @@
 //! Provides file system and shell tools sandboxed to a working directory.
 
 use leviath_providers::Tool;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use tokio::process::Command;
-use tokio::time::{timeout, Duration};
+use tokio::time::{Duration, timeout};
 
 /// Context for tool execution — defines the sandbox root.
 pub struct ToolContext {
@@ -736,11 +736,11 @@ impl BuiltinTools {
         env_shell: Option<String>,
         shell_exists: &dyn Fn(&str) -> bool,
     ) -> (&'static str, &'static str) {
-        if let Some(shell) = env_shell {
-            if shell.ends_with("/zsh") || shell.ends_with("/bash") || shell.ends_with("/sh") {
-                let shell: &'static str = Box::leak(shell.into_boxed_str());
-                return (shell, "-c");
-            }
+        if let Some(shell) = env_shell
+            && (shell.ends_with("/zsh") || shell.ends_with("/bash") || shell.ends_with("/sh"))
+        {
+            let shell: &'static str = Box::leak(shell.into_boxed_str());
+            return (shell, "-c");
         }
         for &shell in &[
             "/bin/bash",
@@ -1178,10 +1178,12 @@ mod tests {
         )));
         let result = tools.resolve("../../etc/passwd");
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("escapes the working directory"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("escapes the working directory")
+        );
     }
 
     #[tokio::test]
@@ -1737,14 +1739,16 @@ mod tests {
                 BuiltinTools::detect_shell()
             });
         assert_eq!(flag, "-c");
-        assert!([
-            "/bin/bash",
-            "/usr/bin/bash",
-            "/bin/zsh",
-            "/usr/bin/zsh",
-            "/bin/sh"
-        ]
-        .contains(&shell));
+        assert!(
+            [
+                "/bin/bash",
+                "/usr/bin/bash",
+                "/bin/zsh",
+                "/usr/bin/zsh",
+                "/bin/sh"
+            ]
+            .contains(&shell)
+        );
     }
 
     // ── detect_shell_impl() — inject env and filesystem for full branch coverage ──

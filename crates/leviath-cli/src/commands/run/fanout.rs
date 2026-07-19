@@ -12,12 +12,12 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use bevy_ecs::prelude::Entity;
-use leviath_core::blueprint::{FanOutConfig, ModelConfig, WorkerFailurePolicy};
 use leviath_core::Blueprint;
+use leviath_core::blueprint::{FanOutConfig, ModelConfig, WorkerFailurePolicy};
 use leviath_package::AgentInstaller;
 use leviath_runtime::{
-    run_inference_loop_shared, AgentPool, AgentState, AgentStatus, ContextWindow, EngineHandle,
-    ParentRef, ToolResultsFuture,
+    AgentPool, AgentState, AgentStatus, ContextWindow, EngineHandle, ParentRef, ToolResultsFuture,
+    run_inference_loop_shared,
 };
 
 use super::io::RunIO;
@@ -156,10 +156,10 @@ fn agent_matches(bp: &Blueprint, needle: &str) -> bool {
         return true;
     }
     for key in ["tags", "capabilities"] {
-        if let Some(val) = bp.metadata.get(key) {
-            if metadata_value_contains(val, needle) {
-                return true;
-            }
+        if let Some(val) = bp.metadata.get(key)
+            && metadata_value_contains(val, needle)
+        {
+            return true;
         }
     }
     false
@@ -544,9 +544,9 @@ pub async fn run_fan_out_stage(
 mod tests {
     use super::*;
     use crate::tools::ToolRegistry;
+    use leviath_core::RegionKind;
     use leviath_core::blueprint::{ModelConfig, Stage, WorkerFailurePolicy};
     use leviath_core::layout::{ContextLayout, RegionDefinition};
-    use leviath_core::RegionKind;
 
     fn bp(name: &str) -> Blueprint {
         let layout = ContextLayout::new(
@@ -647,10 +647,12 @@ mod tests {
         registry.insert("alpha".to_string(), bp("alpha"));
         registry.insert("alto".to_string(), bp("alto"));
         // zero
-        assert!(discover_worker("zzz", &registry)
-            .unwrap_err()
-            .to_string()
-            .contains("matched no"));
+        assert!(
+            discover_worker("zzz", &registry)
+                .unwrap_err()
+                .to_string()
+                .contains("matched no")
+        );
         // ambiguous ("al" matches both), error lists sorted candidates
         let err = discover_worker("al", &registry).unwrap_err().to_string();
         assert!(err.contains("ambiguous"));
@@ -797,7 +799,7 @@ model = { models = [{ provider = "mock", model = "m" }] }
                 None if self.error_when_empty => {
                     return Err(leviath_providers::ProviderError::Other(
                         "worker boom".into(),
-                    ))
+                    ));
                 }
                 None => ("done".to_string(), vec![]),
             };
@@ -839,8 +841,8 @@ model = { models = [{ provider = "mock", model = "m" }] }
 
     /// Blueprint with a fan_out stage (worker_stage=worker) + merge stage.
     fn fanout_blueprint(config: FanOutConfig) -> Blueprint {
-        use leviath_core::layout::{ContextLayout, RegionDefinition};
         use leviath_core::RegionKind;
+        use leviath_core::layout::{ContextLayout, RegionDefinition};
         let layout = ContextLayout::new(
             vec![RegionDefinition::new(
                 "sys".into(),
@@ -1467,12 +1469,14 @@ model = { models = [{ provider = "mock", model = "m" }] }
         .unwrap();
         assert_eq!(outcome, FanOutOutcome::Merge("merge".to_string()));
         // No workers spawned.
-        assert!(engine
-            .read()
-            .await
-            .world()
-            .get::<SubAgentChildren>(parent)
-            .is_none());
+        assert!(
+            engine
+                .read()
+                .await
+                .world()
+                .get::<SubAgentChildren>(parent)
+                .is_none()
+        );
     }
 
     #[tokio::test]

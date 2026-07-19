@@ -159,12 +159,16 @@ mod tests {
         };
         let mut detector = RepetitionDetector::new(config);
 
-        assert!(detector
-            .record_call("read_file", r#"{"path":"src/main.rs"}"#)
-            .is_none());
-        assert!(detector
-            .record_call("read_file", r#"{"path":"src/main.rs"}"#)
-            .is_none());
+        assert!(
+            detector
+                .record_call("read_file", r#"{"path":"src/main.rs"}"#)
+                .is_none()
+        );
+        assert!(
+            detector
+                .record_call("read_file", r#"{"path":"src/main.rs"}"#)
+                .is_none()
+        );
 
         let nudge = detector.record_call("read_file", r#"{"path":"src/main.rs"}"#);
         assert!(nudge.is_some());
@@ -182,17 +186,23 @@ mod tests {
         detector.record_call("read_file", r#"{"path":"foo.py"}"#);
 
         // Productive call resets
-        assert!(detector
-            .record_call("write_file", r#"{"path":"foo.py","content":"x"}"#)
-            .is_none());
+        assert!(
+            detector
+                .record_call("write_file", r#"{"path":"foo.py","content":"x"}"#)
+                .is_none()
+        );
 
         // Read again — counter should be back to 1
-        assert!(detector
-            .record_call("read_file", r#"{"path":"foo.py"}"#)
-            .is_none());
-        assert!(detector
-            .record_call("read_file", r#"{"path":"foo.py"}"#)
-            .is_none());
+        assert!(
+            detector
+                .record_call("read_file", r#"{"path":"foo.py"}"#)
+                .is_none()
+        );
+        assert!(
+            detector
+                .record_call("read_file", r#"{"path":"foo.py"}"#)
+                .is_none()
+        );
 
         // Third read triggers nudge again
         let nudge = detector.record_call("read_file", r#"{"path":"foo.py"}"#);
@@ -210,9 +220,11 @@ mod tests {
 
         // 5 different read-only calls
         for i in 0..4 {
-            assert!(detector
-                .record_call("read_file", &format!(r#"{{"path":"file{i}.rs"}}"#))
-                .is_none());
+            assert!(
+                detector
+                    .record_call("read_file", &format!(r#"{{"path":"file{i}.rs"}}"#))
+                    .is_none()
+            );
         }
         let nudge = detector.record_call("list_dir", r#"{"path":"src/"}"#);
         assert!(nudge.is_some());
@@ -223,15 +235,21 @@ mod tests {
     fn test_different_arguments_dont_trigger_repeat() {
         let mut detector = RepetitionDetector::with_defaults();
 
-        assert!(detector
-            .record_call("read_file", r#"{"path":"a.rs"}"#)
-            .is_none());
-        assert!(detector
-            .record_call("read_file", r#"{"path":"b.rs"}"#)
-            .is_none());
-        assert!(detector
-            .record_call("read_file", r#"{"path":"c.rs"}"#)
-            .is_none());
+        assert!(
+            detector
+                .record_call("read_file", r#"{"path":"a.rs"}"#)
+                .is_none()
+        );
+        assert!(
+            detector
+                .record_call("read_file", r#"{"path":"b.rs"}"#)
+                .is_none()
+        );
+        assert!(
+            detector
+                .record_call("read_file", r#"{"path":"c.rs"}"#)
+                .is_none()
+        );
         // No nudge — all different args
     }
 
@@ -244,9 +262,11 @@ mod tests {
         };
         let mut detector = RepetitionDetector::new(config);
 
-        assert!(detector
-            .record_call("read_file", r#"{"path":"x.rs"}"#)
-            .is_none());
+        assert!(
+            detector
+                .record_call("read_file", r#"{"path":"x.rs"}"#)
+                .is_none()
+        );
         let nudge = detector.record_call("read_file", r#"{"path":"x.rs"}"#);
         assert!(nudge.is_some());
     }
@@ -260,12 +280,16 @@ mod tests {
         };
         let mut detector = RepetitionDetector::new(config);
 
-        assert!(detector
-            .record_call("read_file", r#"{"path":"x.rs"}"#)
-            .is_none());
-        assert!(detector
-            .record_call("read_file", r#"{"path":"x.rs"}"#)
-            .is_none());
+        assert!(
+            detector
+                .record_call("read_file", r#"{"path":"x.rs"}"#)
+                .is_none()
+        );
+        assert!(
+            detector
+                .record_call("read_file", r#"{"path":"x.rs"}"#)
+                .is_none()
+        );
     }
 
     #[test]
@@ -285,9 +309,11 @@ mod tests {
         detector.record_call("read_file", r#"{"path":"c.rs"}"#);
         detector.record_call("read_file", r#"{"path":"d.rs"}"#);
         // Only 2 in streak after reset, so no nudge
-        assert!(detector
-            .record_call("list_dir", r#"{"path":"src/"}"#)
-            .is_some()); // 3 = threshold
+        assert!(
+            detector
+                .record_call("list_dir", r#"{"path":"src/"}"#)
+                .is_some()
+        ); // 3 = threshold
     }
 
     #[test]
@@ -304,8 +330,10 @@ mod tests {
         // Unknown tool: not readonly, not productive — doesn't increment or reset streak
         detector.record_call("some_other_tool", r#"{}"#);
         // Streak is still 2
-        assert!(detector
-            .record_call("read_file", r#"{"path":"c.rs"}"#)
-            .is_some()); // 3 = threshold
+        assert!(
+            detector
+                .record_call("read_file", r#"{"path":"c.rs"}"#)
+                .is_some()
+        ); // 3 = threshold
     }
 }

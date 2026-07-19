@@ -21,7 +21,7 @@
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use crate::runstate::{run_dir, write_meta, RunMeta, RunStatus};
+use crate::runstate::{RunMeta, RunStatus, run_dir, write_meta};
 
 // ─── Value types (re-exported from `leviath-core`) ────────────
 //
@@ -30,8 +30,8 @@ use crate::runstate::{run_dir, write_meta, RunMeta, RunStatus};
 // them without depending on the CLI. Re-exported here so `crate::interaction::*`
 // paths resolve.
 pub use leviath_core::interaction::{
-    make_interaction_id, response_approved, response_as_choice, response_as_text, ApprovalScope,
-    BodyFormat, InteractionKind, InteractionRequest, InteractionResponse,
+    ApprovalScope, BodyFormat, InteractionKind, InteractionRequest, InteractionResponse,
+    make_interaction_id, response_approved, response_as_choice, response_as_text,
 };
 
 // ─── File paths ─────────────────────────────────────────────────────────────
@@ -142,10 +142,10 @@ fn poll_step(run_id: &str, req_id: &str, started: Instant, timeout: Option<Durat
         return PollStep::Answer(resp);
     }
 
-    if let Some(t) = timeout {
-        if started.elapsed() >= t {
-            return PollStep::TimedOut;
-        }
+    if let Some(t) = timeout
+        && started.elapsed() >= t
+    {
+        return PollStep::TimedOut;
     }
 
     PollStep::KeepWaiting
@@ -435,10 +435,11 @@ pub fn request_interaction_from_reader(
                     return InteractionResponse::choice(&req.id, 0);
                 }
                 let s = input.trim();
-                if let Ok(n) = s.parse::<usize>() {
-                    if n >= 1 && n <= req.options.len() {
-                        return InteractionResponse::choice(&req.id, n - 1);
-                    }
+                if let Ok(n) = s.parse::<usize>()
+                    && n >= 1
+                    && n <= req.options.len()
+                {
+                    return InteractionResponse::choice(&req.id, n - 1);
                 }
                 println!("Please enter a number between 1 and {}.", req.options.len());
             }

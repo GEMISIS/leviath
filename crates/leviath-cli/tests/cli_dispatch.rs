@@ -237,13 +237,14 @@ fn add_subcommand_installs_from_local_directory_and_exits_zero() {
         "stderr: {}",
         String::from_utf8_lossy(&output.stderr)
     );
-    assert!(tmp
-        .path()
-        .join(".leviath")
-        .join("agents")
-        .join("coder")
-        .join("agent.leviath")
-        .exists());
+    assert!(
+        tmp.path()
+            .join(".leviath")
+            .join("agents")
+            .join("coder")
+            .join("agent.leviath")
+            .exists()
+    );
 }
 
 // ─── remove ──────────────────────────────────────────────────────────────

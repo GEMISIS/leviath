@@ -9,9 +9,10 @@ use tokio::sync::Mutex;
 
 use crate::config::{Config, ToolPolicy};
 use crate::runstate::{self, RunMeta, RunStatus, StageRecord, StageRunStatus};
-use crate::tools::{resolve_policy, ToolRegistry};
+use crate::tools::{ToolRegistry, resolve_policy};
 
-use super::executor::{run_stage_loop, StageCallbacks, StageContext};
+use super::WorkerArgs;
+use super::executor::{StageCallbacks, StageContext, run_stage_loop};
 use super::helpers::{
     build_context_snapshot, generate_title, initialize_context_window, record_stage_log,
     record_stage_output, write_context_snapshot_if_bg,
@@ -19,7 +20,6 @@ use super::helpers::{
 use super::io::{ConsoleIO, RunIO};
 use super::manifest::{find_manifest, parse_manifest};
 use super::session::build_provider_registry_from_config;
-use super::WorkerArgs;
 
 /// Tracks the current stage index for tool-activity logging from the executor closure.
 type CurrentStageIdx = Arc<Mutex<usize>>;
@@ -129,7 +129,7 @@ async fn dispatch_tool_calls(
             }
             ToolPolicy::Ask => {
                 use crate::interaction::{
-                    request_tool_approval_background, ApprovalScope, TOOL_APPROVAL_TIMEOUT,
+                    ApprovalScope, TOOL_APPROVAL_TIMEOUT, request_tool_approval_background,
                 };
                 let (approved, scope) = request_tool_approval_background(
                     &state.run_id,
@@ -579,13 +579,12 @@ async fn maybe_track_file(
 
     // Upsert into the HashMap region
     let mut guard = context_window.lock().await;
-    if let Some(window) = guard.as_mut() {
-        if let Some(region) = window.get_region_mut(&ft.region) {
-            if matches!(region.kind, leviath_core::RegionKind::HashMap { .. }) {
-                let _ = region.upsert_by_key(&path, file_content, tokens);
-                return replacement_msg;
-            }
-        }
+    if let Some(window) = guard.as_mut()
+        && let Some(region) = window.get_region_mut(&ft.region)
+        && matches!(region.kind, leviath_core::RegionKind::HashMap { .. })
+    {
+        let _ = region.upsert_by_key(&path, file_content, tokens);
+        return replacement_msg;
     }
 
     // Region not found or not HashMap — return original result
@@ -680,7 +679,7 @@ impl leviath_runtime::taint::GatePrompt for WorkerGatePrompt {
     ) -> leviath_runtime::taint::GateResolution {
         use super::dynamic_interaction::{gate_block_info, gate_prompt_args, map_gate_approval};
         use crate::interaction::{
-            request_tool_approval_background, ApprovalScope, TOOL_APPROVAL_TIMEOUT,
+            ApprovalScope, TOOL_APPROVAL_TIMEOUT, request_tool_approval_background,
         };
         use leviath_runtime::taint::GateResolution;
 
@@ -935,15 +934,15 @@ impl<'a> StageCallbacks for WorkerCallbacks<'a> {
             self.meta.cache_write_tokens += resp.tokens_used.cache_write_tokens;
 
             // Carry the final response forward so the next stage sees the previous stage's output
-            if !resp.content.is_empty() {
-                if let Some(mut window) = engine.world_mut().get_mut::<ContextWindow>(entity) {
-                    let tokens = resp.content.len() / 4 + 1;
-                    let _ = window.add_to_region(
-                        "conversation",
-                        format!("Assistant ({}): {}", stage_name, resp.content),
-                        tokens,
-                    );
-                }
+            if !resp.content.is_empty()
+                && let Some(mut window) = engine.world_mut().get_mut::<ContextWindow>(entity)
+            {
+                let tokens = resp.content.len() / 4 + 1;
+                let _ = window.add_to_region(
+                    "conversation",
+                    format!("Assistant ({}): {}", stage_name, resp.content),
+                    tokens,
+                );
             }
         }
 
@@ -1113,11 +1112,11 @@ pub(crate) fn post_tool_context_sync(
     };
     if to_entity {
         // shared→entity: merge context tool writes into entity CW
-        if let Some(shared_cw) = guard.as_ref() {
-            if let Some(mut entity_cw) = world.get_mut::<leviath_runtime::ContextWindow>(ent) {
-                entity_cw.regions = shared_cw.regions.clone();
-                entity_cw.current_tokens = shared_cw.current_tokens;
-            }
+        if let Some(shared_cw) = guard.as_ref()
+            && let Some(mut entity_cw) = world.get_mut::<leviath_runtime::ContextWindow>(ent)
+        {
+            entity_cw.regions = shared_cw.regions.clone();
+            entity_cw.current_tokens = shared_cw.current_tokens;
         }
     } else if let Some(entity_cw) = world.get::<leviath_runtime::ContextWindow>(ent) {
         // entity→shared: update shared copy with engine's changes
@@ -5647,11 +5646,13 @@ for line in sys.stdin:
         let guard = cw.lock().await;
         let region = guard.as_ref().unwrap().get_region("files").unwrap();
         // big.txt was truncated; small.txt kept verbatim.
-        assert!(region
-            .get_by_key("big.txt")
-            .unwrap()
-            .content
-            .contains("truncated"));
+        assert!(
+            region
+                .get_by_key("big.txt")
+                .unwrap()
+                .content
+                .contains("truncated")
+        );
         assert_eq!(region.get_by_key("small.txt").unwrap().content, "tiny");
 
         let _ = std::fs::remove_dir_all(&tmp);

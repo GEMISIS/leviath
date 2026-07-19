@@ -242,20 +242,18 @@ impl Config {
     /// Validate API key formats and return warnings for suspicious keys.
     pub fn validate_keys(&self) -> Vec<String> {
         let mut warnings = Vec::new();
-        if let Some(ref key) = self.providers.anthropic_api_key {
-            if !key.starts_with("sk-ant-") {
-                warnings.push(
-                    "Anthropic API key doesn't start with 'sk-ant-' — verify it's correct"
-                        .to_string(),
-                );
-            }
+        if let Some(ref key) = self.providers.anthropic_api_key
+            && !key.starts_with("sk-ant-")
+        {
+            warnings.push(
+                "Anthropic API key doesn't start with 'sk-ant-' — verify it's correct".to_string(),
+            );
         }
-        if let Some(ref key) = self.providers.openai_api_key {
-            if !key.starts_with("sk-") {
-                warnings.push(
-                    "OpenAI API key doesn't start with 'sk-' — verify it's correct".to_string(),
-                );
-            }
+        if let Some(ref key) = self.providers.openai_api_key
+            && !key.starts_with("sk-")
+        {
+            warnings
+                .push("OpenAI API key doesn't start with 'sk-' — verify it's correct".to_string());
         }
         warnings
     }
@@ -693,10 +691,12 @@ google_api_key = "AIza-existing"
         let result = Config::default().save_to_path(&path);
 
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("Failed to write config"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("Failed to write config")
+        );
     }
 
     #[test]
@@ -707,10 +707,12 @@ google_api_key = "AIza-existing"
         let path = blocking_file.join("config.toml");
         let result = Config::default().save_to_path(&path);
         assert!(result.is_err());
-        assert!(result
-            .unwrap_err()
-            .to_string()
-            .contains("Failed to create config directory"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("Failed to create config directory")
+        );
     }
 
     #[test]

@@ -1,12 +1,12 @@
 //! Input/prompt pane and review body rendering.
 
+use ratatui::Frame;
 use ratatui::layout::{Margin, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{
     Block, BorderType, Borders, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, Wrap,
 };
-use ratatui::Frame;
 
 use crate::commands::dashboard::helpers::truncate;
 use crate::commands::dashboard::state::Dashboard;
@@ -217,9 +217,9 @@ impl Dashboard {
 mod tests {
     use super::*;
     use crate::commands::dashboard::test_support::make_test_dashboard;
+    use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use ratatui::layout::Rect;
-    use ratatui::Terminal;
 
     fn make_test_agent(id: &str, status: AgentDisplayStatus) -> DashboardAgent {
         DashboardAgent {

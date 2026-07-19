@@ -6,9 +6,9 @@
 //! `leviath-cli`.
 
 use async_trait::async_trait;
+use leviath_core::Stage;
 use leviath_core::blueprint::StageResult;
 use leviath_core::run_meta::RegionSnapshot;
-use leviath_core::Stage;
 
 /// Abstraction over I/O for the stage executor.
 #[async_trait]

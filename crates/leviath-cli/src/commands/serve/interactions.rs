@@ -88,19 +88,19 @@ pub(super) async fn send_message(
     })?;
 
     // Write the message as a pending interaction response if the agent is waiting
-    if meta.status == RunStatus::WaitingInput || meta.status == RunStatus::CompleteInteractive {
-        if let Some(req) = interaction::read_request(&id) {
-            let resp = interaction::InteractionResponse::text(&req.id, &body.message);
-            interaction::write_response(&id, &resp).map_err(|e| {
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(ErrorResponse {
-                        error: format!("Failed to write response: {}", e),
-                    }),
-                )
-            })?;
-            return Ok(StatusCode::ACCEPTED);
-        }
+    if (meta.status == RunStatus::WaitingInput || meta.status == RunStatus::CompleteInteractive)
+        && let Some(req) = interaction::read_request(&id)
+    {
+        let resp = interaction::InteractionResponse::text(&req.id, &body.message);
+        interaction::write_response(&id, &resp).map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse {
+                    error: format!("Failed to write response: {}", e),
+                }),
+            )
+        })?;
+        return Ok(StatusCode::ACCEPTED);
     }
 
     // If not waiting, append to the run's output log as a user message
@@ -116,13 +116,13 @@ pub(super) async fn send_message(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::Router;
     use axum::body::Body;
     use axum::http::Request;
     use axum::routing::{get, post};
-    use axum::Router;
     use tower::ServiceExt;
 
-    use crate::runstate::{create_run, RunMeta, RunStatus};
+    use crate::runstate::{RunMeta, RunStatus, create_run};
 
     fn unique_run_id(prefix: &str) -> String {
         use std::time::{SystemTime, UNIX_EPOCH};
@@ -367,10 +367,12 @@ mod tests {
                     .await
                     .unwrap();
                 let val: serde_json::Value = serde_json::from_slice(&body).unwrap();
-                assert!(val["error"]
-                    .as_str()
-                    .unwrap()
-                    .contains("Failed to write interaction response"));
+                assert!(
+                    val["error"]
+                        .as_str()
+                        .unwrap()
+                        .contains("Failed to write interaction response")
+                );
 
                 let _ = std::fs::remove_dir_all(runstate::run_dir(&run_id));
             },
@@ -563,10 +565,12 @@ mod tests {
                     .await
                     .unwrap();
                 let val: serde_json::Value = serde_json::from_slice(&body).unwrap();
-                assert!(val["error"]
-                    .as_str()
-                    .unwrap()
-                    .contains("Failed to write response"));
+                assert!(
+                    val["error"]
+                        .as_str()
+                        .unwrap()
+                        .contains("Failed to write response")
+                );
 
                 let _ = std::fs::remove_dir_all(runstate::run_dir(&run_id));
             },

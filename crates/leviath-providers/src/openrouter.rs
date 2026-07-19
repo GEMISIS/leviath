@@ -3,7 +3,7 @@
 //! OpenRouter provides access to multiple models through a unified API.
 //! Uses OpenAI-compatible format with additional headers.
 
-use crate::openai_compat::{parse_openai_response, send_chat_request, OpenAiSseStream};
+use crate::openai_compat::{OpenAiSseStream, parse_openai_response, send_chat_request};
 use crate::provider::{
     InferenceRequest, InferenceResponse, ModelCapabilities, ModelInfo, Provider, ProviderConfig,
     ProviderError, Result, StreamChunk,
@@ -904,11 +904,13 @@ mod tests {
     async fn infer_stream_connection_refused_returns_error() {
         let provider = provider_with_url("http://127.0.0.1:19997".to_string());
         let result = provider.infer_stream(simple_request()).await;
-        assert!(result
-            .err()
-            .unwrap()
-            .to_string()
-            .contains("Request failed:"));
+        assert!(
+            result
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("Request failed:")
+        );
     }
 
     #[tokio::test]

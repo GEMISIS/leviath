@@ -17,8 +17,8 @@ pub use types::{AppState, ServeArgs, ServerEvent};
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use axum::routing::{get, post};
 use axum::Router;
+use axum::routing::{get, post};
 use tokio::sync::broadcast;
 use tower_http::cors::{Any, CorsLayer};
 
@@ -766,7 +766,7 @@ prompt = "Run"
         crate::runstate::with_isolated_runs_dir_async(
             "test_submit_interaction_full_router",
             |_d| async move {
-                use crate::runstate::{create_run, RunMeta};
+                use crate::runstate::{RunMeta, create_run};
 
                 let run_id = format!(
                     "test-modrs-int-{}-{}",

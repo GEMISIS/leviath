@@ -161,11 +161,11 @@ fn count_files_with(
     read_dir: &dyn Fn(&Path) -> std::io::Result<std::fs::ReadDir>,
 ) -> usize {
     let mut count = 0;
-    if dir.is_dir() {
-        if let Ok(entries) = read_dir(dir) {
-            for entry in entries.filter_map(|e| e.ok()) {
-                count += count_path(&entry.path(), read_dir);
-            }
+    if dir.is_dir()
+        && let Ok(entries) = read_dir(dir)
+    {
+        for entry in entries.filter_map(|e| e.ok()) {
+            count += count_path(&entry.path(), read_dir);
         }
     }
     count
