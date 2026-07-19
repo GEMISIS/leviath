@@ -8,6 +8,59 @@ use leviath_core::{Blueprint, ContextLayout, EvictionStrategy, Region, RegionKin
 
 use crate::{AgentEngine, ContextWindow};
 
+/// Initialize a [`ContextWindow`] in place from a blueprint: add each layout
+/// region plus the infra `tool_results`/`conversation` regions, and seed the
+/// task text into a pinned region. Pure over the window (no engine/entity), so
+/// both the imperative engine and the ECS pipeline's spawner can share it.
+pub fn init_window(window: &mut ContextWindow, blueprint: &Blueprint, task: &str) {
+    for region_def in &blueprint.context_layout.regions {
+        let region = Region::new(
+            region_def.name.clone(),
+            region_def.kind.clone(),
+            region_def.max_tokens,
+        );
+        window.add_region(region);
+    }
+
+    if window.get_region("tool_results").is_none() {
+        let tool_region = Region::new("tool_results".to_string(), RegionKind::Temporary, 5000);
+        window.add_region(tool_region);
+    }
+
+    if window.get_region("conversation").is_none() {
+        let conv_region = Region::new(
+            "conversation".to_string(),
+            RegionKind::SlidingWindow {
+                max_items: 50,
+                eviction_strategy: EvictionStrategy::PerItem,
+            },
+            10000,
+        );
+        window.add_region(conv_region);
+    }
+
+    // Seed the task text into a pinned region.
+    // Prefer a region explicitly named "task"; fall back to the first pinned region.
+    let task_region_name = blueprint
+        .context_layout
+        .regions
+        .iter()
+        .find(|r| r.name == "task" && matches!(r.kind, RegionKind::Pinned))
+        .or_else(|| {
+            blueprint
+                .context_layout
+                .regions
+                .iter()
+                .find(|r| matches!(r.kind, RegionKind::Pinned))
+        })
+        .map(|r| r.name.clone());
+
+    if let Some(region_name) = task_region_name {
+        let task_tokens = task.len() / 4 + 1;
+        let _ = window.add_to_region(&region_name, task.to_string(), task_tokens);
+    }
+}
+
 /// Initialize context window regions on an entity from the blueprint.
 pub fn initialize_context_window(
     engine: &mut AgentEngine,
@@ -16,52 +69,7 @@ pub fn initialize_context_window(
     task: &str,
 ) {
     if let Some(mut window) = engine.world_mut().get_mut::<ContextWindow>(entity) {
-        for region_def in &blueprint.context_layout.regions {
-            let region = Region::new(
-                region_def.name.clone(),
-                region_def.kind.clone(),
-                region_def.max_tokens,
-            );
-            window.add_region(region);
-        }
-
-        if window.get_region("tool_results").is_none() {
-            let tool_region = Region::new("tool_results".to_string(), RegionKind::Temporary, 5000);
-            window.add_region(tool_region);
-        }
-
-        if window.get_region("conversation").is_none() {
-            let conv_region = Region::new(
-                "conversation".to_string(),
-                RegionKind::SlidingWindow {
-                    max_items: 50,
-                    eviction_strategy: EvictionStrategy::PerItem,
-                },
-                10000,
-            );
-            window.add_region(conv_region);
-        }
-
-        // Seed the task text into a pinned region.
-        // Prefer a region explicitly named "task"; fall back to the first pinned region.
-        let task_region_name = blueprint
-            .context_layout
-            .regions
-            .iter()
-            .find(|r| r.name == "task" && matches!(r.kind, RegionKind::Pinned))
-            .or_else(|| {
-                blueprint
-                    .context_layout
-                    .regions
-                    .iter()
-                    .find(|r| matches!(r.kind, RegionKind::Pinned))
-            })
-            .map(|r| r.name.clone());
-
-        if let Some(region_name) = task_region_name {
-            let task_tokens = task.len() / 4 + 1;
-            let _ = window.add_to_region(&region_name, task.to_string(), task_tokens);
-        }
+        init_window(&mut window, blueprint, task);
     }
 }
 
