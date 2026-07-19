@@ -207,6 +207,35 @@ impl PipelineWorld {
             .map(|s| s.status.clone())
     }
 
+    /// Set an agent's status and wake the driver. Returns `false` if the agent no
+    /// longer exists. The async-starting dispatchers only act on `Active` agents,
+    /// so this is how the world pauses/resumes/cancels an agent — a non-`Active`
+    /// agent is simply data the systems skip until it is `Active` again.
+    pub fn set_status(&mut self, entity: Entity, status: AgentStatus) -> bool {
+        let Some(mut state) = self.world.get_mut::<AgentState>(entity) else {
+            return false;
+        };
+        state.status = status;
+        self.wake.notify_one();
+        true
+    }
+
+    /// Pause an agent (it finishes any in-flight step, then stops before starting
+    /// new work). Returns `false` if the agent no longer exists.
+    pub fn pause(&mut self, entity: Entity) -> bool {
+        self.set_status(entity, AgentStatus::Idle)
+    }
+
+    /// Resume a paused agent.
+    pub fn resume(&mut self, entity: Entity) -> bool {
+        self.set_status(entity, AgentStatus::Active)
+    }
+
+    /// Cancel an agent (it stops starting new work; in-flight results still land).
+    pub fn cancel(&mut self, entity: Entity) -> bool {
+        self.set_status(entity, AgentStatus::Cancelled)
+    }
+
     /// Run one schedule tick over every agent.
     pub fn tick(&mut self) {
         self.schedule.run(&mut self.world);
@@ -628,6 +657,45 @@ mod tests {
     async fn agent_status_is_none_for_unknown_entity() {
         let world = build_world(registry_with(vec![]));
         assert_eq!(world.agent_status(Entity::from_raw(999)), None);
+    }
+
+    #[tokio::test]
+    async fn paused_agent_does_not_progress_until_resumed() {
+        let mut world = build_world(registry_with(vec![
+            text("t1"),
+            text("t2"),
+            text("t3"),
+            text("t4"),
+        ]));
+        let e = spawn(&mut world);
+        assert!(world.pause(e));
+
+        world.run_until_idle(30).await;
+        // Paused ⇒ parked as Idle, never inferred.
+        assert_eq!(world.agent_status(e), Some(AgentStatus::Idle));
+
+        assert!(world.resume(e));
+        world.run_until_idle(30).await;
+        assert_eq!(world.agent_status(e), Some(AgentStatus::Complete));
+    }
+
+    #[tokio::test]
+    async fn cancelled_agent_stops_progressing() {
+        let mut world = build_world(registry_with(vec![with_tool("c1", "do"), text("done")]));
+        let e = spawn(&mut world);
+        assert!(world.cancel(e));
+
+        world.run_until_idle(20).await;
+
+        assert_eq!(world.agent_status(e), Some(AgentStatus::Cancelled));
+    }
+
+    #[tokio::test]
+    async fn status_ops_return_false_for_unknown_entity() {
+        let mut world = build_world(registry_with(vec![]));
+        assert!(!world.pause(Entity::from_raw(999)));
+        assert!(!world.resume(Entity::from_raw(999)));
+        assert!(!world.cancel(Entity::from_raw(999)));
     }
 
     #[tokio::test]
