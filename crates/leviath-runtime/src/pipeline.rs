@@ -21,6 +21,7 @@ use crate::components::{AgentState, AgentStatus, ContextWindow, InferenceConfig}
 use crate::engine::ProviderRegistry;
 use crate::inference_bridge::{InferenceJob, InferenceOutcome, run_inference_job};
 use crate::inference_pool::InferencePools;
+use crate::tool_bridge::{BoxedToolExec, ToolJob};
 
 // ─── Phase marker components (an agent is in exactly one) ────────────────────
 
@@ -254,6 +255,60 @@ pub fn process_response(
         } else {
             e.insert(ReadyForTools);
         }
+    }
+}
+
+/// The agent's tool batch has been handed to the tool lane; it is waiting for
+/// the results (which the tool-collect system will apply).
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AwaitingTools;
+
+/// Provides a per-agent tool-execution closure. The concrete implementation
+/// (in the CLI) holds each agent's tool registry, workdir, and permission
+/// policy; the pipeline stays agnostic to *how* tools run. `exec_for` returns a
+/// boxed closure the tool worker runs off the tick.
+pub trait ToolService: Send + Sync {
+    /// Build the closure that runs `calls` for `entity`, resolving `(id, result)`
+    /// pairs.
+    fn exec_for(&self, entity: Entity, calls: Vec<leviath_providers::ToolCall>) -> BoxedToolExec;
+}
+
+/// The tool service, as a world resource.
+#[derive(Resource, Clone)]
+pub struct ToolServiceRes(pub Arc<dyn ToolService>);
+
+/// The job sender feeding the tool lane, as a world resource.
+#[derive(Resource, Clone)]
+pub struct ToolStage(pub UnboundedSender<ToolJob>);
+
+/// Tool-dispatch system: for each `ReadyForTools` agent, turn its stored tool
+/// calls into a job for the (sequential) tool lane and move it to
+/// `AwaitingTools`. The lane serializes execution, so there is no permit gate
+/// here — every ready agent is enqueued and processed in turn.
+pub fn dispatch_tools(
+    agents: Query<(Entity, &crate::components::InferenceResult), With<ReadyForTools>>,
+    service: Res<ToolServiceRes>,
+    stage: Res<ToolStage>,
+    mut commands: Commands,
+) {
+    for (entity, result) in agents.iter() {
+        let calls: Vec<leviath_providers::ToolCall> = result
+            .tool_calls
+            .iter()
+            .map(|c| leviath_providers::ToolCall {
+                id: c.tool_id.clone(),
+                name: c.name.clone(),
+                arguments: c.arguments.clone(),
+            })
+            .collect();
+        let exec = service.0.exec_for(entity, calls);
+        // The lane worker is alive for the world's lifetime; a failed send would
+        // only happen during shutdown, where dropping the job is fine.
+        let _ = stage.0.send(ToolJob { entity, exec });
+        commands
+            .entity(entity)
+            .remove::<ReadyForTools>()
+            .insert(AwaitingTools);
     }
 }
 
@@ -619,5 +674,47 @@ mod tests {
         run_process(&mut world);
         assert!(world.get::<ReadyForTransition>(e).is_some());
         assert!(world.get::<ReadyForTools>(e).is_none());
+    }
+
+    // ── tool-dispatch ──
+
+    /// A tool service that echoes each call as `(id, "ran <name>")`.
+    struct EchoService;
+    impl ToolService for EchoService {
+        fn exec_for(
+            &self,
+            _entity: Entity,
+            calls: Vec<leviath_providers::ToolCall>,
+        ) -> BoxedToolExec {
+            Box::new(move || {
+                Box::pin(async move {
+                    calls
+                        .into_iter()
+                        .map(|c| (c.id, format!("ran {}", c.name)))
+                        .collect()
+                })
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn dispatch_tools_enqueues_runnable_job_and_advances() {
+        let (jtx, mut jrx) = mpsc::unbounded_channel();
+        let mut world = World::new();
+        world.insert_resource(ToolServiceRes(Arc::new(EchoService)));
+        world.insert_resource(ToolStage(jtx));
+        let e = world.spawn((infer_result(true), ReadyForTools)).id();
+
+        let mut s = Schedule::default();
+        s.add_systems(dispatch_tools);
+        s.run(&mut world);
+
+        assert!(world.get::<AwaitingTools>(e).is_some());
+        assert!(world.get::<ReadyForTools>(e).is_none());
+        let job = jrx.try_recv().expect("job enqueued");
+        assert_eq!(job.entity, e);
+        // Run the produced closure (covers the service's exec path).
+        let results = (job.exec)().await;
+        assert_eq!(results, vec![("t".to_string(), "ran n".to_string())]);
     }
 }
