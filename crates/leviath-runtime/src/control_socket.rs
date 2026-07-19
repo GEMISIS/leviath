@@ -19,6 +19,7 @@ use tokio::sync::oneshot;
 
 use crate::components::AgentStatus;
 use crate::host::ControlOp;
+use leviath_core::interaction::{InteractionRequest, InteractionResponse};
 
 /// A control request over the wire. Agents are addressed by run id (the stable
 /// id), except `Message`, which targets an agent id.
@@ -57,6 +58,18 @@ pub enum ControlRequest {
         #[serde(default)]
         target_region: Option<String>,
     },
+    /// List open interactions awaiting an answer.
+    ListInteractions,
+    /// Answer an open interaction.
+    AnswerInteraction {
+        /// The answer (its `request_id` selects the interaction).
+        response: InteractionResponse,
+    },
+    /// Cancel an open interaction.
+    CancelInteraction {
+        /// The interaction id to cancel.
+        request_id: String,
+    },
 }
 
 /// A control response over the wire.
@@ -77,6 +90,11 @@ pub enum ControlResponse {
     List {
         /// `(run_id, status)` pairs.
         runs: Vec<(String, AgentStatus)>,
+    },
+    /// A listing of open interactions.
+    Interactions {
+        /// `(agent_id, request)` pairs.
+        interactions: Vec<(String, InteractionRequest)>,
     },
     /// The request could not be parsed.
     Error {
@@ -137,6 +155,27 @@ async fn dispatch(req: ControlRequest, op_tx: &UnboundedSender<ControlOp>) -> Co
                 target_region,
                 reply,
             });
+            ControlResponse::Ok {
+                ok: rx.await.unwrap_or(false),
+            }
+        }
+        ControlRequest::ListInteractions => {
+            let (reply, rx) = oneshot::channel();
+            let _ = op_tx.send(ControlOp::ListInteractions { reply });
+            ControlResponse::Interactions {
+                interactions: rx.await.unwrap_or_default(),
+            }
+        }
+        ControlRequest::AnswerInteraction { response } => {
+            let (reply, rx) = oneshot::channel();
+            let _ = op_tx.send(ControlOp::AnswerInteraction { response, reply });
+            ControlResponse::Ok {
+                ok: rx.await.unwrap_or(false),
+            }
+        }
+        ControlRequest::CancelInteraction { request_id } => {
+            let (reply, rx) = oneshot::channel();
+            let _ = op_tx.send(ControlOp::CancelInteraction { request_id, reply });
             ControlResponse::Ok {
                 ok: rx.await.unwrap_or(false),
             }
@@ -247,11 +286,16 @@ mod tests {
                     | ControlOp::Cancel { reply, .. } => {
                         let _ = reply.send(true);
                     }
-                    ControlOp::Message { reply, .. } => {
+                    ControlOp::Message { reply, .. }
+                    | ControlOp::AnswerInteraction { reply, .. }
+                    | ControlOp::CancelInteraction { reply, .. } => {
                         let _ = reply.send(true);
                     }
                     ControlOp::List { reply } => {
                         let _ = reply.send(vec![("run-a".to_string(), AgentStatus::Active)]);
+                    }
+                    ControlOp::ListInteractions { reply } => {
+                        let _ = reply.send(vec![]);
                     }
                 }
             }
@@ -307,9 +351,26 @@ mod tests {
                 content: "hi".to_string(),
                 target_region: None,
             },
+            ControlRequest::AnswerInteraction {
+                response: InteractionResponse::text("q1", "yes"),
+            },
+            ControlRequest::CancelInteraction {
+                request_id: "q1".to_string(),
+            },
         ] {
             assert_eq!(round_trip(&req).await, ControlResponse::Ok { ok: true });
         }
+    }
+
+    #[tokio::test]
+    async fn list_interactions_round_trips() {
+        let resp = round_trip(&ControlRequest::ListInteractions).await;
+        assert_eq!(
+            resp,
+            ControlResponse::Interactions {
+                interactions: vec![]
+            }
+        );
     }
 
     #[tokio::test]

@@ -39,7 +39,7 @@ pub enum BodyFormat {
 }
 
 /// A pending interaction request written by the worker.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct InteractionRequest {
     /// Unique ID for this request (uuid-lite: timestamp + stage index).
     pub id: String,
@@ -220,7 +220,7 @@ pub enum ApprovalScope {
 }
 
 /// A response written by the dashboard (or `lev respond`) to answer the worker.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct InteractionResponse {
     /// Must match `InteractionRequest.id`.
     pub request_id: String,
