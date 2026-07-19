@@ -21,6 +21,7 @@ pub mod scheduler;
 pub mod spawn;
 pub mod systems;
 pub mod taint;
+pub mod tool_bridge;
 pub mod tool_source;
 // test_support.rs gates itself with an inner `#![cfg(test)]` attribute, so no
 // `#[cfg(test)]` is needed here (adding one would trigger clippy's
@@ -44,3 +45,4 @@ pub use run_io::RunIO;
 pub use scheduler::TaskScheduler;
 pub use spawn::spawn_child_agent;
 pub use taint::TaintGate;
+pub use tool_bridge::{BoxedToolExec, ToolExecFuture, ToolJob, ToolOutcome, tool_worker};
