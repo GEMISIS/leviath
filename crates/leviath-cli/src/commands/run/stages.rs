@@ -2909,10 +2909,10 @@ mod tests {
     #[tokio::test]
     async fn interactive_stage_tools_foreground_completes_one_turn() {
         // Exercises the `has_tools = true` branch of `run_interactive_stage`:
-        //   • run_inference_loop_filtered succeeds → lines 76-112 (including the
-        //     `if let Some(mut window)` at line 105 whose `}` at line 112 was a gap)
-        //   • foreground path for user input → empty → loop breaks at line 177
-        // No meta/run_id → takes the foreground input path (line 172).
+        //   • run_inference_loop_filtered succeeds → the `if let Some(mut window)`
+        //     context-sync branch
+        //   • foreground path for user input → empty → loop breaks
+        // No meta/run_id → takes the foreground input path.
         let bp = make_blueprint(vec![make_stage("main")]);
         let (mut engine, _pool, entity) = make_engine_and_entity(&bp, "Response");
         let mut io = EmptyInputIO;

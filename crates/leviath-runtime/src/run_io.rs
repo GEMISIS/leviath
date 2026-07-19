@@ -1,6 +1,6 @@
 //! Abstraction over I/O for the stage executor.
 //!
-//! The trait lives in `leviath-runtime` so the relocated stage engine can talk
+//! The trait lives in `leviath-runtime` so the stage engine can talk
 //! to it without depending on the CLI. Concrete implementations
 //! (`ConsoleIO`, the foreground/worker adapters, and the test `MockIO`) live in
 //! `leviath-cli`.

@@ -126,7 +126,7 @@ pub async fn generate_title(
     }
 }
 
-// `initialize_context_window` + `swap_context_layout` moved into
+// `initialize_context_window` + `swap_context_layout` live in
 // `leviath-runtime::context_setup` (pure engine/context operations, no CLI
 // dependency). Re-exported so `super::helpers::...` /
 // `crate::commands::run::helpers::...` call sites keep resolving.

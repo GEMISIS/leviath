@@ -3,7 +3,7 @@
 use crate::config::Config;
 use leviath_runtime::ProviderRegistry;
 
-// `ProviderCreds` + `build_provider_registry(&[ProviderCreds])` moved into
+// `ProviderCreds` + `build_provider_registry(&[ProviderCreds])` live in
 // `leviath-runtime` (plain data + provider instantiation, no `Config`
 // dependency). Re-exported here so `commands::run`'s public re-export and all
 // existing call sites keep resolving. The `Config`-based translators
@@ -660,9 +660,6 @@ mod tests {
         assert_eq!(ollama.base_url.as_deref(), Some("http://custom:11434"));
         assert!(ollama.api_key.is_none());
     }
-
-    // `build_provider_registry_from_creds_slice` moved with
-    // `build_provider_registry` into `leviath-runtime::provider_creds`.
 
     // ─── resolve_task: multiline file content ───────────────────────────
 

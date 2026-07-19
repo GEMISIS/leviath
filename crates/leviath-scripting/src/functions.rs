@@ -32,7 +32,7 @@ pub fn register_functions(engine: &mut Engine) {
             .collect()
     });
 
-    // Token counting (approximate for now)
+    // Token counting (approximate)
     engine.register_fn("count_tokens", |text: &str| -> i64 {
         text.len().div_ceil(4) as i64
     });

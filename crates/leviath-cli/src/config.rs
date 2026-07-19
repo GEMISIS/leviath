@@ -1348,8 +1348,8 @@ max_output_tokens = 2048
         // `Drop` always takes the `None => remove_var(..)` arm. This test
         // seeds both vars with sentinel values first, so `Drop` must take the
         // `Some(path) => set_var(..)` arm instead, restoring them rather than
-        // removing them. The lock is held continuously (moved into the guard
-        // itself) so no concurrently-running test elsewhere in the crate can
+        // removing them. The lock is held continuously (by the guard itself)
+        // so no concurrently-running test elsewhere in the crate can
         // observe or clobber the sentinel values in between.
         let lock = CONFIG_PATH_ENV_LOCK
             .lock()

@@ -5,9 +5,6 @@
 //! Subcommands:
 //!   coverage                    Gate every workspace package at a hard 100%.
 //!   coverage --package <pkg>    Gate just one package (the CI per-package fan-out).
-//!
-//! The zero-suppression policy (no `#[cfg(not(test))]`, no tarpaulin/lcov/grcov
-//! markers) is enforced separately by ast-grep — see `sgconfig.yml`/`.sgrules/`.
 
 mod coverage;
 

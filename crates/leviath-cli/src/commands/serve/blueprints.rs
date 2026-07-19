@@ -658,7 +658,6 @@ prompt = "Run"
     /// directory, so making the directory `0o555` is what forces
     /// `remove_dir_all` to fail there. Windows has no equivalent
     /// "directory write permission" concept via `std::fs::Permissions`, and
-    /// -- contrary to what an earlier version of this test assumed --
     /// marking a file inside the directory read-only does NOT make
     /// `remove_dir_all` fail on Windows: it clears the read-only attribute
     /// before deleting, the same way it silently succeeds through other
