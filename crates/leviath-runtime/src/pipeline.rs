@@ -390,37 +390,107 @@ pub struct ToolServiceRes(pub Arc<dyn ToolService>);
 #[derive(Resource, Clone)]
 pub struct ToolStage(pub UnboundedSender<ToolJob>);
 
-/// Tool-dispatch system: for each `ReadyForTools` agent, turn its stored tool
-/// calls into a job for the (sequential) tool lane and move it to
-/// `AwaitingTools`. The lane serializes execution, so there is no permit gate
-/// here — every ready agent is enqueued and processed in turn.
+/// Context-tool results computed inline by [`dispatch_tools`] (the `context_*`
+/// tools mutate the ECS window, so they can't run on the async lane), held until
+/// [`collect_tools`] merges them with the lane results. Absent when a batch had
+/// no context tools.
+#[derive(Component, Debug, Clone, Default)]
+pub struct ContextToolResults(pub Vec<(String, String)>);
+
+/// Merge context + lane tool results into one `(id, result)` list in the
+/// original tool-call order (Anthropic requires a `tool_result` per `tool_use`,
+/// in order).
+fn merge_in_call_order(
+    tool_calls: &[crate::components::ToolCall],
+    parts: &[(String, String)],
+) -> Vec<(String, String)> {
+    tool_calls
+        .iter()
+        .map(|tc| {
+            let result = parts
+                .iter()
+                .find(|(id, _)| id == &tc.tool_id)
+                .map(|(_, r)| r.clone())
+                .unwrap_or_default();
+            (tc.tool_id.clone(), result)
+        })
+        .collect()
+}
+
+/// Tool-dispatch system: for each `ReadyForTools` agent, apply its `context_*`
+/// tool calls inline (they mutate the ECS window) and hand the rest to the
+/// sequential tool lane, moving it to `AwaitingTools`. If a batch is *all*
+/// context tools there is nothing for the lane, so the results are applied
+/// immediately and the agent loops straight back to `ReadyToInfer`. The lane
+/// serializes execution, so there is no permit gate — every ready agent is
+/// enqueued in turn.
+#[allow(clippy::type_complexity)]
 pub fn dispatch_tools(
-    agents: Query<(Entity, &AgentState, &crate::components::InferenceResult), With<ReadyForTools>>,
+    mut agents: Query<
+        (
+            Entity,
+            &AgentState,
+            &crate::components::InferenceResult,
+            &mut ContextWindow,
+            Option<&crate::components::ToolResultRoutingComponent>,
+            Option<&ToolSensitivities>,
+        ),
+        With<ReadyForTools>,
+    >,
     service: Res<ToolServiceRes>,
     stage: Res<ToolStage>,
     mut commands: Commands,
 ) {
-    for (entity, state, result) in agents.iter() {
+    for (entity, state, result, mut window, routing, sensitivities) in agents.iter_mut() {
         if state.status != AgentStatus::Active {
             continue; // paused / waiting / cancelled — don't start new work
         }
-        let calls: Vec<leviath_providers::ToolCall> = result
-            .tool_calls
-            .iter()
-            .map(|c| leviath_providers::ToolCall {
-                id: c.tool_id.clone(),
-                name: c.name.clone(),
-                arguments: c.arguments.clone(),
-            })
-            .collect();
-        let exec = service.0.exec_for(entity, calls);
+
+        // Apply context_* tools inline (they need world access); collect the rest
+        // for the async lane.
+        let mut context_results = Vec::new();
+        let mut lane_calls = Vec::new();
+        for c in &result.tool_calls {
+            if crate::context_tools::is_context_tool(&c.name) {
+                let text =
+                    crate::context_tools::handle_context_tool(&c.name, &c.arguments, &mut window);
+                context_results.push((c.tool_id.clone(), text));
+            } else {
+                lane_calls.push(leviath_providers::ToolCall {
+                    id: c.tool_id.clone(),
+                    name: c.name.clone(),
+                    arguments: c.arguments.clone(),
+                });
+            }
+        }
+
+        if lane_calls.is_empty() {
+            // Nothing async to run — apply the context results now and loop back.
+            let merged = merge_in_call_order(&result.tool_calls, &context_results);
+            apply_tool_results(
+                &mut window,
+                &result.response,
+                &result.tool_calls,
+                &merged,
+                routing.map(|c| &c.routing),
+                sensitivities.map(|s| &s.0),
+            );
+            commands
+                .entity(entity)
+                .remove::<ReadyForTools>()
+                .insert(ReadyToInfer);
+            continue;
+        }
+
+        let exec = service.0.exec_for(entity, lane_calls);
         // The lane worker is alive for the world's lifetime; a failed send would
         // only happen during shutdown, where dropping the job is fine.
         let _ = stage.0.send(ToolJob { entity, exec });
         commands
             .entity(entity)
             .remove::<ReadyForTools>()
-            .insert(AwaitingTools);
+            .insert(AwaitingTools)
+            .insert(ContextToolResults(context_results));
     }
 }
 
@@ -553,26 +623,37 @@ pub fn collect_tools(
             &crate::components::InferenceResult,
             Option<&crate::components::ToolResultRoutingComponent>,
             Option<&ToolSensitivities>,
+            Option<&ContextToolResults>,
         ),
         With<AwaitingTools>,
     >,
     mut commands: Commands,
 ) {
     while let Ok(outcome) = results.0.try_recv() {
-        let Ok((mut window, infer, routing, sensitivities)) = agents.get_mut(outcome.entity) else {
+        let Ok((mut window, infer, routing, sensitivities, context_results)) =
+            agents.get_mut(outcome.entity)
+        else {
             continue; // stale: agent cancelled/despawned since dispatch
         };
+        // Merge the inline context-tool results (if any) with the lane results,
+        // ordered by the original tool calls.
+        let mut parts = outcome.results;
+        if let Some(ctx) = context_results {
+            parts.extend(ctx.0.iter().cloned());
+        }
+        let merged = merge_in_call_order(&infer.tool_calls, &parts);
         apply_tool_results(
             &mut window,
             &infer.response,
             &infer.tool_calls,
-            &outcome.results,
+            &merged,
             routing.map(|c| &c.routing),
             sensitivities.map(|s| &s.0),
         );
         commands
             .entity(outcome.entity)
             .remove::<AwaitingTools>()
+            .remove::<ContextToolResults>()
             .insert(ReadyToInfer);
     }
 }
@@ -2094,7 +2175,12 @@ mod tests {
         world.insert_resource(ToolServiceRes(Arc::new(EchoService)));
         world.insert_resource(ToolStage(jtx));
         let e = world
-            .spawn((agent_state(), infer_result(true), ReadyForTools))
+            .spawn((
+                agent_state(),
+                infer_result(true),
+                conv_window(),
+                ReadyForTools,
+            ))
             .id();
 
         let mut s = Schedule::default();
@@ -2118,7 +2204,9 @@ mod tests {
         world.insert_resource(ToolStage(jtx));
         let mut st = agent_state();
         st.status = AgentStatus::Cancelled;
-        let e = world.spawn((st, infer_result(true), ReadyForTools)).id();
+        let e = world
+            .spawn((st, infer_result(true), conv_window(), ReadyForTools))
+            .id();
 
         let mut s = Schedule::default();
         s.add_systems(dispatch_tools);
@@ -2126,6 +2214,110 @@ mod tests {
 
         assert!(world.get::<ReadyForTools>(e).is_some()); // cancelled ⇒ not enqueued
         assert!(jrx.try_recv().is_err());
+    }
+
+    fn infer_with(calls: Vec<crate::components::ToolCall>) -> crate::components::InferenceResult {
+        crate::components::InferenceResult {
+            response: "r".to_string(),
+            tool_calls: calls,
+            tokens_used: 0,
+            timestamp: 0,
+        }
+    }
+
+    fn ctx_call(id: &str, region: &str, content: &str) -> crate::components::ToolCall {
+        crate::components::ToolCall {
+            tool_id: id.to_string(),
+            name: "context_write".to_string(),
+            arguments: serde_json::json!({"region": region, "content": content}),
+        }
+    }
+
+    fn notes_window() -> ContextWindow {
+        let mut w = conv_window();
+        w.add_region(Region::new(
+            "notes".to_string(),
+            RegionKind::Clearable,
+            5000,
+        ));
+        w
+    }
+
+    #[tokio::test]
+    async fn dispatch_tools_applies_all_context_inline() {
+        let (jtx, mut jrx) = mpsc::unbounded_channel();
+        let mut world = World::new();
+        world.insert_resource(ToolServiceRes(Arc::new(EchoService)));
+        world.insert_resource(ToolStage(jtx));
+        let e = world
+            .spawn((
+                agent_state(),
+                infer_with(vec![ctx_call("c1", "notes", "hi")]),
+                notes_window(),
+                ReadyForTools,
+            ))
+            .id();
+
+        let mut s = Schedule::default();
+        s.add_systems(dispatch_tools);
+        s.run(&mut world);
+
+        // All-context batch: nothing enqueued, applied inline, ready to infer.
+        assert!(jrx.try_recv().is_err());
+        assert!(world.get::<ReadyToInfer>(e).is_some());
+        assert!(world.get::<ReadyForTools>(e).is_none());
+        assert!(world.get::<ContextToolResults>(e).is_none());
+        assert!(
+            world
+                .get::<ContextWindow>(e)
+                .unwrap()
+                .get_region("notes")
+                .unwrap()
+                .current_tokens
+                > 0
+        );
+    }
+
+    #[tokio::test]
+    async fn dispatch_tools_partitions_context_and_lane() {
+        let (jtx, mut jrx) = mpsc::unbounded_channel();
+        let mut world = World::new();
+        world.insert_resource(ToolServiceRes(Arc::new(EchoService)));
+        world.insert_resource(ToolStage(jtx));
+        let e = world
+            .spawn((
+                agent_state(),
+                infer_with(vec![ctx_call("c1", "notes", "hi"), tc("c2", "read_file")]),
+                notes_window(),
+                ReadyForTools,
+            ))
+            .id();
+
+        let mut s = Schedule::default();
+        s.add_systems(dispatch_tools);
+        s.run(&mut world);
+
+        // Context result stashed; the non-context call went to the lane.
+        assert!(world.get::<AwaitingTools>(e).is_some());
+        let stashed = world.get::<ContextToolResults>(e).unwrap();
+        assert_eq!(stashed.0.len(), 1);
+        assert_eq!(stashed.0[0].0, "c1");
+        let job = jrx.try_recv().expect("lane job for the non-context call");
+        assert_eq!(job.entity, e);
+    }
+
+    #[test]
+    fn merge_in_call_order_fills_missing_with_empty() {
+        let calls = vec![tc("a", "x"), tc("b", "y")];
+        // Only "a" has a result; "b" falls back to empty, in call order.
+        let merged = merge_in_call_order(&calls, &[("a".to_string(), "ra".to_string())]);
+        assert_eq!(
+            merged,
+            vec![
+                ("a".to_string(), "ra".to_string()),
+                ("b".to_string(), String::new()),
+            ]
+        );
     }
 
     // ── tool-collect (apply_tool_results) ──
@@ -2357,6 +2549,41 @@ mod tests {
 
         assert!(world.get::<ReadyToInfer>(e).is_some());
         assert!(world.get::<AwaitingTools>(e).is_none());
+    }
+
+    #[test]
+    fn collect_tools_merges_stashed_context_results() {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let mut world = World::new();
+        world.insert_resource(ToolResults(rx));
+        let e = world
+            .spawn((
+                ctx(&[("conversation", 10_000)]),
+                infer_with(vec![ctx_call("c1", "notes", "hi"), tc("c2", "read")]),
+                ContextToolResults(vec![("c1".to_string(), "stored".to_string())]),
+                AwaitingTools,
+            ))
+            .id();
+        tx.send(ToolOutcome {
+            entity: e,
+            results: vec![("c2".to_string(), "file body".to_string())],
+        })
+        .unwrap();
+
+        run_collect_tools(&mut world);
+
+        assert!(world.get::<ReadyToInfer>(e).is_some());
+        assert!(world.get::<ContextToolResults>(e).is_none()); // consumed
+        // Both results were written into context.
+        assert!(
+            world
+                .get::<ContextWindow>(e)
+                .unwrap()
+                .get_region("conversation")
+                .unwrap()
+                .current_tokens
+                > 0
+        );
     }
 
     #[test]
