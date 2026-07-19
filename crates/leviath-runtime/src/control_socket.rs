@@ -216,6 +216,34 @@ pub async fn handle_connection(
     Ok(())
 }
 
+/// Bind the daemon's control socket at `path`, enforcing a single instance.
+///
+/// If a socket file already exists, probe it: a live daemon answering a connect
+/// means one is already running (returns [`std::io::ErrorKind::AddrInUse`]); a
+/// refused/failed connect means the file is **stale** (a crashed daemon) and is
+/// removed before binding. The parent directory is created if needed.
+pub fn bind_control_socket(path: &std::path::Path) -> std::io::Result<tokio::net::UnixListener> {
+    if path.exists() {
+        match std::os::unix::net::UnixStream::connect(path) {
+            Ok(_) => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::AddrInUse,
+                    "a leviath daemon is already running on this control socket",
+                ));
+            }
+            // Nothing is listening — the socket file is stale; clear it. A failed
+            // remove just means the bind below reports the problem instead.
+            Err(_) => {
+                let _ = std::fs::remove_file(path);
+            }
+        }
+    }
+    // A control-socket path always has a parent directory.
+    let parent = path.parent().expect("control socket path has a parent");
+    std::fs::create_dir_all(parent)?;
+    tokio::net::UnixListener::bind(path)
+}
+
 /// The client half of the control transport: connects to the daemon's control
 /// socket, sends one [`ControlRequest`], and reads back its [`ControlResponse`].
 /// A fresh connection per request keeps it simple and stateless.
@@ -465,6 +493,47 @@ mod tests {
     async fn client_errors_when_socket_absent() {
         let client = ControlClient::new("/nonexistent/leviath-ctl.sock");
         assert!(client.list().await.is_err());
+    }
+
+    #[tokio::test]
+    async fn bind_creates_socket_in_missing_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        // A nested path whose parent doesn't exist yet.
+        let path = dir.path().join("nested").join("control.sock");
+        let listener = bind_control_socket(&path).unwrap();
+        assert!(path.exists());
+        drop(listener);
+    }
+
+    #[tokio::test]
+    async fn bind_removes_stale_socket_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("control.sock");
+        // A leftover regular file where the socket goes: nothing is listening, so
+        // it's stale and must be cleared.
+        std::fs::write(&path, b"stale").unwrap();
+        let listener = bind_control_socket(&path).unwrap();
+        assert!(path.exists());
+        drop(listener);
+    }
+
+    #[tokio::test]
+    async fn bind_errors_when_parent_cannot_be_created() {
+        let dir = tempfile::tempdir().unwrap();
+        // A regular file where a parent directory would need to be created.
+        let blocker = dir.path().join("blocker");
+        std::fs::write(&blocker, b"x").unwrap();
+        let path = blocker.join("control.sock"); // parent "blocker" is a file
+        assert!(bind_control_socket(&path).is_err());
+    }
+
+    #[tokio::test]
+    async fn bind_rejects_when_daemon_already_running() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("control.sock");
+        let _live = bind_control_socket(&path).unwrap(); // first daemon holds it
+        let err = bind_control_socket(&path).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::AddrInUse);
     }
 
     /// A server that writes `bytes` verbatim as the "response" then closes.
