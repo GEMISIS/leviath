@@ -12,6 +12,7 @@ pub mod context_setup;
 pub mod dynamic_interaction;
 pub mod engine;
 pub mod graph;
+pub mod host;
 pub mod inference_bridge;
 pub mod inference_pool;
 pub mod persistence;
