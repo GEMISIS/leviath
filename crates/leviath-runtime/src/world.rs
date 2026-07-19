@@ -271,8 +271,9 @@ impl PipelineWorld {
             || self.count::<With<AwaitingCompaction>>() > 0
     }
 
-    /// Drive the schedule until a tick changes nothing (quiescence).
-    fn run_to_fixed_point(&mut self) {
+    /// Drive the schedule until a tick changes nothing (quiescence). Public so a
+    /// host loop can interleave control operations between quiescent points.
+    pub fn run_to_fixed_point(&mut self) {
         let mut prev = self.fingerprint();
         loop {
             self.tick();
