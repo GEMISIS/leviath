@@ -34,14 +34,16 @@ use tokio::task::JoinHandle;
 use crate::components::{AgentMessage, AgentState, AgentStatus};
 use crate::engine::ProviderRegistry;
 use crate::inference_pool::{InferencePoolConfig, InferencePools};
+use crate::persistence_bridge::persistence_worker;
 use crate::pipeline::{
     AwaitingCompaction, AwaitingInference, AwaitingTools, AwaitingTransitionChoice,
     AwaitingTransitionResponse, CompactionResults, InferenceResults, InferenceStage, MessageIntake,
-    ProcessResponse, Providers, ReadyForTools, ReadyForTransition, ReadyToInfer, ResolveTransition,
-    ToolResults, ToolService, ToolServiceRes, ToolStage, TransitionResults, collect_compaction,
-    collect_inference, collect_tools, collect_transition_choice, deliver_messages,
-    dispatch_compaction, dispatch_inference, dispatch_tools, dispatch_transition_choice,
-    handle_empty_response, process_response, resolve_transition,
+    PersistenceStage, ProcessResponse, Providers, ReadyForTools, ReadyForTransition, ReadyToInfer,
+    ResolveTransition, ToolResults, ToolService, ToolServiceRes, ToolStage, TransitionResults,
+    collect_compaction, collect_inference, collect_tools, collect_transition_choice,
+    deliver_messages, dispatch_compaction, dispatch_inference, dispatch_persistence,
+    dispatch_tools, dispatch_transition_choice, handle_empty_response, process_response,
+    resolve_transition,
 };
 use crate::tool_bridge::tool_worker;
 
@@ -69,6 +71,7 @@ impl PipelineWorld {
         providers: ProviderRegistry,
         tool_service: Arc<dyn ToolService>,
         pool_config: InferencePoolConfig,
+        runs_dir: std::path::PathBuf,
         runtime: Handle,
     ) -> Self {
         let wake = Arc::new(Notify::new());
@@ -79,9 +82,13 @@ impl PipelineWorld {
         let (compact_tx, compact_rx) = unbounded_channel();
         let (tool_job_tx, tool_job_rx) = unbounded_channel();
         let (tool_res_tx, tool_res_rx) = unbounded_channel();
+        let (persist_tx, persist_rx) = unbounded_channel();
         let (msg_tx, msg_rx) = unbounded_channel();
 
         let tool_task = runtime.spawn(tool_worker(tool_job_rx, tool_res_tx, wake.clone()));
+        // Fire-and-forget: the persistence worker exits when the world (and thus
+        // its PersistenceStage sender) is dropped.
+        runtime.spawn(persistence_worker(runs_dir, persist_rx));
 
         let mut world = World::new();
         world.insert_resource(Providers(providers));
@@ -99,6 +106,7 @@ impl PipelineWorld {
         world.insert_resource(ToolServiceRes(tool_service));
         world.insert_resource(ToolStage(tool_job_tx));
         world.insert_resource(ToolResults(tool_res_rx));
+        world.insert_resource(PersistenceStage(persist_tx));
         world.insert_resource(MessageIntake(msg_rx));
 
         let mut schedule = Schedule::default();
@@ -116,6 +124,7 @@ impl PipelineWorld {
                 resolve_transition,
                 dispatch_transition_choice,
                 collect_transition_choice,
+                dispatch_persistence,
             )
                 .chain(),
         );
@@ -444,10 +453,13 @@ mod tests {
     }
 
     fn build_world(providers: ProviderRegistry) -> PipelineWorld {
+        // These agents carry no RunMetadata, so persistence never fires and the
+        // runs dir is never written; any path is fine.
         PipelineWorld::new(
             providers,
             Arc::new(EchoTools),
             InferencePoolConfig::new(),
+            std::env::temp_dir(),
             Handle::current(),
         )
     }
@@ -638,6 +650,71 @@ mod tests {
         world.run_until_idle(20).await;
 
         assert_eq!(world.agent_status(e), Some(AgentStatus::Complete));
+    }
+
+    #[tokio::test]
+    async fn persists_agent_snapshot_to_runs_dir() {
+        // An agent carrying RunMetadata + TokenTotals is snapshotted to disk as it
+        // runs; after it completes, meta.json exists with the final status.
+        let dir = tempfile::tempdir().unwrap();
+        let mut world = PipelineWorld::new(
+            registry_with(vec![with_tool("c1", "do"), text("done")]),
+            Arc::new(EchoTools),
+            InferencePoolConfig::new(),
+            dir.path().to_path_buf(),
+            Handle::current(),
+        );
+        world.spawn_agent((
+            AgentBlueprint(blueprint()),
+            StageCursor { index: 0 },
+            agent_state(),
+            crate::components::MessageInbox::default(),
+            StageProgress::default(),
+            StageInferences(vec![stage("m")]),
+            StageSetups(vec![setup()]),
+            VisitCounts::default(),
+            window(),
+            stage("m"),
+            setup().inference_config,
+            crate::persistence::RunMetadata {
+                run_id: "run-42".to_string(),
+                agent_name: "a".to_string(),
+                agent_path: "/p".to_string(),
+                task: "t".to_string(),
+                model: None,
+                workdir: "/w".to_string(),
+                num_stages: 1,
+                started_at: 0,
+                parent_run_id: None,
+                metadata: std::collections::HashMap::new(),
+                callback_url: None,
+                title: None,
+            },
+            crate::persistence::TokenTotals::default(),
+            crate::pipeline::PersistWatermark::default(),
+            ReadyToInfer,
+        ));
+
+        world.run_until_idle(20).await;
+
+        // The persistence worker is fire-and-forget on its own task; poll until the
+        // final (Complete) snapshot has been flushed.
+        let meta_path = dir.path().join("run-42").join("meta.json");
+        let mut meta = None;
+        for _ in 0..200 {
+            if let Ok(text) = std::fs::read_to_string(&meta_path)
+                && let Ok(m) = serde_json::from_str::<leviath_core::run_meta::RunMeta>(&text)
+                && m.status == leviath_core::run_meta::RunStatus::Complete
+            {
+                meta = Some(m);
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+
+        let meta = meta.expect("final Complete snapshot flushed to disk");
+        assert_eq!(meta.run_id, "run-42");
+        assert!(dir.path().join("run-42").join("context.json").exists());
     }
 
     #[tokio::test]

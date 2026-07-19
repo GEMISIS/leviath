@@ -15,6 +15,7 @@ pub mod graph;
 pub mod inference_bridge;
 pub mod inference_pool;
 pub mod persistence;
+pub mod persistence_bridge;
 pub mod pipeline;
 pub mod pool;
 pub mod provider_creds;

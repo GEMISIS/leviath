@@ -25,6 +25,8 @@ use crate::engine::ProviderRegistry;
 use crate::engine::truncate_on_char_boundary;
 use crate::inference_bridge::{InferenceJob, InferenceOutcome, run_inference_job};
 use crate::inference_pool::InferencePools;
+use crate::persistence::{RunMetadata, TokenTotals, build_context_snapshot, build_run_meta};
+use crate::persistence_bridge::PersistJob;
 use crate::tool_bridge::{BoxedToolExec, ToolJob, ToolOutcome};
 
 // ─── Phase marker components (an agent is in exactly one) ────────────────────
@@ -736,6 +738,63 @@ fn compaction_request(
         temperature: config.temperature,
         tools: Vec::new(),
         extra: serde_json::Value::Null,
+    }
+}
+
+// ─── Persistence (per-agent snapshot writing) ────────────────────────────────
+
+/// Debounce watermark: the (iteration, stage index, status) last persisted for an
+/// agent. A snapshot is written only when one of these changes, so the world
+/// writes on meaningful progress rather than every tick. `None` until the first
+/// snapshot, so a freshly-spawned agent is always written once.
+#[derive(Component, Default)]
+pub struct PersistWatermark {
+    last: Option<(usize, usize, leviath_core::run_meta::RunStatus)>,
+}
+
+/// The sending end of the persistence I/O lane (the receiving end is drained by
+/// [`crate::persistence_bridge::persistence_worker`]).
+#[derive(Resource)]
+pub struct PersistenceStage(pub UnboundedSender<PersistJob>);
+
+/// Persistence-dispatch system: for each agent carrying run metadata whose
+/// (iteration, stage, status) has changed since its last snapshot, build the
+/// `meta.json` + `context.json` value snapshot and hand it to the persistence
+/// lane. Fire-and-forget — no result to collect; the single-worker lane keeps a
+/// given agent's writes ordered. Agents without [`RunMetadata`] aren't persisted.
+#[allow(clippy::type_complexity)]
+pub fn dispatch_persistence(
+    mut agents: Query<(
+        &RunMetadata,
+        &AgentState,
+        &ContextWindow,
+        &StageCursor,
+        &TokenTotals,
+        &mut PersistWatermark,
+    )>,
+    stage: Res<PersistenceStage>,
+) {
+    for (md, state, window, cursor, totals, mut watermark) in agents.iter_mut() {
+        let status = crate::persistence::run_status_from(&state.status);
+        let current = (state.iteration, cursor.index, status.clone());
+        if watermark.last.as_ref() == Some(&current) {
+            continue; // nothing meaningful changed since the last write
+        }
+        watermark.last = Some(current);
+
+        let meta = build_run_meta(
+            md,
+            state,
+            totals,
+            cursor.index,
+            chrono::Utc::now().timestamp(),
+        );
+        let context = build_context_snapshot(window, &state.current_stage);
+        let _ = stage.0.send(PersistJob {
+            run_id: md.run_id.clone(),
+            meta,
+            context,
+        });
     }
 }
 
@@ -3336,6 +3395,92 @@ mod tests {
                 .current_tokens,
             0
         );
+    }
+
+    // ── persistence dispatch ──
+
+    fn run_metadata() -> RunMetadata {
+        RunMetadata {
+            run_id: "run-1".to_string(),
+            agent_name: "a".to_string(),
+            agent_path: "/p".to_string(),
+            task: "t".to_string(),
+            model: None,
+            workdir: "/w".to_string(),
+            num_stages: 1,
+            started_at: 0,
+            parent_run_id: None,
+            metadata: std::collections::HashMap::new(),
+            callback_url: None,
+            title: None,
+        }
+    }
+
+    fn world_with_persistence() -> (World, mpsc::UnboundedReceiver<PersistJob>) {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let mut world = World::new();
+        world.insert_resource(PersistenceStage(tx));
+        (world, rx)
+    }
+
+    fn run_dispatch_persistence(world: &mut World) {
+        let mut s = Schedule::default();
+        s.add_systems(dispatch_persistence);
+        s.run(world);
+    }
+
+    fn spawn_persistable(world: &mut World) -> Entity {
+        world
+            .spawn((
+                run_metadata(),
+                agent_state(),
+                conv_window(),
+                StageCursor { index: 0 },
+                TokenTotals::default(),
+                PersistWatermark::default(),
+            ))
+            .id()
+    }
+
+    #[test]
+    fn persistence_writes_on_first_dispatch_then_debounces() {
+        let (mut world, mut rx) = world_with_persistence();
+        let _e = spawn_persistable(&mut world);
+
+        run_dispatch_persistence(&mut world);
+        let job = rx.try_recv().expect("first snapshot written");
+        assert_eq!(job.run_id, "run-1");
+
+        // No change ⇒ no second write.
+        run_dispatch_persistence(&mut world);
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn persistence_rewrites_when_iteration_changes() {
+        let (mut world, mut rx) = world_with_persistence();
+        let e = spawn_persistable(&mut world);
+
+        run_dispatch_persistence(&mut world);
+        let _ = rx.try_recv().expect("first snapshot");
+
+        world.get_mut::<AgentState>(e).unwrap().iteration += 1;
+        run_dispatch_persistence(&mut world);
+        let job = rx.try_recv().expect("second snapshot after change");
+        assert_eq!(job.meta.iteration, 1);
+    }
+
+    #[test]
+    fn persistence_rewrites_when_status_changes() {
+        let (mut world, mut rx) = world_with_persistence();
+        let e = spawn_persistable(&mut world);
+        run_dispatch_persistence(&mut world);
+        let _ = rx.try_recv().expect("first snapshot");
+
+        world.get_mut::<AgentState>(e).unwrap().status = AgentStatus::Complete;
+        run_dispatch_persistence(&mut world);
+        let job = rx.try_recv().expect("snapshot after completion");
+        assert_eq!(job.meta.status, leviath_core::run_meta::RunStatus::Complete);
     }
 
     // ── async LLM-choice transition ──
