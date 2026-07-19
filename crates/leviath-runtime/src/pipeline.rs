@@ -17,7 +17,9 @@ use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 
 use leviath_providers::{InferenceRequest, Provider, Tool};
 
-use crate::components::{AgentState, AgentStatus, ContextWindow, InferenceConfig};
+use crate::components::{
+    AgentMessage, AgentState, AgentStatus, ContextWindow, InferenceConfig, MessageInbox,
+};
 use crate::engine::ProviderRegistry;
 use crate::engine::truncate_on_char_boundary;
 use crate::inference_bridge::{InferenceJob, InferenceOutcome, run_inference_job};
@@ -463,6 +465,54 @@ pub fn collect_tools(
             .entity(outcome.entity)
             .remove::<AwaitingTools>()
             .insert(ReadyToInfer);
+    }
+}
+
+/// The receiving end of the world's inbound-message channel. Clients (the
+/// control API) send `AgentMessage`s here; the delivery system routes and
+/// delivers them.
+#[derive(Resource)]
+pub struct MessageIntake(pub UnboundedReceiver<AgentMessage>);
+
+/// Message-delivery system: route inbound messages to their target agents'
+/// inboxes (by agent id), then deliver each inbox into the agent's context
+/// window — but only for agents whose current stage accepts messages; otherwise
+/// the messages wait in the inbox for a stage that does. Ported from
+/// `AgentEngine::process_messages` / `deliver_inbox_messages`.
+pub fn deliver_messages(
+    mut intake: ResMut<MessageIntake>,
+    mut agents: Query<(&AgentState, &mut MessageInbox, &mut ContextWindow)>,
+) {
+    // Route inbound channel messages to their target agent's inbox.
+    let mut incoming = Vec::new();
+    while let Ok(msg) = intake.0.try_recv() {
+        incoming.push(msg);
+    }
+    for msg in incoming {
+        for (state, mut inbox, _) in agents.iter_mut() {
+            if state.agent_id == msg.agent_id {
+                inbox.push(msg.clone());
+                break;
+            }
+        }
+        // Unmatched target ⇒ dropped (agent no longer exists).
+    }
+
+    // Deliver inboxes into context windows for agents that accept messages.
+    for (state, mut inbox, mut window) in agents.iter_mut() {
+        if !state.accepts_messages {
+            continue; // hold until a stage that accepts messages
+        }
+        for msg in inbox.drain_all() {
+            let region = msg.target_region.as_deref().unwrap_or("conversation");
+            let tokens = msg.content.len() / 4 + 1;
+            let _ = window.add_typed_entry(
+                region,
+                leviath_core::EntryKind::UserMessage,
+                msg.content.clone(),
+                tokens,
+            );
+        }
     }
 }
 
@@ -1118,5 +1168,123 @@ mod tests {
         run_collect_tools(&mut world);
 
         assert!(world.get::<ReadyToInfer>(e).is_none());
+    }
+
+    // ── message delivery ──
+
+    fn msg(agent_id: &str, content: &str, region: Option<&str>) -> AgentMessage {
+        AgentMessage {
+            agent_id: agent_id.to_string(),
+            content: content.to_string(),
+            target_region: region.map(String::from),
+            priority: 0,
+        }
+    }
+
+    fn run_deliver(world: &mut World) {
+        let mut s = Schedule::default();
+        s.add_systems(deliver_messages);
+        s.run(world);
+    }
+
+    fn spawn_msg_agent(world: &mut World, accepts: bool, regions: &[(&str, usize)]) -> Entity {
+        let mut state = agent_state();
+        state.agent_id = "a1".to_string();
+        state.accepts_messages = accepts;
+        world
+            .spawn((state, MessageInbox::default(), ctx(regions)))
+            .id()
+    }
+
+    #[test]
+    fn deliver_routes_and_delivers_to_accepting_agent() {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let mut world = World::new();
+        world.insert_resource(MessageIntake(rx));
+        let e = spawn_msg_agent(&mut world, true, &[("conversation", 10_000)]);
+        tx.send(msg("a1", "hello", None)).unwrap();
+
+        run_deliver(&mut world);
+
+        assert!(
+            world
+                .get::<ContextWindow>(e)
+                .unwrap()
+                .get_region("conversation")
+                .unwrap()
+                .current_tokens
+                > 0
+        );
+        assert!(world.get::<MessageInbox>(e).unwrap().messages.is_empty());
+    }
+
+    #[test]
+    fn deliver_holds_for_non_accepting_agent() {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let mut world = World::new();
+        world.insert_resource(MessageIntake(rx));
+        let e = spawn_msg_agent(&mut world, false, &[("conversation", 10_000)]);
+        tx.send(msg("a1", "hello", None)).unwrap();
+
+        run_deliver(&mut world);
+
+        // Not delivered — waits in the inbox for a stage that accepts messages.
+        assert_eq!(world.get::<MessageInbox>(e).unwrap().messages.len(), 1);
+        assert_eq!(
+            world
+                .get::<ContextWindow>(e)
+                .unwrap()
+                .get_region("conversation")
+                .unwrap()
+                .current_tokens,
+            0
+        );
+    }
+
+    #[test]
+    fn deliver_drops_message_for_unknown_agent() {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let mut world = World::new();
+        world.insert_resource(MessageIntake(rx));
+        let e = spawn_msg_agent(&mut world, true, &[("conversation", 10_000)]);
+        tx.send(msg("nobody", "hi", None)).unwrap();
+
+        run_deliver(&mut world);
+
+        assert!(world.get::<MessageInbox>(e).unwrap().messages.is_empty());
+        assert_eq!(
+            world
+                .get::<ContextWindow>(e)
+                .unwrap()
+                .get_region("conversation")
+                .unwrap()
+                .current_tokens,
+            0
+        );
+    }
+
+    #[test]
+    fn deliver_honors_target_region() {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let mut world = World::new();
+        world.insert_resource(MessageIntake(rx));
+        let e = spawn_msg_agent(
+            &mut world,
+            true,
+            &[("conversation", 10_000), ("notes", 10_000)],
+        );
+        tx.send(msg("a1", "note this", Some("notes"))).unwrap();
+
+        run_deliver(&mut world);
+
+        assert!(
+            world
+                .get::<ContextWindow>(e)
+                .unwrap()
+                .get_region("notes")
+                .unwrap()
+                .current_tokens
+                > 0
+        );
     }
 }
