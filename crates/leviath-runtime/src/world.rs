@@ -35,18 +35,19 @@ use crate::components::{AgentMessage, AgentState, AgentStatus};
 use crate::engine::ProviderRegistry;
 use crate::inference_pool::{InferencePoolConfig, InferencePools};
 use crate::pipeline::{
-    AwaitingInference, AwaitingTools, AwaitingTransitionChoice, AwaitingTransitionResponse,
-    InferenceResults, InferenceStage, MessageIntake, ProcessResponse, Providers, ReadyForTools,
-    ReadyForTransition, ReadyToInfer, ResolveTransition, ToolResults, ToolService, ToolServiceRes,
-    ToolStage, TransitionResults, collect_inference, collect_tools, collect_transition_choice,
-    deliver_messages, dispatch_inference, dispatch_tools, dispatch_transition_choice,
+    AwaitingCompaction, AwaitingInference, AwaitingTools, AwaitingTransitionChoice,
+    AwaitingTransitionResponse, CompactionResults, InferenceResults, InferenceStage, MessageIntake,
+    ProcessResponse, Providers, ReadyForTools, ReadyForTransition, ReadyToInfer, ResolveTransition,
+    ToolResults, ToolService, ToolServiceRes, ToolStage, TransitionResults, collect_compaction,
+    collect_inference, collect_tools, collect_transition_choice, deliver_messages,
+    dispatch_compaction, dispatch_inference, dispatch_tools, dispatch_transition_choice,
     handle_empty_response, process_response, resolve_transition,
 };
 use crate::tool_bridge::tool_worker;
 
 /// Counts of agents in each phase-marker — the world's per-tick "fingerprint".
 /// Two consecutive equal fingerprints mean a tick changed nothing (quiescence).
-type Fingerprint = [usize; 9];
+type Fingerprint = [usize; 10];
 
 /// The shared ECS world that hosts and drives every agent.
 pub struct PipelineWorld {
@@ -75,6 +76,7 @@ impl PipelineWorld {
 
         let (inf_tx, inf_rx) = unbounded_channel();
         let (trans_tx, trans_rx) = unbounded_channel();
+        let (compact_tx, compact_rx) = unbounded_channel();
         let (tool_job_tx, tool_job_rx) = unbounded_channel();
         let (tool_res_tx, tool_res_rx) = unbounded_channel();
         let (msg_tx, msg_rx) = unbounded_channel();
@@ -87,11 +89,13 @@ impl PipelineWorld {
             pools: Arc::new(InferencePools::new(pool_config)),
             outcomes: inf_tx,
             transition_outcomes: trans_tx,
+            compaction_outcomes: compact_tx,
             wake: wake.clone(),
             runtime,
         });
         world.insert_resource(InferenceResults(inf_rx));
         world.insert_resource(TransitionResults(trans_rx));
+        world.insert_resource(CompactionResults(compact_rx));
         world.insert_resource(ToolServiceRes(tool_service));
         world.insert_resource(ToolStage(tool_job_tx));
         world.insert_resource(ToolResults(tool_res_rx));
@@ -101,6 +105,8 @@ impl PipelineWorld {
         schedule.add_systems(
             (
                 deliver_messages,
+                collect_compaction,
+                dispatch_compaction,
                 dispatch_inference,
                 collect_inference,
                 process_response,
@@ -214,15 +220,17 @@ impl PipelineWorld {
             self.count::<With<AwaitingTools>>(),
             self.count::<With<AwaitingTransitionChoice>>(),
             self.count::<With<AwaitingTransitionResponse>>(),
+            self.count::<With<AwaitingCompaction>>(),
         ]
     }
 
-    /// Any agent waiting on an in-flight async job (inference, tools, or a
-    /// transition choice) whose completion will wake the driver.
+    /// Any agent waiting on an in-flight async job (inference, tools, a
+    /// transition choice, or compaction) whose completion will wake the driver.
     fn has_async_inflight(&mut self) -> bool {
         self.count::<With<AwaitingInference>>() > 0
             || self.count::<With<AwaitingTools>>() > 0
             || self.count::<With<AwaitingTransitionResponse>>() > 0
+            || self.count::<With<AwaitingCompaction>>() > 0
     }
 
     /// Drive the schedule until a tick changes nothing (quiescence).
