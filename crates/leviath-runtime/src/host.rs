@@ -21,7 +21,9 @@ use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::sync::oneshot;
 
 use crate::components::{AgentMessage, AgentState, AgentStatus};
+use crate::interaction_hub::InteractionHub;
 use crate::world::PipelineWorld;
+use leviath_core::interaction::{InteractionRequest, InteractionResponse};
 
 /// A control operation addressed to the host, each carrying a oneshot channel the
 /// host replies on. Agents are addressed by run id.
@@ -71,21 +73,54 @@ pub enum ControlOp {
         /// Reply channel.
         reply: oneshot::Sender<bool>,
     },
+    /// List every open interaction awaiting an answer, as `(agent_id, request)`.
+    ListInteractions {
+        /// Reply channel.
+        reply: oneshot::Sender<Vec<(String, InteractionRequest)>>,
+    },
+    /// Answer an open interaction. Reply is `false` if no such request is open.
+    AnswerInteraction {
+        /// The answer (its `request_id` selects the interaction).
+        response: InteractionResponse,
+        /// Reply channel.
+        reply: oneshot::Sender<bool>,
+    },
+    /// Cancel an open interaction (its asker wakes with a neutral response).
+    /// Reply is `false` if no such request is open.
+    CancelInteraction {
+        /// The interaction id to cancel.
+        request_id: String,
+        /// Reply channel.
+        reply: oneshot::Sender<bool>,
+    },
 }
 
 /// Owns the world and the run-id map; drives the world and services control ops.
 pub struct WorldHost {
     world: PipelineWorld,
     by_run_id: HashMap<String, Entity>,
+    interactions: InteractionHub,
 }
 
 impl WorldHost {
-    /// Wrap a world.
+    /// Wrap a world with a fresh interaction hub.
     pub fn new(world: PipelineWorld) -> Self {
+        Self::with_interactions(world, InteractionHub::new())
+    }
+
+    /// Wrap a world with a specific interaction hub — the daemon shares one hub
+    /// between the tool service's per-agent backends and this host.
+    pub fn with_interactions(world: PipelineWorld, interactions: InteractionHub) -> Self {
         Self {
             world,
             by_run_id: HashMap::new(),
+            interactions,
         }
+    }
+
+    /// A clone of the interaction hub, for building per-agent backends.
+    pub fn interactions(&self) -> InteractionHub {
+        self.interactions.clone()
     }
 
     /// Mutable access to the underlying world (for the spawner to add agents).
@@ -165,6 +200,15 @@ impl WorldHost {
                     .is_ok();
                 let _ = reply.send(ok);
             }
+            ControlOp::ListInteractions { reply } => {
+                let _ = reply.send(self.interactions.pending());
+            }
+            ControlOp::AnswerInteraction { response, reply } => {
+                let _ = reply.send(self.interactions.answer(response));
+            }
+            ControlOp::CancelInteraction { request_id, reply } => {
+                let _ = reply.send(self.interactions.cancel(&request_id));
+            }
         }
     }
 
@@ -193,6 +237,7 @@ impl WorldHost {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::dynamic_interaction::InteractionBackend;
     use crate::inference_pool::InferencePoolConfig;
     use crate::pipeline::{
         AgentBlueprint, ReadyToInfer, StageCursor, StageInference, StageInferences, StageProgress,
@@ -448,6 +493,71 @@ mod tests {
             })
             .await
         );
+    }
+
+    #[tokio::test]
+    async fn interaction_ops_list_answer_and_cancel() {
+        let mut host = host_with(vec![]);
+        let hub = host.interactions();
+        let backend = hub.backend_for("agent-a");
+
+        // An agent's ask is registered on the hub.
+        let asking = tokio::spawn(async move {
+            backend
+                .ask(leviath_core::interaction::InteractionRequest::free_text(
+                    "q1", "prompt?", "stage", true,
+                ))
+                .await
+        });
+        for _ in 0..8 {
+            tokio::task::yield_now().await;
+        }
+
+        // ListInteractions surfaces it.
+        let list = ask(&mut host, |reply| ControlOp::ListInteractions { reply }).await;
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].0, "agent-a");
+
+        // AnswerInteraction fulfils it.
+        let ok = ask(&mut host, |reply| ControlOp::AnswerInteraction {
+            response: leviath_core::interaction::InteractionResponse::text("q1", "hi"),
+            reply,
+        })
+        .await;
+        assert!(ok);
+        assert_eq!(asking.await.unwrap().value.as_deref(), Some("hi"));
+
+        // CancelInteraction on an unknown id ⇒ false.
+        let cancelled = ask(&mut host, |reply| ControlOp::CancelInteraction {
+            request_id: "gone".to_string(),
+            reply,
+        })
+        .await;
+        assert!(!cancelled);
+    }
+
+    #[tokio::test]
+    async fn cancel_interaction_op_wakes_asker() {
+        let mut host = host_with(vec![]);
+        let backend = host.interactions().backend_for("agent-a");
+        let asking = tokio::spawn(async move {
+            backend
+                .ask(leviath_core::interaction::InteractionRequest::free_text(
+                    "q2", "p", "s", true,
+                ))
+                .await
+        });
+        for _ in 0..8 {
+            tokio::task::yield_now().await;
+        }
+
+        let ok = ask(&mut host, |reply| ControlOp::CancelInteraction {
+            request_id: "q2".to_string(),
+            reply,
+        })
+        .await;
+        assert!(ok);
+        assert_eq!(asking.await.unwrap().request_id, "q2");
     }
 
     #[tokio::test]
