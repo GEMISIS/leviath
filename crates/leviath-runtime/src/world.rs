@@ -143,6 +143,21 @@ impl PipelineWorld {
         e
     }
 
+    /// Spawn an agent from a blueprint + task + per-stage resolution (see
+    /// [`crate::pipeline::spawn_agent`]) and wake the driver. Returns the new
+    /// entity, or an error if the first stage's system prompt doesn't fit.
+    pub fn spawn_from_blueprint(
+        &mut self,
+        agent_id: String,
+        blueprint: leviath_core::Blueprint,
+        task: &str,
+        stages: Vec<crate::pipeline::ResolvedStage>,
+    ) -> Result<Entity, String> {
+        let e = crate::pipeline::spawn_agent(&mut self.world, agent_id, blueprint, task, stages)?;
+        self.wake.notify_one();
+        Ok(e)
+    }
+
     /// Deliver a message to a running agent (routed to its inbox on the next
     /// tick) and wake the driver.
     pub fn send_message(&self, msg: AgentMessage) -> Result<(), ProviderError> {
@@ -593,6 +608,64 @@ mod tests {
     async fn agent_status_is_none_for_unknown_entity() {
         let world = build_world(registry_with(vec![]));
         assert_eq!(world.agent_status(Entity::from_raw(999)), None);
+    }
+
+    #[tokio::test]
+    async fn spawn_from_blueprint_builds_a_runnable_agent() {
+        // End-to-end via the blueprint resolver: build → drive → complete.
+        let mut world = build_world(registry_with(vec![with_tool("c1", "do"), text("done")]));
+        let e = world
+            .spawn_from_blueprint(
+                "agent-1".to_string(),
+                blueprint(),
+                "do the task",
+                vec![crate::pipeline::ResolvedStage {
+                    provider_name: "script".to_string(),
+                    model: "m".to_string(),
+                    tools: vec![],
+                }],
+            )
+            .unwrap();
+
+        world.run_until_idle(20).await;
+
+        assert_eq!(world.agent_status(e), Some(AgentStatus::Complete));
+    }
+
+    #[tokio::test]
+    async fn spawn_from_blueprint_errors_on_oversized_system_prompt() {
+        let mut world = build_world(registry_with(vec![]));
+        // A blueprint whose stage carries an enormous system prompt in a tiny
+        // pinned region overflows at spawn.
+        let layout = leviath_core::layout::ContextLayout::new(
+            vec![leviath_core::layout::RegionDefinition::new(
+                "task".to_string(),
+                RegionKind::Pinned,
+                50,
+            )],
+            1000,
+        );
+        let mut s = leviath_core::Stage::new(
+            "s".to_string(),
+            leviath_core::blueprint::ModelConfig::new("script".to_string(), "m".to_string()),
+        );
+        s.config.insert(
+            "system_prompt".to_string(),
+            serde_json::Value::String("x".repeat(100_000)),
+        );
+        let bp = leviath_core::Blueprint::new("t".to_string(), "d".to_string(), vec![s], layout);
+
+        let err = world.spawn_from_blueprint(
+            "a".to_string(),
+            bp,
+            "task",
+            vec![crate::pipeline::ResolvedStage {
+                provider_name: "script".to_string(),
+                model: "m".to_string(),
+                tools: vec![],
+            }],
+        );
+        assert!(err.is_err());
     }
 
     #[tokio::test]
