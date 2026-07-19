@@ -32,10 +32,15 @@ cargo test --all \
   || fail "Tests failed. Fix the failing tests above."
 pass "Tests OK"
 
-# 4. No coverage-suppression markers
+# 4. No coverage-suppression markers (ast-grep structural lint)
 info "Checking for coverage suppression markers..."
-cargo xtask check-exclusions \
-  || fail "Coverage suppression markers found. Remove them and refactor instead."
-pass "No suppression markers OK"
+if command -v ast-grep >/dev/null 2>&1; then
+  ast-grep scan crates xtask .github/workflows \
+    || fail "Coverage suppression markers found. Remove them and refactor instead."
+  pass "No suppression markers OK"
+else
+  info "ast-grep not installed — skipping suppression scan (CI still enforces it)."
+  info "Install: https://ast-grep.github.io/guide/quick-start.html"
+fi
 
 pass "All pre-commit checks passed."

@@ -226,19 +226,23 @@ jobs:
           minColorRange: 50
           maxColorRange: 100
 
-  # The zero-exclusions policy scan runs once (it's OS-independent) rather than
-  # once per coverage runner as it used to.
+  # The zero-exclusions policy scan runs once (it's OS-independent). It uses
+  # ast-grep, which matches Rust/YAML *structurally* (via tree-sitter) rather
+  # than by raw text — so a `#[cfg(not(test))]` attribute is caught but a
+  # backtick mention of it inside a doc comment is not. Rules live in
+  # `.sgrules/` (see `sgconfig.yml`). Explicit scan paths are required because
+  # `.github/` is a hidden directory that a bare `ast-grep scan` would skip.
   check-exclusions:
     name: Check coverage suppression markers
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
+      - name: Install ast-grep
+        uses: taiki-e/install-action@v2
         with:
-          toolchain: stable
-      - uses: Swatinem/rust-cache@v2
-      - name: Check coverage suppression markers
-        run: cargo xtask check-exclusions
+          tool: ast-grep
+      - name: Scan for coverage suppression markers
+        run: ast-grep scan crates xtask .github/workflows
 
   # `crates/leviath-cli/src/main.rs` is the ONE file excluded from coverage
   # measurement — the thin, un-unit-tested composition root where real terminal

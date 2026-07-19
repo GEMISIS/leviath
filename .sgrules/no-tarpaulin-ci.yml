@@ -1,0 +1,13 @@
+id: no-tarpaulin-ci
+language: yaml
+severity: error
+message: >-
+  tarpaulin / lcov / grcov coverage tooling is banned in CI — the designated
+  coverage tool is `cargo xtask coverage`.
+files:
+  - '.github/workflows/*.yml'
+rule:
+  any:
+    - kind: flow_node
+    - kind: block_scalar
+  regex: 'cargo-tarpaulin|cargo tarpaulin|tarpaulin_include|LCOV_EXCL|GRCOV_EXCL'
