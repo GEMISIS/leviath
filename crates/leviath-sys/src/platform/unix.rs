@@ -5,31 +5,17 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::process::Command;
 
-/// The `pre_exec` hook installed by [`configure_detached`]: start a new session
-/// so the child is detached from the controlling terminal.
+/// Put the spawned child into its own process group so it is detached from the
+/// launching terminal's foreground group and outlives that terminal closing.
 ///
-/// `setsid()` fails harmlessly if the caller is already a process-group leader;
-/// its return value is intentionally ignored. This is a free function (rather
-/// than an inline closure) precisely so it can be called directly in a unit
-/// test — covering the real `setsid` call in-process — while ALSO being usable
-/// as a `pre_exec` hook in production, where it runs in the forked child.
-pub(crate) fn new_session() -> io::Result<()> {
-    // SAFETY: `setsid()` is async-signal-safe and has no preconditions beyond
-    // the usual POSIX constraints.
-    unsafe {
-        libc::setsid();
-    }
-    Ok(())
-}
-
-/// Install [`new_session`] as `cmd`'s `pre_exec` hook.
+/// This uses the safe, stable [`CommandExt::process_group`] instead of a
+/// `pre_exec` + `setsid()` hook: both call sites redirect the child's stdio to
+/// files/null and spawn fire-and-forget (the child is reparented to init), so a
+/// fresh process group delivers the same "survives the terminal" behaviour with
+/// no `unsafe` FFI. This only configures `cmd`; nothing runs until `spawn()`.
 pub(crate) fn configure_detached(cmd: &mut Command) {
     use std::os::unix::process::CommandExt;
-    // SAFETY: `new_session` only calls the async-signal-safe `setsid()`, which
-    // is valid to run in the pre_exec child between fork and exec.
-    unsafe {
-        cmd.pre_exec(new_session);
-    }
+    cmd.process_group(0);
 }
 
 /// Send `SIGTERM` to `pid`, guarding against the `kill(0, …)` process-group case.
@@ -37,11 +23,11 @@ pub(crate) fn terminate(pid: u32) -> bool {
     if pid == 0 {
         return false;
     }
-    // SAFETY: `kill()` with a positive pid and a standard signal number has no
-    // memory-safety preconditions; errors (e.g. ESRCH) are intentionally ignored.
-    unsafe {
-        libc::kill(pid as libc::pid_t, libc::SIGTERM);
-    }
+    use nix::sys::signal::{kill, Signal};
+    use nix::unistd::Pid;
+    // Best-effort: any error (e.g. `ESRCH` when the process has already exited)
+    // is intentionally ignored.
+    let _ = kill(Pid::from_raw(pid as i32), Signal::SIGTERM);
     true
 }
 
@@ -103,7 +89,9 @@ mod tests {
         set_mode(&path, 0o644).unwrap();
 
         fn always_fails(_: &Path, _: u32) -> io::Result<()> {
-            Err(io::Error::from_raw_os_error(libc::EPERM))
+            Err(io::Error::from_raw_os_error(
+                nix::errno::Errno::EPERM as i32,
+            ))
         }
 
         let result = ensure_private_with(&path, 0o600, always_fails);
@@ -127,16 +115,9 @@ mod tests {
     }
 
     #[test]
-    fn new_session_returns_ok() {
-        // Runs the real setsid() in-process; it may fail harmlessly if we are
-        // already a process-group leader, but always returns Ok.
-        assert!(new_session().is_ok());
-    }
-
-    #[test]
-    fn configure_detached_installs_hook_without_spawning() {
-        // Registering the pre_exec hook must not fork/exec or panic; the hook
-        // only runs on a later spawn(), which this test deliberately omits.
+    fn configure_detached_sets_process_group_without_spawning() {
+        // Configuring the process group must not fork/exec or panic; it only
+        // takes effect on a later spawn(), which this test deliberately omits.
         let mut cmd = Command::new("true");
         configure_detached(&mut cmd);
     }
