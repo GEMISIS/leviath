@@ -9,6 +9,8 @@
 pub mod compaction_bridge;
 pub mod components;
 pub mod context_setup;
+#[cfg(unix)]
+pub mod control_socket;
 pub mod dynamic_interaction;
 pub mod engine;
 pub mod graph;
