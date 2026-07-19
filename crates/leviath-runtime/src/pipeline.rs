@@ -135,10 +135,12 @@ fn build_request(
 /// inference job, and move it to `AwaitingInference`. If its provider is missing
 /// or no slot is free, it stays `ReadyToInfer` and is retried on a later tick —
 /// no blocking, no wasted task.
+#[allow(clippy::type_complexity)]
 pub fn dispatch_inference(
     agents: Query<
         (
             Entity,
+            &AgentState,
             &ContextWindow,
             Option<&InferenceConfig>,
             &StageInference,
@@ -149,7 +151,10 @@ pub fn dispatch_inference(
     providers: Res<Providers>,
     mut commands: Commands,
 ) {
-    for (entity, window, config, si) in agents.iter() {
+    for (entity, state, window, config, si) in agents.iter() {
+        if state.status != AgentStatus::Active {
+            continue; // paused / waiting / cancelled — don't start new work
+        }
         let Some(provider) = providers.0.get(&si.provider_name).cloned() else {
             continue; // provider not registered — leave ready, retry later
         };
@@ -390,12 +395,15 @@ pub struct ToolStage(pub UnboundedSender<ToolJob>);
 /// `AwaitingTools`. The lane serializes execution, so there is no permit gate
 /// here — every ready agent is enqueued and processed in turn.
 pub fn dispatch_tools(
-    agents: Query<(Entity, &crate::components::InferenceResult), With<ReadyForTools>>,
+    agents: Query<(Entity, &AgentState, &crate::components::InferenceResult), With<ReadyForTools>>,
     service: Res<ToolServiceRes>,
     stage: Res<ToolStage>,
     mut commands: Commands,
 ) {
-    for (entity, result) in agents.iter() {
+    for (entity, state, result) in agents.iter() {
+        if state.status != AgentStatus::Active {
+            continue; // paused / waiting / cancelled — don't start new work
+        }
         let calls: Vec<leviath_providers::ToolCall> = result
             .tool_calls
             .iter()
@@ -603,14 +611,17 @@ const EVICTION_THRESHOLD: f32 = 0.9;
 #[allow(clippy::type_complexity)]
 pub fn dispatch_compaction(
     mut agents: Query<
-        (Entity, &mut ContextWindow, &CompactionSettings),
+        (Entity, &AgentState, &mut ContextWindow, &CompactionSettings),
         (With<ReadyToInfer>, Without<AwaitingCompaction>),
     >,
     stage: Res<InferenceStage>,
     providers: Res<Providers>,
     mut commands: Commands,
 ) {
-    for (entity, mut window, settings) in agents.iter_mut() {
+    for (entity, state, mut window, settings) in agents.iter_mut() {
+        if state.status != AgentStatus::Active {
+            continue; // paused / waiting / cancelled — don't start new work
+        }
         if !window.needs_eviction(EVICTION_THRESHOLD) {
             continue; // under threshold — nothing to do
         }
@@ -1355,6 +1366,7 @@ pub fn dispatch_transition_choice(
     mut agents: Query<
         (
             Entity,
+            &AgentState,
             &mut ContextWindow,
             &StageInference,
             &AgentBlueprint,
@@ -1367,7 +1379,10 @@ pub fn dispatch_transition_choice(
     providers: Res<Providers>,
     mut commands: Commands,
 ) {
-    for (entity, mut window, si, bp, cursor, choice) in agents.iter_mut() {
+    for (entity, state, mut window, si, bp, cursor, choice) in agents.iter_mut() {
+        if state.status != AgentStatus::Active {
+            continue; // paused / waiting / cancelled — don't start new work
+        }
         let Some(provider) = providers.0.get(&si.provider_name).cloned() else {
             continue; // provider not registered — retry later
         };
@@ -1673,7 +1688,12 @@ mod tests {
     async fn dispatch_moves_agent_to_awaiting_and_runs_the_job() {
         let (mut world, mut rx) = build_world(InferencePools::new(InferencePoolConfig::new()));
         let e = world
-            .spawn((window(), stage("m", vec![], None), ReadyToInfer))
+            .spawn((
+                agent_state(),
+                window(),
+                stage("m", vec![], None),
+                ReadyToInfer,
+            ))
             .id();
 
         run(&mut world);
@@ -1695,7 +1715,12 @@ mod tests {
         let _held = pools.try_acquire("m").unwrap(); // occupy the only slot
         let (mut world, _rx) = build_world(pools);
         let e = world
-            .spawn((window(), stage("m", vec![], None), ReadyToInfer))
+            .spawn((
+                agent_state(),
+                window(),
+                stage("m", vec![], None),
+                ReadyToInfer,
+            ))
             .id();
 
         run(&mut world);
@@ -1710,6 +1735,7 @@ mod tests {
         let (mut world, _rx) = build_world(InferencePools::new(InferencePoolConfig::new()));
         let e = world
             .spawn((
+                agent_state(),
                 window(),
                 stage("m", vec![], None).clone_with_provider("nope"),
                 ReadyToInfer,
@@ -1719,6 +1745,22 @@ mod tests {
         run(&mut world);
 
         assert!(world.get::<ReadyToInfer>(e).is_some()); // unknown provider ⇒ untouched
+        assert!(world.get::<AwaitingInference>(e).is_none());
+    }
+
+    #[tokio::test]
+    async fn dispatch_inference_skips_non_active_agent() {
+        let (mut world, _rx) = build_world(InferencePools::new(InferencePoolConfig::new()));
+        let mut st = agent_state();
+        st.status = AgentStatus::Idle; // paused
+        let e = world
+            .spawn((st, window(), stage("m", vec![], None), ReadyToInfer))
+            .id();
+
+        run(&mut world);
+
+        // Paused ⇒ not dispatched, stays ready for when it resumes.
+        assert!(world.get::<ReadyToInfer>(e).is_some());
         assert!(world.get::<AwaitingInference>(e).is_none());
     }
 
@@ -2051,7 +2093,9 @@ mod tests {
         let mut world = World::new();
         world.insert_resource(ToolServiceRes(Arc::new(EchoService)));
         world.insert_resource(ToolStage(jtx));
-        let e = world.spawn((infer_result(true), ReadyForTools)).id();
+        let e = world
+            .spawn((agent_state(), infer_result(true), ReadyForTools))
+            .id();
 
         let mut s = Schedule::default();
         s.add_systems(dispatch_tools);
@@ -2064,6 +2108,24 @@ mod tests {
         // Run the produced closure (covers the service's exec path).
         let results = (job.exec)().await;
         assert_eq!(results, vec![("t".to_string(), "ran n".to_string())]);
+    }
+
+    #[tokio::test]
+    async fn dispatch_tools_skips_non_active_agent() {
+        let (jtx, mut jrx) = mpsc::unbounded_channel();
+        let mut world = World::new();
+        world.insert_resource(ToolServiceRes(Arc::new(EchoService)));
+        world.insert_resource(ToolStage(jtx));
+        let mut st = agent_state();
+        st.status = AgentStatus::Cancelled;
+        let e = world.spawn((st, infer_result(true), ReadyForTools)).id();
+
+        let mut s = Schedule::default();
+        s.add_systems(dispatch_tools);
+        s.run(&mut world);
+
+        assert!(world.get::<ReadyForTools>(e).is_some()); // cancelled ⇒ not enqueued
+        assert!(jrx.try_recv().is_err());
     }
 
     // ── tool-collect (apply_tool_results) ──
@@ -3125,6 +3187,26 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn compaction_skips_non_active_agent() {
+        let (mut world, _rx) = build_world(InferencePools::new(InferencePoolConfig::new()));
+        let mut st = agent_state();
+        st.status = AgentStatus::Idle;
+        let e = world
+            .spawn((
+                compacting_window(),
+                compaction_settings("cfg", "m"),
+                st,
+                ReadyToInfer,
+            ))
+            .id();
+
+        run_dispatch_compaction(&mut world);
+
+        assert!(world.get::<ReadyToInfer>(e).is_some());
+        assert!(world.get::<AwaitingCompaction>(e).is_none());
+    }
+
+    #[tokio::test]
     async fn compaction_skips_when_under_threshold() {
         let (mut world, _rx) = build_world(InferencePools::new(InferencePoolConfig::new()));
         let mut w = ContextWindow::new(1000);
@@ -3647,6 +3729,29 @@ mod tests {
         // The spawned routing job reports back on the transition lane.
         let outcome = trx.recv().await.expect("routing outcome");
         assert_eq!(outcome.entity, e);
+    }
+
+    #[tokio::test]
+    async fn dispatch_choice_skips_non_active_agent() {
+        let (mut world, _rx) = build_world(InferencePools::new(InferencePoolConfig::new()));
+        let bp = blueprint(vec![
+            stage_named("a", None, false, None),
+            stage_named("b", None, false, None),
+        ]);
+        let e = spawn_choosing_agent(
+            &mut world,
+            bp,
+            vec![si("m0"), si("m1")],
+            vec![plain_edge("b")],
+        );
+        world.get_mut::<AgentState>(e).unwrap().status = AgentStatus::Cancelled;
+
+        let mut schedule = Schedule::default();
+        schedule.add_systems(dispatch_transition_choice);
+        schedule.run(&mut world);
+
+        assert!(world.get::<AwaitingTransitionChoice>(e).is_some()); // stayed
+        assert!(world.get::<AwaitingTransitionResponse>(e).is_none());
     }
 
     #[tokio::test]
