@@ -3,8 +3,8 @@
 //! Run via: `cargo xtask <subcommand>`
 //!
 //! Subcommands:
-//!   coverage                    Gate every workspace package at a hard 100%.
-//!   coverage --package <pkg>    Gate just one package (the CI per-package fan-out).
+//!   `coverage`                  Gate every workspace package at a hard 100%.
+//!   `coverage --package <pkg>`  Gate just one package (the CI per-package fan-out).
 
 mod coverage;
 

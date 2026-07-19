@@ -444,7 +444,7 @@ pub enum WorkerFailurePolicy {
 /// Configuration for a [`StageMode::FanOut`] stage.
 ///
 /// Exactly one of `worker_agent` / `worker_stage` / `worker_query` selects the
-/// worker's agent type (validated in [`Blueprint::validate_graph`]).
+/// worker's agent type (validated when the blueprint's graph is checked).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct FanOutConfig {
     /// A separate registered/installed blueprint run as the worker agent type.

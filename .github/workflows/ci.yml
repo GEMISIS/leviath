@@ -82,6 +82,21 @@ jobs:
       - name: Check formatting
         run: cargo fmt --all -- --check
 
+  # Rejects broken or private intra-doc links and stray HTML tags in doc
+  # comments (`-D warnings` promotes every rustdoc lint to an error). Cheap and
+  # OS-independent, so it runs once on ubuntu.
+  docs:
+    name: Docs
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Check docs
+        run: RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
+
   # Coverage runs on all three OSes and enforces a hard 100% on regions, lines,
   # and functions. Each (os × package) runner GATES one package with llvm-cov's
   # own thresholds: `cargo xtask coverage --package <pkg>` runs `cargo llvm-cov

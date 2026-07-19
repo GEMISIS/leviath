@@ -356,6 +356,7 @@ The hook enforces, before every commit:
 
 - **formatting** (`cargo fmt --check`)
 - **clippy** with warnings-as-errors
+- **doc lints** (`cargo doc` with `-D warnings` — no broken/private intra-doc links or stray HTML)
 - the **full test suite**
 - the **coverage-suppression-marker lint** (`ast-grep scan`, if `ast-grep` is installed; CI always enforces it)
 

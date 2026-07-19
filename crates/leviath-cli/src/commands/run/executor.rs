@@ -209,7 +209,7 @@ pub struct StageContext<'a> {
 
 /// A foreground interaction-point asker: resolves an `InteractionRequest` to a
 /// response (real stdin in the binary, a mock in tests). Used by
-/// [`crate::commands::run::stages::run_interactive_points_stage`] on the
+/// `run_interactive_points_stage` on the
 /// foreground (no-run-context) path.
 pub type InteractionAsker =
     fn(&crate::interaction::InteractionRequest) -> crate::interaction::InteractionResponse;
@@ -256,7 +256,7 @@ pub trait StageCallbacks: Send {
     /// Foreground overrides this to return `Some(..)` (its injected asker);
     /// background/worker callers keep the default `None` and resolve interaction
     /// points via IPC (`get_run_context` returns `Some`).
-    /// [`crate::commands::run::stages::run_interactive_points_stage`] requires a
+    /// `run_interactive_points_stage` requires a
     /// `Some` asker only when there's no run context (true foreground).
     fn interaction_point_asker(&self) -> Option<InteractionAsker> {
         None

@@ -1,6 +1,6 @@
 //! On-disk run state for background agent executions.
 //!
-//! Each run lives under ~/.leviath/runs/<run-id>/ with:
+//! Each run lives under `~/.leviath/runs/<run-id>/` with:
 //! - `meta.json`    — run metadata, updated atomically (tmp + rename)
 //! - `output.log`  — append-only combined worker stdout (legacy/fallback)
 //! - `stages.json` — index of per-stage records
@@ -102,7 +102,7 @@ fn dashboard_log_path_from(env_override: Option<&str>) -> PathBuf {
 /// Path to the persistent dashboard activity log (~/.leviath/dashboard.log).
 ///
 /// Honours the `LEVIATH_DASHBOARD_LOG_PATH` override when set (tests use it via
-/// [`isolate_runs_dir_for_test`]); otherwise resolves the real home-relative
+/// `isolate_runs_dir_for_test`); otherwise resolves the real home-relative
 /// path. This function only *computes* a `PathBuf` — it never writes — so both
 /// arms are safe to exercise directly in tests. The write side
 /// ([`append_dashboard_log`] and `Dashboard::add_log`) is what must stay off
@@ -153,7 +153,7 @@ pub fn append_dashboard_log_to(path: &Path, msg: &str) {
 /// worker processes writing state nobody could see.
 static RUN_ID_COUNTER: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 
-/// Generate a unique run ID: "<agent_name>-<timestamp>-<suffix>".
+/// Generate a unique run ID: `<agent_name>-<timestamp>-<suffix>`.
 pub fn new_run_id(agent_name: &str) -> String {
     let now = now_secs();
     let counter = RUN_ID_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed) as i64;

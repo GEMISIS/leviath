@@ -375,7 +375,7 @@ const READ_STALL_TIMEOUT_SECS: u64 = 900;
 ///   so forcing a fresh connection per request, not the protocol, is the fix.
 ///   The cost is a TLS handshake per request, negligible for the sequential
 ///   request/response calls these providers make.
-/// - a `read_timeout` (idle/stall timeout — see [`READ_STALL_TIMEOUT_SECS`]) as
+/// - a `read_timeout` (idle/stall timeout — see `READ_STALL_TIMEOUT_SECS`) as
 ///   a backstop so a stalled connection can never hang the process forever;
 /// - TCP keep-alive.
 ///

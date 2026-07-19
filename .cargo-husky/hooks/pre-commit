@@ -26,13 +26,19 @@ cargo clippy --all-targets --all-features -- -D warnings \
   || fail "cargo clippy failed. Fix the warnings above."
 pass "Clippy OK"
 
-# 3. Tests
+# 3. Docs — no broken/private intra-doc links, no stray HTML tags
+info "Checking docs..."
+RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --quiet \
+  || fail "cargo doc failed — broken/private intra-doc links or invalid HTML. Fix the warnings above."
+pass "Docs OK"
+
+# 4. Tests
 info "Running tests..."
 cargo test --all \
   || fail "Tests failed. Fix the failing tests above."
 pass "Tests OK"
 
-# 4. No coverage-suppression markers (ast-grep structural lint)
+# 5. No coverage-suppression markers (ast-grep structural lint)
 info "Checking for coverage suppression markers..."
 if command -v ast-grep >/dev/null 2>&1; then
   ast-grep scan crates xtask .github/workflows \

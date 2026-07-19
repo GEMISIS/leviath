@@ -80,7 +80,7 @@ impl RiskyExecutors for RealExecutors {
 }
 
 /// Real `lev dash`: supplies the real crossterm terminal backend and event
-/// source to the library's fully-tested [`dashboard::execute_with`]. Wiring
+/// source to the library's fully-tested `dashboard::execute_with`. Wiring
 /// only — the loop, rendering, input handling, and engine setup it composes
 /// are all exercised under `cargo test`.
 async fn real_dashboard(_args: DashboardArgs) -> anyhow::Result<()> {
