@@ -228,6 +228,35 @@ pub fn collect_inference(
     }
 }
 
+/// The response had tool calls; the agent is ready for the tool-dispatch system
+/// to run them (the calls live on its `InferenceResult`).
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReadyForTools;
+
+/// The response had no tool calls; the agent is ready for the transition system
+/// to decide completion / next stage.
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReadyForTransition;
+
+/// Process-response system: route each `ProcessResponse` agent by whether its
+/// last inference asked for tools. Tool calls present ⇒ `ReadyForTools`; none ⇒
+/// `ReadyForTransition` (the transition system decides finish vs. next stage vs.
+/// a "use your tools" nudge). Pure routing — no I/O.
+pub fn process_response(
+    agents: Query<(Entity, &crate::components::InferenceResult), With<ProcessResponse>>,
+    mut commands: Commands,
+) {
+    for (entity, result) in agents.iter() {
+        let mut e = commands.entity(entity);
+        e.remove::<ProcessResponse>();
+        if result.tool_calls.is_empty() {
+            e.insert(ReadyForTransition);
+        } else {
+            e.insert(ReadyForTools);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -546,5 +575,49 @@ mod tests {
         // Untouched — the stale outcome was dropped.
         assert_eq!(world.get::<AgentState>(e).unwrap().iteration, 0);
         assert!(world.get::<ProcessResponse>(e).is_none());
+    }
+
+    // ── process-response routing ──
+
+    fn infer_result(with_tools: bool) -> crate::components::InferenceResult {
+        crate::components::InferenceResult {
+            response: "r".to_string(),
+            tool_calls: if with_tools {
+                vec![crate::components::ToolCall {
+                    tool_id: "t".to_string(),
+                    name: "n".to_string(),
+                    arguments: serde_json::Value::Null,
+                }]
+            } else {
+                vec![]
+            },
+            tokens_used: 0,
+            timestamp: 0,
+        }
+    }
+
+    fn run_process(world: &mut World) {
+        let mut s = Schedule::default();
+        s.add_systems(process_response);
+        s.run(world);
+    }
+
+    #[test]
+    fn process_routes_tool_calls_to_ready_for_tools() {
+        let mut world = World::new();
+        let e = world.spawn((infer_result(true), ProcessResponse)).id();
+        run_process(&mut world);
+        assert!(world.get::<ReadyForTools>(e).is_some());
+        assert!(world.get::<ProcessResponse>(e).is_none());
+        assert!(world.get::<ReadyForTransition>(e).is_none());
+    }
+
+    #[test]
+    fn process_routes_no_tools_to_ready_for_transition() {
+        let mut world = World::new();
+        let e = world.spawn((infer_result(false), ProcessResponse)).id();
+        run_process(&mut world);
+        assert!(world.get::<ReadyForTransition>(e).is_some());
+        assert!(world.get::<ReadyForTools>(e).is_none());
     }
 }
