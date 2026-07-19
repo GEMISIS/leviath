@@ -105,6 +105,7 @@ impl InteractionHub {
 
 /// A per-agent [`InteractionBackend`] that routes `ask` through an
 /// [`InteractionHub`].
+#[derive(Clone)]
 pub struct HubInteractionBackend {
     hub: InteractionHub,
     agent_id: String,

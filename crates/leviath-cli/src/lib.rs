@@ -2,6 +2,7 @@
 
 pub mod commands;
 pub mod config;
+pub mod daemon;
 pub mod dispatch;
 pub mod interaction;
 pub mod render;
