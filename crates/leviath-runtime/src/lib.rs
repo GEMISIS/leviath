@@ -31,7 +31,6 @@ pub mod spawn;
 pub mod systems;
 pub mod taint;
 pub mod tool_bridge;
-pub mod tool_source;
 pub mod world;
 // test_support.rs gates itself with an inner `#![cfg(test)]` attribute, so no
 // `#[cfg(test)]` is needed here (adding one would trigger clippy's
