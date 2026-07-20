@@ -458,6 +458,9 @@ mod tests {
                 workdir: "/w".to_string(),
                 metadata: Default::default(),
                 callback_url: None,
+                yolo: false,
+                allow: Vec::new(),
+                max_depth: None,
             },
         })
         .await;

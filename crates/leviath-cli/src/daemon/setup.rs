@@ -192,6 +192,9 @@ mod tests {
                 workdir: std::env::temp_dir().to_string_lossy().to_string(),
                 metadata: Default::default(),
                 callback_url: None,
+                yolo: false,
+                allow: Vec::new(),
+                max_depth: None,
             },
             reply,
         });
@@ -261,6 +264,9 @@ mod tests {
                 workdir: std::env::temp_dir().to_string_lossy().to_string(),
                 metadata: Default::default(),
                 callback_url: None,
+                yolo: false,
+                allow: Vec::new(),
+                max_depth: None,
             },
             reply,
         });

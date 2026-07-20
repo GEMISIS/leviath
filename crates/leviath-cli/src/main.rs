@@ -116,8 +116,15 @@ async fn real_run(args: commands::run::RunArgs) -> anyhow::Result<()> {
 
     ensure_daemon_running().await?;
     let workdir = std::env::current_dir()?.to_string_lossy().to_string();
-    let spawn_args =
-        leviath_cli::daemon::client::resolve_spawn_args(&path, &task, args.model, &workdir)?;
+    let spawn_args = leviath_cli::daemon::client::resolve_spawn_args(
+        &path,
+        &task,
+        args.model,
+        &workdir,
+        args.yolo,
+        args.allow,
+        args.max_depth,
+    )?;
     leviath_cli::daemon::client::send_spawn(&control_client()?, spawn_args).await
 }
 

@@ -17,6 +17,9 @@ pub fn resolve_spawn_args(
     task: &str,
     model: Option<String>,
     workdir: &str,
+    yolo: bool,
+    allow: Vec<String>,
+    max_depth: Option<usize>,
 ) -> anyhow::Result<SpawnArgs> {
     let manifest = find_manifest(path)?;
     let agent_name = manifest
@@ -32,6 +35,9 @@ pub fn resolve_spawn_args(
         workdir: workdir.to_string(),
         metadata: Default::default(),
         callback_url: None,
+        yolo,
+        allow,
+        max_depth,
     })
 }
 
@@ -81,6 +87,9 @@ mod tests {
             "do it",
             Some("m".to_string()),
             "/work",
+            false,
+            Vec::new(),
+            None,
         )
         .unwrap();
         assert!(args.run_id.contains("my-agent"));
@@ -92,7 +101,18 @@ mod tests {
 
     #[test]
     fn resolve_spawn_args_errors_on_missing_manifest() {
-        assert!(resolve_spawn_args("/no/such/agent", "t", None, "/work").is_err());
+        assert!(
+            resolve_spawn_args(
+                "/no/such/agent",
+                "t",
+                None,
+                "/work",
+                false,
+                Vec::new(),
+                None
+            )
+            .is_err()
+        );
     }
 
     /// Bind a control listener at a fresh id under `dir` and serve one canned

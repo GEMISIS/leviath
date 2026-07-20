@@ -110,6 +110,11 @@ fn reload_one(
         workdir: meta.workdir.clone(),
         metadata: meta.metadata.clone(),
         callback_url: meta.callback_url.clone(),
+        // Launch overrides aren't persisted; a reloaded run reverts to its
+        // blueprint's own tool policy (safe-side: more prompting, never less).
+        yolo: false,
+        allow: Vec::new(),
+        max_depth: None,
     };
     let entity = build_agent(
         world,

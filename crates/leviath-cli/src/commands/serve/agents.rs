@@ -51,6 +51,9 @@ pub(super) async fn spawn_agent(
         workdir,
         metadata: body.metadata.clone(),
         callback_url: body.callback_url.clone(),
+        yolo: body.yolo,
+        allow: body.allow.clone(),
+        max_depth: body.max_depth,
     };
 
     match state.control.spawn(args).await {
