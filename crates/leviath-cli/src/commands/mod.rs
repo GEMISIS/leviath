@@ -14,6 +14,5 @@ pub mod remove;
 pub mod run;
 pub mod serve;
 pub mod setup;
-pub mod spawn;
 pub mod test;
 pub mod validate;

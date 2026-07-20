@@ -32,9 +32,6 @@ pub enum Commands {
     /// Run an agent
     Run(commands::run::RunArgs),
 
-    /// Spawn an agent into the running shared-world daemon
-    Spawn(commands::spawn::SpawnCmdArgs),
-
     /// List agents running in the shared-world daemon
     Ps(commands::ps::PsArgs),
 
@@ -77,10 +74,6 @@ pub enum Commands {
 
     /// Run the shared-world daemon in the foreground
     Daemon(commands::daemon::DaemonArgs),
-
-    /// (Internal) Background worker process — do not call directly
-    #[command(name = "__run-worker", hide = true)]
-    RunWorker(commands::run::WorkerArgs),
 }
 
 /// The subset of commands whose real execution performs I/O that a unit test
@@ -92,10 +85,9 @@ pub enum Commands {
 /// (static dispatch, no `dyn`), so no boxing or `Send` bound is required.
 #[allow(async_fn_in_trait)]
 pub trait RiskyExecutors {
-    /// `lev run` — foreground (blocking stdin/terminal) or a detached worker spawn.
+    /// `lev run` — auto-starts the daemon (real process spawn) if needed and
+    /// spawns the agent into the shared world over the control socket.
     async fn run(&self, args: commands::run::RunArgs) -> anyhow::Result<()>;
-    /// `lev spawn` — reads the real cwd + control-socket path, connects to the daemon.
-    async fn spawn(&self, args: commands::spawn::SpawnCmdArgs) -> anyhow::Result<()>;
     /// `lev ps` — resolves the control-socket path and queries the daemon.
     async fn ps(&self, args: commands::ps::PsArgs) -> anyhow::Result<()>;
     /// `lev msg` — resolves the control-socket path and sends a message.
@@ -110,8 +102,6 @@ pub trait RiskyExecutors {
     async fn serve(&self, args: commands::serve::ServeArgs) -> anyhow::Result<()>;
     /// `lev daemon` — binds the control socket and serves the shared world.
     async fn daemon(&self, args: commands::daemon::DaemonArgs) -> anyhow::Result<()>;
-    /// `lev __run-worker` — the background worker's real inference loop.
-    async fn worker(&self, args: commands::run::WorkerArgs) -> anyhow::Result<()>;
 }
 
 /// Route a parsed subcommand to its executor. Safe commands are called
@@ -122,7 +112,6 @@ pub async fn dispatch(command: Commands, ex: &impl RiskyExecutors) -> anyhow::Re
         Commands::Create(args) => commands::create::execute(args).await,
         Commands::Setup(args) => ex.setup(args).await,
         Commands::Run(args) => ex.run(args).await,
-        Commands::Spawn(args) => ex.spawn(args).await,
         Commands::Ps(args) => ex.ps(args).await,
         Commands::Msg(args) => ex.msg(args).await,
         Commands::Cancel(args) => ex.cancel(args).await,
@@ -137,7 +126,6 @@ pub async fn dispatch(command: Commands, ex: &impl RiskyExecutors) -> anyhow::Re
         Commands::Policy(args) => commands::policy::execute(args).await,
         Commands::Serve(args) => ex.serve(args).await,
         Commands::Daemon(args) => ex.daemon(args).await,
-        Commands::RunWorker(args) => ex.worker(args).await,
     }
 }
 
@@ -152,9 +140,6 @@ mod tests {
 
     impl RiskyExecutors for MockRisky {
         async fn run(&self, _args: commands::run::RunArgs) -> anyhow::Result<()> {
-            Ok(())
-        }
-        async fn spawn(&self, _args: commands::spawn::SpawnCmdArgs) -> anyhow::Result<()> {
             Ok(())
         }
         async fn ps(&self, _args: commands::ps::PsArgs) -> anyhow::Result<()> {
@@ -178,9 +163,6 @@ mod tests {
         async fn daemon(&self, _args: commands::daemon::DaemonArgs) -> anyhow::Result<()> {
             Ok(())
         }
-        async fn worker(&self, _args: commands::run::WorkerArgs) -> anyhow::Result<()> {
-            Ok(())
-        }
     }
 
     fn create_args() -> commands::create::CreateArgs {
@@ -194,19 +176,7 @@ mod tests {
 
     #[tokio::test]
     async fn dispatch_run_variant_is_routed_through_the_executor() {
-        let args = commands::run::RunArgs {
-            path: None,
-            task: None,
-            model: None,
-            foreground: false,
-            yolo: false,
-            allow: vec![],
-            ask: vec![],
-            deny: vec![],
-            max_depth: None,
-            count: 1,
-        };
-        let result = dispatch(Commands::Run(args), &MockRisky).await;
+        let result = dispatch(Commands::Run(commands::run::RunArgs::default()), &MockRisky).await;
         assert!(result.is_ok());
     }
 
@@ -229,17 +199,6 @@ mod tests {
     async fn dispatch_dashboard_variant_is_routed_through_the_executor() {
         let args = commands::dashboard::DashboardArgs {};
         let result = dispatch(Commands::Dashboard(args), &MockRisky).await;
-        assert!(result.is_ok());
-    }
-
-    #[tokio::test]
-    async fn dispatch_spawn_variant_is_routed_through_the_executor() {
-        let args = commands::spawn::SpawnCmdArgs {
-            path: "/no/such/agent".to_string(),
-            task: "t".to_string(),
-            model: None,
-        };
-        let result = dispatch(Commands::Spawn(args), &MockRisky).await;
         assert!(result.is_ok());
     }
 
@@ -281,23 +240,6 @@ mod tests {
             cors: "*".to_string(),
         };
         let result = dispatch(Commands::Serve(args), &MockRisky).await;
-        assert!(result.is_ok());
-    }
-
-    #[tokio::test]
-    async fn dispatch_run_worker_variant_is_routed_through_the_executor() {
-        let args = commands::run::WorkerArgs {
-            path: "/unused/path".to_string(),
-            task: "unused task".to_string(),
-            run_id: "unused-run-id".to_string(),
-            model: None,
-            yolo: false,
-            allow: vec![],
-            ask: vec![],
-            deny: vec![],
-            max_depth: None,
-        };
-        let result = dispatch(Commands::RunWorker(args), &MockRisky).await;
         assert!(result.is_ok());
     }
 

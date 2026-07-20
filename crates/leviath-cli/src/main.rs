@@ -57,11 +57,7 @@ struct RealExecutors;
 
 impl RiskyExecutors for RealExecutors {
     async fn run(&self, args: commands::run::RunArgs) -> anyhow::Result<()> {
-        commands::run::execute(args, real_foreground_io()).await
-    }
-
-    async fn spawn(&self, args: commands::spawn::SpawnCmdArgs) -> anyhow::Result<()> {
-        real_spawn(args).await
+        real_run(args).await
     }
 
     async fn ps(&self, _args: commands::ps::PsArgs) -> anyhow::Result<()> {
@@ -93,10 +89,52 @@ impl RiskyExecutors for RealExecutors {
     async fn daemon(&self, args: commands::daemon::DaemonArgs) -> anyhow::Result<()> {
         real_daemon(args).await
     }
+}
 
-    async fn worker(&self, args: commands::run::WorkerArgs) -> anyhow::Result<()> {
-        commands::run::execute_worker(args).await
+/// Real `lev run`: ensure the daemon is running (auto-start it detached if not),
+/// then resolve the blueprint + task and spawn the agent into the shared world.
+/// Wiring only — the request-building + daemon exchange (`daemon::client`) are
+/// unit-tested; the cwd/home resolution, process spawn, and socket connect are
+/// the un-unit-testable slivers kept here.
+async fn real_run(args: commands::run::RunArgs) -> anyhow::Result<()> {
+    let path = args.path.ok_or_else(|| {
+        anyhow::anyhow!("a blueprint path is required (e.g. `lev run agents/coder \"task\"`)")
+    })?;
+    let task = args
+        .task
+        .ok_or_else(|| anyhow::anyhow!("a task is required (e.g. `-t \"do the thing\"`)"))?;
+
+    ensure_daemon_running().await?;
+    let workdir = std::env::current_dir()?.to_string_lossy().to_string();
+    let spawn_args =
+        leviath_cli::daemon::client::resolve_spawn_args(&path, &task, args.model, &workdir)?;
+    leviath_cli::daemon::client::send_spawn(&control_client()?, spawn_args).await
+}
+
+/// Ensure a daemon is listening on the control socket, auto-starting a detached
+/// `lev daemon` process if none is. Best-effort with a bounded wait for the
+/// socket to appear.
+async fn ensure_daemon_running() -> anyhow::Result<()> {
+    let socket = leviath_cli::daemon::setup::control_socket_path()
+        .ok_or_else(|| anyhow::anyhow!("cannot resolve a home directory for the control socket"))?;
+    if std::os::unix::net::UnixStream::connect(&socket).is_ok() {
+        return Ok(()); // already running
     }
+    let exe = std::env::current_exe()?;
+    let mut cmd = std::process::Command::new(exe);
+    cmd.arg("daemon")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    leviath_sys::process::configure_detached(&mut cmd);
+    cmd.spawn()?;
+    for _ in 0..100 {
+        if std::os::unix::net::UnixStream::connect(&socket).is_ok() {
+            return Ok(());
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    anyhow::bail!("the leviath daemon did not start within 5s");
 }
 
 /// Real `lev daemon`: bind the control socket and drive the shared world until
@@ -153,20 +191,6 @@ fn control_client() -> anyhow::Result<leviath_runtime::control_socket::ControlCl
     Ok(leviath_runtime::control_socket::ControlClient::new(socket))
 }
 
-/// Real `lev spawn`: reads the process's real cwd and the control-socket path,
-/// then hands the request to the tested `spawn::resolve_spawn_args` / `send_spawn`
-/// cores. The env-dependent I/O (cwd, home resolution, socket connect) lives here.
-async fn real_spawn(args: commands::spawn::SpawnCmdArgs) -> anyhow::Result<()> {
-    use leviath_cli::daemon::setup::control_socket_path;
-    use leviath_runtime::control_socket::ControlClient;
-
-    let workdir = std::env::current_dir()?.to_string_lossy().to_string();
-    let spawn_args = commands::spawn::resolve_spawn_args(&args, &workdir)?;
-    let socket = control_socket_path()
-        .ok_or_else(|| anyhow::anyhow!("cannot resolve a home directory for the control socket"))?;
-    commands::spawn::send_spawn(&ControlClient::new(socket), spawn_args).await
-}
-
 /// Real `lev dash`: supplies the real crossterm terminal backend and event
 /// source to the library's fully-tested `dashboard::execute_with`. Wiring
 /// only — the loop, rendering, input handling, and engine setup it composes
@@ -203,20 +227,6 @@ fn open_controlling_tty() -> io::Result<File> {
 #[cfg(not(unix))]
 fn open_controlling_tty() -> io::Result<File> {
     Err(io::Error::other("no controlling terminal on this platform"))
-}
-
-/// Real foreground I/O bundle: real stdin for interactions and the message
-/// reader, and the real `is_terminal` probe. Wires the process's real stdin
-/// into `run`'s fully-tested foreground cores.
-fn real_foreground_io() -> commands::run::ForegroundIo {
-    use std::io::IsTerminal;
-    commands::run::ForegroundIo {
-        ask: |req| {
-            leviath_cli::interaction::request_interaction_from_reader(req, &mut io::stdin().lock())
-        },
-        make_message_reader: || Box::pin(tokio::io::BufReader::new(tokio::io::stdin())),
-        stdin_is_terminal: || io::stdin().is_terminal(),
-    }
 }
 
 /// Real [`TerminalSetup`]: enables raw mode, enters/leaves the real alternate

@@ -84,14 +84,6 @@ impl ToolRegistry {
         tools
     }
 
-    /// Execute a tool by name, dispatching to built-ins or MCP.
-    #[allow(dead_code)]
-    pub async fn call(&self, name: &str, arguments: serde_json::Value) -> String {
-        RegistryToolCaller::from_registry(self)
-            .dispatch(name, arguments)
-            .await
-    }
-
     /// Shut down all MCP connections.
     pub async fn shutdown(&self) {
         let mut mcp = self.mcp.lock().await;
@@ -100,62 +92,6 @@ impl ToolRegistry {
         // We discard the result here rather than branch on a gap that can
         // never be exercised without modifying `leviath-mcp` itself.
         let _ = mcp.shutdown_all().await;
-    }
-}
-
-// ─── StageToolSource seam (Phase 3 decoupling) ───────────────────────────────
-
-use crate::commands::run::tool_source::{StageToolSource, ToolCaller};
-
-/// Concrete [`ToolCaller`] backed by a [`ToolRegistry`]'s executors.
-///
-/// Holds only the (Arc-backed) state a single dispatch needs, so it is cheap to
-/// construct and clone and is `'static + Send + Sync` — fan-out workers move it
-/// into detached tasks. The dispatch logic lives here so that
-/// [`ToolRegistry::call`] and the [`ToolCaller`] impl share one implementation.
-struct RegistryToolCaller {
-    builtins: Arc<BuiltinTools>,
-    mcp: Arc<Mutex<ToolExecutor>>,
-    builtin_names: HashSet<String>,
-}
-
-impl RegistryToolCaller {
-    fn from_registry(reg: &ToolRegistry) -> Self {
-        Self {
-            builtins: reg.builtins.clone(),
-            mcp: reg.mcp.clone(),
-            builtin_names: reg.builtin_names.clone(),
-        }
-    }
-
-    async fn dispatch(&self, name: &str, arguments: serde_json::Value) -> String {
-        if self.builtin_names.contains(name) {
-            self.builtins.execute(name, arguments).await
-        } else {
-            let mut mcp = self.mcp.lock().await;
-            match mcp.execute(name, arguments).await {
-                Ok(r) if r.success => r.text,
-                Ok(r) => format!("[error] tool '{}' failed: {}", name, r.text),
-                Err(e) => format!("[error] tool '{}' error: {}", name, e),
-            }
-        }
-    }
-}
-
-#[async_trait::async_trait]
-impl ToolCaller for RegistryToolCaller {
-    async fn call(&self, name: &str, arguments: serde_json::Value) -> String {
-        self.dispatch(name, arguments).await
-    }
-}
-
-impl StageToolSource for ToolRegistry {
-    fn all_tool_defs(&self) -> Vec<Tool> {
-        ToolRegistry::all_tool_defs(self)
-    }
-
-    fn tool_caller(&self) -> Arc<dyn ToolCaller> {
-        Arc::new(RegistryToolCaller::from_registry(self))
     }
 }
 
@@ -827,43 +763,6 @@ for line in sys.stdin:
         let registry = ToolRegistry::build(std::env::temp_dir(), &config).await;
 
         assert!(registry.mcp_tool_defs.is_empty());
-    }
-
-    #[tokio::test]
-    async fn call_dispatches_to_builtin_and_all_mcp_result_arms() {
-        let config = config_with_mcp_server("python3", vec!["-c", STUB_INIT_AND_LIST]);
-        let registry = ToolRegistry::build(std::env::temp_dir(), &config).await;
-
-        // Builtin path.
-        let builtin_out = registry
-            .call(
-                "read_file",
-                serde_json::json!({"path": "definitely-not-here.txt"}),
-            )
-            .await;
-        assert!(!builtin_out.is_empty());
-
-        // MCP `Ok(r) if r.success` arm.
-        let ok_out = registry.call("echo", serde_json::json!({})).await;
-        assert_eq!(ok_out, "echoed!");
-
-        // MCP `Ok(r)` (tool-level failure) arm.
-        let fail_out = registry
-            .call("echo", serde_json::json!({"fail": true}))
-            .await;
-        assert!(fail_out.contains("[error]"));
-        assert!(fail_out.contains("it broke"));
-
-        // MCP `Err(e)` (transport/protocol error) arm: a tool name the stub
-        // doesn't recognize at all is never in `cached_tools()`, but the
-        // server *is* connected -- unlike `execute()`'s "no server found"
-        // path, this specific `Err` comes from the JSON-RPC "method not
-        // found" response bubbling up through `call_tool`. We can't hit
-        // that distinct transport-error arm without a tool name the stub
-        // itself advertises but then refuses at call time, which the stub
-        // doesn't model -- `discover.rs`'s own test suite already covers
-        // this exact JSON-RPC-error-response path at the `MCPClient` level.
-        registry.shutdown().await;
     }
 
     #[tokio::test]
@@ -2239,34 +2138,6 @@ mod policy_tests {
 
         let entity = bevy_ecs::prelude::Entity::from_raw(42);
         exec.register_agent("agent-1".to_string(), entity);
-    }
-
-    // ─── ToolRegistry call dispatch ───────────────────────────────────────
-
-    #[tokio::test]
-    async fn test_tool_registry_call_builtin() {
-        let config = Config::default();
-        let workdir = std::env::current_dir().unwrap();
-        let registry = ToolRegistry::build(workdir, &config).await;
-
-        // list_dir is a builtin tool
-        let result = registry
-            .call("list_dir", serde_json::json!({"path": "."}))
-            .await;
-        assert!(!result.is_empty());
-    }
-
-    #[tokio::test]
-    async fn test_tool_registry_call_unknown_mcp() {
-        let config = Config::default();
-        let workdir = std::env::current_dir().unwrap();
-        let registry = ToolRegistry::build(workdir, &config).await;
-
-        // Unknown MCP tool should return error
-        let result = registry
-            .call("nonexistent_mcp_tool", serde_json::json!({}))
-            .await;
-        assert!(result.contains("[error]"));
     }
 
     #[tokio::test]
