@@ -41,6 +41,9 @@ pub enum Commands {
     /// Cancel a running agent
     Cancel(commands::ctl::CancelArgs),
 
+    /// Answer a pending interaction (or list open ones with no request id)
+    Respond(commands::ctl::RespondArgs),
+
     /// List available and installed blueprints
     List(commands::list::ListArgs),
 
@@ -94,6 +97,8 @@ pub trait RiskyExecutors {
     async fn msg(&self, args: commands::ctl::MsgArgs) -> anyhow::Result<()>;
     /// `lev cancel` — resolves the control-socket path and cancels a run.
     async fn cancel(&self, args: commands::ctl::CancelArgs) -> anyhow::Result<()>;
+    /// `lev respond` — resolves the control-socket path and answers/lists interactions.
+    async fn respond(&self, args: commands::ctl::RespondArgs) -> anyhow::Result<()>;
     /// `lev setup` — interactive (blocking stdin) or `--non-interactive`.
     async fn setup(&self, args: commands::setup::SetupArgs) -> anyhow::Result<()>;
     /// `lev dash` — takes over the real terminal and blocks on real keyboard input.
@@ -115,6 +120,7 @@ pub async fn dispatch(command: Commands, ex: &impl RiskyExecutors) -> anyhow::Re
         Commands::Ps(args) => ex.ps(args).await,
         Commands::Msg(args) => ex.msg(args).await,
         Commands::Cancel(args) => ex.cancel(args).await,
+        Commands::Respond(args) => ex.respond(args).await,
         Commands::List(args) => commands::list::execute(args).await,
         Commands::Add(args) => commands::add::execute(args).await,
         Commands::Remove(args) => commands::remove::execute(args).await,
@@ -146,6 +152,9 @@ mod tests {
             Ok(())
         }
         async fn msg(&self, _args: commands::ctl::MsgArgs) -> anyhow::Result<()> {
+            Ok(())
+        }
+        async fn respond(&self, _args: commands::ctl::RespondArgs) -> anyhow::Result<()> {
             Ok(())
         }
         async fn cancel(&self, _args: commands::ctl::CancelArgs) -> anyhow::Result<()> {
@@ -209,6 +218,19 @@ mod tests {
             content: "c".to_string(),
         };
         assert!(dispatch(Commands::Msg(args), &MockRisky).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn dispatch_respond_variant_is_routed_through_the_executor() {
+        let args = commands::ctl::RespondArgs {
+            request_id: None,
+            value: None,
+            choice: None,
+            approve: false,
+            deny: false,
+            session: false,
+        };
+        assert!(dispatch(Commands::Respond(args), &MockRisky).await.is_ok());
     }
 
     #[tokio::test]

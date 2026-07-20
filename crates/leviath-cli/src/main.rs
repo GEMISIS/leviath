@@ -72,6 +72,10 @@ impl RiskyExecutors for RealExecutors {
         commands::ctl::cancel_run(&control_client()?, &args).await
     }
 
+    async fn respond(&self, args: commands::ctl::RespondArgs) -> anyhow::Result<()> {
+        commands::ctl::respond(&control_client()?, &args).await
+    }
+
     async fn setup(&self, args: commands::setup::SetupArgs) -> anyhow::Result<()> {
         // The interactive arm reads the process's real stdin; the branch +
         // config wiring is the tested `setup::execute_with`.

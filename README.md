@@ -106,6 +106,8 @@ logs). Inspect and steer running agents from any terminal:
 lev ps                       # list running agents and their status
 lev msg <agent-id> "..."     # send a message to a running agent
 lev cancel <run-id>          # cancel a run
+lev respond                  # list interactions an agent is waiting on
+lev respond <req-id> "..."   # answer a pending ask_user interaction
 ```
 
 Or open the dashboard to watch them work:
@@ -296,6 +298,7 @@ Covers agent lifecycle, human-in-the-loop interaction, blueprint management, per
 | `lev ps` | List running agents and their status |
 | `lev msg <agent-id> <content>` | Send a message to a running agent |
 | `lev cancel <run-id>` | Cancel a running agent |
+| `lev respond [req-id] [value]` | List or answer pending `ask_user` interactions |
 | `lev daemon` | Run the shared-world daemon in the foreground |
 | `lev dash` | TUI dashboard |
 | `lev serve` | API server |
