@@ -156,6 +156,14 @@ pub fn build_host(
         .world_mut()
         .insert_resource(FanOutSpawnerRes(Arc::new(fanout_spawner)));
 
+    // The tool allowlist policy (`policy.toml`), for the taint gate. A malformed
+    // file falls back to an empty policy (deny-by-clearance only) rather than
+    // failing daemon startup.
+    let policy = crate::commands::policy::load_policy().unwrap_or_default();
+    host.world_mut()
+        .world_mut()
+        .insert_resource(leviath_runtime::pipeline::PolicyGate(policy));
+
     // The spawner captures everything an agent needs; `now_secs` is called at
     // spawn time for the run's start timestamp.
     host.set_spawner(Box::new(move |world, args| {

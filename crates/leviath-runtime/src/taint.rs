@@ -40,8 +40,9 @@ pub trait GatePrompt: Send + Sync {
 pub type ScriptRuleChecker = dyn Fn(&str, Option<&str>, TaintLevel) -> Option<String>;
 
 /// Taint gate — checks whether a tool invocation is allowed given the
-/// current taint state of the context window.
-#[derive(Debug, Clone)]
+/// current taint state of the context window. Attached per-agent (as an ECS
+/// component) when the agent's blueprint opts into taint tracking.
+#[derive(Debug, Clone, bevy_ecs::component::Component)]
 pub struct TaintGate {
     /// Security configuration.
     config: SecurityConfig,

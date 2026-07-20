@@ -239,6 +239,23 @@ pub fn build_agent(
     let num_stages = blueprint.stages.len();
     let compaction = blueprint.compaction_config.clone();
     let max_child_depth = blueprint.max_child_depth.unwrap_or(DEFAULT_SUBAGENT_DEPTH);
+    // Taint gate: opt-in via the blueprint's `[security]` block. When on, the
+    // agent's outbound tool calls are gated against its context taint + the policy
+    // allowlist; when absent/off no gate is attached (zero enforcement overhead).
+    let security = blueprint.security.clone().unwrap_or_default();
+    let tool_sensitivities: Option<HashMap<String, leviath_core::TaintLevel>> =
+        security.taint_tracking.then(|| {
+            let gate = leviath_runtime::TaintGate::new(security.clone());
+            all_tool_defs
+                .iter()
+                .map(|t| {
+                    (
+                        t.name.clone(),
+                        gate.tool_classification(&t.name).sensitivity,
+                    )
+                })
+                .collect()
+        });
     // Per-stage tool permissions (in stage order) + the entry stage's index, for
     // the tool state's stage-scoped policy layer.
     let stage_perms_by_index: Vec<HashMap<String, String>> = blueprint
@@ -285,6 +302,21 @@ pub fn build_agent(
         // dangling `if let` block-end region.
         compaction.into_iter().for_each(|cc| {
             entity_mut.insert(CompactionSettings(cc));
+        });
+        // Attach the taint gate + per-tool sensitivities and turn on the window's
+        // taint tracking when the blueprint opts in (`Option`'s iterator keeps the
+        // enforcement path region-free when taint is off).
+        tool_sensitivities.into_iter().for_each(|sensitivities| {
+            entity_mut.insert((
+                leviath_runtime::TaintGate::new(security.clone()),
+                leviath_runtime::pipeline::ToolSensitivities(sensitivities),
+            ));
+            // `Option`'s iterator enables tracking without a dead "no window" arm
+            // (a freshly spawned agent always carries a ContextWindow).
+            entity_mut
+                .get_mut::<leviath_runtime::components::ContextWindow>()
+                .into_iter()
+                .for_each(|mut window| window.enable_taint_tracking());
         });
     }
 
@@ -529,6 +561,56 @@ mod tests {
             allow: Vec::new(),
             max_depth: None,
         }
+    }
+
+    #[tokio::test]
+    async fn build_agent_attaches_taint_gate_when_security_enabled() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = dir.path().join("agent.leviath");
+        std::fs::write(
+            &manifest,
+            "[agent]\nname = \"sec\"\nversion = \"0.1.0\"\ndescription = \"d\"\n\n\
+             [security]\ntaint_tracking = true\n\n\
+             [stages.main]\nmodel = { provider = \"anthropic\", model = \"m\" }\n",
+        )
+        .unwrap();
+        let (mut world, cli) = test_world();
+        let hub = InteractionHub::new();
+        let mcp = Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new()));
+        let entity = build_agent(
+            world.world_mut(),
+            cli.as_ref(),
+            &Config::default(),
+            mcp,
+            &[],
+            &hub,
+            &spawn_args(&manifest.to_string_lossy()),
+            100,
+            sub_tx(),
+        )
+        .expect("spawn succeeds");
+
+        // Taint opt-in ⇒ gate + sensitivities attached and window tracking on.
+        assert!(
+            world
+                .world()
+                .get::<leviath_runtime::TaintGate>(entity)
+                .is_some()
+        );
+        assert!(
+            world
+                .world()
+                .get::<leviath_runtime::pipeline::ToolSensitivities>(entity)
+                .is_some()
+        );
+        assert!(
+            world
+                .world()
+                .get::<leviath_runtime::components::ContextWindow>(entity)
+                .unwrap()
+                .overall_taint()
+                .is_some()
+        );
     }
 
     #[tokio::test]

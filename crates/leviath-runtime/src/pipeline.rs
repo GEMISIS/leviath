@@ -465,20 +465,26 @@ pub fn dispatch_tools(
             &mut ContextWindow,
             Option<&crate::components::ToolResultRoutingComponent>,
             Option<&ToolSensitivities>,
+            Option<&mut crate::taint::TaintGate>,
         ),
         With<ReadyForTools>,
     >,
     service: Res<ToolServiceRes>,
     stage: Res<ToolStage>,
+    policy: Option<Res<PolicyGate>>,
     mut commands: Commands,
 ) {
-    for (entity, state, result, mut window, routing, sensitivities) in agents.iter_mut() {
+    let default_policy = leviath_core::PolicyConfig::default();
+    let policy_ref = policy.as_ref().map(|p| &p.0).unwrap_or(&default_policy);
+    for (entity, state, result, mut window, routing, sensitivities, mut gate) in agents.iter_mut() {
         if state.status != AgentStatus::Active {
             continue; // paused / waiting / cancelled — don't start new work
         }
 
         // Apply context_* tools inline (they need world access); collect the rest
-        // for the async lane.
+        // for the async lane. A taint-gated agent's outbound calls that would leak
+        // over-cleared data (and aren't allowlisted) are blocked here with a
+        // `[blocked]` result instead of reaching the executor.
         let mut context_results = Vec::new();
         let mut lane_calls = Vec::new();
         for c in &result.tool_calls {
@@ -486,13 +492,27 @@ pub fn dispatch_tools(
                 let text =
                     crate::context_tools::handle_context_tool(&c.name, &c.arguments, &mut window);
                 context_results.push((c.tool_id.clone(), text));
-            } else {
-                lane_calls.push(leviath_providers::ToolCall {
-                    id: c.tool_id.clone(),
-                    name: c.name.clone(),
-                    arguments: c.arguments.clone(),
-                });
+                continue;
             }
+            if let Some(gate) = gate.as_deref_mut() {
+                let decision = gate.check_with_policy(
+                    &state.agent_id,
+                    &c.name,
+                    &window,
+                    None,
+                    policy_ref,
+                    None,
+                );
+                if !decision.is_allowed() {
+                    context_results.push((c.tool_id.clone(), taint_block_message(&decision)));
+                    continue;
+                }
+            }
+            lane_calls.push(leviath_providers::ToolCall {
+                id: c.tool_id.clone(),
+                name: c.name.clone(),
+                arguments: c.arguments.clone(),
+            });
         }
 
         if lane_calls.is_empty() {
@@ -529,6 +549,36 @@ pub fn dispatch_tools(
 /// when taint tracking is enabled. Absent ⇒ taint off ⇒ results tagged Public.
 #[derive(Component, Debug, Clone, Default)]
 pub struct ToolSensitivities(pub std::collections::HashMap<String, leviath_core::TaintLevel>);
+
+/// The tool allowlist policy (`policy.toml`), as a world resource. The daemon
+/// inserts it; a taint-gated agent's outbound calls are checked against it. When
+/// absent, the gate falls back to an empty policy (deny-by-clearance only).
+#[derive(Resource, Default)]
+pub struct PolicyGate(pub leviath_core::PolicyConfig);
+
+/// The `[blocked]` tool result produced when the taint gate denies an outbound
+/// call: enough for the model to understand why and adjust.
+fn taint_block_message(decision: &leviath_core::taint::GateDecision) -> String {
+    match decision {
+        leviath_core::taint::GateDecision::Blocked {
+            taint_level,
+            clearance,
+            tool_name,
+            source_regions,
+        } => format!(
+            "[blocked] Tool '{tool_name}' would send {taint_level:?}-level data over a channel \
+             cleared only for {clearance:?} (tainted by: {}). Add an allowlist rule with \
+             `lev policy add` to permit it.",
+            if source_regions.is_empty() {
+                "context".to_string()
+            } else {
+                source_regions.join(", ")
+            }
+        ),
+        // Only ever called on a Blocked decision.
+        leviath_core::taint::GateDecision::Allowed => "[blocked] tool call denied".to_string(),
+    }
+}
 
 /// The receiving end of the tool-outcomes channel, as a world resource.
 #[derive(Resource)]
@@ -2503,6 +2553,120 @@ mod tests {
         assert_eq!(stashed.0[0].0, "c1");
         let job = jrx.try_recv().expect("lane job for the non-context call");
         assert_eq!(job.entity, e);
+    }
+
+    // ── taint gate (dispatch_tools) ──
+
+    /// A taint-tracking window carrying `Internal`-level data.
+    fn tainted_conv_window() -> ContextWindow {
+        let mut w = conv_window();
+        w.enable_taint_tracking();
+        let _ = w.add_typed_tainted_to_region(
+            "conversation",
+            leviath_core::EntryKind::UserMessage,
+            "secret".to_string(),
+            5,
+            leviath_core::TaintLevel::Internal,
+        );
+        w
+    }
+
+    fn enabled_gate() -> crate::taint::TaintGate {
+        crate::taint::TaintGate::new(leviath_core::SecurityConfig {
+            taint_tracking: true,
+            ..Default::default()
+        })
+    }
+
+    #[tokio::test]
+    async fn dispatch_tools_gate_blocks_outbound_leak_but_allows_inbound() {
+        let (jtx, mut jrx) = mpsc::unbounded_channel();
+        let mut world = World::new();
+        world.insert_resource(ToolServiceRes(Arc::new(EchoService)));
+        world.insert_resource(ToolStage(jtx));
+        // `shell` is outbound (clearance Public) over Internal data ⇒ blocked;
+        // `read_file` is inbound ⇒ always allowed ⇒ goes to the lane.
+        let e = world
+            .spawn((
+                agent_state(),
+                infer_with(vec![tc("c_shell", "shell"), tc("c_read", "read_file")]),
+                tainted_conv_window(),
+                ReadyForTools,
+                enabled_gate(),
+            ))
+            .id();
+        let mut s = Schedule::default();
+        s.add_systems(dispatch_tools);
+        s.run(&mut world);
+
+        assert!(world.get::<AwaitingTools>(e).is_some());
+        let stashed = world.get::<ContextToolResults>(e).unwrap();
+        assert!(
+            stashed
+                .0
+                .iter()
+                .any(|(id, msg)| id == "c_shell" && msg.contains("[blocked]"))
+        );
+        let job = jrx.try_recv().expect("read_file enqueued to the lane");
+        assert_eq!(job.entity, e);
+    }
+
+    #[tokio::test]
+    async fn dispatch_tools_gate_allows_outbound_via_allowlist() {
+        let (jtx, mut jrx) = mpsc::unbounded_channel();
+        let mut world = World::new();
+        world.insert_resource(ToolServiceRes(Arc::new(EchoService)));
+        world.insert_resource(ToolStage(jtx));
+        // An allowlist rule permits `shell` up to Internal sensitivity.
+        world.insert_resource(PolicyGate(leviath_core::PolicyConfig {
+            allowlist: vec![leviath_core::policy::AllowlistRule {
+                tool: "shell".to_string(),
+                to: vec![],
+                channel: vec![],
+                max_sensitivity: leviath_core::TaintLevel::Internal,
+            }],
+            mcp_overrides: Default::default(),
+        }));
+        let e = world
+            .spawn((
+                agent_state(),
+                infer_with(vec![tc("c_shell", "shell")]),
+                tainted_conv_window(),
+                ReadyForTools,
+                enabled_gate(),
+            ))
+            .id();
+        let mut s = Schedule::default();
+        s.add_systems(dispatch_tools);
+        s.run(&mut world);
+
+        // Allowlisted ⇒ the outbound call reaches the lane instead of `[blocked]`.
+        assert!(world.get::<AwaitingTools>(e).is_some());
+        let job = jrx.try_recv().expect("shell enqueued via allowlist");
+        assert_eq!(job.entity, e);
+    }
+
+    #[test]
+    fn taint_block_message_renders_blocked_and_falls_back() {
+        use leviath_core::taint::GateDecision;
+        let blocked = GateDecision::Blocked {
+            taint_level: leviath_core::TaintLevel::Internal,
+            clearance: leviath_core::TaintLevel::Public,
+            source_regions: vec!["conversation".to_string()],
+            tool_name: "shell".to_string(),
+        };
+        let msg = taint_block_message(&blocked);
+        assert!(msg.contains("shell") && msg.contains("conversation") && msg.contains("[blocked]"));
+        // Empty source regions render as "context".
+        let blocked_empty = GateDecision::Blocked {
+            taint_level: leviath_core::TaintLevel::Internal,
+            clearance: leviath_core::TaintLevel::Public,
+            source_regions: vec![],
+            tool_name: "shell".to_string(),
+        };
+        assert!(taint_block_message(&blocked_empty).contains("context"));
+        // The Allowed arm is only a defensive fallback.
+        assert!(taint_block_message(&GateDecision::Allowed).contains("blocked"));
     }
 
     #[test]
