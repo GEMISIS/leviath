@@ -8,6 +8,8 @@ mod blueprints;
 mod config;
 mod interactions;
 mod polling;
+#[cfg(test)]
+mod testutil;
 mod tree;
 mod types;
 mod websocket;
@@ -37,8 +39,11 @@ impl<T> Drop for AbortOnDrop<T> {
     }
 }
 
-pub async fn execute(args: ServeArgs) -> anyhow::Result<()> {
-    execute_with_shutdown(args, Box::pin(std::future::pending()), None).await
+pub async fn execute(
+    args: ServeArgs,
+    control: leviath_runtime::control_socket::ControlClient,
+) -> anyhow::Result<()> {
+    execute_with_shutdown(args, control, Box::pin(std::future::pending()), None).await
 }
 
 /// Core of [`execute`], with an optional shutdown signal so tests can stop
@@ -63,6 +68,7 @@ pub async fn execute(args: ServeArgs) -> anyhow::Result<()> {
 /// convenience.
 async fn execute_with_shutdown(
     args: ServeArgs,
+    control: leviath_runtime::control_socket::ControlClient,
     shutdown: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>,
     ready: Option<tokio::sync::oneshot::Sender<SocketAddr>>,
 ) -> anyhow::Result<()> {
@@ -76,6 +82,7 @@ async fn execute_with_shutdown(
     let state = AppState {
         config: Arc::new(cfg),
         event_tx: event_tx.clone(),
+        control,
     };
 
     // Background polling loop. Held behind an abort-on-drop guard so the
@@ -271,11 +278,20 @@ mod tests {
         assert_response_ok("HTTP/1.1 404 Not Found\r\n\r\n");
     }
 
+    /// A control client pointing at an address with no daemon: agent-action
+    /// endpoints report "not reachable", and read/bootstrap paths don't touch it.
+    fn no_daemon_control() -> leviath_runtime::control_socket::ControlClient {
+        leviath_runtime::control_socket::ControlClient::new(
+            leviath_runtime::control_socket::control_id(std::path::Path::new("/no/such/leviath")),
+        )
+    }
+
     fn test_state() -> AppState {
         let (tx, _) = broadcast::channel(64);
         AppState {
             config: Arc::new(Config::default()),
             event_tx: tx,
+            control: no_daemon_control(),
         }
     }
 
@@ -472,14 +488,16 @@ model = "claude-sonnet-4-6"
     }
 
     #[tokio::test]
-    async fn test_interaction_not_found() {
+    async fn test_interaction_route_reaches_daemon() {
+        // The route is wired to the handler, which (with no daemon in this test)
+        // reports the daemon unreachable — proving the request reached it.
         let app = test_app();
         let req = Request::builder()
             .uri("/api/agents/nonexistent/interaction")
             .body(Body::empty())
             .unwrap();
         let resp = app.oneshot(req).await.unwrap();
-        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
     }
 
     #[tokio::test]
@@ -663,7 +681,7 @@ prompt = "Run"
     }
 
     #[tokio::test]
-    async fn test_full_router_kill_agent_not_found() {
+    async fn test_full_router_kill_agent_reaches_daemon() {
         let app = full_app();
         let req = Request::builder()
             .method("DELETE")
@@ -671,11 +689,11 @@ prompt = "Run"
             .body(Body::empty())
             .unwrap();
         let resp = app.oneshot(req).await.unwrap();
-        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
     }
 
     #[tokio::test]
-    async fn test_full_router_send_message_not_found() {
+    async fn test_full_router_send_message_reaches_daemon() {
         let app = full_app();
         let body = serde_json::json!({"message": "hello"});
         let req = Request::builder()
@@ -685,7 +703,7 @@ prompt = "Run"
             .body(Body::from(serde_json::to_string(&body).unwrap()))
             .unwrap();
         let resp = app.oneshot(req).await.unwrap();
-        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
     }
 
     #[tokio::test]
@@ -762,50 +780,20 @@ prompt = "Run"
     }
 
     #[tokio::test]
-    async fn test_submit_interaction_full_router() {
-        crate::runstate::with_isolated_runs_dir_async(
-            "test_submit_interaction_full_router",
-            |_d| async move {
-                use crate::runstate::{RunMeta, create_run};
-
-                let run_id = format!(
-                    "test-modrs-int-{}-{}",
-                    std::process::id(),
-                    std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap()
-                        .subsec_nanos()
-                );
-                let meta = RunMeta::new(
-                    run_id.clone(),
-                    "test-agent".to_string(),
-                    "/path".to_string(),
-                    "task".to_string(),
-                    None,
-                    "/tmp".to_string(),
-                    1,
-                );
-                create_run(&meta).unwrap();
-
-                let app = full_app();
-                let body = serde_json::json!({
-                    "request_id": "req-full-001",
-                    "value": "do it",
-                    "scope": "once"
-                });
-                let req = Request::builder()
-                    .method("POST")
-                    .uri(format!("/api/agents/{}/interaction", run_id))
-                    .header("content-type", "application/json")
-                    .body(Body::from(serde_json::to_string(&body).unwrap()))
-                    .unwrap();
-                let resp = app.oneshot(req).await.unwrap();
-                assert_eq!(resp.status(), StatusCode::ACCEPTED);
-
-                let _ = std::fs::remove_dir_all(crate::runstate::run_dir(&run_id));
-            },
-        )
-        .await;
+    async fn test_submit_interaction_full_router_reaches_daemon() {
+        // The POST-interaction route is wired to the handler, which reaches the
+        // (absent-in-test) daemon. The ACCEPTED path is covered by the
+        // interactions handler's own tests against a fake daemon.
+        let app = full_app();
+        let body = serde_json::json!({"request_id": "req-1", "value": "do it", "scope": "once"});
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/agents/any/interaction")
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::to_string(&body).unwrap()))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
     }
 
     // ─── execute() — real server bootstrap ─────────────────────────────────
@@ -850,6 +838,7 @@ prompt = "Run"
                 let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
                 let handle = tokio::spawn(execute_with_shutdown(
                     args,
+                    no_daemon_control(),
                     Box::pin(std::future::pending()),
                     Some(ready_tx),
                 ));
@@ -890,6 +879,7 @@ prompt = "Run"
                 let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
                 let handle = tokio::spawn(execute_with_shutdown(
                     args,
+                    no_daemon_control(),
                     Box::pin(std::future::pending()),
                     Some(ready_tx),
                 ));
@@ -913,7 +903,7 @@ prompt = "Run"
             host: "not a valid host".to_string(),
             cors: "*".to_string(),
         };
-        let result = execute(args).await;
+        let result = execute(args, no_daemon_control()).await;
         assert!(result.is_err());
     }
 
@@ -943,7 +933,7 @@ prompt = "Run"
                     host: "127.0.0.1".to_string(),
                     cors: "*".to_string(),
                 };
-                let result = execute(args).await;
+                let result = execute(args, no_daemon_control()).await;
                 assert_execute_failed_on_malformed_config(&result);
             },
         )
@@ -978,6 +968,7 @@ prompt = "Run"
 
         let handle = tokio::spawn(execute_with_shutdown(
             args,
+            no_daemon_control(),
             Box::pin(shutdown_fut),
             Some(ready_tx),
         ));
@@ -1010,7 +1001,7 @@ prompt = "Run"
             host: "127.0.0.1".to_string(),
             cors: "*".to_string(),
         };
-        let result = execute(args).await;
+        let result = execute(args, no_daemon_control()).await;
         drop(taken);
         assert_execute_failed_on_port_in_use(&result);
     }
@@ -1036,6 +1027,7 @@ prompt = "Run"
 
                 let handle = tokio::spawn(execute_with_shutdown(
                     args,
+                    no_daemon_control(),
                     Box::pin(shutdown_fut),
                     Some(ready_tx),
                 ));
@@ -1076,8 +1068,12 @@ prompt = "Run"
                     let _ = shutdown_rx.await;
                 };
 
-                let handle =
-                    tokio::spawn(execute_with_shutdown(args, Box::pin(shutdown_fut), None));
+                let handle = tokio::spawn(execute_with_shutdown(
+                    args,
+                    no_daemon_control(),
+                    Box::pin(shutdown_fut),
+                    None,
+                ));
                 // Give the server a moment to bind before shutting down.
                 tokio::time::sleep(std::time::Duration::from_millis(100)).await;
                 let _ = shutdown_tx.send(());

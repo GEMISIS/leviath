@@ -83,7 +83,10 @@ impl RiskyExecutors for RealExecutors {
     }
 
     async fn serve(&self, args: commands::serve::ServeArgs) -> anyhow::Result<()> {
-        commands::serve::execute(args).await
+        // The HTTP API is a gateway to the shared-world daemon: ensure it's
+        // running, then serve, routing agent actions through its control socket.
+        ensure_daemon_running().await?;
+        commands::serve::execute(args, control_client()?).await
     }
 
     async fn daemon(&self, args: commands::daemon::DaemonArgs) -> anyhow::Result<()> {

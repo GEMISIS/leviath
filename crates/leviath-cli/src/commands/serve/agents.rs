@@ -5,231 +5,81 @@ use std::path::PathBuf;
 use axum::extract::{Path as AxumPath, Query, State};
 use axum::http::StatusCode;
 use axum::response::Json;
+use leviath_runtime::control_socket::{ControlRequest, ControlResponse};
+use leviath_runtime::host::SpawnArgs;
 
 use super::blueprints::discover_blueprints;
 use super::types::*;
-use crate::runstate::{self, ContextSnapshot, RunMeta, RunStatus};
+use crate::runstate::{self, ContextSnapshot, RunMeta};
 
-/// Every fallible external effect `spawn_agent` performs beyond the pure
-/// blueprint-lookup step, behind one seam. Production uses
-/// [`RealSpawnAgentIo`] (the real filesystem/process calls); tests inject a
-/// mock that can selectively fail any single operation while the rest behave
-/// exactly as production -- eliminating the need for either a genuine OS
-/// resource failure or racing `LEVIATH_RUNS_DIR` against concurrently-running
-/// tests and real background `lev` processes on the machine (both tried and
-/// rejected in earlier passes at this file).
-trait SpawnAgentIo: Send + Sync {
-    fn read_manifest(&self, path: &std::path::Path) -> std::io::Result<String>;
-    fn parse_manifest(&self, content: &str) -> anyhow::Result<leviath_core::Blueprint>;
-    fn create_run(&self, meta: &RunMeta) -> anyhow::Result<()>;
-    /// Opens the log file and clones the handle (stdout gets the original,
-    /// stderr gets the clone) in one step, so a mock can inject either the
-    /// open or the `try_clone` failure without needing a real fd-exhaustion
-    /// trick to force the latter.
-    fn open_log_files(
-        &self,
-        path: &std::path::Path,
-    ) -> std::io::Result<(std::fs::File, std::fs::File)>;
-    fn current_exe(&self) -> std::io::Result<PathBuf>;
-    fn spawn(&self, cmd: std::process::Command) -> std::io::Result<std::process::Child>;
-}
-
-struct RealSpawnAgentIo;
-
-impl SpawnAgentIo for RealSpawnAgentIo {
-    fn read_manifest(&self, path: &std::path::Path) -> std::io::Result<String> {
-        std::fs::read_to_string(path)
-    }
-
-    fn parse_manifest(&self, content: &str) -> anyhow::Result<leviath_core::Blueprint> {
-        Ok(leviath_core::manifest::parse_manifest(content)?)
-    }
-
-    fn create_run(&self, meta: &RunMeta) -> anyhow::Result<()> {
-        runstate::create_run(meta)
-    }
-
-    fn open_log_files(
-        &self,
-        path: &std::path::Path,
-    ) -> std::io::Result<(std::fs::File, std::fs::File)> {
-        let log_file = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(path)?;
-        // try_clone on a freshly-opened writable file is infallible in practice.
-        let log_file2 = log_file
-            .try_clone()
-            .expect("try_clone of log file should not fail");
-        Ok((log_file, log_file2))
-    }
-
-    fn current_exe(&self) -> std::io::Result<PathBuf> {
-        std::env::current_exe()
-    }
-
-    fn spawn(&self, mut cmd: std::process::Command) -> std::io::Result<std::process::Child> {
-        cmd.spawn()
-    }
-}
-
+/// `POST /api/agents`: spawn an agent into the shared-world daemon.
+///
+/// Resolves the blueprint's manifest path, mints a run id, and asks the daemon
+/// (over the control socket) to create the agent; the daemon loads the blueprint,
+/// resolves tools/model, and persists the run so the read endpoints observe it.
+///
+/// `yolo` / `allow` / `max_depth` from the request are not yet forwarded (the
+/// daemon applies the blueprint's own tool policy); this is a safe-side
+/// degradation — more approval prompting, never less.
 pub(super) async fn spawn_agent(
     State(state): State<AppState>,
     Json(body): Json<SpawnAgentReq>,
 ) -> Result<Json<SpawnAgentResp>, (StatusCode, Json<ErrorResponse>)> {
-    spawn_agent_with(state, body, &RealSpawnAgentIo).await
-}
-
-async fn spawn_agent_with(
-    state: AppState,
-    body: SpawnAgentReq,
-    io: &dyn SpawnAgentIo,
-) -> Result<Json<SpawnAgentResp>, (StatusCode, Json<ErrorResponse>)> {
-    // Find the blueprint manifest
     let blueprints = discover_blueprints(&state.config);
     let bp_info = blueprints
         .iter()
         .find(|b| b.name == body.blueprint)
-        .ok_or((
-            StatusCode::NOT_FOUND,
-            Json(ErrorResponse {
-                error: format!("Blueprint '{}' not found", body.blueprint),
-            }),
-        ))?;
-
-    // Re-reading and re-parsing the manifest here (rather than trusting
-    // `bp_info`, which already has `name`/`stages.len()`) is deliberate, not
-    // redundant: it gives the API caller an immediate 400 on an invalid
-    // manifest instead of a spawned-but-doomed-to-fail worker process they'd
-    // only find out about by polling run status later. `io.read_manifest`/
-    // `io.parse_manifest` let tests force these to fail deterministically
-    // without a real TOCTOU race.
+        .ok_or_else(|| {
+            err(
+                StatusCode::NOT_FOUND,
+                format!("Blueprint '{}' not found", body.blueprint),
+            )
+        })?;
     let manifest_path = PathBuf::from(&bp_info.path).join("agent.leviath");
-    let manifest_content = io.read_manifest(&manifest_path).map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse {
-                error: format!("Failed to read manifest: {}", e),
-            }),
-        )
-    })?;
-    let blueprint = io.parse_manifest(&manifest_content).map_err(|e| {
-        (
-            StatusCode::BAD_REQUEST,
-            Json(ErrorResponse {
-                error: format!("Invalid manifest: {}", e),
-            }),
-        )
-    })?;
 
     let workdir = body.workdir.clone().unwrap_or_else(|| {
         std::env::current_dir()
             .map(|p| p.to_string_lossy().to_string())
-            .expect("failed to read current working directory")
+            .unwrap_or_default()
     });
-
-    let run_id = runstate::new_run_id(&blueprint.name);
-    let mut meta = RunMeta::new(
-        run_id.clone(),
-        blueprint.name.clone(),
-        bp_info.path.clone(),
-        body.task.clone(),
-        body.model.clone(),
-        workdir.clone(),
-        blueprint.stages.len(),
-    );
-    meta.metadata = body.metadata.clone();
-    meta.callback_url = body.callback_url.clone();
-
-    io.create_run(&meta).map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse {
-                error: format!("Failed to create run: {}", e),
-            }),
-        )
-    })?;
-
-    // Spawn background worker process (same as `lev run`)
-    let log_path = runstate::run_dir(&run_id).join("output.log");
-    let (log_file, log_file2) = io.open_log_files(&log_path).map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse {
-                error: format!("Failed to open log file: {}", e),
-            }),
-        )
-    })?;
-
-    let exe = io.current_exe().map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse {
-                error: format!("Failed to locate executable: {}", e),
-            }),
-        )
-    })?;
-
-    let mut cmd = std::process::Command::new(&exe);
-    cmd.arg("__run-worker")
-        .arg(manifest_path.to_string_lossy().as_ref())
-        .arg("--task")
-        .arg(&body.task)
-        .arg("--run-id")
-        .arg(&run_id);
-
-    if let Some(ref model) = body.model {
-        cmd.arg("--model").arg(model);
-    }
-    if body.yolo {
-        cmd.arg("--yolo");
-    }
-    for t in &body.allow {
-        cmd.arg("--allow").arg(t);
-    }
-    if let Some(md) = body.max_depth {
-        cmd.arg("--max-depth").arg(md.to_string());
-    }
-
-    cmd.current_dir(&workdir)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::from(log_file))
-        .stderr(std::process::Stdio::from(log_file2));
-
-    // Detach the worker into its own session (no-op on non-Unix).
-    leviath_sys::configure_detached(&mut cmd);
-
-    io.spawn(cmd).map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ErrorResponse {
-                error: format!("Failed to spawn worker: {}", e),
-            }),
-        )
-    })?;
-
-    // Broadcast the spawned event
-    let _ = state.event_tx.send(ServerEvent::AgentSpawned {
-        agent_id: blueprint.name.clone(),
-        run_id: run_id.clone(),
-        parent_id: None,
-        blueprint: blueprint.name.clone(),
-    });
-
-    let span = tracing::info_span!(
-        "spawn_agent_via_api",
-        run_id = tracing::field::Empty,
-        blueprint = tracing::field::Empty
-    );
-    let _enter = span.enter();
-    span.record("run_id", tracing::field::display(&run_id));
-    span.record("blueprint", tracing::field::display(&blueprint.name));
-    tracing::info!("Spawned agent via API");
-
-    Ok(Json(SpawnAgentResp {
-        agent_id: blueprint.name,
+    let run_id = runstate::new_run_id(&body.blueprint);
+    let args = SpawnArgs {
         run_id,
-    }))
+        blueprint_path: manifest_path.to_string_lossy().to_string(),
+        task: body.task.clone(),
+        model: body.model.clone(),
+        workdir,
+        metadata: body.metadata.clone(),
+        callback_url: body.callback_url.clone(),
+    };
+
+    match state.control.spawn(args).await {
+        Ok(ControlResponse::Spawned { run_id }) => {
+            let _ = state.event_tx.send(ServerEvent::AgentSpawned {
+                agent_id: run_id.clone(),
+                run_id: run_id.clone(),
+                parent_id: None,
+                blueprint: body.blueprint.clone(),
+            });
+            tracing::info!(run_id = %run_id, blueprint = %body.blueprint, "spawned agent via API");
+            Ok(Json(SpawnAgentResp {
+                agent_id: run_id.clone(),
+                run_id,
+            }))
+        }
+        Ok(ControlResponse::Error { message }) => Err(err(
+            StatusCode::BAD_REQUEST,
+            format!("Failed to spawn agent: {message}"),
+        )),
+        Ok(other) => Err(err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Unexpected daemon response: {other:?}"),
+        )),
+        Err(e) => Err(err(
+            StatusCode::SERVICE_UNAVAILABLE,
+            format!("Daemon not reachable: {e}"),
+        )),
+    }
 }
 
 pub(super) async fn list_agents(Query(query): Query<ListAgentsQuery>) -> Json<Vec<RunMeta>> {
@@ -333,46 +183,37 @@ pub(super) async fn agent_result(
     }))
 }
 
+/// `DELETE /api/agents/{id}`: cancel a run in the shared-world daemon. The
+/// daemon cancels the agent (cascading to its sub-agents in the one world) and
+/// persists the terminal status.
 pub(super) async fn kill_agent(
+    State(state): State<AppState>,
     AxumPath(id): AxumPath<String>,
 ) -> Result<StatusCode, (StatusCode, Json<ErrorResponse>)> {
-    let meta = runstate::read_meta(&id).map_err(|_| {
-        (
+    match state
+        .control
+        .request(&ControlRequest::Cancel { run_id: id.clone() })
+        .await
+    {
+        Ok(ControlResponse::Ok { ok: true }) => Ok(StatusCode::NO_CONTENT),
+        Ok(ControlResponse::Ok { ok: false }) => Err(err(
             StatusCode::NOT_FOUND,
-            Json(ErrorResponse {
-                error: format!("Agent run '{}' not found", id),
-            }),
-        )
-    })?;
-
-    // Kill the process
-    leviath_sys::terminate(meta.pid);
-
-    // Update status
-    let mut meta = meta;
-    meta.status = RunStatus::Cancelled;
-    meta.touch();
-    let _ = runstate::write_meta(&meta);
-
-    // Cascade kill to children
-    let runs = runstate::list_runs();
-    for child in runs {
-        if child.parent_run_id.as_deref() == Some(&id) {
-            leviath_sys::terminate(child.pid);
-            let mut child = child;
-            child.status = RunStatus::Cancelled;
-            child.touch();
-            let _ = runstate::write_meta(&child);
-        }
+            format!("Agent run '{id}' not found"),
+        )),
+        Ok(other) => Err(err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Unexpected daemon response: {other:?}"),
+        )),
+        Err(e) => Err(err(
+            StatusCode::SERVICE_UNAVAILABLE,
+            format!("Daemon not reachable: {e}"),
+        )),
     }
-
-    Ok(StatusCode::NO_CONTENT)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashMap;
 
     use axum::Router;
     use axum::body::Body;
@@ -382,15 +223,24 @@ mod tests {
     use tokio::sync::broadcast;
     use tower::ServiceExt;
 
+    use crate::commands::serve::testutil::fake_daemon;
     use crate::config::Config;
     use crate::runstate::{RunMeta, RunStatus, create_run};
-    use crate::test_support::with_tracing;
+    use leviath_runtime::control_socket::ControlClient;
+
+    /// A control client at an address with no daemon (read endpoints don't use it).
+    fn no_daemon() -> ControlClient {
+        ControlClient::new(leviath_runtime::control_socket::control_id(
+            std::path::Path::new("/no/such/daemon"),
+        ))
+    }
 
     fn test_state() -> AppState {
         let (tx, _) = broadcast::channel(64);
         AppState {
             config: Arc::new(Config::default()),
             event_tx: tx,
+            control: no_daemon(),
         }
     }
 
@@ -413,7 +263,7 @@ mod tests {
         )
     }
 
-    fn test_state_with_agent_paths(paths: Vec<PathBuf>) -> AppState {
+    fn test_state_with_agent_paths(paths: Vec<PathBuf>, control: ControlClient) -> AppState {
         let (tx, _) = broadcast::channel(64);
         AppState {
             config: Arc::new(Config {
@@ -421,6 +271,7 @@ mod tests {
                 ..Default::default()
             }),
             event_tx: tx,
+            control,
         }
     }
 
@@ -444,554 +295,100 @@ prompt = "Plan the work"
     }
 
     // ─── spawn_agent ──────────────────────────────────────────────────────────
-    //
-    // spawn_agent shells out to `std::env::current_exe()` with `__run-worker`.
-    // Under `cargo test` that resolves to the test harness binary rather than
-    // `lev`, so the spawned child immediately exits with an "unrecognized
-    // option" error instead of doing real work. That's fine for these tests:
-    // we only assert on spawn_agent's own behavior (run creation, response
-    // shape, event broadcast) up through a successful `Command::spawn()`,
-    // not on what the child process does afterwards.
+
+    /// A router over `POST /api/agents` backed by `control`, plus a temp agents
+    /// dir holding one discoverable blueprint named "spawnable".
+    fn spawn_app(control: ControlClient) -> (Router, tempfile::TempDir) {
+        let agents = tempfile::tempdir().unwrap();
+        write_test_blueprint(&agents.path().join("spawnable"), "spawnable");
+        // A sibling subdir with no manifest, so blueprint discovery exercises the
+        // "subdir without agent.leviath" branch.
+        std::fs::create_dir_all(agents.path().join("not-a-blueprint")).unwrap();
+        let state = test_state_with_agent_paths(vec![agents.path().to_path_buf()], control);
+        let app = Router::new()
+            .route("/api/agents", axum::routing::post(spawn_agent))
+            .with_state(state);
+        (app, agents)
+    }
+
+    async fn post_spawn(app: Router, body: &str) -> StatusCode {
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/agents")
+            .header("content-type", "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap();
+        app.oneshot(req).await.unwrap().status()
+    }
 
     #[tokio::test]
     async fn spawn_agent_blueprint_not_found_returns_404() {
-        let dir = tempfile::tempdir().unwrap();
-        let state = test_state_with_agent_paths(vec![dir.path().to_path_buf()]);
-        let app = Router::new()
-            .route("/api/agents", axum::routing::post(spawn_agent))
-            .with_state(state);
-        let body = serde_json::json!({
-            "blueprint": "does-not-exist-xyz",
-            "task": "do something"
+        let (app, _agents) = spawn_app(no_daemon());
+        assert_eq!(
+            post_spawn(app, r#"{"blueprint":"ghost","task":"t"}"#).await,
+            StatusCode::NOT_FOUND
+        );
+    }
+
+    #[tokio::test]
+    async fn spawn_agent_success_returns_ok() {
+        let (control, _dir, _srv) = fake_daemon(|_| ControlResponse::Spawned {
+            run_id: "run-1".to_string(),
         });
-        let req = Request::builder()
-            .method("POST")
-            .uri("/api/agents")
-            .header("content-type", "application/json")
-            .body(Body::from(serde_json::to_string(&body).unwrap()))
-            .unwrap();
-        let resp = app.oneshot(req).await.unwrap();
-        assert_eq!(resp.status(), axum::http::StatusCode::NOT_FOUND);
-    }
-
-    fn assert_open_log_files_fails(result: &std::io::Result<(std::fs::File, std::fs::File)>) {
-        assert!(
-            result.is_err(),
-            "opening a log file under a missing directory should fail"
+        let (app, _agents) = spawn_app(control);
+        assert_eq!(
+            post_spawn(
+                app,
+                r#"{"blueprint":"spawnable","task":"do it","workdir":"/tmp"}"#
+            )
+            .await,
+            StatusCode::OK
         );
     }
 
-    /// Exercises the `?` error path in `RealSpawnAgentIo::open_log_files`
-    /// (line 61) by passing a path whose parent directory does not exist so
-    /// `OpenOptions::open` returns an I/O error.
-    #[test]
-    fn real_spawn_agent_io_open_log_files_fails_on_missing_parent_dir() {
-        let io = RealSpawnAgentIo;
-        let bad_path = std::path::Path::new("/nonexistent-dir-abc123/output.log");
-        let result = io.open_log_files(bad_path);
-        assert_open_log_files_fails(&result);
-    }
-
-    /// Exercises the `?` error path in `RealSpawnAgentIo::parse_manifest`
-    /// (the `parse_manifest(content)?` propagation) by feeding it invalid TOML.
-    #[test]
-    fn real_spawn_agent_io_parse_manifest_propagates_error() {
-        let io = RealSpawnAgentIo;
-        let result = io.parse_manifest("this is not = = = valid toml [[[");
-        assert!(result.is_err());
-    }
-
-    #[test]
-    #[should_panic(expected = "opening a log file under a missing directory should fail")]
-    fn assert_open_log_files_fails_panics_when_ok() {
-        let io = RealSpawnAgentIo;
-        let tmp = tempfile::tempdir().unwrap();
-        let good_path = tmp.path().join("output.log");
-        let result = io.open_log_files(&good_path);
-        assert_open_log_files_fails(&result);
-    }
-
-    fn assert_broadcast_agent_spawned(spawned_events: &[String], run_id: &str) {
-        assert!(
-            spawned_events.iter().any(|ev_rid| ev_rid == run_id),
-            "should broadcast AgentSpawned event"
-        );
-    }
-
-    #[test]
-    #[should_panic(expected = "should broadcast AgentSpawned event")]
-    fn assert_broadcast_agent_spawned_panics_when_missing() {
-        assert_broadcast_agent_spawned(&[], "some-run-id");
-    }
-
     #[tokio::test]
-    async fn spawn_agent_valid_blueprint_creates_run_and_returns_ok() {
-        with_tracing(|| {});
-        crate::runstate::with_isolated_runs_dir_async(
-            "spawn_agent_valid_blueprint_creates_run_and_returns_ok",
-            |_d| async move {
-                let dir = tempfile::tempdir().unwrap();
-                let bp_name = format!("spawnable-{}", std::process::id());
-                write_test_blueprint(&dir.path().join(&bp_name), &bp_name);
-
-                let state = test_state_with_agent_paths(vec![dir.path().to_path_buf()]);
-                let mut rx = state.event_tx.subscribe();
-                // Pre-broadcast a non-AgentSpawned event so the drain loop below sees
-                // it and exercises the `if let` non-matching branch (line 536 else-path).
-                let _ = state.event_tx.send(ServerEvent::Tokens {
-                    agent_id: "pre-event".to_string(),
-                    run_id: "pre-event-run".to_string(),
-                    prompt_tokens: 0,
-                    completion_tokens: 0,
-                    cached_tokens: 0,
-                    cache_write_tokens: 0,
-                });
-                let app = Router::new()
-                    .route("/api/agents", axum::routing::post(spawn_agent))
-                    .with_state(state);
-
-                let workdir = tempfile::tempdir().unwrap();
-                let body = serde_json::json!({
-                    "blueprint": bp_name,
-                    "task": "do the thing",
-                    "workdir": workdir.path().to_string_lossy(),
-                });
-                let req = Request::builder()
-                    .method("POST")
-                    .uri("/api/agents")
-                    .header("content-type", "application/json")
-                    .body(Body::from(serde_json::to_string(&body).unwrap()))
-                    .unwrap();
-                let resp = app.oneshot(req).await.unwrap();
-                assert_eq!(resp.status(), axum::http::StatusCode::OK);
-
-                let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
-                    .await
-                    .unwrap();
-                let spawn_resp: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-                let agent_id = spawn_resp["agent_id"].as_str().unwrap().to_string();
-                let run_id = spawn_resp["run_id"].as_str().unwrap().to_string();
-                assert_eq!(agent_id, bp_name);
-                assert!(run_id.contains(&bp_name));
-
-                // The run should have been persisted to disk.
-                let meta = runstate::read_meta(&run_id).expect("run meta should exist");
-                assert_eq!(meta.agent_name, bp_name);
-
-                // Drain all events: the pre-broadcast Tokens event exercises the
-                // `if let ServerEvent::AgentSpawned` else-path; the real AgentSpawned
-                // event exercises the if-branch.
-                let mut spawned_events: Vec<String> = Vec::new();
-                while let Ok(ev) = rx.try_recv() {
-                    if let ServerEvent::AgentSpawned { run_id: ev_rid, .. } = ev {
-                        spawned_events.push(ev_rid);
-                    }
-                }
-                assert_broadcast_agent_spawned(&spawned_events, &run_id);
-
-                // Give the (doomed) child process a moment to exit on its own so we
-                // don't leave a zombie process behind, then clean up run state.
-                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-                let _ = std::fs::remove_dir_all(runstate::run_dir(&run_id));
-            },
-        )
-        .await;
-    }
-
-    #[tokio::test]
-    async fn spawn_agent_with_full_options_creates_run() {
-        crate::runstate::with_isolated_runs_dir_async(
-            "spawn_agent_with_full_options_creates_run",
-            |_d| async move {
-                let dir = tempfile::tempdir().unwrap();
-                let bp_name = format!("spawnable-full-{}", std::process::id());
-                write_test_blueprint(&dir.path().join(&bp_name), &bp_name);
-
-                let state = test_state_with_agent_paths(vec![dir.path().to_path_buf()]);
-                let app = Router::new()
-                    .route("/api/agents", axum::routing::post(spawn_agent))
-                    .with_state(state);
-
-                let workdir = tempfile::tempdir().unwrap();
-                let body = serde_json::json!({
-                    "blueprint": bp_name,
-                    "task": "do the thing",
-                    "workdir": workdir.path().to_string_lossy(),
-                    "model": "claude-sonnet-4-6",
-                    "yolo": true,
-                    "allow": ["read_file"],
-                    "max_depth": 2,
-                    "metadata": {"k": "v"},
-                    "callback_url": "https://example.com/hook",
-                });
-                let req = Request::builder()
-                    .method("POST")
-                    .uri("/api/agents")
-                    .header("content-type", "application/json")
-                    .body(Body::from(serde_json::to_string(&body).unwrap()))
-                    .unwrap();
-                let resp = app.oneshot(req).await.unwrap();
-                assert_eq!(resp.status(), axum::http::StatusCode::OK);
-
-                let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
-                    .await
-                    .unwrap();
-                let spawn_resp: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-                let run_id = spawn_resp["run_id"].as_str().unwrap().to_string();
-                let meta = runstate::read_meta(&run_id).expect("run meta should exist");
-                assert_eq!(
-                    meta.callback_url.as_deref(),
-                    Some("https://example.com/hook")
-                );
-                assert_eq!(meta.metadata.get("k").map(|v| v.as_str()), Some("v"));
-
-                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-                let _ = std::fs::remove_dir_all(runstate::run_dir(&run_id));
-            },
-        )
-        .await;
-    }
-
-    #[tokio::test]
-    async fn spawn_agent_without_workdir_falls_back_to_current_dir() {
-        crate::runstate::with_isolated_runs_dir_async(
-            "spawn_agent_without_workdir_falls_back_to_current_dir",
-            |_d| async move {
-                // Every other spawn_agent test supplies `workdir` explicitly; this
-                // exercises the `body.workdir.unwrap_or_else(|| current_dir())`
-                // fallback branch specifically.
-                let dir = tempfile::tempdir().unwrap();
-                let bp_name = format!("spawnable-no-workdir-{}", std::process::id());
-                write_test_blueprint(&dir.path().join(&bp_name), &bp_name);
-
-                let state = test_state_with_agent_paths(vec![dir.path().to_path_buf()]);
-                let app = Router::new()
-                    .route("/api/agents", axum::routing::post(spawn_agent))
-                    .with_state(state);
-
-                let body = serde_json::json!({
-                    "blueprint": bp_name,
-                    "task": "do the thing",
-                });
-                let req = Request::builder()
-                    .method("POST")
-                    .uri("/api/agents")
-                    .header("content-type", "application/json")
-                    .body(Body::from(serde_json::to_string(&body).unwrap()))
-                    .unwrap();
-                let resp = app.oneshot(req).await.unwrap();
-                assert_eq!(resp.status(), axum::http::StatusCode::OK);
-
-                let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
-                    .await
-                    .unwrap();
-                let spawn_resp: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-                let run_id = spawn_resp["run_id"].as_str().unwrap().to_string();
-                let meta = runstate::read_meta(&run_id).expect("run meta should exist");
-                let expected_workdir = std::env::current_dir()
-                    .map(|p| p.to_string_lossy().to_string())
-                    .expect("current_dir should succeed in test");
-                assert_eq!(meta.workdir, expected_workdir);
-
-                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-                let _ = std::fs::remove_dir_all(runstate::run_dir(&run_id));
-            },
-        )
-        .await;
-    }
-
-    #[tokio::test]
-    async fn spawn_agent_manifest_removed_after_discovery_returns_404() {
-        // Blueprint dir exists at discovery time but its manifest is removed
-        // before spawn_agent looks it up. discover_blueprints already
-        // filters out unreadable manifests, so the net effect is the same
-        // 404 path as "blueprint not found" — this documents that behavior
-        // explicitly rather than relying on it being implicit.
-        let dir = tempfile::tempdir().unwrap();
-        let bp_name = format!("vanishing-{}", std::process::id());
-        let bp_dir = dir.path().join(&bp_name);
-        write_test_blueprint(&bp_dir, &bp_name);
-
-        let state = test_state_with_agent_paths(vec![dir.path().to_path_buf()]);
-
-        std::fs::remove_file(bp_dir.join("agent.leviath")).unwrap();
-
-        let app = Router::new()
-            .route("/api/agents", axum::routing::post(spawn_agent))
-            .with_state(state);
-        let body = serde_json::json!({
-            "blueprint": bp_name,
-            "task": "do the thing",
+    async fn spawn_agent_without_workdir_falls_back_to_cwd() {
+        let (control, _dir, _srv) = fake_daemon(|_| ControlResponse::Spawned {
+            run_id: "r".to_string(),
         });
-        let req = Request::builder()
-            .method("POST")
-            .uri("/api/agents")
-            .header("content-type", "application/json")
-            .body(Body::from(serde_json::to_string(&body).unwrap()))
-            .unwrap();
-        let resp = app.oneshot(req).await.unwrap();
-        assert_eq!(resp.status(), axum::http::StatusCode::NOT_FOUND);
-    }
-
-    // ─── spawn_agent_with: injectable I/O failure paths ─────────────────────
-    //
-    // MockSpawnAgentIo delegates every operation to the real implementation
-    // except whichever single one `fail_on` names, which returns a canned
-    // `Err` instead. This forces each of `spawn_agent`'s error-response arms
-    // deterministically, without a real OS resource failure or racing
-    // `LEVIATH_RUNS_DIR` against concurrently-running tests / real
-    // background `lev` processes on the machine (both tried and rejected in
-    // earlier passes at this file).
-    #[derive(Clone, Copy, PartialEq, Eq)]
-    enum FailOn {
-        #[allow(dead_code)]
-        None,
-        ReadManifest,
-        ParseManifest,
-        CreateRun,
-        OpenLogFile,
-        CloneLogFile,
-        CurrentExe,
-        Spawn,
-    }
-
-    struct MockSpawnAgentIo {
-        fail_on: FailOn,
-    }
-
-    impl SpawnAgentIo for MockSpawnAgentIo {
-        fn read_manifest(&self, path: &std::path::Path) -> std::io::Result<String> {
-            if self.fail_on == FailOn::ReadManifest {
-                return Err(std::io::Error::other("mock read_manifest failure"));
-            }
-            std::fs::read_to_string(path)
-        }
-
-        fn parse_manifest(&self, content: &str) -> anyhow::Result<leviath_core::Blueprint> {
-            if self.fail_on == FailOn::ParseManifest {
-                anyhow::bail!("mock parse_manifest failure");
-            }
-            Ok(leviath_core::manifest::parse_manifest(content)?)
-        }
-
-        fn create_run(&self, meta: &RunMeta) -> anyhow::Result<()> {
-            if self.fail_on == FailOn::CreateRun {
-                anyhow::bail!("mock create_run failure");
-            }
-            runstate::create_run(meta)
-        }
-
-        fn open_log_files(
-            &self,
-            path: &std::path::Path,
-        ) -> std::io::Result<(std::fs::File, std::fs::File)> {
-            if self.fail_on == FailOn::OpenLogFile {
-                return Err(std::io::Error::other("mock open_log_file failure"));
-            }
-            let log_file = std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(path)
-                .expect("mock open_log_files: file open should succeed");
-            if self.fail_on == FailOn::CloneLogFile {
-                return Err(std::io::Error::other("mock clone_log_file failure"));
-            }
-            let log_file2 = log_file
-                .try_clone()
-                .expect("mock open_log_files: try_clone should succeed");
-            Ok((log_file, log_file2))
-        }
-
-        fn current_exe(&self) -> std::io::Result<PathBuf> {
-            if self.fail_on == FailOn::CurrentExe {
-                return Err(std::io::Error::other("mock current_exe failure"));
-            }
-            std::env::current_exe()
-        }
-
-        fn spawn(&self, mut cmd: std::process::Command) -> std::io::Result<std::process::Child> {
-            if self.fail_on == FailOn::Spawn {
-                return Err(std::io::Error::other("mock spawn failure"));
-            }
-            cmd.spawn()
-        }
-    }
-
-    fn make_spawn_req(bp_name: &str, workdir: &std::path::Path) -> SpawnAgentReq {
-        SpawnAgentReq {
-            blueprint: bp_name.to_string(),
-            task: "do the thing".to_string(),
-            model: None,
-            max_depth: None,
-            yolo: false,
-            allow: vec![],
-            workdir: Some(workdir.to_string_lossy().to_string()),
-            metadata: HashMap::new(),
-            callback_url: None,
-        }
-    }
-
-    /// `CreateRun` succeeding but a later step (`OpenLogFile`/`CurrentExe`/
-    /// `Spawn`) failing still leaves a real run directory on disk (created
-    /// before the injected failure point) -- clean up by prefix, mirroring
-    /// `commands/run/mod.rs`'s identical helper for the same situation.
-    fn cleanup_runs_with_prefix(agent_name: &str) {
-        cleanup_runs_with_prefix_in_dir(agent_name, &runstate::runs_dir());
-    }
-
-    fn cleanup_runs_with_prefix_in_dir(agent_name: &str, dir: &std::path::Path) {
-        let Ok(entries) = std::fs::read_dir(dir) else {
-            return;
-        };
-        let prefix = format!("{agent_name}-");
-        for entry in entries.flatten() {
-            if entry
-                .file_name()
-                .to_string_lossy()
-                .starts_with(prefix.as_str())
-            {
-                let _ = std::fs::remove_dir_all(entry.path());
-            }
-        }
-    }
-
-    #[test]
-    fn cleanup_runs_with_prefix_handles_nonexistent_runs_dir() {
-        // Covers the `else { return; }` branch when runs dir doesn't exist.
-        // Uses a path parameter instead of env var to avoid races with other tests.
-        cleanup_runs_with_prefix_in_dir(
-            "anything",
-            &std::path::PathBuf::from("/tmp/nonexistent-serve-agents-test-dir-xyz"),
+        let (app, _agents) = spawn_app(control);
+        // No workdir field → the handler falls back to the current directory.
+        assert_eq!(
+            post_spawn(app, r#"{"blueprint":"spawnable","task":"t"}"#).await,
+            StatusCode::OK
         );
     }
 
-    #[test]
-    fn cleanup_runs_with_prefix_only_removes_matching_entries() {
-        // Every existing test only ever calls this against either a
-        // nonexistent dir (the `else` branch above) or a dir containing
-        // exclusively matching-prefix entries -- leaving the loop's
-        // non-matching-entry skip arm (`if ... starts_with(...)` false)
-        // never independently exercised. A dir with both a matching and a
-        // non-matching entry closes that gap directly.
-        let dir = tempfile::tempdir().unwrap();
-        let matching = dir.path().join("agent-x-1234");
-        let other = dir.path().join("unrelated-dir");
-        std::fs::create_dir_all(&matching).unwrap();
-        std::fs::create_dir_all(&other).unwrap();
-
-        cleanup_runs_with_prefix_in_dir("agent-x", dir.path());
-
-        assert!(!matching.exists());
-        assert!(other.exists());
-    }
-
-    async fn assert_spawn_agent_fails_on(fail_on: FailOn, expected_status: StatusCode) {
-        // Spans this whole helper (not just the individual one-line test
-        // wrappers that call it) since `spawn_agent_with`/`cleanup_runs_with_prefix`
-        // transitively touch `runstate::run_dir`/`runs_dir` -- without a
-        // guard pinning `LEVIATH_RUNS_DIR` for this entire multi-step flow,
-        // a concurrently-running isolated test on another thread could flip
-        // the env var between this helper's create_run and open_log_files
-        // steps, resolving to two different directories.
-        crate::runstate::with_isolated_runs_dir_async(
-            "assert_spawn_agent_fails_on",
-            |_d| async move {
-                let dir = tempfile::tempdir().unwrap();
-                let bp_name = format!("spawn-fail-{:?}-{}", fail_on as u8, std::process::id());
-                write_test_blueprint(&dir.path().join(&bp_name), &bp_name);
-                let state = test_state_with_agent_paths(vec![dir.path().to_path_buf()]);
-                let workdir = tempfile::tempdir().unwrap();
-                let body = make_spawn_req(&bp_name, workdir.path());
-                let io = MockSpawnAgentIo { fail_on };
-
-                let result = spawn_agent_with(state, body, &io).await;
-                cleanup_runs_with_prefix(&bp_name);
-                let (status, _) = result.expect_err("expected spawn_agent_with to fail");
-                assert_eq!(status, expected_status);
-            },
-        )
-        .await;
+    #[tokio::test]
+    async fn spawn_agent_daemon_error_returns_400() {
+        let (control, _dir, _srv) = fake_daemon(|_| ControlResponse::Error {
+            message: "bad blueprint".to_string(),
+        });
+        let (app, _agents) = spawn_app(control);
+        assert_eq!(
+            post_spawn(app, r#"{"blueprint":"spawnable","task":"t"}"#).await,
+            StatusCode::BAD_REQUEST
+        );
     }
 
     #[tokio::test]
-    async fn spawn_agent_with_read_manifest_failure_returns_500() {
-        assert_spawn_agent_fails_on(FailOn::ReadManifest, StatusCode::INTERNAL_SERVER_ERROR).await;
+    async fn spawn_agent_unexpected_response_returns_500() {
+        let (control, _dir, _srv) = fake_daemon(|_| ControlResponse::Ok { ok: true });
+        let (app, _agents) = spawn_app(control);
+        assert_eq!(
+            post_spawn(app, r#"{"blueprint":"spawnable","task":"t"}"#).await,
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
     }
 
     #[tokio::test]
-    async fn spawn_agent_with_parse_manifest_failure_returns_400() {
-        assert_spawn_agent_fails_on(FailOn::ParseManifest, StatusCode::BAD_REQUEST).await;
+    async fn spawn_agent_daemon_absent_returns_503() {
+        let (app, _agents) = spawn_app(no_daemon());
+        assert_eq!(
+            post_spawn(app, r#"{"blueprint":"spawnable","task":"t"}"#).await,
+            StatusCode::SERVICE_UNAVAILABLE
+        );
     }
-
-    #[tokio::test]
-    async fn spawn_agent_with_create_run_failure_returns_500() {
-        assert_spawn_agent_fails_on(FailOn::CreateRun, StatusCode::INTERNAL_SERVER_ERROR).await;
-    }
-
-    #[tokio::test]
-    async fn spawn_agent_with_open_log_file_failure_returns_500() {
-        assert_spawn_agent_fails_on(FailOn::OpenLogFile, StatusCode::INTERNAL_SERVER_ERROR).await;
-    }
-
-    #[tokio::test]
-    async fn spawn_agent_with_clone_log_file_failure_returns_500() {
-        assert_spawn_agent_fails_on(FailOn::CloneLogFile, StatusCode::INTERNAL_SERVER_ERROR).await;
-    }
-
-    #[tokio::test]
-    async fn spawn_agent_with_current_exe_failure_returns_500() {
-        assert_spawn_agent_fails_on(FailOn::CurrentExe, StatusCode::INTERNAL_SERVER_ERROR).await;
-    }
-
-    #[tokio::test]
-    async fn spawn_agent_with_spawn_failure_returns_500() {
-        assert_spawn_agent_fails_on(FailOn::Spawn, StatusCode::INTERNAL_SERVER_ERROR).await;
-    }
-
-    #[tokio::test]
-    async fn spawn_agent_with_no_failure_succeeds_via_mock() {
-        crate::runstate::with_isolated_runs_dir_async(
-            "spawn_agent_with_no_failure_succeeds_via_mock",
-            |_d| async move {
-                // Exercises MockSpawnAgentIo::spawn's `cmd.spawn()` path (FailOn::None
-                // means no mock fails, so the real spawn is called). The spawned
-                // process exits quickly (test harness binary + unknown args).
-                let dir = tempfile::tempdir().unwrap();
-                let bp_name = format!("spawn-mock-ok-{}", std::process::id());
-                write_test_blueprint(&dir.path().join(&bp_name), &bp_name);
-                let state = test_state_with_agent_paths(vec![dir.path().to_path_buf()]);
-                let workdir = tempfile::tempdir().unwrap();
-                let body = make_spawn_req(&bp_name, workdir.path());
-                let io = MockSpawnAgentIo {
-                    fail_on: FailOn::None,
-                };
-                let result = spawn_agent_with(state, body, &io).await;
-                let run_id = result
-                    .expect("expected spawn_agent_with to succeed")
-                    .0
-                    .run_id
-                    .clone();
-                cleanup_runs_with_prefix(&bp_name);
-                // Give the spawned child a moment to exit cleanly.
-                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-                let _ = std::fs::remove_dir_all(runstate::run_dir(&run_id));
-            },
-        )
-        .await;
-    }
-
-    /// Exercises the `?` error propagation in `MockSpawnAgentIo::parse_manifest`
-    /// (fail_on is not `ParseManifest`, so the real parser runs and errors on
-    /// invalid TOML instead of the canned mock failure).
-    #[test]
-    fn mock_spawn_agent_io_parse_manifest_propagates_error() {
-        let io = MockSpawnAgentIo {
-            fail_on: FailOn::None,
-        };
-        let result = io.parse_manifest("this is not = = = valid toml [[[");
-        assert!(result.is_err());
-    }
-
     // ─── list_agents ──────────────────────────────────────────────────────────
 
     #[tokio::test]
@@ -1526,104 +923,55 @@ prompt = "Plan the work"
     }
 
     // ─── kill_agent ───────────────────────────────────────────────────────────
-    // Note: We set pid to a large non-existent PID to avoid kill(0, SIGTERM)
-    // which would send SIGTERM to the entire process group (the test process).
 
-    fn make_run_with_safe_pid(id: &str) -> RunMeta {
-        let mut meta = make_run(id);
-        // Use a PID that almost certainly doesn't exist to avoid killing ourselves.
-        // libc::kill on a non-existent PID is a no-op (returns ESRCH).
-        meta.pid = 999_999_999;
-        meta
-    }
-
-    #[tokio::test]
-    async fn kill_agent_existing_run_returns_no_content() {
-        crate::runstate::with_isolated_runs_dir_async(
-            "kill_agent_existing_run_returns_no_content",
-            |_d| async move {
-                use axum::routing::delete;
-
-                let run_id = unique_run_id("kill-agent");
-                let meta = make_run_with_safe_pid(&run_id);
-                create_run(&meta).unwrap();
-
-                let app = Router::new()
-                    .route("/api/agents/{id}", delete(kill_agent))
-                    .with_state(test_state());
-                let req = Request::builder()
-                    .method("DELETE")
-                    .uri(format!("/api/agents/{}", run_id))
-                    .body(Body::empty())
-                    .unwrap();
-                let resp = app.oneshot(req).await.unwrap();
-                assert_eq!(resp.status(), axum::http::StatusCode::NO_CONTENT);
-
-                // Verify status was updated to Cancelled
-                let updated = runstate::read_meta(&run_id).unwrap();
-                assert_eq!(updated.status, RunStatus::Cancelled);
-
-                let _ = std::fs::remove_dir_all(runstate::run_dir(&run_id));
-            },
-        )
-        .await;
-    }
-
-    #[tokio::test]
-    async fn kill_agent_nonexistent_returns_404() {
+    async fn delete_agent(control: ControlClient, id: &str) -> StatusCode {
         use axum::routing::delete;
-
+        let (tx, _) = broadcast::channel(16);
+        let state = AppState {
+            config: Arc::new(Config::default()),
+            event_tx: tx,
+            control,
+        };
         let app = Router::new()
             .route("/api/agents/{id}", delete(kill_agent))
-            .with_state(test_state());
+            .with_state(state);
         let req = Request::builder()
             .method("DELETE")
-            .uri("/api/agents/nonexistent-kill-xyz")
+            .uri(format!("/api/agents/{id}"))
             .body(Body::empty())
             .unwrap();
-        let resp = app.oneshot(req).await.unwrap();
-        assert_eq!(resp.status(), axum::http::StatusCode::NOT_FOUND);
+        app.oneshot(req).await.unwrap().status()
     }
 
     #[tokio::test]
-    async fn kill_agent_cascades_to_children() {
-        crate::runstate::with_isolated_runs_dir_async(
-            "kill_agent_cascades_to_children",
-            |_d| async move {
-                use axum::routing::delete;
+    async fn kill_agent_cancels_via_daemon() {
+        let (control, _dir, _srv) = fake_daemon(|_| ControlResponse::Ok { ok: true });
+        assert_eq!(delete_agent(control, "run-a").await, StatusCode::NO_CONTENT);
+    }
 
-                let parent_id = unique_run_id("kill-parent");
-                let child_id = unique_run_id("kill-child");
+    #[tokio::test]
+    async fn kill_agent_unknown_run_is_404() {
+        let (control, _dir, _srv) = fake_daemon(|_| ControlResponse::Ok { ok: false });
+        assert_eq!(delete_agent(control, "ghost").await, StatusCode::NOT_FOUND);
+    }
 
-                let parent = make_run_with_safe_pid(&parent_id);
-                create_run(&parent).unwrap();
+    #[tokio::test]
+    async fn kill_agent_unexpected_response_is_500() {
+        let (control, _dir, _srv) = fake_daemon(|_| ControlResponse::Spawned {
+            run_id: "x".to_string(),
+        });
+        assert_eq!(
+            delete_agent(control, "a").await,
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
+    }
 
-                let mut child = make_run_with_safe_pid(&child_id);
-                child.parent_run_id = Some(parent_id.clone());
-                create_run(&child).unwrap();
-
-                let app = Router::new()
-                    .route("/api/agents/{id}", delete(kill_agent))
-                    .with_state(test_state());
-                let req = Request::builder()
-                    .method("DELETE")
-                    .uri(format!("/api/agents/{}", parent_id))
-                    .body(Body::empty())
-                    .unwrap();
-                let resp = app.oneshot(req).await.unwrap();
-                assert_eq!(resp.status(), axum::http::StatusCode::NO_CONTENT);
-
-                // Both parent and child should be Cancelled
-                let parent_meta = runstate::read_meta(&parent_id).unwrap();
-                let child_meta = runstate::read_meta(&child_id).unwrap();
-                assert_eq!(parent_meta.status, RunStatus::Cancelled);
-                assert_eq!(child_meta.status, RunStatus::Cancelled);
-
-                let _ = std::fs::remove_dir_all(runstate::run_dir(&parent_id));
-                let _ = std::fs::remove_dir_all(runstate::run_dir(&child_id));
-            },
-        )
-        .await;
+    #[tokio::test]
+    async fn kill_agent_daemon_absent_is_503() {
+        assert_eq!(
+            delete_agent(no_daemon(), "a").await,
+            StatusCode::SERVICE_UNAVAILABLE
+        );
     }
 
     #[test]

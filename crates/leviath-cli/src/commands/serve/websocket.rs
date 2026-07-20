@@ -222,6 +222,7 @@ mod tests {
         AppState {
             config: Arc::new(Config::default()),
             event_tx: tx,
+            control: crate::commands::serve::testutil::no_daemon_client(),
         }
     }
 
@@ -508,6 +509,7 @@ mod tests {
         let state = AppState {
             config: Arc::new(Config::default()),
             event_tx: tx.clone(),
+            control: crate::commands::serve::testutil::no_daemon_client(),
         };
         let addr = spawn_test_server(state).await;
 
@@ -632,6 +634,7 @@ mod tests {
         let state = AppState {
             config: Arc::new(Config::default()),
             event_tx: tx.clone(),
+            control: crate::commands::serve::testutil::no_daemon_client(),
         };
         let (addr, shutdown_tx, handle) = spawn_test_server_with_shutdown(state).await;
 
