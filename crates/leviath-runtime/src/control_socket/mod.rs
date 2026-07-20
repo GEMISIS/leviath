@@ -456,6 +456,7 @@ mod tests {
                 model: None,
                 workdir: "/w".to_string(),
                 metadata: Default::default(),
+                callback_url: None,
             },
         })
         .await;

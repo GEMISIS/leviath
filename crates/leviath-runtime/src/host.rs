@@ -45,6 +45,9 @@ pub struct SpawnArgs {
     /// Custom key/value metadata from the request.
     #[serde(default)]
     pub metadata: HashMap<String, String>,
+    /// Webhook to POST on completion/error (surfaced in the run metadata).
+    #[serde(default)]
+    pub callback_url: Option<String>,
 }
 
 /// The daemon-installed function that turns [`SpawnArgs`] into a live agent:
