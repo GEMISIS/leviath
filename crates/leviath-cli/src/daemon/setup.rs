@@ -114,6 +114,9 @@ pub fn build_host(
         runtime,
     );
     let mut host = WorldHost::with_interactions(world, hub.clone());
+    // Handed to each agent's tool state so its sub-agent tools reach the world
+    // through the host.
+    let subagent_tx = host.subagent_sender();
 
     // Restart recovery: reload persisted non-terminal agents so interrupted runs
     // (including mid-inference ones) resume. Done before the spawner moves the
@@ -127,6 +130,7 @@ pub fn build_host(
         &hub,
         &runs_dir,
         now_secs(),
+        &subagent_tx,
     );
     for (run_id, entity) in reloaded {
         host.register(run_id, entity);
@@ -144,6 +148,7 @@ pub fn build_host(
             &hub,
             args,
             now_secs(),
+            subagent_tx.clone(),
         )
     }));
     host

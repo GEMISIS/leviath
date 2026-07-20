@@ -8,4 +8,5 @@ pub mod client;
 pub mod recovery;
 pub mod setup;
 pub mod spawn;
+pub mod subagent;
 pub mod tool_service;

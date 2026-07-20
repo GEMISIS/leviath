@@ -16,12 +16,13 @@ use bevy_ecs::entity::Entity;
 use leviath_core::run_meta::{ContextSnapshot, RunMeta, RunStatus};
 use leviath_mcp::ToolExecutor;
 use leviath_providers::Tool;
-use leviath_runtime::host::SpawnArgs;
+use leviath_runtime::host::{SpawnArgs, SubAgentOp};
 use leviath_runtime::interaction_hub::InteractionHub;
 use leviath_runtime::persistence::{RunMetadata, TokenTotals};
 use leviath_runtime::restore::restore_agent;
 use leviath_runtime::world::PipelineWorld;
 use tokio::sync::Mutex;
+use tokio::sync::mpsc::UnboundedSender;
 
 use crate::config::Config;
 use crate::daemon::spawn::build_agent;
@@ -40,6 +41,7 @@ pub fn reload_persisted_agents(
     hub: &InteractionHub,
     runs_dir: &Path,
     now_secs: i64,
+    subagent_tx: &UnboundedSender<SubAgentOp>,
 ) -> Vec<(String, Entity)> {
     let mut restored = Vec::new();
     let Ok(dir_entries) = std::fs::read_dir(runs_dir) else {
@@ -63,6 +65,7 @@ pub fn reload_persisted_agents(
             &meta,
             &run_dir,
             now_secs,
+            subagent_tx,
         ) {
             Ok(entity) => restored.push((meta.run_id.clone(), entity)),
             Err(e) => {
@@ -101,6 +104,7 @@ fn reload_one(
     meta: &RunMeta,
     run_dir: &Path,
     now_secs: i64,
+    subagent_tx: &UnboundedSender<SubAgentOp>,
 ) -> Result<Entity, String> {
     let args = SpawnArgs {
         run_id: meta.run_id.clone(),
@@ -125,6 +129,7 @@ fn reload_one(
         hub,
         &args,
         now_secs,
+        subagent_tx.clone(),
     )?;
 
     // Restore the persisted context (if any), stage, iteration, and token totals.
@@ -173,6 +178,10 @@ mod tests {
     use leviath_runtime::components::AgentStatus;
     use leviath_runtime::inference_pool::InferencePoolConfig;
     use tokio::runtime::Handle;
+
+    fn sub_tx() -> UnboundedSender<SubAgentOp> {
+        tokio::sync::mpsc::unbounded_channel().0
+    }
 
     struct FakeProvider;
     #[async_trait::async_trait]
@@ -327,6 +336,7 @@ mod tests {
             &hub,
             runs.path(),
             999,
+            &sub_tx(),
         );
 
         assert_eq!(restored.len(), 1);
@@ -368,6 +378,7 @@ mod tests {
             &hub,
             runs.path(),
             999,
+            &sub_tx(),
         );
         assert_eq!(restored.len(), 1);
         assert!(world.world().get::<TokenTotals>(restored[0].1).is_some());
@@ -389,6 +400,7 @@ mod tests {
                 &hub,
                 std::path::Path::new("/no/such/runs/dir"),
                 1,
+                &sub_tx(),
             )
             .is_empty()
         );
@@ -417,6 +429,7 @@ mod tests {
             &hub,
             runs.path(),
             1,
+            &sub_tx(),
         );
         assert!(restored.is_empty()); // all skipped, none fatal
     }

@@ -57,6 +57,9 @@ pub struct AgentToolState {
     pub interaction: HubInteractionBackend,
     /// The current stage name, for tagging interactions (re-synced on stage change).
     pub stage_name: Arc<StdMutex<String>>,
+    /// Handle for the sub-agent tools (spawn/check/wait/send/kill), or `None`
+    /// when this agent can't reach the host (e.g. in unit tests).
+    pub subagent: Option<crate::daemon::subagent::SubAgentHandle>,
 }
 
 /// Execute a single (non-context) tool call against the built-in or MCP executor.
@@ -92,6 +95,17 @@ pub async fn dispatch_tools(
         )
         .await
         {
+            out.push((tc.id, result));
+            continue;
+        }
+
+        // Sub-agent tools (spawn/check/wait/send/kill) reach the world through
+        // the host, not the builtin/MCP executors.
+        if crate::daemon::subagent::is_subagent_tool(&tc.name) {
+            let result = match &state.subagent {
+                Some(handle) => crate::daemon::subagent::handle(handle, &tc).await,
+                None => "[error] sub-agent tools are unavailable for this agent".to_string(),
+            };
             out.push((tc.id, result));
             continue;
         }
@@ -218,6 +232,7 @@ mod tests {
             global_perms: Arc::new(global),
             interaction: hub.backend_for("agent-a"),
             stage_name: Arc::new(StdMutex::new("main".to_string())),
+            subagent: None,
         })
     }
 
@@ -305,6 +320,7 @@ mod tests {
             global_perms: Arc::new(HashMap::new()),
             interaction: hub.backend_for("a"),
             stage_name: Arc::new(StdMutex::new("main".to_string())),
+            subagent: None,
         });
         service.register(e, state.clone());
 
@@ -362,6 +378,71 @@ mod tests {
         )
         .await;
         assert_eq!(out.len(), 1); // executed, not asked
+    }
+
+    #[tokio::test]
+    async fn subagent_tool_without_a_handle_reports_unavailable() {
+        let hub = InteractionHub::new();
+        // state_with leaves `subagent: None`.
+        let state = state_with(&hub, leviath_mcp::ToolExecutor::new(), HashMap::new());
+        let out = dispatch_tools(
+            state,
+            vec![call(
+                "c1",
+                "spawn_agent",
+                serde_json::json!({ "blueprint": "x", "task": "t" }),
+            )],
+        )
+        .await;
+        assert_eq!(out.len(), 1);
+        assert!(out[0].1.contains("unavailable"));
+    }
+
+    #[tokio::test]
+    async fn subagent_tool_with_a_handle_is_routed_to_the_handler() {
+        let hub = InteractionHub::new();
+        // A handle whose host is already gone: routing succeeds but the send
+        // fails, so the handler reports "shutting down" — which proves the call
+        // reached `subagent::handle` (the Some branch), not the None fallback.
+        // Drop the receiver explicitly (a `_rx` binding would outlive the send
+        // and hang the handler on the never-answered oneshot reply).
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        drop(rx);
+        let handle = crate::daemon::subagent::SubAgentHandle {
+            sender: tx,
+            parent_run_id: "parent".to_string(),
+            workdir: "/tmp".to_string(),
+            max_depth: 3,
+        };
+        let builtins = Arc::new(leviath_tools::BuiltinTools::new(
+            leviath_tools::ToolContext::new(std::env::temp_dir()),
+        ));
+        let builtin_names: HashSet<String> = builtins.names().into_iter().collect();
+        let state = Arc::new(AgentToolState {
+            builtins,
+            mcp: Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new())),
+            builtin_names,
+            launch_overrides: Arc::new(HashMap::new()),
+            session_allows: Arc::new(Mutex::new(HashSet::new())),
+            stage_perms: Arc::new(StdMutex::new(HashMap::new())),
+            stage_perms_by_index: Arc::new(Vec::new()),
+            agent_perms: Arc::new(HashMap::new()),
+            global_perms: Arc::new(HashMap::new()),
+            interaction: hub.backend_for("agent-a"),
+            stage_name: Arc::new(StdMutex::new("main".to_string())),
+            subagent: Some(handle),
+        });
+        let out = dispatch_tools(
+            state,
+            vec![call(
+                "c1",
+                "kill_agent",
+                serde_json::json!({ "agent_id": "c" }),
+            )],
+        )
+        .await;
+        assert_eq!(out.len(), 1);
+        assert!(out[0].1.contains("shutting down"));
     }
 
     #[tokio::test]
