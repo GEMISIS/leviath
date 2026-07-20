@@ -1,0 +1,735 @@
+//! The daemon spawner: turns a [`SpawnArgs`] request into a live agent in the
+//! shared world — the CLI-side policy the runtime host calls for a `Spawn`
+//! control op.
+//!
+//! It loads the blueprint, resolves each stage's provider/model (against the
+//! world's registered providers) and effective tool set, spawns the agent via
+//! [`leviath_runtime::pipeline::spawn_agent`], attaches its run metadata /
+//! token totals / compaction settings, and registers its per-agent tool state
+//! with the [`CliToolService`]. The heavy MCP connections are shared (built once
+//! at daemon startup), so this whole path is synchronous — which lets it run
+//! straight from the host's control loop.
+
+use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
+
+use bevy_ecs::entity::Entity;
+use leviath_core::blueprint::{Blueprint, ModelConfig};
+use leviath_providers::Tool;
+use leviath_runtime::engine::ProviderRegistry;
+use leviath_runtime::host::SpawnArgs;
+use leviath_runtime::interaction_hub::InteractionHub;
+use leviath_runtime::persistence::{RunMetadata, TokenTotals};
+use leviath_runtime::pipeline::{
+    CompactionSettings, PersistWatermark, Providers, ResolvedStage, spawn_agent,
+};
+use leviath_runtime::world::PipelineWorld;
+use tokio::sync::Mutex;
+
+use crate::config::Config;
+use crate::daemon::tool_service::{AgentToolState, CliToolService};
+
+/// Resolve a stage's [`ModelConfig`] to a concrete `(provider, model)` against
+/// the registered providers. Honors a `--model` override (`provider/model` or a
+/// bare `model`), otherwise picks the first listed model whose provider is
+/// registered, then falls back to the user default (when `allow_user_default`),
+/// and finally to the config's first listed entry. (Ported from the executor's
+/// inline resolution.)
+pub fn resolve_stage_model(
+    model_cfg: &ModelConfig,
+    model_override: Option<&str>,
+    config: &Config,
+    registry: &ProviderRegistry,
+) -> (String, String) {
+    let (override_provider, override_model) = match model_override {
+        Some(ov) if ov.contains('/') => {
+            let (p, m) = ov.split_once('/').unwrap();
+            (Some(p.to_string()), Some(m.to_string()))
+        }
+        Some(ov) => (None, Some(ov.to_string())),
+        None => (None, None),
+    };
+
+    // Full provider/model override wins outright.
+    if let Some(provider) = override_provider {
+        return (provider, override_model.unwrap_or_default());
+    }
+
+    // First listed model whose provider is registered.
+    for entry in &model_cfg.models {
+        if registry.has(&entry.provider) {
+            let model = override_model
+                .clone()
+                .unwrap_or_else(|| entry.model.clone());
+            return (entry.provider.clone(), model);
+        }
+    }
+
+    // Fall back to the user's default model, or finally the first listed entry.
+    user_default_model(model_cfg, override_model.as_deref(), config, registry).unwrap_or_else(
+        || {
+            (
+                model_cfg.provider().to_string(),
+                model_cfg.model().to_string(),
+            )
+        },
+    )
+}
+
+/// The user-default fallback for [`resolve_stage_model`]: `None` when the stage
+/// forbids it or no usable default exists.
+fn user_default_model(
+    model_cfg: &ModelConfig,
+    override_model: Option<&str>,
+    config: &Config,
+    registry: &ProviderRegistry,
+) -> Option<(String, String)> {
+    if !model_cfg.allow_user_default {
+        return None;
+    }
+    if let Some(model) = override_model {
+        return Some((config.default_provider.clone(), model.to_string()));
+    }
+    if let Some(default_model) = &config.default_model
+        && registry.has(&config.default_provider)
+    {
+        return Some((config.default_provider.clone(), default_model.clone()));
+    }
+    None
+}
+
+/// Resolve every stage's provider/model + effective tool set from the blueprint.
+fn resolve_stages(
+    blueprint: &Blueprint,
+    model_override: Option<&str>,
+    config: &Config,
+    registry: &ProviderRegistry,
+    all_tool_defs: &[Tool],
+) -> Vec<ResolvedStage> {
+    blueprint
+        .stages
+        .iter()
+        .map(|stage| {
+            let (provider_name, model) =
+                resolve_stage_model(&stage.model, model_override, config, registry);
+            // An empty `available_tools` means the stage exposes no tools (matches
+            // the imperative executor).
+            let tools = if stage.available_tools.is_empty() {
+                Vec::new()
+            } else {
+                all_tool_defs
+                    .iter()
+                    .filter(|t| stage.available_tools.iter().any(|n| n == &t.name))
+                    .cloned()
+                    .collect()
+            };
+            ResolvedStage {
+                provider_name,
+                model,
+                tools,
+            }
+        })
+        .collect()
+}
+
+/// Build one agent's [`AgentToolState`] from the shared executors + config.
+#[allow(clippy::too_many_arguments)]
+fn build_tool_state(
+    builtins: Arc<leviath_tools::BuiltinTools>,
+    builtin_names: HashSet<String>,
+    mcp: Arc<Mutex<leviath_mcp::ToolExecutor>>,
+    config: &Config,
+    hub: &InteractionHub,
+    run_id: &str,
+    entry_stage: &str,
+) -> Arc<AgentToolState> {
+    Arc::new(AgentToolState {
+        builtins,
+        mcp,
+        builtin_names,
+        launch_overrides: Arc::new(HashMap::new()),
+        session_allows: Arc::new(Mutex::new(HashSet::new())),
+        stage_perms: Arc::new(Mutex::new(HashMap::new())),
+        agent_perms: Arc::new(HashMap::new()),
+        global_perms: Arc::new(config.tool_permissions.clone()),
+        interaction: hub.backend_for(run_id),
+        stage_name: Arc::new(Mutex::new(entry_stage.to_string())),
+    })
+}
+
+/// Load the blueprint at `args.blueprint_path`, spawn the agent into `world`,
+/// register its tool state, and return the new entity.
+#[allow(clippy::too_many_arguments)]
+pub fn build_agent(
+    world: &mut PipelineWorld,
+    tool_service: &CliToolService,
+    config: &Config,
+    shared_mcp: Arc<Mutex<leviath_mcp::ToolExecutor>>,
+    mcp_tool_defs: &[Tool],
+    hub: &InteractionHub,
+    args: &SpawnArgs,
+    now_secs: i64,
+) -> Result<Entity, String> {
+    // 1. Load the blueprint (the client resolves the manifest path).
+    let content = std::fs::read_to_string(&args.blueprint_path)
+        .map_err(|e| format!("read manifest '{}': {e}", args.blueprint_path))?;
+    let blueprint = leviath_core::manifest::parse_manifest(&content)
+        .map_err(|e| format!("parse manifest: {e}"))?;
+    blueprint
+        .validate()
+        .map_err(|e| format!("invalid blueprint: {e}"))?;
+
+    // 2. Per-agent built-in tools (over the agent's workdir).
+    let builtins = Arc::new(leviath_tools::BuiltinTools::new(
+        leviath_tools::ToolContext::new(std::path::PathBuf::from(&args.workdir)),
+    ));
+    let builtin_names: HashSet<String> = builtins.names().into_iter().collect();
+    let mut all_tool_defs = builtins.tool_defs();
+    all_tool_defs.extend(leviath_tools::BuiltinTools::subagent_tool_defs());
+    all_tool_defs.extend(mcp_tool_defs.iter().cloned());
+
+    // 3. Resolve stages against the world's providers.
+    let entry_stage = blueprint
+        .entry_stage
+        .clone()
+        .or_else(|| blueprint.stages.first().map(|s| s.name.clone()))
+        .unwrap_or_default();
+    let stages = {
+        let registry = &world
+            .world()
+            .get_resource::<Providers>()
+            .expect("Providers resource present in a PipelineWorld")
+            .0;
+        resolve_stages(
+            &blueprint,
+            args.model.as_deref(),
+            config,
+            registry,
+            &all_tool_defs,
+        )
+    };
+
+    // 4. Snapshot the blueprint bits we need after it's moved into the world.
+    let agent_name = blueprint.name.clone();
+    let num_stages = blueprint.stages.len();
+    let compaction = blueprint.compaction_config.clone();
+    let model_label = stages
+        .first()
+        .map(|s| format!("{}/{}", s.provider_name, s.model));
+
+    // 5. Spawn the agent.
+    let entity = spawn_agent(
+        world.world_mut(),
+        args.run_id.clone(),
+        blueprint,
+        &args.task,
+        stages,
+    )?;
+
+    // 6. Attach run metadata / token totals / persistence watermark (+ optional
+    // compaction settings).
+    let metadata = RunMetadata {
+        run_id: args.run_id.clone(),
+        agent_name,
+        agent_path: args.blueprint_path.clone(),
+        task: args.task.clone(),
+        model: model_label,
+        workdir: args.workdir.clone(),
+        num_stages,
+        started_at: now_secs,
+        parent_run_id: None,
+        metadata: args.metadata.clone(),
+        callback_url: None,
+        title: None,
+    };
+    {
+        let mut entity_mut = world.world_mut().entity_mut(entity);
+        entity_mut.insert((
+            metadata,
+            TokenTotals::default(),
+            PersistWatermark::default(),
+        ));
+        // `Option`'s iterator inserts compaction settings when present without a
+        // dangling `if let` block-end region.
+        compaction.into_iter().for_each(|cc| {
+            entity_mut.insert(CompactionSettings(cc));
+        });
+    }
+
+    // 7. Register the per-agent tool state.
+    let state = build_tool_state(
+        builtins,
+        builtin_names,
+        shared_mcp,
+        config,
+        hub,
+        &args.run_id,
+        &entry_stage,
+    );
+    tool_service.register(entity, state);
+
+    Ok(entity)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use leviath_core::blueprint::ModelEntry;
+
+    fn model_cfg(models: Vec<(&str, &str)>) -> ModelConfig {
+        ModelConfig {
+            models: models
+                .into_iter()
+                .map(|(p, m)| ModelEntry {
+                    provider: p.to_string(),
+                    model: m.to_string(),
+                })
+                .collect(),
+            allow_user_default: true,
+            parameters: HashMap::new(),
+        }
+    }
+
+    fn registry_with(providers: &[&str]) -> ProviderRegistry {
+        let mut r = ProviderRegistry::new();
+        for p in providers {
+            r.register(p.to_string(), Arc::new(FakeProvider));
+        }
+        r
+    }
+
+    struct FakeProvider;
+    #[async_trait::async_trait]
+    impl leviath_providers::Provider for FakeProvider {
+        async fn infer(
+            &self,
+            _r: leviath_providers::InferenceRequest,
+        ) -> leviath_providers::Result<leviath_providers::InferenceResponse> {
+            Err(leviath_providers::ProviderError::Other(
+                "test provider".to_string(),
+            ))
+        }
+        fn count_tokens(&self, _t: &str, _m: &str) -> usize {
+            1
+        }
+        fn max_context_tokens(&self, _m: &str) -> usize {
+            1000
+        }
+        fn name(&self) -> &str {
+            "fake"
+        }
+        fn capabilities(&self, _m: &str) -> leviath_providers::ModelCapabilities {
+            leviath_providers::ModelCapabilities::default()
+        }
+    }
+
+    #[test]
+    fn resolve_full_override_wins() {
+        let (p, m) = resolve_stage_model(
+            &model_cfg(vec![("anthropic", "x")]),
+            Some("openai/gpt-5"),
+            &Config::default(),
+            &registry_with(&[]),
+        );
+        assert_eq!((p.as_str(), m.as_str()), ("openai", "gpt-5"));
+    }
+
+    #[test]
+    fn resolve_first_available_model() {
+        // anthropic not registered, openai is → picks openai.
+        let (p, m) = resolve_stage_model(
+            &model_cfg(vec![("anthropic", "a"), ("openai", "o")]),
+            None,
+            &Config::default(),
+            &registry_with(&["openai"]),
+        );
+        assert_eq!((p.as_str(), m.as_str()), ("openai", "o"));
+    }
+
+    #[test]
+    fn resolve_model_only_override_keeps_available_provider() {
+        let (p, m) = resolve_stage_model(
+            &model_cfg(vec![("openai", "o")]),
+            Some("gpt-override"),
+            &Config::default(),
+            &registry_with(&["openai"]),
+        );
+        assert_eq!((p.as_str(), m.as_str()), ("openai", "gpt-override"));
+    }
+
+    #[test]
+    fn resolve_user_default_when_nothing_listed_available() {
+        // Listed provider "ghost" is unavailable; anthropic (the default) is.
+        let config = Config {
+            default_provider: "anthropic".to_string(),
+            default_model: Some("claude-default".to_string()),
+            ..Default::default()
+        };
+        let (p, m) = resolve_stage_model(
+            &model_cfg(vec![("ghost", "g")]),
+            None,
+            &config,
+            &registry_with(&["anthropic"]),
+        );
+        assert_eq!((p.as_str(), m.as_str()), ("anthropic", "claude-default"));
+    }
+
+    #[test]
+    fn resolve_user_default_with_model_override() {
+        let config = Config {
+            default_provider: "anthropic".to_string(),
+            ..Default::default()
+        };
+        let (p, m) = resolve_stage_model(
+            &model_cfg(vec![("ghost", "g")]),
+            Some("just-a-model"),
+            &config,
+            &registry_with(&[]),
+        );
+        assert_eq!((p.as_str(), m.as_str()), ("anthropic", "just-a-model"));
+    }
+
+    #[test]
+    fn resolve_user_default_provider_unavailable_falls_through() {
+        // allow_user_default, a default_model set, but the default provider isn't
+        // registered ⇒ neither user-default branch fires ⇒ last resort.
+        let config = Config {
+            default_provider: "ghost-default".to_string(),
+            default_model: Some("dm".to_string()),
+            ..Default::default()
+        };
+        let (p, m) = resolve_stage_model(
+            &model_cfg(vec![("ghost", "g")]),
+            None,
+            &config,
+            &registry_with(&[]),
+        );
+        assert_eq!((p.as_str(), m.as_str()), ("ghost", "g"));
+    }
+
+    #[test]
+    fn resolve_last_resort_first_listed() {
+        // No override, nothing available, no usable default → first listed entry.
+        let config = Config::default(); // default_model None
+        let (p, m) = resolve_stage_model(
+            &model_cfg(vec![("ghost", "g")]),
+            None,
+            &config,
+            &registry_with(&[]),
+        );
+        assert_eq!((p.as_str(), m.as_str()), ("ghost", "g"));
+    }
+
+    #[test]
+    fn resolve_no_user_default_uses_last_resort() {
+        let mut cfg = model_cfg(vec![("ghost", "g")]);
+        cfg.allow_user_default = false; // forbid the default fallback
+        let config = Config {
+            default_model: Some("would-be-default".to_string()),
+            ..Default::default()
+        };
+        let (p, m) = resolve_stage_model(&cfg, None, &config, &registry_with(&["anthropic"]));
+        assert_eq!((p.as_str(), m.as_str()), ("ghost", "g"));
+    }
+
+    // ── build_agent (full spawn from a manifest) ──
+
+    use leviath_providers::Provider;
+    use leviath_runtime::components::AgentStatus;
+    use leviath_runtime::inference_pool::InferencePoolConfig;
+    use tokio::runtime::Handle;
+
+    fn coder_manifest() -> String {
+        std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../agents/coder/agent.leviath"),
+        )
+        .expect("read coder manifest")
+    }
+
+    fn test_world() -> (PipelineWorld, Arc<CliToolService>) {
+        let cli = Arc::new(CliToolService::new());
+        let world = PipelineWorld::new(
+            registry_with(&["anthropic", "openai", "ollama"]),
+            cli.clone(),
+            InferencePoolConfig::new(),
+            std::env::temp_dir(),
+            Handle::current(),
+        );
+        (world, cli)
+    }
+
+    fn spawn_args(path: &str) -> SpawnArgs {
+        SpawnArgs {
+            run_id: "run-x".to_string(),
+            blueprint_path: path.to_string(),
+            task: "do the thing".to_string(),
+            model: None,
+            workdir: std::env::temp_dir().to_string_lossy().to_string(),
+            metadata: HashMap::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn build_agent_spawns_registers_and_wires_tools() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = dir.path().join("agent.leviath");
+        std::fs::write(&manifest, coder_manifest()).unwrap();
+
+        let (mut world, cli) = test_world();
+        let hub = InteractionHub::new();
+        let mcp = Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new()));
+        let entity = build_agent(
+            &mut world,
+            cli.as_ref(),
+            &Config::default(),
+            mcp,
+            &[],
+            &hub,
+            &spawn_args(&manifest.to_string_lossy()),
+            100,
+        )
+        .expect("spawn succeeds");
+
+        assert_eq!(world.agent_status(entity), Some(AgentStatus::Active));
+        // The run metadata was attached.
+        let md = world
+            .world()
+            .get::<RunMetadata>(entity)
+            .expect("run metadata");
+        assert_eq!(md.run_id, "run-x");
+        assert_eq!(md.agent_name, "coder");
+        // Tool state was registered: a tool batch dispatches (not "no tool state").
+        let out = leviath_runtime::pipeline::ToolService::exec_for(
+            cli.as_ref(),
+            entity,
+            vec![leviath_providers::ToolCall {
+                id: "c1".to_string(),
+                name: "list_dir".to_string(),
+                arguments: serde_json::json!({"path": "."}),
+            }],
+        )()
+        .await;
+        assert_eq!(out[0].0, "c1");
+        assert!(!out[0].1.contains("no tool state"));
+    }
+
+    #[tokio::test]
+    async fn fake_provider_methods_are_exercised() {
+        let p = FakeProvider;
+        assert_eq!(p.name(), "fake");
+        assert_eq!(p.count_tokens("t", "m"), 1);
+        assert_eq!(p.max_context_tokens("m"), 1000);
+        let _ = p.capabilities("m");
+        assert!(
+            p.infer(leviath_providers::InferenceRequest {
+                system: vec![],
+                messages: vec![],
+                model: "m".to_string(),
+                max_tokens: 1,
+                temperature: 0.0,
+                tools: vec![],
+                extra: serde_json::Value::Null,
+            })
+            .await
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn resolve_stages_empty_available_tools_gets_none() {
+        let mut stage =
+            leviath_core::Stage::new("s".to_string(), model_cfg(vec![("anthropic", "m")]));
+        stage.available_tools = vec![]; // empty ⇒ no tools
+        let layout = leviath_core::layout::ContextLayout::new(vec![], 1000);
+        let bp = Blueprint::new("t".to_string(), "d".to_string(), vec![stage], layout);
+        let tools = vec![Tool {
+            name: "read_file".to_string(),
+            description: String::new(),
+            parameters: serde_json::Value::Null,
+        }];
+        let resolved = resolve_stages(
+            &bp,
+            None,
+            &Config::default(),
+            &registry_with(&["anthropic"]),
+            &tools,
+        );
+        assert!(resolved[0].tools.is_empty());
+    }
+
+    #[tokio::test]
+    async fn build_agent_read_error() {
+        let (mut world, cli) = test_world();
+        let hub = InteractionHub::new();
+        let mcp = Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new()));
+        let err = build_agent(
+            &mut world,
+            cli.as_ref(),
+            &Config::default(),
+            mcp,
+            &[],
+            &hub,
+            &spawn_args("/no/such/manifest.leviath"),
+            100,
+        )
+        .unwrap_err();
+        assert!(err.contains("read manifest"));
+    }
+
+    /// A minimal single-stage manifest with a tiny task region and a `system_prompt`
+    /// large enough to overflow it, so stage-0 setup fails in `spawn_agent`.
+    const OVERSIZED_MANIFEST: &str = r#"
+[agent]
+name = "tiny"
+version = "0.1.0"
+description = "d"
+entry_stage = "main"
+
+[context.regions]
+task = { kind = "pinned", max_tokens = 20 }
+
+[stages.main]
+mode = "autonomous"
+model = { models = [{ provider = "anthropic", model = "m" }] }
+description = "d"
+available_tools = []
+system_prompt = "SYSTEM_PROMPT_PLACEHOLDER"
+"#;
+
+    #[tokio::test]
+    async fn build_agent_propagates_spawn_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = dir.path().join("tiny.leviath");
+        // A huge prompt that cannot fit the 20-token "task" region.
+        let content = OVERSIZED_MANIFEST.replace("SYSTEM_PROMPT_PLACEHOLDER", &"x ".repeat(5000));
+        std::fs::write(&manifest, content).unwrap();
+
+        let (mut world, cli) = test_world();
+        let hub = InteractionHub::new();
+        let mcp = Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new()));
+        let result = build_agent(
+            &mut world,
+            cli.as_ref(),
+            &Config::default(),
+            mcp,
+            &[],
+            &hub,
+            &spawn_args(&manifest.to_string_lossy()),
+            100,
+        );
+        assert!(result.is_err(), "expected spawn error, got {result:?}");
+    }
+
+    #[tokio::test]
+    async fn build_agent_invalid_blueprint() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = dir.path().join("bad.leviath");
+        // entry_stage names a stage that doesn't exist ⇒ validate() fails.
+        std::fs::write(
+            &manifest,
+            r#"
+[agent]
+name = "bad"
+version = "0.1.0"
+description = "d"
+entry_stage = "ghost"
+
+[context.regions]
+task = { kind = "pinned", max_tokens = 4000 }
+
+[stages.main]
+mode = "autonomous"
+model = { models = [{ provider = "anthropic", model = "m" }] }
+description = "d"
+available_tools = []
+"#,
+        )
+        .unwrap();
+        let (mut world, cli) = test_world();
+        let hub = InteractionHub::new();
+        let mcp = Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new()));
+        let err = build_agent(
+            &mut world,
+            cli.as_ref(),
+            &Config::default(),
+            mcp,
+            &[],
+            &hub,
+            &spawn_args(&manifest.to_string_lossy()),
+            100,
+        )
+        .unwrap_err();
+        assert!(err.contains("invalid blueprint"));
+    }
+
+    #[tokio::test]
+    async fn build_agent_without_entry_stage_and_with_compaction() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = dir.path().join("mini.leviath");
+        // No entry_stage (falls back to the first stage) + a compaction section.
+        std::fs::write(
+            &manifest,
+            r#"
+[agent]
+name = "mini"
+version = "0.1.0"
+description = "d"
+
+[compaction]
+provider = "anthropic"
+model = "claude-x"
+
+[context.regions]
+task = { kind = "pinned", max_tokens = 4000 }
+
+[stages.main]
+mode = "autonomous"
+model = { models = [{ provider = "anthropic", model = "m" }] }
+description = "d"
+available_tools = []
+system_prompt = "be brief"
+"#,
+        )
+        .unwrap();
+        let (mut world, cli) = test_world();
+        let hub = InteractionHub::new();
+        let mcp = Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new()));
+        let entity = build_agent(
+            &mut world,
+            cli.as_ref(),
+            &Config::default(),
+            mcp,
+            &[],
+            &hub,
+            &spawn_args(&manifest.to_string_lossy()),
+            100,
+        )
+        .expect("spawn succeeds");
+        assert_eq!(world.agent_status(entity), Some(AgentStatus::Active));
+        // Compaction settings were attached.
+        assert!(world.world().get::<CompactionSettings>(entity).is_some());
+    }
+
+    #[tokio::test]
+    async fn build_agent_parse_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = dir.path().join("bad.leviath");
+        std::fs::write(&manifest, "this is not valid toml : : :").unwrap();
+        let (mut world, cli) = test_world();
+        let hub = InteractionHub::new();
+        let mcp = Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new()));
+        let err = build_agent(
+            &mut world,
+            cli.as_ref(),
+            &Config::default(),
+            mcp,
+            &[],
+            &hub,
+            &spawn_args(&manifest.to_string_lossy()),
+            100,
+        )
+        .unwrap_err();
+        assert!(err.contains("parse manifest"));
+    }
+}
