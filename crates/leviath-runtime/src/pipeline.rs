@@ -21,12 +21,11 @@ use crate::compaction_bridge::{CompactionJob, CompactionOutcome, run_compaction_
 use crate::components::{
     AgentMessage, AgentState, AgentStatus, ContextWindow, InferenceConfig, MessageInbox,
 };
-use crate::engine::ProviderRegistry;
-use crate::engine::truncate_on_char_boundary;
 use crate::inference_bridge::{InferenceJob, InferenceOutcome, run_inference_job};
 use crate::inference_pool::InferencePools;
 use crate::persistence::{RunMetadata, TokenTotals, build_context_snapshot, build_run_meta};
 use crate::persistence_bridge::PersistJob;
+use crate::providers::ProviderRegistry;
 use crate::tool_bridge::{BoxedToolExec, ToolJob, ToolOutcome};
 
 // ─── Phase marker components (an agent is in exactly one) ────────────────────
@@ -96,6 +95,13 @@ pub struct InferenceStage {
     pub wake: Arc<Notify>,
     /// Runtime the worker tasks are spawned onto.
     pub runtime: Handle,
+}
+
+/// Truncate `text` to at most `max_chars` characters, never splitting a
+/// multi-byte UTF-8 char. `max_chars` is an approximate char budget the caller
+/// derives from a token estimate.
+fn truncate_on_char_boundary(text: &str, max_chars: usize) -> String {
+    text.chars().take(max_chars).collect()
 }
 
 /// Build the [`InferenceRequest`] for an agent from its context window + stage

@@ -1,12 +1,12 @@
-//! Engine context-window setup helpers shared by the stage engine.
+//! Context-window setup helpers shared by the ECS pipeline's spawner and
+//! stage-entry.
 //!
-//! These are pure operations over an [`AgentEngine`]'s [`ContextWindow`] driven
-//! by a blueprint/layout, so they live in the runtime (the CLI re-exports them
-//! from `commands::run::helpers` for existing call sites).
+//! These are pure operations over a [`ContextWindow`] driven by a
+//! blueprint/layout.
 
 use leviath_core::{Blueprint, ContextLayout, EvictionStrategy, Region, RegionKind};
 
-use crate::{AgentEngine, ContextWindow};
+use crate::ContextWindow;
 
 /// Initialize a [`ContextWindow`] in place from a blueprint: add each layout
 /// region plus the infra `tool_results`/`conversation` regions, and seed the
@@ -61,18 +61,6 @@ pub fn init_window(window: &mut ContextWindow, blueprint: &Blueprint, task: &str
     }
 }
 
-/// Initialize context window regions on an entity from the blueprint.
-pub fn initialize_context_window(
-    engine: &mut AgentEngine,
-    entity: bevy_ecs::prelude::Entity,
-    blueprint: &Blueprint,
-    task: &str,
-) {
-    if let Some(mut window) = engine.world_mut().get_mut::<ContextWindow>(entity) {
-        init_window(&mut window, blueprint, task);
-    }
-}
-
 /// Swap a [`ContextWindow`] to a stage-specific layout in place, preserving each
 /// carried-over region's existing content by name. Pure over the window (no
 /// engine/entity), so both the imperative engine and the ECS pipeline's
@@ -99,22 +87,10 @@ pub fn apply_layout(window: &mut ContextWindow, layout: &ContextLayout) {
     window.current_tokens = window.calculate_tokens();
 }
 
-/// Swap context layout to a stage-specific layout (preserving existing content where possible).
-pub fn swap_context_layout(
-    engine: &mut AgentEngine,
-    entity: bevy_ecs::prelude::Entity,
-    layout: &ContextLayout,
-) {
-    if let Some(mut window) = engine.world_mut().get_mut::<ContextWindow>(entity) {
-        apply_layout(&mut window, layout);
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{initialize_context_window, swap_context_layout};
-    use crate::{AgentEngine, AgentPool, ContextWindow, ProviderRegistry};
-    use bevy_ecs::prelude::Entity;
+    use super::{apply_layout, init_window};
+    use crate::ContextWindow;
     use leviath_core::{
         Blueprint, ContextLayout, EvictionStrategy, RegionKind, Stage, blueprint::ModelConfig,
         layout::RegionDefinition,
@@ -129,17 +105,14 @@ mod tests {
         Blueprint::new("bp".to_string(), "desc".to_string(), stages, layout)
     }
 
-    fn engine_and_entity() -> (AgentEngine, Entity) {
-        let mut engine = AgentEngine::with_providers(ProviderRegistry::new());
-        let mut pool = AgentPool::new(blueprint_with(vec![]));
-        let id = pool.spawn_agent(engine.world_mut());
-        let entity = pool.get_agent(&id).unwrap();
-        (engine, entity)
+    fn seeded_window(bp: &Blueprint, task: &str) -> ContextWindow {
+        let mut window = ContextWindow::new(100_000);
+        init_window(&mut window, bp, task);
+        window
     }
 
     #[test]
-    fn initialize_prefers_named_task_region_and_keeps_existing_infra_regions() {
-        let (mut engine, entity) = engine_and_entity();
+    fn init_prefers_named_task_region_and_keeps_existing_infra_regions() {
         let bp = blueprint_with(vec![
             RegionDefinition::new("task".to_string(), RegionKind::Pinned, 5000),
             RegionDefinition::new("tool_results".to_string(), RegionKind::Temporary, 5000),
@@ -153,9 +126,7 @@ mod tests {
             ),
         ]);
 
-        initialize_context_window(&mut engine, entity, &bp, "do the thing");
-
-        let window = engine.world().get::<ContextWindow>(entity).unwrap();
+        let window = seeded_window(&bp, "do the thing");
         // Task seeded into the explicitly-named "task" pinned region.
         assert!(
             window
@@ -185,8 +156,7 @@ mod tests {
     }
 
     #[test]
-    fn initialize_adds_infra_regions_and_falls_back_to_first_pinned() {
-        let (mut engine, entity) = engine_and_entity();
+    fn init_adds_infra_regions_and_falls_back_to_first_pinned() {
         // Only a pinned "system" region (not named "task"): task falls back to
         // it, and tool_results + conversation are auto-added.
         let bp = blueprint_with(vec![RegionDefinition::new(
@@ -195,9 +165,7 @@ mod tests {
             5000,
         )]);
 
-        initialize_context_window(&mut engine, entity, &bp, "seed task");
-
-        let window = engine.world().get::<ContextWindow>(entity).unwrap();
+        let window = seeded_window(&bp, "seed task");
         assert!(window.get_region("tool_results").is_some());
         assert!(window.get_region("conversation").is_some());
         assert!(
@@ -211,17 +179,14 @@ mod tests {
     }
 
     #[test]
-    fn initialize_without_pinned_region_does_not_seed_task() {
-        let (mut engine, entity) = engine_and_entity();
+    fn init_without_pinned_region_does_not_seed_task() {
         let bp = blueprint_with(vec![RegionDefinition::new(
             "scratch".to_string(),
             RegionKind::Temporary,
             5000,
         )]);
 
-        initialize_context_window(&mut engine, entity, &bp, "unseeded task");
-
-        let window = engine.world().get::<ContextWindow>(entity).unwrap();
+        let window = seeded_window(&bp, "unseeded task");
         // No pinned region → task text is seeded nowhere; the sole declared
         // region stays empty.
         assert!(window.get_region("scratch").unwrap().content.is_empty());
@@ -231,8 +196,7 @@ mod tests {
     }
 
     #[test]
-    fn initialize_task_named_region_that_is_not_pinned_falls_back_to_first_pinned() {
-        let (mut engine, entity) = engine_and_entity();
+    fn init_task_named_region_that_is_not_pinned_falls_back_to_first_pinned() {
         // A region literally named "task" but NOT pinned must be rejected by
         // the `name == "task" && matches!(kind, Pinned)` guard, falling back to
         // the first pinned region ("system").
@@ -241,9 +205,7 @@ mod tests {
             RegionDefinition::new("system".to_string(), RegionKind::Pinned, 5000),
         ]);
 
-        initialize_context_window(&mut engine, entity, &bp, "fallback seed");
-
-        let window = engine.world().get::<ContextWindow>(entity).unwrap();
+        let window = seeded_window(&bp, "fallback seed");
         // The non-pinned "task" region is left empty...
         assert!(window.get_region("task").unwrap().content.is_empty());
         // ...and the seed lands in the first pinned region instead.
@@ -258,14 +220,13 @@ mod tests {
     }
 
     #[test]
-    fn swap_layout_preserves_overlapping_content_and_creates_new_regions() {
-        let (mut engine, entity) = engine_and_entity();
+    fn apply_layout_preserves_overlapping_content_and_creates_new_regions() {
         let bp = blueprint_with(vec![RegionDefinition::new(
             "system".to_string(),
             RegionKind::Pinned,
             5000,
         )]);
-        initialize_context_window(&mut engine, entity, &bp, "carried content");
+        let mut window = seeded_window(&bp, "carried content");
 
         // New layout keeps "system" (content should carry over) and adds a
         // brand-new "scratch" region (no prior content → the None branch).
@@ -277,9 +238,8 @@ mod tests {
             8000,
         );
 
-        swap_context_layout(&mut engine, entity, &new_layout);
+        apply_layout(&mut window, &new_layout);
 
-        let window = engine.world().get::<ContextWindow>(entity).unwrap();
         assert_eq!(window.regions.len(), 2);
         assert!(
             window
@@ -293,33 +253,5 @@ mod tests {
         // Token total recomputed from the surviving content.
         assert_eq!(window.current_tokens, window.calculate_tokens());
         assert!(window.current_tokens > 0);
-    }
-
-    #[test]
-    fn both_helpers_no_op_on_entity_without_context_window() {
-        // An entity that has no ContextWindow component makes the guarding
-        // `if let Some(mut window)` fall through — both helpers are safe no-ops.
-        let mut engine = AgentEngine::with_providers(ProviderRegistry::new());
-        let bare = engine.world_mut().spawn_empty().id();
-
-        let bp = blueprint_with(vec![RegionDefinition::new(
-            "system".to_string(),
-            RegionKind::Pinned,
-            5000,
-        )]);
-        initialize_context_window(&mut engine, bare, &bp, "ignored");
-
-        let layout = ContextLayout::new(
-            vec![RegionDefinition::new(
-                "system".to_string(),
-                RegionKind::Pinned,
-                5000,
-            )],
-            5000,
-        );
-        swap_context_layout(&mut engine, bare, &layout);
-
-        // Still no ContextWindow was created.
-        assert!(engine.world().get::<ContextWindow>(bare).is_none());
     }
 }

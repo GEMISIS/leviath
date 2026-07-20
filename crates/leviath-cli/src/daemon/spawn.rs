@@ -16,7 +16,7 @@ use std::sync::{Arc, Mutex as StdMutex};
 use bevy_ecs::entity::Entity;
 use leviath_core::blueprint::{Blueprint, ModelConfig};
 use leviath_providers::Tool;
-use leviath_runtime::engine::ProviderRegistry;
+use leviath_runtime::ProviderRegistry;
 use leviath_runtime::host::SpawnArgs;
 use leviath_runtime::interaction_hub::InteractionHub;
 use leviath_runtime::persistence::{RunMetadata, TokenTotals};

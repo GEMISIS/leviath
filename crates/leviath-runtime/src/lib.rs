@@ -12,8 +12,6 @@ pub mod context_setup;
 pub mod context_tools;
 pub mod control_socket;
 pub mod dynamic_interaction;
-pub mod engine;
-pub mod graph;
 pub mod host;
 pub mod inference_bridge;
 pub mod inference_pool;
@@ -21,14 +19,11 @@ pub mod interaction_hub;
 pub mod persistence;
 pub mod persistence_bridge;
 pub mod pipeline;
-pub mod pool;
 pub mod provider_creds;
+pub mod providers;
 pub mod repetition;
 pub mod restore;
 pub mod run_io;
-pub mod scheduler;
-pub mod spawn;
-pub mod systems;
 pub mod taint;
 pub mod tool_bridge;
 pub mod world;
@@ -42,16 +37,10 @@ pub use components::{
     InferenceConfig, InferenceResult, MessageInbox, NeedsCompaction, ParentRef, SubAgentChildren,
     TaskAssignment, ToolResultRoutingComponent,
 };
-pub use engine::{
-    AgentEngine, EngineHandle, ProviderRegistry, ToolExecutorDyn, ToolResultsFuture,
-    run_inference_loop_shared,
-};
 pub use inference_bridge::{InferenceJob, InferenceOutcome, run_inference_job};
 pub use inference_pool::{InferencePermit, InferencePoolConfig, InferencePools};
-pub use pool::AgentPool;
 pub use provider_creds::{ProviderCreds, build_provider_registry};
+pub use providers::ProviderRegistry;
 pub use run_io::RunIO;
-pub use scheduler::TaskScheduler;
-pub use spawn::spawn_child_agent;
 pub use taint::TaintGate;
 pub use tool_bridge::{BoxedToolExec, ToolExecFuture, ToolJob, ToolOutcome, tool_worker};
