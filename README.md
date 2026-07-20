@@ -97,7 +97,18 @@ lev run coder --task "Build a CLI that converts CSV to JSON"
 lev run deep-researcher --task "Survey the current state of solid-state battery technology"
 ```
 
-Then open the dashboard to watch it work:
+`lev run` hands the agent to a background **daemon** that hosts every agent in
+one shared world, so runs keep going after your terminal closes. The daemon
+starts automatically on first use (run it yourself with `lev daemon` to watch its
+logs). Inspect and steer running agents from any terminal:
+
+```bash
+lev ps                       # list running agents and their status
+lev msg <agent-id> "..."     # send a message to a running agent
+lev cancel <run-id>          # cancel a run
+```
+
+Or open the dashboard to watch them work:
 
 ```bash
 lev dash
@@ -281,12 +292,16 @@ Covers agent lifecycle, human-in-the-loop interaction, blueprint management, per
 | Command | Description |
 |---------|-------------|
 | `lev create <name>` | Create an agent project |
-| `lev run [path] --task "..."` | Run an agent |
+| `lev run [path] --task "..."` | Run an agent in the shared-world daemon (auto-started) |
+| `lev ps` | List running agents and their status |
+| `lev msg <agent-id> <content>` | Send a message to a running agent |
+| `lev cancel <run-id>` | Cancel a running agent |
+| `lev daemon` | Run the shared-world daemon in the foreground |
 | `lev dash` | TUI dashboard |
 | `lev serve` | API server |
 | `lev validate [path]` | Validate an agent blueprint |
 | `lev pack` / `lev add` / `lev remove` | Package management |
-| `lev list` | List agents |
+| `lev list` | List installed agents |
 | `lev test` | Run agent tests |
 | `lev setup` / `lev models` | Configuration |
 
