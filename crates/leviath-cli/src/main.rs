@@ -280,11 +280,15 @@ fn control_client() -> anyhow::Result<leviath_runtime::control_socket::ControlCl
 /// only — the loop, rendering, input handling, and engine setup it composes
 /// are all exercised under `cargo test`.
 async fn real_dashboard(_args: DashboardArgs) -> anyhow::Result<()> {
+    // The dashboard is a client of the shared-world daemon: ensure it's running,
+    // then observe/control it over the control socket.
+    ensure_daemon_running().await?;
+    let control = control_client()?;
     let mut setup = CrosstermSetup {
         viewport: Viewport::Fullscreen,
     };
     let mut events = CrosstermEventSource::new();
-    commands::dashboard::execute_with(&mut setup, &mut events, real_yank).await
+    commands::dashboard::execute_with(control, &mut setup, &mut events, real_yank).await
 }
 
 /// Real clipboard copy for the dashboard's `y` keypress: try a native tool,

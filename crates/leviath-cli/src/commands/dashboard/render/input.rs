@@ -12,7 +12,7 @@ use crate::commands::dashboard::helpers::truncate;
 use crate::commands::dashboard::state::Dashboard;
 use crate::commands::dashboard::theme::*;
 use crate::commands::dashboard::types::*;
-use crate::interaction;
+use leviath_core::interaction;
 
 impl Dashboard {
     pub(in crate::commands::dashboard) fn render_review_body(
@@ -233,16 +233,12 @@ mod tests {
             tokens_in: 100,
             tokens_out: 50,
             cached_tokens: 10,
-            context_tokens: (500, 8000),
             iteration: 3,
             waiting_prompt: Some("What should I do?".to_string()),
             pending_request: None,
             last_answered_request_id: None,
             context_snapshot: None,
             stages: vec![],
-            entity: bevy_ecs::prelude::Entity::from_raw(0),
-            is_run_state: true,
-            pid: 0,
             workdir: "/tmp/test".to_string(),
             task: "test task".to_string(),
             title: Some("My Test".to_string()),

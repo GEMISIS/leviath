@@ -2,11 +2,11 @@
 
 use crossterm::event::KeyCode;
 
-use super::helpers::{kill_write_cancelled, truncate};
+use super::helpers::truncate;
 use super::state::Dashboard;
 use super::types::*;
-use crate::interaction;
 use crate::runstate;
+use leviath_core::interaction;
 
 impl Dashboard {
     pub(super) fn handle_key(&mut self, key: crossterm::event::KeyEvent) {
@@ -331,9 +331,7 @@ impl Dashboard {
     }
 
     fn handle_yank_with_fn(&mut self, yank_fn: fn(&str) -> bool) {
-        if let Some(agent) = self.selected_agent()
-            && agent.is_run_state
-        {
+        if let Some(agent) = self.selected_agent() {
             let (content, label) = match self.stage_content_mode {
                 StageContentMode::Output => (
                     runstate::tail_stage_output(&agent.id, self.selected_stage, 524_288),
@@ -381,28 +379,15 @@ impl Dashboard {
             )
         {
             let agent_id = agent.id.clone();
-            let _pid = agent.pid;
-            let is_run_state = agent.is_run_state;
-            let was_waiting = matches!(agent.status, AgentDisplayStatus::Waiting);
-            if is_run_state {
-                leviath_sys::terminate(_pid);
-                kill_write_cancelled(&agent_id);
-                if was_waiting {
-                    interaction::clear_interaction(&agent_id);
-                }
-            } else {
-                let _ = self.cmd_tx.send(EngineCommand::CancelAgent {
-                    agent_id: agent_id.clone(),
-                });
-            }
-            // The index came from `display_indices`/`agents` just above,
-            // via the `self.selected_agent()` lookup that got us into
-            // this branch, and nothing in between (the OS kill signal,
-            // `kill_write_cancelled`, `clear_interaction`, or the
-            // `cmd_tx.send`) mutates either collection or `self.selected`
-            // -- so it's always still valid. An `if let` guard here would
-            // add an "index went stale" branch that can never actually be
-            // exercised.
+            let _ = self.cmd_tx.send(DaemonCommand::Cancel {
+                run_id: agent_id.clone(),
+            });
+            // The index came from `display_indices`/`agents` just above, via the
+            // `self.selected_agent()` lookup that got us into this branch, and
+            // the `cmd_tx.send` in between does not mutate either collection or
+            // `self.selected` -- so it's always still valid. An `if let` guard
+            // here would add an "index went stale" branch that can never
+            // actually be exercised.
             let idx = self
                 .selected_agent_raw_idx()
                 .expect("selected_agent() returned Some above");
@@ -460,21 +445,12 @@ impl Dashboard {
                 self.update_display_indices();
             }
             KeyCode::Char('d') => {
-                let info = self
-                    .selected_agent()
-                    .map(|a| (a.id.clone(), a.is_run_state));
-                if let Some((id, is_run_state)) = info {
-                    if is_run_state {
-                        self.confirm_delete = true;
-                        self.add_log(format!(
-                            "Delete run '{}'? This kills the process and is PERMANENT. (y/n)",
-                            id
-                        ));
-                    } else {
-                        self.add_log(
-                            "Only background runs can be deleted from the dashboard".to_string(),
-                        );
-                    }
+                if let Some(id) = self.selected_agent().map(|a| a.id.clone()) {
+                    self.confirm_delete = true;
+                    self.add_log(format!(
+                        "Delete run '{}'? This cancels it and is PERMANENT. (y/n)",
+                        id
+                    ));
                 }
             }
             KeyCode::Char('c') => {
@@ -498,30 +474,22 @@ impl Dashboard {
             )
         {
             let agent_id = agent.id.clone();
-            if agent.is_run_state {
-                leviath_sys::terminate(agent.pid);
-                kill_write_cancelled(&agent_id);
-                if matches!(agent.status, AgentDisplayStatus::Waiting) {
-                    interaction::clear_interaction(&agent_id);
-                }
-                // See the comment in `handle_kill_from_detail` -- the
-                // index is still valid because nothing since the
-                // `self.selected_agent()` lookup above touches
-                // `display_indices`/`agents`/`selected`.
-                let idx = self
-                    .selected_agent_raw_idx()
-                    .expect("selected_agent() returned Some above");
-                let a = self.agents.get_mut(idx).expect(
-                    "index snapshotted from the still-unchanged display_indices/agents above",
-                );
-                a.status = AgentDisplayStatus::Cancelled;
-                a.waiting_prompt = None;
-                a.pending_request = None;
-            } else {
-                let _ = self.cmd_tx.send(EngineCommand::CancelAgent {
-                    agent_id: agent_id.clone(),
-                });
-            }
+            let _ = self.cmd_tx.send(DaemonCommand::Cancel {
+                run_id: agent_id.clone(),
+            });
+            // See the comment in `handle_kill_from_detail` -- the index is still
+            // valid because the `cmd_tx.send` above does not touch
+            // `display_indices`/`agents`/`selected`.
+            let idx = self
+                .selected_agent_raw_idx()
+                .expect("selected_agent() returned Some above");
+            let a = self
+                .agents
+                .get_mut(idx)
+                .expect("index snapshotted from the still-unchanged display_indices/agents above");
+            a.status = AgentDisplayStatus::Cancelled;
+            a.waiting_prompt = None;
+            a.pending_request = None;
             self.add_log(format!("{}: Cancel requested", agent_id));
         }
     }
@@ -534,20 +502,11 @@ impl Dashboard {
             )
         {
             let agent_id = agent.id.clone();
-            if agent.is_run_state {
-                leviath_sys::terminate(agent.pid);
-                kill_write_cancelled(&agent_id);
-                if matches!(agent.status, AgentDisplayStatus::Waiting) {
-                    interaction::clear_interaction(&agent_id);
-                }
-            } else {
-                let _ = self.cmd_tx.send(EngineCommand::CancelAgent {
-                    agent_id: agent_id.clone(),
-                });
-            }
-            // See the comment in `handle_kill_from_detail` -- the index
-            // is still valid because nothing since the
-            // `self.selected_agent()` lookup above touches
+            let _ = self.cmd_tx.send(DaemonCommand::Cancel {
+                run_id: agent_id.clone(),
+            });
+            // See the comment in `handle_kill_from_detail` -- the index is still
+            // valid because the `cmd_tx.send` above does not touch
             // `display_indices`/`agents`/`selected`.
             let idx = self
                 .selected_agent_raw_idx()
@@ -566,8 +525,8 @@ impl Dashboard {
     pub(super) fn submit_input(&mut self) {
         use interaction::{ApprovalScope, InteractionKind, InteractionResponse};
 
-        let (agent_id, is_run_state, req) = match self.selected_agent() {
-            Some(a) => (a.id.clone(), a.is_run_state, a.pending_request.clone()),
+        let (agent_id, req) = match self.selected_agent() {
+            Some(a) => (a.id.clone(), a.pending_request.clone()),
             None => return,
         };
 
@@ -655,11 +614,10 @@ impl Dashboard {
 
         let answered_id = resp.request_id.clone();
         // The index is still valid because nothing since the
-        // `self.selected_agent()` lookup at the top of this function (which
-        // is where `req`/`agent_id`/`is_run_state` came from) touches
-        // `display_indices`/`agents`/`selected` -- an `if let` guard here
-        // would add an "index went stale" branch that can never actually be
-        // exercised.
+        // `self.selected_agent()` lookup at the top of this function (which is
+        // where `req`/`agent_id` came from) touches
+        // `display_indices`/`agents`/`selected` -- an `if let` guard here would
+        // add an "index went stale" branch that can never actually be exercised.
         let idx = self
             .selected_agent_raw_idx()
             .expect("selected_agent() returned Some above");
@@ -676,99 +634,19 @@ impl Dashboard {
         a.pending_request = None;
         a.status = AgentDisplayStatus::Active;
 
-        if is_run_state {
-            match interaction::write_response(&agent_id, &resp) {
-                Ok(()) => self.add_log(format!("Sent: {}", display)),
-                Err(e) => self.add_log(format!("Failed to send response: {}", e)),
-            }
+        // A pending interaction is answered via the daemon's interaction hub;
+        // free-typed input with no pending request is delivered as a mid-run
+        // message to the agent.
+        if req.is_some() {
+            let _ = self.cmd_tx.send(DaemonCommand::Answer { response: resp });
+            self.add_log(format!("Sent: {}", display));
         } else {
-            let input_text = resp
-                .value
-                .or_else(|| resp.choice_index.map(|i| i.to_string()))
-                .unwrap_or_default();
-            let _ = self.cmd_tx.send(EngineCommand::SendInput {
+            let content = resp.value.clone().unwrap_or_default();
+            let _ = self.cmd_tx.send(DaemonCommand::Message {
                 agent_id: agent_id.clone(),
-                input: input_text,
+                content,
             });
-            if req.is_none() {
-                self.add_log(format!("💬 User: \"{}\"", display));
-            } else {
-                self.add_log(format!("Sent: {}", display));
-            }
-        }
-    }
-
-    pub(super) fn process_events(&mut self) {
-        while let Ok(event) = self.event_rx.try_recv() {
-            match event {
-                AgentEvent::StageChanged { agent_id, stage } => {
-                    if let Some(agent) = self.agents.iter_mut().find(|a| a.id == agent_id) {
-                        agent.stage = stage.clone();
-                    }
-                    self.add_log(format!("{}: Stage -> {}", agent_id, stage));
-                }
-                AgentEvent::StatusChanged { agent_id, status } => {
-                    if let Some(agent) = self.agents.iter_mut().find(|a| a.id == agent_id) {
-                        agent.status = status;
-                    }
-                }
-                AgentEvent::NeedsInput { agent_id, prompt } => {
-                    if let Some(agent) = self.agents.iter_mut().find(|a| a.id == agent_id) {
-                        agent.status = AgentDisplayStatus::Waiting;
-                        agent.waiting_prompt = Some(prompt.clone());
-                    }
-                    self.add_log(format!("{}: Waiting for input", agent_id));
-                }
-                AgentEvent::ToolCalled {
-                    agent_id,
-                    tool,
-                    args,
-                } => {
-                    self.add_log(format!(
-                        "{}: Tool {}({})",
-                        agent_id,
-                        tool,
-                        truncate(&args, 40)
-                    ));
-                }
-                AgentEvent::InferenceComplete {
-                    agent_id,
-                    content,
-                    tokens_used,
-                    tokens_prompt,
-                } => {
-                    if let Some(_agent) = self.agents.iter_mut().find(|a| a.id == agent_id) {
-                        _agent.iteration += 1;
-                    }
-                    self.add_log(format!(
-                        "{}: Inference done ({}tok in, {}tok out) {}",
-                        agent_id,
-                        tokens_prompt,
-                        tokens_used,
-                        truncate(&content, 60)
-                    ));
-                }
-                AgentEvent::Error { agent_id, error } => {
-                    if let Some(agent) = self.agents.iter_mut().find(|a| a.id == agent_id) {
-                        agent.status = AgentDisplayStatus::Error(error.clone());
-                    }
-                    self.add_log(format!("{}: ERROR: {}", agent_id, error));
-                }
-                AgentEvent::Log(msg) => {
-                    self.add_log(msg);
-                }
-                AgentEvent::AgentDone { agent_id } => {
-                    if let Some(agent) = self.agents.iter_mut().find(|a| a.id == agent_id)
-                        && !matches!(
-                            agent.status,
-                            AgentDisplayStatus::Error(_) | AgentDisplayStatus::Cancelled
-                        )
-                    {
-                        agent.status = AgentDisplayStatus::Complete;
-                    }
-                    self.add_log(format!("{}: Done", agent_id));
-                }
-            }
+            self.add_log(format!("💬 User: \"{}\"", display));
         }
     }
 }
@@ -793,16 +671,12 @@ mod tests {
             tokens_in: 0,
             tokens_out: 0,
             cached_tokens: 0,
-            context_tokens: (0, 0),
             iteration: 0,
             waiting_prompt: None,
             pending_request: None,
             last_answered_request_id: None,
             context_snapshot: None,
             stages: vec![],
-            entity: bevy_ecs::prelude::Entity::from_raw(0),
-            is_run_state: true,
-            pid: 0,
             workdir: "/tmp".to_string(),
             task: "test".to_string(),
             title: None,
@@ -1144,12 +1018,14 @@ mod tests {
     fn input_mode_choice_up_down() {
         let mut dash = make_test_dashboard();
         let mut agent = make_test_agent("run-1", AgentDisplayStatus::Waiting);
-        agent.pending_request = Some(crate::interaction::InteractionRequest::multiple_choice(
-            "mc1",
-            "Pick one",
-            vec!["A".into(), "B".into(), "C".into()],
-            "main",
-        ));
+        agent.pending_request = Some(
+            leviath_core::interaction::InteractionRequest::multiple_choice(
+                "mc1",
+                "Pick one",
+                vec!["A".into(), "B".into(), "C".into()],
+                "main",
+            ),
+        );
         agent.waiting_prompt = Some("Pick one".to_string());
         dash.agents.push(agent);
         dash.update_display_indices();
@@ -1180,7 +1056,7 @@ mod tests {
     fn input_mode_esc_exits() {
         let mut dash = make_test_dashboard();
         let mut agent = make_test_agent("run-1", AgentDisplayStatus::Waiting);
-        agent.pending_request = Some(crate::interaction::InteractionRequest::free_text(
+        agent.pending_request = Some(leviath_core::interaction::InteractionRequest::free_text(
             "ft1", "prompt", "main", true,
         ));
         agent.waiting_prompt = Some("prompt".to_string());
@@ -1197,7 +1073,7 @@ mod tests {
     fn input_mode_free_text_typing_appends_to_textarea() {
         let mut dash = make_test_dashboard();
         let mut agent = make_test_agent("run-1", AgentDisplayStatus::Waiting);
-        agent.pending_request = Some(crate::interaction::InteractionRequest::free_text(
+        agent.pending_request = Some(leviath_core::interaction::InteractionRequest::free_text(
             "ft1", "prompt", "main", true,
         ));
         agent.waiting_prompt = Some("prompt".to_string());
@@ -1216,7 +1092,7 @@ mod tests {
         // EditText routes through the text-editing key arm just like FreeText.
         let mut dash = make_test_dashboard();
         let mut agent = make_test_agent("run-1", AgentDisplayStatus::Waiting);
-        agent.pending_request = Some(crate::interaction::InteractionRequest::edit_text(
+        agent.pending_request = Some(leviath_core::interaction::InteractionRequest::edit_text(
             "et1", "Edit", "main", "seed",
         ));
         dash.agents.push(agent);
@@ -1232,7 +1108,7 @@ mod tests {
     fn seed_input_textarea_prefills_edit_text_body() {
         let mut dash = make_test_dashboard();
         let mut agent = make_test_agent("run-1", AgentDisplayStatus::Waiting);
-        agent.pending_request = Some(crate::interaction::InteractionRequest::edit_text(
+        agent.pending_request = Some(leviath_core::interaction::InteractionRequest::edit_text(
             "et1",
             "Edit",
             "main",
@@ -1252,7 +1128,7 @@ mod tests {
     fn seed_input_textarea_empty_for_free_text() {
         let mut dash = make_test_dashboard();
         let mut agent = make_test_agent("run-1", AgentDisplayStatus::Waiting);
-        agent.pending_request = Some(crate::interaction::InteractionRequest::free_text(
+        agent.pending_request = Some(leviath_core::interaction::InteractionRequest::free_text(
             "ft1", "Q?", "main", true,
         ));
         dash.agents.push(agent);
@@ -1269,8 +1145,7 @@ mod tests {
         let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
         let mut dash = Dashboard::new(cmd_tx);
         let mut agent = make_test_agent("run-1", AgentDisplayStatus::Waiting);
-        agent.is_run_state = false; // cmd_tx path — capture the SendInput value
-        agent.pending_request = Some(crate::interaction::InteractionRequest::edit_text(
+        agent.pending_request = Some(interaction::InteractionRequest::edit_text(
             "et1", "Edit", "main", "old",
         ));
         dash.agents.push(agent);
@@ -1284,14 +1159,12 @@ mod tests {
 
         assert!(!dash.input_mode);
         assert!(dash.agents[0].pending_request.is_none());
-        // The edited text reached the engine with indentation + newline intact.
-        let cmd = cmd_rx.try_recv().expect("a SendInput command was queued");
-        // The edited text reached the engine with indentation + newline intact.
+        // The edited text is answered to the daemon with indentation + newline intact.
+        let cmd = cmd_rx.try_recv().expect("an Answer command was queued");
         assert_eq!(
             cmd,
-            EngineCommand::SendInput {
-                agent_id: "run-1".to_string(),
-                input: "  indented\nsecond line".to_string(),
+            DaemonCommand::Answer {
+                response: interaction::InteractionResponse::text("et1", "  indented\nsecond line"),
             }
         );
     }
@@ -1302,8 +1175,7 @@ mod tests {
         let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
         let mut dash = Dashboard::new(cmd_tx);
         let mut agent = make_test_agent("run-1", AgentDisplayStatus::Waiting);
-        agent.is_run_state = false;
-        agent.pending_request = Some(crate::interaction::InteractionRequest::edit_text(
+        agent.pending_request = Some(interaction::InteractionRequest::edit_text(
             "et1", "Edit", "main", "old",
         ));
         dash.agents.push(agent);
@@ -1316,12 +1188,11 @@ mod tests {
         dash.submit_input();
 
         assert!(!dash.input_mode);
-        let cmd = cmd_rx.try_recv().expect("a SendInput command was queued");
+        let cmd = cmd_rx.try_recv().expect("an Answer command was queued");
         assert_eq!(
             cmd,
-            EngineCommand::SendInput {
-                agent_id: "run-1".to_string(),
-                input: "   ".to_string(),
+            DaemonCommand::Answer {
+                response: interaction::InteractionResponse::text("et1", "   "),
             }
         );
     }
@@ -1345,12 +1216,14 @@ mod tests {
     fn input_mode_esc_on_choice_resets() {
         let mut dash = make_test_dashboard();
         let mut agent = make_test_agent("run-1", AgentDisplayStatus::Waiting);
-        agent.pending_request = Some(crate::interaction::InteractionRequest::multiple_choice(
-            "mc1",
-            "Pick",
-            vec!["A".into(), "B".into()],
-            "main",
-        ));
+        agent.pending_request = Some(
+            leviath_core::interaction::InteractionRequest::multiple_choice(
+                "mc1",
+                "Pick",
+                vec!["A".into(), "B".into()],
+                "main",
+            ),
+        );
         agent.waiting_prompt = Some("Pick".to_string());
         dash.agents.push(agent);
         dash.update_display_indices();
@@ -1388,28 +1261,25 @@ mod tests {
     }
 
     #[test]
-    fn cancel_from_list_waiting_agent_clears_interaction() {
-        crate::runstate::with_isolated_runs_dir(
-            "cancel_from_list_waiting_agent_clears_interaction",
-            |_d| {
-                let run_id = "test-cancel-list-waiting-clears";
-                std::fs::create_dir_all(crate::runstate::run_dir(run_id)).unwrap();
-                let req =
-                    crate::interaction::InteractionRequest::free_text("q1", "?", "main", true);
-                let _ = crate::interaction::write_request(run_id, &req);
+    fn cancel_from_list_waiting_agent_clears_local_state_and_cancels() {
+        let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
+        let mut dash = Dashboard::new(cmd_tx);
+        let mut agent = make_test_agent("run-1", AgentDisplayStatus::Waiting);
+        agent.waiting_prompt = Some("?".to_string());
+        agent.pending_request = Some(interaction::InteractionRequest::free_text(
+            "q1", "?", "main", true,
+        ));
+        dash.agents.push(agent);
+        dash.update_display_indices();
+        dash.handle_key(key(KeyCode::Char('c')));
 
-                let mut dash = make_test_dashboard();
-                let mut agent = make_test_agent(run_id, AgentDisplayStatus::Waiting);
-                agent.waiting_prompt = Some("?".to_string());
-                dash.agents.push(agent);
-                dash.update_display_indices();
-                dash.handle_key(key(KeyCode::Char('c')));
-
-                assert_cancelled(&dash.agents[0].status);
-                assert!(crate::interaction::read_request(run_id).is_none());
-
-                let _ = std::fs::remove_dir_all(crate::runstate::run_dir(run_id));
-            },
+        assert_cancelled(&dash.agents[0].status);
+        assert!(dash.agents[0].pending_request.is_none());
+        assert_eq!(
+            cmd_rx.try_recv().unwrap(),
+            DaemonCommand::Cancel {
+                run_id: "run-1".to_string()
+            }
         );
     }
 
@@ -1418,8 +1288,7 @@ mod tests {
         // See kill_from_detail_with_pid_sends_signal for why this PID value
         // is safe: implausibly large, guaranteed ESRCH no-op.
         let mut dash = make_test_dashboard();
-        let mut agent = make_test_agent("run-1", AgentDisplayStatus::Active);
-        agent.pid = 2_000_000_000;
+        let agent = make_test_agent("run-1", AgentDisplayStatus::Active);
         dash.agents.push(agent);
         dash.update_display_indices();
         dash.handle_key(key(KeyCode::Char('c')));
@@ -1465,8 +1334,7 @@ mod tests {
         // See kill_from_detail_with_pid_sends_signal for why this PID value
         // is safe: implausibly large, guaranteed ESRCH no-op.
         let mut dash = make_test_dashboard();
-        let mut agent = make_test_agent("run-1", AgentDisplayStatus::Active);
-        agent.pid = 2_000_000_000;
+        let agent = make_test_agent("run-1", AgentDisplayStatus::Active);
         dash.agents.push(agent);
         dash.update_display_indices();
         dash.handle_key(key(KeyCode::Char('k')));
@@ -1556,8 +1424,7 @@ mod tests {
         // is guaranteed to be a harmless no-op (ESRCH) rather than risking
         // sending SIGTERM to a real, unrelated process.
         let mut dash = make_test_dashboard();
-        let mut agent = make_test_agent("run-1", AgentDisplayStatus::Active);
-        agent.pid = 2_000_000_000;
+        let agent = make_test_agent("run-1", AgentDisplayStatus::Active);
         dash.agents.push(agent);
         dash.update_display_indices();
         dash.detail_view = true;
@@ -1566,30 +1433,26 @@ mod tests {
     }
 
     #[test]
-    fn kill_from_detail_waiting_agent_clears_interaction() {
-        crate::runstate::with_isolated_runs_dir(
-            "kill_from_detail_waiting_agent_clears_interaction",
-            |_d| {
-                let run_id = "test-kill-waiting-clears";
-                std::fs::create_dir_all(crate::runstate::run_dir(run_id)).unwrap();
-                let req =
-                    crate::interaction::InteractionRequest::free_text("q1", "?", "main", true);
-                let _ = crate::interaction::write_request(run_id, &req);
-                assert!(crate::interaction::read_request(run_id).is_some());
+    fn kill_from_detail_waiting_agent_clears_local_state_and_cancels() {
+        let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
+        let mut dash = Dashboard::new(cmd_tx);
+        let mut agent = make_test_agent("run-1", AgentDisplayStatus::Waiting);
+        agent.waiting_prompt = Some("?".to_string());
+        agent.pending_request = Some(interaction::InteractionRequest::free_text(
+            "q1", "?", "main", true,
+        ));
+        dash.agents.push(agent);
+        dash.update_display_indices();
+        dash.detail_view = true;
+        dash.handle_key(key(KeyCode::Char('k')));
 
-                let mut dash = make_test_dashboard();
-                let mut agent = make_test_agent(run_id, AgentDisplayStatus::Waiting);
-                agent.waiting_prompt = Some("?".to_string());
-                dash.agents.push(agent);
-                dash.update_display_indices();
-                dash.detail_view = true;
-                dash.handle_key(key(KeyCode::Char('k')));
-
-                assert_cancelled(&dash.agents[0].status);
-                assert!(crate::interaction::read_request(run_id).is_none());
-
-                let _ = std::fs::remove_dir_all(crate::runstate::run_dir(run_id));
-            },
+        assert_cancelled(&dash.agents[0].status);
+        assert!(dash.agents[0].pending_request.is_none());
+        assert_eq!(
+            cmd_rx.try_recv().unwrap(),
+            DaemonCommand::Cancel {
+                run_id: "run-1".to_string()
+            }
         );
     }
 
@@ -1643,7 +1506,7 @@ mod tests {
         let mut dash = make_test_dashboard();
         let mut agent = make_test_agent("run-1", AgentDisplayStatus::Waiting);
         agent.waiting_prompt = Some("prompt".to_string());
-        agent.pending_request = Some(crate::interaction::InteractionRequest::free_text(
+        agent.pending_request = Some(leviath_core::interaction::InteractionRequest::free_text(
             "ft1", "prompt", "main", true,
         ));
         agent.stage_index = 0;
@@ -1710,24 +1573,13 @@ mod tests {
         assert!(dash.confirm_delete);
     }
 
-    #[test]
-    fn main_list_d_non_run_state_agent_no_confirm() {
-        let mut dash = make_test_dashboard();
-        let mut agent = make_test_agent("run-1", AgentDisplayStatus::Active);
-        agent.is_run_state = false;
-        dash.agents.push(agent);
-        dash.update_display_indices();
-        dash.handle_key(key(KeyCode::Char('d')));
-        assert!(!dash.confirm_delete);
-    }
-
     // ─── detail view: review scroll ───────────────────────────────────────
 
     #[test]
     fn detail_view_scroll_with_review_body() {
         let mut dash = make_test_dashboard();
         let mut agent = make_test_agent("run-1", AgentDisplayStatus::Waiting);
-        agent.pending_request = Some(crate::interaction::InteractionRequest::review(
+        agent.pending_request = Some(leviath_core::interaction::InteractionRequest::review(
             "rev1",
             "Review",
             "# Long markdown body\n\nSome content here.",
@@ -1759,12 +1611,14 @@ mod tests {
     fn input_mode_tool_approval_up_down() {
         let mut dash = make_test_dashboard();
         let mut agent = make_test_agent("run-1", AgentDisplayStatus::Waiting);
-        agent.pending_request = Some(crate::interaction::InteractionRequest::tool_approval(
-            "ta1",
-            "bash",
-            serde_json::json!({"cmd": "ls"}),
-            "main",
-        ));
+        agent.pending_request = Some(
+            leviath_core::interaction::InteractionRequest::tool_approval(
+                "ta1",
+                "bash",
+                serde_json::json!({"cmd": "ls"}),
+                "main",
+            ),
+        );
         agent.waiting_prompt = Some("Allow tool?".to_string());
         dash.agents.push(agent);
         dash.update_display_indices();
@@ -1790,12 +1644,14 @@ mod tests {
     fn input_mode_tool_approval_esc_resets() {
         let mut dash = make_test_dashboard();
         let mut agent = make_test_agent("run-1", AgentDisplayStatus::Waiting);
-        agent.pending_request = Some(crate::interaction::InteractionRequest::tool_approval(
-            "ta1",
-            "bash",
-            serde_json::json!({"cmd": "ls"}),
-            "main",
-        ));
+        agent.pending_request = Some(
+            leviath_core::interaction::InteractionRequest::tool_approval(
+                "ta1",
+                "bash",
+                serde_json::json!({"cmd": "ls"}),
+                "main",
+            ),
+        );
         agent.waiting_prompt = Some("Allow tool?".to_string());
         dash.agents.push(agent);
         dash.update_display_indices();
@@ -1815,8 +1671,7 @@ mod tests {
         let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
         let mut dash = Dashboard::new(cmd_tx);
         let mut agent = make_test_agent("run-1", AgentDisplayStatus::Waiting);
-        agent.is_run_state = false;
-        agent.pending_request = Some(crate::interaction::InteractionRequest::free_text(
+        agent.pending_request = Some(leviath_core::interaction::InteractionRequest::free_text(
             "ft1", "What?", "main", true,
         ));
         agent.waiting_prompt = Some("What?".to_string());
@@ -1843,8 +1698,7 @@ mod tests {
         let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
         let mut dash = Dashboard::new(cmd_tx);
         let mut agent = make_test_agent("run-1", AgentDisplayStatus::Waiting);
-        agent.is_run_state = false; // use cmd_tx path to avoid disk I/O
-        agent.pending_request = Some(crate::interaction::InteractionRequest::free_text(
+        agent.pending_request = Some(leviath_core::interaction::InteractionRequest::free_text(
             "ft1", "What?", "main", true,
         ));
         agent.waiting_prompt = Some("What?".to_string());
@@ -1869,13 +1723,14 @@ mod tests {
         let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
         let mut dash = Dashboard::new(cmd_tx);
         let mut agent = make_test_agent("run-1", AgentDisplayStatus::Waiting);
-        agent.is_run_state = false;
-        agent.pending_request = Some(crate::interaction::InteractionRequest::multiple_choice(
-            "mc1",
-            "Pick",
-            vec!["A".into(), "B".into(), "C".into()],
-            "main",
-        ));
+        agent.pending_request = Some(
+            leviath_core::interaction::InteractionRequest::multiple_choice(
+                "mc1",
+                "Pick",
+                vec!["A".into(), "B".into(), "C".into()],
+                "main",
+            ),
+        );
         agent.waiting_prompt = Some("Pick".to_string());
         dash.agents.push(agent);
         dash.update_display_indices();
@@ -1897,13 +1752,14 @@ mod tests {
         let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
         let mut dash = Dashboard::new(cmd_tx);
         let mut agent = make_test_agent("run-1", AgentDisplayStatus::Waiting);
-        agent.is_run_state = false;
-        agent.pending_request = Some(crate::interaction::InteractionRequest::tool_approval(
-            "ta1",
-            "bash",
-            serde_json::json!({"cmd": "ls"}),
-            "main",
-        ));
+        agent.pending_request = Some(
+            leviath_core::interaction::InteractionRequest::tool_approval(
+                "ta1",
+                "bash",
+                serde_json::json!({"cmd": "ls"}),
+                "main",
+            ),
+        );
         agent.waiting_prompt = Some("Allow tool?".to_string());
         dash.agents.push(agent);
         dash.update_display_indices();
@@ -1921,13 +1777,14 @@ mod tests {
         let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
         let mut dash = Dashboard::new(cmd_tx);
         let mut agent = make_test_agent("run-1", AgentDisplayStatus::Waiting);
-        agent.is_run_state = false;
-        agent.pending_request = Some(crate::interaction::InteractionRequest::tool_approval(
-            "ta1",
-            "bash",
-            serde_json::json!({"cmd": "ls"}),
-            "main",
-        ));
+        agent.pending_request = Some(
+            leviath_core::interaction::InteractionRequest::tool_approval(
+                "ta1",
+                "bash",
+                serde_json::json!({"cmd": "ls"}),
+                "main",
+            ),
+        );
         agent.waiting_prompt = Some("Allow tool?".to_string());
         dash.agents.push(agent);
         dash.update_display_indices();
@@ -1945,13 +1802,14 @@ mod tests {
         let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
         let mut dash = Dashboard::new(cmd_tx);
         let mut agent = make_test_agent("run-1", AgentDisplayStatus::Waiting);
-        agent.is_run_state = false;
-        agent.pending_request = Some(crate::interaction::InteractionRequest::tool_approval(
-            "ta1",
-            "bash",
-            serde_json::json!({"cmd": "ls"}),
-            "main",
-        ));
+        agent.pending_request = Some(
+            leviath_core::interaction::InteractionRequest::tool_approval(
+                "ta1",
+                "bash",
+                serde_json::json!({"cmd": "ls"}),
+                "main",
+            ),
+        );
         agent.waiting_prompt = Some("Allow tool?".to_string());
         dash.agents.push(agent);
         dash.update_display_indices();
@@ -1971,8 +1829,7 @@ mod tests {
         let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
         let mut dash = Dashboard::new(cmd_tx);
         let mut agent = make_test_agent("run-1", AgentDisplayStatus::Waiting);
-        agent.is_run_state = false;
-        agent.pending_request = Some(crate::interaction::InteractionRequest::confirm(
+        agent.pending_request = Some(leviath_core::interaction::InteractionRequest::confirm(
             "c1", "Proceed?", "main",
         ));
         agent.waiting_prompt = Some("Proceed?".to_string());
@@ -1992,8 +1849,7 @@ mod tests {
         let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
         let mut dash = Dashboard::new(cmd_tx);
         let mut agent = make_test_agent("run-1", AgentDisplayStatus::Waiting);
-        agent.is_run_state = false;
-        agent.pending_request = Some(crate::interaction::InteractionRequest::confirm(
+        agent.pending_request = Some(leviath_core::interaction::InteractionRequest::confirm(
             "c1", "Proceed?", "main",
         ));
         agent.waiting_prompt = Some("Proceed?".to_string());
@@ -2015,8 +1871,7 @@ mod tests {
         let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
         let mut dash = Dashboard::new(cmd_tx);
         let mut agent = make_test_agent("run-1", AgentDisplayStatus::Waiting);
-        agent.is_run_state = false; // in-process
-        agent.pending_request = Some(crate::interaction::InteractionRequest::free_text(
+        agent.pending_request = Some(leviath_core::interaction::InteractionRequest::free_text(
             "ft1", "What?", "main", true,
         ));
         agent.waiting_prompt = Some("What?".to_string());
@@ -2042,7 +1897,6 @@ mod tests {
         let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
         let mut dash = Dashboard::new(cmd_tx);
         let mut agent = make_test_agent("run-1", AgentDisplayStatus::Active);
-        agent.is_run_state = false;
         agent.pending_request = None;
         agent.waiting_prompt = None;
         dash.agents.push(agent);
@@ -2064,7 +1918,6 @@ mod tests {
         let (cmd_tx, _cmd_rx) = mpsc::unbounded_channel();
         let mut dash = Dashboard::new(cmd_tx);
         let mut agent = make_test_agent("run-1", AgentDisplayStatus::Active);
-        agent.is_run_state = false;
         agent.pending_request = None;
         dash.agents.push(agent);
         dash.update_display_indices();
@@ -2077,111 +1930,13 @@ mod tests {
         assert!(!dash.input_mode);
     }
 
-    // ─── process_events for InferenceComplete ─────────────────────────────
-
-    #[test]
-    fn process_events_inference_complete_increments_iteration() {
-        let mut dash = make_test_dashboard();
-        dash.agents
-            .push(make_test_agent("run-1", AgentDisplayStatus::Active));
-        dash.update_display_indices();
-        let tx = dash.event_tx.clone();
-        tx.send(AgentEvent::InferenceComplete {
-            agent_id: "run-1".to_string(),
-            content: "analysis complete".to_string(),
-            tokens_used: 200,
-            tokens_prompt: 100,
-        })
-        .unwrap();
-        dash.process_events();
-        assert_eq!(dash.agents[0].iteration, 1);
-    }
-
-    // ─── process_events for NeedsInput ────────────────────────────────────
-
-    #[test]
-    fn process_events_needs_input_sets_waiting() {
-        let mut dash = make_test_dashboard();
-        dash.agents
-            .push(make_test_agent("run-1", AgentDisplayStatus::Active));
-        dash.update_display_indices();
-        let tx = dash.event_tx.clone();
-        tx.send(AgentEvent::NeedsInput {
-            agent_id: "run-1".to_string(),
-            prompt: "Please provide input".to_string(),
-        })
-        .unwrap();
-        dash.process_events();
-        assert_eq!(dash.agents[0].status, AgentDisplayStatus::Waiting);
-        assert_eq!(
-            dash.agents[0].waiting_prompt.as_deref(),
-            Some("Please provide input")
-        );
-    }
-
-    // ─── process_events AgentDone doesn't override Error/Cancelled ────────
-
-    #[test]
-    fn process_events_agent_done_for_unknown_agent_is_noop() {
-        let mut dash = make_test_dashboard();
-        dash.agents
-            .push(make_test_agent("run-1", AgentDisplayStatus::Active));
-        dash.update_display_indices();
-        let tx = dash.event_tx.clone();
-        // Event for an agent_id that isn't in dash.agents at all.
-        tx.send(AgentEvent::AgentDone {
-            agent_id: "nonexistent-run".to_string(),
-        })
-        .unwrap();
-        dash.process_events();
-        // The unrelated existing agent must be untouched.
-        assert_eq!(dash.agents[0].status, AgentDisplayStatus::Active);
-    }
-
-    #[test]
-    fn process_events_agent_done_does_not_override_error() {
-        let mut dash = make_test_dashboard();
-        dash.agents.push(make_test_agent(
-            "run-1",
-            AgentDisplayStatus::Error("failed".to_string()),
-        ));
-        dash.update_display_indices();
-        let tx = dash.event_tx.clone();
-        tx.send(AgentEvent::AgentDone {
-            agent_id: "run-1".to_string(),
-        })
-        .unwrap();
-        dash.process_events();
-        // Should still be Error("failed"), not Complete.
-        assert_eq!(
-            dash.agents[0].status,
-            AgentDisplayStatus::Error("failed".to_string())
-        );
-    }
-
-    #[test]
-    fn process_events_agent_done_does_not_override_cancelled() {
-        let mut dash = make_test_dashboard();
-        dash.agents
-            .push(make_test_agent("run-1", AgentDisplayStatus::Cancelled));
-        dash.update_display_indices();
-        let tx = dash.event_tx.clone();
-        tx.send(AgentEvent::AgentDone {
-            agent_id: "run-1".to_string(),
-        })
-        .unwrap();
-        dash.process_events();
-        assert_eq!(dash.agents[0].status, AgentDisplayStatus::Cancelled);
-    }
-
     // ─── handle_kill_from_detail for in-process agent ─────────────────────
 
     #[test]
     fn kill_from_detail_in_process_agent_sends_command() {
         let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
         let mut dash = Dashboard::new(cmd_tx);
-        let mut agent = make_test_agent("run-1", AgentDisplayStatus::Active);
-        agent.is_run_state = false;
+        let agent = make_test_agent("run-1", AgentDisplayStatus::Active);
         dash.agents.push(agent);
         dash.update_display_indices();
         dash.detail_view = true;
@@ -2201,8 +1956,7 @@ mod tests {
     fn cancel_from_list_in_process_agent_sends_command() {
         let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
         let mut dash = Dashboard::new(cmd_tx);
-        let mut agent = make_test_agent("run-1", AgentDisplayStatus::Active);
-        agent.is_run_state = false;
+        let agent = make_test_agent("run-1", AgentDisplayStatus::Active);
         dash.agents.push(agent);
         dash.update_display_indices();
 
@@ -2219,8 +1973,7 @@ mod tests {
     fn kill_from_list_in_process_agent_sends_command() {
         let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
         let mut dash = Dashboard::new(cmd_tx);
-        let mut agent = make_test_agent("run-1", AgentDisplayStatus::Active);
-        agent.is_run_state = false;
+        let agent = make_test_agent("run-1", AgentDisplayStatus::Active);
         dash.agents.push(agent);
         dash.update_display_indices();
 
@@ -2321,32 +2074,13 @@ mod tests {
 
     // ─── d key from main list for non-run-state agent ─────────────────────
 
-    #[test]
-    fn main_list_d_for_non_run_state_logs_message() {
-        let mut dash = make_test_dashboard();
-        dash.log.clear();
-        let mut agent = make_test_agent("run-1", AgentDisplayStatus::Active);
-        agent.is_run_state = false;
-        dash.agents.push(agent);
-        dash.update_display_indices();
-
-        dash.handle_key(key(KeyCode::Char('d')));
-
-        assert!(!dash.confirm_delete);
-        assert!(
-            dash.log
-                .iter()
-                .any(|e| e.message.contains("Only background runs"))
-        );
-    }
-
     // ─── input_mode_key: FreeText Enter submits ───────────────────────────
 
     #[test]
     fn input_mode_free_text_enter_submits() {
         let mut dash = make_test_dashboard();
         let mut agent = make_test_agent("run-1", AgentDisplayStatus::Waiting);
-        agent.pending_request = Some(crate::interaction::InteractionRequest::free_text(
+        agent.pending_request = Some(leviath_core::interaction::InteractionRequest::free_text(
             "ft1", "prompt", "main", true,
         ));
         agent.waiting_prompt = Some("prompt".to_string());
@@ -2370,12 +2104,14 @@ mod tests {
             let run_id = format!("test-mc-enter-{}", std::process::id());
             let mut dash = make_test_dashboard();
             let mut agent = make_test_agent(&run_id, AgentDisplayStatus::Waiting);
-            agent.pending_request = Some(crate::interaction::InteractionRequest::multiple_choice(
-                "mc1",
-                "Pick",
-                vec!["A".into(), "B".into()],
-                "main",
-            ));
+            agent.pending_request = Some(
+                leviath_core::interaction::InteractionRequest::multiple_choice(
+                    "mc1",
+                    "Pick",
+                    vec!["A".into(), "B".into()],
+                    "main",
+                ),
+            );
             agent.waiting_prompt = Some("Pick".to_string());
             dash.agents.push(agent);
             dash.update_display_indices();
@@ -2396,47 +2132,13 @@ mod tests {
 
     // ─── Multiple events processed in sequence ────────────────────────────
 
-    #[test]
-    fn process_multiple_events_in_sequence() {
-        let mut dash = make_test_dashboard();
-        dash.log.clear();
-        dash.agents
-            .push(make_test_agent("run-1", AgentDisplayStatus::Active));
-        dash.agents
-            .push(make_test_agent("run-2", AgentDisplayStatus::Active));
-        dash.update_display_indices();
-        let tx = dash.event_tx.clone();
-        tx.send(AgentEvent::StageChanged {
-            agent_id: "run-1".to_string(),
-            stage: "code".to_string(),
-        })
-        .unwrap();
-        tx.send(AgentEvent::InferenceComplete {
-            agent_id: "run-2".to_string(),
-            content: "done".to_string(),
-            tokens_used: 50,
-            tokens_prompt: 25,
-        })
-        .unwrap();
-        tx.send(AgentEvent::AgentDone {
-            agent_id: "run-1".to_string(),
-        })
-        .unwrap();
-
-        dash.process_events();
-
-        assert_eq!(dash.agents[0].stage, "code");
-        assert_eq!(dash.agents[0].status, AgentDisplayStatus::Complete);
-        assert_eq!(dash.agents[1].iteration, 1);
-    }
-
     // ─── submit_input last_answered_request_id tracking ───────────────────
 
     #[test]
     fn submit_input_tracks_last_answered_request_id() {
         let mut dash = make_test_dashboard();
         let mut agent = make_test_agent("run-1", AgentDisplayStatus::Waiting);
-        agent.pending_request = Some(crate::interaction::InteractionRequest::free_text(
+        agent.pending_request = Some(leviath_core::interaction::InteractionRequest::free_text(
             "req-42", "What?", "main", true,
         ));
         agent.waiting_prompt = Some("What?".to_string());
@@ -2622,121 +2324,6 @@ mod tests {
         assert!(dash.toasts.is_empty());
     }
 
-    #[test]
-    fn yank_non_run_state_agent_is_noop() {
-        // Exercises the `else` branch of `if agent.is_run_state` (line 358)
-        // in handle_yank: non-run-state agents skip yank entirely.
-        let mut dash = make_test_dashboard();
-        let mut agent = make_test_agent("run-1", AgentDisplayStatus::Active);
-        agent.is_run_state = false;
-        dash.agents.push(agent);
-        dash.update_display_indices();
-        dash.detail_view = true;
-
-        dash.handle_key(key(KeyCode::Char('y')));
-
-        // No toast generated — yank does nothing for non-run-state agents.
-        assert!(dash.toasts.is_empty());
-    }
-
-    // ─── process_events: agent not found for various event types ──────────
-
-    #[test]
-    fn process_events_stage_changed_unknown_agent_logs_but_no_update() {
-        // Exercises the `else` path of `if let Some(agent) = ... .find(...)` (line 656)
-        // in StageChanged: logs the message but no agent is updated.
-        let mut dash = make_test_dashboard();
-        dash.agents
-            .push(make_test_agent("run-1", AgentDisplayStatus::Active));
-        dash.update_display_indices();
-        let tx = dash.event_tx.clone();
-        tx.send(AgentEvent::StageChanged {
-            agent_id: "nonexistent".to_string(),
-            stage: "code".to_string(),
-        })
-        .unwrap();
-        dash.process_events();
-        // Existing agent is untouched
-        assert_eq!(dash.agents[0].stage, "main");
-    }
-
-    #[test]
-    fn process_events_status_changed_unknown_agent_no_update() {
-        // Exercises the `else` path of `if let Some(agent) = ... .find(...)` (line 662)
-        // in StatusChanged: event for unknown agent id is silently ignored.
-        let mut dash = make_test_dashboard();
-        dash.agents
-            .push(make_test_agent("run-1", AgentDisplayStatus::Active));
-        dash.update_display_indices();
-        let tx = dash.event_tx.clone();
-        tx.send(AgentEvent::StatusChanged {
-            agent_id: "nonexistent".to_string(),
-            status: AgentDisplayStatus::Complete,
-        })
-        .unwrap();
-        dash.process_events();
-        // Existing agent remains Active
-        assert_eq!(dash.agents[0].status, AgentDisplayStatus::Active);
-    }
-
-    #[test]
-    fn process_events_needs_input_unknown_agent_logs_but_no_update() {
-        // Exercises the `else` path of `if let Some(agent) = ... .find(...)` (line 668)
-        // in NeedsInput: logs the message but the unknown agent is not updated.
-        let mut dash = make_test_dashboard();
-        dash.agents
-            .push(make_test_agent("run-1", AgentDisplayStatus::Active));
-        dash.update_display_indices();
-        let tx = dash.event_tx.clone();
-        tx.send(AgentEvent::NeedsInput {
-            agent_id: "nonexistent".to_string(),
-            prompt: "?".to_string(),
-        })
-        .unwrap();
-        dash.process_events();
-        // Existing agent still Active, no waiting_prompt set
-        assert_eq!(dash.agents[0].status, AgentDisplayStatus::Active);
-        assert!(dash.agents[0].waiting_prompt.is_none());
-    }
-
-    #[test]
-    fn process_events_inference_complete_unknown_agent_logs_but_no_update() {
-        // Exercises the `else` path of `if let Some(_agent) = ... .find(...)` (line 691)
-        // in InferenceComplete: iteration is NOT incremented for unknown agents.
-        let mut dash = make_test_dashboard();
-        dash.agents
-            .push(make_test_agent("run-1", AgentDisplayStatus::Active));
-        dash.update_display_indices();
-        let tx = dash.event_tx.clone();
-        tx.send(AgentEvent::InferenceComplete {
-            agent_id: "nonexistent".to_string(),
-            content: "done".to_string(),
-            tokens_used: 10,
-            tokens_prompt: 5,
-        })
-        .unwrap();
-        dash.process_events();
-        assert_eq!(dash.agents[0].iteration, 0);
-    }
-
-    #[test]
-    fn process_events_error_unknown_agent_logs_but_no_update() {
-        // Exercises the `else` path of `if let Some(agent) = ... .find(...)` (line 703)
-        // in Error: the existing agent's status is unaffected.
-        let mut dash = make_test_dashboard();
-        dash.agents
-            .push(make_test_agent("run-1", AgentDisplayStatus::Active));
-        dash.update_display_indices();
-        let tx = dash.event_tx.clone();
-        tx.send(AgentEvent::Error {
-            agent_id: "nonexistent".to_string(),
-            error: "boom".to_string(),
-        })
-        .unwrap();
-        dash.process_events();
-        assert_eq!(dash.agents[0].status, AgentDisplayStatus::Active);
-    }
-
     // ─── main list: Down key — three agents to confirm can-move path ──────
 
     #[test]
@@ -2771,8 +2358,7 @@ mod tests {
         // Exercises line 493: `a.pending_request = None;` in handle_cancel_from_list.
         let mut dash = make_test_dashboard();
         let mut agent = make_test_agent("run-1", AgentDisplayStatus::Active);
-        agent.is_run_state = true;
-        agent.pending_request = Some(crate::interaction::InteractionRequest::free_text(
+        agent.pending_request = Some(leviath_core::interaction::InteractionRequest::free_text(
             "r1", "?", "main", true,
         ));
         dash.agents.push(agent);
@@ -2791,8 +2377,7 @@ mod tests {
         // Exercises line 531: `a.pending_request = None;` in handle_kill_from_list.
         let mut dash = make_test_dashboard();
         let mut agent = make_test_agent("run-1", AgentDisplayStatus::Active);
-        agent.is_run_state = true;
-        agent.pending_request = Some(crate::interaction::InteractionRequest::free_text(
+        agent.pending_request = Some(leviath_core::interaction::InteractionRequest::free_text(
             "r1", "?", "main", true,
         ));
         dash.agents.push(agent);
@@ -2811,8 +2396,7 @@ mod tests {
         // Exercises line 392: `a.pending_request = None;` in handle_kill_from_detail.
         let mut dash = make_test_dashboard();
         let mut agent = make_test_agent("run-1", AgentDisplayStatus::Active);
-        agent.is_run_state = true;
-        agent.pending_request = Some(crate::interaction::InteractionRequest::free_text(
+        agent.pending_request = Some(leviath_core::interaction::InteractionRequest::free_text(
             "r1", "?", "main", true,
         ));
         dash.agents.push(agent);

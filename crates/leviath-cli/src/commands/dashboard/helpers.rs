@@ -1,7 +1,5 @@
 //! Pure utility functions used across the dashboard.
 
-use crate::runstate;
-
 /// Format a Unix timestamp as a relative time string ("just now", "2m ago", "1h ago").
 pub(super) fn relative_time(ts: i64) -> String {
     if ts == 0 {
@@ -31,16 +29,6 @@ pub(super) fn relative_time(ts: i64) -> String {
     } else {
         let d = secs / 86400;
         format!("{}d ago", d)
-    }
-}
-
-/// After SIGTERMing a background worker, immediately write Cancelled to meta.json
-/// so the next sync tick doesn't revert the status.
-pub(super) fn kill_write_cancelled(run_id: &str) {
-    if let Ok(mut meta) = runstate::read_meta(run_id) {
-        meta.status = runstate::RunStatus::Cancelled;
-        meta.touch();
-        let _ = runstate::write_meta(&meta);
     }
 }
 
@@ -549,42 +537,6 @@ mod tests {
         });
         // The native tool "ran" but failed, so control reached the fallback.
         assert!(result);
-    }
-
-    // ─── kill_write_cancelled ───────────────────────────────────────────────
-
-    #[test]
-    fn test_kill_write_cancelled_updates_existing_meta() {
-        crate::runstate::with_isolated_runs_dir(
-            "test_kill_write_cancelled_updates_existing_meta",
-            |_d| {
-                let run_id = "test-kill-write-cancelled";
-                let meta = runstate::RunMeta::new(
-                    run_id.to_string(),
-                    "agent".to_string(),
-                    "/tmp/agent.toml".to_string(),
-                    "task".to_string(),
-                    None,
-                    "/tmp".to_string(),
-                    1,
-                );
-                runstate::create_run(&meta).unwrap();
-
-                kill_write_cancelled(run_id);
-
-                let after = runstate::read_meta(run_id).unwrap();
-                assert_eq!(after.status, runstate::RunStatus::Cancelled);
-
-                let _ = std::fs::remove_dir_all(runstate::run_dir(run_id));
-            },
-        );
-    }
-
-    #[test]
-    fn test_kill_write_cancelled_missing_run_is_noop() {
-        // No meta.json exists for this run_id — read_meta fails, the `if let
-        // Ok` guard should just skip without panicking.
-        kill_write_cancelled("test-kill-write-cancelled-nonexistent");
     }
 
     // ─── yank_to_clipboard ──────────────────────────────────────────────────
