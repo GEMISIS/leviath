@@ -65,10 +65,15 @@ impl RiskyExecutors for RealExecutors {
     }
 
     async fn ps(&self, _args: commands::ps::PsArgs) -> anyhow::Result<()> {
-        let socket = leviath_cli::daemon::setup::control_socket_path().ok_or_else(|| {
-            anyhow::anyhow!("cannot resolve a home directory for the control socket")
-        })?;
-        commands::ps::send_list(&leviath_runtime::control_socket::ControlClient::new(socket)).await
+        commands::ps::send_list(&control_client()?).await
+    }
+
+    async fn msg(&self, args: commands::ctl::MsgArgs) -> anyhow::Result<()> {
+        commands::ctl::send_message(&control_client()?, &args).await
+    }
+
+    async fn cancel(&self, args: commands::ctl::CancelArgs) -> anyhow::Result<()> {
+        commands::ctl::cancel_run(&control_client()?, &args).await
     }
 
     async fn setup(&self, args: commands::setup::SetupArgs) -> anyhow::Result<()> {
@@ -139,6 +144,13 @@ async fn real_daemon(args: commands::daemon::DaemonArgs) -> anyhow::Result<()> {
 
     let _ = std::fs::remove_file(&socket);
     Ok(())
+}
+
+/// Build a control client at the resolved daemon socket path.
+fn control_client() -> anyhow::Result<leviath_runtime::control_socket::ControlClient> {
+    let socket = leviath_cli::daemon::setup::control_socket_path()
+        .ok_or_else(|| anyhow::anyhow!("cannot resolve a home directory for the control socket"))?;
+    Ok(leviath_runtime::control_socket::ControlClient::new(socket))
 }
 
 /// Real `lev spawn`: reads the process's real cwd and the control-socket path,

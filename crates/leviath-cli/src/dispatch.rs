@@ -38,6 +38,12 @@ pub enum Commands {
     /// List agents running in the shared-world daemon
     Ps(commands::ps::PsArgs),
 
+    /// Send a message to a running agent
+    Msg(commands::ctl::MsgArgs),
+
+    /// Cancel a running agent
+    Cancel(commands::ctl::CancelArgs),
+
     /// List available and installed blueprints
     List(commands::list::ListArgs),
 
@@ -92,6 +98,10 @@ pub trait RiskyExecutors {
     async fn spawn(&self, args: commands::spawn::SpawnCmdArgs) -> anyhow::Result<()>;
     /// `lev ps` — resolves the control-socket path and queries the daemon.
     async fn ps(&self, args: commands::ps::PsArgs) -> anyhow::Result<()>;
+    /// `lev msg` — resolves the control-socket path and sends a message.
+    async fn msg(&self, args: commands::ctl::MsgArgs) -> anyhow::Result<()>;
+    /// `lev cancel` — resolves the control-socket path and cancels a run.
+    async fn cancel(&self, args: commands::ctl::CancelArgs) -> anyhow::Result<()>;
     /// `lev setup` — interactive (blocking stdin) or `--non-interactive`.
     async fn setup(&self, args: commands::setup::SetupArgs) -> anyhow::Result<()>;
     /// `lev dash` — takes over the real terminal and blocks on real keyboard input.
@@ -114,6 +124,8 @@ pub async fn dispatch(command: Commands, ex: &impl RiskyExecutors) -> anyhow::Re
         Commands::Run(args) => ex.run(args).await,
         Commands::Spawn(args) => ex.spawn(args).await,
         Commands::Ps(args) => ex.ps(args).await,
+        Commands::Msg(args) => ex.msg(args).await,
+        Commands::Cancel(args) => ex.cancel(args).await,
         Commands::List(args) => commands::list::execute(args).await,
         Commands::Add(args) => commands::add::execute(args).await,
         Commands::Remove(args) => commands::remove::execute(args).await,
@@ -146,6 +158,12 @@ mod tests {
             Ok(())
         }
         async fn ps(&self, _args: commands::ps::PsArgs) -> anyhow::Result<()> {
+            Ok(())
+        }
+        async fn msg(&self, _args: commands::ctl::MsgArgs) -> anyhow::Result<()> {
+            Ok(())
+        }
+        async fn cancel(&self, _args: commands::ctl::CancelArgs) -> anyhow::Result<()> {
             Ok(())
         }
         async fn setup(&self, _args: commands::setup::SetupArgs) -> anyhow::Result<()> {
@@ -223,6 +241,23 @@ mod tests {
         };
         let result = dispatch(Commands::Spawn(args), &MockRisky).await;
         assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn dispatch_msg_variant_is_routed_through_the_executor() {
+        let args = commands::ctl::MsgArgs {
+            agent_id: "a".to_string(),
+            content: "c".to_string(),
+        };
+        assert!(dispatch(Commands::Msg(args), &MockRisky).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn dispatch_cancel_variant_is_routed_through_the_executor() {
+        let args = commands::ctl::CancelArgs {
+            run_id: "r".to_string(),
+        };
+        assert!(dispatch(Commands::Cancel(args), &MockRisky).await.is_ok());
     }
 
     #[tokio::test]

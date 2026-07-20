@@ -2,6 +2,7 @@
 
 pub mod add;
 pub mod create;
+pub mod ctl;
 pub mod daemon;
 pub mod dashboard;
 pub mod list;
