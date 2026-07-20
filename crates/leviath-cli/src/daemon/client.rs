@@ -1,14 +1,7 @@
-//! `lev spawn` — spawn an agent into the running shared-world daemon.
-//!
-//! This is the shared-world counterpart to `lev run`: instead of launching a
-//! per-run worker process, it resolves the blueprint + task locally and asks the
-//! daemon (over its control socket) to create the agent in the one shared world,
-//! printing the new run id.
-//!
-//! The pure request-building ([`resolve_spawn_args`]) and the daemon exchange
-//! ([`send_spawn`]) are tested here; the thin outer wiring that reads the real
-//! cwd + control-socket path lives in the binary behind
-//! [`crate::dispatch::RiskyExecutors`].
+//! Client-side helpers for talking to the shared-world daemon: building a spawn
+//! request from local inputs and exchanging it over the control socket. Shared by
+//! `lev run` (and reusable by other clients). The socket-path resolution + connect
+//! live in the binary; these cores are unit-testable against a fake socket server.
 
 use anyhow::bail;
 use leviath_runtime::control_socket::{ControlClient, ControlResponse};
@@ -17,23 +10,15 @@ use leviath_runtime::host::SpawnArgs;
 use crate::commands::run::manifest::find_manifest;
 use crate::runstate::new_run_id;
 
-/// Arguments for `lev spawn`.
-#[derive(clap::Args, Debug, Clone)]
-pub struct SpawnCmdArgs {
-    /// Path to the agent blueprint (a manifest file or its directory).
-    pub path: String,
-    /// The task for the agent.
-    pub task: String,
-    /// Model override (`provider/model` or a bare model name).
-    #[arg(long)]
-    pub model: Option<String>,
-}
-
-/// Resolve the local inputs of a spawn request: find the manifest, mint a run
-/// id from the agent's directory name, and record `workdir` (the caller passes
-/// the resolved working directory).
-pub fn resolve_spawn_args(args: &SpawnCmdArgs, workdir: &str) -> anyhow::Result<SpawnArgs> {
-    let manifest = find_manifest(&args.path)?;
+/// Resolve the local inputs of a spawn request: find the manifest, mint a run id
+/// from the agent's directory name, and record the working directory.
+pub fn resolve_spawn_args(
+    path: &str,
+    task: &str,
+    model: Option<String>,
+    workdir: &str,
+) -> anyhow::Result<SpawnArgs> {
+    let manifest = find_manifest(path)?;
     let agent_name = manifest
         .parent()
         .and_then(|p| p.file_name())
@@ -42,15 +27,15 @@ pub fn resolve_spawn_args(args: &SpawnCmdArgs, workdir: &str) -> anyhow::Result<
     Ok(SpawnArgs {
         run_id: new_run_id(agent_name),
         blueprint_path: manifest.to_string_lossy().to_string(),
-        task: args.task.clone(),
-        model: args.model.clone(),
+        task: task.to_string(),
+        model,
         workdir: workdir.to_string(),
         metadata: Default::default(),
     })
 }
 
-/// Send a resolved spawn request to the daemon over `client` and report the
-/// outcome, printing the new run id on success.
+/// Send a resolved spawn request to the daemon and report the outcome, printing
+/// the new run id on success.
 pub async fn send_spawn(client: &ControlClient, spawn_args: SpawnArgs) -> anyhow::Result<()> {
     match client.spawn(spawn_args).await {
         Ok(ControlResponse::Spawned { run_id }) => {
@@ -83,23 +68,20 @@ mod tests {
         dir.join("agent.leviath")
     }
 
-    fn cmd(path: &str) -> SpawnCmdArgs {
-        SpawnCmdArgs {
-            path: path.to_string(),
-            task: "do it".to_string(),
-            model: Some("m".to_string()),
-        }
-    }
-
     #[test]
     fn resolve_spawn_args_finds_manifest_and_builds_request() {
         let dir = tempfile::tempdir().unwrap();
-        // The manifest lives in a directory named after the agent.
         let agent_dir = dir.path().join("my-agent");
         std::fs::create_dir_all(&agent_dir).unwrap();
         let manifest = write_manifest(&agent_dir);
 
-        let args = resolve_spawn_args(&cmd(manifest.to_str().unwrap()), "/work").unwrap();
+        let args = resolve_spawn_args(
+            manifest.to_str().unwrap(),
+            "do it",
+            Some("m".to_string()),
+            "/work",
+        )
+        .unwrap();
         assert!(args.run_id.contains("my-agent"));
         assert_eq!(args.task, "do it");
         assert_eq!(args.model.as_deref(), Some("m"));
@@ -109,11 +91,9 @@ mod tests {
 
     #[test]
     fn resolve_spawn_args_errors_on_missing_manifest() {
-        assert!(resolve_spawn_args(&cmd("/no/such/agent"), "/work").is_err());
+        assert!(resolve_spawn_args("/no/such/agent", "t", None, "/work").is_err());
     }
 
-    /// Bind a fake daemon at `socket` that reads one request and writes
-    /// `response_line` back, then closes. Returns its task handle.
     fn fake_daemon(socket: std::path::PathBuf, response_line: &'static str) -> JoinHandle<()> {
         let listener = UnixListener::bind(&socket).unwrap();
         tokio::spawn(async move {
@@ -133,8 +113,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let socket = dir.path().join("ctl.sock");
         let server = fake_daemon(socket.clone(), response_line);
-        let client = ControlClient::new(&socket);
-        let result = send_spawn(&client, SpawnArgs::default()).await;
+        let result = send_spawn(&ControlClient::new(&socket), SpawnArgs::default()).await;
         server.await.unwrap();
         result
     }
@@ -164,8 +143,12 @@ mod tests {
 
     #[tokio::test]
     async fn send_spawn_errors_when_daemon_absent() {
-        let client = ControlClient::new("/nonexistent/leviath-ctl.sock");
-        let err = send_spawn(&client, SpawnArgs::default()).await.unwrap_err();
+        let err = send_spawn(
+            &ControlClient::new("/nonexistent/leviath-ctl.sock"),
+            SpawnArgs::default(),
+        )
+        .await
+        .unwrap_err();
         assert!(err.to_string().contains("not reachable"));
     }
 }
