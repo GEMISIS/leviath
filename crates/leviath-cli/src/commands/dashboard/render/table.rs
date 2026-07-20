@@ -10,7 +10,7 @@ use crate::commands::dashboard::helpers::{format_tokens, relative_time, truncate
 use crate::commands::dashboard::state::Dashboard;
 use crate::commands::dashboard::theme::*;
 use crate::commands::dashboard::types::*;
-use crate::interaction;
+use leviath_core::interaction;
 
 impl Dashboard {
     pub(in crate::commands::dashboard) fn draw_agent_table(
@@ -61,23 +61,14 @@ impl Dashboard {
                     .as_deref()
                     .map(|t| truncate(t.trim_start_matches('#').trim(), 26))
                     .unwrap_or_else(|| truncate(&agent.task, 26));
-                let tok_str = if agent.is_run_state {
-                    if agent.tokens_in == 0 && agent.tokens_out == 0 {
-                        "—".to_string()
-                    } else {
-                        format!(
-                            "{}↑ {}↓",
-                            format_tokens(agent.tokens_in),
-                            format_tokens(agent.tokens_out)
-                        )
-                    }
+                let tok_str = if agent.tokens_in == 0 && agent.tokens_out == 0 {
+                    "—".to_string()
                 } else {
-                    let (cur, max) = agent.context_tokens;
-                    if max > 0 {
-                        format!("{}/{}", format_tokens(cur), format_tokens(max))
-                    } else {
-                        format_tokens(cur)
-                    }
+                    format!(
+                        "{}↑ {}↓",
+                        format_tokens(agent.tokens_in),
+                        format_tokens(agent.tokens_out)
+                    )
                 };
                 let stage_str = if agent.num_stages > 1 {
                     format!(
@@ -457,16 +448,12 @@ mod tests {
             tokens_in: 100,
             tokens_out: 50,
             cached_tokens: 10,
-            context_tokens: (500, 8000),
             iteration: 3,
             waiting_prompt: None,
             pending_request: None,
             last_answered_request_id: None,
             context_snapshot: None,
             stages: vec![],
-            entity: bevy_ecs::prelude::Entity::from_raw(0),
-            is_run_state: true,
-            pid: 0,
             workdir: "/tmp/test".to_string(),
             task: "test task".to_string(),
             title: Some("My Test".to_string()),
@@ -537,9 +524,7 @@ mod tests {
         let backend = TestBackend::new(120, 40);
         let mut terminal = Terminal::new(backend).unwrap();
         let mut dash = make_test_dashboard();
-        let mut agent = make_test_agent("run-ecs", AgentDisplayStatus::Active);
-        agent.is_run_state = false;
-        agent.context_tokens = (4000, 8000);
+        let agent = make_test_agent("run-ecs", AgentDisplayStatus::Active);
         dash.agents.push(agent);
         dash.update_display_indices();
         terminal
@@ -556,7 +541,6 @@ mod tests {
         let mut terminal = Terminal::new(backend).unwrap();
         let mut dash = make_test_dashboard();
         let mut agent = make_test_agent("run-zero-tok", AgentDisplayStatus::Active);
-        agent.is_run_state = true;
         agent.tokens_in = 0;
         agent.tokens_out = 0;
         dash.agents.push(agent);
@@ -617,9 +601,7 @@ mod tests {
         let backend = TestBackend::new(120, 40);
         let mut terminal = Terminal::new(backend).unwrap();
         let mut dash = make_test_dashboard();
-        let mut agent = make_test_agent("run-zero-ctx", AgentDisplayStatus::Active);
-        agent.is_run_state = false;
-        agent.context_tokens = (0, 0);
+        let agent = make_test_agent("run-zero-ctx", AgentDisplayStatus::Active);
         dash.agents.push(agent);
         dash.update_display_indices();
         terminal
@@ -925,7 +907,7 @@ mod tests {
         let mut dash = make_test_dashboard();
         let mut agent = make_test_agent("run-resp", AgentDisplayStatus::Waiting);
         agent.waiting_prompt = Some("prompt".to_string());
-        agent.pending_request = Some(crate::interaction::InteractionRequest::free_text(
+        agent.pending_request = Some(leviath_core::interaction::InteractionRequest::free_text(
             "ft1", "prompt", "main", true,
         ));
         agent.stage_index = 0;

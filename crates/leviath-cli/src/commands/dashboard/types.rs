@@ -1,14 +1,13 @@
 //! Type definitions for the dashboard: display status, agent representation, events.
 
 use clap::Args;
-use tokio::sync::mpsc;
 
 use super::graph::GraphTransitionInfo;
 use super::theme::{C_ACTIVE, C_DIM, C_ERROR, C_SUCCESS, C_WARN};
 use super::theme::{GLYPH_ACTIVE, GLYPH_COMPLETE, GLYPH_ERROR, GLYPH_PENDING, GLYPH_WAITING};
 
-use crate::interaction;
 use crate::runstate::{self, StageRecord};
+use leviath_core::interaction;
 
 use ratatui::style::Color;
 
@@ -81,8 +80,6 @@ pub struct DashboardAgent {
     pub tokens_out: usize,
     /// Cumulative tokens read from provider cache.
     pub cached_tokens: usize,
-    /// Context-window occupancy for in-process agents: (current, max).
-    pub context_tokens: (usize, usize),
     pub iteration: usize,
     pub waiting_prompt: Option<String>,
     /// Full structured interaction request (populated for WaitingInput agents)
@@ -94,12 +91,6 @@ pub struct DashboardAgent {
     pub context_snapshot: Option<runstate::ContextSnapshot>,
     /// Per-stage records from stages.json
     pub stages: Vec<StageRecord>,
-    /// The ECS entity for this agent (dummy sentinel for run-state agents)
-    pub entity: bevy_ecs::prelude::Entity,
-    /// True when tracked via on-disk run-state (background worker process)
-    pub is_run_state: bool,
-    /// PID of worker process (0 for in-process agents)
-    pub pid: u32,
     /// Working directory the agent ran in
     pub workdir: String,
     /// Original task prompt
@@ -130,43 +121,6 @@ pub struct DashboardAgent {
     pub taint_summary: Vec<(String, String)>,
 }
 
-/// Event from an agent back to the dashboard.
-#[derive(Debug, Clone)]
-#[allow(dead_code)] // All variants are part of the agent event protocol
-pub enum AgentEvent {
-    StageChanged {
-        agent_id: String,
-        stage: String,
-    },
-    StatusChanged {
-        agent_id: String,
-        status: AgentDisplayStatus,
-    },
-    NeedsInput {
-        agent_id: String,
-        prompt: String,
-    },
-    ToolCalled {
-        agent_id: String,
-        tool: String,
-        args: String,
-    },
-    InferenceComplete {
-        agent_id: String,
-        content: String,
-        tokens_used: usize,
-        tokens_prompt: usize,
-    },
-    Error {
-        agent_id: String,
-        error: String,
-    },
-    Log(String),
-    AgentDone {
-        agent_id: String,
-    },
-}
-
 /// Log entry for the dashboard log panel.
 #[derive(Debug, Clone)]
 pub(super) struct LogEntry {
@@ -174,11 +128,18 @@ pub(super) struct LogEntry {
     pub(super) message: String,
 }
 
-/// Command sent from the dashboard to the engine background task.
-#[derive(Debug, PartialEq, Eq)]
-pub(super) enum EngineCommand {
-    CancelAgent { agent_id: String },
-    SendInput { agent_id: String, input: String },
+/// Command sent from the dashboard's (sync) input handlers to the async
+/// daemon-control background task, which forwards it over the control socket.
+#[derive(Debug, PartialEq)]
+pub(super) enum DaemonCommand {
+    /// Cancel a run.
+    Cancel { run_id: String },
+    /// Answer a pending `ask_user` interaction.
+    Answer {
+        response: interaction::InteractionResponse,
+    },
+    /// Deliver a mid-run message to a running agent.
+    Message { agent_id: String, content: String },
 }
 
 /// Toast notification shown as an overlay.
@@ -195,14 +156,6 @@ pub(super) enum ToastLevel {
     Info,
     Warning,
     Error,
-}
-
-/// Convenience constructor for creating channels.
-pub(super) fn create_event_channel() -> (
-    mpsc::UnboundedSender<AgentEvent>,
-    mpsc::UnboundedReceiver<AgentEvent>,
-) {
-    mpsc::unbounded_channel()
 }
 
 #[cfg(test)]
@@ -269,27 +222,25 @@ mod tests {
     }
 
     #[test]
-    fn engine_command_debug() {
-        let cmd = EngineCommand::CancelAgent {
-            agent_id: "run-123".to_string(),
+    fn daemon_command_debug_and_eq() {
+        let cmd = DaemonCommand::Cancel {
+            run_id: "run-123".to_string(),
         };
         let dbg = format!("{:?}", cmd);
         assert!(dbg.contains("run-123"));
-    }
-
-    #[test]
-    fn agent_event_debug() {
-        let ev = AgentEvent::Log("hello world".to_string());
-        let dbg = format!("{:?}", ev);
-        assert!(dbg.contains("hello world"));
-    }
-
-    #[test]
-    fn event_channel_works() {
-        let (tx, mut rx) = create_event_channel();
-        tx.send(AgentEvent::Log("test".to_string())).unwrap();
-        let msg = rx.try_recv().unwrap();
-        assert!(matches!(msg, AgentEvent::Log(s) if s == "test"));
+        assert_eq!(
+            cmd,
+            DaemonCommand::Cancel {
+                run_id: "run-123".to_string()
+            }
+        );
+        assert_ne!(
+            cmd,
+            DaemonCommand::Message {
+                agent_id: "a".to_string(),
+                content: "b".to_string()
+            }
+        );
     }
 
     #[test]
@@ -316,16 +267,12 @@ mod tests {
             tokens_in: 100,
             tokens_out: 50,
             cached_tokens: 0,
-            context_tokens: (0, 0),
             iteration: 1,
             waiting_prompt: None,
             pending_request: None,
             last_answered_request_id: None,
             context_snapshot: None,
             stages: vec![],
-            entity: bevy_ecs::prelude::Entity::from_raw(0),
-            is_run_state: true,
-            pid: 0,
             workdir: "/tmp".to_string(),
             task: "do stuff".to_string(),
             title: Some("My Task".to_string()),

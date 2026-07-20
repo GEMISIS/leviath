@@ -11,46 +11,42 @@ mod theme;
 mod types;
 
 pub use helpers::yank_to_clipboard_via;
-pub use types::{AgentDisplayStatus, AgentEvent, DashboardAgent, DashboardArgs};
+pub use types::{AgentDisplayStatus, DashboardAgent, DashboardArgs};
 
 use crossterm::event::{Event, KeyEventKind};
-use leviath_runtime::AgentEngine;
+use leviath_runtime::control_socket::{ControlClient, ControlRequest};
 use ratatui::Terminal;
-use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
 
-use super::run::build_provider_registry_from_config;
-use crate::config::Config;
-
 use state::Dashboard;
-use types::EngineCommand;
+use types::DaemonCommand;
 
-/// Background task that processes engine commands (cancel/input) for in-process agent state.
-async fn engine_background_loop(
-    engine: leviath_runtime::EngineHandle,
-    mut cmd_rx: mpsc::UnboundedReceiver<EngineCommand>,
-    event_tx: mpsc::UnboundedSender<AgentEvent>,
+/// Background task that forwards the dashboard's control commands (cancel /
+/// answer-interaction / message) to the shared-world daemon over the control
+/// socket. The dashboard is a pure client: it never drives agents itself.
+async fn daemon_background_loop(
+    control: ControlClient,
+    mut cmd_rx: mpsc::UnboundedReceiver<DaemonCommand>,
 ) {
     while let Some(cmd) = cmd_rx.recv().await {
         match cmd {
-            EngineCommand::CancelAgent { agent_id } => {
-                let mut eng = engine.write().await;
-                let _ = eng.cancel_agent(&agent_id);
-                let _ = event_tx.send(AgentEvent::StatusChanged {
-                    agent_id,
-                    status: AgentDisplayStatus::Cancelled,
-                });
+            DaemonCommand::Cancel { run_id } => {
+                let _ = control.request(&ControlRequest::Cancel { run_id }).await;
             }
-            EngineCommand::SendInput { agent_id, input } => {
-                let eng = engine.read().await;
-                let msg = leviath_runtime::AgentMessage {
-                    agent_id,
-                    content: input,
-                    target_region: Some("conversation".to_string()),
-                    priority: 0,
-                };
-                let _ = eng.send_message(msg);
+            DaemonCommand::Answer { response } => {
+                let _ = control
+                    .request(&ControlRequest::AnswerInteraction { response })
+                    .await;
+            }
+            DaemonCommand::Message { agent_id, content } => {
+                let _ = control
+                    .request(&ControlRequest::Message {
+                        agent_id,
+                        content,
+                        target_region: None,
+                    })
+                    .await;
             }
         }
     }
@@ -117,14 +113,14 @@ pub trait TerminalSetup {
 /// with canned events, keeping the whole function covered.
 async fn execute_core<S: TerminalSetup, E: EventSource>(
     dashboard: &mut Dashboard,
-    engine: &leviath_runtime::EngineHandle,
+    control: &ControlClient,
     setup: &mut S,
     events: &mut E,
 ) -> anyhow::Result<()> {
     setup.enable()?;
     let mut terminal = setup.create_terminal()?;
     let tick_rate = Duration::from_millis(100);
-    run_dashboard_loop(dashboard, engine, &mut terminal, events, tick_rate).await?;
+    run_dashboard_loop(dashboard, control, &mut terminal, events, tick_rate).await?;
     setup.disable();
     setup.print_done();
     Ok(())
@@ -146,7 +142,7 @@ async fn execute_core<S: TerminalSetup, E: EventSource>(
 /// terminal backend.
 async fn run_dashboard_loop<B: ratatui::backend::Backend>(
     dashboard: &mut Dashboard,
-    engine: &leviath_runtime::EngineHandle,
+    control: &ControlClient,
     terminal: &mut Terminal<B>,
     events: &mut impl EventSource,
     tick_rate: Duration,
@@ -155,16 +151,13 @@ async fn run_dashboard_loop<B: ratatui::backend::Backend>(
         dashboard.tick_count += 1;
         dashboard.tick_toasts();
 
-        // Process agent events
-        dashboard.process_events();
+        // Pull the daemon's open interactions (best-effort; ignore if the daemon
+        // is unreachable) so waiting agents show their prompt.
+        dashboard.sync_interactions(control).await;
 
-        // Sync background runs from on-disk run-state dir
+        // Sync background runs from on-disk run-state dir (the daemon persists
+        // meta/context/stages there).
         dashboard.sync_from_run_state();
-
-        // Sync state from ECS world (try_lock to avoid blocking the UI)
-        if let Ok(eng) = engine.try_read() {
-            dashboard.sync_agent_state_from_world(&eng);
-        }
 
         // Draw
         terminal.draw(|frame| dashboard.draw(frame))?;
@@ -188,32 +181,21 @@ async fn run_dashboard_loop<B: ratatui::backend::Backend>(
     }
 }
 
-/// Builds the [`Dashboard`] and its backing [`AgentEngine`], starts the
-/// engine background loop, and seeds the startup log line. Split out of
-/// [`execute`] purely so this (entirely terminal-independent) setup is
-/// unit-testable on its own, separate from the real-terminal I/O sliver.
-async fn init_dashboard(
-    config: &Config,
-    yank_fn: fn(&str) -> bool,
-) -> (Dashboard, leviath_runtime::EngineHandle) {
-    let registry = build_provider_registry_from_config(config);
-    let engine = Arc::new(tokio::sync::RwLock::new(AgentEngine::with_providers(
-        registry,
-    )));
-
+/// Builds the [`Dashboard`], starts the daemon-control background loop, and
+/// seeds the startup log line. Split out of [`execute`] purely so this
+/// (entirely terminal-independent) setup is unit-testable on its own, separate
+/// from the real-terminal I/O sliver.
+fn init_dashboard(control: ControlClient, yank_fn: fn(&str) -> bool) -> Dashboard {
     let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
     let mut dashboard =
         Dashboard::new_with_log_path(cmd_tx, crate::runstate::dashboard_log_path(), yank_fn);
 
-    // Store event_tx for background loop
-    let bg_event_tx = dashboard.event_tx.clone();
-
-    // Start engine background loop
-    tokio::spawn(engine_background_loop(engine.clone(), cmd_rx, bg_event_tx));
+    // Forward the dashboard's control commands to the daemon.
+    tokio::spawn(daemon_background_loop(control, cmd_rx));
 
     dashboard.add_log("Dashboard started. Use `lev run <agent>` to start an agent.".to_string());
 
-    (dashboard, engine)
+    dashboard
 }
 
 /// Load config, build the dashboard + engine, and run the event loop against
@@ -232,13 +214,13 @@ async fn init_dashboard(
 /// the binary passes the real native-tool/OSC52 clipboard (which can write the
 /// real terminal), tests pass a no-op.
 pub async fn execute_with<S: TerminalSetup, E: EventSource>(
+    control: ControlClient,
     setup: &mut S,
     events: &mut E,
     yank_fn: fn(&str) -> bool,
 ) -> anyhow::Result<()> {
-    let config = Config::load()?;
-    let (mut dashboard, engine) = init_dashboard(&config, yank_fn).await;
-    execute_core(&mut dashboard, &engine, setup, events).await
+    let mut dashboard = init_dashboard(control.clone(), yank_fn);
+    execute_core(&mut dashboard, &control, setup, events).await
 }
 
 #[cfg(test)]
@@ -269,162 +251,118 @@ mod tests {
         }
     }
 
-    #[test]
-    fn agent_event_log_variant() {
-        let event = AgentEvent::Log("test message".to_string());
-        let dbg = format!("{:?}", event);
-        assert!(dbg.contains("test message"));
+    /// A control client pointing at a socket with no daemon behind it; requests
+    /// fail fast, which the dashboard treats as "nothing to observe".
+    fn no_daemon_control() -> ControlClient {
+        let dir = std::env::temp_dir().join("leviath-dash-no-daemon");
+        ControlClient::new(leviath_runtime::control_socket::control_id(&dir))
     }
 
-    #[test]
-    fn agent_event_stage_changed() {
-        let event = AgentEvent::StageChanged {
-            agent_id: "agent-1".to_string(),
-            stage: "implement".to_string(),
-        };
-        let dbg = format!("{:?}", event);
-        assert!(dbg.contains("agent-1"));
-        assert!(dbg.contains("implement"));
-    }
-
-    #[test]
-    fn agent_event_status_changed() {
-        let event = AgentEvent::StatusChanged {
-            agent_id: "agent-1".to_string(),
-            status: AgentDisplayStatus::Complete,
-        };
-        let dbg = format!("{:?}", event);
-        assert!(dbg.contains("agent-1"));
-        assert!(dbg.contains("Complete"));
-    }
-
-    #[test]
-    fn agent_event_needs_input() {
-        let event = AgentEvent::NeedsInput {
-            agent_id: "agent-1".to_string(),
-            prompt: "What should I do?".to_string(),
-        };
-        let dbg = format!("{:?}", event);
-        assert!(dbg.contains("What should I do?"));
-    }
-
-    #[test]
-    fn agent_event_tool_called() {
-        let event = AgentEvent::ToolCalled {
-            agent_id: "agent-1".to_string(),
-            tool: "read_file".to_string(),
-            args: r#"{"path": "foo.txt"}"#.to_string(),
-        };
-        let dbg = format!("{:?}", event);
-        assert!(dbg.contains("read_file"));
-    }
-
-    #[test]
-    fn agent_event_error() {
-        let event = AgentEvent::Error {
-            agent_id: "agent-1".to_string(),
-            error: "something broke".to_string(),
-        };
-        let dbg = format!("{:?}", event);
-        assert!(dbg.contains("something broke"));
+    /// A fake daemon that accepts one connection, records the request line it
+    /// receives, replies `{"result":"ok","ok":true}`, and returns the request.
+    fn recording_daemon(dir: &std::path::Path) -> (ControlClient, tokio::task::JoinHandle<String>) {
+        use leviath_runtime::control_socket::{bind_control_listener, control_id};
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+        let id = control_id(dir);
+        let mut listener = bind_control_listener(&id).unwrap();
+        let handle = tokio::spawn(async move {
+            let stream = listener.accept().await.unwrap();
+            let (read_half, mut write_half) = tokio::io::split(stream);
+            let mut lines = BufReader::new(read_half).lines();
+            let req = lines.next_line().await.unwrap().unwrap_or_default();
+            write_half
+                .write_all(b"{\"result\":\"ok\",\"ok\":true}\n")
+                .await
+                .unwrap();
+            req
+        });
+        (ControlClient::new(id), handle)
     }
 
     // ─── init_dashboard ──────────────────────────────────────────────────
 
     #[tokio::test]
-    async fn init_dashboard_seeds_startup_log_and_starts_background_loop() {
+    async fn init_dashboard_seeds_startup_log_and_forwards_commands() {
         crate::runstate::with_isolated_runs_dir_async(
-            "init_dashboard_seeds_startup_log_and_starts_background_loop",
+            "init_dashboard_seeds_startup_log",
             |_d| async move {
-                let config = Config::default();
-                let (dashboard, engine) = init_dashboard(&config, |_| false).await;
-
+                let dashboard = init_dashboard(no_daemon_control(), |_| false);
                 assert!(
                     dashboard
                         .log
                         .iter()
                         .any(|entry| entry.message.contains("Dashboard started"))
                 );
-
-                // The background loop is live: a CancelAgent command sent on
-                // dashboard's own cmd_tx should be processed without panicking.
+                // The background loop is live: a command on the dashboard's own
+                // cmd_tx is accepted (delivered to the unreachable daemon).
                 dashboard
                     .cmd_tx
-                    .send(EngineCommand::CancelAgent {
-                        agent_id: "nonexistent".to_string(),
+                    .send(DaemonCommand::Cancel {
+                        run_id: "nope".to_string(),
                     })
                     .unwrap();
-                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-                let _ = engine.try_read();
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
             },
         )
         .await;
     }
 
-    // ─── engine_background_loop: CancelAgent command ─────────────────────
+    // ─── daemon_background_loop ───────────────────────────────────────────
 
     #[tokio::test]
-    async fn engine_background_loop_cancel_agent() {
-        let engine = Arc::new(tokio::sync::RwLock::new(AgentEngine::new()));
-        let (cmd_tx, cmd_rx) = mpsc::unbounded_channel::<EngineCommand>();
-        let (event_tx, mut event_rx) = mpsc::unbounded_channel::<AgentEvent>();
-
-        // Start the background loop
-        tokio::spawn(engine_background_loop(engine, cmd_rx, event_tx));
-
-        // Send a CancelAgent command
+    async fn daemon_background_loop_forwards_cancel() {
+        let dir = tempfile::tempdir().unwrap();
+        let (control, server) = recording_daemon(dir.path());
+        let (cmd_tx, cmd_rx) = mpsc::unbounded_channel::<DaemonCommand>();
+        tokio::spawn(daemon_background_loop(control, cmd_rx));
         cmd_tx
-            .send(EngineCommand::CancelAgent {
-                agent_id: "agent-nonexistent".to_string(),
+            .send(DaemonCommand::Cancel {
+                run_id: "run-1".to_string(),
             })
             .unwrap();
-
-        // The loop should process it and send back a StatusChanged event
-        let ev = tokio::time::timeout(std::time::Duration::from_millis(500), event_rx.recv())
-            .await
-            .expect("timed out waiting for StatusChanged event")
-            .expect("channel closed before event was sent");
-        // Verify via Debug representation to avoid dead else-branches in
-        // pattern matching (LLVM would mark the not-matched arm as uncovered).
-        let dbg = format!("{ev:?}");
-        assert!(dbg.contains("StatusChanged"));
-        assert!(dbg.contains("agent-nonexistent"));
-        assert!(dbg.contains("Cancelled"));
+        let req = server.await.unwrap();
+        assert!(req.contains("cancel"));
+        assert!(req.contains("run-1"));
     }
 
     #[tokio::test]
-    async fn engine_background_loop_send_input_command() {
-        let engine = Arc::new(tokio::sync::RwLock::new(AgentEngine::new()));
-        let (cmd_tx, cmd_rx) = mpsc::unbounded_channel::<EngineCommand>();
-        let (event_tx, _event_rx) = mpsc::unbounded_channel::<AgentEvent>();
-
-        tokio::spawn(engine_background_loop(engine, cmd_rx, event_tx));
-
-        // Send a SendInput command — should not panic even if no agent exists
+    async fn daemon_background_loop_forwards_answer() {
+        let dir = tempfile::tempdir().unwrap();
+        let (control, server) = recording_daemon(dir.path());
+        let (cmd_tx, cmd_rx) = mpsc::unbounded_channel::<DaemonCommand>();
+        tokio::spawn(daemon_background_loop(control, cmd_rx));
         cmd_tx
-            .send(EngineCommand::SendInput {
-                agent_id: "nonexistent".to_string(),
-                input: "test input".to_string(),
+            .send(DaemonCommand::Answer {
+                response: leviath_core::interaction::InteractionResponse::text("q1", "yes"),
             })
             .unwrap();
-
-        // Give it a moment to process
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        // No panic = success
+        let req = server.await.unwrap();
+        assert!(req.contains("answer_interaction"));
+        assert!(req.contains("q1"));
     }
 
     #[tokio::test]
-    async fn engine_background_loop_exits_when_channel_dropped() {
-        let engine = Arc::new(tokio::sync::RwLock::new(AgentEngine::new()));
-        let (cmd_tx, cmd_rx) = mpsc::unbounded_channel::<EngineCommand>();
-        let (event_tx, _event_rx) = mpsc::unbounded_channel::<AgentEvent>();
+    async fn daemon_background_loop_forwards_message() {
+        let dir = tempfile::tempdir().unwrap();
+        let (control, server) = recording_daemon(dir.path());
+        let (cmd_tx, cmd_rx) = mpsc::unbounded_channel::<DaemonCommand>();
+        tokio::spawn(daemon_background_loop(control, cmd_rx));
+        cmd_tx
+            .send(DaemonCommand::Message {
+                agent_id: "a1".to_string(),
+                content: "hi there".to_string(),
+            })
+            .unwrap();
+        let req = server.await.unwrap();
+        assert!(req.contains("message"));
+        assert!(req.contains("hi there"));
+    }
 
-        let handle = tokio::spawn(engine_background_loop(engine, cmd_rx, event_tx));
-
-        // Drop the sender to close the channel
+    #[tokio::test]
+    async fn daemon_background_loop_exits_when_channel_dropped() {
+        let (cmd_tx, cmd_rx) = mpsc::unbounded_channel::<DaemonCommand>();
+        let handle = tokio::spawn(daemon_background_loop(no_daemon_control(), cmd_rx));
         drop(cmd_tx);
-
-        // The loop should exit because the channel is closed
         let result = tokio::time::timeout(std::time::Duration::from_millis(500), handle).await;
         assert!(result.is_ok());
     }
@@ -462,16 +400,12 @@ mod tests {
             tokens_in: 0,
             tokens_out: 0,
             cached_tokens: 0,
-            context_tokens: (0, 0),
             iteration: 0,
             waiting_prompt: None,
             pending_request: None,
             last_answered_request_id: None,
             context_snapshot: None,
             stages: vec![],
-            entity: bevy_ecs::prelude::Entity::from_raw(0),
-            is_run_state: false,
-            pid: 0,
             workdir: "/tmp".to_string(),
             task: "test task".to_string(),
             title: None,
@@ -488,7 +422,6 @@ mod tests {
         assert_eq!(agent.id, "run-test");
         assert_eq!(agent.blueprint_name, "tester");
         assert_eq!(agent.stage, "init");
-        assert!(!agent.is_run_state);
     }
 
     // ─── run_dashboard_loop / EventSource ───────────────────────────────────
@@ -673,7 +606,7 @@ mod tests {
     #[tokio::test]
     async fn run_dashboard_loop_quits_on_esc_from_main_list() {
         let mut dashboard = make_test_dashboard();
-        let engine = Arc::new(tokio::sync::RwLock::new(AgentEngine::new()));
+        let control = no_daemon_control();
         let mut terminal = test_terminal();
         // A no-op Resize tick first, then the Esc that triggers quit --
         // covers both the `Event::Resize` and `Event::Key` match arms.
@@ -681,7 +614,7 @@ mod tests {
 
         let result = run_dashboard_loop(
             &mut dashboard,
-            &engine,
+            &control,
             &mut terminal,
             &mut events,
             Duration::from_millis(1),
@@ -698,7 +631,7 @@ mod tests {
         // pending); tick 2: Esc quits.  The `None` entry exercises the
         // `if let Some(event)` fallthrough path (line 127 in mod.rs).
         let mut dashboard = make_test_dashboard();
-        let engine = Arc::new(tokio::sync::RwLock::new(AgentEngine::new()));
+        let control = no_daemon_control();
         let mut terminal = test_terminal();
         // `None` entry → poll returns Ok(None) on tick 1 (no-event path);
         // `Some(Esc)` → poll returns Ok(Some(Esc)) on tick 2 → quit.
@@ -706,7 +639,7 @@ mod tests {
 
         let result = run_dashboard_loop(
             &mut dashboard,
-            &engine,
+            &control,
             &mut terminal,
             &mut events,
             Duration::from_millis(1),
@@ -722,7 +655,7 @@ mod tests {
         // A key release (not Press) and a mouse-like "other" event are both
         // ignored by the `_ => {}` arm; only the trailing Esc actually quits.
         let mut dashboard = make_test_dashboard();
-        let engine = Arc::new(tokio::sync::RwLock::new(AgentEngine::new()));
+        let control = no_daemon_control();
         let mut terminal = test_terminal();
         let release = Event::Key(crossterm::event::KeyEvent::new_with_kind(
             KeyCode::Char('x'),
@@ -733,7 +666,7 @@ mod tests {
 
         let result = run_dashboard_loop(
             &mut dashboard,
-            &engine,
+            &control,
             &mut terminal,
             &mut events,
             Duration::from_millis(1),
@@ -747,13 +680,13 @@ mod tests {
     #[tokio::test]
     async fn run_dashboard_loop_propagates_event_source_error() {
         let mut dashboard = make_test_dashboard();
-        let engine = Arc::new(tokio::sync::RwLock::new(AgentEngine::new()));
+        let control = no_daemon_control();
         let mut terminal = test_terminal();
         let mut events = TestEventSource::failing();
 
         let result = run_dashboard_loop(
             &mut dashboard,
-            &engine,
+            &control,
             &mut terminal,
             &mut events,
             Duration::from_millis(1),
@@ -761,29 +694,6 @@ mod tests {
         .await;
 
         assert!(result.is_err());
-    }
-
-    #[tokio::test]
-    async fn run_dashboard_loop_syncs_agent_state_when_engine_lock_available() {
-        // Exercises the `engine.try_lock()` success branch (as opposed to
-        // the lock being held elsewhere, which the other tests implicitly
-        // cover since they never contend for it either -- both arms of the
-        // `if let Ok(...)` are trivial, but this makes the intent explicit).
-        let mut dashboard = make_test_dashboard();
-        let engine = Arc::new(tokio::sync::RwLock::new(AgentEngine::new()));
-        let mut terminal = test_terminal();
-        let mut events = TestEventSource::new(vec![key(KeyCode::Esc)]);
-
-        let result = run_dashboard_loop(
-            &mut dashboard,
-            &engine,
-            &mut terminal,
-            &mut events,
-            Duration::from_millis(1),
-        )
-        .await;
-
-        assert!(result.is_ok());
     }
 
     // `crossterm::event::poll` cannot be called from a real unit test: it
@@ -811,13 +721,13 @@ mod tests {
         // shares run_dashboard_loop's one monomorphization with the
         // success-path tests (the draw `?` has both arms covered there).
         let mut dashboard = make_test_dashboard();
-        let engine = Arc::new(tokio::sync::RwLock::new(AgentEngine::new()));
+        let control = no_daemon_control();
         let mut terminal = Terminal::new(TestBackendHarness::failing(120, 40)).unwrap();
         let mut events = TestEventSource::new(vec![]); // never reached
 
         let result = run_dashboard_loop(
             &mut dashboard,
-            &engine,
+            &control,
             &mut terminal,
             &mut events,
             Duration::from_millis(1),
@@ -825,42 +735,6 @@ mod tests {
         .await;
 
         assert!(result.is_err());
-    }
-
-    #[tokio::test]
-    async fn run_dashboard_loop_skips_sync_when_engine_locked() {
-        // Exercises the `if let Ok(eng) = engine.try_lock()` *failure* arm
-        // (the engine is held by another task while the loop tick runs).
-        // When the lock is contended, `sync_agent_state_from_world` is
-        // skipped and the loop continues normally to the draw + event steps.
-        //
-        // We acquire a WRITE lock on the engine in the current task BEFORE
-        // starting the loop.  A held write lock blocks the loop's `try_read()`
-        // (readers can't proceed while a writer holds the lock), so the sync is
-        // skipped. We use TestEventSource (dequeues instantly without
-        // `.await`-ing) so Tokio never yields to another task that could release
-        // the lock.
-        let mut dashboard = make_test_dashboard();
-        let engine = Arc::new(tokio::sync::RwLock::new(AgentEngine::new()));
-        let _guard = engine.try_write().expect("should be unlocked");
-
-        let mut terminal = test_terminal();
-        // With `_guard` held, `try_lock()` fails on the first tick (sync is
-        // skipped).  `TestEventSource` immediately returns `Some(Esc)`,
-        // so the loop quits after exactly one tick.
-        let mut events = TestEventSource::new(vec![key(KeyCode::Esc)]);
-
-        let result = run_dashboard_loop(
-            &mut dashboard,
-            &engine,
-            &mut terminal,
-            &mut events,
-            Duration::from_millis(1),
-        )
-        .await;
-
-        assert!(result.is_ok());
-        assert!(dashboard.should_quit);
     }
 
     // Caveat for anyone tempted to bound `run_dashboard_loop` with a
@@ -993,11 +867,11 @@ mod tests {
         crate::runstate::with_isolated_runs_dir_async(
             "execute_core_happy_path_quits_on_esc",
             |_d| async move {
-                let config = Config::default();
-                let (mut dashboard, engine) = init_dashboard(&config, |_| false).await;
+                let control = no_daemon_control();
+                let mut dashboard = init_dashboard(control.clone(), |_| false);
                 let mut setup = TestSetup::new();
                 let mut events = TestEventSource::new(vec![key(KeyCode::Esc)]);
-                let result = execute_core(&mut dashboard, &engine, &mut setup, &mut events).await;
+                let result = execute_core(&mut dashboard, &control, &mut setup, &mut events).await;
                 assert!(result.is_ok());
                 assert!(dashboard.should_quit);
             },
@@ -1019,7 +893,9 @@ mod tests {
                     |_d| async move {
                         let mut setup = TestSetup::new();
                         let mut events = TestEventSource::new(vec![key(KeyCode::Esc)]);
-                        let result = execute_with(&mut setup, &mut events, |_| false).await;
+                        let result =
+                            execute_with(no_daemon_control(), &mut setup, &mut events, |_| false)
+                                .await;
                         assert!(result.is_ok());
                     },
                 )
@@ -1030,43 +906,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn execute_with_propagates_config_load_error() {
-        // Covers the `Config::load()?` error arm of `execute_with`: point the
-        // isolated config path at a malformed file so the load fails and the
-        // `?` propagates before the dashboard/engine are ever built.
-        // `isolate_config_path_for_test` creates the fake config dir, so the
-        // path's parent already exists — write the malformed file directly.
-        crate::config::with_isolated_config_path_async(
-            "execute_with_dashboard_bad_config",
-            |_fake_dir| async move {
-                std::fs::write(
-                    crate::config::Config::config_path(),
-                    b"this is not valid toml ][ = =",
-                )
-                .unwrap();
-                let mut setup = TestSetup::new();
-                let mut events = TestEventSource::new(vec![]);
-                let result = execute_with(&mut setup, &mut events, |_| false).await;
-                assert!(result.is_err());
-            },
-        )
-        .await;
-    }
-
-    #[tokio::test]
     async fn execute_core_enable_error_propagates() {
         crate::runstate::with_isolated_runs_dir_async(
             "execute_core_enable_error_propagates",
             |_d| async move {
-                let config = Config::default();
-                let (mut dashboard, engine) = init_dashboard(&config, |_| false).await;
+                let control = no_daemon_control();
+                let mut dashboard = init_dashboard(control.clone(), |_| false);
                 // `setup.enable()?` fails first, so the loop is never reached.
                 let mut setup = TestSetup {
                     enable_should_fail: true,
                     create_should_fail: false,
                 };
                 let mut events = TestEventSource::new(vec![]);
-                let result = execute_core(&mut dashboard, &engine, &mut setup, &mut events).await;
+                let result = execute_core(&mut dashboard, &control, &mut setup, &mut events).await;
                 assert!(result.is_err());
             },
         )
@@ -1078,8 +930,8 @@ mod tests {
         crate::runstate::with_isolated_runs_dir_async(
             "execute_core_create_terminal_error_propagates",
             |_d| async move {
-                let config = Config::default();
-                let (mut dashboard, engine) = init_dashboard(&config, |_| false).await;
+                let control = no_daemon_control();
+                let mut dashboard = init_dashboard(control.clone(), |_| false);
                 // `enable()` succeeds, then `create_terminal()?` fails -- deterministic
                 // (no real backend / TTY involved), so this can never hang.
                 let mut setup = TestSetup {
@@ -1087,7 +939,7 @@ mod tests {
                     create_should_fail: true,
                 };
                 let mut events = TestEventSource::new(vec![]);
-                let result = execute_core(&mut dashboard, &engine, &mut setup, &mut events).await;
+                let result = execute_core(&mut dashboard, &control, &mut setup, &mut events).await;
                 assert!(result.is_err());
             },
         )
@@ -1099,11 +951,11 @@ mod tests {
         crate::runstate::with_isolated_runs_dir_async(
             "execute_core_loop_error_propagates",
             |_d| async move {
-                let config = Config::default();
-                let (mut dashboard, engine) = init_dashboard(&config, |_| false).await;
+                let control = no_daemon_control();
+                let mut dashboard = init_dashboard(control.clone(), |_| false);
                 let mut setup = TestSetup::new();
                 let mut events = TestEventSource::failing();
-                let result = execute_core(&mut dashboard, &engine, &mut setup, &mut events).await;
+                let result = execute_core(&mut dashboard, &control, &mut setup, &mut events).await;
                 assert!(result.is_err());
             },
         )

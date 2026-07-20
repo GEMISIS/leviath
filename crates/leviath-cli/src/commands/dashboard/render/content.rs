@@ -36,12 +36,8 @@ impl Dashboard {
         agent: &DashboardAgent,
     ) {
         // Use per-stage context if available, else fall back to global snapshot
-        let snap_opt = if agent.is_run_state {
-            runstate::read_stage_context(&agent.id, self.selected_stage)
-                .or_else(|| agent.context_snapshot.clone())
-        } else {
-            agent.context_snapshot.clone()
-        };
+        let snap_opt = runstate::read_stage_context(&agent.id, self.selected_stage)
+            .or_else(|| agent.context_snapshot.clone());
 
         // Constrain context card to at most 60 cols, left-aligned
         let card_w = ctx_area.width.min(64);
@@ -278,8 +274,7 @@ impl Dashboard {
         };
 
         // Tool count badge for logs tab
-        let tool_count = if self.stage_content_mode == StageContentMode::Logs && agent.is_run_state
-        {
+        let tool_count = if self.stage_content_mode == StageContentMode::Logs {
             let raw = runstate::tail_stage_log(&agent.id, self.selected_stage, 131_072);
             let tc = raw.lines().filter(|l| l.starts_with("[tool]")).count();
             if tc > 0 {
@@ -333,7 +328,7 @@ impl Dashboard {
         };
 
         // Bottom-left file path hint
-        let file_path_hint = if agent.is_run_state {
+        let file_path_hint = {
             let file_name = match self.stage_content_mode {
                 StageContentMode::Output => "output.log",
                 StageContentMode::Logs => "logs.log",
@@ -348,8 +343,6 @@ impl Dashboard {
                 .unwrap_or_default();
             let shortened = shorten_home_path(raw, &home);
             format!(" {} ", shortened)
-        } else {
-            String::new()
         };
 
         let content_block = Block::default()
@@ -386,12 +379,8 @@ impl Dashboard {
     }
 
     fn build_context_lines(&self, agent: &DashboardAgent, render_width: u16) -> Vec<Line<'static>> {
-        let snap_opt = if agent.is_run_state {
-            runstate::read_stage_context(&agent.id, self.selected_stage)
-                .or_else(|| agent.context_snapshot.clone())
-        } else {
-            agent.context_snapshot.clone()
-        };
+        let snap_opt = runstate::read_stage_context(&agent.id, self.selected_stage)
+            .or_else(|| agent.context_snapshot.clone());
         if let Some(snap) = snap_opt {
             let mut lines: Vec<Line> = Vec::new();
 
@@ -634,14 +623,10 @@ impl Dashboard {
         is_output: bool,
         render_width: u16,
     ) -> Vec<Line<'static>> {
-        let content = if agent.is_run_state {
-            if is_output {
-                runstate::tail_stage_output(&agent.id, self.selected_stage, 131_072)
-            } else {
-                runstate::tail_stage_log(&agent.id, self.selected_stage, 131_072)
-            }
+        let content = if is_output {
+            runstate::tail_stage_output(&agent.id, self.selected_stage, 131_072)
         } else {
-            String::new()
+            runstate::tail_stage_log(&agent.id, self.selected_stage, 131_072)
         };
 
         if is_output && !content.is_empty() {
@@ -700,16 +685,12 @@ mod tests {
             tokens_in: 100,
             tokens_out: 50,
             cached_tokens: 10,
-            context_tokens: (500, 8000),
             iteration: 3,
             waiting_prompt: None,
             pending_request: None,
             last_answered_request_id: None,
             context_snapshot: None,
             stages: vec![],
-            entity: bevy_ecs::prelude::Entity::from_raw(0),
-            is_run_state: false, // false so we don't hit disk reads
-            pid: 0,
             workdir: "/tmp/test".to_string(),
             task: "test task".to_string(),
             title: Some("My Test".to_string()),
@@ -1047,9 +1028,7 @@ mod tests {
             runstate::append_stage_output(run_id, 0, text);
         }
 
-        let mut agent = make_test_agent(run_id, AgentDisplayStatus::Active);
-        agent.is_run_state = true;
-        agent
+        make_test_agent(run_id, AgentDisplayStatus::Active)
     }
 
     #[test]
@@ -1789,8 +1768,7 @@ mod tests {
         dash.stage_content_mode = StageContentMode::Logs;
         // is_run_state = true means it tries to read disk, but dir won't exist
         // so it returns empty content gracefully
-        let mut agent = make_test_agent("run-logs-rs", AgentDisplayStatus::Active);
-        agent.is_run_state = true;
+        let agent = make_test_agent("run-logs-rs", AgentDisplayStatus::Active);
         terminal
             .draw(|f| {
                 let area = Rect::new(0, 0, 100, 20);
@@ -1880,7 +1858,6 @@ mod tests {
         let dash = make_test_dashboard();
         let mut agent = make_test_agent("run-rs-ctx", AgentDisplayStatus::Active);
         // is_run_state = true, context_snapshot as fallback
-        agent.is_run_state = true;
         agent.context_snapshot = Some(make_context_snapshot(3000, 8000));
         terminal
             .draw(|f| {
@@ -1898,8 +1875,7 @@ mod tests {
         let mut terminal = Terminal::new(backend).unwrap();
         let mut dash = make_test_dashboard();
         dash.stage_content_mode = StageContentMode::Context;
-        let mut agent = make_test_agent("run-ctx-rs", AgentDisplayStatus::Active);
-        agent.is_run_state = true;
+        let agent = make_test_agent("run-ctx-rs", AgentDisplayStatus::Active);
         // No context_snapshot so it shows "no context snapshot available"
         terminal
             .draw(|f| {
@@ -1917,8 +1893,7 @@ mod tests {
         let mut terminal = Terminal::new(backend).unwrap();
         let mut dash = make_test_dashboard();
         dash.stage_content_mode = StageContentMode::Context;
-        let mut agent = make_test_agent("run-ctx-fph", AgentDisplayStatus::Active);
-        agent.is_run_state = true;
+        let agent = make_test_agent("run-ctx-fph", AgentDisplayStatus::Active);
         terminal
             .draw(|f| {
                 let area = Rect::new(0, 0, 100, 20);
@@ -1935,8 +1910,7 @@ mod tests {
         let mut terminal = Terminal::new(backend).unwrap();
         let mut dash = make_test_dashboard();
         dash.stage_content_mode = StageContentMode::Logs;
-        let mut agent = make_test_agent("run-logs-fph", AgentDisplayStatus::Active);
-        agent.is_run_state = true;
+        let agent = make_test_agent("run-logs-fph", AgentDisplayStatus::Active);
         terminal
             .draw(|f| {
                 let area = Rect::new(0, 0, 100, 20);

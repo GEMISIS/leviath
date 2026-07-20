@@ -54,7 +54,7 @@ impl Dashboard {
     }
 
     fn draw_detail_panel(&mut self, frame: &mut Frame, area: ratatui::layout::Rect) {
-        use crate::interaction::InteractionKind;
+        use leviath_core::interaction::InteractionKind;
 
         let agent = match self.selected_agent() {
             Some(a) => a.clone(),
@@ -238,16 +238,12 @@ mod tests {
             tokens_in: 100,
             tokens_out: 50,
             cached_tokens: 10,
-            context_tokens: (500, 8000),
             iteration: 3,
             waiting_prompt: None,
             pending_request: None,
             last_answered_request_id: None,
             context_snapshot: None,
             stages: vec![],
-            entity: bevy_ecs::prelude::Entity::from_raw(0),
-            is_run_state: false,
-            pid: 0,
             workdir: "/tmp/test".to_string(),
             task: "test task".to_string(),
             title: Some("My Test".to_string()),
@@ -319,12 +315,14 @@ mod tests {
         let mut dash = make_test_dashboard();
         let mut agent = make_test_agent("run-mc-input", AgentDisplayStatus::Waiting);
         agent.waiting_prompt = Some("Pick one".to_string());
-        agent.pending_request = Some(crate::interaction::InteractionRequest::multiple_choice(
-            "mc1",
-            "Pick one",
-            vec!["A".to_string(), "B".to_string()],
-            "main",
-        ));
+        agent.pending_request = Some(
+            leviath_core::interaction::InteractionRequest::multiple_choice(
+                "mc1",
+                "Pick one",
+                vec!["A".to_string(), "B".to_string()],
+                "main",
+            ),
+        );
         dash.agents.push(agent);
         dash.update_display_indices();
         dash.detail_view = true;
@@ -340,12 +338,14 @@ mod tests {
         let mut dash = make_test_dashboard();
         let mut agent = make_test_agent("run-mc-preview", AgentDisplayStatus::Waiting);
         agent.waiting_prompt = Some("Pick one".to_string());
-        agent.pending_request = Some(crate::interaction::InteractionRequest::multiple_choice(
-            "mc2",
-            "Pick one",
-            vec!["A".to_string(), "B".to_string()],
-            "main",
-        ));
+        agent.pending_request = Some(
+            leviath_core::interaction::InteractionRequest::multiple_choice(
+                "mc2",
+                "Pick one",
+                vec!["A".to_string(), "B".to_string()],
+                "main",
+            ),
+        );
         agent.stages = vec![crate::runstate::StageRecord::new("main".to_string(), 0)];
         dash.agents.push(agent);
         dash.update_display_indices();
@@ -399,12 +399,14 @@ mod tests {
         let mut dash = make_test_dashboard();
         let mut agent = make_test_agent("run-wrong-stage-input", AgentDisplayStatus::Waiting);
         agent.waiting_prompt = Some("Pick one".to_string());
-        agent.pending_request = Some(crate::interaction::InteractionRequest::multiple_choice(
-            "mc-wrong-stage",
-            "Pick one",
-            vec!["A".to_string(), "B".to_string()],
-            "main",
-        ));
+        agent.pending_request = Some(
+            leviath_core::interaction::InteractionRequest::multiple_choice(
+                "mc-wrong-stage",
+                "Pick one",
+                vec!["A".to_string(), "B".to_string()],
+                "main",
+            ),
+        );
         agent.num_stages = 2;
         agent.stage_index = 0;
         agent.stages = vec![
@@ -521,9 +523,9 @@ mod tests {
         let mut dash = make_test_dashboard();
         let mut agent = make_test_agent("run-wait", AgentDisplayStatus::Waiting);
         agent.waiting_prompt = Some("What should I do?".to_string());
-        agent.pending_request = Some(crate::interaction::InteractionRequest {
+        agent.pending_request = Some(leviath_core::interaction::InteractionRequest {
             id: "req-1".to_string(),
-            kind: crate::interaction::InteractionKind::FreeText,
+            kind: leviath_core::interaction::InteractionKind::FreeText,
             prompt: "What should I do?".to_string(),
             options: vec![],
             tool_name: None,
@@ -531,7 +533,7 @@ mod tests {
             required: true,
             stage_name: "main".to_string(),
             body: None,
-            body_format: crate::interaction::BodyFormat::Plain,
+            body_format: leviath_core::interaction::BodyFormat::Plain,
         });
         dash.agents.push(agent);
         dash.update_display_indices();
@@ -607,9 +609,9 @@ mod tests {
         let mut dash = make_test_dashboard();
         let mut agent = make_test_agent("run-rv", AgentDisplayStatus::Waiting);
         agent.waiting_prompt = Some("Review this plan".to_string());
-        agent.pending_request = Some(crate::interaction::InteractionRequest {
+        agent.pending_request = Some(leviath_core::interaction::InteractionRequest {
             id: "req-rv".to_string(),
-            kind: crate::interaction::InteractionKind::FreeText,
+            kind: leviath_core::interaction::InteractionKind::FreeText,
             prompt: "Review this plan".to_string(),
             options: vec![],
             tool_name: None,
@@ -617,7 +619,7 @@ mod tests {
             required: true,
             stage_name: "main".to_string(),
             body: Some("# Plan\n\n- Step 1\n- Step 2\n- Step 3\n\nDo you approve?".to_string()),
-            body_format: crate::interaction::BodyFormat::Markdown,
+            body_format: leviath_core::interaction::BodyFormat::Markdown,
         });
         dash.agents.push(agent);
         dash.update_display_indices();
