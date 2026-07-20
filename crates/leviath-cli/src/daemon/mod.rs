@@ -4,4 +4,5 @@
 //! [`leviath_runtime::control_socket`]): the tool service that bridges tool calls
 //! to the built-in / MCP executors and the interaction hub.
 
+pub mod spawn;
 pub mod tool_service;
