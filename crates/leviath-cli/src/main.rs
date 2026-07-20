@@ -64,6 +64,13 @@ impl RiskyExecutors for RealExecutors {
         real_spawn(args).await
     }
 
+    async fn ps(&self, _args: commands::ps::PsArgs) -> anyhow::Result<()> {
+        let socket = leviath_cli::daemon::setup::control_socket_path().ok_or_else(|| {
+            anyhow::anyhow!("cannot resolve a home directory for the control socket")
+        })?;
+        commands::ps::send_list(&leviath_runtime::control_socket::ControlClient::new(socket)).await
+    }
+
     async fn setup(&self, args: commands::setup::SetupArgs) -> anyhow::Result<()> {
         // The interactive arm reads the process's real stdin; the branch +
         // config wiring is the tested `setup::execute_with`.

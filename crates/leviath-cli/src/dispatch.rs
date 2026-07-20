@@ -35,6 +35,9 @@ pub enum Commands {
     /// Spawn an agent into the running shared-world daemon
     Spawn(commands::spawn::SpawnCmdArgs),
 
+    /// List agents running in the shared-world daemon
+    Ps(commands::ps::PsArgs),
+
     /// List available and installed blueprints
     List(commands::list::ListArgs),
 
@@ -87,6 +90,8 @@ pub trait RiskyExecutors {
     async fn run(&self, args: commands::run::RunArgs) -> anyhow::Result<()>;
     /// `lev spawn` — reads the real cwd + control-socket path, connects to the daemon.
     async fn spawn(&self, args: commands::spawn::SpawnCmdArgs) -> anyhow::Result<()>;
+    /// `lev ps` — resolves the control-socket path and queries the daemon.
+    async fn ps(&self, args: commands::ps::PsArgs) -> anyhow::Result<()>;
     /// `lev setup` — interactive (blocking stdin) or `--non-interactive`.
     async fn setup(&self, args: commands::setup::SetupArgs) -> anyhow::Result<()>;
     /// `lev dash` — takes over the real terminal and blocks on real keyboard input.
@@ -108,6 +113,7 @@ pub async fn dispatch(command: Commands, ex: &impl RiskyExecutors) -> anyhow::Re
         Commands::Setup(args) => ex.setup(args).await,
         Commands::Run(args) => ex.run(args).await,
         Commands::Spawn(args) => ex.spawn(args).await,
+        Commands::Ps(args) => ex.ps(args).await,
         Commands::List(args) => commands::list::execute(args).await,
         Commands::Add(args) => commands::add::execute(args).await,
         Commands::Remove(args) => commands::remove::execute(args).await,
@@ -137,6 +143,9 @@ mod tests {
             Ok(())
         }
         async fn spawn(&self, _args: commands::spawn::SpawnCmdArgs) -> anyhow::Result<()> {
+            Ok(())
+        }
+        async fn ps(&self, _args: commands::ps::PsArgs) -> anyhow::Result<()> {
             Ok(())
         }
         async fn setup(&self, _args: commands::setup::SetupArgs) -> anyhow::Result<()> {
@@ -213,6 +222,12 @@ mod tests {
             model: None,
         };
         let result = dispatch(Commands::Spawn(args), &MockRisky).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn dispatch_ps_variant_is_routed_through_the_executor() {
+        let result = dispatch(Commands::Ps(commands::ps::PsArgs {}), &MockRisky).await;
         assert!(result.is_ok());
     }
 
