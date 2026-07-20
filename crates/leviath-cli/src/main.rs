@@ -118,9 +118,9 @@ async fn real_run(args: commands::run::RunArgs) -> anyhow::Result<()> {
 /// subprocess spawn + poll live here.
 async fn ensure_daemon_running() -> anyhow::Result<()> {
     use leviath_runtime::control_socket::is_daemon_running;
-    let port_file = leviath_cli::daemon::setup::control_port_file()
-        .ok_or_else(|| anyhow::anyhow!("cannot resolve a home directory for the control port"))?;
-    if is_daemon_running(&port_file) {
+    let id = leviath_cli::daemon::setup::control_address()
+        .ok_or_else(|| anyhow::anyhow!("cannot resolve a home directory for the control socket"))?;
+    if is_daemon_running(&id) {
         return Ok(()); // already running
     }
     let exe = std::env::current_exe()?;
@@ -132,7 +132,7 @@ async fn ensure_daemon_running() -> anyhow::Result<()> {
     leviath_sys::process::configure_detached(&mut cmd);
     cmd.spawn()?;
     for _ in 0..100 {
-        if is_daemon_running(&port_file) {
+        if is_daemon_running(&id) {
             return Ok(());
         }
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
@@ -140,40 +140,36 @@ async fn ensure_daemon_running() -> anyhow::Result<()> {
     anyhow::bail!("the leviath daemon did not start within 5s");
 }
 
-/// Real `lev daemon`: bind the control socket and drive the shared world until
-/// Ctrl-C. Wiring only — the world, host, tool service, and spawner it composes
-/// (`daemon::setup`) plus the control transport (`control_socket`) are all
-/// unit-tested. The accept loop + real socket/signal I/O are the un-unit-testable
-/// slivers, kept here in the (coverage-unmeasured) binary.
+/// Real `lev daemon`: bind the platform control socket and drive the shared world
+/// until Ctrl-C. Wiring only — the world, host, tool service, and spawner it
+/// composes (`daemon::setup`) plus the control transport (`control_socket`:
+/// bind/accept/handle) are all unit-tested. Only the real accept loop + signal
+/// I/O are the un-unit-testable slivers kept here in the (coverage-unmeasured)
+/// binary.
 async fn real_daemon(args: commands::daemon::DaemonArgs) -> anyhow::Result<()> {
-    use leviath_cli::daemon::setup::{control_port_file, setup_daemon_host};
-    use leviath_runtime::control_socket::{check_single_instance, handle_connection, publish_port};
+    use leviath_cli::daemon::setup::{control_address, setup_daemon_host};
+    use leviath_runtime::control_socket::{
+        bind_control_listener, control_id_from_str, handle_connection,
+    };
 
     let config = leviath_cli::config::Config::load().unwrap_or_default();
     let runs_dir = leviath_cli::runstate::runs_dir();
-    let port_file = match args.socket {
-        Some(ref s) => std::path::PathBuf::from(s),
-        None => control_port_file().ok_or_else(|| {
-            anyhow::anyhow!("cannot resolve a home directory for the control port")
+    let id = match args.socket {
+        Some(ref s) => control_id_from_str(s),
+        None => control_address().ok_or_else(|| {
+            anyhow::anyhow!("cannot resolve a home directory for the control socket")
         })?,
     };
 
-    // Refuse to start a second daemon on a live control port, then bind an
-    // ephemeral loopback port and publish it. The raw socket binding is kept here
-    // (the coverage-excluded bin) because it cannot fail deterministically under
-    // test; the single-instance check and port publishing are the tested cores.
-    check_single_instance(&port_file)?;
-    let std_listener = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))?;
-    std_listener.set_nonblocking(true)?;
-    let addr = std_listener.local_addr()?;
-    publish_port(&port_file, addr.port())?;
-    let listener = tokio::net::TcpListener::from_std(std_listener)?;
+    // `bind_control_listener` enforces the single-instance guarantee and is fully
+    // unit-tested; only driving its `accept` in a loop is the untestable sliver.
+    let mut listener = bind_control_listener(&id)?;
     let mut host = setup_daemon_host(config, runs_dir, tokio::runtime::Handle::current()).await;
 
     // Accept connections and feed control ops to the host.
     let (op_tx, op_rx) = tokio::sync::mpsc::unbounded_channel();
     tokio::spawn(async move {
-        while let Ok((stream, _addr)) = listener.accept().await {
+        while let Ok(stream) = listener.accept().await {
             let op_tx = op_tx.clone();
             tokio::spawn(async move {
                 let _ = handle_connection(stream, op_tx).await;
@@ -188,21 +184,17 @@ async fn real_daemon(args: commands::daemon::DaemonArgs) -> anyhow::Result<()> {
         shutdown.notify_one();
     });
 
-    info!(%addr, "leviath daemon listening");
-    println!("leviath daemon listening on {addr}");
+    info!("leviath daemon listening");
+    println!("leviath daemon listening");
     host.serve(op_rx).await;
-
-    let _ = std::fs::remove_file(&port_file);
     Ok(())
 }
 
-/// Build a control client pointed at the daemon's published control port.
+/// Build a control client pointed at the daemon's control socket.
 fn control_client() -> anyhow::Result<leviath_runtime::control_socket::ControlClient> {
-    let port_file = leviath_cli::daemon::setup::control_port_file()
-        .ok_or_else(|| anyhow::anyhow!("cannot resolve a home directory for the control port"))?;
-    Ok(leviath_runtime::control_socket::ControlClient::new(
-        port_file,
-    ))
+    let id = leviath_cli::daemon::setup::control_address()
+        .ok_or_else(|| anyhow::anyhow!("cannot resolve a home directory for the control socket"))?;
+    Ok(leviath_runtime::control_socket::ControlClient::new(id))
 }
 
 /// Real `lev dash`: supplies the real crossterm terminal backend and event
