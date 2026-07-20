@@ -164,6 +164,14 @@ pub fn build_host(
         .world_mut()
         .insert_resource(leviath_runtime::pipeline::PolicyGate(policy));
 
+    // Scripted gate rules (`<config>/leviath/rules/*.rhai`), consulted by the gate
+    // after the static allowlist (a no-op checker when there are none).
+    let script_checker =
+        crate::daemon::gate_rules::build_gate_script_checker(&crate::commands::policy::rules_dir());
+    host.world_mut()
+        .world_mut()
+        .insert_resource(leviath_runtime::pipeline::GateScriptRules(script_checker));
+
     // The spawner captures everything an agent needs; `now_secs` is called at
     // spawn time for the run's start timestamp.
     host.set_spawner(Box::new(move |world, args| {

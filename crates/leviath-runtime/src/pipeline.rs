@@ -472,10 +472,12 @@ pub fn dispatch_tools(
     service: Res<ToolServiceRes>,
     stage: Res<ToolStage>,
     policy: Option<Res<PolicyGate>>,
+    script_rules: Option<Res<GateScriptRules>>,
     mut commands: Commands,
 ) {
     let default_policy = leviath_core::PolicyConfig::default();
     let policy_ref = policy.as_ref().map(|p| &p.0).unwrap_or(&default_policy);
+    let script_checker = script_rules.as_ref().map(|r| r.0.as_ref());
     for (entity, state, result, mut window, routing, sensitivities, mut gate) in agents.iter_mut() {
         if state.status != AgentStatus::Active {
             continue; // paused / waiting / cancelled — don't start new work
@@ -501,7 +503,7 @@ pub fn dispatch_tools(
                     &window,
                     None,
                     policy_ref,
-                    None,
+                    script_checker,
                 );
                 if !decision.is_allowed() {
                     context_results.push((c.tool_id.clone(), taint_block_message(&decision)));
@@ -555,6 +557,12 @@ pub struct ToolSensitivities(pub std::collections::HashMap<String, leviath_core:
 /// absent, the gate falls back to an empty policy (deny-by-clearance only).
 #[derive(Resource, Default)]
 pub struct PolicyGate(pub leviath_core::PolicyConfig);
+
+/// The scripted gate rules (`~/.config/leviath/rules/*.rhai`), as a world
+/// resource. The daemon builds the checker (it owns the Rhai engine); the gate
+/// consults it after the static allowlist. Absent ⇒ no scripted rules.
+#[derive(Resource, Clone)]
+pub struct GateScriptRules(pub std::sync::Arc<crate::taint::ScriptRuleChecker>);
 
 /// The `[blocked]` tool result produced when the taint gate denies an outbound
 /// call: enough for the model to understand why and adjust.
@@ -2643,6 +2651,37 @@ mod tests {
         // Allowlisted ⇒ the outbound call reaches the lane instead of `[blocked]`.
         assert!(world.get::<AwaitingTools>(e).is_some());
         let job = jrx.try_recv().expect("shell enqueued via allowlist");
+        assert_eq!(job.entity, e);
+    }
+
+    #[tokio::test]
+    async fn dispatch_tools_gate_allows_outbound_via_scripted_rule() {
+        let (jtx, mut jrx) = mpsc::unbounded_channel();
+        let mut world = World::new();
+        world.insert_resource(ToolServiceRes(Arc::new(EchoService)));
+        world.insert_resource(ToolStage(jtx));
+        // No static allowlist, but a scripted rule that permits `shell`.
+        let checker: std::sync::Arc<crate::taint::ScriptRuleChecker> =
+            std::sync::Arc::new(|tool: &str, _target: Option<&str>, _taint| {
+                (tool == "shell").then(|| "scripted".to_string())
+            });
+        world.insert_resource(GateScriptRules(checker));
+        let e = world
+            .spawn((
+                agent_state(),
+                infer_with(vec![tc("c_shell", "shell")]),
+                tainted_conv_window(),
+                ReadyForTools,
+                enabled_gate(),
+            ))
+            .id();
+        let mut s = Schedule::default();
+        s.add_systems(dispatch_tools);
+        s.run(&mut world);
+
+        // The scripted rule allows it ⇒ reaches the lane, not `[blocked]`.
+        assert!(world.get::<AwaitingTools>(e).is_some());
+        let job = jrx.try_recv().expect("shell enqueued via scripted rule");
         assert_eq!(job.entity, e);
     }
 
