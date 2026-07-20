@@ -87,7 +87,14 @@ impl RiskyExecutors for RealExecutors {
     }
 
     async fn daemon(&self, args: commands::daemon::DaemonArgs) -> anyhow::Result<()> {
-        real_daemon(args).await
+        use commands::daemon::DaemonAction;
+        match args.action {
+            None => real_daemon(args).await,
+            Some(DaemonAction::Start) => real_daemon_start().await,
+            Some(DaemonAction::Stop) => real_daemon_stop().await,
+            Some(DaemonAction::Status) => real_daemon_status().await,
+            Some(DaemonAction::Restart) => real_daemon_restart().await,
+        }
     }
 }
 
@@ -138,6 +145,60 @@ async fn ensure_daemon_running() -> anyhow::Result<()> {
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
     anyhow::bail!("the leviath daemon did not start within 5s");
+}
+
+/// `lev daemon start`: auto-start a detached daemon if none is running.
+async fn real_daemon_start() -> anyhow::Result<()> {
+    ensure_daemon_running().await?;
+    println!("leviath daemon is running");
+    Ok(())
+}
+
+/// `lev daemon stop`: ask the running daemon to shut down, then wait for it to
+/// exit. The request-building is the tested `daemon::send_shutdown`; the
+/// readiness poll over the real socket is the untestable sliver.
+async fn real_daemon_stop() -> anyhow::Result<()> {
+    use leviath_runtime::control_socket::is_daemon_running;
+    let id = leviath_cli::daemon::setup::control_address()
+        .ok_or_else(|| anyhow::anyhow!("cannot resolve a home directory for the control socket"))?;
+    if !is_daemon_running(&id) {
+        println!("daemon not running");
+        return Ok(());
+    }
+    commands::daemon::send_shutdown(&control_client()?).await?;
+    for _ in 0..100 {
+        if !is_daemon_running(&id) {
+            println!("daemon stopped");
+            return Ok(());
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    anyhow::bail!("the leviath daemon did not shut down within 5s");
+}
+
+/// `lev daemon status`: report whether the daemon is running and its agent count.
+async fn real_daemon_status() -> anyhow::Result<()> {
+    use leviath_runtime::control_socket::{ControlResponse, is_daemon_running};
+    let id = leviath_cli::daemon::setup::control_address()
+        .ok_or_else(|| anyhow::anyhow!("cannot resolve a home directory for the control socket"))?;
+    let running = is_daemon_running(&id);
+    let count = if running {
+        match control_client()?.list().await {
+            Ok(ControlResponse::List { runs }) => runs.len(),
+            _ => 0,
+        }
+    } else {
+        0
+    };
+    println!("{}", commands::daemon::format_status(running, count));
+    Ok(())
+}
+
+/// `lev daemon restart`: stop the running daemon (if any), then start a fresh one
+/// — which reloads persisted agents on startup.
+async fn real_daemon_restart() -> anyhow::Result<()> {
+    real_daemon_stop().await?;
+    real_daemon_start().await
 }
 
 /// Real `lev daemon`: bind the platform control socket and drive the shared world

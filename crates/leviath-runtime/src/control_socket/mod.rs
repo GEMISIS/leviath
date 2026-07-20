@@ -96,6 +96,8 @@ pub enum ControlRequest {
         /// The interaction id to cancel.
         request_id: String,
     },
+    /// Shut the daemon down.
+    Shutdown,
 }
 
 /// A control response over the wire.
@@ -222,6 +224,13 @@ async fn dispatch(req: ControlRequest, op_tx: &UnboundedSender<ControlOp>) -> Co
                 ok: rx.await.unwrap_or(false),
             }
         }
+        ControlRequest::Shutdown => {
+            let (reply, rx) = oneshot::channel();
+            let _ = op_tx.send(ControlOp::Shutdown { reply });
+            ControlResponse::Ok {
+                ok: rx.await.unwrap_or(false),
+            }
+        }
     }
 }
 
@@ -315,6 +324,11 @@ impl ControlClient {
     pub async fn list(&self) -> std::io::Result<ControlResponse> {
         self.request(&ControlRequest::List).await
     }
+
+    /// Ask the daemon to shut down.
+    pub async fn shutdown(&self) -> std::io::Result<ControlResponse> {
+        self.request(&ControlRequest::Shutdown).await
+    }
 }
 
 #[cfg(test)]
@@ -346,7 +360,8 @@ mod tests {
                     }
                     ControlOp::Message { reply, .. }
                     | ControlOp::AnswerInteraction { reply, .. }
-                    | ControlOp::CancelInteraction { reply, .. } => {
+                    | ControlOp::CancelInteraction { reply, .. }
+                    | ControlOp::Shutdown { reply } => {
                         let _ = reply.send(true);
                     }
                     ControlOp::List { reply } => {
@@ -491,6 +506,14 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn shutdown_request_round_trips() {
+        assert_eq!(
+            round_trip(&ControlRequest::Shutdown).await,
+            ControlResponse::Ok { ok: true }
+        );
+    }
+
     /// A connected `(client, server)` stream pair, plus the `TempDir` keeping the
     /// listener's socket alive, for driving `handle_connection` directly.
     async fn connected_pair() -> (ClientStream, ServerStream, tempfile::TempDir) {
@@ -558,7 +581,7 @@ mod tests {
         spawn_fake_host(op_rx);
         let (mut listener, id, _dir) = test_listener();
         tokio::spawn(async move {
-            for _ in 0..3 {
+            for _ in 0..4 {
                 let stream = listener.accept().await.unwrap();
                 let op_tx = op_tx.clone();
                 tokio::spawn(async move {
@@ -593,6 +616,10 @@ mod tests {
         assert_eq!(
             std::mem::discriminant(&list),
             std::mem::discriminant(&ControlResponse::List { runs: vec![] })
+        );
+        assert_eq!(
+            client.shutdown().await.unwrap(),
+            ControlResponse::Ok { ok: true }
         );
     }
 

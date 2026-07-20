@@ -128,6 +128,12 @@ pub enum ControlOp {
         /// Reply channel.
         reply: oneshot::Sender<bool>,
     },
+    /// Shut the daemon down: signal the world's shutdown so the serve loop
+    /// returns. Reply is sent (`true`) before the shutdown is triggered.
+    Shutdown {
+        /// Reply channel.
+        reply: oneshot::Sender<bool>,
+    },
 }
 
 /// Owns the world and the run-id map; drives the world and services control ops.
@@ -264,6 +270,12 @@ impl WorldHost {
             }
             ControlOp::CancelInteraction { request_id, reply } => {
                 let _ = reply.send(self.interactions.cancel(&request_id));
+            }
+            ControlOp::Shutdown { reply } => {
+                // Reply first (best effort), then trigger the world's shutdown so
+                // the serve loop's next `select!` returns.
+                let _ = reply.send(true);
+                self.world.shutdown();
             }
         }
     }
@@ -719,6 +731,19 @@ mod tests {
         let host = handle.await.unwrap();
         // The agent ran to completion under the serve loop.
         assert_eq!(host.world.agent_status(e), Some(AgentStatus::Complete));
+    }
+
+    #[tokio::test]
+    async fn shutdown_op_stops_the_serve_loop() {
+        let mut host = host_with(vec![]);
+        let (op_tx, op_rx) = mpsc::unbounded_channel();
+        let handle = tokio::spawn(async move { host.serve(op_rx).await });
+
+        let (tx, rx) = oneshot::channel();
+        op_tx.send(ControlOp::Shutdown { reply: tx }).unwrap();
+        assert!(rx.await.unwrap());
+        // The serve loop returns once the world's shutdown is signalled.
+        handle.await.unwrap();
     }
 
     #[tokio::test]
