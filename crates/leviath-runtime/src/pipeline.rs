@@ -1267,9 +1267,10 @@ fn attach_stage_components(
 /// Force an agent into the stage at `target_idx` via direct world access — the
 /// same effect as [`resolve_transition`]'s linear-`Next` arm, but callable from
 /// an exclusive system (e.g. the fan-out collector jumping to its `merge_stage`)
-/// where no [`Commands`] queue is available. On a system-prompt overflow the agent
-/// is marked `Error`, mirroring the transition systems.
-pub(crate) fn force_transition(world: &mut World, entity: Entity, target_idx: usize) {
+/// or the daemon (spawning a fan-out worker directly at its worker stage) where no
+/// [`Commands`] queue is available. On a system-prompt overflow the agent is
+/// marked `Error`, mirroring the transition systems.
+pub fn force_transition(world: &mut World, entity: Entity, target_idx: usize) {
     // Phase 1 (scoped borrow): mutate the agent's own state via `enter_stage`,
     // returning the components Phase 2 must insert — or `None` if the agent is
     // gone or its system prompt overflowed (already marked `Error` in-place).

@@ -5,6 +5,7 @@
 //! to the built-in / MCP executors and the interaction hub.
 
 pub mod client;
+pub mod fanout_spawner;
 pub mod recovery;
 pub mod setup;
 pub mod spawn;

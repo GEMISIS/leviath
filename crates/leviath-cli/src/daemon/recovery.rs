@@ -121,7 +121,7 @@ fn reload_one(
         max_depth: None,
     };
     let entity = build_agent(
-        world,
+        world.world_mut(),
         tool_service,
         config,
         shared_mcp,
