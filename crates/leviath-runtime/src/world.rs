@@ -767,7 +767,10 @@ mod tests {
         world.run_until_idle(20).await;
 
         // The persistence worker is fire-and-forget on its own task; poll until the
-        // final (Complete) snapshot has been flushed.
+        // final (Complete) snapshot has been flushed. A short real sleep between
+        // polls (rather than a bare `yield_now`) gives the worker's write actual
+        // wall-clock time to land under load — otherwise the loop can spin through
+        // every iteration before the write completes and spuriously time out.
         let meta_path = dir.path().join("run-42").join("meta.json");
         let mut meta = None;
         for _ in 0..200 {
@@ -778,7 +781,7 @@ mod tests {
                 meta = Some(m);
                 break;
             }
-            tokio::task::yield_now().await;
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
 
         let meta = meta.expect("final Complete snapshot flushed to disk");
