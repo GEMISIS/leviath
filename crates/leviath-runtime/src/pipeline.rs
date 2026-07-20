@@ -1264,6 +1264,85 @@ fn attach_stage_components(
     }
 }
 
+/// Force an agent into the stage at `target_idx` via direct world access — the
+/// same effect as [`resolve_transition`]'s linear-`Next` arm, but callable from
+/// an exclusive system (e.g. the fan-out collector jumping to its `merge_stage`)
+/// where no [`Commands`] queue is available. On a system-prompt overflow the agent
+/// is marked `Error`, mirroring the transition systems.
+pub(crate) fn force_transition(world: &mut World, entity: Entity, target_idx: usize) {
+    // Phase 1 (scoped borrow): mutate the agent's own state via `enter_stage`,
+    // returning the components Phase 2 must insert — or `None` if the agent is
+    // gone or its system prompt overflowed (already marked `Error` in-place).
+    let attach: Option<(StageInference, StageSetup, String)> = {
+        let mut q = world.query::<(
+            &AgentBlueprint,
+            &mut StageCursor,
+            &mut AgentState,
+            &mut StageProgress,
+            &StageInferences,
+            &StageSetups,
+            &mut VisitCounts,
+            &mut ContextWindow,
+        )>();
+        let Ok((
+            bp,
+            mut cursor,
+            mut state,
+            mut progress,
+            stage_infs,
+            setups,
+            mut visits,
+            mut window,
+        )) = q.get_mut(world, entity)
+        else {
+            return; // agent despawned
+        };
+        let setup = setups.0[target_idx].clone();
+        let stage_inf = stage_infs.0[target_idx].clone();
+        let name = bp.0.stages[target_idx].name.clone();
+        let bp = bp.0.clone();
+        match enter_stage(
+            target_idx,
+            &bp,
+            &mut cursor,
+            &mut state,
+            &mut progress,
+            &mut visits,
+            &setup,
+            &mut window,
+        ) {
+            Ok(()) => Some((stage_inf, setup, name)),
+            Err(message) => {
+                state.status = AgentStatus::Error { message };
+                None
+            }
+        }
+    };
+
+    // Phase 2 (borrow released): attach the new stage's components directly.
+    let Some((stage_inf, setup, name)) = attach else {
+        return;
+    };
+    let mut em = world.entity_mut(entity);
+    em.insert(stage_inf)
+        .insert(setup.inference_config.clone())
+        .insert(StageJustEntered {
+            index: target_idx,
+            name,
+        })
+        .insert(ReadyToInfer);
+    match &setup.routing {
+        Some(routing) => {
+            em.insert(crate::components::ToolResultRoutingComponent {
+                routing: routing.clone(),
+            });
+        }
+        None => {
+            em.remove::<crate::components::ToolResultRoutingComponent>();
+        }
+    }
+}
+
 /// A blueprint stage resolved to a concrete provider, model, and effective tool
 /// set — the per-stage input to [`spawn_agent`]. The caller (CLI / daemon) owns
 /// the model-selection policy (overrides, availability, user defaults) and tool
@@ -1293,11 +1372,25 @@ fn stage_setup_from(stage: &leviath_core::Stage) -> StageSetup {
         .get("max_output_tokens")
         .and_then(|v| v.as_u64())
         .map(|t| t as usize);
-    let system_prompt = stage
+    let base_prompt = stage
         .config
         .get("system_prompt")
         .and_then(|v| v.as_str())
         .map(String::from);
+    // A fan-out stage's single inference IS the "split": fold its `split_prompt`
+    // (which asks for the JSON array of work items) onto any base instructions so
+    // the stage's normal inference produces the work items the split system parses.
+    let system_prompt = match &stage.mode {
+        leviath_core::blueprint::StageMode::FanOut { config }
+            if !config.split_prompt.trim().is_empty() =>
+        {
+            Some(match base_prompt {
+                Some(base) => format!("{base}\n\n{}", config.split_prompt),
+                None => config.split_prompt.clone(),
+            })
+        }
+        _ => base_prompt,
+    };
     StageSetup {
         inference_config: InferenceConfig {
             temperature,
@@ -3430,6 +3523,45 @@ mod tests {
                 .get::<crate::components::ToolResultRoutingComponent>(e)
                 .is_none()
         );
+    }
+
+    #[test]
+    fn stage_setup_from_folds_fanout_split_prompt() {
+        use leviath_core::blueprint::{FanOutConfig, StageMode, WorkerFailurePolicy};
+        let fanout = |split: &str| StageMode::FanOut {
+            config: FanOutConfig {
+                worker_agent: None,
+                worker_stage: Some("w".to_string()),
+                worker_query: None,
+                merge_stage: None,
+                max_workers: 4,
+                on_worker_failure: WorkerFailurePolicy::Continue,
+                split_prompt: split.to_string(),
+            },
+        };
+
+        // Fan-out stage with a base prompt: split prompt is appended.
+        let mut s = stage_named("fan", None, false, None);
+        s.mode = fanout("SPLIT NOW");
+        s.config.insert(
+            "system_prompt".to_string(),
+            serde_json::Value::String("base instructions".to_string()),
+        );
+        let sp = stage_setup_from(&s).system_prompt.unwrap();
+        assert!(sp.contains("base instructions") && sp.contains("SPLIT NOW"));
+
+        // Fan-out stage with no base prompt: the split prompt alone.
+        let mut s2 = stage_named("fan", None, false, None);
+        s2.mode = fanout("ONLY SPLIT");
+        assert_eq!(
+            stage_setup_from(&s2).system_prompt,
+            Some("ONLY SPLIT".to_string())
+        );
+
+        // Fan-out stage with an empty split prompt: base prompt is left as-is.
+        let mut s3 = stage_named("fan", None, false, None);
+        s3.mode = fanout("   ");
+        assert_eq!(stage_setup_from(&s3).system_prompt, None);
     }
 
     #[test]

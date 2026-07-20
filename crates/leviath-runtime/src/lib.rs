@@ -12,6 +12,7 @@ pub mod context_setup;
 pub mod context_tools;
 pub mod control_socket;
 pub mod dynamic_interaction;
+pub mod fanout;
 pub mod host;
 pub mod inference_bridge;
 pub mod inference_pool;
@@ -37,6 +38,7 @@ pub use components::{
     InferenceConfig, InferenceResult, MessageInbox, NeedsCompaction, ParentRef, SubAgentChildren,
     TaskAssignment, ToolResultRoutingComponent,
 };
+pub use fanout::{FanOutSpawner, FanOutSpawnerRes, WorkItem, parse_work_items};
 pub use inference_bridge::{InferenceJob, InferenceOutcome, run_inference_job};
 pub use inference_pool::{InferencePermit, InferencePoolConfig, InferencePools};
 pub use provider_creds::{ProviderCreds, build_provider_registry};

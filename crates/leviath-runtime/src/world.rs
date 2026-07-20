@@ -122,6 +122,8 @@ impl PipelineWorld {
                 dispatch_compaction,
                 dispatch_inference,
                 collect_inference,
+                // Intercept a fan-out stage's split response before normal routing.
+                crate::fanout::fan_out_split,
                 process_response,
                 dispatch_tools,
                 collect_tools,
@@ -129,6 +131,8 @@ impl PipelineWorld {
                 resolve_transition,
                 dispatch_transition_choice,
                 collect_transition_choice,
+                // Drive fan-out workers and merge once they finish.
+                crate::fanout::fan_out_collect,
                 sync_tool_stages,
                 dispatch_persistence,
             )
