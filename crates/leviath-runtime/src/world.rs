@@ -40,9 +40,9 @@ use crate::pipeline::{
     PersistenceStage, ProcessResponse, Providers, ReadyForTools, ReadyForTransition, ReadyToInfer,
     ResolveTransition, ToolResults, ToolService, ToolServiceRes, ToolStage, TransitionResults,
     collect_compaction, collect_inference, collect_tools, collect_transition_choice,
-    deliver_messages, dispatch_compaction, dispatch_inference, dispatch_persistence,
-    dispatch_tools, dispatch_transition_choice, handle_empty_response, process_response,
-    resolve_transition, sync_tool_stages,
+    deliver_messages, dispatch_compaction, dispatch_edge_compact, dispatch_inference,
+    dispatch_persistence, dispatch_tools, dispatch_transition_choice, handle_empty_response,
+    process_response, resolve_transition, sync_tool_stages,
 };
 use crate::providers::ProviderRegistry;
 use crate::tool_bridge::tool_worker;
@@ -119,6 +119,9 @@ impl PipelineWorld {
             (
                 deliver_messages,
                 collect_compaction,
+                // Route edge-transform compaction through the compaction lane
+                // before the threshold-based pass.
+                dispatch_edge_compact,
                 dispatch_compaction,
                 dispatch_inference,
                 collect_inference,

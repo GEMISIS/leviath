@@ -922,6 +922,156 @@ fn compaction_request(
     }
 }
 
+// ─── Edge transforms (context reshaping on stage transitions) ────────────────
+
+/// Regions an edge transform asked to LLM-compact after a transition, awaiting
+/// the compaction lane (drained by [`dispatch_edge_compact`]).
+#[derive(Component, Debug, Clone)]
+pub struct PendingEdgeCompact(pub Vec<String>);
+
+/// Whether a region kind is "stage-specific" — eligible for an edge transform to
+/// clear or compact. The always-preserved kinds (pinned identity, compaction
+/// history, hashmap stores) are never touched.
+fn is_stage_specific(kind: &leviath_core::RegionKind) -> bool {
+    !matches!(
+        kind,
+        leviath_core::RegionKind::Pinned
+            | leviath_core::RegionKind::CompactHistory { .. }
+            | leviath_core::RegionKind::HashMap { .. }
+    )
+}
+
+/// Apply an edge transform's **synchronous** effects to the outgoing window
+/// (clearing stage-specific / named regions) and return the names of regions the
+/// caller should hand to the LLM compaction lane. (Ported from the deleted
+/// `graph::apply_edge_transform`; `Direct` on a linear/chosen edge carries context
+/// as-is.)
+pub(crate) fn apply_edge_transform(
+    window: &mut ContextWindow,
+    transform: &leviath_core::blueprint::EdgeTransform,
+) -> Vec<String> {
+    use leviath_core::blueprint::EdgeTransform;
+    match transform {
+        EdgeTransform::Direct => Vec::new(),
+        EdgeTransform::Clear => {
+            window
+                .regions
+                .iter_mut()
+                .filter(|r| is_stage_specific(&r.kind))
+                .for_each(|r| r.clear());
+            window.current_tokens = window.calculate_tokens();
+            Vec::new()
+        }
+        EdgeTransform::Compact { .. } => window
+            .regions
+            .iter()
+            .filter(|r| is_stage_specific(&r.kind) && !r.content.is_empty())
+            .map(|r| r.name.clone())
+            .collect(),
+        EdgeTransform::Custom {
+            carry,
+            compact,
+            clear,
+            ..
+        } => {
+            clear
+                .iter()
+                .filter(|n| !carry.contains(n))
+                .for_each(|name| {
+                    window
+                        .get_region_mut(name)
+                        .into_iter()
+                        .for_each(|r| r.clear());
+                });
+            window.current_tokens = window.calculate_tokens();
+            compact
+                .iter()
+                .filter(|n| !carry.contains(n))
+                .filter(|n| window.get_region(n).is_some_and(|r| !r.content.is_empty()))
+                .cloned()
+                .collect()
+        }
+    }
+}
+
+/// Edge-compaction dispatch: for each `ReadyToInfer` agent with a
+/// [`PendingEdgeCompact`] (an edge transform requested LLM summarization), spawn a
+/// compaction job for the named regions (reusing the compaction lane) and hold the
+/// agent `AwaitingCompaction`. If the agent has no compaction config, nothing to
+/// summarize, or no provider/permit, the request is dropped and the agent proceeds
+/// to inference un-compacted (memory-pressure compaction still applies later).
+#[allow(clippy::type_complexity)]
+pub fn dispatch_edge_compact(
+    mut agents: Query<
+        (
+            Entity,
+            &AgentState,
+            &ContextWindow,
+            &PendingEdgeCompact,
+            Option<&CompactionSettings>,
+        ),
+        (With<ReadyToInfer>, Without<AwaitingCompaction>),
+    >,
+    stage: Res<InferenceStage>,
+    providers: Res<Providers>,
+    mut commands: Commands,
+) {
+    for (entity, state, window, pending, settings) in agents.iter_mut() {
+        if state.status != AgentStatus::Active {
+            continue; // paused / waiting / cancelled — don't start new work
+        }
+        let started = settings
+            .and_then(|s| {
+                let config = &s.0;
+                let requests = build_edge_compact_requests(window, &pending.0, config)?;
+                let provider = providers.0.get(&config.provider).cloned()?;
+                let permit = stage.pools.try_acquire(&config.model)?;
+                stage.runtime.spawn(run_compaction_job(
+                    CompactionJob {
+                        entity,
+                        provider,
+                        requests,
+                        permit,
+                    },
+                    stage.compaction_outcomes.clone(),
+                    stage.wake.clone(),
+                ));
+                Some(())
+            })
+            .is_some();
+
+        let mut ec = commands.entity(entity);
+        ec.remove::<PendingEdgeCompact>();
+        if started {
+            ec.remove::<ReadyToInfer>().insert(AwaitingCompaction);
+        }
+    }
+}
+
+/// Build the per-region summarize requests for an edge compaction, or `None` when
+/// none of the named regions have content to summarize.
+fn build_edge_compact_requests(
+    window: &ContextWindow,
+    regions: &[String],
+    config: &leviath_core::CompactionConfig,
+) -> Option<Vec<(String, InferenceRequest)>> {
+    let requests: Vec<(String, InferenceRequest)> = regions
+        .iter()
+        .filter_map(|name| {
+            let region = window.get_region(name)?;
+            let content = region
+                .content
+                .iter()
+                .map(|e| e.content.as_str())
+                .collect::<Vec<_>>()
+                .join("\n\n");
+            (!content.is_empty())
+                .then(|| (name.clone(), compaction_request(config, &content, name)))
+        })
+        .collect();
+    (!requests.is_empty()).then_some(requests)
+}
+
 // ─── Persistence (per-agent snapshot writing) ────────────────────────────────
 
 /// Debounce watermark: the (iteration, stage index, status) last persisted for an
@@ -1085,8 +1235,8 @@ pub struct AwaitingTransitionChoice(pub Vec<leviath_core::blueprint::TransitionE
 enum StageResolution {
     /// No valid outgoing transition — the agent is done.
     Terminal,
-    /// Advance to this stage index.
-    Next(usize),
+    /// Advance to this stage index, applying the edge's context transform.
+    Next(usize, leviath_core::blueprint::EdgeTransform),
     /// Multiple candidate edges — an LLM must choose among them.
     Choose(Vec<leviath_core::blueprint::TransitionEdge>),
 }
@@ -1105,7 +1255,11 @@ fn resolve_transition_sync(
     match &stage.transitions {
         None => {
             if stage_idx + 1 < blueprint.stages.len() {
-                StageResolution::Next(stage_idx + 1)
+                // A linear fall-through carries context as-is (Direct).
+                StageResolution::Next(
+                    stage_idx + 1,
+                    leviath_core::blueprint::EdgeTransform::Direct,
+                )
             } else {
                 StageResolution::Terminal
             }
@@ -1143,7 +1297,7 @@ fn resolve_transition_sync(
                         .iter()
                         .position(|s| s.name == choosable[0].target)
                         .unwrap_or(0);
-                    StageResolution::Next(idx)
+                    StageResolution::Next(idx, choosable[0].transform.clone())
                 }
                 _ => StageResolution::Choose(choosable.into_iter().cloned().collect()),
             }
@@ -1192,7 +1346,10 @@ pub fn resolve_transition(
                 state.status = AgentStatus::Complete;
                 commands.entity(entity).remove::<ResolveTransition>();
             }
-            StageResolution::Next(idx) => {
+            StageResolution::Next(idx, transform) => {
+                // Reshape the outgoing context per the edge transform before the
+                // new stage's layout/prompt setup.
+                let to_compact = apply_edge_transform(&mut window, &transform);
                 let setup = &setups.0[idx];
                 match enter_stage(
                     idx,
@@ -1209,6 +1366,11 @@ pub fn resolve_transition(
                         let mut ec = commands.entity(entity);
                         ec.remove::<ResolveTransition>();
                         attach_stage_components(ec, stage_infs.0[idx].clone(), setup, idx, name);
+                        if !to_compact.is_empty() {
+                            commands
+                                .entity(entity)
+                                .insert(PendingEdgeCompact(to_compact));
+                        }
                     }
                     Err(message) => {
                         state.status = AgentStatus::Error { message };
@@ -1766,6 +1928,15 @@ pub fn collect_transition_choice(
                         .iter()
                         .position(|s| s.name == target)
                         .unwrap_or(0);
+                // Apply the chosen edge's context transform (Direct when the
+                // matched target has no explicit edge, e.g. a fallback).
+                let transform = resp
+                    .0
+                    .iter()
+                    .find(|e| e.target == target)
+                    .map(|e| e.transform.clone())
+                    .unwrap_or_default();
+                let to_compact = apply_edge_transform(&mut window, &transform);
                 let setup = &setups.0[idx];
                 match enter_stage(
                     idx,
@@ -1782,6 +1953,11 @@ pub fn collect_transition_choice(
                         let mut ec = commands.entity(outcome.entity);
                         ec.remove::<AwaitingTransitionResponse>();
                         attach_stage_components(ec, stage_infs.0[idx].clone(), setup, idx, name);
+                        if !to_compact.is_empty() {
+                            commands
+                                .entity(outcome.entity)
+                                .insert(PendingEdgeCompact(to_compact));
+                        }
                     }
                     Err(message) => {
                         state.status = AgentStatus::Error { message };
@@ -4031,6 +4207,289 @@ mod tests {
         assert!(world.get::<AwaitingCompaction>(e).is_none());
     }
 
+    // ── edge transforms ──
+
+    use leviath_core::blueprint::EdgeTransform;
+
+    /// A window with a pinned `sys` region and a stage-specific `scratch` region,
+    /// both with content.
+    fn transform_window() -> ContextWindow {
+        let mut w = ContextWindow::new(1000);
+        let mut sys = Region::new("sys".to_string(), RegionKind::Pinned, 500);
+        let _ = sys.add_entry("identity".to_string(), 10);
+        w.add_region(sys);
+        let mut scratch = Region::new("scratch".to_string(), RegionKind::Clearable, 500);
+        let _ = scratch.add_entry("work".to_string(), 10);
+        w.add_region(scratch);
+        w.current_tokens = w.calculate_tokens();
+        w
+    }
+
+    #[test]
+    fn apply_edge_transform_direct_is_a_noop() {
+        let mut w = transform_window();
+        let before = w.current_tokens;
+        assert!(apply_edge_transform(&mut w, &EdgeTransform::Direct).is_empty());
+        assert_eq!(w.current_tokens, before);
+        assert!(w.get_region("scratch").unwrap().current_tokens > 0);
+    }
+
+    #[test]
+    fn apply_edge_transform_clear_wipes_stage_specific_keeps_pinned() {
+        let mut w = transform_window();
+        assert!(apply_edge_transform(&mut w, &EdgeTransform::Clear).is_empty());
+        assert_eq!(w.get_region("scratch").unwrap().current_tokens, 0);
+        assert!(w.get_region("sys").unwrap().current_tokens > 0);
+    }
+
+    #[test]
+    fn apply_edge_transform_compact_returns_stage_specific_with_content() {
+        let mut w = transform_window();
+        // Pinned excluded; scratch (stage-specific, has content) returned; not cleared.
+        assert_eq!(
+            apply_edge_transform(&mut w, &EdgeTransform::Compact { prompt: None }),
+            vec!["scratch".to_string()]
+        );
+        assert!(w.get_region("scratch").unwrap().current_tokens > 0);
+    }
+
+    #[test]
+    fn apply_edge_transform_custom_respects_carry_clear_and_compact() {
+        let mut w = transform_window();
+        let mut keep = Region::new("keep".to_string(), RegionKind::Clearable, 500);
+        let _ = keep.add_entry("keepme".to_string(), 10);
+        w.add_region(keep);
+        let mut drop = Region::new("drop".to_string(), RegionKind::Clearable, 500);
+        let _ = drop.add_entry("dropme".to_string(), 10);
+        w.add_region(drop);
+        w.current_tokens = w.calculate_tokens();
+
+        let transform = EdgeTransform::Custom {
+            carry: vec!["keep".to_string()],
+            // scratch has content ⇒ kept; keep excluded (carry); ghost absent ⇒ filtered.
+            compact: vec![
+                "scratch".to_string(),
+                "keep".to_string(),
+                "ghost".to_string(),
+            ],
+            // drop cleared; keep protected by carry; missing region is a no-op.
+            clear: vec![
+                "drop".to_string(),
+                "keep".to_string(),
+                "missing".to_string(),
+            ],
+            compact_prompt: None,
+        };
+        let out = apply_edge_transform(&mut w, &transform);
+        assert_eq!(w.get_region("drop").unwrap().current_tokens, 0);
+        assert!(w.get_region("keep").unwrap().current_tokens > 0);
+        assert_eq!(out, vec!["scratch".to_string()]);
+    }
+
+    /// A window with a stage-specific `scratch` region carrying summarizable text.
+    fn scratch_window() -> ContextWindow {
+        let mut w = ContextWindow::new(1000);
+        let mut scratch = Region::new("scratch".to_string(), RegionKind::Clearable, 500);
+        let _ = scratch.add_entry("work to summarize".to_string(), 20);
+        w.add_region(scratch);
+        w.current_tokens = w.calculate_tokens();
+        w
+    }
+
+    fn run_dispatch_edge_compact(world: &mut World) {
+        let mut s = Schedule::default();
+        s.add_systems(dispatch_edge_compact);
+        s.run(world);
+    }
+
+    #[tokio::test]
+    async fn edge_compact_dispatches_to_the_compaction_lane() {
+        let (mut world, _rx) = build_world(InferencePools::new(InferencePoolConfig::new()));
+        let e = world
+            .spawn((
+                scratch_window(),
+                PendingEdgeCompact(vec!["scratch".to_string()]),
+                compaction_settings("cfg", "m"),
+                agent_state(),
+                ReadyToInfer,
+            ))
+            .id();
+        run_dispatch_edge_compact(&mut world);
+        assert!(world.get::<AwaitingCompaction>(e).is_some());
+        assert!(world.get::<ReadyToInfer>(e).is_none());
+        assert!(world.get::<PendingEdgeCompact>(e).is_none());
+    }
+
+    #[tokio::test]
+    async fn edge_compact_skips_non_active_agent() {
+        let (mut world, _rx) = build_world(InferencePools::new(InferencePoolConfig::new()));
+        let mut st = agent_state();
+        st.status = AgentStatus::Cancelled;
+        let e = world
+            .spawn((
+                scratch_window(),
+                PendingEdgeCompact(vec!["scratch".to_string()]),
+                compaction_settings("cfg", "m"),
+                st,
+                ReadyToInfer,
+            ))
+            .id();
+        run_dispatch_edge_compact(&mut world);
+        // Left untouched (marker preserved) for when it resumes.
+        assert!(world.get::<PendingEdgeCompact>(e).is_some());
+        assert!(world.get::<AwaitingCompaction>(e).is_none());
+    }
+
+    #[tokio::test]
+    async fn edge_compact_drops_marker_without_compaction_settings() {
+        let (mut world, _rx) = build_world(InferencePools::new(InferencePoolConfig::new()));
+        let e = world
+            .spawn((
+                scratch_window(),
+                PendingEdgeCompact(vec!["scratch".to_string()]),
+                agent_state(),
+                ReadyToInfer,
+            ))
+            .id();
+        run_dispatch_edge_compact(&mut world);
+        // No settings ⇒ can't summarize ⇒ drop the request, proceed to inference.
+        assert!(world.get::<PendingEdgeCompact>(e).is_none());
+        assert!(world.get::<ReadyToInfer>(e).is_some());
+        assert!(world.get::<AwaitingCompaction>(e).is_none());
+    }
+
+    #[tokio::test]
+    async fn edge_compact_drops_marker_when_nothing_to_summarize() {
+        let (mut world, _rx) = build_world(InferencePools::new(InferencePoolConfig::new()));
+        // A present-but-empty region + an absent region ⇒ no requests.
+        let mut w = ContextWindow::new(1000);
+        let mut empty = Region::new("empty".to_string(), RegionKind::Clearable, 500);
+        let _ = empty.add_entry(String::new(), 5);
+        w.add_region(empty);
+        let e = world
+            .spawn((
+                w,
+                PendingEdgeCompact(vec!["empty".to_string(), "ghost".to_string()]),
+                compaction_settings("cfg", "m"),
+                agent_state(),
+                ReadyToInfer,
+            ))
+            .id();
+        run_dispatch_edge_compact(&mut world);
+        assert!(world.get::<PendingEdgeCompact>(e).is_none());
+        assert!(world.get::<AwaitingCompaction>(e).is_none());
+    }
+
+    #[tokio::test]
+    async fn edge_compact_drops_marker_when_provider_missing() {
+        let (mut world, _rx) = build_world(InferencePools::new(InferencePoolConfig::new()));
+        let e = world
+            .spawn((
+                scratch_window(),
+                PendingEdgeCompact(vec!["scratch".to_string()]),
+                compaction_settings("ghost", "m"), // unregistered provider
+                agent_state(),
+                ReadyToInfer,
+            ))
+            .id();
+        run_dispatch_edge_compact(&mut world);
+        assert!(world.get::<PendingEdgeCompact>(e).is_none());
+        assert!(world.get::<AwaitingCompaction>(e).is_none());
+    }
+
+    #[tokio::test]
+    async fn edge_compact_drops_marker_when_pool_full() {
+        let mut cfg = InferencePoolConfig::new();
+        cfg.set_limit("m", 0);
+        let (mut world, _rx) = build_world(InferencePools::new(cfg));
+        let e = world
+            .spawn((
+                scratch_window(),
+                PendingEdgeCompact(vec!["scratch".to_string()]),
+                compaction_settings("cfg", "m"),
+                agent_state(),
+                ReadyToInfer,
+            ))
+            .id();
+        run_dispatch_edge_compact(&mut world);
+        assert!(world.get::<PendingEdgeCompact>(e).is_none());
+        assert!(world.get::<AwaitingCompaction>(e).is_none());
+    }
+
+    fn clear_edge(target: &str) -> leviath_core::blueprint::TransitionEdge {
+        leviath_core::blueprint::TransitionEdge {
+            target: target.to_string(),
+            condition: leviath_core::blueprint::TransitionCondition::Always,
+            hint: None,
+            transform: EdgeTransform::Clear,
+        }
+    }
+
+    #[test]
+    fn resolve_transition_applies_the_edge_clear_transform() {
+        let a = stage_named(
+            "a",
+            Some(vec![("go".to_string(), clear_edge("b"))]),
+            false,
+            None,
+        );
+        let b = stage_named("b", None, false, None);
+        let bp = blueprint(vec![a, b]);
+        let mut world = World::new();
+        let e = spawn_transition_agent(
+            &mut world,
+            bp,
+            vec![stage("m", vec![], None), stage("m", vec![], None)],
+            VisitCounts::default(),
+        );
+        // Seed content so the Clear transform has something to wipe.
+        world
+            .get_mut::<ContextWindow>(e)
+            .unwrap()
+            .add_to_region("conversation", "chatter".to_string(), 10)
+            .unwrap();
+        run_transition(&mut world);
+
+        assert_eq!(world.get::<StageCursor>(e).unwrap().index, 1); // entered b
+        assert_eq!(
+            world
+                .get::<ContextWindow>(e)
+                .unwrap()
+                .get_region("conversation")
+                .unwrap()
+                .current_tokens,
+            0 // Clear transform wiped it
+        );
+        assert!(world.get::<PendingEdgeCompact>(e).is_none()); // Clear needs no LLM
+    }
+
+    #[test]
+    fn resolve_transition_with_compact_transform_marks_pending_edge_compact() {
+        let mut edge = clear_edge("b");
+        edge.transform = EdgeTransform::Compact { prompt: None };
+        let a = stage_named("a", Some(vec![("go".to_string(), edge)]), false, None);
+        let b = stage_named("b", None, false, None);
+        let bp = blueprint(vec![a, b]);
+        let mut world = World::new();
+        let e = spawn_transition_agent(
+            &mut world,
+            bp,
+            vec![stage("m", vec![], None), stage("m", vec![], None)],
+            VisitCounts::default(),
+        );
+        world
+            .get_mut::<ContextWindow>(e)
+            .unwrap()
+            .add_to_region("conversation", "summarize me".to_string(), 10)
+            .unwrap();
+        run_transition(&mut world);
+
+        assert_eq!(world.get::<StageCursor>(e).unwrap().index, 1);
+        // The Compact transform queued the conversation region for the LLM lane.
+        let pending = world.get::<PendingEdgeCompact>(e).unwrap();
+        assert_eq!(pending.0, vec!["conversation".to_string()]);
+    }
+
     fn world_with_compaction_results() -> (World, mpsc::UnboundedSender<CompactionOutcome>) {
         let (tx, rx) = mpsc::unbounded_channel();
         let mut world = World::new();
@@ -4520,6 +4979,37 @@ mod tests {
         assert!(world.get::<ReadyToInfer>(e).is_some());
         assert!(world.get::<AwaitingTransitionResponse>(e).is_none());
         assert_eq!(world.get::<AgentState>(e).unwrap().current_stage, "b");
+    }
+
+    #[test]
+    fn collect_choice_applies_the_chosen_edge_transform() {
+        let (mut world, tx) = world_with_transition_results();
+        let bp = blueprint(vec![
+            stage_named("a", None, false, None),
+            stage_named("b", None, false, None),
+        ]);
+        let mut edge = plain_edge("b");
+        edge.transform = EdgeTransform::Compact { prompt: None };
+        let e = spawn_responding_agent(&mut world, bp, vec![si("m0"), si("m1")], vec![edge]);
+        world
+            .get_mut::<ContextWindow>(e)
+            .unwrap()
+            .add_to_region("conversation", "summarize me".to_string(), 10)
+            .unwrap();
+        tx.send(InferenceOutcome {
+            entity: e,
+            result: Ok(resp("b")),
+        })
+        .unwrap();
+
+        run_collect_transition(&mut world);
+
+        assert_eq!(world.get::<StageCursor>(e).unwrap().index, 1);
+        // The chosen edge's Compact transform queued the conversation region.
+        assert_eq!(
+            world.get::<PendingEdgeCompact>(e).unwrap().0,
+            vec!["conversation".to_string()]
+        );
     }
 
     #[test]
