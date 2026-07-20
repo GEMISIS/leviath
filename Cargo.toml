@@ -40,7 +40,8 @@ leviath-tools = { path = "crates/leviath-tools" }
 leviath-sys = { path = "crates/leviath-sys" }
 
 # External dependencies
-bevy_ecs = "0.15"
+bevy_ecs = { version = "0.15", features = ["multi_threaded"] }
+bevy_tasks = "0.15"
 tokio = { version = "1.41", features = ["full"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"

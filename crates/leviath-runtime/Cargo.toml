@@ -10,6 +10,7 @@ authors.workspace = true
 leviath-core = { workspace = true }
 leviath-providers = { workspace = true }
 bevy_ecs = { workspace = true }
+bevy_tasks = { workspace = true }
 tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

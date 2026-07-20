@@ -74,6 +74,11 @@ impl PipelineWorld {
         runs_dir: std::path::PathBuf,
         runtime: Handle,
     ) -> Self {
+        // The multi-threaded schedule executor and `Query::par_iter` fan out over
+        // the compute task pool; initialize it once (idempotent) so per-agent
+        // phases (e.g. request assembly in `dispatch_inference`) run in parallel.
+        bevy_tasks::ComputeTaskPool::get_or_init(bevy_tasks::TaskPool::default);
+
         let wake = Arc::new(Notify::new());
         let shutdown = Arc::new(Notify::new());
 
