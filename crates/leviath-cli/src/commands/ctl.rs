@@ -75,24 +75,21 @@ pub async fn cancel_run(client: &ControlClient, args: &CancelArgs) -> anyhow::Re
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::net::Ipv4Addr;
+    use leviath_runtime::control_socket::{ControlId, bind_control_listener, control_id};
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-    use tokio::net::TcpListener;
     use tokio::task::JoinHandle;
 
-    async fn fake_daemon(
-        port_file: std::path::PathBuf,
+    /// Bind a control listener at a fresh id under `dir` and serve one canned
+    /// response, returning the id clients connect to and the server task.
+    fn fake_daemon(
+        dir: &std::path::Path,
         response_line: &'static str,
-    ) -> JoinHandle<()> {
-        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
-        std::fs::write(
-            &port_file,
-            listener.local_addr().unwrap().port().to_string(),
-        )
-        .unwrap();
-        tokio::spawn(async move {
-            let (stream, _) = listener.accept().await.unwrap();
-            let (read_half, mut write_half) = stream.into_split();
+    ) -> (ControlId, JoinHandle<()>) {
+        let id = control_id(dir);
+        let mut listener = bind_control_listener(&id).unwrap();
+        let handle = tokio::spawn(async move {
+            let stream = listener.accept().await.unwrap();
+            let (read_half, mut write_half) = tokio::io::split(stream);
             let mut lines = BufReader::new(read_half).lines();
             let _request = lines.next_line().await.unwrap();
             write_half
@@ -100,7 +97,8 @@ mod tests {
                 .await
                 .unwrap();
             write_half.write_all(b"\n").await.unwrap();
-        })
+        });
+        (id, handle)
     }
 
     /// Run `op` against a fake daemon that replies `response_line`.
@@ -110,9 +108,8 @@ mod tests {
         Fut: std::future::Future<Output = anyhow::Result<()>>,
     {
         let dir = tempfile::tempdir().unwrap();
-        let port_file = dir.path().join("ctl.port");
-        let server = fake_daemon(port_file.clone(), response_line).await;
-        let result = op(ControlClient::new(&port_file)).await;
+        let (id, server) = fake_daemon(dir.path(), response_line);
+        let result = op(ControlClient::new(id)).await;
         server.await.unwrap();
         result
     }
@@ -189,7 +186,8 @@ mod tests {
 
     #[tokio::test]
     async fn not_reachable_is_an_error() {
-        let client = ControlClient::new("/nonexistent/leviath-ctl.port");
+        let dir = tempfile::tempdir().unwrap();
+        let client = ControlClient::new(control_id(&dir.path().join("no-daemon")));
         let err = cancel_run(
             &client,
             &CancelArgs {

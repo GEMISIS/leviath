@@ -22,11 +22,12 @@ use crate::daemon::spawn::build_agent;
 use crate::daemon::tool_service::CliToolService;
 use crate::tools::ToolRegistry;
 
-/// The daemon's control port file: `<leviath-home>/.leviath/control.port`
-/// (honoring `LEVIATH_HOME`). The daemon publishes its loopback port here and
-/// clients read it to connect. `None` if no home directory can be resolved.
-pub fn control_port_file() -> Option<std::path::PathBuf> {
-    leviath_home_dir().map(|home| home.join(".leviath").join("control.port"))
+/// The daemon's control-channel id, derived from `<leviath-home>/.leviath`
+/// (honoring `LEVIATH_HOME`): a Unix-socket path on Unix, a named-pipe name on
+/// Windows. `None` if no home directory can be resolved.
+pub fn control_address() -> Option<leviath_runtime::control_socket::ControlId> {
+    leviath_home_dir()
+        .map(|home| leviath_runtime::control_socket::control_id(&home.join(".leviath")))
 }
 
 /// Build the daemon's [`WorldHost`], doing the async startup work: build the
@@ -124,12 +125,19 @@ mod tests {
     }
 
     #[test]
-    fn control_port_file_uses_leviath_home() {
-        temp_env::with_var("LEVIATH_HOME", Some("/tmp/leviath-home-x"), || {
-            let path = control_port_file().unwrap();
-            assert!(path.ends_with(".leviath/control.port"));
-            assert!(path.starts_with("/tmp/leviath-home-x"));
-        });
+    fn control_address_is_derived_from_leviath_home() {
+        let a = temp_env::with_var("LEVIATH_HOME", Some("/tmp/leviath-home-a"), control_address)
+            .unwrap();
+        let b = temp_env::with_var("LEVIATH_HOME", Some("/tmp/leviath-home-b"), control_address)
+            .unwrap();
+        // Different homes resolve to different control ids on every platform.
+        assert_ne!(a, b);
+        // On Unix the id is the socket path under the home's `.leviath` dir.
+        #[cfg(unix)]
+        {
+            assert!(a.ends_with(".leviath/control.sock"));
+            assert!(a.starts_with("/tmp/leviath-home-a"));
+        }
     }
 
     #[tokio::test]
