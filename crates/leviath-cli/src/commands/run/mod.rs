@@ -31,4 +31,16 @@ pub struct RunArgs {
     /// Model override (`provider/model` or a bare model name).
     #[arg(short, long)]
     pub model: Option<String>,
+
+    /// Approve every tool call without prompting.
+    #[arg(long)]
+    pub yolo: bool,
+
+    /// Allow a tool outright (repeatable).
+    #[arg(long)]
+    pub allow: Vec<String>,
+
+    /// Override the blueprint's max sub-agent tree depth.
+    #[arg(long)]
+    pub max_depth: Option<usize>,
 }

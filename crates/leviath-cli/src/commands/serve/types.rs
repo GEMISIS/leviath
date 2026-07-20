@@ -150,17 +150,13 @@ pub(super) struct SpawnAgentReq {
     pub(super) blueprint: String,
     pub(super) task: String,
     pub(super) model: Option<String>,
-    // Accepted for API compatibility but not yet forwarded to the daemon's
-    // `SpawnArgs` — the agent runs under its blueprint's own tool policy. A
-    // safe-side gap (more approval prompting, never less); wiring these through
-    // is a follow-up.
-    #[allow(dead_code)]
+    /// Override the blueprint's max sub-agent tree depth.
     pub(super) max_depth: Option<usize>,
+    /// Approve every tool call for this run.
     #[serde(default)]
-    #[allow(dead_code)]
     pub(super) yolo: bool,
+    /// Tools to allow outright for this run.
     #[serde(default)]
-    #[allow(dead_code)]
     pub(super) allow: Vec<String>,
     pub(super) workdir: Option<String>,
     #[serde(default)]

@@ -48,6 +48,15 @@ pub struct SpawnArgs {
     /// Webhook to POST on completion/error (surfaced in the run metadata).
     #[serde(default)]
     pub callback_url: Option<String>,
+    /// Approve every tool call for this run (the `--yolo` launch override).
+    #[serde(default)]
+    pub yolo: bool,
+    /// Tools to allow outright for this run (the `--allow` launch override).
+    #[serde(default)]
+    pub allow: Vec<String>,
+    /// Override the blueprint's max sub-agent tree depth.
+    #[serde(default)]
+    pub max_depth: Option<usize>,
 }
 
 /// The daemon-installed function that turns [`SpawnArgs`] into a live agent:

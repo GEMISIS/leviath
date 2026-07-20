@@ -148,6 +148,7 @@ fn build_tool_state(
     entry_stage: &str,
     entry_index: usize,
     stage_perms_by_index: Vec<HashMap<String, String>>,
+    launch_overrides: HashMap<String, crate::config::ToolPolicy>,
 ) -> Arc<AgentToolState> {
     let entry_perms = stage_perms_by_index
         .get(entry_index)
@@ -157,7 +158,7 @@ fn build_tool_state(
         builtins,
         mcp,
         builtin_names,
-        launch_overrides: Arc::new(HashMap::new()),
+        launch_overrides: Arc::new(launch_overrides),
         session_allows: Arc::new(Mutex::new(HashSet::new())),
         stage_perms: Arc::new(StdMutex::new(entry_perms)),
         stage_perms_by_index: Arc::new(stage_perms_by_index),
@@ -184,11 +185,15 @@ pub fn build_agent(
     // 1. Load the blueprint (the client resolves the manifest path).
     let content = std::fs::read_to_string(&args.blueprint_path)
         .map_err(|e| format!("read manifest '{}': {e}", args.blueprint_path))?;
-    let blueprint = leviath_core::manifest::parse_manifest(&content)
+    let mut blueprint = leviath_core::manifest::parse_manifest(&content)
         .map_err(|e| format!("parse manifest: {e}"))?;
     blueprint
         .validate()
         .map_err(|e| format!("invalid blueprint: {e}"))?;
+    // A request-level `--max-depth` overrides the blueprint's sub-agent depth cap.
+    if let Some(md) = args.max_depth {
+        blueprint.max_child_depth = Some(md);
+    }
 
     // 2. Per-agent built-in tools (over the agent's workdir).
     let builtins = Arc::new(leviath_tools::BuiltinTools::new(
@@ -280,6 +285,15 @@ pub fn build_agent(
     }
 
     // 7. Register the per-agent tool state.
+    // Launch overrides: `--yolo` allows every tool (`*` wildcard); `--allow X`
+    // allows tool `X` outright.
+    let mut launch_overrides: HashMap<String, crate::config::ToolPolicy> = HashMap::new();
+    if args.yolo {
+        launch_overrides.insert("*".to_string(), crate::config::ToolPolicy::Allow);
+    }
+    for tool in &args.allow {
+        launch_overrides.insert(tool.clone(), crate::config::ToolPolicy::Allow);
+    }
     let state = build_tool_state(
         builtins,
         builtin_names,
@@ -290,6 +304,7 @@ pub fn build_agent(
         &entry_stage,
         entry_index,
         stage_perms_by_index,
+        launch_overrides,
     );
     tool_service.register(entity, state);
 
@@ -493,6 +508,9 @@ mod tests {
             workdir: std::env::temp_dir().to_string_lossy().to_string(),
             metadata: HashMap::new(),
             callback_url: None,
+            yolo: false,
+            allow: Vec::new(),
+            max_depth: None,
         }
     }
 
@@ -538,6 +556,56 @@ mod tests {
         .await;
         assert_eq!(out[0].0, "c1");
         assert!(!out[0].1.contains("no tool state"));
+    }
+
+    #[tokio::test]
+    async fn build_agent_applies_yolo_allow_and_max_depth() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = dir.path().join("agent.leviath");
+        std::fs::write(&manifest, coder_manifest()).unwrap();
+
+        let (mut world, cli) = test_world();
+        let hub = InteractionHub::new();
+        let mcp = Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new()));
+        // Config denies read_file; the launch overrides must win.
+        let config = Config {
+            tool_permissions: HashMap::from([(
+                "read_file".to_string(),
+                crate::config::ToolPolicy::Deny,
+            )]),
+            ..Default::default()
+        };
+        let mut args = spawn_args(&manifest.to_string_lossy());
+        args.yolo = true;
+        args.allow = vec!["read_file".to_string()];
+        args.max_depth = Some(7);
+
+        let entity = build_agent(
+            &mut world,
+            cli.as_ref(),
+            &config,
+            mcp,
+            &[],
+            &hub,
+            &args,
+            100,
+        )
+        .expect("spawn succeeds");
+        assert_eq!(world.agent_status(entity), Some(AgentStatus::Active));
+
+        // `--yolo` overrides the config deny: read_file executes (an error reading
+        // a missing file) rather than being `[denied]`.
+        let out = leviath_runtime::pipeline::ToolService::exec_for(
+            cli.as_ref(),
+            entity,
+            vec![leviath_providers::ToolCall {
+                id: "c1".to_string(),
+                name: "read_file".to_string(),
+                arguments: serde_json::json!({"path": "/no/such/file"}),
+            }],
+        )()
+        .await;
+        assert!(!out[0].1.contains("[denied]"));
     }
 
     #[tokio::test]
