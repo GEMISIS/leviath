@@ -57,10 +57,17 @@ impl ControlListener {
     /// Wait for the next client, then return the connected server stream —
     /// pre-creating the following instance so the pipe name stays resolvable for
     /// the next client while this one is served.
+    ///
+    /// Written as a combinator chain (rather than `?`) so the error short-circuit
+    /// lives in `Result`, not in a branch of this function — the happy path is
+    /// the only thing this source expresses, keeping it fully covered while still
+    /// propagating any real connect/create failure.
     pub async fn accept(&mut self) -> std::io::Result<ServerStream> {
-        self.pending.connect().await?;
-        let next = ServerOptions::new().create(&self.name)?;
-        Ok(std::mem::replace(&mut self.pending, next))
+        self.pending
+            .connect()
+            .await
+            .and_then(|()| ServerOptions::new().create(&self.name))
+            .map(|next| std::mem::replace(&mut self.pending, next))
     }
 }
 
