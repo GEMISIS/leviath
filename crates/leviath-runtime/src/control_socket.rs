@@ -1,6 +1,13 @@
-//! The local control transport: a Unix-domain socket that carries newline-
+//! The local control transport: a loopback TCP socket that carries newline-
 //! delimited JSON [`ControlRequest`]/[`ControlResponse`] frames between clients
 //! (the TUI/CLI) and the world host.
+//!
+//! A loopback socket (rather than a Unix-domain socket) is used so the transport
+//! is one code path on every platform — `tokio` has no async Unix-domain socket
+//! on Windows, whereas TCP is uniform. The daemon binds an ephemeral
+//! `127.0.0.1` port and publishes it to a small *port file*; clients read the
+//! port from that file to connect. Binding to loopback keeps the channel local
+//! to the machine.
 //!
 //! Each accepted connection is served concurrently. A request is translated into
 //! a [`ControlOp`] (with a fresh oneshot), forwarded to the host's control
@@ -9,11 +16,11 @@
 //! management channel (the opt-in HTTP API that `lev serve` toggles is a separate
 //! surface).
 
-#![cfg(unix)]
+use std::net::{Ipv4Addr, SocketAddr};
 
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::net::UnixStream;
+use tokio::net::TcpStream;
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::oneshot;
 
@@ -209,10 +216,10 @@ async fn dispatch(req: ControlRequest, op_tx: &UnboundedSender<ControlOp>) -> Co
 /// client hangs up or on an I/O error. A malformed request line gets an `Error`
 /// response and the connection continues.
 ///
-/// The accept loop that produces the `UnixStream`s (and owns the socket file's
+/// The accept loop that produces the `TcpStream`s (and owns the port file's
 /// lifecycle) lives with the daemon; this is the reusable per-connection half.
 pub async fn handle_connection(
-    stream: UnixStream,
+    stream: TcpStream,
     op_tx: UnboundedSender<ControlOp>,
 ) -> std::io::Result<()> {
     let (read_half, mut write_half) = stream.into_split();
@@ -237,53 +244,84 @@ pub async fn handle_connection(
     Ok(())
 }
 
-/// Bind the daemon's control socket at `path`, enforcing a single instance.
-///
-/// If a socket file already exists, probe it: a live daemon answering a connect
-/// means one is already running (returns [`std::io::ErrorKind::AddrInUse`]); a
-/// refused/failed connect means the file is **stale** (a crashed daemon) and is
-/// removed before binding. The parent directory is created if needed.
-pub fn bind_control_socket(path: &std::path::Path) -> std::io::Result<tokio::net::UnixListener> {
-    if path.exists() {
-        match std::os::unix::net::UnixStream::connect(path) {
-            Ok(_) => {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::AddrInUse,
-                    "a leviath daemon is already running on this control socket",
-                ));
-            }
-            // Nothing is listening — the socket file is stale; clear it. A failed
-            // remove just means the bind below reports the problem instead.
-            Err(_) => {
-                let _ = std::fs::remove_file(path);
-            }
-        }
-    }
-    // A control-socket path always has a parent directory.
-    let parent = path.parent().expect("control socket path has a parent");
-    std::fs::create_dir_all(parent)?;
-    tokio::net::UnixListener::bind(path)
+/// Read a control port from a port file, returning `None` if the file is
+/// missing or does not contain a valid port number.
+fn read_port_file(port_file: &std::path::Path) -> Option<u16> {
+    std::fs::read_to_string(port_file)
+        .ok()
+        .and_then(|s| s.trim().parse::<u16>().ok())
 }
 
-/// The client half of the control transport: connects to the daemon's control
-/// socket, sends one [`ControlRequest`], and reads back its [`ControlResponse`].
-/// A fresh connection per request keeps it simple and stateless.
+/// True if a daemon is currently answering on the port published in
+/// `port_file` (a `127.0.0.1:<port>` connect succeeds). `false` when the file is
+/// missing, holds no valid port, or the port refuses connections (stale).
+pub fn is_daemon_running(port_file: &std::path::Path) -> bool {
+    read_port_file(port_file)
+        .is_some_and(|port| std::net::TcpStream::connect((Ipv4Addr::LOCALHOST, port)).is_ok())
+}
+
+/// Enforce a single daemon instance against a published `port_file`.
+///
+/// If `port_file` already names a live daemon ([`is_daemon_running`]), this
+/// returns [`std::io::ErrorKind::AddrInUse`]. Otherwise the file is **stale** (a
+/// crashed daemon, or none) and this returns `Ok(())` — the caller is free to
+/// bind.
+///
+/// The caller then binds an ephemeral loopback port and hands it to
+/// [`publish_port`]. Binding lives with the caller (the binary) because a raw
+/// `TcpListener::bind` cannot fail deterministically under test.
+pub fn check_single_instance(port_file: &std::path::Path) -> std::io::Result<()> {
+    if is_daemon_running(port_file) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::AddrInUse,
+            "a leviath daemon is already running on this control port",
+        ));
+    }
+    Ok(())
+}
+
+/// Publish the daemon's bound `port` to `port_file`, creating the parent
+/// directory if needed, so clients can find it.
+pub fn publish_port(port_file: &std::path::Path, port: u16) -> std::io::Result<()> {
+    // A port-file path always has a parent directory.
+    let parent = port_file.parent().expect("port file path has a parent");
+    std::fs::create_dir_all(parent)?;
+    std::fs::write(port_file, port.to_string())
+}
+
+/// The client half of the control transport: reads the daemon's port from a
+/// port file, connects to `127.0.0.1:<port>`, sends one [`ControlRequest`], and
+/// reads back its [`ControlResponse`]. A fresh connection per request keeps it
+/// simple and stateless.
 pub struct ControlClient {
-    socket_path: std::path::PathBuf,
+    port_file: std::path::PathBuf,
 }
 
 impl ControlClient {
-    /// A client for the control socket at `socket_path`.
-    pub fn new(socket_path: impl Into<std::path::PathBuf>) -> Self {
+    /// A client that resolves the daemon's port from the port file at
+    /// `port_file`.
+    pub fn new(port_file: impl Into<std::path::PathBuf>) -> Self {
         Self {
-            socket_path: socket_path.into(),
+            port_file: port_file.into(),
         }
     }
 
-    /// Send one request and await its response. Errors if the socket can't be
+    /// Resolve the daemon's loopback address from the port file, erroring (as
+    /// "not connected") when the file is missing or holds no valid port.
+    fn addr(&self) -> std::io::Result<SocketAddr> {
+        let port = read_port_file(&self.port_file).ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::NotConnected,
+                "no leviath daemon control port is published",
+            )
+        })?;
+        Ok(SocketAddr::from((Ipv4Addr::LOCALHOST, port)))
+    }
+
+    /// Send one request and await its response. Errors if the daemon can't be
     /// reached, the connection closes before a reply, or the reply doesn't parse.
     pub async fn request(&self, req: &ControlRequest) -> std::io::Result<ControlResponse> {
-        let stream = UnixStream::connect(&self.socket_path).await?;
+        let stream = TcpStream::connect(self.addr()?).await?;
         let (read_half, mut write_half) = stream.into_split();
         let mut line = serde_json::to_string(req).expect("ControlRequest serializes");
         line.push('\n');
@@ -324,8 +362,17 @@ impl ControlClient {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tokio::net::UnixListener;
+    use tokio::net::TcpListener;
     use tokio::sync::mpsc;
+
+    /// A connected loopback TCP pair (client, server) — the TCP analogue of
+    /// `UnixStream::pair`, used to drive `handle_connection` directly.
+    async fn tcp_pair() -> (TcpStream, TcpStream) {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (client, accepted) = tokio::join!(TcpStream::connect(addr), listener.accept());
+        (client.unwrap(), accepted.unwrap().0)
+    }
 
     /// A fake host: drains ControlOps and replies with scripted values.
     fn spawn_fake_host(mut rx: mpsc::UnboundedReceiver<ControlOp>) {
@@ -368,7 +415,7 @@ mod tests {
     async fn round_trip(req: &ControlRequest) -> ControlResponse {
         let (op_tx, op_rx) = mpsc::unbounded_channel();
         spawn_fake_host(op_rx);
-        let (client, server) = UnixStream::pair().unwrap();
+        let (client, server) = tcp_pair().await;
         tokio::spawn(async move {
             let _ = handle_connection(server, op_tx).await;
         });
@@ -472,7 +519,7 @@ mod tests {
     async fn malformed_request_gets_error_and_connection_continues() {
         let (op_tx, op_rx) = mpsc::unbounded_channel();
         spawn_fake_host(op_rx);
-        let (client, server) = UnixStream::pair().unwrap();
+        let (client, server) = tcp_pair().await;
         let handle = tokio::spawn(async move { handle_connection(server, op_tx).await });
 
         let (read_half, mut write_half) = client.into_split();
@@ -505,13 +552,18 @@ mod tests {
         handle.await.unwrap().unwrap();
     }
 
-    /// Bind a listener at a temp path, accept exactly `n` connections and serve
-    /// each with `handle_connection`, returning the socket path (and the tempdir
-    /// keeping it alive).
-    fn spawn_server(n: usize) -> (tempfile::TempDir, std::path::PathBuf) {
+    /// Bind a loopback listener, publish its port to a temp port file, accept
+    /// exactly `n` connections and serve each with `handle_connection`, returning
+    /// the port-file path (and the tempdir keeping it alive).
+    async fn spawn_server(n: usize) -> (tempfile::TempDir, std::path::PathBuf) {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("ctl.sock");
-        let listener = UnixListener::bind(&path).unwrap();
+        let port_file = dir.path().join("ctl.port");
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        std::fs::write(
+            &port_file,
+            listener.local_addr().unwrap().port().to_string(),
+        )
+        .unwrap();
         let (op_tx, op_rx) = mpsc::unbounded_channel();
         spawn_fake_host(op_rx);
         tokio::spawn(async move {
@@ -523,12 +575,12 @@ mod tests {
                 });
             }
         });
-        (dir, path)
+        (dir, port_file)
     }
 
     #[tokio::test]
     async fn client_round_trips_status_and_list() {
-        let (_dir, path) = spawn_server(3);
+        let (_dir, path) = spawn_server(3).await;
         let client = ControlClient::new(path);
 
         let spawned = client
@@ -560,69 +612,114 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn client_errors_when_socket_absent() {
-        let client = ControlClient::new("/nonexistent/leviath-ctl.sock");
+    async fn client_errors_when_port_file_absent() {
+        let client = ControlClient::new("/nonexistent/leviath-ctl.port");
         assert!(client.list().await.is_err());
     }
 
     #[tokio::test]
-    async fn bind_creates_socket_in_missing_dir() {
+    async fn client_errors_when_port_file_holds_no_valid_port() {
+        let dir = tempfile::tempdir().unwrap();
+        let port_file = dir.path().join("ctl.port");
+        std::fs::write(&port_file, b"not-a-port").unwrap();
+        let err = ControlClient::new(&port_file).list().await.unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::NotConnected);
+    }
+
+    #[tokio::test]
+    async fn client_errors_when_port_is_dead() {
+        // A valid port that nothing listens on: `addr()` resolves, but the TCP
+        // connect is refused (exercising the connect `?` after `addr`).
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let dead_port = listener.local_addr().unwrap().port();
+        drop(listener); // free the port so connects are refused
+        let dir = tempfile::tempdir().unwrap();
+        let port_file = dir.path().join("ctl.port");
+        std::fs::write(&port_file, dead_port.to_string()).unwrap();
+        assert!(ControlClient::new(&port_file).list().await.is_err());
+    }
+
+    #[test]
+    fn publish_port_creates_port_file_in_missing_dir() {
         let dir = tempfile::tempdir().unwrap();
         // A nested path whose parent doesn't exist yet.
-        let path = dir.path().join("nested").join("control.sock");
-        let listener = bind_control_socket(&path).unwrap();
-        assert!(path.exists());
-        drop(listener);
+        let path = dir.path().join("nested").join("control.port");
+        publish_port(&path, 54321).unwrap();
+        assert_eq!(read_port_file(&path), Some(54321));
     }
 
-    #[tokio::test]
-    async fn bind_removes_stale_socket_file() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("control.sock");
-        // A leftover regular file where the socket goes: nothing is listening, so
-        // it's stale and must be cleared.
-        std::fs::write(&path, b"stale").unwrap();
-        let listener = bind_control_socket(&path).unwrap();
-        assert!(path.exists());
-        drop(listener);
-    }
-
-    #[tokio::test]
-    async fn bind_errors_when_parent_cannot_be_created() {
+    #[test]
+    fn publish_port_errors_when_parent_cannot_be_created() {
         let dir = tempfile::tempdir().unwrap();
         // A regular file where a parent directory would need to be created.
         let blocker = dir.path().join("blocker");
         std::fs::write(&blocker, b"x").unwrap();
-        let path = blocker.join("control.sock"); // parent "blocker" is a file
-        assert!(bind_control_socket(&path).is_err());
+        let path = blocker.join("control.port"); // parent "blocker" is a file
+        assert!(publish_port(&path, 1234).is_err());
+    }
+
+    #[test]
+    fn publish_port_errors_when_target_is_a_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("control.port");
+        std::fs::create_dir(&path).unwrap(); // the write target is a directory
+        assert!(publish_port(&path, 1234).is_err());
+    }
+
+    #[test]
+    fn single_instance_ok_when_no_port_file() {
+        let dir = tempfile::tempdir().unwrap();
+        // Absent file → free to bind.
+        check_single_instance(&dir.path().join("control.port")).unwrap();
     }
 
     #[tokio::test]
-    async fn bind_rejects_when_daemon_already_running() {
+    async fn single_instance_ignores_stale_port_file() {
+        // A port file pointing at a dead port is stale → free to bind.
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let dead_port = listener.local_addr().unwrap().port();
+        drop(listener);
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("control.sock");
-        let _live = bind_control_socket(&path).unwrap(); // first daemon holds it
-        let err = bind_control_socket(&path).unwrap_err();
+        let path = dir.path().join("control.port");
+        std::fs::write(&path, dead_port.to_string()).unwrap();
+        check_single_instance(&path).unwrap();
+    }
+
+    #[tokio::test]
+    async fn single_instance_rejects_when_daemon_already_running() {
+        // A live listener on the published port → already running.
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("control.port");
+        std::fs::write(&path, port.to_string()).unwrap();
+        let err = check_single_instance(&path).unwrap_err();
         assert_eq!(err.kind(), std::io::ErrorKind::AddrInUse);
     }
 
-    /// A server that writes `bytes` verbatim as the "response" then closes.
-    fn spawn_raw_server(bytes: &'static [u8]) -> (tempfile::TempDir, std::path::PathBuf) {
+    /// A server that writes `bytes` verbatim as the "response" then closes,
+    /// publishing its port to a temp port file.
+    async fn spawn_raw_server(bytes: &'static [u8]) -> (tempfile::TempDir, std::path::PathBuf) {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("ctl.sock");
-        let listener = UnixListener::bind(&path).unwrap();
+        let port_file = dir.path().join("ctl.port");
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        std::fs::write(
+            &port_file,
+            listener.local_addr().unwrap().port().to_string(),
+        )
+        .unwrap();
         tokio::spawn(async move {
             let (stream, _) = listener.accept().await.unwrap();
             let (_r, mut w) = stream.into_split();
             let _ = w.write_all(bytes).await;
         });
-        (dir, path)
+        (dir, port_file)
     }
 
     #[tokio::test]
     async fn client_errors_on_unparseable_response() {
         // Valid UTF-8 but not a ControlResponse → InvalidData.
-        let (_dir, path) = spawn_raw_server(b"not json\n");
+        let (_dir, path) = spawn_raw_server(b"not json\n").await;
         let err = ControlClient::new(&path).list().await.unwrap_err();
         assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
     }
@@ -630,7 +727,7 @@ mod tests {
     #[tokio::test]
     async fn client_errors_on_invalid_utf8_response() {
         // Invalid UTF-8 makes the response line reader itself error.
-        let (_dir, path) = spawn_raw_server(&[0xff, 0xfe, b'\n']);
+        let (_dir, path) = spawn_raw_server(&[0xff, 0xfe, b'\n']).await;
         assert!(ControlClient::new(&path).list().await.is_err());
     }
 
@@ -638,14 +735,25 @@ mod tests {
     async fn client_errors_on_closed_connection_without_reply() {
         // A server that accepts then immediately drops the connection (no reply).
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("ctl.sock");
-        let listener = UnixListener::bind(&path).unwrap();
+        let port_file = dir.path().join("ctl.port");
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        std::fs::write(
+            &port_file,
+            listener.local_addr().unwrap().port().to_string(),
+        )
+        .unwrap();
         tokio::spawn(async move {
             let (stream, _) = listener.accept().await.unwrap();
-            drop(stream); // hang up before responding
+            // Drain the request line first, so dropping the stream is a clean FIN
+            // (unread data would instead make the OS send an RST): the client then
+            // observes a plain EOF before any reply, not a connection-reset error.
+            let (read_half, _write_half) = stream.into_split();
+            let mut lines = BufReader::new(read_half).lines();
+            let _ = lines.next_line().await;
+            // hang up before responding
         });
 
-        let client = ControlClient::new(&path);
+        let client = ControlClient::new(&port_file);
         let err = client.list().await.unwrap_err();
         assert_eq!(err.kind(), std::io::ErrorKind::UnexpectedEof);
     }
@@ -654,7 +762,7 @@ mod tests {
     async fn invalid_utf8_line_ends_connection_with_error() {
         let (op_tx, op_rx) = mpsc::unbounded_channel();
         spawn_fake_host(op_rx);
-        let (client, server) = UnixStream::pair().unwrap();
+        let (client, server) = tcp_pair().await;
         let handle = tokio::spawn(async move { handle_connection(server, op_tx).await });
 
         let (_read_half, mut write_half) = client.into_split();

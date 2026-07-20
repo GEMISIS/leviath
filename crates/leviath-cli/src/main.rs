@@ -111,13 +111,16 @@ async fn real_run(args: commands::run::RunArgs) -> anyhow::Result<()> {
     leviath_cli::daemon::client::send_spawn(&control_client()?, spawn_args).await
 }
 
-/// Ensure a daemon is listening on the control socket, auto-starting a detached
+/// Ensure a daemon is listening on the control port, auto-starting a detached
 /// `lev daemon` process if none is. Best-effort with a bounded wait for the
-/// socket to appear.
+/// port to become reachable. The reachability check is the tested
+/// [`leviath_runtime::control_socket::is_daemon_running`]; only the real
+/// subprocess spawn + poll live here.
 async fn ensure_daemon_running() -> anyhow::Result<()> {
-    let socket = leviath_cli::daemon::setup::control_socket_path()
-        .ok_or_else(|| anyhow::anyhow!("cannot resolve a home directory for the control socket"))?;
-    if std::os::unix::net::UnixStream::connect(&socket).is_ok() {
+    use leviath_runtime::control_socket::is_daemon_running;
+    let port_file = leviath_cli::daemon::setup::control_port_file()
+        .ok_or_else(|| anyhow::anyhow!("cannot resolve a home directory for the control port"))?;
+    if is_daemon_running(&port_file) {
         return Ok(()); // already running
     }
     let exe = std::env::current_exe()?;
@@ -129,7 +132,7 @@ async fn ensure_daemon_running() -> anyhow::Result<()> {
     leviath_sys::process::configure_detached(&mut cmd);
     cmd.spawn()?;
     for _ in 0..100 {
-        if std::os::unix::net::UnixStream::connect(&socket).is_ok() {
+        if is_daemon_running(&port_file) {
             return Ok(());
         }
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
@@ -143,19 +146,28 @@ async fn ensure_daemon_running() -> anyhow::Result<()> {
 /// unit-tested. The accept loop + real socket/signal I/O are the un-unit-testable
 /// slivers, kept here in the (coverage-unmeasured) binary.
 async fn real_daemon(args: commands::daemon::DaemonArgs) -> anyhow::Result<()> {
-    use leviath_cli::daemon::setup::{control_socket_path, setup_daemon_host};
-    use leviath_runtime::control_socket::{bind_control_socket, handle_connection};
+    use leviath_cli::daemon::setup::{control_port_file, setup_daemon_host};
+    use leviath_runtime::control_socket::{check_single_instance, handle_connection, publish_port};
 
     let config = leviath_cli::config::Config::load().unwrap_or_default();
     let runs_dir = leviath_cli::runstate::runs_dir();
-    let socket = match args.socket {
+    let port_file = match args.socket {
         Some(ref s) => std::path::PathBuf::from(s),
-        None => control_socket_path().ok_or_else(|| {
-            anyhow::anyhow!("cannot resolve a home directory for the control socket")
+        None => control_port_file().ok_or_else(|| {
+            anyhow::anyhow!("cannot resolve a home directory for the control port")
         })?,
     };
 
-    let listener = bind_control_socket(&socket)?;
+    // Refuse to start a second daemon on a live control port, then bind an
+    // ephemeral loopback port and publish it. The raw socket binding is kept here
+    // (the coverage-excluded bin) because it cannot fail deterministically under
+    // test; the single-instance check and port publishing are the tested cores.
+    check_single_instance(&port_file)?;
+    let std_listener = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))?;
+    std_listener.set_nonblocking(true)?;
+    let addr = std_listener.local_addr()?;
+    publish_port(&port_file, addr.port())?;
+    let listener = tokio::net::TcpListener::from_std(std_listener)?;
     let mut host = setup_daemon_host(config, runs_dir, tokio::runtime::Handle::current()).await;
 
     // Accept connections and feed control ops to the host.
@@ -176,19 +188,21 @@ async fn real_daemon(args: commands::daemon::DaemonArgs) -> anyhow::Result<()> {
         shutdown.notify_one();
     });
 
-    info!(socket = %socket.display(), "leviath daemon listening");
-    println!("leviath daemon listening on {}", socket.display());
+    info!(%addr, "leviath daemon listening");
+    println!("leviath daemon listening on {addr}");
     host.serve(op_rx).await;
 
-    let _ = std::fs::remove_file(&socket);
+    let _ = std::fs::remove_file(&port_file);
     Ok(())
 }
 
-/// Build a control client at the resolved daemon socket path.
+/// Build a control client pointed at the daemon's published control port.
 fn control_client() -> anyhow::Result<leviath_runtime::control_socket::ControlClient> {
-    let socket = leviath_cli::daemon::setup::control_socket_path()
-        .ok_or_else(|| anyhow::anyhow!("cannot resolve a home directory for the control socket"))?;
-    Ok(leviath_runtime::control_socket::ControlClient::new(socket))
+    let port_file = leviath_cli::daemon::setup::control_port_file()
+        .ok_or_else(|| anyhow::anyhow!("cannot resolve a home directory for the control port"))?;
+    Ok(leviath_runtime::control_socket::ControlClient::new(
+        port_file,
+    ))
 }
 
 /// Real `lev dash`: supplies the real crossterm terminal backend and event

@@ -51,8 +51,9 @@ pub async fn send_spawn(client: &ControlClient, spawn_args: SpawnArgs) -> anyhow
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::net::Ipv4Addr;
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-    use tokio::net::UnixListener;
+    use tokio::net::TcpListener;
     use tokio::task::JoinHandle;
 
     fn write_manifest(dir: &std::path::Path) -> std::path::PathBuf {
@@ -94,8 +95,16 @@ mod tests {
         assert!(resolve_spawn_args("/no/such/agent", "t", None, "/work").is_err());
     }
 
-    fn fake_daemon(socket: std::path::PathBuf, response_line: &'static str) -> JoinHandle<()> {
-        let listener = UnixListener::bind(&socket).unwrap();
+    async fn fake_daemon(
+        port_file: std::path::PathBuf,
+        response_line: &'static str,
+    ) -> JoinHandle<()> {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        std::fs::write(
+            &port_file,
+            listener.local_addr().unwrap().port().to_string(),
+        )
+        .unwrap();
         tokio::spawn(async move {
             let (stream, _) = listener.accept().await.unwrap();
             let (read_half, mut write_half) = stream.into_split();
@@ -111,9 +120,9 @@ mod tests {
 
     async fn send(response_line: &'static str) -> anyhow::Result<()> {
         let dir = tempfile::tempdir().unwrap();
-        let socket = dir.path().join("ctl.sock");
-        let server = fake_daemon(socket.clone(), response_line);
-        let result = send_spawn(&ControlClient::new(&socket), SpawnArgs::default()).await;
+        let port_file = dir.path().join("ctl.port");
+        let server = fake_daemon(port_file.clone(), response_line).await;
+        let result = send_spawn(&ControlClient::new(&port_file), SpawnArgs::default()).await;
         server.await.unwrap();
         result
     }
@@ -144,7 +153,7 @@ mod tests {
     #[tokio::test]
     async fn send_spawn_errors_when_daemon_absent() {
         let err = send_spawn(
-            &ControlClient::new("/nonexistent/leviath-ctl.sock"),
+            &ControlClient::new("/nonexistent/leviath-ctl.port"),
             SpawnArgs::default(),
         )
         .await

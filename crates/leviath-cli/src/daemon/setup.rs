@@ -22,10 +22,11 @@ use crate::daemon::spawn::build_agent;
 use crate::daemon::tool_service::CliToolService;
 use crate::tools::ToolRegistry;
 
-/// The daemon's control-socket path: `<leviath-home>/.leviath/control.sock`
-/// (honoring `LEVIATH_HOME`). `None` if no home directory can be resolved.
-pub fn control_socket_path() -> Option<std::path::PathBuf> {
-    leviath_home_dir().map(|home| home.join(".leviath").join("control.sock"))
+/// The daemon's control port file: `<leviath-home>/.leviath/control.port`
+/// (honoring `LEVIATH_HOME`). The daemon publishes its loopback port here and
+/// clients read it to connect. `None` if no home directory can be resolved.
+pub fn control_port_file() -> Option<std::path::PathBuf> {
+    leviath_home_dir().map(|home| home.join(".leviath").join("control.port"))
 }
 
 /// Build the daemon's [`WorldHost`], doing the async startup work: build the
@@ -123,10 +124,10 @@ mod tests {
     }
 
     #[test]
-    fn control_socket_path_uses_leviath_home() {
+    fn control_port_file_uses_leviath_home() {
         temp_env::with_var("LEVIATH_HOME", Some("/tmp/leviath-home-x"), || {
-            let path = control_socket_path().unwrap();
-            assert!(path.ends_with(".leviath/control.sock"));
+            let path = control_port_file().unwrap();
+            assert!(path.ends_with(".leviath/control.port"));
             assert!(path.starts_with("/tmp/leviath-home-x"));
         });
     }
