@@ -161,35 +161,43 @@ pub fn dispatch_inference(
     >,
     stage: Res<InferenceStage>,
     providers: Res<Providers>,
-    mut commands: Commands,
+    par_commands: ParallelCommands,
 ) {
-    for (entity, state, window, config, si) in agents.iter() {
-        if state.status != AgentStatus::Active {
-            continue; // paused / waiting / cancelled — don't start new work
-        }
-        let Some(provider) = providers.0.get(&si.provider_name).cloned() else {
-            continue; // provider not registered — leave ready, retry later
-        };
-        let Some(permit) = stage.pools.try_acquire(&si.model) else {
-            continue; // pool full — leave ready, retry next tick
-        };
-        let request = build_request(window, config, si, &provider);
-        let job = InferenceJob {
-            entity,
-            provider,
-            request,
-            permit,
-        };
-        stage.runtime.spawn(run_inference_job(
-            job,
-            stage.outcomes.clone(),
-            stage.wake.clone(),
-        ));
-        commands
-            .entity(entity)
-            .remove::<ReadyToInfer>()
-            .insert(AwaitingInference);
-    }
+    // Fan out across ready agents: request assembly (`build_request`) is the
+    // per-agent CPU cost and is independent, so it runs in parallel on the
+    // compute pool. Permit acquisition (an atomic semaphore) and the tokio spawn
+    // are thread-safe; the marker swap is batched via `ParallelCommands`.
+    agents
+        .par_iter()
+        .for_each(|(entity, state, window, config, si)| {
+            if state.status != AgentStatus::Active {
+                return; // paused / waiting / cancelled — don't start new work
+            }
+            let Some(provider) = providers.0.get(&si.provider_name).cloned() else {
+                return; // provider not registered — leave ready, retry later
+            };
+            let Some(permit) = stage.pools.try_acquire(&si.model) else {
+                return; // pool full — leave ready, retry next tick
+            };
+            let request = build_request(window, config, si, &provider);
+            let job = InferenceJob {
+                entity,
+                provider,
+                request,
+                permit,
+            };
+            stage.runtime.spawn(run_inference_job(
+                job,
+                stage.outcomes.clone(),
+                stage.wake.clone(),
+            ));
+            par_commands.command_scope(|mut commands| {
+                commands
+                    .entity(entity)
+                    .remove::<ReadyToInfer>()
+                    .insert(AwaitingInference);
+            });
+        });
 }
 
 /// The response has been applied and is ready to be examined for tool calls (or
