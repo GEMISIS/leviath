@@ -491,6 +491,7 @@ mod tests {
         let state = AppState {
             config: Arc::new(Config::default()),
             event_tx: tx,
+            control: crate::commands::serve::testutil::no_daemon_client(),
         };
         (state, rx)
     }

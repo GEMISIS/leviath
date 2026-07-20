@@ -88,6 +88,10 @@ pub enum ServerEvent {
 pub struct AppState {
     pub(super) config: Arc<Config>,
     pub(super) event_tx: broadcast::Sender<ServerEvent>,
+    /// Client for the shared-world daemon's control socket. Agent actions
+    /// (spawn/cancel/message/interactions) go through this; read endpoints still
+    /// observe the runs dir the daemon persists to.
+    pub(super) control: leviath_runtime::control_socket::ControlClient,
 }
 
 // ─── Error response ─────────────────────────────────────────────────────────
@@ -95,6 +99,14 @@ pub struct AppState {
 #[derive(Debug, Serialize)]
 pub(super) struct ErrorResponse {
     pub(super) error: String,
+}
+
+/// Build a `(status, JSON error)` response tuple.
+pub(super) fn err(
+    code: axum::http::StatusCode,
+    message: String,
+) -> (axum::http::StatusCode, axum::response::Json<ErrorResponse>) {
+    (code, axum::response::Json(ErrorResponse { error: message }))
 }
 
 // ─── Blueprint types ────────────────────────────────────────────────────────
@@ -138,10 +150,17 @@ pub(super) struct SpawnAgentReq {
     pub(super) blueprint: String,
     pub(super) task: String,
     pub(super) model: Option<String>,
+    // Accepted for API compatibility but not yet forwarded to the daemon's
+    // `SpawnArgs` — the agent runs under its blueprint's own tool policy. A
+    // safe-side gap (more approval prompting, never less); wiring these through
+    // is a follow-up.
+    #[allow(dead_code)]
     pub(super) max_depth: Option<usize>,
     #[serde(default)]
+    #[allow(dead_code)]
     pub(super) yolo: bool,
     #[serde(default)]
+    #[allow(dead_code)]
     pub(super) allow: Vec<String>,
     pub(super) workdir: Option<String>,
     #[serde(default)]
@@ -216,7 +235,7 @@ pub(super) struct SubmitInteractionReq {
 #[derive(Deserialize)]
 pub(super) struct SendMessageReq {
     pub(super) message: String,
-    #[allow(dead_code)]
+    #[serde(default)]
     pub(super) target_region: Option<String>,
 }
 

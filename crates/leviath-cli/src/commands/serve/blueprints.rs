@@ -233,6 +233,7 @@ mod tests {
                 ..Default::default()
             }),
             event_tx: tx,
+            control: crate::commands::serve::testutil::no_daemon_client(),
         }
     }
 

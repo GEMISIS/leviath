@@ -275,6 +275,7 @@ where
 /// socket (resolved from a [`ControlId`]), sends one [`ControlRequest`], and
 /// reads back its [`ControlResponse`]. A fresh connection per request keeps it
 /// simple and stateless.
+#[derive(Clone)]
 pub struct ControlClient {
     id: ControlId,
 }
