@@ -37,7 +37,8 @@ pub trait GatePrompt: Send + Sync {
 
 /// Type alias for a scripted rule checker function.
 /// Takes (tool_name, target, taint_level) and returns Some(script_name) if the rule allows.
-pub type ScriptRuleChecker = dyn Fn(&str, Option<&str>, TaintLevel) -> Option<String>;
+/// `Send + Sync` so a boxed checker can live in a shared-world resource.
+pub type ScriptRuleChecker = dyn Fn(&str, Option<&str>, TaintLevel) -> Option<String> + Send + Sync;
 
 /// Taint gate — checks whether a tool invocation is allowed given the
 /// current taint state of the context window. Attached per-agent (as an ECS

@@ -94,8 +94,8 @@ fn policy_path() -> std::path::PathBuf {
     leviath_config_dir(dirs::config_dir(), dirs::home_dir()).join("policy.toml")
 }
 
-/// List the scripted rules directory.
-fn rules_dir() -> std::path::PathBuf {
+/// The scripted rules directory (`<config>/leviath/rules`).
+pub(crate) fn rules_dir() -> std::path::PathBuf {
     leviath_config_dir(dirs::config_dir(), dirs::home_dir()).join("rules")
 }
 
