@@ -1,8 +1,8 @@
 //! `lev test` - Run agent tests
 
 use clap::Args;
-use leviath_core::{Region, RegionKind};
-use leviath_runtime::{AgentEngine, AgentPool, ProviderRegistry};
+use leviath_providers::InferenceRequest;
+use leviath_runtime::{ContextWindow, ProviderRegistry, context_setup};
 use serde::Deserialize;
 use std::fs;
 use std::path::Path;
@@ -288,94 +288,52 @@ async fn execute_with_registry(
     Ok(())
 }
 
-/// Initialise the context-window regions for a test run.
-///
-/// Returns `true` when the entity has a [`leviath_runtime::ContextWindow`]
-/// component (the normal path) and `false` when it does not (should never
-/// happen with a pool-spawned agent, but the branch is kept so both paths
-/// are reachable from unit tests).
-fn init_test_context_window(
-    world: &mut bevy_ecs::world::World,
-    entity: bevy_ecs::entity::Entity,
-    blueprint: &leviath_core::Blueprint,
-    input: &str,
-) -> bool {
-    let Some(mut window) = world.get_mut::<leviath_runtime::ContextWindow>(entity) else {
-        return false;
-    };
-
-    for region_def in &blueprint.context_layout.regions {
-        let region = Region::new(
-            region_def.name.clone(),
-            region_def.kind.clone(),
-            region_def.max_tokens,
-        );
-        window.add_region(region);
-    }
-
-    // Add tool_results region if not present
-    if window.get_region("tool_results").is_none() {
-        let tool_region = Region::new("tool_results".to_string(), RegionKind::Temporary, 5000);
-        window.add_region(tool_region);
-    }
-
-    // Add test input to the first pinned/system region
-    let system_region_name = blueprint
-        .context_layout
-        .regions
-        .iter()
-        .find(|r| matches!(r.kind, RegionKind::Pinned))
-        .map(|r| r.name.clone());
-
-    if let Some(region_name) = system_region_name {
-        let task_tokens = input.len() / 4 + 1;
-        let _ = window.add_to_region(&region_name, input.to_string(), task_tokens);
-    }
-
-    true
-}
-
-/// Run a single test case by spawning an agent and running one inference call.
+/// Run a single test case: build a one-off context window from the blueprint,
+/// run one inference against the resolved provider, and check the assertions.
 async fn run_test_case(
     blueprint: &leviath_core::Blueprint,
     registry: &ProviderRegistry,
     test: &TestCase,
 ) -> anyhow::Result<bool> {
-    // Create engine with providers
-    let mut engine = AgentEngine::with_providers(registry.clone());
-
-    // Create agent pool and spawn agent
-    let mut pool = AgentPool::new(blueprint.clone());
-    let agent_id = pool.spawn_agent(engine.world_mut());
-    let entity = pool
-        .get_agent(&agent_id)
-        .expect("AgentPool::spawn_agent always inserts the entity; this is unreachable");
-
-    // Initialize context window regions from blueprint layout
-    init_test_context_window(engine.world_mut(), entity, blueprint, &test.input);
-
-    // Get model config from the first stage
+    // Model config comes from the first stage.
     let stage = blueprint
         .stages
         .first()
         .ok_or(anyhow::anyhow!("Blueprint has no stages"))?;
+    let provider_name = stage.model.provider();
+    let model_name = stage.model.model();
 
-    let provider_name_owned = stage.model.provider().to_string();
-    let model_name_owned = stage.model.model().to_string();
-    let provider_name = &provider_name_owned;
-    let model_name = &model_name_owned;
-
-    // Check if provider is available
-    if !engine.providers().has(provider_name) {
-        anyhow::bail!(
+    let provider = registry.get(provider_name).ok_or_else(|| {
+        anyhow::anyhow!(
             "Provider '{}' is not configured. Set API key in ~/.leviath/config.toml",
             provider_name
-        );
-    }
+        )
+    })?;
 
-    // Run a single inference call (not the full loop)
-    let response = engine
-        .run_inference(entity, provider_name, model_name, Vec::new())
+    // Build a standalone context window from the blueprint's layout, seeding the
+    // test input as the task, then assemble a single inference request. This
+    // mirrors what the ECS pipeline's spawner does, without the shared world:
+    // `lev test` only needs one inference to validate a stage's first response.
+    let mut window = ContextWindow::new(blueprint.context_layout.total_budget_tokens);
+    context_setup::init_window(&mut window, blueprint, &test.input);
+
+    let assembled = window.assemble();
+    let caps = provider.capabilities(model_name);
+    let remaining = window.max_tokens.saturating_sub(window.current_tokens);
+    let temperature = if caps.supports_temperature { 0.7 } else { 0.0 };
+    let request = InferenceRequest {
+        system: assembled.system_blocks,
+        messages: assembled.messages,
+        model: model_name.to_string(),
+        max_tokens: remaining.min(caps.max_output_tokens),
+        temperature,
+        // `lev test` advertises no tools (matches prior single-shot behaviour).
+        tools: Vec::new(),
+        extra: serde_json::Value::Null,
+    };
+
+    let response = provider
+        .infer(request)
         .await
         .map_err(|e| anyhow::anyhow!("Inference failed: {}", e))?;
 
@@ -1211,6 +1169,50 @@ model = { provider = "anthropic", model = "claude-sonnet-4-6" }
         }
     }
 
+    /// A mock provider that does NOT support temperature (the default caps have
+    /// it `true`), so the `else { 0.0 }` branch of the temperature choice runs.
+    struct NoTemperatureProvider;
+
+    #[async_trait::async_trait]
+    impl Provider for NoTemperatureProvider {
+        async fn infer(
+            &self,
+            _request: InferenceRequest,
+        ) -> leviath_providers::Result<InferenceResponse> {
+            Ok(InferenceResponse {
+                content: "cold hello".to_string(),
+                tool_calls: vec![],
+                tokens_used: TokenUsage {
+                    prompt_tokens: 1,
+                    completion_tokens: 1,
+                    total_tokens: 2,
+                    cached_tokens: 0,
+                    cache_write_tokens: 0,
+                },
+                finish_reason: FinishReason::Complete,
+            })
+        }
+
+        fn count_tokens(&self, text: &str, _model: &str) -> usize {
+            text.len()
+        }
+
+        fn max_context_tokens(&self, _model: &str) -> usize {
+            8192
+        }
+
+        fn name(&self) -> &str {
+            "no-temperature"
+        }
+
+        fn capabilities(&self, _model: &str) -> leviath_providers::ModelCapabilities {
+            leviath_providers::ModelCapabilities {
+                supports_temperature: false,
+                ..Default::default()
+            }
+        }
+    }
+
     /// A mock provider that always returns an error.
     struct ErrorProvider;
 
@@ -1277,7 +1279,7 @@ max_tokens = 5000
     // ── new coverage tests ────────────────────────────────────────────────────
 
     /// Covers the `map_err(|e| anyhow!("Inference failed: {}", e))` closure
-    /// path at the `run_inference` call-site.
+    /// path at the `provider.infer(...)` call-site.
     #[tokio::test]
     async fn run_test_case_inference_error_propagates() {
         let blueprint = basic_blueprint();
@@ -1318,8 +1320,8 @@ max_tokens = 5000
         assert!(err.contains("Blueprint has no stages"));
     }
 
-    /// Covers the `if window.get_region("tool_results").is_none()` false branch:
-    /// the region already exists, so we skip the insertion block.
+    /// A blueprint that already declares a `tool_results` region runs fine (the
+    /// window builder leaves the existing region in place).
     #[tokio::test]
     async fn run_test_case_with_preexisting_tool_results_region() {
         let blueprint = blueprint_with_tool_results_region();
@@ -1507,30 +1509,12 @@ model = { provider = "anthropic", model = "claude-sonnet-4-6" }
         assert!(result.is_err());
     }
 
-    /// Covers the `else { return false; }` arm of `init_test_context_window`:
-    /// an entity that was spawned WITHOUT a ContextWindow component causes the
-    /// function to return `false` immediately.
-    #[test]
-    fn init_test_context_window_returns_false_for_entity_without_context_window() {
-        use bevy_ecs::world::World;
-        let blueprint = basic_blueprint();
-        let mut world = World::new();
-        // Spawn an entity with NO components — no ContextWindow.
-        let entity = world.spawn(()).id();
-        let result = init_test_context_window(&mut world, entity, &blueprint, "hello");
-        assert!(!result);
-    }
-
-    /// Covers the `if let Some(region_name) = system_region_name` false branch
-    /// in `init_test_context_window`: a blueprint whose context_layout has no
-    /// Pinned regions means `system_region_name` is `None`, so the
-    /// `add_to_region` call is skipped.
-    #[test]
-    fn init_test_context_window_no_pinned_region_skips_input() {
-        use bevy_ecs::world::World;
+    /// A blueprint with no Pinned region still runs: `init_window` simply skips
+    /// seeding the task, and the inference proceeds.
+    #[tokio::test]
+    async fn run_test_case_with_no_pinned_region_still_runs() {
         use leviath_core::Blueprint;
         use leviath_core::layout::ContextLayout;
-        // Blueprint with no context regions → ContextLayout has no Pinned region.
         let blueprint = Blueprint::new(
             "no-regions".to_string(),
             "test".to_string(),
@@ -1543,11 +1527,22 @@ model = { provider = "anthropic", model = "claude-sonnet-4-6" }
             )],
             ContextLayout::new(vec![], 4096),
         );
-        let mut world = World::new();
-        let window = leviath_runtime::ContextWindow::new(4096);
-        let entity = world.spawn((window,)).id();
-        let result = init_test_context_window(&mut world, entity, &blueprint, "hello");
-        assert!(result);
+        let mut registry = ProviderRegistry::new();
+        registry.register(
+            "anthropic".to_string(),
+            Arc::new(MockProvider {
+                content: "hello world".to_string(),
+                tool_calls: vec![],
+            }),
+        );
+        let tc = TestCase {
+            name: "no_pinned".to_string(),
+            input: "hi".to_string(),
+            expect_contains: Some("world".to_string()),
+            expect_tool_call: None,
+            max_tokens: None,
+        };
+        assert!(run_test_case(&blueprint, &registry, &tc).await.unwrap());
     }
 
     #[tokio::test]
@@ -1725,10 +1720,32 @@ model = { provider = "anthropic", model = "claude-sonnet-4-6" }
         assert!(err.contains("not configured"));
     }
 
+    #[test]
+    fn no_temperature_provider_metadata_is_exercised() {
+        let p = NoTemperatureProvider;
+        assert_eq!(p.name(), "no-temperature");
+        assert_eq!(p.count_tokens("abcd", "m"), 4);
+        assert_eq!(p.max_context_tokens("m"), 8192);
+    }
+
     #[tokio::test]
-    async fn run_test_case_long_input_computes_task_tokens() {
-        // Exercise the pinned-region input injection branch with an input
-        // long enough that `input.len() / 4 + 1` is non-trivial.
+    async fn run_test_case_omits_temperature_when_provider_lacks_it() {
+        let blueprint = basic_blueprint();
+        let mut registry = ProviderRegistry::new();
+        registry.register("anthropic".to_string(), Arc::new(NoTemperatureProvider));
+        let tc = TestCase {
+            name: "no_temp".to_string(),
+            input: "hi".to_string(),
+            expect_contains: Some("cold".to_string()),
+            expect_tool_call: None,
+            max_tokens: None,
+        };
+        assert!(run_test_case(&blueprint, &registry, &tc).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn run_test_case_long_input_runs() {
+        // A long input still seeds cleanly into the pinned task region.
         let blueprint = basic_blueprint();
         let mut registry = ProviderRegistry::new();
         registry.register(
