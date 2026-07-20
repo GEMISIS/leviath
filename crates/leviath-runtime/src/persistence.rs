@@ -113,6 +113,7 @@ pub fn build_context_snapshot(window: &ContextWindow, stage_name: &str) -> Conte
                 .map(|e| RegionEntrySnapshot {
                     content: e.content.clone(),
                     tokens: e.tokens,
+                    kind: e.kind.clone(),
                     metadata: e.metadata.clone(),
                     key: e.key.clone(),
                 })

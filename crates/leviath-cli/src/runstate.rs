@@ -652,6 +652,7 @@ mod tests {
             entries: vec![RegionEntrySnapshot {
                 content: "You are helpful".into(),
                 tokens: 3,
+                kind: Default::default(),
                 metadata: None,
                 key: None,
             }],
@@ -1129,12 +1130,14 @@ mod tests {
                         RegionEntrySnapshot {
                             content: "You are helpful".into(),
                             tokens: 3,
+                            kind: Default::default(),
                             metadata: None,
                             key: None,
                         },
                         RegionEntrySnapshot {
                             content: "Additional instruction".into(),
                             tokens: 5,
+                            kind: Default::default(),
                             metadata: Some(serde_json::json!({"source": "user"})),
                             key: None,
                         },
@@ -1165,6 +1168,7 @@ mod tests {
         let entry = RegionEntrySnapshot {
             content: "test".into(),
             tokens: 1,
+            kind: Default::default(),
             metadata: None,
             key: None,
         };

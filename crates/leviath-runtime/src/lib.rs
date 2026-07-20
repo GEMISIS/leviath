@@ -24,6 +24,7 @@ pub mod pipeline;
 pub mod pool;
 pub mod provider_creds;
 pub mod repetition;
+pub mod restore;
 pub mod run_io;
 pub mod scheduler;
 pub mod spawn;

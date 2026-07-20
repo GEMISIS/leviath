@@ -136,6 +136,10 @@ impl RunMeta {
 pub struct RegionEntrySnapshot {
     pub content: String,
     pub tokens: usize,
+    /// The entry's role/kind, so a snapshot round-trips faithfully when the
+    /// daemon reloads it on restart. Defaults to `Text` for older snapshots.
+    #[serde(default)]
+    pub kind: crate::region::EntryKind,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub metadata: Option<serde_json::Value>,
     /// Key for HashMap region entries (file paths, section names, etc.)
@@ -342,6 +346,7 @@ mod tests {
                 entries: vec![RegionEntrySnapshot {
                     content: "hi".to_string(),
                     tokens: 1,
+                    kind: crate::region::EntryKind::UserMessage,
                     metadata: Some(serde_json::json!({"a": 1})),
                     key: Some("k".to_string()),
                 }],

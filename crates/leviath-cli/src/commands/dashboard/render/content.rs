@@ -1389,6 +1389,7 @@ mod tests {
                 entries: vec![runstate::RegionEntrySnapshot {
                     content: "Hello world".to_string(),
                     tokens: 5,
+                    kind: Default::default(),
                     metadata: None,
                     key: None,
                 }],
@@ -1685,6 +1686,7 @@ mod tests {
                 entries: vec![runstate::RegionEntrySnapshot {
                     content: "hello token world".to_string(),
                     tokens: 5,
+                    kind: Default::default(),
                     metadata: None,
                     key: None,
                 }],
@@ -1713,6 +1715,7 @@ mod tests {
             .map(|i| runstate::RegionEntrySnapshot {
                 content: format!("content line {}", i),
                 tokens: 10,
+                kind: Default::default(),
                 metadata: None,
                 key: None,
             })
