@@ -72,10 +72,27 @@ pub fn build_host(
         providers,
         tool_service.clone(),
         InferencePoolConfig::new(),
-        runs_dir,
+        runs_dir.clone(),
         runtime,
     );
     let mut host = WorldHost::with_interactions(world, hub.clone());
+
+    // Restart recovery: reload persisted non-terminal agents so interrupted runs
+    // (including mid-inference ones) resume. Done before the spawner moves the
+    // shared resources.
+    let reloaded = crate::daemon::recovery::reload_persisted_agents(
+        host.world_mut(),
+        tool_service.as_ref(),
+        &config,
+        shared_mcp.clone(),
+        &mcp_tool_defs,
+        &hub,
+        &runs_dir,
+        now_secs(),
+    );
+    for (run_id, entity) in reloaded {
+        host.register(run_id, entity);
+    }
 
     // The spawner captures everything an agent needs; `now_secs` is called at
     // spawn time for the run's start timestamp.
@@ -143,8 +160,14 @@ mod tests {
     #[tokio::test]
     async fn setup_daemon_host_builds_a_working_host() {
         // Config::default has no MCP servers → the shared MCP connect is a no-op.
-        let mut host =
-            setup_daemon_host(Config::default(), std::env::temp_dir(), Handle::current()).await;
+        // An empty runs dir → restart recovery finds nothing to reload.
+        let runs = tempfile::tempdir().unwrap();
+        let mut host = setup_daemon_host(
+            Config::default(),
+            runs.path().to_path_buf(),
+            Handle::current(),
+        )
+        .await;
 
         // Spawning through the wired host exercises the real setup end to end
         // (including the now_secs timestamp closure).
@@ -215,10 +238,11 @@ mod tests {
         registry.register("anthropic".to_string(), Arc::new(FakeProvider));
         let mcp = Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new()));
 
+        let runs = tempfile::tempdir().unwrap();
         let mut host = build_host(
             Config::default(),
             registry,
-            std::env::temp_dir(),
+            runs.path().to_path_buf(),
             mcp,
             vec![],
             Handle::current(),
@@ -244,6 +268,79 @@ mod tests {
         let (reply, rx) = oneshot::channel();
         host.handle(ControlOp::Status {
             run_id: "run-1".to_string(),
+            reply,
+        });
+        assert_eq!(rx.await.unwrap(), Some(AgentStatus::Active));
+    }
+
+    #[tokio::test]
+    async fn build_host_reloads_and_registers_persisted_runs() {
+        // A running run persisted under the runs dir must be reloaded + registered
+        // by `build_host` (exercising the recovery register loop).
+        let agent = tempfile::tempdir().unwrap();
+        let manifest = agent.path().join("agent.leviath");
+        std::fs::write(
+            &manifest,
+            std::fs::read_to_string(
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("../../agents/coder/agent.leviath"),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+
+        let runs = tempfile::tempdir().unwrap();
+        let run_dir = runs.path().join("resumed");
+        std::fs::create_dir_all(&run_dir).unwrap();
+        let meta = leviath_core::run_meta::RunMeta {
+            run_id: "resumed".to_string(),
+            agent_name: "coder".to_string(),
+            agent_path: manifest.to_string_lossy().to_string(),
+            task: "resume".to_string(),
+            model: None,
+            pid: 0,
+            status: leviath_core::run_meta::RunStatus::Running,
+            current_stage: "implement".to_string(),
+            stage_index: 0,
+            num_stages: 1,
+            iteration: 2,
+            prompt_tokens: 0,
+            completion_tokens: 0,
+            cached_tokens: 0,
+            cache_write_tokens: 0,
+            tool_calls: 0,
+            workdir: std::env::temp_dir().to_string_lossy().to_string(),
+            started_at: 1,
+            updated_at: 1,
+            error: None,
+            title: None,
+            metadata: Default::default(),
+            callback_url: None,
+            parent_run_id: None,
+        };
+        std::fs::write(
+            run_dir.join("meta.json"),
+            serde_json::to_string(&meta).unwrap(),
+        )
+        .unwrap();
+
+        let mut registry = ProviderRegistry::new();
+        registry.register("anthropic".to_string(), Arc::new(FakeProvider));
+        let mcp = Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new()));
+        let mut host = build_host(
+            Config::default(),
+            registry,
+            runs.path().to_path_buf(),
+            mcp,
+            vec![],
+            Handle::current(),
+            || 100,
+        );
+
+        // The reloaded run is registered → Status resolves it.
+        let (reply, rx) = oneshot::channel();
+        host.handle(ControlOp::Status {
+            run_id: "resumed".to_string(),
             reply,
         });
         assert_eq!(rx.await.unwrap(), Some(AgentStatus::Active));
