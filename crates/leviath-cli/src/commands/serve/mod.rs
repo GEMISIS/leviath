@@ -85,14 +85,19 @@ async fn execute_with_shutdown(
         control,
     };
 
-    // Background polling loop. Held behind an abort-on-drop guard so the
-    // task is torn down whenever this function returns *or* is cancelled —
-    // e.g. when a test aborts the outer `execute()`/`execute_with_shutdown()`
-    // task. Without this, aborting only the outer task left the inner
-    // `polling_loop` (an unconditional `loop { ... sleep(200ms) ... }`)
-    // running detached until the whole runtime was torn down.
-    let poll_state = state.clone();
-    let _poll_guard = AbortOnDrop(tokio::spawn(polling::polling_loop(poll_state)));
+    // Background world-event consumer: subscribes to the daemon's pushed
+    // `WorldEvent` stream and forwards each event to WebSocket subscribers.
+    // Held behind an abort-on-drop guard so the task is torn down whenever this
+    // function returns *or* is cancelled — e.g. when a test aborts the outer
+    // `execute()`/`execute_with_shutdown()` task. Without this, aborting only
+    // the outer task left the inner `event_loop` (an unconditional
+    // subscribe-and-reconnect loop) running detached until the whole runtime
+    // was torn down.
+    let event_state = state.clone();
+    let _event_guard = AbortOnDrop(tokio::spawn(polling::event_loop(
+        event_state,
+        polling::RECONNECT_BACKOFF,
+    )));
 
     let cors = if args.cors == "*" {
         CorsLayer::new()

@@ -237,13 +237,16 @@ async fn real_daemon(args: commands::daemon::DaemonArgs) -> anyhow::Result<()> {
     let mut listener = bind_control_listener(&id)?;
     let mut host = setup_daemon_host(config, runs_dir, tokio::runtime::Handle::current()).await;
 
-    // Accept connections and feed control ops to the host.
+    // Accept connections and feed control ops to the host; `Subscribe`
+    // connections stream world events from the host's event sender.
     let (op_tx, op_rx) = tokio::sync::mpsc::unbounded_channel();
+    let events = host.event_sender();
     tokio::spawn(async move {
         while let Ok(stream) = listener.accept().await {
             let op_tx = op_tx.clone();
+            let events = events.clone();
             tokio::spawn(async move {
-                let _ = handle_connection(stream, op_tx).await;
+                let _ = handle_connection(stream, op_tx, events).await;
             });
         }
     });
