@@ -8,6 +8,7 @@ pub mod list;
 pub mod models;
 pub mod pack;
 pub mod policy;
+pub mod ps;
 pub mod remove;
 pub mod run;
 pub mod serve;
