@@ -17,7 +17,7 @@ use bevy_ecs::entity::Entity;
 use leviath_core::blueprint::{Blueprint, ModelConfig};
 use leviath_providers::Tool;
 use leviath_runtime::ProviderRegistry;
-use leviath_runtime::host::SpawnArgs;
+use leviath_runtime::host::{SpawnArgs, SubAgentOp};
 use leviath_runtime::interaction_hub::InteractionHub;
 use leviath_runtime::persistence::{RunMetadata, TokenTotals};
 use leviath_runtime::pipeline::{
@@ -25,9 +25,14 @@ use leviath_runtime::pipeline::{
 };
 use leviath_runtime::world::PipelineWorld;
 use tokio::sync::Mutex;
+use tokio::sync::mpsc::UnboundedSender;
 
 use crate::config::Config;
+use crate::daemon::subagent::SubAgentHandle;
 use crate::daemon::tool_service::{AgentToolState, CliToolService};
+
+/// Default max sub-agent tree depth when a blueprint doesn't set one.
+const DEFAULT_SUBAGENT_DEPTH: usize = 3;
 
 /// Resolve a stage's [`ModelConfig`] to a concrete `(provider, model)` against
 /// the registered providers. Honors a `--model` override (`provider/model` or a
@@ -149,6 +154,7 @@ fn build_tool_state(
     entry_index: usize,
     stage_perms_by_index: Vec<HashMap<String, String>>,
     launch_overrides: HashMap<String, crate::config::ToolPolicy>,
+    subagent: Option<SubAgentHandle>,
 ) -> Arc<AgentToolState> {
     let entry_perms = stage_perms_by_index
         .get(entry_index)
@@ -166,6 +172,7 @@ fn build_tool_state(
         global_perms: Arc::new(config.tool_permissions.clone()),
         interaction: hub.backend_for(run_id),
         stage_name: Arc::new(StdMutex::new(entry_stage.to_string())),
+        subagent,
     })
 }
 
@@ -181,6 +188,7 @@ pub fn build_agent(
     hub: &InteractionHub,
     args: &SpawnArgs,
     now_secs: i64,
+    subagent_tx: UnboundedSender<SubAgentOp>,
 ) -> Result<Entity, String> {
     // 1. Load the blueprint (the client resolves the manifest path).
     let content = std::fs::read_to_string(&args.blueprint_path)
@@ -229,6 +237,7 @@ pub fn build_agent(
     let agent_name = blueprint.name.clone();
     let num_stages = blueprint.stages.len();
     let compaction = blueprint.compaction_config.clone();
+    let max_child_depth = blueprint.max_child_depth.unwrap_or(DEFAULT_SUBAGENT_DEPTH);
     // Per-stage tool permissions (in stage order) + the entry stage's index, for
     // the tool state's stage-scoped policy layer.
     let stage_perms_by_index: Vec<HashMap<String, String>> = blueprint
@@ -294,6 +303,12 @@ pub fn build_agent(
     for tool in &args.allow {
         launch_overrides.insert(tool.clone(), crate::config::ToolPolicy::Allow);
     }
+    let subagent = SubAgentHandle {
+        sender: subagent_tx,
+        parent_run_id: args.run_id.clone(),
+        workdir: args.workdir.clone(),
+        max_depth: max_child_depth,
+    };
     let state = build_tool_state(
         builtins,
         builtin_names,
@@ -305,6 +320,7 @@ pub fn build_agent(
         entry_index,
         stage_perms_by_index,
         launch_overrides,
+        Some(subagent),
     );
     tool_service.register(entity, state);
 
@@ -314,6 +330,11 @@ pub fn build_agent(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A throwaway sub-agent op sender for tests that don't exercise the bridge.
+    fn sub_tx() -> UnboundedSender<SubAgentOp> {
+        tokio::sync::mpsc::unbounded_channel().0
+    }
     use leviath_core::blueprint::ModelEntry;
 
     fn model_cfg(models: Vec<(&str, &str)>) -> ModelConfig {
@@ -532,6 +553,7 @@ mod tests {
             &hub,
             &spawn_args(&manifest.to_string_lossy()),
             100,
+            sub_tx(),
         )
         .expect("spawn succeeds");
 
@@ -589,6 +611,7 @@ mod tests {
             &hub,
             &args,
             100,
+            sub_tx(),
         )
         .expect("spawn succeeds");
         assert_eq!(world.agent_status(entity), Some(AgentStatus::Active));
@@ -666,6 +689,7 @@ mod tests {
             &hub,
             &spawn_args("/no/such/manifest.leviath"),
             100,
+            sub_tx(),
         )
         .unwrap_err();
         assert!(err.contains("read manifest"));
@@ -711,6 +735,7 @@ system_prompt = "SYSTEM_PROMPT_PLACEHOLDER"
             &hub,
             &spawn_args(&manifest.to_string_lossy()),
             100,
+            sub_tx(),
         );
         assert!(result.is_err(), "expected spawn error, got {result:?}");
     }
@@ -752,6 +777,7 @@ available_tools = []
             &hub,
             &spawn_args(&manifest.to_string_lossy()),
             100,
+            sub_tx(),
         )
         .unwrap_err();
         assert!(err.contains("invalid blueprint"));
@@ -798,6 +824,7 @@ system_prompt = "be brief"
             &hub,
             &spawn_args(&manifest.to_string_lossy()),
             100,
+            sub_tx(),
         )
         .expect("spawn succeeds");
         assert_eq!(world.agent_status(entity), Some(AgentStatus::Active));
@@ -822,6 +849,7 @@ system_prompt = "be brief"
             &hub,
             &spawn_args(&manifest.to_string_lossy()),
             100,
+            sub_tx(),
         )
         .unwrap_err();
         assert!(err.contains("parse manifest"));
