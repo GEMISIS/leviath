@@ -435,16 +435,52 @@ mod tests {
         consume_once(&state, &client).await; // subscribe fails → returns immediately
     }
 
+    /// A fake daemon that accepts `passes` subscribe connections, streaming one
+    /// [`WorldEvent::Status`] on each before closing it.
+    fn reconnecting_daemon(
+        dir: &std::path::Path,
+        passes: usize,
+    ) -> (ControlClient, tokio::task::JoinHandle<()>) {
+        let id = control_id(dir);
+        let mut listener = bind_control_listener(&id).unwrap();
+        let handle = tokio::spawn(async move {
+            for _ in 0..passes {
+                let stream = listener.accept().await.unwrap();
+                let (read_half, mut write_half) = tokio::io::split(stream);
+                let mut lines = BufReader::new(read_half).lines();
+                let _subscribe = lines.next_line().await.unwrap();
+                let mut line = serde_json::to_string(&WorldEvent::Status {
+                    run_id: "r".into(),
+                    agent_id: "a".into(),
+                    status: "active".into(),
+                    stage: "s".into(),
+                    iteration: 0,
+                    tool_calls: 0,
+                    accepts_messages: true,
+                })
+                .unwrap();
+                line.push('\n');
+                write_half.write_all(line.as_bytes()).await.unwrap();
+                // Drop write_half → the stream ends → event_loop reconnects.
+            }
+        });
+        (ControlClient::new(id), handle)
+    }
+
     #[tokio::test]
     async fn event_loop_reconnects_after_each_pass() {
-        // A zero backoff makes the loop spin: subscribe fails (no daemon) → back
-        // off (instantly) → retry, covering its loop-back edge. Abort once it has
-        // cycled a few times.
-        let (state, _rx) = state_with(no_daemon_client());
+        // Deterministically prove the loop reconnects: a daemon streams one event
+        // per subscribe pass and closes; awaiting two events forces the loop
+        // through consume_once → backoff → re-subscribe (its loop-back edge). A
+        // zero backoff keeps it prompt, but the `recv().await`s — not scheduler
+        // timing — are what gate the assertions, so this is platform-stable.
+        let dir = tempfile::tempdir().unwrap();
+        let (control, server) = reconnecting_daemon(dir.path(), 2);
+        let (state, mut rx) = state_with(control);
         let handle = tokio::spawn(event_loop(state, Duration::ZERO));
-        for _ in 0..5 {
-            tokio::task::yield_now().await;
-        }
+        assert_eq!(tag(&rx.recv().await.unwrap()), "agent_status");
+        assert_eq!(tag(&rx.recv().await.unwrap()), "agent_status");
         handle.abort();
+        server.await.unwrap();
     }
 }
