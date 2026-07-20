@@ -14,6 +14,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex as StdMutex};
 
 use bevy_ecs::entity::Entity;
+use bevy_ecs::world::World;
 use leviath_core::blueprint::{Blueprint, ModelConfig};
 use leviath_providers::Tool;
 use leviath_runtime::ProviderRegistry;
@@ -23,7 +24,6 @@ use leviath_runtime::persistence::{RunMetadata, TokenTotals};
 use leviath_runtime::pipeline::{
     CompactionSettings, PersistWatermark, Providers, ResolvedStage, spawn_agent,
 };
-use leviath_runtime::world::PipelineWorld;
 use tokio::sync::Mutex;
 use tokio::sync::mpsc::UnboundedSender;
 
@@ -177,10 +177,12 @@ fn build_tool_state(
 }
 
 /// Load the blueprint at `args.blueprint_path`, spawn the agent into `world`,
-/// register its tool state, and return the new entity.
+/// register its tool state, and return the new entity. Operates on the raw ECS
+/// [`World`] so it is callable both from the host's spawner (via
+/// `PipelineWorld::world_mut`) and from a fan-out world-system.
 #[allow(clippy::too_many_arguments)]
 pub fn build_agent(
-    world: &mut PipelineWorld,
+    world: &mut World,
     tool_service: &CliToolService,
     config: &Config,
     shared_mcp: Arc<Mutex<leviath_mcp::ToolExecutor>>,
@@ -220,7 +222,6 @@ pub fn build_agent(
         .unwrap_or_default();
     let stages = {
         let registry = &world
-            .world()
             .get_resource::<Providers>()
             .expect("Providers resource present in a PipelineWorld")
             .0;
@@ -255,13 +256,7 @@ pub fn build_agent(
         .map(|s| format!("{}/{}", s.provider_name, s.model));
 
     // 5. Spawn the agent.
-    let entity = spawn_agent(
-        world.world_mut(),
-        args.run_id.clone(),
-        blueprint,
-        &args.task,
-        stages,
-    )?;
+    let entity = spawn_agent(world, args.run_id.clone(), blueprint, &args.task, stages)?;
 
     // 6. Attach run metadata / token totals / persistence watermark (+ optional
     // compaction settings).
@@ -280,7 +275,7 @@ pub fn build_agent(
         title: None,
     };
     {
-        let mut entity_mut = world.world_mut().entity_mut(entity);
+        let mut entity_mut = world.entity_mut(entity);
         entity_mut.insert((
             metadata,
             TokenTotals::default(),
@@ -330,6 +325,7 @@ pub fn build_agent(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use leviath_runtime::world::PipelineWorld;
 
     /// A throwaway sub-agent op sender for tests that don't exercise the bridge.
     fn sub_tx() -> UnboundedSender<SubAgentOp> {
@@ -545,7 +541,7 @@ mod tests {
         let hub = InteractionHub::new();
         let mcp = Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new()));
         let entity = build_agent(
-            &mut world,
+            world.world_mut(),
             cli.as_ref(),
             &Config::default(),
             mcp,
@@ -603,7 +599,7 @@ mod tests {
         args.max_depth = Some(7);
 
         let entity = build_agent(
-            &mut world,
+            world.world_mut(),
             cli.as_ref(),
             &config,
             mcp,
@@ -681,7 +677,7 @@ mod tests {
         let hub = InteractionHub::new();
         let mcp = Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new()));
         let err = build_agent(
-            &mut world,
+            world.world_mut(),
             cli.as_ref(),
             &Config::default(),
             mcp,
@@ -727,7 +723,7 @@ system_prompt = "SYSTEM_PROMPT_PLACEHOLDER"
         let hub = InteractionHub::new();
         let mcp = Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new()));
         let result = build_agent(
-            &mut world,
+            world.world_mut(),
             cli.as_ref(),
             &Config::default(),
             mcp,
@@ -769,7 +765,7 @@ available_tools = []
         let hub = InteractionHub::new();
         let mcp = Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new()));
         let err = build_agent(
-            &mut world,
+            world.world_mut(),
             cli.as_ref(),
             &Config::default(),
             mcp,
@@ -816,7 +812,7 @@ system_prompt = "be brief"
         let hub = InteractionHub::new();
         let mcp = Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new()));
         let entity = build_agent(
-            &mut world,
+            world.world_mut(),
             cli.as_ref(),
             &Config::default(),
             mcp,
@@ -841,7 +837,7 @@ system_prompt = "be brief"
         let hub = InteractionHub::new();
         let mcp = Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new()));
         let err = build_agent(
-            &mut world,
+            world.world_mut(),
             cli.as_ref(),
             &Config::default(),
             mcp,

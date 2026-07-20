@@ -16,8 +16,11 @@ use leviath_runtime::world::PipelineWorld;
 use tokio::runtime::Handle;
 use tokio::sync::Mutex;
 
+use leviath_runtime::fanout::FanOutSpawnerRes;
+
 use crate::commands::run::session::build_provider_registry_from_config;
 use crate::config::{Config, leviath_home_dir};
+use crate::daemon::fanout_spawner::DaemonFanOutSpawner;
 use crate::daemon::spawn::build_agent;
 use crate::daemon::tool_service::CliToolService;
 use crate::tools::ToolRegistry;
@@ -136,11 +139,28 @@ pub fn build_host(
         host.register(run_id, entity);
     }
 
+    // Install the fan-out spawner as a world resource so the runtime's fan-out
+    // systems can start workers (it captures the same context as the spawner
+    // below, cloned before those move into the closure).
+    let fanout_spawner = DaemonFanOutSpawner {
+        config: config.clone(),
+        shared_mcp: shared_mcp.clone(),
+        mcp_tool_defs: mcp_tool_defs.clone(),
+        hub: hub.clone(),
+        subagent_tx: subagent_tx.clone(),
+        tool_service: tool_service.clone(),
+        agents_dir: leviath_home_dir().map(|h| h.join(".leviath").join("agents")),
+        now_secs,
+    };
+    host.world_mut()
+        .world_mut()
+        .insert_resource(FanOutSpawnerRes(Arc::new(fanout_spawner)));
+
     // The spawner captures everything an agent needs; `now_secs` is called at
     // spawn time for the run's start timestamp.
     host.set_spawner(Box::new(move |world, args| {
         build_agent(
-            world,
+            world.world_mut(),
             tool_service.as_ref(),
             &config,
             shared_mcp.clone(),
