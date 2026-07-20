@@ -16,7 +16,7 @@ mod foreground;
 mod helpers;
 mod inference;
 pub mod io;
-mod manifest;
+pub mod manifest;
 pub mod session;
 mod stages;
 pub mod tool_source;
