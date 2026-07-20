@@ -41,6 +41,18 @@ pub struct ReadyToInfer;
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AwaitingInference;
 
+/// Transient tag: the agent just entered a stage (index + name). The
+/// [`sync_tool_stages`] system reads it to notify the [`ToolService`] of the
+/// stage change, then removes it. Carries the data so the tool service need not
+/// query the world.
+#[derive(Component, Debug, Clone)]
+pub struct StageJustEntered {
+    /// The new stage's index.
+    pub index: usize,
+    /// The new stage's name.
+    pub name: String,
+}
+
 // ─── Per-agent stage data the dispatch system reads ──────────────────────────
 
 /// Resolved inference parameters for the agent's current stage, set when it
@@ -380,6 +392,11 @@ pub trait ToolService: Send + Sync {
     /// Build the closure that runs `calls` for `entity`, resolving `(id, result)`
     /// pairs.
     fn exec_for(&self, entity: Entity, calls: Vec<leviath_providers::ToolCall>) -> BoxedToolExec;
+
+    /// Notify the service that `entity` entered the stage at `stage_index` named
+    /// `stage_name`, so it can re-sync that agent's per-stage tool permissions.
+    /// Default no-op for services without per-stage policy.
+    fn sync_stage(&self, _entity: Entity, _stage_index: usize, _stage_name: &str) {}
 }
 
 /// The tool service, as a world resource.
@@ -1116,9 +1133,10 @@ pub fn resolve_transition(
                     &mut window,
                 ) {
                     Ok(()) => {
+                        let name = bp.0.stages[idx].name.clone();
                         let mut ec = commands.entity(entity);
                         ec.remove::<ResolveTransition>();
-                        attach_stage_components(ec, stage_infs.0[idx].clone(), setup);
+                        attach_stage_components(ec, stage_infs.0[idx].clone(), setup, idx, name);
                     }
                     Err(message) => {
                         state.status = AgentStatus::Error { message };
@@ -1209,10 +1227,16 @@ fn attach_stage_components(
     mut entity: bevy_ecs::system::EntityCommands,
     stage_inf: StageInference,
     setup: &StageSetup,
+    stage_index: usize,
+    stage_name: String,
 ) {
     entity
         .insert(stage_inf)
         .insert(setup.inference_config.clone())
+        .insert(StageJustEntered {
+            index: stage_index,
+            name: stage_name,
+        })
         .insert(ReadyToInfer);
     match &setup.routing {
         Some(routing) => {
@@ -1588,9 +1612,10 @@ pub fn collect_transition_choice(
                     &mut window,
                 ) {
                     Ok(()) => {
+                        let name = bp.0.stages[idx].name.clone();
                         let mut ec = commands.entity(outcome.entity);
                         ec.remove::<AwaitingTransitionResponse>();
-                        attach_stage_components(ec, stage_infs.0[idx].clone(), setup);
+                        attach_stage_components(ec, stage_infs.0[idx].clone(), setup, idx, name);
                     }
                     Err(message) => {
                         state.status = AgentStatus::Error { message };
@@ -1607,6 +1632,21 @@ pub fn collect_transition_choice(
                     .remove::<AwaitingTransitionResponse>();
             }
         }
+    }
+}
+
+/// Notify the [`ToolService`] of every agent that just entered a stage (tagged
+/// with [`StageJustEntered`] by the transition systems), so it can re-sync that
+/// agent's per-stage tool permissions, then clear the tag. Runs after the
+/// transition systems each tick.
+pub fn sync_tool_stages(
+    service: Res<ToolServiceRes>,
+    entered: Query<(Entity, &StageJustEntered)>,
+    mut commands: Commands,
+) {
+    for (entity, stage) in entered.iter() {
+        service.0.sync_stage(entity, stage.index, &stage.name);
+        commands.entity(entity).remove::<StageJustEntered>();
     }
 }
 
@@ -2166,6 +2206,57 @@ mod tests {
                 })
             })
         }
+    }
+
+    /// A tool service that records every `sync_stage` call.
+    #[derive(Default)]
+    struct RecordingService(Arc<std::sync::Mutex<Vec<(Entity, usize, String)>>>);
+    impl ToolService for RecordingService {
+        fn exec_for(
+            &self,
+            _entity: Entity,
+            _calls: Vec<leviath_providers::ToolCall>,
+        ) -> BoxedToolExec {
+            Box::new(|| Box::pin(async { Vec::new() }))
+        }
+        fn sync_stage(&self, entity: Entity, stage_index: usize, stage_name: &str) {
+            self.0
+                .lock()
+                .unwrap()
+                .push((entity, stage_index, stage_name.to_string()));
+        }
+    }
+
+    #[tokio::test]
+    async fn sync_tool_stages_notifies_service_and_clears_marker() {
+        let mut world = World::new();
+        let log = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let service = Arc::new(RecordingService(log.clone()));
+        world.insert_resource(ToolServiceRes(service.clone()));
+        let entity = world
+            .spawn(StageJustEntered {
+                index: 2,
+                name: "review".to_string(),
+            })
+            .id();
+        let mut schedule = Schedule::default();
+        schedule.add_systems(sync_tool_stages);
+        schedule.run(&mut world);
+
+        assert_eq!(
+            log.lock().unwrap().as_slice(),
+            &[(entity, 2, "review".to_string())]
+        );
+        // The transient marker is cleared after notifying.
+        assert!(world.get::<StageJustEntered>(entity).is_none());
+        // The service's tool executor still runs (returns no results here).
+        assert!(service.exec_for(entity, Vec::new())().await.is_empty());
+    }
+
+    #[test]
+    fn default_sync_stage_is_a_noop() {
+        // A service that doesn't override `sync_stage` uses the no-op default.
+        EchoService.sync_stage(Entity::from_raw(0), 3, "x");
     }
 
     #[tokio::test]

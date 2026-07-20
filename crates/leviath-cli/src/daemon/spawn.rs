@@ -11,7 +11,7 @@
 //! straight from the host's control loop.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex};
 
 use bevy_ecs::entity::Entity;
 use leviath_core::blueprint::{Blueprint, ModelConfig};
@@ -133,6 +133,10 @@ fn resolve_stages(
 }
 
 /// Build one agent's [`AgentToolState`] from the shared executors + config.
+///
+/// `stage_perms_by_index` holds every stage's `[tool_permissions]` (in stage
+/// order); the entry stage's map seeds `stage_perms`, and the pipeline's
+/// `sync_stage` swaps in the right one as the agent changes stage.
 #[allow(clippy::too_many_arguments)]
 fn build_tool_state(
     builtins: Arc<leviath_tools::BuiltinTools>,
@@ -142,18 +146,25 @@ fn build_tool_state(
     hub: &InteractionHub,
     run_id: &str,
     entry_stage: &str,
+    entry_index: usize,
+    stage_perms_by_index: Vec<HashMap<String, String>>,
 ) -> Arc<AgentToolState> {
+    let entry_perms = stage_perms_by_index
+        .get(entry_index)
+        .cloned()
+        .unwrap_or_default();
     Arc::new(AgentToolState {
         builtins,
         mcp,
         builtin_names,
         launch_overrides: Arc::new(HashMap::new()),
         session_allows: Arc::new(Mutex::new(HashSet::new())),
-        stage_perms: Arc::new(Mutex::new(HashMap::new())),
+        stage_perms: Arc::new(StdMutex::new(entry_perms)),
+        stage_perms_by_index: Arc::new(stage_perms_by_index),
         agent_perms: Arc::new(HashMap::new()),
         global_perms: Arc::new(config.tool_permissions.clone()),
         interaction: hub.backend_for(run_id),
-        stage_name: Arc::new(Mutex::new(entry_stage.to_string())),
+        stage_name: Arc::new(StdMutex::new(entry_stage.to_string())),
     })
 }
 
@@ -213,6 +224,18 @@ pub fn build_agent(
     let agent_name = blueprint.name.clone();
     let num_stages = blueprint.stages.len();
     let compaction = blueprint.compaction_config.clone();
+    // Per-stage tool permissions (in stage order) + the entry stage's index, for
+    // the tool state's stage-scoped policy layer.
+    let stage_perms_by_index: Vec<HashMap<String, String>> = blueprint
+        .stages
+        .iter()
+        .map(|s| s.tool_permissions.clone())
+        .collect();
+    let entry_index = blueprint
+        .stages
+        .iter()
+        .position(|s| s.name == entry_stage)
+        .unwrap_or(0);
     let model_label = stages
         .first()
         .map(|s| format!("{}/{}", s.provider_name, s.model));
@@ -265,6 +288,8 @@ pub fn build_agent(
         hub,
         &args.run_id,
         &entry_stage,
+        entry_index,
+        stage_perms_by_index,
     );
     tool_service.register(entity, state);
 
