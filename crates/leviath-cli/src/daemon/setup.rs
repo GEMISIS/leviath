@@ -191,6 +191,7 @@ mod tests {
                 model: None,
                 workdir: std::env::temp_dir().to_string_lossy().to_string(),
                 metadata: Default::default(),
+                callback_url: None,
             },
             reply,
         });
@@ -259,6 +260,7 @@ mod tests {
                 model: None,
                 workdir: std::env::temp_dir().to_string_lossy().to_string(),
                 metadata: Default::default(),
+                callback_url: None,
             },
             reply,
         });

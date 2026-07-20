@@ -262,7 +262,7 @@ pub fn build_agent(
         started_at: now_secs,
         parent_run_id: None,
         metadata: args.metadata.clone(),
-        callback_url: None,
+        callback_url: args.callback_url.clone(),
         title: None,
     };
     {
@@ -492,6 +492,7 @@ mod tests {
             model: None,
             workdir: std::env::temp_dir().to_string_lossy().to_string(),
             metadata: HashMap::new(),
+            callback_url: None,
         }
     }
 

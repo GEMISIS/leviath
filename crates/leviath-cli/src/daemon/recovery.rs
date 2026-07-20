@@ -109,6 +109,7 @@ fn reload_one(
         model: meta.model.clone(),
         workdir: meta.workdir.clone(),
         metadata: meta.metadata.clone(),
+        callback_url: meta.callback_url.clone(),
     };
     let entity = build_agent(
         world,

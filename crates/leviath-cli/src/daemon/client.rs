@@ -31,6 +31,7 @@ pub fn resolve_spawn_args(
         model,
         workdir: workdir.to_string(),
         metadata: Default::default(),
+        callback_url: None,
     })
 }
 
