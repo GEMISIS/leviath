@@ -74,9 +74,60 @@ impl RiskyExecutors for RealExecutors {
         commands::serve::execute(args).await
     }
 
+    async fn daemon(&self, args: commands::daemon::DaemonArgs) -> anyhow::Result<()> {
+        real_daemon(args).await
+    }
+
     async fn worker(&self, args: commands::run::WorkerArgs) -> anyhow::Result<()> {
         commands::run::execute_worker(args).await
     }
+}
+
+/// Real `lev daemon`: bind the control socket and drive the shared world until
+/// Ctrl-C. Wiring only — the world, host, tool service, and spawner it composes
+/// (`daemon::setup`) plus the control transport (`control_socket`) are all
+/// unit-tested. The accept loop + real socket/signal I/O are the un-unit-testable
+/// slivers, kept here in the (coverage-unmeasured) binary.
+async fn real_daemon(args: commands::daemon::DaemonArgs) -> anyhow::Result<()> {
+    use leviath_cli::daemon::setup::{control_socket_path, setup_daemon_host};
+    use leviath_runtime::control_socket::{bind_control_socket, handle_connection};
+
+    let config = leviath_cli::config::Config::load().unwrap_or_default();
+    let runs_dir = leviath_cli::runstate::runs_dir();
+    let socket = match args.socket {
+        Some(ref s) => std::path::PathBuf::from(s),
+        None => control_socket_path().ok_or_else(|| {
+            anyhow::anyhow!("cannot resolve a home directory for the control socket")
+        })?,
+    };
+
+    let listener = bind_control_socket(&socket)?;
+    let mut host = setup_daemon_host(config, runs_dir, tokio::runtime::Handle::current()).await;
+
+    // Accept connections and feed control ops to the host.
+    let (op_tx, op_rx) = tokio::sync::mpsc::unbounded_channel();
+    tokio::spawn(async move {
+        while let Ok((stream, _addr)) = listener.accept().await {
+            let op_tx = op_tx.clone();
+            tokio::spawn(async move {
+                let _ = handle_connection(stream, op_tx).await;
+            });
+        }
+    });
+
+    // Ctrl-C shuts the world down cleanly.
+    let shutdown = host.world_mut().shutdown_handle();
+    tokio::spawn(async move {
+        let _ = tokio::signal::ctrl_c().await;
+        shutdown.notify_one();
+    });
+
+    info!(socket = %socket.display(), "leviath daemon listening");
+    println!("leviath daemon listening on {}", socket.display());
+    host.serve(op_rx).await;
+
+    let _ = std::fs::remove_file(&socket);
+    Ok(())
 }
 
 /// Real `lev dash`: supplies the real crossterm terminal backend and event

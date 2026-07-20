@@ -63,6 +63,9 @@ pub enum Commands {
     /// Start the REST + WebSocket API server
     Serve(commands::serve::ServeArgs),
 
+    /// Run the shared-world daemon in the foreground
+    Daemon(commands::daemon::DaemonArgs),
+
     /// (Internal) Background worker process — do not call directly
     #[command(name = "__run-worker", hide = true)]
     RunWorker(commands::run::WorkerArgs),
@@ -85,6 +88,8 @@ pub trait RiskyExecutors {
     async fn dashboard(&self, args: commands::dashboard::DashboardArgs) -> anyhow::Result<()>;
     /// `lev serve` — binds a real port and serves indefinitely.
     async fn serve(&self, args: commands::serve::ServeArgs) -> anyhow::Result<()>;
+    /// `lev daemon` — binds the control socket and serves the shared world.
+    async fn daemon(&self, args: commands::daemon::DaemonArgs) -> anyhow::Result<()>;
     /// `lev __run-worker` — the background worker's real inference loop.
     async fn worker(&self, args: commands::run::WorkerArgs) -> anyhow::Result<()>;
 }
@@ -107,6 +112,7 @@ pub async fn dispatch(command: Commands, ex: &impl RiskyExecutors) -> anyhow::Re
         Commands::Validate(args) => commands::validate::execute(args).await,
         Commands::Policy(args) => commands::policy::execute(args).await,
         Commands::Serve(args) => ex.serve(args).await,
+        Commands::Daemon(args) => ex.daemon(args).await,
         Commands::RunWorker(args) => ex.worker(args).await,
     }
 }
@@ -131,6 +137,9 @@ mod tests {
             Ok(())
         }
         async fn serve(&self, _args: commands::serve::ServeArgs) -> anyhow::Result<()> {
+            Ok(())
+        }
+        async fn daemon(&self, _args: commands::daemon::DaemonArgs) -> anyhow::Result<()> {
             Ok(())
         }
         async fn worker(&self, _args: commands::run::WorkerArgs) -> anyhow::Result<()> {
@@ -184,6 +193,13 @@ mod tests {
     async fn dispatch_dashboard_variant_is_routed_through_the_executor() {
         let args = commands::dashboard::DashboardArgs {};
         let result = dispatch(Commands::Dashboard(args), &MockRisky).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn dispatch_daemon_variant_is_routed_through_the_executor() {
+        let args = commands::daemon::DaemonArgs { socket: None };
+        let result = dispatch(Commands::Daemon(args), &MockRisky).await;
         assert!(result.is_ok());
     }
 
