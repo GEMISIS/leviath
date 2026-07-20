@@ -30,6 +30,44 @@ pub fn control_address() -> Option<leviath_runtime::control_socket::ControlId> {
         .map(|home| leviath_runtime::control_socket::control_id(&home.join(".leviath")))
 }
 
+/// This CLI binary's build id (short git hash, `-dirty` when the tree had
+/// uncommitted changes), embedded at compile time by `build.rs`. A long-lived
+/// daemon records the build it started from; a mismatch means the installed
+/// binary is newer and the daemon is running stale code.
+pub const CURRENT_BUILD: &str = env!("LEVIATH_BUILD");
+
+/// Path to the file where a running daemon records its build id
+/// (`<leviath-home>/.leviath/daemon.build`).
+pub fn build_marker_path() -> Option<std::path::PathBuf> {
+    leviath_home_dir().map(|home| home.join(".leviath").join("daemon.build"))
+}
+
+/// Record [`CURRENT_BUILD`] so the CLI can detect a stale daemon later.
+/// Best-effort — a missing marker just triggers a restart on the next command.
+pub fn write_build_marker() {
+    // Combinators (rather than `if let`) so the "no home dir" / "no parent"
+    // fallbacks don't add branches that can't be exercised where a home always
+    // resolves — mirroring `control_address`'s `.map` style.
+    build_marker_path().into_iter().for_each(|path| {
+        let _ = path.parent().map(std::fs::create_dir_all);
+        let _ = std::fs::write(&path, CURRENT_BUILD);
+    });
+}
+
+/// The build id a running daemon recorded, if the marker exists and is readable.
+pub fn read_build_marker() -> Option<String> {
+    build_marker_path()
+        .and_then(|path| std::fs::read_to_string(path).ok())
+        .map(|s| s.trim().to_string())
+}
+
+/// Whether a running daemon should be restarted because it is on a different
+/// build than this CLI (or recorded no build at all — e.g. it predates this
+/// check).
+pub fn daemon_build_is_stale(recorded: Option<&str>) -> bool {
+    recorded != Some(CURRENT_BUILD)
+}
+
 /// Build the daemon's [`WorldHost`], doing the async startup work: build the
 /// provider registry from config and connect the shared MCP servers (both reused
 /// by every agent), then wire the host + spawner via [`build_host`].
@@ -352,5 +390,35 @@ mod tests {
             reply,
         });
         assert_eq!(rx.await.unwrap(), Some(AgentStatus::Active));
+    }
+
+    #[test]
+    fn daemon_build_is_stale_compares_against_current_build() {
+        assert!(daemon_build_is_stale(None), "missing marker is stale");
+        assert!(
+            daemon_build_is_stale(Some("some-other-build")),
+            "a different build is stale"
+        );
+        assert!(
+            !daemon_build_is_stale(Some(CURRENT_BUILD)),
+            "the current build is not stale"
+        );
+    }
+
+    #[test]
+    fn build_marker_round_trips_and_is_current() {
+        let dir = tempfile::tempdir().unwrap();
+        temp_env::with_var("LEVIATH_HOME", Some(dir.path()), || {
+            // No marker yet → read is None → treated as stale.
+            assert!(read_build_marker().is_none());
+            assert!(daemon_build_is_stale(read_build_marker().as_deref()));
+
+            write_build_marker();
+            let path = build_marker_path().unwrap();
+            assert!(path.exists());
+            assert_eq!(read_build_marker().as_deref(), Some(CURRENT_BUILD));
+            // A daemon that wrote the current build is not stale.
+            assert!(!daemon_build_is_stale(read_build_marker().as_deref()));
+        });
     }
 }

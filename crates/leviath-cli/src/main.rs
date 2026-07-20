@@ -138,11 +138,27 @@ async fn real_run(args: commands::run::RunArgs) -> anyhow::Result<()> {
 /// [`leviath_runtime::control_socket::is_daemon_running`]; only the real
 /// subprocess spawn + poll live here.
 async fn ensure_daemon_running() -> anyhow::Result<()> {
+    use leviath_cli::daemon::setup::{
+        CURRENT_BUILD, control_address, daemon_build_is_stale, read_build_marker,
+    };
     use leviath_runtime::control_socket::is_daemon_running;
-    let id = leviath_cli::daemon::setup::control_address()
+    let id = control_address()
         .ok_or_else(|| anyhow::anyhow!("cannot resolve a home directory for the control socket"))?;
     if is_daemon_running(&id) {
-        return Ok(()); // already running
+        if !daemon_build_is_stale(read_build_marker().as_deref()) {
+            return Ok(()); // already running the current build
+        }
+        // A daemon from an older build is running. It cannot pick up new code, so
+        // restart it cleanly — it reloads its persisted agents on startup, so
+        // in-flight runs survive the swap.
+        eprintln!("leviath daemon is on an older build; restarting to load {CURRENT_BUILD}…");
+        let _ = commands::daemon::send_shutdown(&control_client()?).await;
+        for _ in 0..100 {
+            if !is_daemon_running(&id) {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
     }
     let exe = std::env::current_exe()?;
     let mut cmd = std::process::Command::new(exe);
@@ -239,6 +255,9 @@ async fn real_daemon(args: commands::daemon::DaemonArgs) -> anyhow::Result<()> {
     // `bind_control_listener` enforces the single-instance guarantee and is fully
     // unit-tested; only driving its `accept` in a loop is the untestable sliver.
     let mut listener = bind_control_listener(&id)?;
+    // Record the build we started from so a later CLI can detect stale code and
+    // restart us (must happen right after we win the single-instance bind).
+    leviath_cli::daemon::setup::write_build_marker();
     let mut host = setup_daemon_host(config, runs_dir, tokio::runtime::Handle::current()).await;
 
     // Accept connections and feed control ops to the host; `Subscribe`
