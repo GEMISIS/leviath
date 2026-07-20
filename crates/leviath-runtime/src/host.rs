@@ -654,7 +654,7 @@ mod tests {
     }
 
     fn host_with(responses: Vec<InferenceResponse>) -> WorldHost {
-        let mut registry = crate::engine::ProviderRegistry::new();
+        let mut registry = crate::providers::ProviderRegistry::new();
         registry.register(
             "script".to_string(),
             Arc::new(Script {

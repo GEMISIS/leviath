@@ -8,7 +8,7 @@
 use std::sync::Arc;
 
 use leviath_providers::Tool;
-use leviath_runtime::engine::ProviderRegistry;
+use leviath_runtime::ProviderRegistry;
 use leviath_runtime::host::WorldHost;
 use leviath_runtime::inference_pool::InferencePoolConfig;
 use leviath_runtime::interaction_hub::InteractionHub;

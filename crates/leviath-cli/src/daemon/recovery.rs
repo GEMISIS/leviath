@@ -169,8 +169,8 @@ fn reload_one(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use leviath_runtime::ProviderRegistry;
     use leviath_runtime::components::AgentStatus;
-    use leviath_runtime::engine::ProviderRegistry;
     use leviath_runtime::inference_pool::InferencePoolConfig;
     use tokio::runtime::Handle;
 

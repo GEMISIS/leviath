@@ -32,7 +32,6 @@ use tokio::sync::mpsc::{UnboundedSender, unbounded_channel};
 use tokio::task::JoinHandle;
 
 use crate::components::{AgentMessage, AgentState, AgentStatus};
-use crate::engine::ProviderRegistry;
 use crate::inference_pool::{InferencePoolConfig, InferencePools};
 use crate::persistence_bridge::persistence_worker;
 use crate::pipeline::{
@@ -45,6 +44,7 @@ use crate::pipeline::{
     dispatch_tools, dispatch_transition_choice, handle_empty_response, process_response,
     resolve_transition, sync_tool_stages,
 };
+use crate::providers::ProviderRegistry;
 use crate::tool_bridge::tool_worker;
 
 /// Counts of agents in each phase-marker — the world's per-tick "fingerprint".
