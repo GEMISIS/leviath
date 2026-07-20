@@ -2,6 +2,7 @@
 
 pub mod add;
 pub mod create;
+pub mod daemon;
 pub mod dashboard;
 pub mod list;
 pub mod models;
