@@ -35,8 +35,11 @@ impl Dashboard {
                     .fg(status_color)
                     .add_modifier(Modifier::BOLD),
             ),
+            // Cap the status text so a long error message (the full text lives in
+            // the Output pane) can't consume the whole line and push the run id
+            // off the right edge.
             _ => Span::styled(
-                format!("{} ", agent.status),
+                format!("{} ", truncate(&agent.status.to_string(), 28)),
                 Style::default()
                     .fg(status_color)
                     .add_modifier(Modifier::BOLD),
