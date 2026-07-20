@@ -43,16 +43,20 @@ pub struct AgentToolState {
     pub launch_overrides: Arc<HashMap<String, ToolPolicy>>,
     /// Tools the user allowed for the whole run (grows on "allow for session").
     pub session_allows: Arc<Mutex<HashSet<String>>>,
-    /// Current stage's `tool_permissions` (updated by the host on stage change).
-    pub stage_perms: Arc<Mutex<HashMap<String, String>>>,
+    /// The current stage's `tool_permissions` — re-synced by `sync_stage` on each
+    /// stage change (a `std` mutex so the sync system can update it synchronously).
+    pub stage_perms: Arc<StdMutex<HashMap<String, String>>>,
+    /// Every stage's `tool_permissions`, indexed by stage index; `sync_stage`
+    /// copies the entered stage's map into `stage_perms`.
+    pub stage_perms_by_index: Arc<Vec<HashMap<String, String>>>,
     /// Blueprint-level `[tool_permissions]`.
     pub agent_perms: Arc<HashMap<String, String>>,
     /// Config-level tool permissions.
     pub global_perms: Arc<HashMap<String, ToolPolicy>>,
     /// The agent's interaction backend (ask_user + tool approvals).
     pub interaction: HubInteractionBackend,
-    /// The current stage name, for tagging interactions.
-    pub stage_name: Arc<Mutex<String>>,
+    /// The current stage name, for tagging interactions (re-synced on stage change).
+    pub stage_name: Arc<StdMutex<String>>,
 }
 
 /// Execute a single (non-context) tool call against the built-in or MCP executor.
@@ -75,7 +79,7 @@ pub async fn dispatch_tools(
     state: Arc<AgentToolState>,
     calls: Vec<ToolCall>,
 ) -> Vec<(String, String)> {
-    let stage_name = state.stage_name.lock().await.clone();
+    let stage_name = state.stage_name.lock().unwrap().clone();
     let mut out = Vec::with_capacity(calls.len());
     for tc in calls {
         // ask_user_* / present_for_review are handled by the interaction backend.
@@ -96,7 +100,7 @@ pub async fn dispatch_tools(
         let policy = if state.session_allows.lock().await.contains(&tc.name) {
             ToolPolicy::Allow
         } else {
-            let stage_snap = state.stage_perms.lock().await.clone();
+            let stage_snap = state.stage_perms.lock().unwrap().clone();
             resolve_policy(
                 &tc.name,
                 is_builtin,
@@ -158,6 +162,15 @@ impl CliToolService {
 }
 
 impl ToolService for CliToolService {
+    fn sync_stage(&self, entity: Entity, stage_index: usize, stage_name: &str) {
+        if let Some(state) = self.states.lock().unwrap().get(&entity) {
+            if let Some(perms) = state.stage_perms_by_index.get(stage_index) {
+                *state.stage_perms.lock().unwrap() = perms.clone();
+            }
+            *state.stage_name.lock().unwrap() = stage_name.to_string();
+        }
+    }
+
     fn exec_for(&self, entity: Entity, calls: Vec<ToolCall>) -> BoxedToolExec {
         let state = self.states.lock().unwrap().get(&entity).cloned();
         Box::new(move || {
@@ -199,11 +212,12 @@ mod tests {
             builtin_names,
             launch_overrides: Arc::new(HashMap::new()),
             session_allows: Arc::new(Mutex::new(HashSet::new())),
-            stage_perms: Arc::new(Mutex::new(HashMap::new())),
+            stage_perms: Arc::new(StdMutex::new(HashMap::new())),
+            stage_perms_by_index: Arc::new(Vec::new()),
             agent_perms: Arc::new(HashMap::new()),
             global_perms: Arc::new(global),
             interaction: hub.backend_for("agent-a"),
-            stage_name: Arc::new(Mutex::new("main".to_string())),
+            stage_name: Arc::new(StdMutex::new("main".to_string())),
         })
     }
 
@@ -266,6 +280,46 @@ mod tests {
         service.unregister(e);
         let out2 = service.exec_for(e, vec![call("c1", "bash", serde_json::json!({}))])().await;
         assert!(out2[0].1.contains("no tool state"));
+    }
+
+    #[test]
+    fn sync_stage_swaps_perms_and_name() {
+        let hub = InteractionHub::new();
+        let service = CliToolService::new();
+        let e = Entity::from_raw(9);
+        let mut deny = HashMap::new();
+        deny.insert("bash".to_string(), "deny".to_string());
+        let builtins = Arc::new(leviath_tools::BuiltinTools::new(
+            leviath_tools::ToolContext::new(std::env::temp_dir()),
+        ));
+        let builtin_names: HashSet<String> = builtins.names().into_iter().collect();
+        let state = Arc::new(AgentToolState {
+            builtins,
+            mcp: Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new())),
+            builtin_names,
+            launch_overrides: Arc::new(HashMap::new()),
+            session_allows: Arc::new(Mutex::new(HashSet::new())),
+            stage_perms: Arc::new(StdMutex::new(HashMap::new())),
+            stage_perms_by_index: Arc::new(vec![HashMap::new(), deny.clone()]),
+            agent_perms: Arc::new(HashMap::new()),
+            global_perms: Arc::new(HashMap::new()),
+            interaction: hub.backend_for("a"),
+            stage_name: Arc::new(StdMutex::new("main".to_string())),
+        });
+        service.register(e, state.clone());
+
+        // Entering stage 1 swaps in that stage's perms + name.
+        service.sync_stage(e, 1, "review");
+        assert_eq!(*state.stage_perms.lock().unwrap(), deny);
+        assert_eq!(*state.stage_name.lock().unwrap(), "review");
+
+        // An out-of-range index leaves perms as-is but still updates the name.
+        service.sync_stage(e, 99, "ghost");
+        assert_eq!(*state.stage_perms.lock().unwrap(), deny);
+        assert_eq!(*state.stage_name.lock().unwrap(), "ghost");
+
+        // An unregistered entity is a no-op (must not panic).
+        service.sync_stage(Entity::from_raw(123), 0, "x");
     }
 
     #[tokio::test]

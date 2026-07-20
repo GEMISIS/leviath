@@ -43,7 +43,7 @@ use crate::pipeline::{
     collect_compaction, collect_inference, collect_tools, collect_transition_choice,
     deliver_messages, dispatch_compaction, dispatch_inference, dispatch_persistence,
     dispatch_tools, dispatch_transition_choice, handle_empty_response, process_response,
-    resolve_transition,
+    resolve_transition, sync_tool_stages,
 };
 use crate::tool_bridge::tool_worker;
 
@@ -124,6 +124,7 @@ impl PipelineWorld {
                 resolve_transition,
                 dispatch_transition_choice,
                 collect_transition_choice,
+                sync_tool_stages,
                 dispatch_persistence,
             )
                 .chain(),
