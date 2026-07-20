@@ -14,14 +14,15 @@
 //! handling a control op and then re-driving to quiescence so its effect (a
 //! resume, a delivered message) is applied immediately.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use bevy_ecs::entity::Entity;
 use tokio::sync::mpsc::UnboundedReceiver;
-use tokio::sync::oneshot;
+use tokio::sync::{broadcast, oneshot};
 
-use crate::components::{AgentMessage, AgentState, AgentStatus};
+use crate::components::{AgentMessage, AgentState, AgentStatus, ContextWindow};
 use crate::interaction_hub::InteractionHub;
+use crate::persistence::{RunMetadata, TokenTotals};
 use crate::world::PipelineWorld;
 use leviath_core::interaction::{InteractionRequest, InteractionResponse};
 use serde::{Deserialize, Serialize};
@@ -148,12 +149,121 @@ pub enum ControlOp {
     },
 }
 
+/// A change in the world, broadcast to subscribers (the HTTP/WS gateway) so they
+/// get pushed updates instead of polling. Emitted by the host as it drives the
+/// world; streamed over the control transport via `ControlRequest::Subscribe`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "event", rename_all = "snake_case")]
+pub enum WorldEvent {
+    /// A run first appeared in the world.
+    Spawned {
+        /// The run id.
+        run_id: String,
+        /// The agent id.
+        agent_id: String,
+        /// The blueprint / agent name.
+        blueprint: String,
+    },
+    /// A run's status, stage, iteration, or tool-call count changed.
+    Status {
+        /// The run id.
+        run_id: String,
+        /// The agent id.
+        agent_id: String,
+        /// Short status label (`active`, `waiting`, `complete`, …).
+        status: String,
+        /// The current stage name.
+        stage: String,
+        /// The current iteration.
+        iteration: usize,
+        /// Cumulative tool calls.
+        tool_calls: usize,
+        /// Whether the current stage accepts messages.
+        accepts_messages: bool,
+    },
+    /// A run's token totals changed.
+    Tokens {
+        /// The run id.
+        run_id: String,
+        /// The agent id.
+        agent_id: String,
+        /// Cumulative prompt tokens.
+        prompt_tokens: usize,
+        /// Cumulative completion tokens.
+        completion_tokens: usize,
+        /// Cumulative cached tokens.
+        cached_tokens: usize,
+        /// Cumulative cache-write tokens.
+        cache_write_tokens: usize,
+    },
+    /// A run's context-window token usage changed.
+    Context {
+        /// The run id.
+        run_id: String,
+        /// The agent id.
+        agent_id: String,
+        /// Current context tokens.
+        total_tokens: usize,
+        /// Max context tokens.
+        max_tokens: usize,
+    },
+    /// A run raised a new interaction awaiting an answer.
+    Interaction {
+        /// The run id.
+        run_id: String,
+        /// The agent id.
+        agent_id: String,
+        /// The interaction request.
+        request: InteractionRequest,
+    },
+    /// A run reached a terminal status.
+    Completed {
+        /// The run id.
+        run_id: String,
+        /// The agent id.
+        agent_id: String,
+        /// The terminal status label.
+        status: String,
+    },
+}
+
+/// A short, stable status label for [`WorldEvent`].
+fn status_str(status: &AgentStatus) -> &'static str {
+    match status {
+        AgentStatus::Idle => "idle",
+        AgentStatus::Active => "active",
+        AgentStatus::Waiting => "waiting",
+        AgentStatus::Complete => "complete",
+        AgentStatus::Error { .. } => "error",
+        AgentStatus::Cancelled => "cancelled",
+    }
+}
+
+/// The last-emitted snapshot of an agent, for change detection.
+#[derive(Clone)]
+struct Emitted {
+    status: &'static str,
+    stage: String,
+    iteration: usize,
+    tool_calls: usize,
+    accepts_messages: bool,
+    prompt_tokens: usize,
+    completion_tokens: usize,
+    cached_tokens: usize,
+    cache_write_tokens: usize,
+    context_tokens: usize,
+    terminal: bool,
+}
+
 /// Owns the world and the run-id map; drives the world and services control ops.
 pub struct WorldHost {
     world: PipelineWorld,
     by_run_id: HashMap<String, Entity>,
     interactions: InteractionHub,
     spawner: Option<Spawner>,
+    events: broadcast::Sender<WorldEvent>,
+    emitted: HashMap<String, Emitted>,
+    emitted_interactions: HashSet<String>,
 }
 
 impl WorldHost {
@@ -165,11 +275,166 @@ impl WorldHost {
     /// Wrap a world with a specific interaction hub — the daemon shares one hub
     /// between the tool service's per-agent backends and this host.
     pub fn with_interactions(world: PipelineWorld, interactions: InteractionHub) -> Self {
+        let (events, _) = broadcast::channel(1024);
         Self {
             world,
             by_run_id: HashMap::new(),
             interactions,
             spawner: None,
+            events,
+            emitted: HashMap::new(),
+            emitted_interactions: HashSet::new(),
+        }
+    }
+
+    /// Subscribe to [`WorldEvent`]s. The HTTP/WS gateway uses this (via the
+    /// control transport's `Subscribe`) to push updates instead of polling.
+    pub fn subscribe(&self) -> broadcast::Receiver<WorldEvent> {
+        self.events.subscribe()
+    }
+
+    /// The world-event sender, handed to the control transport so a `Subscribe`
+    /// connection can stream events.
+    pub fn event_sender(&self) -> broadcast::Sender<WorldEvent> {
+        self.events.clone()
+    }
+
+    /// Diff every registered run against its last-emitted snapshot and broadcast
+    /// what changed (status/tokens/context/completion) plus any new interaction.
+    /// Called after each drive to quiescence, so subscribers see every change.
+    fn emit_events(&mut self) {
+        let pairs: Vec<(String, Entity)> = self
+            .by_run_id
+            .iter()
+            .map(|(k, &v)| (k.clone(), v))
+            .collect();
+        for (run_id, entity) in pairs {
+            let Some(state) = self.world.world().get::<AgentState>(entity) else {
+                continue; // reaped between registration and now
+            };
+            let agent_id = state.agent_id.clone();
+            let status = status_str(&state.status);
+            let terminal = matches!(
+                state.status,
+                AgentStatus::Complete | AgentStatus::Error { .. } | AgentStatus::Cancelled
+            );
+            let cur = {
+                let totals = self
+                    .world
+                    .world()
+                    .get::<TokenTotals>(entity)
+                    .copied()
+                    .unwrap_or_default();
+                let (context_tokens, _) = self
+                    .world
+                    .world()
+                    .get::<ContextWindow>(entity)
+                    .map(|w| (w.current_tokens, w.max_tokens))
+                    .unwrap_or((0, 0));
+                Emitted {
+                    status,
+                    stage: state.current_stage.clone(),
+                    iteration: state.iteration,
+                    tool_calls: totals.tool_calls,
+                    accepts_messages: state.accepts_messages,
+                    prompt_tokens: totals.prompt_tokens,
+                    completion_tokens: totals.completion_tokens,
+                    cached_tokens: totals.cached_tokens,
+                    cache_write_tokens: totals.cache_write_tokens,
+                    context_tokens,
+                    terminal,
+                }
+            };
+            let max_tokens = self
+                .world
+                .world()
+                .get::<ContextWindow>(entity)
+                .map(|w| w.max_tokens)
+                .unwrap_or(0);
+            let prev = self.emitted.get(&run_id).cloned();
+
+            if prev.is_none() {
+                let blueprint = self
+                    .world
+                    .world()
+                    .get::<RunMetadata>(entity)
+                    .map(|m| m.agent_name.clone())
+                    .unwrap_or_default();
+                let _ = self.events.send(WorldEvent::Spawned {
+                    run_id: run_id.clone(),
+                    agent_id: agent_id.clone(),
+                    blueprint,
+                });
+            }
+
+            let status_key = |e: &Emitted| {
+                (
+                    e.status,
+                    e.stage.clone(),
+                    e.iteration,
+                    e.tool_calls,
+                    e.accepts_messages,
+                )
+            };
+            if prev.as_ref().map(status_key) != Some(status_key(&cur)) {
+                let _ = self.events.send(WorldEvent::Status {
+                    run_id: run_id.clone(),
+                    agent_id: agent_id.clone(),
+                    status: status.to_string(),
+                    stage: cur.stage.clone(),
+                    iteration: cur.iteration,
+                    tool_calls: cur.tool_calls,
+                    accepts_messages: cur.accepts_messages,
+                });
+            }
+
+            let token_key = |e: &Emitted| {
+                (
+                    e.prompt_tokens,
+                    e.completion_tokens,
+                    e.cached_tokens,
+                    e.cache_write_tokens,
+                )
+            };
+            if prev.as_ref().map(token_key) != Some(token_key(&cur)) {
+                let _ = self.events.send(WorldEvent::Tokens {
+                    run_id: run_id.clone(),
+                    agent_id: agent_id.clone(),
+                    prompt_tokens: cur.prompt_tokens,
+                    completion_tokens: cur.completion_tokens,
+                    cached_tokens: cur.cached_tokens,
+                    cache_write_tokens: cur.cache_write_tokens,
+                });
+            }
+
+            if prev.as_ref().map(|e| e.context_tokens) != Some(cur.context_tokens) {
+                let _ = self.events.send(WorldEvent::Context {
+                    run_id: run_id.clone(),
+                    agent_id: agent_id.clone(),
+                    total_tokens: cur.context_tokens,
+                    max_tokens,
+                });
+            }
+
+            if cur.terminal && prev.as_ref().map(|e| e.terminal) != Some(true) {
+                let _ = self.events.send(WorldEvent::Completed {
+                    run_id: run_id.clone(),
+                    agent_id: agent_id.clone(),
+                    status: status.to_string(),
+                });
+            }
+
+            self.emitted.insert(run_id, cur);
+        }
+
+        for (agent_id, request) in self.interactions.pending() {
+            if self.emitted_interactions.insert(request.id.clone()) {
+                let _ = self.events.send(WorldEvent::Interaction {
+                    run_id: agent_id.clone(),
+                    agent_id,
+                    request,
+                });
+            }
         }
     }
 
@@ -300,6 +565,7 @@ impl WorldHost {
         let shutdown = self.world.shutdown_handle();
         loop {
             self.world.run_to_fixed_point();
+            self.emit_events();
             tokio::select! {
                 _ = wake.notified() => {}
                 _ = shutdown.notified() => return,
@@ -756,6 +1022,141 @@ mod tests {
         assert!(rx.await.unwrap());
         // The serve loop returns once the world's shutdown is signalled.
         handle.await.unwrap();
+    }
+
+    #[test]
+    fn status_str_covers_all_variants() {
+        assert_eq!(status_str(&AgentStatus::Idle), "idle");
+        assert_eq!(status_str(&AgentStatus::Active), "active");
+        assert_eq!(status_str(&AgentStatus::Waiting), "waiting");
+        assert_eq!(status_str(&AgentStatus::Complete), "complete");
+        assert_eq!(
+            status_str(&AgentStatus::Error {
+                message: "x".to_string()
+            }),
+            "error"
+        );
+        assert_eq!(status_str(&AgentStatus::Cancelled), "cancelled");
+    }
+
+    #[tokio::test]
+    async fn emit_events_broadcasts_agent_changes() {
+        let mut host = host_with(vec![text("done")]);
+        let mut rx = host.subscribe();
+        let entity = spawn(&mut host, "run-a", "agent-a");
+        // Attach run metadata so the `Spawned` event carries the blueprint name.
+        host.world_mut()
+            .world_mut()
+            .entity_mut(entity)
+            .insert(RunMetadata {
+                run_id: "run-a".to_string(),
+                agent_name: "coder".to_string(),
+                agent_path: "/a".to_string(),
+                task: "t".to_string(),
+                model: None,
+                workdir: "/w".to_string(),
+                num_stages: 1,
+                started_at: 0,
+                parent_run_id: None,
+                metadata: std::collections::HashMap::new(),
+                callback_url: None,
+                title: None,
+            });
+
+        // First emission after spawn: Spawned + Status + Tokens + Context.
+        host.emit_events();
+        let first: Vec<WorldEvent> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
+        assert!(
+            first
+                .iter()
+                .any(|e| matches!(e, WorldEvent::Spawned { .. }))
+        );
+        assert!(first.iter().any(|e| matches!(e, WorldEvent::Status { .. })));
+        assert!(first.iter().any(|e| matches!(e, WorldEvent::Tokens { .. })));
+        assert!(
+            first
+                .iter()
+                .any(|e| matches!(e, WorldEvent::Context { .. }))
+        );
+
+        // A second emission with nothing changed emits nothing (skip branches).
+        host.emit_events();
+        assert!(rx.try_recv().is_err());
+
+        // Drive to completion, then emit: a terminal `Completed` fires.
+        host.world_mut().run_until_idle(20).await;
+        host.emit_events();
+        let done: Vec<WorldEvent> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
+        assert!(
+            done.iter()
+                .any(|e| matches!(e, WorldEvent::Completed { .. }))
+        );
+
+        // Once terminal and unchanged, a further emission fires nothing.
+        host.emit_events();
+        assert!(
+            std::iter::from_fn(|| rx.try_recv().ok())
+                .collect::<Vec<_>>()
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn emit_events_broadcasts_new_interactions_once() {
+        let mut host = host_with(vec![]);
+        let mut rx = host.subscribe();
+        let backend = host.interactions().backend_for("agent-a");
+        let asking = tokio::spawn(async move {
+            backend
+                .ask(leviath_core::interaction::InteractionRequest::free_text(
+                    "q1", "p", "s", true,
+                ))
+                .await
+        });
+        for _ in 0..8 {
+            tokio::task::yield_now().await;
+        }
+
+        host.emit_events();
+        let evs: Vec<WorldEvent> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
+        assert!(
+            evs.iter()
+                .any(|e| matches!(e, WorldEvent::Interaction { .. }))
+        );
+        // A second emission does not re-broadcast the same interaction.
+        host.emit_events();
+        assert!(rx.try_recv().is_err());
+
+        // Answer it so the asking task finishes cleanly.
+        assert!(
+            host.interactions()
+                .answer(leviath_core::interaction::InteractionResponse::text(
+                    "q1", "ok"
+                ))
+        );
+        let _ = asking.await;
+    }
+
+    #[tokio::test]
+    async fn event_sender_feeds_subscribers() {
+        let host = host_with(vec![]);
+        let mut rx = host.subscribe();
+        let event = WorldEvent::Completed {
+            run_id: "r".to_string(),
+            agent_id: "a".to_string(),
+            status: "complete".to_string(),
+        };
+        host.event_sender().send(event.clone()).unwrap();
+        assert_eq!(rx.try_recv().unwrap(), event);
+    }
+
+    #[tokio::test]
+    async fn emit_events_skips_despawned_agents() {
+        let mut host = host_with(vec![]);
+        let e = spawn(&mut host, "run-a", "agent-a");
+        host.world_mut().world_mut().despawn(e);
+        // The stale run-id mapping is skipped; must not panic.
+        host.emit_events();
     }
 
     #[tokio::test]

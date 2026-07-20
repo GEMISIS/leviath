@@ -20,10 +20,10 @@
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::sync::mpsc::UnboundedSender;
-use tokio::sync::oneshot;
+use tokio::sync::{broadcast, oneshot};
 
 use crate::components::AgentStatus;
-use crate::host::{ControlOp, SpawnArgs};
+use crate::host::{ControlOp, SpawnArgs, WorldEvent};
 use leviath_core::interaction::{InteractionRequest, InteractionResponse};
 
 #[cfg(unix)]
@@ -98,6 +98,9 @@ pub enum ControlRequest {
     },
     /// Shut the daemon down.
     Shutdown,
+    /// Switch this connection to an event stream: the daemon writes newline-JSON
+    /// [`WorldEvent`]s until the client disconnects. No per-request reply.
+    Subscribe,
 }
 
 /// A control response over the wire.
@@ -231,6 +234,35 @@ async fn dispatch(req: ControlRequest, op_tx: &UnboundedSender<ControlOp>) -> Co
                 ok: rx.await.unwrap_or(false),
             }
         }
+        // `Subscribe` is intercepted by `handle_connection` (it streams rather
+        // than replies once); reaching here would be a routing bug.
+        ControlRequest::Subscribe => ControlResponse::Error {
+            message: "subscribe is a streaming request, not a single-reply op".to_string(),
+        },
+    }
+}
+
+/// Stream [`WorldEvent`]s to a subscribed client until it disconnects (a write
+/// fails) or the broadcast channel closes. Lagged events are skipped.
+async fn stream_events<W>(
+    write: &mut W,
+    mut rx: broadcast::Receiver<WorldEvent>,
+) -> std::io::Result<()>
+where
+    W: AsyncWrite + Unpin,
+{
+    loop {
+        match rx.recv().await {
+            Ok(event) => {
+                let mut line = serde_json::to_string(&event).expect("WorldEvent serializes");
+                line.push('\n');
+                if write.write_all(line.as_bytes()).await.is_err() {
+                    return Ok(()); // client hung up
+                }
+            }
+            Err(broadcast::error::RecvError::Lagged(_)) => continue,
+            Err(broadcast::error::RecvError::Closed) => return Ok(()),
+        }
     }
 }
 
@@ -245,6 +277,7 @@ async fn dispatch(req: ControlRequest, op_tx: &UnboundedSender<ControlOp>) -> Co
 pub async fn handle_connection<S>(
     stream: S,
     op_tx: UnboundedSender<ControlOp>,
+    events: broadcast::Sender<WorldEvent>,
 ) -> std::io::Result<()>
 where
     S: AsyncRead + AsyncWrite + Unpin,
@@ -256,6 +289,15 @@ where
             continue;
         }
         let response = match serde_json::from_str::<ControlRequest>(&line) {
+            // Subscribe switches this connection to an event stream and never
+            // returns to the request loop. Drop this connection's sender clone
+            // after subscribing so the channel closes once the world's sender
+            // does (a clean end on daemon shutdown).
+            Ok(ControlRequest::Subscribe) => {
+                let rx = events.subscribe();
+                drop(events);
+                return stream_events(&mut write_half, rx).await;
+            }
             Ok(req) => dispatch(req, &op_tx).await,
             Err(e) => ControlResponse::Error {
                 message: format!("invalid request: {e}"),
@@ -330,12 +372,51 @@ impl ControlClient {
     pub async fn shutdown(&self) -> std::io::Result<ControlResponse> {
         self.request(&ControlRequest::Shutdown).await
     }
+
+    /// Open a pushed event stream: connect, send `Subscribe`, and return a reader
+    /// that yields [`WorldEvent`]s until the daemon closes the connection. The
+    /// HTTP/WS gateway uses this instead of polling.
+    pub async fn subscribe(&self) -> std::io::Result<WorldEventStream> {
+        let stream = connect(&self.id).await?;
+        let (read_half, mut write_half) = tokio::io::split(stream);
+        let mut line =
+            serde_json::to_string(&ControlRequest::Subscribe).expect("ControlRequest serializes");
+        line.push('\n');
+        // A failed write means the peer is already gone; the read side then sees
+        // EOF and `next` returns `None`, so the write needs no separate handling.
+        let _ = write_half.write_all(line.as_bytes()).await;
+        Ok(WorldEventStream {
+            lines: BufReader::new(read_half).lines(),
+            _write: write_half,
+        })
+    }
+}
+
+/// A reader over a `Subscribe` connection, yielding [`WorldEvent`]s the daemon
+/// pushes.
+pub struct WorldEventStream {
+    lines: tokio::io::Lines<BufReader<tokio::io::ReadHalf<ClientStream>>>,
+    // Held open so the connection (and thus the subscription) stays alive.
+    _write: tokio::io::WriteHalf<ClientStream>,
+}
+
+impl WorldEventStream {
+    /// The next event, or `None` once the connection closes.
+    pub async fn next(&mut self) -> Option<WorldEvent> {
+        let line = self.lines.next_line().await.ok().flatten()?;
+        serde_json::from_str(&line).ok()
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use tokio::sync::mpsc;
+
+    /// An event sender with no live world behind it (tests that don't stream).
+    fn no_events() -> broadcast::Sender<WorldEvent> {
+        broadcast::channel(16).0
+    }
 
     /// A fake host: drains ControlOps and replies with scripted values.
     fn spawn_fake_host(mut rx: mpsc::UnboundedReceiver<ControlOp>) {
@@ -391,7 +472,7 @@ mod tests {
         let (mut listener, id, _dir) = test_listener();
         tokio::spawn(async move {
             let stream = listener.accept().await.unwrap();
-            let _ = handle_connection(stream, op_tx).await;
+            let _ = handle_connection(stream, op_tx, no_events()).await;
         });
 
         let stream = connect(&id).await.unwrap();
@@ -519,6 +600,114 @@ mod tests {
         );
     }
 
+    fn completed(run_id: &str) -> WorldEvent {
+        WorldEvent::Completed {
+            run_id: run_id.to_string(),
+            agent_id: "a".to_string(),
+            status: "complete".to_string(),
+        }
+    }
+
+    #[tokio::test]
+    async fn dispatch_rejects_subscribe_as_a_single_reply_op() {
+        let (op_tx, _rx) = mpsc::unbounded_channel();
+        let resp = dispatch(ControlRequest::Subscribe, &op_tx).await;
+        assert_eq!(
+            std::mem::discriminant(&resp),
+            std::mem::discriminant(&ControlResponse::Error {
+                message: String::new()
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn stream_events_skips_lagged_writes_ok_and_stops_on_closed() {
+        use tokio::io::AsyncReadExt;
+        let (tx, rx) = broadcast::channel::<WorldEvent>(1);
+        // Overflow the 1-slot buffer so the receiver lags, then leave one to read.
+        tx.send(completed("first")).unwrap();
+        tx.send(completed("second")).unwrap();
+        tx.send(completed("third")).unwrap();
+        drop(tx); // no more senders → Closed once drained
+
+        let (mut w, mut r) = tokio::io::duplex(4096);
+        let server = tokio::spawn(async move { stream_events(&mut w, rx).await });
+        let mut buf = String::new();
+        r.read_to_string(&mut buf).await.unwrap();
+        server.await.unwrap().unwrap();
+        // The lagged-past earliest events were skipped; the latest was written.
+        assert!(buf.contains("third"));
+        assert!(!buf.contains("first"));
+    }
+
+    #[tokio::test]
+    async fn stream_events_returns_when_the_client_hangs_up() {
+        let (tx, rx) = broadcast::channel::<WorldEvent>(4);
+        tx.send(completed("x")).unwrap();
+        let (mut w, r) = tokio::io::duplex(64);
+        drop(r); // reader gone → the write fails, ending the stream
+        stream_events(&mut w, rx).await.unwrap();
+        drop(tx);
+    }
+
+    #[tokio::test]
+    async fn subscribe_streams_events_to_the_client() {
+        let (events, _r) = broadcast::channel::<WorldEvent>(16);
+        let (op_tx, op_rx) = mpsc::unbounded_channel();
+        spawn_fake_host(op_rx);
+        let (mut listener, id, _dir) = test_listener();
+        let server_events = events.clone();
+        let server = tokio::spawn(async move {
+            let stream = listener.accept().await.unwrap();
+            let _ = handle_connection(stream, op_tx, server_events).await;
+        });
+
+        let mut stream = ControlClient::new(id).subscribe().await.unwrap();
+        // Emit until the server has subscribed and the client receives it.
+        let received = loop {
+            events.send(completed("run-1")).unwrap();
+            tokio::select! {
+                e = stream.next() => break e,
+                _ = tokio::time::sleep(std::time::Duration::from_millis(5)) => {}
+            }
+        };
+        let received = received.expect("an event should have streamed to the client");
+        assert_eq!(
+            std::mem::discriminant(&received),
+            std::mem::discriminant(&completed("x"))
+        );
+        // Drop the last sender so the server's stream ends and its task finishes.
+        drop(events);
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn subscribe_errors_when_daemon_absent() {
+        let dir = tempfile::tempdir().unwrap();
+        let client = ControlClient::new(control_id(&dir.path().join("no-daemon")));
+        assert!(client.subscribe().await.is_err());
+    }
+
+    #[tokio::test]
+    async fn subscribe_stream_ends_when_the_daemon_closes() {
+        let (events, _r) = broadcast::channel::<WorldEvent>(16);
+        let (op_tx, op_rx) = mpsc::unbounded_channel();
+        spawn_fake_host(op_rx);
+        let (mut listener, id, _dir) = test_listener();
+        let server_events = events.clone();
+        tokio::spawn(async move {
+            let stream = listener.accept().await.unwrap();
+            let _ = handle_connection(stream, op_tx, server_events).await;
+        });
+
+        let mut stream = ControlClient::new(id).subscribe().await.unwrap();
+        // Give the server time to subscribe (and drop its sender clone), then drop
+        // the last sender: the channel closes and the stream ends.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        drop(events);
+        assert!(stream.next().await.is_none());
+    }
+
     /// A connected `(client, server)` stream pair, plus the `TempDir` keeping the
     /// listener's socket alive, for driving `handle_connection` directly.
     async fn connected_pair() -> (ClientStream, ServerStream, tempfile::TempDir) {
@@ -532,7 +721,8 @@ mod tests {
         let (op_tx, op_rx) = mpsc::unbounded_channel();
         spawn_fake_host(op_rx);
         let (client, server, _dir) = connected_pair().await;
-        let handle = tokio::spawn(async move { handle_connection(server, op_tx).await });
+        let handle =
+            tokio::spawn(async move { handle_connection(server, op_tx, no_events()).await });
 
         let (read_half, mut write_half) = tokio::io::split(client);
         // A blank line (skipped) then garbage (error) then a valid request.
@@ -569,7 +759,8 @@ mod tests {
         let (op_tx, op_rx) = mpsc::unbounded_channel();
         spawn_fake_host(op_rx);
         let (client, server, _dir) = connected_pair().await;
-        let handle = tokio::spawn(async move { handle_connection(server, op_tx).await });
+        let handle =
+            tokio::spawn(async move { handle_connection(server, op_tx, no_events()).await });
 
         let (_read_half, mut write_half) = tokio::io::split(client);
         // Invalid UTF-8 makes the line reader return an I/O error, which
@@ -590,7 +781,7 @@ mod tests {
                 let stream = listener.accept().await.unwrap();
                 let op_tx = op_tx.clone();
                 tokio::spawn(async move {
-                    let _ = handle_connection(stream, op_tx).await;
+                    let _ = handle_connection(stream, op_tx, no_events()).await;
                 });
             }
         });
