@@ -60,6 +60,10 @@ impl RiskyExecutors for RealExecutors {
         commands::run::execute(args, real_foreground_io()).await
     }
 
+    async fn spawn(&self, args: commands::spawn::SpawnCmdArgs) -> anyhow::Result<()> {
+        real_spawn(args).await
+    }
+
     async fn setup(&self, args: commands::setup::SetupArgs) -> anyhow::Result<()> {
         // The interactive arm reads the process's real stdin; the branch +
         // config wiring is the tested `setup::execute_with`.
@@ -128,6 +132,20 @@ async fn real_daemon(args: commands::daemon::DaemonArgs) -> anyhow::Result<()> {
 
     let _ = std::fs::remove_file(&socket);
     Ok(())
+}
+
+/// Real `lev spawn`: reads the process's real cwd and the control-socket path,
+/// then hands the request to the tested `spawn::resolve_spawn_args` / `send_spawn`
+/// cores. The env-dependent I/O (cwd, home resolution, socket connect) lives here.
+async fn real_spawn(args: commands::spawn::SpawnCmdArgs) -> anyhow::Result<()> {
+    use leviath_cli::daemon::setup::control_socket_path;
+    use leviath_runtime::control_socket::ControlClient;
+
+    let workdir = std::env::current_dir()?.to_string_lossy().to_string();
+    let spawn_args = commands::spawn::resolve_spawn_args(&args, &workdir)?;
+    let socket = control_socket_path()
+        .ok_or_else(|| anyhow::anyhow!("cannot resolve a home directory for the control socket"))?;
+    commands::spawn::send_spawn(&ControlClient::new(socket), spawn_args).await
 }
 
 /// Real `lev dash`: supplies the real crossterm terminal backend and event
