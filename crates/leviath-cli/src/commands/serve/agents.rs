@@ -18,9 +18,8 @@ use crate::runstate::{self, ContextSnapshot, RunMeta};
 /// (over the control socket) to create the agent; the daemon loads the blueprint,
 /// resolves tools/model, and persists the run so the read endpoints observe it.
 ///
-/// `yolo` / `allow` / `max_depth` from the request are not yet forwarded (the
-/// daemon applies the blueprint's own tool policy); this is a safe-side
-/// degradation — more approval prompting, never less.
+/// `yolo` / `allow` / `max_depth` from the request are forwarded through
+/// [`SpawnArgs`] to the daemon's tool-policy resolution.
 pub(super) async fn spawn_agent(
     State(state): State<AppState>,
     Json(body): Json<SpawnAgentReq>,
