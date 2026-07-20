@@ -16,9 +16,40 @@ use leviath_runtime::world::PipelineWorld;
 use tokio::runtime::Handle;
 use tokio::sync::Mutex;
 
-use crate::config::Config;
+use crate::commands::run::session::build_provider_registry_from_config;
+use crate::config::{Config, leviath_home_dir};
 use crate::daemon::spawn::build_agent;
 use crate::daemon::tool_service::CliToolService;
+use crate::tools::ToolRegistry;
+
+/// The daemon's control-socket path: `<leviath-home>/.leviath/control.sock`
+/// (honoring `LEVIATH_HOME`). `None` if no home directory can be resolved.
+pub fn control_socket_path() -> Option<std::path::PathBuf> {
+    leviath_home_dir().map(|home| home.join(".leviath").join("control.sock"))
+}
+
+/// Build the daemon's [`WorldHost`], doing the async startup work: build the
+/// provider registry from config and connect the shared MCP servers (both reused
+/// by every agent), then wire the host + spawner via [`build_host`].
+pub async fn setup_daemon_host(
+    config: Config,
+    runs_dir: std::path::PathBuf,
+    runtime: Handle,
+) -> WorldHost {
+    let providers = build_provider_registry_from_config(&config);
+    // MCP connections are shared across agents; the workdir here only seeds the
+    // (discarded) built-ins — each agent gets its own over its own workdir.
+    let registry = ToolRegistry::build(std::env::temp_dir(), &config).await;
+    build_host(
+        config,
+        providers,
+        runs_dir,
+        registry.mcp,
+        registry.mcp_tool_defs,
+        runtime,
+        || chrono::Utc::now().timestamp(),
+    )
+}
 
 /// Build the daemon's [`WorldHost`]: one world hosting every agent, its tool
 /// service + interaction hub, and a `Spawn`-op spawner that loads blueprints and
@@ -89,6 +120,49 @@ mod tests {
         fn capabilities(&self, _m: &str) -> leviath_providers::ModelCapabilities {
             leviath_providers::ModelCapabilities::default()
         }
+    }
+
+    #[test]
+    fn control_socket_path_uses_leviath_home() {
+        temp_env::with_var("LEVIATH_HOME", Some("/tmp/leviath-home-x"), || {
+            let path = control_socket_path().unwrap();
+            assert!(path.ends_with(".leviath/control.sock"));
+            assert!(path.starts_with("/tmp/leviath-home-x"));
+        });
+    }
+
+    #[tokio::test]
+    async fn setup_daemon_host_builds_a_working_host() {
+        // Config::default has no MCP servers → the shared MCP connect is a no-op.
+        let mut host =
+            setup_daemon_host(Config::default(), std::env::temp_dir(), Handle::current()).await;
+
+        // Spawning through the wired host exercises the real setup end to end
+        // (including the now_secs timestamp closure).
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = dir.path().join("agent.leviath");
+        std::fs::write(
+            &manifest,
+            std::fs::read_to_string(
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("../../agents/coder/agent.leviath"),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let (reply, rx) = oneshot::channel();
+        host.handle(ControlOp::Spawn {
+            args: SpawnArgs {
+                run_id: "run-s".to_string(),
+                blueprint_path: manifest.to_string_lossy().to_string(),
+                task: "t".to_string(),
+                model: None,
+                workdir: std::env::temp_dir().to_string_lossy().to_string(),
+                metadata: Default::default(),
+            },
+            reply,
+        });
+        assert_eq!(rx.await.unwrap(), Ok("run-s".to_string()));
     }
 
     #[tokio::test]

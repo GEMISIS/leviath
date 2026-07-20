@@ -17,7 +17,7 @@ mod helpers;
 mod inference;
 pub mod io;
 mod manifest;
-mod session;
+pub mod session;
 mod stages;
 pub mod tool_source;
 mod worker;
