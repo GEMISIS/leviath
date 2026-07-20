@@ -227,7 +227,10 @@ mod tests {
 
     #[tokio::test]
     async fn dispatch_daemon_variant_is_routed_through_the_executor() {
-        let args = commands::daemon::DaemonArgs { socket: None };
+        let args = commands::daemon::DaemonArgs {
+            action: None,
+            socket: None,
+        };
         let result = dispatch(Commands::Daemon(args), &MockRisky).await;
         assert!(result.is_ok());
     }
