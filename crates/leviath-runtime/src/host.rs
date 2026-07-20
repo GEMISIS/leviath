@@ -17,10 +17,12 @@
 use std::collections::{HashMap, HashSet};
 
 use bevy_ecs::entity::Entity;
-use tokio::sync::mpsc::UnboundedReceiver;
+use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tokio::sync::{broadcast, oneshot};
 
-use crate::components::{AgentMessage, AgentState, AgentStatus, ContextWindow};
+use crate::components::{
+    AgentMessage, AgentState, AgentStatus, ContextWindow, ParentRef, SubAgentChildren,
+};
 use crate::interaction_hub::InteractionHub;
 use crate::persistence::{RunMetadata, TokenTotals};
 use crate::world::PipelineWorld;
@@ -65,6 +67,51 @@ pub struct SpawnArgs {
 /// returns the new entity (the host records the run-id mapping). Returns `Err`
 /// with a human-readable message on failure.
 pub type Spawner = Box<dyn FnMut(&mut PipelineWorld, &SpawnArgs) -> Result<Entity, String> + Send>;
+
+/// A world-access request from an agent's tool lane. The sub-agent tools
+/// (`spawn_agent`/`check_agent`/`send_to_agent`/`kill_agent`) need the world and
+/// the [`Spawner`], which only the host holds — the tool lane runs async, off the
+/// world. Each carries a oneshot reply, so the (sequential) tool lane blocks on
+/// the host applying it, mirroring the interaction hub.
+pub enum SubAgentOp {
+    /// Spawn a child agent from `args`, linked as a child of `parent_run_id`.
+    /// Rejected if the child would exceed `max_depth`. Reply is the child run id.
+    Spawn {
+        /// The child's spawn parameters (blueprint path, task, etc.). Boxed
+        /// because it is much larger than the other variants' payloads.
+        args: Box<SpawnArgs>,
+        /// The run id of the agent doing the spawning.
+        parent_run_id: String,
+        /// Maximum allowed sub-agent tree depth (root = 0).
+        max_depth: usize,
+        /// Reply: the child's run id, or an error message.
+        reply: oneshot::Sender<Result<String, String>>,
+    },
+    /// Report a run's current status (`None` if the host has no such live run).
+    Check {
+        /// The run to query.
+        run_id: String,
+        /// Reply: the run's status.
+        reply: oneshot::Sender<Option<AgentStatus>>,
+    },
+    /// Deliver a message into a running agent's inbox. Reply is whether a live
+    /// agent accepted it.
+    Send {
+        /// The target run.
+        run_id: String,
+        /// The message body.
+        content: String,
+        /// Reply: whether the message was accepted.
+        reply: oneshot::Sender<bool>,
+    },
+    /// Cancel a run and its whole sub-tree. Reply is whether any agent was found.
+    Kill {
+        /// The run to cancel (with its descendants).
+        run_id: String,
+        /// Reply: whether anything was cancelled.
+        reply: oneshot::Sender<bool>,
+    },
+}
 
 /// A control operation addressed to the host, each carrying a oneshot channel the
 /// host replies on. Agents are addressed by run id.
@@ -264,6 +311,10 @@ pub struct WorldHost {
     events: broadcast::Sender<WorldEvent>,
     emitted: HashMap<String, Emitted>,
     emitted_interactions: HashSet<String>,
+    /// Sub-agent world-access requests from tool lanes. The host holds a `tx`
+    /// clone so the receiver never closes (its `recv` never yields `None`).
+    subagent_tx: UnboundedSender<SubAgentOp>,
+    subagent_rx: UnboundedReceiver<SubAgentOp>,
 }
 
 impl WorldHost {
@@ -276,6 +327,7 @@ impl WorldHost {
     /// between the tool service's per-agent backends and this host.
     pub fn with_interactions(world: PipelineWorld, interactions: InteractionHub) -> Self {
         let (events, _) = broadcast::channel(1024);
+        let (subagent_tx, subagent_rx) = tokio::sync::mpsc::unbounded_channel();
         Self {
             world,
             by_run_id: HashMap::new(),
@@ -284,7 +336,15 @@ impl WorldHost {
             events,
             emitted: HashMap::new(),
             emitted_interactions: HashSet::new(),
+            subagent_tx,
+            subagent_rx,
         }
+    }
+
+    /// A sender for [`SubAgentOp`]s. The daemon hands a clone to each agent's tool
+    /// state so the sub-agent tools can reach the world through the host.
+    pub fn subagent_sender(&self) -> UnboundedSender<SubAgentOp> {
+        self.subagent_tx.clone()
     }
 
     /// Subscribe to [`WorldEvent`]s. The HTTP/WS gateway uses this (via the
@@ -465,6 +525,113 @@ impl WorldHost {
         self.world.world().get::<AgentState>(entity).map(|_| entity)
     }
 
+    /// Service one [`SubAgentOp`] from a tool lane, replying on its oneshot.
+    fn handle_subagent(&mut self, op: SubAgentOp) {
+        match op {
+            SubAgentOp::Spawn {
+                args,
+                parent_run_id,
+                max_depth,
+                reply,
+            } => {
+                let _ = reply.send(self.spawn_child(*args, &parent_run_id, max_depth));
+            }
+            SubAgentOp::Check { run_id, reply } => {
+                let status = self
+                    .live_entity(&run_id)
+                    .and_then(|e| self.world.agent_status(e));
+                let _ = reply.send(status);
+            }
+            SubAgentOp::Send {
+                run_id,
+                content,
+                reply,
+            } => {
+                let ok = self
+                    .world
+                    .send_message(AgentMessage {
+                        agent_id: run_id,
+                        content,
+                        target_region: None,
+                        priority: 0,
+                    })
+                    .is_ok();
+                let _ = reply.send(ok);
+            }
+            SubAgentOp::Kill { run_id, reply } => {
+                let _ = reply.send(self.cancel_tree(&run_id));
+            }
+        }
+    }
+
+    /// Spawn a child agent under `parent_run_id`, linking `ParentRef` /
+    /// `SubAgentChildren` and registering its run id. `Err` if the parent is not
+    /// live, the depth limit is reached, or the spawner rejects it.
+    fn spawn_child(
+        &mut self,
+        args: SpawnArgs,
+        parent_run_id: &str,
+        max_depth: usize,
+    ) -> Result<String, String> {
+        let parent = self
+            .live_entity(parent_run_id)
+            .ok_or_else(|| format!("parent run '{parent_run_id}' is not live"))?;
+        let parent_depth = self
+            .world
+            .world()
+            .get::<ParentRef>(parent)
+            .map_or(0, |p| p.depth);
+        let child_depth = parent_depth + 1;
+        if child_depth > max_depth {
+            return Err(format!(
+                "sub-agent depth limit ({max_depth}) reached; not spawning deeper"
+            ));
+        }
+        let run_id = args.run_id.clone();
+        let child = match self.spawner.as_mut() {
+            Some(spawner) => spawner(&mut self.world, &args)?,
+            None => return Err("this daemon cannot spawn agents".to_string()),
+        };
+        let world = self.world.world_mut();
+        world.entity_mut(child).insert(ParentRef {
+            parent_entity: parent,
+            parent_agent_id: parent_run_id.to_string(),
+            depth: child_depth,
+        });
+        match world.get_mut::<SubAgentChildren>(parent) {
+            Some(mut kids) => kids.children.push(child),
+            None => {
+                world.entity_mut(parent).insert(SubAgentChildren {
+                    children: vec![child],
+                    max_child_depth: max_depth,
+                });
+            }
+        }
+        self.by_run_id.insert(run_id.clone(), child);
+        Ok(run_id)
+    }
+
+    /// Cancel a run and every descendant. Returns whether the run was live.
+    fn cancel_tree(&mut self, run_id: &str) -> bool {
+        let Some(root) = self.live_entity(run_id) else {
+            return false;
+        };
+        // Collect the subtree (parent before children), then cancel each.
+        let mut subtree = Vec::new();
+        let mut stack = vec![root];
+        while let Some(e) = stack.pop() {
+            subtree.push(e);
+            if let Some(kids) = self.world.world().get::<SubAgentChildren>(e) {
+                stack.extend(kids.children.iter().copied());
+            }
+        }
+        let mut cancelled = false;
+        for e in subtree {
+            cancelled |= self.world.cancel(e);
+        }
+        cancelled
+    }
+
     /// List every known live run and its status.
     fn list(&self) -> Vec<(String, AgentStatus)> {
         self.by_run_id
@@ -575,6 +742,8 @@ impl WorldHost {
                         None => return, // all control senders dropped
                     }
                 }
+                // The host holds a `subagent_tx`, so this only yields `Some`.
+                Some(sub) = self.subagent_rx.recv() => self.handle_subagent(sub),
             }
         }
     }
@@ -890,6 +1059,205 @@ mod tests {
         assert!(result.unwrap_err().contains("cannot spawn"));
     }
 
+    // ─── sub-agent bridge ──────────────────────────────────────────────────
+
+    async fn ask_sub<T>(
+        host: &mut WorldHost,
+        make: impl FnOnce(oneshot::Sender<T>) -> SubAgentOp,
+    ) -> T {
+        let (tx, rx) = oneshot::channel();
+        host.handle_subagent(make(tx));
+        rx.await.unwrap()
+    }
+
+    /// A spawner that adds a bare child agent and returns it.
+    fn child_spawner() -> Spawner {
+        Box::new(|world, args| Ok(world.spawn_agent((agent_state(&args.run_id),))))
+    }
+
+    #[tokio::test]
+    async fn subagent_spawn_links_child_and_registers() {
+        let mut host = host_with(vec![]);
+        host.set_spawner(child_spawner());
+        let parent = spawn(&mut host, "parent", "parent");
+
+        let result = ask_sub(&mut host, |reply| SubAgentOp::Spawn {
+            args: Box::new(SpawnArgs {
+                run_id: "child".to_string(),
+                ..Default::default()
+            }),
+            parent_run_id: "parent".to_string(),
+            max_depth: 3,
+            reply,
+        })
+        .await;
+        assert_eq!(result, Ok("child".to_string()));
+
+        let child = host.by_run_id["child"];
+        // The child links back to the parent at depth 1.
+        let pref = host.world.world().get::<ParentRef>(child).unwrap();
+        assert_eq!(pref.parent_entity, parent);
+        assert_eq!(pref.depth, 1);
+        // The parent tracks the child.
+        let kids = host.world.world().get::<SubAgentChildren>(parent).unwrap();
+        assert_eq!(kids.children, vec![child]);
+    }
+
+    #[tokio::test]
+    async fn subagent_spawn_appends_to_existing_children() {
+        let mut host = host_with(vec![]);
+        host.set_spawner(child_spawner());
+        spawn(&mut host, "parent", "parent");
+        for id in ["c1", "c2"] {
+            let r = ask_sub(&mut host, |reply| SubAgentOp::Spawn {
+                args: Box::new(SpawnArgs {
+                    run_id: id.to_string(),
+                    ..Default::default()
+                }),
+                parent_run_id: "parent".to_string(),
+                max_depth: 3,
+                reply,
+            })
+            .await;
+            assert!(r.is_ok());
+        }
+        let parent = host.by_run_id["parent"];
+        let kids = host.world.world().get::<SubAgentChildren>(parent).unwrap();
+        assert_eq!(kids.children.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn subagent_spawn_rejects_beyond_max_depth() {
+        let mut host = host_with(vec![]);
+        host.set_spawner(child_spawner());
+        spawn(&mut host, "parent", "parent");
+        let result = ask_sub(&mut host, |reply| SubAgentOp::Spawn {
+            args: Box::new(SpawnArgs {
+                run_id: "child".to_string(),
+                ..Default::default()
+            }),
+            parent_run_id: "parent".to_string(),
+            max_depth: 0, // child would be depth 1 > 0
+            reply,
+        })
+        .await;
+        assert!(result.unwrap_err().contains("depth limit"));
+        assert!(!host.by_run_id.contains_key("child"));
+    }
+
+    #[tokio::test]
+    async fn subagent_spawn_unknown_parent_and_no_spawner_and_spawner_error() {
+        // Unknown parent.
+        let mut host = host_with(vec![]);
+        host.set_spawner(child_spawner());
+        let r = ask_sub(&mut host, |reply| SubAgentOp::Spawn {
+            args: Box::new(SpawnArgs::default()),
+            parent_run_id: "ghost".to_string(),
+            max_depth: 3,
+            reply,
+        })
+        .await;
+        assert!(r.unwrap_err().contains("not live"));
+
+        // No spawner installed.
+        let mut host2 = host_with(vec![]);
+        spawn(&mut host2, "parent", "parent");
+        let r = ask_sub(&mut host2, |reply| SubAgentOp::Spawn {
+            args: Box::new(SpawnArgs::default()),
+            parent_run_id: "parent".to_string(),
+            max_depth: 3,
+            reply,
+        })
+        .await;
+        assert!(r.unwrap_err().contains("cannot spawn"));
+
+        // Spawner rejects.
+        let mut host3 = host_with(vec![]);
+        host3.set_spawner(Box::new(|_w, _a| Err("bad blueprint".to_string())));
+        spawn(&mut host3, "parent", "parent");
+        let r = ask_sub(&mut host3, |reply| SubAgentOp::Spawn {
+            args: Box::new(SpawnArgs::default()),
+            parent_run_id: "parent".to_string(),
+            max_depth: 3,
+            reply,
+        })
+        .await;
+        assert_eq!(r, Err("bad blueprint".to_string()));
+    }
+
+    #[tokio::test]
+    async fn subagent_check_reports_status_or_none() {
+        let mut host = host_with(vec![]);
+        spawn(&mut host, "run-a", "run-a");
+        let status = ask_sub(&mut host, |reply| SubAgentOp::Check {
+            run_id: "run-a".to_string(),
+            reply,
+        })
+        .await;
+        assert_eq!(status, Some(AgentStatus::Active));
+
+        let none = ask_sub(&mut host, |reply| SubAgentOp::Check {
+            run_id: "ghost".to_string(),
+            reply,
+        })
+        .await;
+        assert_eq!(none, None);
+    }
+
+    #[tokio::test]
+    async fn subagent_send_delivers_to_inbox() {
+        let mut host = host_with(vec![]);
+        spawn(&mut host, "run-a", "run-a");
+        let ok = ask_sub(&mut host, |reply| SubAgentOp::Send {
+            run_id: "run-a".to_string(),
+            content: "hello child".to_string(),
+            reply,
+        })
+        .await;
+        assert!(ok);
+    }
+
+    #[tokio::test]
+    async fn subagent_kill_cancels_the_whole_tree() {
+        let mut host = host_with(vec![]);
+        host.set_spawner(child_spawner());
+        spawn(&mut host, "parent", "parent");
+        ask_sub(&mut host, |reply| SubAgentOp::Spawn {
+            args: Box::new(SpawnArgs {
+                run_id: "child".to_string(),
+                ..Default::default()
+            }),
+            parent_run_id: "parent".to_string(),
+            max_depth: 3,
+            reply,
+        })
+        .await
+        .unwrap();
+
+        let ok = ask_sub(&mut host, |reply| SubAgentOp::Kill {
+            run_id: "parent".to_string(),
+            reply,
+        })
+        .await;
+        assert!(ok);
+        assert_eq!(
+            host.world.agent_status(host.by_run_id["parent"]),
+            Some(AgentStatus::Cancelled)
+        );
+        assert_eq!(
+            host.world.agent_status(host.by_run_id["child"]),
+            Some(AgentStatus::Cancelled)
+        );
+
+        // Killing an unknown run is a no-op.
+        let miss = ask_sub(&mut host, |reply| SubAgentOp::Kill {
+            run_id: "ghost".to_string(),
+            reply,
+        })
+        .await;
+        assert!(!miss);
+    }
+
     #[tokio::test]
     async fn interaction_ops_list_answer_and_cancel() {
         let mut host = host_with(vec![]);
@@ -1021,6 +1389,30 @@ mod tests {
         op_tx.send(ControlOp::Shutdown { reply: tx }).unwrap();
         assert!(rx.await.unwrap());
         // The serve loop returns once the world's shutdown is signalled.
+        handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn serve_loop_services_subagent_ops_via_the_sender() {
+        let mut host = host_with(vec![]);
+        spawn(&mut host, "run-a", "run-a");
+        let sub_tx = host.subagent_sender();
+        let (op_tx, op_rx) = mpsc::unbounded_channel();
+        let handle = tokio::spawn(async move { host.serve(op_rx).await });
+
+        // A Check submitted on the sub-agent channel is serviced by the serve loop.
+        let (tx, rx) = oneshot::channel();
+        sub_tx
+            .send(SubAgentOp::Check {
+                run_id: "run-a".to_string(),
+                reply: tx,
+            })
+            .unwrap();
+        assert!(rx.await.unwrap().is_some());
+
+        let (stx, srx) = oneshot::channel();
+        op_tx.send(ControlOp::Shutdown { reply: stx }).unwrap();
+        assert!(srx.await.unwrap());
         handle.await.unwrap();
     }
 
