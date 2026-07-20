@@ -360,6 +360,12 @@ impl Dashboard {
                     status,
                     AgentDisplayStatus::Waiting | AgentDisplayStatus::CompleteInteractive
                 );
+                let is_terminal = matches!(
+                    status,
+                    AgentDisplayStatus::Complete
+                        | AgentDisplayStatus::Cancelled
+                        | AgentDisplayStatus::Error(_)
+                );
                 if now_is_waiting {
                     // Entering or staying in a wait — freeze timer at entry point
                     if agent.active_until.is_none() {
@@ -369,6 +375,12 @@ impl Dashboard {
                     // Leaving a wait — accumulate how long we were waiting
                     if let Some(wait_start) = agent.active_until.take() {
                         agent.waiting_secs += (run.updated_at - wait_start).max(0) as u64;
+                    }
+                    // A terminal agent (complete / cancelled / error) is no longer
+                    // running, so freeze its elapsed timer at the transition time
+                    // instead of letting it tick up against the wall clock.
+                    if is_terminal {
+                        agent.active_until = Some(run.updated_at);
                     }
                 }
                 agent.status = status;
@@ -462,9 +474,16 @@ impl Dashboard {
                     parent_id: None,
                     depth: 0,
                     started_at: run.started_at,
+                    // Freeze the elapsed timer for agents that are already waiting
+                    // or terminal when first observed; only genuinely-running
+                    // agents tick against the wall clock.
                     active_until: if matches!(
                         run.status,
-                        RunStatus::WaitingInput | RunStatus::CompleteInteractive
+                        RunStatus::WaitingInput
+                            | RunStatus::CompleteInteractive
+                            | RunStatus::Complete
+                            | RunStatus::Cancelled
+                            | RunStatus::Error
                     ) {
                         Some(run.updated_at)
                     } else {
@@ -1406,24 +1425,24 @@ mod tests {
         );
     }
 
-    #[cfg(unix)]
     #[test]
     fn delete_selected_agent_missing_run_dir_logs_delete_failed() {
         // Unlike `delete_selected_agent_removes_run_state_agent` (which
-        // pre-creates the run dir so removal succeeds), this never creates
-        // it -- `std::fs::remove_dir_all` on a nonexistent path returns
-        // `Err`, exercising the "Delete failed" log branch.
-        let mut dash = make_test_dashboard();
-        dash.log.clear();
-        let tmp_id = format!("test-run-missing-{}", std::process::id());
+        // pre-creates the run dir so removal succeeds), this never creates it --
+        // `std::fs::remove_dir_all` on a nonexistent path returns `Err` on every
+        // platform, exercising the "Delete failed" log branch. Runs under an
+        // isolated runs dir so it never touches the real `~/.leviath`.
+        crate::runstate::with_isolated_runs_dir("delete_selected_agent_missing_run_dir", |_d| {
+            let mut dash = make_test_dashboard();
+            dash.log.clear();
+            let agent = make_test_agent("test-run-missing", AgentDisplayStatus::Complete);
+            dash.agents.push(agent);
+            dash.update_display_indices();
 
-        let agent = make_test_agent(&tmp_id, AgentDisplayStatus::Complete);
-        dash.agents.push(agent);
-        dash.update_display_indices();
+            dash.delete_selected_agent();
 
-        dash.delete_selected_agent();
-
-        assert!(dash.log.iter().any(|l| l.message.contains("Delete failed")));
+            assert!(dash.log.iter().any(|l| l.message.contains("Delete failed")));
+        });
     }
 
     // ─── selected_stage_can_respond: empty stage_name falls back ──────────

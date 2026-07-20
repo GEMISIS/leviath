@@ -668,6 +668,20 @@ impl ContextWindow {
             });
         }
 
+        // The conversation must END with a user message: providers reject a
+        // request that ends on an assistant turn as an (unsupported) prefill
+        // ("This model does not support assistant message prefill"). After a
+        // stage transition that carries the conversation, the last message is
+        // the previous stage's final assistant turn — hand the turn back to the
+        // model with a minimal nudge so it acts on the new stage's instructions.
+        if messages.last().map(|m| m.role.as_str()) == Some("assistant") {
+            messages.push(leviath_providers::Message {
+                role: "user".to_string(),
+                content: "Continue.".into(),
+                cache_breakpoint: false,
+            });
+        }
+
         AssembledContext {
             system_blocks,
             messages,
@@ -1691,6 +1705,45 @@ mod tests {
     // ─── Tool-use/tool-result pairing sanitization tests ────────────────
 
     #[test]
+    fn test_assemble_appends_user_nudge_when_conversation_ends_with_assistant() {
+        // After a stage transition the carried conversation ends with the prior
+        // stage's assistant turn; assemble must append a trailing user message so
+        // the request doesn't end on an assistant turn (rejected as prefill).
+        let mut window = ContextWindow::new(100_000);
+        window.add_region(Region::new(
+            "conversation".to_string(),
+            RegionKind::SlidingWindow {
+                max_items: 100,
+                eviction_strategy: EvictionStrategy::PerItem,
+            },
+            50_000,
+        ));
+        window
+            .add_typed_entry(
+                "conversation",
+                leviath_core::EntryKind::UserMessage,
+                "do the task".to_string(),
+                10,
+            )
+            .unwrap();
+        window
+            .add_typed_entry(
+                "conversation",
+                leviath_core::EntryKind::AssistantTurn { tool_calls: vec![] },
+                "All done with stage one.".to_string(),
+                10,
+            )
+            .unwrap();
+
+        let assembled = window.assemble();
+        assert_eq!(
+            assembled.messages.last().map(|m| m.role.as_str()),
+            Some("user"),
+            "the assembled conversation must end with a user message"
+        );
+    }
+
+    #[test]
     fn test_assemble_strips_orphaned_tool_use() {
         let mut window = ContextWindow::new(100_000);
         let region = Region::new(
@@ -2677,10 +2730,14 @@ mod tests {
         }
 
         let assembled = window.assemble();
-        assert_eq!(assembled.messages.len(), 10);
+        // 10 alternating messages end on an assistant turn, so assemble appends a
+        // trailing "Continue." user nudge → 11 messages.
+        assert_eq!(assembled.messages.len(), 11);
+        assert_eq!(assembled.messages.last().unwrap().role, "user");
 
-        // The 4th-from-last (index 6) should have cache_breakpoint = true
-        let bp_idx = assembled.messages.len() - 4;
+        // The breakpoint is placed at the 4th-from-last of the pre-nudge run
+        // (index 6 of the original 10); the nudge is appended after.
+        let bp_idx = 6;
         for (i, msg) in assembled.messages.iter().enumerate() {
             if i == bp_idx {
                 assert!(
