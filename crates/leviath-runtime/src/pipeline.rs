@@ -202,6 +202,7 @@ pub fn dispatch_inference(
                 job,
                 stage.outcomes.clone(),
                 stage.wake.clone(),
+                crate::inference_bridge::RetryPolicy::default(),
             ));
             par_commands.command_scope(|mut commands| {
                 commands
@@ -2603,6 +2604,7 @@ pub fn dispatch_transition_choice(
             job,
             stage.transition_outcomes.clone(),
             stage.wake.clone(),
+            crate::inference_bridge::RetryPolicy::default(),
         ));
         commands
             .entity(entity)

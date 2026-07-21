@@ -37,6 +37,46 @@ pub enum ProviderError {
     Other(String),
 }
 
+impl ProviderError {
+    /// Whether this failure is worth retrying — a transient network or
+    /// server-side issue (connection reset, timeout, 429, 5xx / "overloaded")
+    /// — as opposed to a permanent one (auth, invalid request, token limit)
+    /// that would just fail again.
+    pub fn is_transient(&self) -> bool {
+        match self {
+            // Network-level failures: connection reset, timeout, DNS, TLS.
+            ProviderError::RequestFailed(_) => true,
+            // 429 — back off and retry.
+            ProviderError::RateLimitExceeded => true,
+            // We only have the message, so match the common server-side (5xx)
+            // signals — including Anthropic's 529 "overloaded". 4xx client
+            // errors carry none of these and stay permanent.
+            ProviderError::ApiError(msg) => {
+                let m = msg.to_ascii_lowercase();
+                [
+                    "500",
+                    "502",
+                    "503",
+                    "504",
+                    "529",
+                    "overloaded",
+                    "internal server error",
+                    "bad gateway",
+                    "service unavailable",
+                    "gateway timeout",
+                ]
+                .iter()
+                .any(|s| m.contains(s))
+            }
+            // A malformed response, an over-limit request, or an unknown error
+            // won't be fixed by retrying.
+            ProviderError::InvalidResponse(_)
+            | ProviderError::TokenLimitExceeded { .. }
+            | ProviderError::Other(_) => false,
+        }
+    }
+}
+
 /// Capabilities supported by a model.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelCapabilities {
@@ -527,6 +567,24 @@ mod stream_once {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn provider_error_is_transient_classification() {
+        // Network + rate-limit + 5xx / overloaded ⇒ retry.
+        assert!(ProviderError::RequestFailed("connection reset".into()).is_transient());
+        assert!(ProviderError::RateLimitExceeded.is_transient());
+        assert!(ProviderError::ApiError("HTTP 503 Service Unavailable".into()).is_transient());
+        assert!(ProviderError::ApiError("500 internal server error".into()).is_transient());
+        assert!(ProviderError::ApiError("529 overloaded".into()).is_transient());
+        assert!(ProviderError::ApiError("502 Bad Gateway".into()).is_transient());
+        assert!(ProviderError::ApiError("504 gateway timeout".into()).is_transient());
+        // 4xx client errors + malformed / limit / unknown ⇒ permanent.
+        assert!(!ProviderError::ApiError("401 unauthorized".into()).is_transient());
+        assert!(!ProviderError::ApiError("400 bad request".into()).is_transient());
+        assert!(!ProviderError::InvalidResponse("garbage".into()).is_transient());
+        assert!(!ProviderError::TokenLimitExceeded { used: 9, max: 8 }.is_transient());
+        assert!(!ProviderError::Other("mystery".into()).is_transient());
+    }
 
     // ─── ProviderError Display ──────────────────────────────────────────────
 

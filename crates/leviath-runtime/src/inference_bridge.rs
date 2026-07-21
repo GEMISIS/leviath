@@ -14,6 +14,7 @@
 //! one per agent — that is what keeps CPU bounded by work, not by agent count.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use bevy_ecs::entity::Entity;
 use leviath_providers::{InferenceRequest, InferenceResponse, Provider, ProviderError};
@@ -21,6 +22,30 @@ use tokio::sync::Notify;
 use tokio::sync::mpsc::UnboundedSender;
 
 use crate::inference_pool::InferencePermit;
+
+/// How a transient inference failure is retried before the agent is failed.
+///
+/// Transient errors (see [`ProviderError::is_transient`]) are retried with
+/// exponential backoff; a permanent error (auth, invalid request, token limit)
+/// fails immediately. This keeps a passing network blip from marking a stage
+/// `error` and carrying its half-finished work forward.
+#[derive(Debug, Clone, Copy)]
+pub struct RetryPolicy {
+    /// Total attempts including the first (e.g. `4` = one try + three retries).
+    pub max_attempts: u32,
+    /// Base backoff; the retry after attempt `n` waits `base_delay * 2^(n-1)`
+    /// (so 1s, 2s, 4s, … for a 1s base).
+    pub base_delay: Duration,
+}
+
+impl Default for RetryPolicy {
+    fn default() -> Self {
+        Self {
+            max_attempts: 4,
+            base_delay: Duration::from_secs(1),
+        }
+    }
+}
 
 /// A unit of inference work the dispatch system hands to the worker pool.
 pub struct InferenceJob {
@@ -54,6 +79,7 @@ pub async fn run_inference_job(
     job: InferenceJob,
     results: UnboundedSender<InferenceOutcome>,
     wake: Arc<Notify>,
+    retry: RetryPolicy,
 ) {
     let InferenceJob {
         entity,
@@ -61,7 +87,20 @@ pub async fn run_inference_job(
         request,
         permit,
     } = job;
-    let result = provider.infer(request).await;
+    // Retry transient failures (connection reset, timeout, 429, 5xx) with
+    // exponential backoff, holding the permit across the backoff; a permanent
+    // error fails immediately.
+    let mut attempt = 1u32;
+    let result = loop {
+        match provider.infer(request.clone()).await {
+            Ok(response) => break Ok(response),
+            Err(e) if e.is_transient() && attempt < retry.max_attempts => {
+                tokio::time::sleep(retry.base_delay * 2u32.pow(attempt - 1)).await;
+                attempt += 1;
+            }
+            Err(e) => break Err(e),
+        }
+    };
     drop(permit); // free the pool slot before the collect system runs
     let _ = results.send(InferenceOutcome { entity, result });
     wake.notify_one();
@@ -146,7 +185,13 @@ mod tests {
     async fn run_job_reports_ok_and_wakes() {
         let (tx, mut rx) = mpsc::unbounded_channel();
         let wake = Arc::new(Notify::new());
-        run_inference_job(job(Arc::new(Fixed::Ok(response("hi")))), tx, wake.clone()).await;
+        run_inference_job(
+            job(Arc::new(Fixed::Ok(response("hi")))),
+            tx,
+            wake.clone(),
+            RetryPolicy::default(),
+        )
+        .await;
 
         let outcome = rx.try_recv().expect("outcome sent");
         assert_eq!(outcome.entity, Entity::from_raw(7));
@@ -160,7 +205,7 @@ mod tests {
         let (tx, mut rx) = mpsc::unbounded_channel();
         let wake = Arc::new(Notify::new());
         let err = Arc::new(Fixed::Err("boom".to_string()));
-        run_inference_job(job(err), tx, wake).await;
+        run_inference_job(job(err), tx, wake, RetryPolicy::default()).await;
 
         let outcome = rx.try_recv().expect("outcome sent");
         assert!(outcome.result.is_err());
@@ -183,6 +228,145 @@ mod tests {
         drop(rx); // world shutting down: nobody to receive
         let wake = Arc::new(Notify::new());
         // Must not panic even though the send fails.
-        run_inference_job(job(Arc::new(Fixed::Ok(response("x")))), tx, wake).await;
+        run_inference_job(
+            job(Arc::new(Fixed::Ok(response("x")))),
+            tx,
+            wake,
+            RetryPolicy::default(),
+        )
+        .await;
+    }
+
+    // ── retry behavior ──
+
+    enum Step {
+        Ok(String),
+        Transient,
+        Permanent,
+    }
+
+    /// A provider that plays a scripted sequence of results and counts calls.
+    struct Scripted {
+        steps: std::sync::Mutex<std::collections::VecDeque<Step>>,
+        calls: std::sync::Mutex<u32>,
+    }
+
+    #[async_trait::async_trait]
+    impl Provider for Scripted {
+        async fn infer(
+            &self,
+            _req: InferenceRequest,
+        ) -> leviath_providers::Result<InferenceResponse> {
+            *self.calls.lock().unwrap() += 1;
+            match self.steps.lock().unwrap().pop_front() {
+                Some(Step::Ok(t)) => Ok(response(&t)),
+                Some(Step::Transient) => Err(ProviderError::RateLimitExceeded),
+                Some(Step::Permanent) => Err(ProviderError::Other("permanent".to_string())),
+                None => Err(ProviderError::Other("exhausted".to_string())),
+            }
+        }
+        fn count_tokens(&self, _t: &str, _m: &str) -> usize {
+            1
+        }
+        fn max_context_tokens(&self, _m: &str) -> usize {
+            100_000
+        }
+        fn name(&self) -> &str {
+            "scripted"
+        }
+        fn capabilities(&self, _m: &str) -> leviath_providers::ModelCapabilities {
+            leviath_providers::ModelCapabilities::default()
+        }
+    }
+
+    fn no_delay(max_attempts: u32) -> RetryPolicy {
+        RetryPolicy {
+            max_attempts,
+            base_delay: Duration::ZERO,
+        }
+    }
+
+    #[tokio::test]
+    async fn run_job_retries_transient_then_succeeds() {
+        let provider = Arc::new(Scripted {
+            steps: std::sync::Mutex::new(
+                vec![
+                    Step::Transient,
+                    Step::Transient,
+                    Step::Ok("done".to_string()),
+                ]
+                .into(),
+            ),
+            calls: std::sync::Mutex::new(0),
+        });
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        run_inference_job(
+            job(provider.clone()),
+            tx,
+            Arc::new(Notify::new()),
+            no_delay(4),
+        )
+        .await;
+        let outcome = rx.try_recv().expect("outcome sent");
+        assert_eq!(outcome.result.unwrap().content, "done");
+        assert_eq!(*provider.calls.lock().unwrap(), 3); // two retries then success
+    }
+
+    #[tokio::test]
+    async fn run_job_gives_up_after_max_attempts() {
+        let provider = Arc::new(Scripted {
+            steps: std::sync::Mutex::new(
+                vec![
+                    Step::Transient,
+                    Step::Transient,
+                    Step::Transient,
+                    Step::Transient,
+                ]
+                .into(),
+            ),
+            calls: std::sync::Mutex::new(0),
+        });
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        run_inference_job(
+            job(provider.clone()),
+            tx,
+            Arc::new(Notify::new()),
+            no_delay(3),
+        )
+        .await;
+        let outcome = rx.try_recv().expect("outcome sent");
+        assert!(outcome.result.is_err());
+        assert_eq!(*provider.calls.lock().unwrap(), 3); // exhausted the 3 attempts
+    }
+
+    #[tokio::test]
+    async fn run_job_does_not_retry_a_permanent_error() {
+        let provider = Arc::new(Scripted {
+            steps: std::sync::Mutex::new(vec![Step::Permanent, Step::Ok("x".to_string())].into()),
+            calls: std::sync::Mutex::new(0),
+        });
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        run_inference_job(
+            job(provider.clone()),
+            tx,
+            Arc::new(Notify::new()),
+            no_delay(4),
+        )
+        .await;
+        let outcome = rx.try_recv().expect("outcome sent");
+        assert!(outcome.result.is_err());
+        assert_eq!(*provider.calls.lock().unwrap(), 1); // no retry on a permanent error
+    }
+
+    #[test]
+    fn scripted_provider_metadata_is_exercised() {
+        let p = Scripted {
+            steps: std::sync::Mutex::new(std::collections::VecDeque::new()),
+            calls: std::sync::Mutex::new(0),
+        };
+        assert_eq!(p.name(), "scripted");
+        assert_eq!(p.count_tokens("t", "m"), 1);
+        assert_eq!(p.max_context_tokens("m"), 100_000);
+        let _ = p.capabilities("m");
     }
 }
