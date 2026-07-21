@@ -10,7 +10,7 @@
 use bevy_ecs::prelude::*;
 use leviath_core::RegionKind;
 use leviath_core::run_meta::{
-    ContextSnapshot, RegionEntrySnapshot, RegionSnapshot, RunMeta, RunStatus,
+    ContextSnapshot, RegionEntrySnapshot, RegionSnapshot, RunMeta, RunStatus, StageRunStatus,
 };
 
 use crate::components::{AgentState, AgentStatus, ContextWindow};
@@ -80,6 +80,18 @@ pub fn run_status_from(status: &AgentStatus) -> RunStatus {
         AgentStatus::Complete => RunStatus::Complete,
         AgentStatus::Error { .. } => RunStatus::Error,
         AgentStatus::Cancelled => RunStatus::Cancelled,
+    }
+}
+
+/// Map an agent's ECS status to the on-disk per-stage [`StageRunStatus`] for the
+/// stage it is currently in. `Cancelled` has no stage-level equivalent, so it
+/// surfaces as `Error` (the stage stopped without completing).
+pub fn stage_status_from(status: &AgentStatus) -> StageRunStatus {
+    match status {
+        AgentStatus::Idle | AgentStatus::Active => StageRunStatus::Active,
+        AgentStatus::Waiting => StageRunStatus::WaitingInput,
+        AgentStatus::Complete => StageRunStatus::Complete,
+        AgentStatus::Error { .. } | AgentStatus::Cancelled => StageRunStatus::Error,
     }
 }
 
@@ -222,6 +234,37 @@ mod tests {
         assert_eq!(
             run_status_from(&AgentStatus::Cancelled),
             RunStatus::Cancelled
+        );
+    }
+
+    #[test]
+    fn stage_status_mapping_covers_all_variants() {
+        use leviath_core::run_meta::StageRunStatus;
+        assert_eq!(
+            stage_status_from(&AgentStatus::Idle),
+            StageRunStatus::Active
+        );
+        assert_eq!(
+            stage_status_from(&AgentStatus::Active),
+            StageRunStatus::Active
+        );
+        assert_eq!(
+            stage_status_from(&AgentStatus::Waiting),
+            StageRunStatus::WaitingInput
+        );
+        assert_eq!(
+            stage_status_from(&AgentStatus::Complete),
+            StageRunStatus::Complete
+        );
+        assert_eq!(
+            stage_status_from(&AgentStatus::Error {
+                message: "x".to_string()
+            }),
+            StageRunStatus::Error
+        );
+        assert_eq!(
+            stage_status_from(&AgentStatus::Cancelled),
+            StageRunStatus::Error
         );
     }
 
