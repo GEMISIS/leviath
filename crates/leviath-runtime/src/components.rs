@@ -58,6 +58,18 @@ pub struct SubAgentChildren {
     pub max_child_depth: usize,
 }
 
+/// Marker: this agent is blocked on an open user interaction (a tool-approval
+/// prompt, an `ask_user_*` question, or a plan-approval review).
+///
+/// Inserted by [`reflect_interaction_status`](crate::pipeline::reflect_interaction_status)
+/// when the shared [`InteractionHub`](crate::interaction_hub::InteractionHub)
+/// reports a pending request for the agent, and removed when that request
+/// clears. It records that the agent's `Waiting` status is interaction-driven,
+/// so the reflection is distinct from fan-out waiting
+/// ([`FanOutWaiting`](crate::fanout::FanOutWaiting)).
+#[derive(Component, Debug, Clone)]
+pub struct AwaitingInteraction;
+
 /// Status of an agent.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum AgentStatus {

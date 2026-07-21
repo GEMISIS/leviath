@@ -320,8 +320,21 @@ impl Dashboard {
     pub(super) fn sync_from_run_state(&mut self) {
         let runs = runstate::list_runs();
         for run in runs {
+            // A live open prompt from the daemon's hub (populated each tick by
+            // `sync_interactions`) is the authoritative signal that this agent is
+            // blocked on us — surface it regardless of the persisted status,
+            // which can lag a tick behind the hub or (for tool-approval prompts)
+            // never flips on its own.
+            let pending_request = self.pending_interactions.get(&run.run_id).cloned();
+
             let status = match run.status {
-                RunStatus::Starting | RunStatus::Running => AgentDisplayStatus::Active,
+                RunStatus::Starting | RunStatus::Running => {
+                    if pending_request.is_some() {
+                        AgentDisplayStatus::Waiting
+                    } else {
+                        AgentDisplayStatus::Active
+                    }
+                }
                 RunStatus::WaitingInput => AgentDisplayStatus::Waiting,
                 RunStatus::Complete => AgentDisplayStatus::Complete,
                 RunStatus::CompleteInteractive => AgentDisplayStatus::CompleteInteractive,
@@ -331,16 +344,16 @@ impl Dashboard {
                 RunStatus::Cancelled => AgentDisplayStatus::Cancelled,
             };
 
-            // For WaitingInput and CompleteInteractive agents, take the pending
-            // interaction from the daemon-sourced map (populated by
-            // `sync_interactions`).
-            let needs_input = matches!(
-                run.status,
-                RunStatus::WaitingInput | RunStatus::CompleteInteractive
-            );
+            // Attach the pending interaction whenever the hub holds one, or for
+            // a CompleteInteractive agent (which accepts a follow-up message even
+            // with no open request).
+            let needs_input =
+                pending_request.is_some() || matches!(run.status, RunStatus::CompleteInteractive);
             let (waiting_prompt, pending_request) = if needs_input {
-                let req = self.pending_interactions.get(&run.run_id).cloned();
-                (req.as_ref().map(|r| r.prompt.clone()), req)
+                (
+                    pending_request.as_ref().map(|r| r.prompt.clone()),
+                    pending_request,
+                )
             } else {
                 (None, None)
             };
@@ -1689,6 +1702,41 @@ mod tests {
                 assert_eq!(agent.waiting_prompt.as_deref(), Some("What next?"));
                 assert!(agent.pending_request.is_some());
                 assert!(agent.active_until.is_some());
+
+                cleanup_run(run_id);
+            },
+        );
+    }
+
+    #[test]
+    fn sync_from_run_state_running_agent_with_open_prompt_surfaces_it() {
+        // The bug fix: a run whose persisted status is still `Running` but which
+        // the daemon's hub reports an open interaction for (e.g. a tool-approval
+        // prompt, which never flips the persisted status on its own) must show
+        // as Waiting and surface the prompt — not sit silently Active.
+        crate::runstate::with_isolated_runs_dir(
+            "sync_from_run_state_running_agent_with_open_prompt_surfaces_it",
+            |_d| {
+                let run_id = "test-sync-running-open-prompt";
+                cleanup_run(run_id);
+                let meta = make_run_meta(run_id, RunStatus::Running);
+                runstate::create_run(&meta).unwrap();
+                let req = interaction::InteractionRequest::tool_approval(
+                    "approve-1",
+                    "write_file",
+                    serde_json::json!({}),
+                    "implement",
+                );
+
+                let mut dash = make_test_dashboard();
+                dash.pending_interactions
+                    .insert(run_id.to_string(), req.clone());
+                dash.sync_from_run_state();
+
+                let agent = dash.agents.iter().find(|a| a.id == run_id).unwrap();
+                assert_eq!(agent.status, AgentDisplayStatus::Waiting);
+                assert!(agent.waiting_prompt.is_some());
+                assert!(agent.pending_request.is_some());
 
                 cleanup_run(run_id);
             },

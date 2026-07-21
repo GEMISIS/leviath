@@ -109,13 +109,16 @@ pub fn build_host(
 ) -> WorldHost {
     let hub = InteractionHub::new();
     let tool_service = Arc::new(CliToolService::new());
-    let world = PipelineWorld::new(
+    let mut world = PipelineWorld::new(
         providers,
         tool_service.clone(),
         InferencePoolConfig::new(),
         runs_dir.clone(),
         runtime,
     );
+    // Share the hub with the tick loop so a blocked agent's open prompt is
+    // reflected into its status (Active ↔ Waiting) for the dashboard to surface.
+    world.insert_interaction_hub(hub.clone());
     let mut host = WorldHost::with_interactions(world, hub.clone());
     // Handed to each agent's tool state so its sub-agent tools reach the world
     // through the host.

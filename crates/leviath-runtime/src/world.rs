@@ -42,7 +42,7 @@ use crate::pipeline::{
     collect_compaction, collect_inference, collect_tools, collect_transition_choice,
     deliver_messages, dispatch_compaction, dispatch_edge_compact, dispatch_inference,
     dispatch_persistence, dispatch_tools, dispatch_transition_choice, handle_empty_response,
-    process_response, resolve_transition, sync_tool_stages,
+    process_response, reflect_interaction_status, resolve_transition, sync_tool_stages,
 };
 use crate::providers::ProviderRegistry;
 use crate::tool_bridge::tool_worker;
@@ -137,6 +137,10 @@ impl PipelineWorld {
                 // Drive fan-out workers and merge once they finish.
                 crate::fanout::fan_out_collect,
                 sync_tool_stages,
+                // Mirror open interaction-hub requests into agent status
+                // (Active ↔ Waiting) so the dashboard surfaces blocked prompts;
+                // must run before persistence so the status change is written.
+                reflect_interaction_status,
                 dispatch_persistence,
             )
                 .chain(),
@@ -161,6 +165,16 @@ impl PipelineWorld {
     /// Read-only access to the underlying ECS world.
     pub fn world(&self) -> &World {
         &self.world
+    }
+
+    /// Install the shared interaction hub as a world resource and attach this
+    /// world's wake handle to it, so opening/answering a prompt wakes the driver
+    /// and [`reflect_interaction_status`]
+    /// mirrors the change into agent status. Call once at startup, before
+    /// serving. Without this, that system is a no-op (test worlds).
+    pub fn insert_interaction_hub(&mut self, hub: crate::interaction_hub::InteractionHub) {
+        hub.attach_wake(self.wake.clone());
+        self.world.insert_resource(hub);
     }
 
     /// Spawn an agent from its pre-built component bundle and wake the driver so
@@ -559,6 +573,35 @@ mod tests {
                 .current_tokens
                 > 0
         );
+    }
+
+    #[tokio::test]
+    async fn insert_interaction_hub_installs_resource_and_attaches_wake() {
+        use crate::dynamic_interaction::InteractionBackend;
+        use crate::interaction_hub::InteractionHub;
+        let mut world = build_world(registry_with(vec![]));
+        let hub = InteractionHub::new();
+        world.insert_interaction_hub(hub.clone());
+
+        // The hub is now a world resource the reflect system reads.
+        assert!(world.world().get_resource::<InteractionHub>().is_some());
+
+        // The wake handle was attached: opening a request nudges the same wake
+        // the driver parks on (a later notified() returns immediately).
+        let backend = hub.backend_for("x");
+        let asking = tokio::spawn(async move {
+            backend
+                .ask(leviath_core::interaction::InteractionRequest::free_text(
+                    "q", "p", "s", true,
+                ))
+                .await
+        });
+        for _ in 0..8 {
+            tokio::task::yield_now().await;
+        }
+        world.wake_handle().notified().await;
+        hub.cancel("q");
+        let _ = asking.await;
     }
 
     #[tokio::test]
