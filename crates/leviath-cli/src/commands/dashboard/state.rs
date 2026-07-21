@@ -258,16 +258,22 @@ impl Dashboard {
         runstate::append_dashboard_log_to(&self.log_path, &msg);
     }
 
-    #[allow(dead_code)]
-    pub(super) fn push_toast(&mut self, msg: impl Into<String>, level: ToastLevel) {
-        // 25 ticks ≈ 2.5 seconds at 100ms/tick
-        self.toasts.push(Toast {
+    /// Push a transient toast, capping the on-screen stack at 4 (oldest drops).
+    /// An associated fn over `&mut Vec<Toast>` (not `&mut self`) so it can be
+    /// called while another field of `self` — e.g. `self.agents` — is borrowed.
+    pub(super) fn push_toast(
+        toasts: &mut Vec<Toast>,
+        msg: impl Into<String>,
+        level: ToastLevel,
+        remaining_ticks: u32,
+    ) {
+        toasts.push(Toast {
             message: msg.into(),
-            remaining_ticks: 25,
+            remaining_ticks,
             level,
         });
-        if self.toasts.len() > 4 {
-            self.toasts.remove(0);
+        if toasts.len() > 4 {
+            toasts.remove(0);
         }
     }
 
@@ -331,20 +337,22 @@ impl Dashboard {
                         } else {
                             format!(": {}", truncate(msg, 40))
                         };
-                        self.toasts.push(Toast {
-                            message: format!("Agent '{}' failed{}", name, preview),
-                            remaining_ticks: 50,
-                            level: ToastLevel::Error,
-                        });
+                        Self::push_toast(
+                            &mut self.toasts,
+                            format!("Agent '{}' failed{}", name, preview),
+                            ToastLevel::Error,
+                            50,
+                        );
                     } else if matches!(
                         status,
                         AgentDisplayStatus::Complete | AgentDisplayStatus::CompleteInteractive
                     ) {
-                        self.toasts.push(Toast {
-                            message: format!("Agent '{}' completed", name),
-                            remaining_ticks: 35,
-                            level: ToastLevel::Info,
-                        });
+                        Self::push_toast(
+                            &mut self.toasts,
+                            format!("Agent '{}' completed", name),
+                            ToastLevel::Info,
+                            35,
+                        );
                     }
                 }
 
@@ -409,11 +417,12 @@ impl Dashboard {
                                     .title
                                     .clone()
                                     .unwrap_or(truncate(&agent.blueprint_name, 20));
-                                self.toasts.push(Toast {
-                                    message: format!("Agent '{}' needs input", name),
-                                    remaining_ticks: 35,
-                                    level: ToastLevel::Warning,
-                                });
+                                Self::push_toast(
+                                    &mut self.toasts,
+                                    format!("Agent '{}' needs input", name),
+                                    ToastLevel::Warning,
+                                    35,
+                                );
                             }
                             agent.waiting_prompt = waiting_prompt;
                             agent.pending_request = pending_request;
@@ -432,22 +441,24 @@ impl Dashboard {
                         && matches!(run.status, RunStatus::WaitingInput)
                     {
                         let name = run.title.clone().unwrap_or(truncate(&run.agent_name, 20));
-                        self.toasts.push(Toast {
-                            message: format!("Agent '{}' needs input", name),
-                            remaining_ticks: 35,
-                            level: ToastLevel::Warning,
-                        });
+                        Self::push_toast(
+                            &mut self.toasts,
+                            format!("Agent '{}' needs input", name),
+                            ToastLevel::Warning,
+                            35,
+                        );
                     }
                     if matches!(
                         run.status,
                         RunStatus::Complete | RunStatus::CompleteInteractive
                     ) {
                         let name = run.title.clone().unwrap_or(truncate(&run.agent_name, 20));
-                        self.toasts.push(Toast {
-                            message: format!("Agent '{}' completed", name),
-                            remaining_ticks: 35,
-                            level: ToastLevel::Info,
-                        });
+                        Self::push_toast(
+                            &mut self.toasts,
+                            format!("Agent '{}' completed", name),
+                            ToastLevel::Info,
+                            35,
+                        );
                     }
                 }
                 self.agents.push(DashboardAgent {
@@ -810,7 +821,12 @@ mod tests {
     fn push_toast_limits_to_four() {
         let mut dash = make_test_dashboard();
         for i in 0..6 {
-            dash.push_toast(format!("toast {}", i), ToastLevel::Info);
+            Dashboard::push_toast(
+                &mut dash.toasts,
+                format!("toast {}", i),
+                ToastLevel::Info,
+                25,
+            );
         }
         assert_eq!(dash.toasts.len(), 4);
     }
@@ -1305,7 +1321,7 @@ mod tests {
     #[test]
     fn push_toast_warning_level() {
         let mut dash = make_test_dashboard();
-        dash.push_toast("warning!", ToastLevel::Warning);
+        Dashboard::push_toast(&mut dash.toasts, "warning!", ToastLevel::Warning, 25);
         assert_eq!(dash.toasts.len(), 1);
         assert_eq!(dash.toasts[0].level, ToastLevel::Warning);
     }
@@ -1313,7 +1329,7 @@ mod tests {
     #[test]
     fn push_toast_error_level() {
         let mut dash = make_test_dashboard();
-        dash.push_toast("error!", ToastLevel::Error);
+        Dashboard::push_toast(&mut dash.toasts, "error!", ToastLevel::Error, 25);
         assert_eq!(dash.toasts.len(), 1);
         assert_eq!(dash.toasts[0].level, ToastLevel::Error);
     }
