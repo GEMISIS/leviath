@@ -42,8 +42,8 @@ use crate::pipeline::{
     collect_compaction, collect_inference, collect_tools, collect_transition_choice,
     deliver_messages, dispatch_compaction, dispatch_edge_compact, dispatch_inference,
     dispatch_persistence, dispatch_tools, dispatch_transition_choice, enforce_max_iterations,
-    handle_empty_response, process_response, reflect_interaction_status, resolve_transition,
-    sync_tool_stages,
+    handle_empty_response, process_response, reflect_interaction_status, require_context_regions,
+    resolve_transition, sync_tool_stages,
 };
 use crate::providers::ProviderRegistry;
 use crate::tool_bridge::tool_worker;
@@ -152,6 +152,9 @@ impl PipelineWorld {
         schedule.add_systems(
             (
                 handle_empty_response,
+                // Re-run a stage that left a `required` context region empty
+                // before it may transition or ask for approval.
+                require_context_regions,
                 // Intercept a would-be transition for an interactive-points stage
                 // (e.g. plan_approval) and drive the interaction-point lane.
                 crate::interaction_points::gate_interaction_points,
