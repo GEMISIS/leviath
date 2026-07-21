@@ -1571,6 +1571,94 @@ fn resolve_transition_sync(
     }
 }
 
+/// Marks a parent agent held at a `requires_children` stage boundary until all
+/// its spawned sub-agents are terminal. Distinct from `FanOutWaiting` (which is
+/// the fan-out split/merge wait).
+#[derive(Component, Debug, Clone, Copy)]
+pub struct WaitingForChildren;
+
+/// Whether an agent status is terminal (the run/child has finished).
+fn is_terminal_status(status: &AgentStatus) -> bool {
+    matches!(
+        status,
+        AgentStatus::Complete | AgentStatus::Error { .. } | AgentStatus::Cancelled
+    )
+}
+
+/// `requires_children` gate (exclusive, mirrors the fan-out wait): a stage marked
+/// `requires_children` may not transition while any of the agent's spawned
+/// sub-agents ([`SubAgentChildren`](crate::components::SubAgentChildren)) are
+/// still running — the parent is held `Waiting` (`WaitingForChildren`) and
+/// resumes (re-inserting `ResolveTransition`, back to `Active`) once every child
+/// is terminal.
+pub fn gate_requires_children(world: &mut World) {
+    use crate::components::SubAgentChildren;
+
+    // Hold: transitioning agents whose stage requires children that aren't done.
+    // `&AgentState` in the query guarantees the later `.expect()` never fires.
+    let mut candidates: Vec<(Entity, Vec<Entity>)> = Vec::new();
+    {
+        let mut q = world.query_filtered::<(
+            Entity,
+            &AgentBlueprint,
+            &StageCursor,
+            &SubAgentChildren,
+            &AgentState,
+        ), With<ResolveTransition>>();
+        for (e, bp, cursor, children, _) in q.iter(world) {
+            if bp.0.stages[cursor.index].requires_children {
+                candidates.push((e, children.children.clone()));
+            }
+        }
+    }
+    for (entity, children) in candidates {
+        let pending = children.iter().any(|&c| {
+            world
+                .get::<AgentState>(c)
+                .is_some_and(|s| !is_terminal_status(&s.status))
+        });
+        if pending {
+            world
+                .entity_mut(entity)
+                .remove::<ResolveTransition>()
+                .insert(WaitingForChildren);
+            world
+                .get_mut::<AgentState>(entity)
+                .expect("held agent has AgentState")
+                .status = AgentStatus::Waiting;
+        }
+    }
+
+    // Resume: held agents whose children have all finished.
+    let mut waiting: Vec<(Entity, Vec<Entity>)> = Vec::new();
+    {
+        let mut q = world.query_filtered::<
+            (Entity, Option<&SubAgentChildren>, &AgentState),
+            With<WaitingForChildren>,
+        >();
+        for (e, children, _) in q.iter(world) {
+            waiting.push((e, children.map(|c| c.children.clone()).unwrap_or_default()));
+        }
+    }
+    for (entity, children) in waiting {
+        let all_done = children.iter().all(|&c| {
+            world
+                .get::<AgentState>(c)
+                .is_none_or(|s| is_terminal_status(&s.status))
+        });
+        if all_done {
+            world
+                .entity_mut(entity)
+                .remove::<WaitingForChildren>()
+                .insert(ResolveTransition);
+            world
+                .get_mut::<AgentState>(entity)
+                .expect("waiting agent has AgentState")
+                .status = AgentStatus::Active;
+        }
+    }
+}
+
 /// Default re-entry cap for required-region gating: how many times a stage is
 /// re-run to populate an empty `required` region before proceeding anyway (with a
 /// warning). Overridable per stage via `max_revisits`.
@@ -5615,6 +5703,149 @@ mod tests {
         for e in [met, capped, errored] {
             assert!(world.get::<ResolveTransition>(e).is_some());
             assert!(world.get::<ReadyToInfer>(e).is_none());
+        }
+    }
+
+    // ── requires_children gate (#7) ──
+
+    use crate::components::SubAgentChildren;
+
+    fn state_with(status: AgentStatus) -> AgentState {
+        AgentState {
+            status,
+            ..agent_state()
+        }
+    }
+
+    fn requires_children_bp(req: bool) -> AgentBlueprint {
+        let mut s = stage_named("a", None, false, None);
+        s.requires_children = req;
+        AgentBlueprint(blueprint(vec![s]))
+    }
+
+    fn children(entities: Vec<Entity>) -> SubAgentChildren {
+        SubAgentChildren {
+            children: entities,
+            max_child_depth: 3,
+        }
+    }
+
+    fn run_gate_children(world: &mut World) {
+        let mut s = Schedule::default();
+        s.add_systems(gate_requires_children);
+        s.run(world);
+    }
+
+    #[test]
+    fn is_terminal_status_classifies_all_variants() {
+        assert!(is_terminal_status(&AgentStatus::Complete));
+        assert!(is_terminal_status(&AgentStatus::Error {
+            message: "x".to_string()
+        }));
+        assert!(is_terminal_status(&AgentStatus::Cancelled));
+        assert!(!is_terminal_status(&AgentStatus::Active));
+        assert!(!is_terminal_status(&AgentStatus::Idle));
+        assert!(!is_terminal_status(&AgentStatus::Waiting));
+    }
+
+    #[test]
+    fn gate_requires_children_holds_then_resumes() {
+        let mut world = World::new();
+        let child = world.spawn(state_with(AgentStatus::Active)).id();
+        let parent = world
+            .spawn((
+                requires_children_bp(true),
+                StageCursor { index: 0 },
+                agent_state(),
+                children(vec![child]),
+                ResolveTransition,
+            ))
+            .id();
+        run_gate_children(&mut world);
+        assert!(world.get::<WaitingForChildren>(parent).is_some());
+        assert!(world.get::<ResolveTransition>(parent).is_none());
+        assert_eq!(
+            world.get::<AgentState>(parent).unwrap().status,
+            AgentStatus::Waiting
+        );
+
+        // Child finishes ⇒ the parent resumes and may transition.
+        world.get_mut::<AgentState>(child).unwrap().status = AgentStatus::Complete;
+        run_gate_children(&mut world);
+        assert!(world.get::<WaitingForChildren>(parent).is_none());
+        assert!(world.get::<ResolveTransition>(parent).is_some());
+        assert_eq!(
+            world.get::<AgentState>(parent).unwrap().status,
+            AgentStatus::Active
+        );
+    }
+
+    #[test]
+    fn gate_requires_children_does_not_hold_when_not_required_done_or_absent() {
+        let mut world = World::new();
+        // requires_children = false, even with a running child ⇒ not held.
+        let c1 = world.spawn(state_with(AgentStatus::Active)).id();
+        let p_norequire = world
+            .spawn((
+                requires_children_bp(false),
+                StageCursor { index: 0 },
+                agent_state(),
+                children(vec![c1]),
+                ResolveTransition,
+            ))
+            .id();
+        // requires_children = true but the child is already terminal ⇒ not held.
+        let c2 = world.spawn(state_with(AgentStatus::Complete)).id();
+        let p_done = world
+            .spawn((
+                requires_children_bp(true),
+                StageCursor { index: 0 },
+                agent_state(),
+                children(vec![c2]),
+                ResolveTransition,
+            ))
+            .id();
+        // requires_children = true but the child entity no longer exists ⇒ not held.
+        let p_ghost = world
+            .spawn((
+                requires_children_bp(true),
+                StageCursor { index: 0 },
+                agent_state(),
+                children(vec![Entity::from_raw(999_999)]),
+                ResolveTransition,
+            ))
+            .id();
+        run_gate_children(&mut world);
+        for p in [p_norequire, p_done, p_ghost] {
+            assert!(world.get::<ResolveTransition>(p).is_some());
+            assert!(world.get::<WaitingForChildren>(p).is_none());
+        }
+    }
+
+    #[test]
+    fn gate_requires_children_resume_waits_on_pending_and_clears_missing() {
+        let mut world = World::new();
+        // Held with a still-running child ⇒ stays waiting.
+        let child = world.spawn(state_with(AgentStatus::Active)).id();
+        let stuck = world
+            .spawn((agent_state(), children(vec![child]), WaitingForChildren))
+            .id();
+        // Held with no children component ⇒ resumes (vacuously done).
+        let bare = world.spawn((agent_state(), WaitingForChildren)).id();
+        // Held with a missing child entity ⇒ resumes.
+        let ghost = world
+            .spawn((
+                agent_state(),
+                children(vec![Entity::from_raw(999_999)]),
+                WaitingForChildren,
+            ))
+            .id();
+        run_gate_children(&mut world);
+        assert!(world.get::<WaitingForChildren>(stuck).is_some());
+        assert!(world.get::<ResolveTransition>(stuck).is_none());
+        for p in [bare, ghost] {
+            assert!(world.get::<WaitingForChildren>(p).is_none());
+            assert!(world.get::<ResolveTransition>(p).is_some());
         }
     }
 
