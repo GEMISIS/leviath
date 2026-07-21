@@ -172,14 +172,14 @@ Agents spawn children with different blueprints. A **fan-out** stage splits a ta
 
 **🙋 Human-in-the-Loop**
 
-Message a running agent from the terminal or dashboard — input is injected between inference calls, so you redirect, answer, or add constraints without restarting. Force checkpoints with a stage's `interaction_points`, or grant `ask_user_*` tools so the agent asks on its own judgment — all gated by per-stage tool permissions.
+Message a running agent from the terminal or dashboard — input is injected between inference calls, so you redirect, answer, or add constraints without restarting. Force checkpoints with a stage's `interaction_points` — approve, request revisions, or **edit the agent's output directly** (e.g. tweak the plan before it's implemented, and your edits stick through later revisions) — or grant `ask_user_*` tools so the agent asks on its own judgment. All gated by per-stage tool permissions.
 
 </td>
 <td width="33%" valign="top">
 
 **🛡️ Taint-Tracked Data Flow (In Progress)**
 
-A deterministic sensitivity model (Public / Internal / Private) tags every context region — set by the runtime, never by model output. Tools declare a direction and clearance, so an outbound call carrying data above its level gets blocked before it fires, and taint recovers automatically as entries evict. Configure it with an opt-in `[security]` block, layer on allowlists and Rhai policy rules, and dry-run any tool with `lev policy test`.
+A deterministic sensitivity model (Public / Internal / Private) tags every context region — set by the runtime, never by model output. Tools declare a direction and clearance, so an outbound call carrying data above its level is blocked before it fires — returned as `[blocked]`, or, in the daemon, surfaced as an *allow once / allow for this session / deny* prompt — and taint recovers automatically as entries evict. Configure it with an opt-in `[security]` block, layer on allowlists and Rhai policy rules, and dry-run any tool with `lev policy test`.
 
 </td>
 </tr>
