@@ -57,34 +57,6 @@ pub fn register_functions(engine: &mut Engine) {
     });
 
     engine.register_fn("is_empty", |text: &str| -> bool { text.trim().is_empty() });
-
-    // Summarization placeholder (requires LLM provider, not available in scripting layer)
-    // Users should implement this at the application level
-    engine.register_fn("summarize", |text: &str, max_tokens: i64| -> String {
-        // Simple truncation as placeholder
-        let target_chars = (max_tokens * 4) as usize;
-        if text.len() <= target_chars {
-            text.to_string()
-        } else {
-            format!("{}...", &text[..target_chars])
-        }
-    });
-
-    // Extract modified files/content
-    // This is a placeholder - real implementation would parse structured data
-    engine.register_fn("extract_modified", |content: &str| -> rhai::Array {
-        // Look for lines starting with common markers
-        content
-            .lines()
-            .filter(|line| {
-                line.starts_with("modified:")
-                    || line.starts_with("changed:")
-                    || line.starts_with("updated:")
-                    || line.starts_with("M ")
-            })
-            .map(|line| rhai::Dynamic::from(line.to_string()))
-            .collect()
-    });
 }
 
 #[cfg(test)]
@@ -337,51 +309,5 @@ mod tests {
         let e = engine();
         let result: bool = e.eval(r#"is_empty("hi")"#).unwrap();
         assert!(!result);
-    }
-
-    // --- summarize ---
-
-    #[test]
-    fn summarize_short_text_unchanged() {
-        let e = engine();
-        let result: String = e.eval(r#"summarize("hello", 100)"#).unwrap();
-        assert_eq!(result, "hello");
-    }
-
-    #[test]
-    fn summarize_long_text_truncated() {
-        let e = engine();
-        // max_tokens=2 => target_chars=8, "hello world" is 11 chars => truncated
-        let result: String = e.eval(r#"summarize("hello world", 2)"#).unwrap();
-        assert!(result.ends_with("..."));
-        assert!(result.len() < "hello world".len() + 3);
-    }
-
-    // --- extract_modified ---
-
-    #[test]
-    fn extract_modified_finds_markers() {
-        let e = engine();
-        let result: rhai::Array = e
-            .eval(r#"extract_modified("modified: a.rs\nother line\nchanged: b.rs\nM c.rs")"#)
-            .unwrap();
-        assert_eq!(result.len(), 3);
-    }
-
-    #[test]
-    fn extract_modified_no_matches() {
-        let e = engine();
-        let result: rhai::Array = e
-            .eval(r#"extract_modified("no markers here\njust text")"#)
-            .unwrap();
-        assert_eq!(result.len(), 0);
-    }
-
-    #[test]
-    fn extract_modified_updated_marker() {
-        let e = engine();
-        let result: rhai::Array = e.eval(r#"extract_modified("updated: file.txt")"#).unwrap();
-        assert_eq!(result.len(), 1);
-        assert_eq!(result[0].clone_cast::<String>(), "updated: file.txt");
     }
 }

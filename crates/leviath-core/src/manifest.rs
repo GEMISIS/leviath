@@ -734,25 +734,6 @@ fn parse_security_config(security_table: &toml::value::Table) -> crate::Security
     {
         sc.taint_tracking = tt;
     }
-    if let Some(pm) = security_table.get("pointer_mode").and_then(|v| v.as_bool()) {
-        sc.pointer_mode = pm;
-    }
-    if let Some(fm_val) = security_table.get("filter_mode") {
-        if let Some(fm_str) = fm_val.as_str() {
-            sc.filter_mode = crate::FilterMode::from_str_loose(fm_str);
-        } else if let Some(false) = fm_val.as_bool() {
-            sc.filter_mode = None;
-        }
-    }
-    if let Some(deg_arr) = security_table.get("degradation").and_then(|v| v.as_array()) {
-        let modes: Vec<crate::InputMode> = deg_arr
-            .iter()
-            .filter_map(|v| v.as_str().and_then(crate::InputMode::from_str_loose))
-            .collect();
-        if !modes.is_empty() {
-            sc.degradation = modes;
-        }
-    }
     sc
 }
 
@@ -1428,6 +1409,23 @@ mode = "autonomous"
     }
 
     #[test]
+    fn parse_manifest_security_block_without_taint_tracking_defaults_true() {
+        // A present `[security]` block that omits `taint_tracking` keeps the
+        // default (true) — block presence implies intent to configure security.
+        let toml = r#"
+[agent]
+name = "sec-default"
+
+[security]
+
+[stages.main]
+mode = "autonomous"
+"#;
+        let bp = parse_manifest(toml).unwrap();
+        assert!(bp.security.as_ref().unwrap().taint_tracking);
+    }
+
+    #[test]
     fn parse_manifest_no_security_is_none() {
         let toml = r#"
 [agent]
@@ -2050,19 +2048,10 @@ name = "security-test"
 
 [security]
 taint_tracking = true
-pointer_mode = true
-filter_mode = "structured"
-degradation = ["pointer", "filter", "traditional"]
 "#;
         let bp = parse_manifest(toml).unwrap();
         let sc = bp.security.as_ref().unwrap();
         assert!(sc.taint_tracking);
-        assert!(sc.pointer_mode);
-        assert_eq!(sc.filter_mode, Some(crate::FilterMode::Structured));
-        assert_eq!(sc.degradation.len(), 3);
-        assert_eq!(sc.degradation[0], crate::InputMode::Pointer);
-        assert_eq!(sc.degradation[1], crate::InputMode::Filter);
-        assert_eq!(sc.degradation[2], crate::InputMode::Traditional);
     }
 
     #[test]
@@ -2080,20 +2069,6 @@ taint_tracking = false
     }
 
     #[test]
-    fn parse_manifest_security_filter_mode_false() {
-        let toml = r#"
-[agent]
-name = "no-filter"
-
-[security]
-filter_mode = false
-"#;
-        let bp = parse_manifest(toml).unwrap();
-        let sc = bp.security.as_ref().unwrap();
-        assert!(sc.filter_mode.is_none());
-    }
-
-    #[test]
     fn parse_manifest_no_security_section() {
         let toml = r#"
 [agent]
@@ -2101,35 +2076,6 @@ name = "no-security"
 "#;
         let bp = parse_manifest(toml).unwrap();
         assert!(bp.security.is_none());
-    }
-
-    #[test]
-    fn parse_manifest_security_freeform_filter() {
-        let toml = r#"
-[agent]
-name = "freeform-test"
-
-[security]
-filter_mode = "freeform"
-"#;
-        let bp = parse_manifest(toml).unwrap();
-        let sc = bp.security.as_ref().unwrap();
-        assert_eq!(sc.filter_mode, Some(crate::FilterMode::Freeform));
-    }
-
-    #[test]
-    fn parse_manifest_security_partial_degradation() {
-        let toml = r#"
-[agent]
-name = "partial-deg"
-
-[security]
-degradation = ["traditional"]
-"#;
-        let bp = parse_manifest(toml).unwrap();
-        let sc = bp.security.as_ref().unwrap();
-        assert_eq!(sc.degradation.len(), 1);
-        assert_eq!(sc.degradation[0], crate::InputMode::Traditional);
     }
 
     /// Agent-level tool_permissions with a non-string value — the inner
@@ -2624,79 +2570,25 @@ write_file = 123
     }
 
     #[test]
-    fn parse_manifest_security_all_branches() {
-        // Agent-level [security]: pointer_mode, filter_mode = false (→ None),
-        // and a non-empty degradation list. Stage-level [security]: a string
-        // filter_mode. Together these exercise every branch of
-        // parse_security_config.
+    fn parse_manifest_security_agent_and_stage() {
+        // Both an agent-level [security] and a stage-level override parse,
+        // exercising both call sites of parse_security_config.
         let toml = r#"
 [agent]
-name = "sec-all-branches"
+name = "sec-branches"
 
 [security]
 taint_tracking = false
-pointer_mode = true
-filter_mode = false
-degradation = ["pointer", "filter", "not-a-real-mode"]
 
 [stages.a]
 mode = "autonomous"
 
 [stages.a.security]
-filter_mode = "structured"
-
-[stages.b]
-mode = "autonomous"
-
-[stages.c]
-mode = "autonomous"
-
-[stages.c.security]
-filter_mode = true
+taint_tracking = true
 "#;
         let bp = parse_manifest(toml).unwrap();
-        let agent_sec = bp.security.as_ref().unwrap();
-        assert!(!agent_sec.taint_tracking);
-        assert!(agent_sec.pointer_mode);
-        // filter_mode = false → explicitly disabled.
-        assert!(agent_sec.filter_mode.is_none());
-        // Only the two recognized degradation modes survive.
-        assert_eq!(
-            agent_sec.degradation,
-            vec![crate::InputMode::Pointer, crate::InputMode::Filter]
-        );
-
+        assert!(!bp.security.as_ref().unwrap().taint_tracking);
         let stage_a = bp.find_stage("a").unwrap();
-        let a_sec = stage_a.security.as_ref().unwrap();
-        assert_eq!(a_sec.filter_mode, Some(crate::FilterMode::Structured));
-
-        // Stage c: filter_mode = true (a non-`false` bool) matches neither the
-        // string arm nor the `Some(false)` arm, leaving filter_mode untouched.
-        let stage_c = bp.find_stage("c").unwrap();
-        let c_sec = stage_c.security.as_ref().unwrap();
-        assert_eq!(
-            c_sec.filter_mode,
-            crate::SecurityConfig::default().filter_mode
-        );
-    }
-
-    #[test]
-    fn parse_manifest_security_empty_degradation_keeps_default() {
-        // A degradation list with no recognized modes leaves `modes` empty, so
-        // the `if !modes.is_empty()` assignment is skipped and the default is
-        // retained.
-        let toml = r#"
-[agent]
-name = "sec-empty-deg"
-
-[security]
-degradation = ["nonsense", "also-bad"]
-"#;
-        let bp = parse_manifest(toml).unwrap();
-        let sec = bp.security.as_ref().unwrap();
-        assert_eq!(
-            sec.degradation,
-            crate::SecurityConfig::default().degradation
-        );
+        assert!(stage_a.security.as_ref().unwrap().taint_tracking);
     }
 }

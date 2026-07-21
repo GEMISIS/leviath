@@ -3847,7 +3847,6 @@ mod tests {
     fn enabled_gate() -> crate::taint::TaintGate {
         crate::taint::TaintGate::new(leviath_core::SecurityConfig {
             taint_tracking: true,
-            ..Default::default()
         })
     }
 

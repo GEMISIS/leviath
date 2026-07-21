@@ -996,9 +996,6 @@ pub enum ContentTransform {
 
     /// Extract specific fields
     Extract { fields: Vec<String> },
-
-    /// Custom transformation
-    Custom { function: String },
 }
 
 #[cfg(test)]

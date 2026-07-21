@@ -37,7 +37,6 @@ pub use region::{
     SerializedToolCall,
 };
 pub use taint::{
-    FilterInput, FilterMode, FilterOperation, GateDecision, GateDecisionSource, GateEvent,
-    InputMode, PointerRef, RegionTaint, SecurityConfig, TaintLevel, ToolClassification,
-    ToolDirection,
+    GateDecision, GateDecisionSource, GateEvent, RegionTaint, SecurityConfig, TaintLevel,
+    ToolClassification, ToolDirection,
 };
