@@ -2476,30 +2476,61 @@ fn build_transition_prompt(
 }
 
 /// Match an LLM transition response to one of the choosable edges' target stages,
-/// or `None` if the stage may complete and the LLM said "DONE". Falls back to the
-/// first edge when nothing matches. (Ported from the matching tail of
-/// `graph::prompt_llm_transition`, keyed on `target` for pipeline consistency.)
+/// or `None` if the stage may complete and the LLM chose to end here.
+///
+/// Models are asked to answer with only the target stage name (or `DONE`), but
+/// frequently wrap it in prose or re-explain the stage. We therefore look for a
+/// clean, standalone decision — scanning the first line, then the concluding
+/// line, for a **whole-word** match against a stage name or `DONE` — instead of
+/// substring-scanning the whole response, where a stage name mentioned in
+/// passing ("the implementation", "the approved plan") would hijack the routing.
+/// When nothing matches, a stage that may complete ends the run; otherwise the
+/// run advances along the first declared edge.
 fn match_transition_choice(
     choice: &str,
     edges: &[leviath_core::blueprint::TransitionEdge],
     allow_complete: bool,
 ) -> Option<String> {
-    if allow_complete && choice.eq_ignore_ascii_case("done") {
-        return None;
-    }
-    for edge in edges {
-        if choice.eq_ignore_ascii_case(&edge.target) || choice.contains(edge.target.as_str()) {
-            return Some(edge.target.clone());
+    let lines: Vec<&str> = choice
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .collect();
+    // Candidate decision lines, in priority order: the first line (the model was
+    // told to reply with only the name, so the answer leads), then — only if it
+    // is short and answer-like (≤ 3 words) — the concluding line, which catches
+    // models that reason first and answer last without matching a stage name
+    // buried in a prose summary ("the approved plan was implemented").
+    let words_in = |line: &str| {
+        line.split(|c: char| !c.is_alphanumeric() && c != '_')
+            .filter(|w| !w.is_empty())
+            .count()
+    };
+    let first = lines.first().copied();
+    let last = lines
+        .last()
+        .copied()
+        .filter(|l| lines.len() > 1 && words_in(l) <= 3);
+    for line in first.into_iter().chain(last) {
+        for word in line.split(|c: char| !c.is_alphanumeric() && c != '_') {
+            if word.is_empty() {
+                continue;
+            }
+            if allow_complete && word.eq_ignore_ascii_case("done") {
+                return None;
+            }
+            if let Some(edge) = edges.iter().find(|e| word.eq_ignore_ascii_case(&e.target)) {
+                return Some(edge.target.clone());
+            }
         }
     }
-    let lower = choice.to_lowercase();
-    for edge in edges {
-        if lower.contains(&edge.target.to_lowercase()) {
-            return Some(edge.target.clone());
-        }
+    // No clear decision: a stage that may end prefers ending over looping back;
+    // otherwise the run advances along the first declared edge.
+    if allow_complete {
+        None
+    } else {
+        edges.first().map(|edge| edge.target.clone())
     }
-    // Nothing matched — fall back to the first available edge.
-    edges.first().map(|edge| edge.target.clone())
 }
 
 /// Transition-choice dispatch: for each `AwaitingTransitionChoice` agent, inject
@@ -6802,31 +6833,76 @@ mod tests {
     }
 
     #[test]
-    fn match_choice_exact_and_contains_and_fallback() {
+    fn match_choice_exact_and_word_and_fallback() {
         let edges = vec![plain_edge("review"), plain_edge("plan")];
         // Exact (case-insensitive).
         assert_eq!(
             match_transition_choice("REVIEW", &edges, false),
             Some("review".to_string())
         );
-        // Substring (choice contains the target verbatim).
+        // The target appears as a whole word in the (single) decision line.
         assert_eq!(
             match_transition_choice("go to plan now", &edges, false),
             Some("plan".to_string())
         );
-        // Lowercase-contains fallback (target casing differs from the response).
+        // Whole-word match is case-insensitive.
         let mixed = vec![plain_edge("Deploy")];
         assert_eq!(
             match_transition_choice("please deploy it", &mixed, false),
             Some("Deploy".to_string())
         );
-        // No match at all ⇒ first edge.
+        // No match at all ⇒ first edge (stage cannot complete).
         assert_eq!(
             match_transition_choice("nonsense", &edges, false),
             Some("review".to_string())
         );
         // No edges ⇒ nothing to pick.
         assert_eq!(match_transition_choice("x", &[], false), None);
+    }
+
+    #[test]
+    fn match_choice_ignores_stage_names_buried_in_prose() {
+        // Regression: a review stage's verbose transition response that mentions
+        // "the implementation" must NOT be routed back to the `implement` edge —
+        // "implementation" is not the whole word "implement". With no clear
+        // decision and allow_complete, the run ends (the review approved).
+        let edges = vec![plain_edge("implement"), plain_edge("error_recovery")];
+        let verbose = "## Review of `test.py`\n\n- The implementation correctly \
+                       follows the approved plan. Runs on Python 3.\n\nAPPROVED.";
+        assert_eq!(match_transition_choice(verbose, &edges, true), None);
+        // Same response in a stage that cannot complete ⇒ first edge, not a
+        // prose false-positive.
+        assert_eq!(
+            match_transition_choice(verbose, &edges, false),
+            Some("implement".to_string())
+        );
+    }
+
+    #[test]
+    fn match_choice_reads_done_from_a_verbose_first_line() {
+        // "DONE" leading a multi-line summary still completes a completable stage.
+        let edges = vec![plain_edge("implement")];
+        let resp = "DONE\n\n## Summary\nThe task is complete; no further work needed.";
+        assert_eq!(match_transition_choice(resp, &edges, true), None);
+        // But a stage that cannot complete ignores the "DONE" and advances along
+        // its first edge rather than matching "plan" inside "approved plan".
+        let edges2 = vec![plain_edge("review"), plain_edge("plan")];
+        let resp2 = "DONE\n\nThe approved plan was implemented; no further work.";
+        assert_eq!(
+            match_transition_choice(resp2, &edges2, false),
+            Some("review".to_string())
+        );
+    }
+
+    #[test]
+    fn match_choice_reads_decision_from_the_concluding_line() {
+        // Some models put the answer at the end after reasoning.
+        let edges = vec![plain_edge("implement"), plain_edge("error_recovery")];
+        let resp = "The tests still fail on the edge case.\n\nimplement";
+        assert_eq!(
+            match_transition_choice(resp, &edges, true),
+            Some("implement".to_string())
+        );
     }
 
     #[test]
