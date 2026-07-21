@@ -10,7 +10,7 @@
 //!
 //! ## Why this crate exists
 //!
-//! 1. **De-duplication.** The `process_group` detach, `nix`-based `kill`, and
+//! 1. **De-duplication.** The `process_group` detach and
 //!    `Permissions::from_mode(0o600)` logic each has exactly one implementation
 //!    here, rather than being spread across call sites in `leviath-cli`.
 //! 2. **Per-OS coverage correctness.** Because all platform code is gathered
@@ -19,8 +19,8 @@
 //!    compiled, so the coverage tool never sees them as gaps. The
 //!    Linux-visible code paths are all reachable from real unit tests.
 //! 3. **Testability.** Every function in this crate is exercised by real unit
-//!    tests — the syscalls here are either safe to call under test (`kill` on a
-//!    nonexistent pid returns `ESRCH`, `chmod` on a tempfile) or split behind an
+//!    tests — the syscalls here are either safe to call under test (`chmod` on a
+//!    tempfile) or split behind an
 //!    injected seam ([`tty::osc52_write_via`]
 //!    takes the tty opener + sink; `perms`' hardening op is a `fn` pointer). The
 //!    only genuinely-untestable real-I/O leaves (opening `/dev/tty`, writing the
@@ -34,5 +34,5 @@ pub mod process;
 pub mod tty;
 
 pub use perms::{ensure_file_private, secure_dir_perms, secure_file_perms};
-pub use process::{configure_detached, terminate};
+pub use process::configure_detached;
 pub use tty::osc52_write_via;
