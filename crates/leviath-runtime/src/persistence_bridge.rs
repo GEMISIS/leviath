@@ -11,7 +11,8 @@
 
 use std::path::{Path, PathBuf};
 
-use leviath_core::run_meta::{ContextSnapshot, RunMeta};
+use leviath_core::run_meta::{ContextSnapshot, RunMeta, StageRecord};
+use tokio::io::AsyncWriteExt;
 use tokio::sync::mpsc::UnboundedReceiver;
 
 /// One agent snapshot to write to disk.
@@ -22,6 +23,13 @@ pub struct PersistJob {
     pub meta: RunMeta,
     /// The `context.json` contents.
     pub context: ContextSnapshot,
+    /// The `stages.json` index (per-stage names/status/tokens/timestamps). Empty
+    /// ⇒ not rewritten this job (agents without a stage ledger).
+    pub stages: Vec<StageRecord>,
+    /// Readable output lines to append to `stages/<idx>/output.log`.
+    pub output_appends: Vec<(usize, String)>,
+    /// Operational log lines to append to `stages/<idx>/logs.log`.
+    pub log_appends: Vec<(usize, String)>,
 }
 
 /// The single-lane persistence worker: writes each [`PersistJob`]'s files under
@@ -47,6 +55,49 @@ async fn write_snapshot(runs_dir: &Path, job: &PersistJob) {
     let ctx_json =
         serde_json::to_string_pretty(&job.context).expect("ContextSnapshot always serializes");
     write_bytes_atomic(&dir.join("context.json"), ctx_json.as_bytes(), &job.run_id).await;
+
+    // Per-stage index (names/status), rewritten whole; empty ⇒ agent has no ledger.
+    if !job.stages.is_empty() {
+        let stages_json =
+            serde_json::to_string_pretty(&job.stages).expect("StageRecord slice always serializes");
+        write_bytes_atomic(
+            &dir.join("stages.json"),
+            stages_json.as_bytes(),
+            &job.run_id,
+        )
+        .await;
+    }
+    // Append-only per-stage output + logs.
+    for (idx, line) in &job.output_appends {
+        append_stage_line(&dir, *idx, "output.log", line, &job.run_id).await;
+    }
+    for (idx, line) in &job.log_appends {
+        append_stage_line(&dir, *idx, "logs.log", line, &job.run_id).await;
+    }
+}
+
+/// Append one line (with a trailing newline) to `stages/<idx>/<file>` under the
+/// run dir, creating the stage directory if needed. Best-effort: a failed
+/// `create_dir_all` just makes the subsequent open fail, and the append write
+/// result is intentionally ignored — persistence must never stall the world.
+async fn append_stage_line(run_dir: &Path, stage_idx: usize, file: &str, line: &str, run_id: &str) {
+    let stage_dir = run_dir.join("stages").join(stage_idx.to_string());
+    let _ = tokio::fs::create_dir_all(&stage_dir).await;
+    match tokio::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(stage_dir.join(file))
+        .await
+    {
+        Ok(mut handle) => {
+            let mut bytes = line.as_bytes().to_vec();
+            bytes.push(b'\n');
+            let _ = handle.write_all(&bytes).await;
+        }
+        Err(e) => {
+            tracing::warn!(run_id = %run_id, error = %e, "persistence: stage log open failed");
+        }
+    }
 }
 
 /// Write `bytes` to `path` via a sibling temp file + rename (atomic on the same
@@ -98,6 +149,9 @@ mod tests {
             run_id: "run-1".to_string(),
             meta: meta("run-1"),
             context: context(),
+            stages: vec![],
+            output_appends: vec![],
+            log_appends: vec![],
         })
         .unwrap();
         drop(tx); // close so the worker loop ends
@@ -114,6 +168,63 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn worker_writes_stages_index_and_appends_output_and_logs() {
+        let dir = tempfile::tempdir().unwrap();
+        write_snapshot(
+            dir.path(),
+            &PersistJob {
+                run_id: "r".to_string(),
+                meta: meta("r"),
+                context: context(),
+                stages: vec![StageRecord::new("plan".to_string(), 0)],
+                output_appends: vec![(0, "the plan".to_string())],
+                log_appends: vec![(0, "[tool] list_dir: .".to_string())],
+            },
+        )
+        .await;
+
+        let run = dir.path().join("r");
+        let idx: Vec<StageRecord> =
+            serde_json::from_str(&std::fs::read_to_string(run.join("stages.json")).unwrap())
+                .unwrap();
+        assert_eq!(idx[0].name, "plan");
+        let out = std::fs::read_to_string(run.join("stages/0/output.log")).unwrap();
+        assert!(out.contains("the plan"));
+        let log = std::fs::read_to_string(run.join("stages/0/logs.log")).unwrap();
+        assert!(log.contains("[tool] list_dir"));
+    }
+
+    #[tokio::test]
+    async fn empty_stages_are_not_written() {
+        let dir = tempfile::tempdir().unwrap();
+        write_snapshot(
+            dir.path(),
+            &PersistJob {
+                run_id: "r".to_string(),
+                meta: meta("r"),
+                context: context(),
+                stages: vec![],
+                output_appends: vec![],
+                log_appends: vec![],
+            },
+        )
+        .await;
+        // No stages.json, no stages dir when there's nothing to write.
+        assert!(!dir.path().join("r/stages.json").exists());
+    }
+
+    #[tokio::test]
+    async fn stage_line_open_failure_is_handled() {
+        crate::test_support::with_tracing(|| {});
+        let dir = tempfile::tempdir().unwrap();
+        let run = dir.path().join("r");
+        // `output.log` already exists as a *directory*, so the append open fails.
+        std::fs::create_dir_all(run.join("stages/0/output.log")).unwrap();
+        append_stage_line(&run, 0, "output.log", "line", "r").await;
+        // No panic; nothing appended (the path is a directory).
+    }
+
+    #[tokio::test]
     async fn write_is_skipped_when_runs_dir_unwritable() {
         crate::test_support::with_tracing(|| {});
         // runs_dir points at a *file*, so create_dir_all fails — must not panic.
@@ -124,6 +235,9 @@ mod tests {
                 run_id: "r".to_string(),
                 meta: meta("r"),
                 context: context(),
+                stages: vec![],
+                output_appends: vec![],
+                log_appends: vec![],
             },
         )
         .await;
@@ -144,6 +258,9 @@ mod tests {
                 run_id: "r".to_string(),
                 meta: meta("r"),
                 context: context(),
+                stages: vec![],
+                output_appends: vec![],
+                log_appends: vec![],
             },
         )
         .await;
@@ -168,6 +285,9 @@ mod tests {
                 run_id: "r".to_string(),
                 meta: meta("r"),
                 context: context(),
+                stages: vec![],
+                output_appends: vec![],
+                log_appends: vec![],
             },
         )
         .await;

@@ -252,20 +252,45 @@ pub fn collect_inference(
         (
             &mut AgentState,
             Option<&mut crate::persistence::TokenTotals>,
+            Option<&StageCursor>,
+            Option<&mut StageLedger>,
+            Option<&mut StageIoBuffer>,
         ),
         With<AwaitingInference>,
     >,
     mut commands: Commands,
 ) {
     while let Ok(outcome) = results.0.try_recv() {
-        let Ok((mut state, totals)) = agents.get_mut(outcome.entity) else {
+        let Ok((mut state, totals, cursor, mut ledger, buffer)) = agents.get_mut(outcome.entity)
+        else {
             continue; // stale: agent cancelled/despawned since dispatch
         };
+        let idx = cursor.map_or(0, |c| c.index);
         match outcome.result {
             Ok(response) => {
                 state.iteration += 1;
                 if let Some(mut totals) = totals {
                     totals.add_usage(&response.tokens_used);
+                }
+                // Accrue this iteration's tokens against the current stage record.
+                if let Some(rec) = ledger.as_deref_mut().and_then(|l| l.0.get_mut(idx)) {
+                    rec.prompt_tokens += response.tokens_used.prompt_tokens;
+                    rec.completion_tokens += response.tokens_used.completion_tokens;
+                    rec.cached_tokens += response.tokens_used.cached_tokens;
+                }
+                // Buffer the readable output + a token line for the stage's logs.
+                if let Some(mut buffer) = buffer {
+                    if !response.content.trim().is_empty() {
+                        buffer.output.push((idx, response.content.clone()));
+                    }
+                    buffer.logs.push((
+                        idx,
+                        format!(
+                            "[Tokens: {} in, {} out]",
+                            response.tokens_used.prompt_tokens,
+                            response.tokens_used.completion_tokens
+                        ),
+                    ));
                 }
                 let result = to_inference_result(&response);
                 commands
@@ -275,6 +300,9 @@ pub fn collect_inference(
                     .insert(ProcessResponse);
             }
             Err(err) => {
+                if let Some(mut buffer) = buffer {
+                    buffer.logs.push((idx, format!("[error] {err}")));
+                }
                 state.status = AgentStatus::Error {
                     message: err.to_string(),
                 };
@@ -308,6 +336,28 @@ pub struct StageProgress {
     pub total_tool_calls: usize,
     /// Consecutive text-only responses that were nudged toward tool use.
     pub text_only_nudges: usize,
+}
+
+/// One [`StageRecord`](leviath_core::run_meta::StageRecord) per blueprint stage,
+/// seeded at spawn (names + `Pending`) and reconciled by [`dispatch_persistence`]
+/// (status + timestamps), with per-stage tokens accrued by [`collect_inference`].
+/// Serialized to `stages.json` so the dashboard / serve API can show every
+/// stage's real name and status — not just the active one (whose name is the only
+/// one carried in `meta.json`).
+#[derive(Component, Debug, Clone)]
+pub struct StageLedger(pub Vec<leviath_core::run_meta::StageRecord>);
+
+/// Buffered per-stage output/log lines awaiting the persistence lane. Emitters
+/// ([`collect_inference`], [`collect_tools`]) push; [`dispatch_persistence`]
+/// drains and clears, forwarding the lines to `stages/<idx>/output.log` (readable
+/// assistant output) and `stages/<idx>/logs.log` (tool + token + error events).
+#[derive(Component, Debug, Clone, Default)]
+pub struct StageIoBuffer {
+    /// Readable assistant output lines, each tagged with its stage index.
+    pub output: Vec<(usize, String)>,
+    /// Operational log lines (tool activity, token counts, errors), each tagged
+    /// with its stage index.
+    pub logs: Vec<(usize, String)>,
 }
 
 /// Process-response system: route each `ProcessResponse` agent by whether its
@@ -434,6 +484,17 @@ pub struct ContextToolResults(pub Vec<(String, String)>);
 /// Merge context + lane tool results into one `(id, result)` list in the
 /// original tool-call order (Anthropic requires a `tool_result` per `tool_use`,
 /// in order).
+/// Collapse a possibly-multiline string to a single trimmed line capped at
+/// `max` characters (with an ellipsis when truncated), for one-line log entries.
+fn one_line(s: &str, max: usize) -> String {
+    let flat = s.split_whitespace().collect::<Vec<_>>().join(" ");
+    if flat.chars().count() > max {
+        format!("{}…", flat.chars().take(max).collect::<String>())
+    } else {
+        flat
+    }
+}
+
 fn merge_in_call_order(
     tool_calls: &[crate::components::ToolCall],
     parts: &[(String, String)],
@@ -716,13 +777,15 @@ pub fn collect_tools(
             Option<&crate::components::ToolResultRoutingComponent>,
             Option<&ToolSensitivities>,
             Option<&ContextToolResults>,
+            Option<&StageCursor>,
+            Option<&mut StageIoBuffer>,
         ),
         With<AwaitingTools>,
     >,
     mut commands: Commands,
 ) {
     while let Ok(outcome) = results.0.try_recv() {
-        let Ok((mut window, infer, routing, sensitivities, context_results)) =
+        let Ok((mut window, infer, routing, sensitivities, context_results, cursor, buffer)) =
             agents.get_mut(outcome.entity)
         else {
             continue; // stale: agent cancelled/despawned since dispatch
@@ -734,6 +797,17 @@ pub fn collect_tools(
             parts.extend(ctx.0.iter().cloned());
         }
         let merged = merge_in_call_order(&infer.tool_calls, &parts);
+        // Buffer one readable `[tool] name: result` line per call for the stage's
+        // logs (merged is in call order, so it zips with the calls by index).
+        if let Some(mut buffer) = buffer {
+            let idx = cursor.map_or(0, |c| c.index);
+            for (call, (_id, result)) in infer.tool_calls.iter().zip(merged.iter()) {
+                buffer.logs.push((
+                    idx,
+                    format!("[tool] {}: {}", call.name, one_line(result, 200)),
+                ));
+            }
+        }
         apply_tool_results(
             &mut window,
             &infer.response,
@@ -1142,6 +1216,47 @@ pub fn reflect_interaction_status(
     }
 }
 
+/// Reconcile a [`StageLedger`]'s per-stage `status` + timestamps against the
+/// agent's current stage index and status: stages before the cursor are
+/// `Complete`, the cursor stage takes the mapped agent status, later stages stay
+/// `Pending`. `started_at`/`ended_at` are stamped once and never overwritten, so
+/// repeated calls are idempotent.
+fn reconcile_stage_ledger(
+    ledger: &mut StageLedger,
+    cursor_index: usize,
+    status: &AgentStatus,
+    now: i64,
+) {
+    use leviath_core::run_meta::StageRunStatus;
+    let active = crate::persistence::stage_status_from(status);
+    for rec in ledger.0.iter_mut() {
+        match rec.index.cmp(&cursor_index) {
+            std::cmp::Ordering::Less => {
+                if rec.started_at.is_none() {
+                    rec.started_at = Some(now);
+                }
+                rec.status = StageRunStatus::Complete;
+                if rec.ended_at.is_none() {
+                    rec.ended_at = Some(now);
+                }
+            }
+            std::cmp::Ordering::Equal => {
+                if rec.started_at.is_none() {
+                    rec.started_at = Some(now);
+                }
+                if active == StageRunStatus::Complete && rec.ended_at.is_none() {
+                    rec.ended_at = Some(now);
+                }
+                rec.status = active.clone();
+            }
+            std::cmp::Ordering::Greater => {
+                rec.status = StageRunStatus::Pending;
+            }
+        }
+    }
+}
+
+#[allow(clippy::type_complexity)]
 pub fn dispatch_persistence(
     mut agents: Query<(
         &RunMetadata,
@@ -1150,29 +1265,51 @@ pub fn dispatch_persistence(
         &StageCursor,
         &TokenTotals,
         &mut PersistWatermark,
+        Option<&mut StageLedger>,
+        Option<&mut StageIoBuffer>,
     )>,
     stage: Res<PersistenceStage>,
 ) {
-    for (md, state, window, cursor, totals, mut watermark) in agents.iter_mut() {
-        let status = crate::persistence::run_status_from(&state.status);
-        let current = (state.iteration, cursor.index, status.clone());
-        if watermark.last.as_ref() == Some(&current) {
-            continue; // nothing meaningful changed since the last write
-        }
-        watermark.last = Some(current);
+    for (md, state, window, cursor, totals, mut watermark, mut ledger, buffer) in agents.iter_mut()
+    {
+        let now = chrono::Utc::now().timestamp();
 
-        let meta = build_run_meta(
-            md,
-            state,
-            totals,
-            cursor.index,
-            chrono::Utc::now().timestamp(),
-        );
+        // Reconcile the stage ledger every persist tick so status/timestamps track
+        // the agent regardless of whether the run-level watermark changed.
+        if let Some(ledger) = ledger.as_deref_mut() {
+            reconcile_stage_ledger(ledger, cursor.index, &state.status, now);
+        }
+
+        // Always flush any buffered per-stage output/log lines.
+        let (output_appends, log_appends) = match buffer {
+            Some(mut buf) => (
+                std::mem::take(&mut buf.output),
+                std::mem::take(&mut buf.logs),
+            ),
+            None => (Vec::new(), Vec::new()),
+        };
+        let has_appends = !output_appends.is_empty() || !log_appends.is_empty();
+
+        let status = crate::persistence::run_status_from(&state.status);
+        let current = (state.iteration, cursor.index, status);
+        let watermark_changed = watermark.last.as_ref() != Some(&current);
+        if !watermark_changed && !has_appends {
+            continue; // nothing meaningful changed and nothing buffered
+        }
+        if watermark_changed {
+            watermark.last = Some(current);
+        }
+
+        let meta = build_run_meta(md, state, totals, cursor.index, now);
         let context = build_context_snapshot(window, &state.current_stage);
+        let stages = ledger.as_deref().map(|l| l.0.clone()).unwrap_or_default();
         let _ = stage.0.send(PersistJob {
             run_id: md.run_id.clone(),
             meta,
             context,
+            stages,
+            output_appends,
+            log_appends,
         });
     }
 }
@@ -1719,6 +1856,17 @@ pub fn spawn_agent(
     let mut visits = VisitCounts::default();
     *visits.0.entry(stage0_name.clone()).or_insert(0) += 1;
 
+    // Seed the per-stage ledger (names + Pending) so the dashboard shows every
+    // stage's real name from the first persist, not just the active one.
+    let ledger = StageLedger(
+        blueprint
+            .stages
+            .iter()
+            .enumerate()
+            .map(|(i, s)| leviath_core::run_meta::StageRecord::new(s.name.clone(), i))
+            .collect(),
+    );
+
     let entity = world
         .spawn((
             AgentBlueprint(blueprint),
@@ -1743,6 +1891,10 @@ pub fn spawn_agent(
             ReadyToInfer,
         ))
         .id();
+    // Inserted after spawn: the bundle above is already at bevy's 15-tuple limit.
+    world
+        .entity_mut(entity)
+        .insert((ledger, StageIoBuffer::default()));
     if let Some(routing) = stage0_routing {
         world
             .entity_mut(entity)
@@ -2372,6 +2524,283 @@ mod tests {
             }
         );
         assert!(world.get::<AwaitingInference>(e).is_none());
+    }
+
+    // ── stage-io persistence (#1) ──
+
+    fn ledger2() -> StageLedger {
+        StageLedger(vec![
+            leviath_core::run_meta::StageRecord::new("plan".to_string(), 0),
+            leviath_core::run_meta::StageRecord::new("impl".to_string(), 1),
+        ])
+    }
+
+    #[test]
+    fn one_line_collapses_whitespace_and_truncates() {
+        assert_eq!(one_line("a\n  b\tc ", 100), "a b c");
+        let long = "x".repeat(250);
+        let out = one_line(&long, 200);
+        assert!(out.ends_with('…'));
+        assert_eq!(out.chars().count(), 201); // 200 chars + the ellipsis
+    }
+
+    #[test]
+    fn reconcile_stage_ledger_sets_past_active_future_once() {
+        use leviath_core::run_meta::StageRunStatus;
+        let mut led = StageLedger(vec![
+            leviath_core::run_meta::StageRecord::new("a".to_string(), 0),
+            leviath_core::run_meta::StageRecord::new("b".to_string(), 1),
+            leviath_core::run_meta::StageRecord::new("c".to_string(), 2),
+        ]);
+        reconcile_stage_ledger(&mut led, 1, &AgentStatus::Active, 100);
+        assert_eq!(led.0[0].status, StageRunStatus::Complete);
+        assert_eq!(led.0[0].started_at, Some(100));
+        assert_eq!(led.0[0].ended_at, Some(100));
+        assert_eq!(led.0[1].status, StageRunStatus::Active);
+        assert_eq!(led.0[1].started_at, Some(100));
+        assert_eq!(led.0[1].ended_at, None);
+        assert_eq!(led.0[2].status, StageRunStatus::Pending);
+
+        // Idempotent: a later reconcile doesn't overwrite the stamped timestamps.
+        reconcile_stage_ledger(&mut led, 1, &AgentStatus::Active, 200);
+        assert_eq!(led.0[0].ended_at, Some(100));
+        assert_eq!(led.0[1].started_at, Some(100));
+    }
+
+    #[test]
+    fn reconcile_stage_ledger_completes_current_stage_on_run_complete() {
+        use leviath_core::run_meta::StageRunStatus;
+        let mut led = StageLedger(vec![leviath_core::run_meta::StageRecord::new(
+            "a".to_string(),
+            0,
+        )]);
+        reconcile_stage_ledger(&mut led, 0, &AgentStatus::Complete, 50);
+        assert_eq!(led.0[0].status, StageRunStatus::Complete);
+        assert_eq!(led.0[0].ended_at, Some(50));
+    }
+
+    #[test]
+    fn collect_inference_buffers_output_token_line_and_stage_tokens() {
+        let (mut world, tx) = world_with_results();
+        let e = world
+            .spawn((
+                agent_state(),
+                AwaitingInference,
+                StageCursor { index: 1 },
+                ledger2(),
+                StageIoBuffer::default(),
+            ))
+            .id();
+        let mut response = resp("the plan");
+        response.tokens_used.prompt_tokens = 5;
+        response.tokens_used.completion_tokens = 3;
+        response.tokens_used.cached_tokens = 2;
+        tx.send(InferenceOutcome {
+            entity: e,
+            result: Ok(response),
+        })
+        .unwrap();
+
+        run_collect(&mut world);
+
+        let buf = world.get::<StageIoBuffer>(e).unwrap();
+        assert_eq!(buf.output, vec![(1, "the plan".to_string())]);
+        assert_eq!(buf.logs, vec![(1, "[Tokens: 5 in, 3 out]".to_string())]);
+        let led = world.get::<StageLedger>(e).unwrap();
+        assert_eq!(led.0[1].prompt_tokens, 5);
+        assert_eq!(led.0[1].completion_tokens, 3);
+        assert_eq!(led.0[1].cached_tokens, 2);
+    }
+
+    #[test]
+    fn collect_inference_skips_empty_output_but_logs_tokens() {
+        let (mut world, tx) = world_with_results();
+        let e = world
+            .spawn((
+                agent_state(),
+                AwaitingInference,
+                StageCursor { index: 0 },
+                StageIoBuffer::default(),
+            ))
+            .id();
+        tx.send(InferenceOutcome {
+            entity: e,
+            result: Ok(resp("   ")), // whitespace-only ⇒ no output line
+        })
+        .unwrap();
+
+        run_collect(&mut world);
+
+        let buf = world.get::<StageIoBuffer>(e).unwrap();
+        assert!(buf.output.is_empty());
+        assert_eq!(buf.logs.len(), 1); // token line only
+    }
+
+    #[test]
+    fn collect_inference_error_buffers_error_line() {
+        let (mut world, tx) = world_with_results();
+        let e = world
+            .spawn((
+                agent_state(),
+                AwaitingInference,
+                StageCursor { index: 0 },
+                StageIoBuffer::default(),
+            ))
+            .id();
+        tx.send(InferenceOutcome {
+            entity: e,
+            result: Err(leviath_providers::ProviderError::Other("boom".to_string())),
+        })
+        .unwrap();
+
+        run_collect(&mut world);
+
+        let buf = world.get::<StageIoBuffer>(e).unwrap();
+        assert_eq!(buf.logs, vec![(0, "[error] boom".to_string())]);
+    }
+
+    #[test]
+    fn collect_inference_tolerates_cursor_beyond_ledger() {
+        let (mut world, tx) = world_with_results();
+        let e = world
+            .spawn((
+                agent_state(),
+                AwaitingInference,
+                StageCursor { index: 9 }, // past the 2-stage ledger
+                ledger2(),
+                StageIoBuffer::default(),
+            ))
+            .id();
+        tx.send(InferenceOutcome {
+            entity: e,
+            result: Ok(resp("x")),
+        })
+        .unwrap();
+
+        run_collect(&mut world);
+
+        // No panic; output tagged with idx 9, ledger tokens untouched.
+        assert_eq!(
+            world.get::<StageIoBuffer>(e).unwrap().output,
+            vec![(9, "x".to_string())]
+        );
+        assert_eq!(world.get::<StageLedger>(e).unwrap().0[0].prompt_tokens, 0);
+    }
+
+    #[test]
+    fn collect_tools_buffers_one_tool_log_line_per_call() {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let mut world = World::new();
+        world.insert_resource(ToolResults(rx));
+        let e = world
+            .spawn((
+                ctx(&[("conversation", 10_000)]),
+                infer_with(vec![tc("c1", "read_file")]),
+                AwaitingTools,
+                StageCursor { index: 2 },
+                StageIoBuffer::default(),
+            ))
+            .id();
+        tx.send(ToolOutcome {
+            entity: e,
+            results: vec![("c1".to_string(), "file\nbody".to_string())],
+        })
+        .unwrap();
+
+        run_collect_tools(&mut world);
+
+        let buf = world.get::<StageIoBuffer>(e).unwrap();
+        assert_eq!(
+            buf.logs,
+            vec![(2, "[tool] read_file: file body".to_string())]
+        );
+    }
+
+    #[test]
+    fn dispatch_persistence_emits_stage_index_and_drains_io_buffer() {
+        use leviath_core::run_meta::StageRunStatus;
+        let (mut world, mut rx) = world_with_persistence();
+        let mut buf = StageIoBuffer::default();
+        buf.output.push((0, "hello".to_string()));
+        buf.logs.push((0, "[tool] x: y".to_string()));
+        let e = world
+            .spawn((
+                run_metadata(),
+                agent_state(),
+                conv_window(),
+                StageCursor { index: 0 },
+                TokenTotals::default(),
+                PersistWatermark::default(),
+                ledger2(),
+                buf,
+            ))
+            .id();
+
+        run_dispatch_persistence(&mut world);
+
+        let job = rx.try_recv().expect("job sent");
+        assert_eq!(job.stages.len(), 2);
+        assert_eq!(job.stages[0].name, "plan");
+        assert_eq!(job.stages[0].status, StageRunStatus::Active);
+        assert_eq!(job.output_appends, vec![(0, "hello".to_string())]);
+        assert_eq!(job.log_appends, vec![(0, "[tool] x: y".to_string())]);
+        // The buffer was drained in place.
+        assert!(world.get::<StageIoBuffer>(e).unwrap().output.is_empty());
+    }
+
+    #[test]
+    fn dispatch_persistence_flushes_buffered_io_without_a_watermark_change() {
+        let (mut world, mut rx) = world_with_persistence();
+        let e = world
+            .spawn((
+                run_metadata(),
+                agent_state(),
+                conv_window(),
+                StageCursor { index: 0 },
+                TokenTotals::default(),
+                PersistWatermark::default(),
+                StageIoBuffer::default(),
+            ))
+            .id();
+
+        // First pass: watermark changes ⇒ a job is sent, buffer stays empty.
+        run_dispatch_persistence(&mut world);
+        let _ = rx.try_recv().expect("first job");
+
+        // Watermark unchanged, but new buffered content ⇒ still flushed.
+        world
+            .get_mut::<StageIoBuffer>(e)
+            .unwrap()
+            .logs
+            .push((0, "late log".to_string()));
+        run_dispatch_persistence(&mut world);
+        let job = rx.try_recv().expect("append-triggered job");
+        assert_eq!(job.log_appends, vec![(0, "late log".to_string())]);
+    }
+
+    #[test]
+    fn spawn_agent_seeds_the_stage_ledger_with_names() {
+        let mk = |name: &str| {
+            leviath_core::Stage::new(
+                name.to_string(),
+                leviath_core::blueprint::ModelConfig::new("p".to_string(), "m".to_string()),
+            )
+        };
+        let bp = blueprint(vec![mk("plan"), mk("build")]);
+        let mut world = World::new();
+        let e = spawn_agent(
+            &mut world,
+            "run-led".to_string(),
+            bp,
+            "task",
+            vec![resolved("m"), resolved("m")],
+        )
+        .expect("spawn");
+        let led = world.get::<StageLedger>(e).expect("ledger seeded");
+        assert_eq!(led.0.len(), 2);
+        assert_eq!(led.0[0].name, "plan");
+        assert_eq!(led.0[1].name, "build");
+        assert!(world.get::<StageIoBuffer>(e).is_some());
     }
 
     #[test]
