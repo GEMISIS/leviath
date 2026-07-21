@@ -14,6 +14,7 @@ pub mod context_transform;
 pub mod control_socket;
 pub mod dynamic_interaction;
 pub mod fanout;
+pub mod gate_prompt;
 pub mod host;
 pub mod inference_bridge;
 pub mod inference_pool;

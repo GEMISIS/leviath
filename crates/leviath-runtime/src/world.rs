@@ -91,12 +91,14 @@ impl PipelineWorld {
         let (persist_tx, persist_rx) = unbounded_channel();
         let (msg_tx, msg_rx) = unbounded_channel();
         let (ip_tx, ip_rx) = unbounded_channel();
+        let (gp_tx, gp_rx) = unbounded_channel();
 
         let tool_task = runtime.spawn(tool_worker(tool_job_rx, tool_res_tx, wake.clone()));
         // Fire-and-forget: the persistence worker exits when the world (and thus
         // its PersistenceStage sender) is dropped.
         runtime.spawn(persistence_worker(runs_dir, persist_rx));
         let ip_runtime = runtime.clone();
+        let gp_runtime = runtime.clone();
 
         let mut world = World::new();
         world.insert_resource(Providers(providers));
@@ -114,6 +116,12 @@ impl PipelineWorld {
             runtime: ip_runtime,
         });
         world.insert_resource(crate::interaction_points::InteractionPointResults(ip_rx));
+        world.insert_resource(crate::gate_prompt::GatePromptStage {
+            outcomes: gp_tx,
+            wake: wake.clone(),
+            runtime: gp_runtime,
+        });
+        world.insert_resource(crate::gate_prompt::GatePromptResults(gp_rx));
         world.insert_resource(InferenceResults(inf_rx));
         world.insert_resource(TransitionResults(trans_rx));
         world.insert_resource(CompactionResults(compact_rx));
@@ -141,6 +149,9 @@ impl PipelineWorld {
                 // Intercept a fan-out stage's split response before normal routing.
                 crate::fanout::fan_out_split,
                 process_response,
+                // Apply resolved taint gate prompts (re-arming ReadyForTools)
+                // before the tool dispatch re-runs the held batch.
+                crate::gate_prompt::collect_gate_prompt,
                 dispatch_tools,
                 collect_tools,
                 // Apply any resolved stage-boundary interaction-point answers
