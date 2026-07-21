@@ -8,8 +8,11 @@
 //! access), so those never reach here. Every other call is resolved against the
 //! agent's policy layers and executed; `ask_user_*` / `present_for_review` are
 //! handled by [`dispatch_dynamic_interaction`]. File-tracking result rewriting is
-//! not yet applied here (an opt-in blueprint feature that also needs window
-//! access — a follow-up).
+//! deliberately *not* done here: this executor is ECS-free (no context window),
+//! so the shared world's `collect_tools` applies the agent's `file_tracking`
+//! config to these results downstream — where the window is available — via the
+//! same path top-level agents use. Every daemon agent, sub-agent included, gets
+//! file-tracking whenever its blueprint declares it.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex as StdMutex};
