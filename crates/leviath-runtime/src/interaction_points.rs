@@ -68,6 +68,13 @@ pub struct InteractionPointCursor(pub usize);
 #[derive(Component, Debug, Clone, Copy)]
 pub struct InteractionPointRounds(pub usize);
 
+/// The authoritative document to present as the point's `body` on the next
+/// dispatch, overriding the last inference response. Set when the user edits the
+/// document directly (so the re-presented approval shows the *edited* text, not
+/// the pre-edit version) and consumed on the next dispatch.
+#[derive(Component, Debug, Clone)]
+pub struct PlanBodyOverride(pub String);
+
 // ─── Lane plumbing ───────────────────────────────────────────────────────────
 
 /// What the user's answer resolved to, routed deterministically from the option
@@ -153,9 +160,11 @@ fn lookup_directive<'a>(
         .map(|(_, d)| d.as_str())
 }
 
-/// Build the interaction request for a point in its declared style.
-fn build_point_request(point: &InteractionPoint, id: String) -> InteractionRequest {
-    match point.style {
+/// Build the interaction request for a point in its declared style, attaching
+/// `body` (the document the stage produced — e.g. the plan) so the client can
+/// show just this instance's document to review, rather than the full history.
+fn build_point_request(point: &InteractionPoint, id: String, body: &str) -> InteractionRequest {
+    let mut req = match point.style {
         InteractionStyle::MultipleChoice => InteractionRequest::multiple_choice(
             id,
             &point.prompt,
@@ -166,7 +175,12 @@ fn build_point_request(point: &InteractionPoint, id: String) -> InteractionReque
         InteractionStyle::FreeText => {
             InteractionRequest::free_text(id, &point.prompt, &point.name, point.required)
         }
+    };
+    if !body.trim().is_empty() {
+        req.body = Some(body.to_string());
+        req.body_format = leviath_core::interaction::BodyFormat::Markdown;
     }
+    req
 }
 
 /// Resolve a response to the selected option label / free text: a choice index
@@ -231,7 +245,7 @@ async fn run_interaction_point(
     // point (same name/round) never collide in the shared hub.
     let ask_id = format!("{agent_id}-point-{}-{round}", point.name);
     let backend = hub.backend_for(agent_id);
-    let req = build_point_request(&point, ask_id.clone());
+    let req = build_point_request(&point, ask_id.clone(), &body);
     let resp = backend.ask(req).await;
     let user_text = resolve_answer(&resp, &point.options);
 
@@ -248,7 +262,7 @@ async fn run_interaction_point(
         Routed::Edit { user_text } => {
             let edit_req = InteractionRequest::edit_text(
                 format!("{ask_id}-edit"),
-                "Edit the text below, then submit your changes:",
+                "Edit the document — your changes replace it, then submit:",
                 &point.name,
                 body,
             );
@@ -321,6 +335,7 @@ pub fn dispatch_interaction_point(
             &InferenceResult,
             Option<&InteractionPointCursor>,
             Option<&InteractionPointRounds>,
+            Option<&PlanBodyOverride>,
         ),
         With<ReadyForInteractionPoint>,
     >,
@@ -331,7 +346,7 @@ pub fn dispatch_interaction_point(
     let (Some(hub), Some(stage)) = (hub, stage) else {
         return; // no lane wired (test world)
     };
-    for (entity, state, bp, cursor, infer, pc, rounds) in agents.iter() {
+    for (entity, state, bp, cursor, infer, pc, rounds, plan_override) in agents.iter() {
         if state.status != AgentStatus::Active {
             continue; // paused / cancelled — don't open a prompt
         }
@@ -345,12 +360,17 @@ pub fn dispatch_interaction_point(
                 .insert(ResolveTransition);
             continue;
         };
+        // The document to review: a direct edit (override) takes precedence over
+        // the last inference response, so a re-presented approval reflects it.
+        let body = plan_override
+            .map(|o| o.0.clone())
+            .unwrap_or_else(|| infer.response.clone());
         stage.runtime.spawn(run_interaction_point(
             entity,
             hub.clone(),
             state.agent_id.clone(),
             point,
-            infer.response.clone(),
+            body,
             rounds.map_or(0, |r| r.0),
             stage.outcomes.clone(),
             stage.wake.clone(),
@@ -358,6 +378,7 @@ pub fn dispatch_interaction_point(
         commands
             .entity(entity)
             .remove::<ReadyForInteractionPoint>()
+            .remove::<PlanBodyOverride>()
             .insert(AwaitingInteractionPoint);
     }
 }
@@ -461,6 +482,9 @@ pub fn collect_interaction_point(
                                 format!("\n─── Updated (your edit) ───\n{edited}"),
                             ));
                         }
+                        // Present the edited text (not the pre-edit inference
+                        // response) as the re-presented point's review body.
+                        e.insert(PlanBodyOverride(edited));
                     }
                     // Re-present the same point with the edit applied (no re-infer).
                     e.insert(InteractionPointRounds(round + 1))
@@ -612,19 +636,31 @@ mod tests {
         let mc = build_point_request(
             &point("p", InteractionStyle::MultipleChoice, &["a", "b"]),
             "id".to_string(),
+            "## Plan\n1. do it",
         );
         assert_eq!(mc.kind, InteractionKind::MultipleChoice);
         assert_eq!(mc.options.len(), 2);
+        // The document is attached as a markdown body to review.
+        assert_eq!(mc.body.as_deref(), Some("## Plan\n1. do it"));
+        assert_eq!(
+            mc.body_format,
+            leviath_core::interaction::BodyFormat::Markdown
+        );
         let cf = build_point_request(
             &point("p", InteractionStyle::Confirm, &[]),
             "id".to_string(),
+            "",
         );
         assert_eq!(cf.kind, InteractionKind::Confirm);
+        // A blank body is not attached.
+        assert_eq!(cf.body, None);
         let ft = build_point_request(
             &point("p", InteractionStyle::FreeText, &[]),
             "id".to_string(),
+            "   ",
         );
         assert_eq!(ft.kind, InteractionKind::FreeText);
+        assert_eq!(ft.body, None);
     }
 
     #[test]
@@ -842,11 +878,39 @@ mod tests {
         s.run(&mut world);
         assert!(world.get::<AwaitingInteractionPoint>(e).is_some());
         assert!(world.get::<ReadyForInteractionPoint>(e).is_none());
-        // The ask task registered a request in the hub.
+        // The ask task registered a request in the hub, carrying the produced
+        // document (the plan) as its review body.
         for _ in 0..8 {
             tokio::task::yield_now().await;
         }
-        assert_eq!(hub.pending().len(), 1);
+        let pending = hub.pending();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].1.body.as_deref(), Some("the plan"));
+    }
+
+    #[tokio::test]
+    async fn dispatch_prefers_the_plan_body_override() {
+        let (mut world, hub) = dispatch_world();
+        let e = world
+            .spawn((
+                agent_state(AgentStatus::Active),
+                blueprint_with(vec![plan_point()]),
+                StageCursor { index: 0 },
+                infer("the stale pre-edit plan"),
+                PlanBodyOverride("the edited plan".to_string()),
+                ReadyForInteractionPoint,
+            ))
+            .id();
+        let mut s = Schedule::default();
+        s.add_systems(dispatch_interaction_point);
+        s.run(&mut world);
+        // The override is consumed once dispatched.
+        assert!(world.get::<PlanBodyOverride>(e).is_none());
+        for _ in 0..8 {
+            tokio::task::yield_now().await;
+        }
+        // The edited text, not the inference response, is the review body.
+        assert_eq!(hub.pending()[0].1.body.as_deref(), Some("the edited plan"));
     }
 
     // ── collect ──
@@ -1002,6 +1066,11 @@ mod tests {
         assert_eq!(buf.output.len(), 1);
         assert_eq!(buf.output[0].0, 0);
         assert!(buf.output[0].1.contains("the revised plan"));
+        // The edited text is also queued as the re-presented point's review body.
+        assert_eq!(
+            world.get::<PlanBodyOverride>(e).unwrap().0,
+            "the revised plan"
+        );
     }
 
     #[test]
