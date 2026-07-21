@@ -993,21 +993,20 @@ prompt = "Run"
     }).await;
     }
 
-    /// Covers `TcpListener::bind(addr).await?` error path (line 116 gap) by
-    /// binding the target port before calling execute().
+    /// Covers the `TcpListener::bind(addr).await?` error path deterministically
+    /// by binding to a reserved TEST-NET-1 address (RFC 5737, `192.0.2.0/24`)
+    /// that is never assigned to a local interface, so the bind always fails
+    /// with `EADDRNOTAVAIL`. (A prior version reused an already-bound ephemeral
+    /// port, which occasionally let the second bind succeed under parallel-test
+    /// load and left this region uncovered — a genuine flake.)
     #[tokio::test]
-    async fn execute_with_port_in_use_returns_bind_error() {
-        // Bind a port and keep it open so execute()'s bind fails.
-        let taken = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let port = taken.local_addr().unwrap().port();
-
+    async fn execute_with_unbindable_address_returns_bind_error() {
         let args = ServeArgs {
-            port,
-            host: "127.0.0.1".to_string(),
+            port: 8080,
+            host: "192.0.2.1".to_string(),
             cors: "*".to_string(),
         };
         let result = execute(args, no_daemon_control()).await;
-        drop(taken);
         assert_execute_failed_on_port_in_use(&result);
     }
 
