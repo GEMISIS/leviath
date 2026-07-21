@@ -303,12 +303,17 @@ pub fn collect_inference(
                 if let Some(mut buffer) = buffer {
                     buffer.logs.push((idx, format!("[error] {err}")));
                 }
+                // Record the error and route it to the stage's transition logic
+                // (which follows an `error`-conditioned edge if the stage has one,
+                // e.g. → error_recovery, or terminates the run otherwise).
                 state.status = AgentStatus::Error {
                     message: err.to_string(),
                 };
                 commands
                     .entity(outcome.entity)
-                    .remove::<AwaitingInference>();
+                    .remove::<AwaitingInference>()
+                    .insert(StageOutcome::Errored(err.to_string()))
+                    .insert(ResolveTransition);
             }
         }
     }
@@ -336,6 +341,21 @@ pub struct StageProgress {
     pub total_tool_calls: usize,
     /// Consecutive text-only responses that were nudged toward tool use.
     pub text_only_nudges: usize,
+    /// Inferences run in this stage (per-stage, unlike the run-cumulative
+    /// `AgentState.iteration`), for enforcing the stage's `max_iterations`.
+    pub iterations: usize,
+}
+
+/// How a stage ended, when that governs the transition. Absent ⇒ the stage
+/// completed normally. Read by [`resolve_transition`] to follow an
+/// `error`/`max_iterations`-conditioned edge (e.g. → error_recovery) when the
+/// stage errored or hit its iteration cap.
+#[derive(Component, Debug, Clone, PartialEq, Eq)]
+pub enum StageOutcome {
+    /// The stage errored (carries the error message for the terminal case).
+    Errored(String),
+    /// The stage hit its `max_iterations` cap.
+    MaxIterations,
 }
 
 /// One [`StageRecord`](leviath_core::run_meta::StageRecord) per blueprint stage,
@@ -378,6 +398,7 @@ pub fn process_response(
     mut commands: Commands,
 ) {
     for (entity, result, mut progress, totals) in agents.iter_mut() {
+        progress.iterations += 1; // per-stage inference count (for max_iterations)
         let mut e = commands.entity(entity);
         e.remove::<ProcessResponse>();
         if result.tool_calls.is_empty() {
@@ -1420,10 +1441,70 @@ pub struct AwaitingTransitionChoice(pub Vec<leviath_core::blueprint::TransitionE
 enum StageResolution {
     /// No valid outgoing transition — the agent is done.
     Terminal,
+    /// The stage errored and has no `error` edge — terminate the run as errored,
+    /// preserving the error status the collect system already set.
+    TerminalError,
     /// Advance to this stage index, applying the edge's context transform.
     Next(usize, leviath_core::blueprint::EdgeTransform),
     /// Multiple candidate edges — an LLM must choose among them.
     Choose(Vec<leviath_core::blueprint::TransitionEdge>),
+}
+
+/// Find the first available edge with the given `condition` (e.g. `Error` or
+/// `MaxIterations`) whose target exists and hasn't exhausted its revisit budget.
+fn find_conditioned_edge(
+    blueprint: &leviath_core::Blueprint,
+    stage: &leviath_core::Stage,
+    visits: &std::collections::HashMap<String, usize>,
+    condition: leviath_core::blueprint::TransitionCondition,
+) -> Option<(usize, leviath_core::blueprint::EdgeTransform)> {
+    let transitions = stage.transitions.as_ref()?;
+    transitions.values().find_map(|edge| {
+        if edge.condition != condition {
+            return None;
+        }
+        let idx = blueprint
+            .stages
+            .iter()
+            .position(|s| s.name == edge.target)?;
+        let within_budget = match blueprint.stages[idx].max_revisits {
+            Some(max) => visits.get(&edge.target).copied().unwrap_or(0) <= max,
+            None => true,
+        };
+        within_budget.then(|| (idx, edge.transform.clone()))
+    })
+}
+
+/// Max-iterations guard: for each `ReadyToInfer` agent whose per-stage inference
+/// count has reached the stage's `max_iterations`, end the stage (routing to a
+/// `max_iterations` edge if one exists, else a normal transition) instead of
+/// running another inference. Ported from the imperative `run_autonomous` cap.
+pub fn enforce_max_iterations(
+    agents: Query<
+        (
+            Entity,
+            &AgentState,
+            &AgentBlueprint,
+            &StageCursor,
+            &StageProgress,
+        ),
+        With<ReadyToInfer>,
+    >,
+    mut commands: Commands,
+) {
+    for (entity, state, bp, cursor, progress) in agents.iter() {
+        if state.status != AgentStatus::Active {
+            continue;
+        }
+        let max = bp.0.stages[cursor.index].max_iterations.unwrap_or(0);
+        if max > 0 && progress.iterations >= max {
+            commands
+                .entity(entity)
+                .remove::<ReadyToInfer>()
+                .insert(ResolveTransition)
+                .insert(StageOutcome::MaxIterations);
+        }
+    }
 }
 
 /// Resolve the next stage for a normally-completed stage without any LLM call.
@@ -1508,11 +1589,13 @@ pub fn resolve_transition(
             &StageSetups,
             &mut VisitCounts,
             &mut ContextWindow,
+            Option<&StageOutcome>,
         ),
         With<ResolveTransition>,
     >,
     mut commands: Commands,
 ) {
+    use leviath_core::blueprint::TransitionCondition;
     for (
         entity,
         bp,
@@ -1523,13 +1606,41 @@ pub fn resolve_transition(
         setups,
         mut visits,
         mut window,
+        outcome,
     ) in agents.iter_mut()
     {
         let stage = &bp.0.stages[cursor.index];
-        match resolve_transition_sync(&bp.0, stage, cursor.index, &visits.0) {
+        // How the stage ended governs the transition: an error/max-iterations
+        // outcome follows its conditioned edge (e.g. → error_recovery) if present.
+        let resolution = match outcome {
+            Some(StageOutcome::Errored(_)) => {
+                find_conditioned_edge(&bp.0, stage, &visits.0, TransitionCondition::Error)
+                    .map(|(i, t)| StageResolution::Next(i, t))
+                    .unwrap_or(StageResolution::TerminalError)
+            }
+            Some(StageOutcome::MaxIterations) => {
+                find_conditioned_edge(&bp.0, stage, &visits.0, TransitionCondition::MaxIterations)
+                    .map(|(i, t)| StageResolution::Next(i, t))
+                    .unwrap_or_else(|| {
+                        resolve_transition_sync(&bp.0, stage, cursor.index, &visits.0)
+                    })
+            }
+            None => resolve_transition_sync(&bp.0, stage, cursor.index, &visits.0),
+        };
+        match resolution {
             StageResolution::Terminal => {
                 state.status = AgentStatus::Complete;
-                commands.entity(entity).remove::<ResolveTransition>();
+                commands
+                    .entity(entity)
+                    .remove::<ResolveTransition>()
+                    .remove::<StageOutcome>();
+            }
+            StageResolution::TerminalError => {
+                // Status was set to Error by the collect system; just stop.
+                commands
+                    .entity(entity)
+                    .remove::<ResolveTransition>()
+                    .remove::<StageOutcome>();
             }
             StageResolution::Next(idx, transform) => {
                 // Reshape the outgoing context per the edge transform before the
@@ -1547,9 +1658,12 @@ pub fn resolve_transition(
                     &mut window,
                 ) {
                     Ok(()) => {
+                        // Entering a stage is active work; clears a prior error
+                        // status when recovering down an `error` edge.
+                        state.status = AgentStatus::Active;
                         let name = bp.0.stages[idx].name.clone();
                         let mut ec = commands.entity(entity);
-                        ec.remove::<ResolveTransition>();
+                        ec.remove::<ResolveTransition>().remove::<StageOutcome>();
                         attach_stage_components(ec, stage_infs.0[idx].clone(), setup, idx, name);
                         if !to_compact.is_empty() {
                             commands
@@ -1559,7 +1673,10 @@ pub fn resolve_transition(
                     }
                     Err(message) => {
                         state.status = AgentStatus::Error { message };
-                        commands.entity(entity).remove::<ResolveTransition>();
+                        commands
+                            .entity(entity)
+                            .remove::<ResolveTransition>()
+                            .remove::<StageOutcome>();
                     }
                 }
             }
@@ -1567,6 +1684,7 @@ pub fn resolve_transition(
                 commands
                     .entity(entity)
                     .remove::<ResolveTransition>()
+                    .remove::<StageOutcome>()
                     .insert(AwaitingTransitionChoice(edges));
             }
         }
@@ -2527,6 +2645,13 @@ mod tests {
             }
         );
         assert!(world.get::<AwaitingInference>(e).is_none());
+        // The error is routed to the transition logic (which follows an `error`
+        // edge if the stage has one, else terminates).
+        assert!(world.get::<ResolveTransition>(e).is_some());
+        assert_eq!(
+            world.get::<StageOutcome>(e).unwrap(),
+            &StageOutcome::Errored("boom".to_string())
+        );
     }
 
     // ── stage-io persistence (#1) ──
@@ -2949,6 +3074,7 @@ mod tests {
         let progress = StageProgress {
             total_tool_calls: 2,
             text_only_nudges: 0,
+            iterations: 0,
         };
         let e = world
             .spawn((
@@ -2969,6 +3095,7 @@ mod tests {
         let progress = StageProgress {
             total_tool_calls: 0,
             text_only_nudges: MAX_TEXT_ONLY_NUDGES,
+            iterations: 0,
         };
         let e = world
             .spawn((
@@ -3868,6 +3995,7 @@ mod tests {
                 StageProgress {
                     total_tool_calls: 3,
                     text_only_nudges: 1,
+                    iterations: 0,
                 },
                 StageInferences(stage_infs),
                 setups(n),
@@ -4968,6 +5096,244 @@ mod tests {
         // The Compact transform queued the conversation region for the LLM lane.
         let pending = world.get::<PendingEdgeCompact>(e).unwrap();
         assert_eq!(pending.0, vec!["conversation".to_string()]);
+    }
+
+    // ── max_iterations + error/max-iter edges (#3+#4) ──
+
+    use leviath_core::blueprint::TransitionCondition;
+
+    fn conditioned_edge(
+        target: &str,
+        condition: TransitionCondition,
+    ) -> leviath_core::blueprint::TransitionEdge {
+        let mut e = plain_edge(target);
+        e.condition = condition;
+        e
+    }
+
+    fn spawn_ready_agent(
+        world: &mut World,
+        max_iterations: Option<usize>,
+        iterations: usize,
+        status: AgentStatus,
+    ) -> Entity {
+        let mut s = stage_named("a", None, false, None);
+        s.max_iterations = max_iterations;
+        let bp = blueprint(vec![s]);
+        world
+            .spawn((
+                AgentBlueprint(bp),
+                StageCursor { index: 0 },
+                AgentState {
+                    status,
+                    ..agent_state()
+                },
+                StageProgress {
+                    iterations,
+                    ..Default::default()
+                },
+                ReadyToInfer,
+            ))
+            .id()
+    }
+
+    fn run_enforce(world: &mut World) {
+        let mut s = Schedule::default();
+        s.add_systems(enforce_max_iterations);
+        s.run(world);
+    }
+
+    #[test]
+    fn enforce_max_iterations_caps_at_the_limit() {
+        let mut world = World::new();
+        let e = spawn_ready_agent(&mut world, Some(3), 3, AgentStatus::Active);
+        run_enforce(&mut world);
+        assert!(world.get::<ResolveTransition>(e).is_some());
+        assert!(world.get::<ReadyToInfer>(e).is_none());
+        assert_eq!(
+            world.get::<StageOutcome>(e).unwrap(),
+            &StageOutcome::MaxIterations
+        );
+    }
+
+    #[test]
+    fn enforce_max_iterations_below_limit_or_unlimited_or_paused_is_noop() {
+        let mut world = World::new();
+        let below = spawn_ready_agent(&mut world, Some(5), 2, AgentStatus::Active);
+        let unlimited = spawn_ready_agent(&mut world, None, 99, AgentStatus::Active);
+        let zero = spawn_ready_agent(&mut world, Some(0), 99, AgentStatus::Active);
+        let paused = spawn_ready_agent(&mut world, Some(1), 99, AgentStatus::Idle);
+        run_enforce(&mut world);
+        for e in [below, unlimited, zero, paused] {
+            assert!(world.get::<ReadyToInfer>(e).is_some());
+            assert!(world.get::<ResolveTransition>(e).is_none());
+        }
+    }
+
+    #[test]
+    fn find_conditioned_edge_matches_condition_target_and_budget() {
+        let err = conditioned_edge("recovery", TransitionCondition::Error);
+        let a = stage_named("a", Some(vec![("e".to_string(), err)]), false, None);
+        let recovery = stage_named("recovery", None, false, None);
+        let bp = blueprint(vec![a, recovery]);
+        let visits = std::collections::HashMap::new();
+        assert_eq!(
+            find_conditioned_edge(&bp, &bp.stages[0], &visits, TransitionCondition::Error)
+                .map(|(i, _)| i),
+            Some(1)
+        );
+        // No max_iterations edge present.
+        assert!(
+            find_conditioned_edge(
+                &bp,
+                &bp.stages[0],
+                &visits,
+                TransitionCondition::MaxIterations
+            )
+            .is_none()
+        );
+        // A stage with no transitions at all yields nothing.
+        let none_bp = blueprint(vec![stage_named("solo", None, false, None)]);
+        assert!(
+            find_conditioned_edge(
+                &none_bp,
+                &none_bp.stages[0],
+                &visits,
+                TransitionCondition::Error
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn find_conditioned_edge_skips_unknown_target_and_exhausted_revisits() {
+        let ghost = conditioned_edge("nope", TransitionCondition::Error);
+        let a = stage_named("a", Some(vec![("g".to_string(), ghost)]), false, None);
+        let bp = blueprint(vec![a]);
+        let visits = std::collections::HashMap::new();
+        assert!(
+            find_conditioned_edge(&bp, &bp.stages[0], &visits, TransitionCondition::Error)
+                .is_none()
+        );
+
+        // Target exists but its revisit budget is exhausted.
+        let err = conditioned_edge("recovery", TransitionCondition::Error);
+        let a2 = stage_named("a", Some(vec![("e".to_string(), err)]), false, None);
+        let recovery = stage_named("recovery", None, false, Some(0));
+        let bp2 = blueprint(vec![a2, recovery]);
+        let mut visited = std::collections::HashMap::new();
+        visited.insert("recovery".to_string(), 1);
+        assert!(
+            find_conditioned_edge(&bp2, &bp2.stages[0], &visited, TransitionCondition::Error)
+                .is_none()
+        );
+    }
+
+    fn spawn_outcome_agent(
+        world: &mut World,
+        bp: leviath_core::Blueprint,
+        outcome: StageOutcome,
+        status: AgentStatus,
+    ) -> Entity {
+        let n = bp.stages.len();
+        let infs: Vec<StageInference> = (0..n).map(|_| stage("m", vec![], None)).collect();
+        let e = spawn_transition_agent(world, bp, infs, VisitCounts::default());
+        world
+            .entity_mut(e)
+            .insert(outcome)
+            .get_mut::<AgentState>()
+            .unwrap()
+            .status = status;
+        e
+    }
+
+    #[test]
+    fn resolve_transition_routes_error_to_error_edge() {
+        let err = conditioned_edge("recovery", TransitionCondition::Error);
+        let a = stage_named("a", Some(vec![("e".to_string(), err)]), false, None);
+        let recovery = stage_named("recovery", None, false, None);
+        let bp = blueprint(vec![a, recovery]);
+        let mut world = World::new();
+        let e = spawn_outcome_agent(
+            &mut world,
+            bp,
+            StageOutcome::Errored("boom".to_string()),
+            AgentStatus::Error {
+                message: "boom".to_string(),
+            },
+        );
+        run_transition(&mut world);
+        assert_eq!(world.get::<StageCursor>(e).unwrap().index, 1); // entered recovery
+        assert_eq!(
+            world.get::<AgentState>(e).unwrap().status,
+            AgentStatus::Active
+        );
+        assert!(world.get::<StageOutcome>(e).is_none());
+    }
+
+    #[test]
+    fn resolve_transition_errors_terminally_without_an_error_edge() {
+        // Stage 'a' has only an Always edge to 'b' — no error edge.
+        let a = stage_named(
+            "a",
+            Some(vec![("go".to_string(), plain_edge("b"))]),
+            false,
+            None,
+        );
+        let b = stage_named("b", None, false, None);
+        let bp = blueprint(vec![a, b]);
+        let mut world = World::new();
+        let e = spawn_outcome_agent(
+            &mut world,
+            bp,
+            StageOutcome::Errored("boom".to_string()),
+            AgentStatus::Error {
+                message: "boom".to_string(),
+            },
+        );
+        run_transition(&mut world);
+        assert_eq!(world.get::<StageCursor>(e).unwrap().index, 0); // no transition
+        assert_eq!(
+            world.get::<AgentState>(e).unwrap().status,
+            AgentStatus::Error {
+                message: "boom".to_string()
+            }
+        );
+        assert!(world.get::<StageOutcome>(e).is_none());
+        assert!(world.get::<ResolveTransition>(e).is_none());
+    }
+
+    #[test]
+    fn resolve_transition_routes_max_iterations_edge_else_falls_through() {
+        // With a max_iterations edge → follow it.
+        let mi = conditioned_edge("recovery", TransitionCondition::MaxIterations);
+        let a = stage_named("a", Some(vec![("m".to_string(), mi)]), false, None);
+        let recovery = stage_named("recovery", None, false, None);
+        let bp = blueprint(vec![a, recovery]);
+        let mut world = World::new();
+        let e = spawn_outcome_agent(
+            &mut world,
+            bp,
+            StageOutcome::MaxIterations,
+            AgentStatus::Active,
+        );
+        run_transition(&mut world);
+        assert_eq!(world.get::<StageCursor>(e).unwrap().index, 1);
+
+        // Without one → fall through to a normal (linear) transition.
+        let a2 = stage_named("a", None, false, None);
+        let b2 = stage_named("b", None, false, None);
+        let bp2 = blueprint(vec![a2, b2]);
+        let mut world2 = World::new();
+        let e2 = spawn_outcome_agent(
+            &mut world2,
+            bp2,
+            StageOutcome::MaxIterations,
+            AgentStatus::Active,
+        );
+        run_transition(&mut world2);
+        assert_eq!(world2.get::<StageCursor>(e2).unwrap().index, 1); // linear fall-through
+        assert!(world2.get::<StageOutcome>(e2).is_none());
     }
 
     fn world_with_compaction_results() -> (World, mpsc::UnboundedSender<CompactionOutcome>) {
