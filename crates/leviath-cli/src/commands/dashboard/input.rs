@@ -129,6 +129,21 @@ impl Dashboard {
                 .is_some_and(|r| r.kind == InteractionKind::EditText)
     }
 
+    /// The document to review for the selected agent's pending interaction — the
+    /// current instance's plan/output, carried as the request `body`. Shown in
+    /// the output pane in place of the full accumulated history. `None` while
+    /// actively editing (the textarea takes the pane) or when there is no body.
+    pub(in crate::commands::dashboard) fn reviewing_body(&self) -> Option<String> {
+        if self.editing_document() {
+            return None;
+        }
+        self.selected_agent()
+            .and_then(|a| a.pending_request.as_ref())
+            .and_then(|r| r.body.as_deref())
+            .filter(|b| !b.trim().is_empty())
+            .map(str::to_string)
+    }
+
     /// Whether the pending request carries a scrollable review document.
     /// `EditText` also uses `body`, but for editing (not scrolling), so it is
     /// explicitly excluded here.
@@ -1152,6 +1167,36 @@ mod tests {
         // Entering input mode over an EditText ⇒ editing inline.
         dash.input_mode = true;
         assert!(dash.editing_document());
+        // While editing, the textarea owns the pane — no separate review body.
+        assert!(dash.reviewing_body().is_none());
+    }
+
+    #[test]
+    fn reviewing_body_returns_the_pending_document_or_none() {
+        let mut dash = make_test_dashboard();
+        // No agent / no pending ⇒ None.
+        assert!(dash.reviewing_body().is_none());
+
+        let mut agent = make_test_agent("run-1", AgentDisplayStatus::Waiting);
+        let mut req = leviath_core::interaction::InteractionRequest::multiple_choice(
+            "mc1",
+            "Approve?",
+            vec!["Approve".to_string()],
+            "plan_approval",
+        );
+        req.body = Some("## Plan\n1. write it".to_string());
+        agent.pending_request = Some(req);
+        dash.agents.push(agent);
+        dash.update_display_indices();
+        // A pending body is surfaced for review.
+        assert_eq!(
+            dash.reviewing_body().as_deref(),
+            Some("## Plan\n1. write it")
+        );
+
+        // A blank body is not surfaced.
+        dash.agents[0].pending_request.as_mut().unwrap().body = Some("   ".to_string());
+        assert!(dash.reviewing_body().is_none());
     }
 
     #[test]
