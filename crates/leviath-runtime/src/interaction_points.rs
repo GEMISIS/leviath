@@ -38,7 +38,9 @@ use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use crate::components::{AgentState, AgentStatus, ContextWindow, InferenceResult};
 use crate::dynamic_interaction::InteractionBackend;
 use crate::interaction_hub::InteractionHub;
-use crate::pipeline::{AgentBlueprint, ReadyToInfer, ResolveTransition, StageCursor};
+use crate::pipeline::{
+    AgentBlueprint, ReadyToInfer, ResolveTransition, StageCursor, StageIoBuffer,
+};
 
 /// Maximum directive/edit revision rounds at one interaction point before the
 /// stage proceeds regardless, so a revise/edit loop can never run forever.
@@ -375,13 +377,16 @@ pub fn collect_interaction_point(
             &StageCursor,
             Option<&InteractionPointCursor>,
             Option<&InteractionPointRounds>,
+            Option<&mut StageIoBuffer>,
         ),
         With<AwaitingInteractionPoint>,
     >,
     mut commands: Commands,
 ) {
     while let Ok(out) = results.0.try_recv() {
-        let Ok((mut state, mut window, bp, cursor, pc, rounds)) = agents.get_mut(out.entity) else {
+        let Ok((mut state, mut window, bp, cursor, pc, rounds, io_buf)) =
+            agents.get_mut(out.entity)
+        else {
             continue; // stale: agent cancelled/despawned since dispatch
         };
         let idx = pc.map_or(0, |c| c.0);
@@ -447,6 +452,15 @@ pub fn collect_interaction_point(
                              authoritative version and re-present it:\n{edited}"
                         );
                         inject(&mut window, &name, "", &note);
+                        // Surface the adopted text in the stage output so observers
+                        // (e.g. the dashboard's output pane, which reads output.log)
+                        // reflect the revision rather than the pre-edit version.
+                        if let Some(mut buf) = io_buf {
+                            buf.output.push((
+                                cursor.index,
+                                format!("\n─── Updated (your edit) ───\n{edited}"),
+                            ));
+                        }
                     }
                     // Re-present the same point with the edit applied (no re-infer).
                     e.insert(InteractionPointRounds(round + 1))
@@ -958,6 +972,36 @@ mod tests {
         .unwrap();
         run_collect(&mut world);
         assert!(world.get::<ResolveTransition>(e).is_some());
+    }
+
+    #[test]
+    fn collect_edit_surfaces_the_adopted_text_in_stage_output() {
+        let (mut world, tx) = collect_world();
+        let e = world
+            .spawn((
+                agent_state(AgentStatus::Waiting),
+                window(),
+                blueprint_with(vec![plan_point()]),
+                StageCursor { index: 0 },
+                AwaitingInteractionPoint,
+                StageIoBuffer::default(),
+            ))
+            .id();
+        tx.send(InteractionPointOutcome {
+            entity: e,
+            decision: PointOutcome::Edit {
+                user_text: "Add detail".to_string(),
+                edited: "the revised plan".to_string(),
+            },
+        })
+        .unwrap();
+        run_collect(&mut world);
+        // The adopted text is buffered for stages/<idx>/output.log, tagged with
+        // the current stage index, so observers reflect the revision.
+        let buf = world.get::<StageIoBuffer>(e).unwrap();
+        assert_eq!(buf.output.len(), 1);
+        assert_eq!(buf.output[0].0, 0);
+        assert!(buf.output[0].1.contains("the revised plan"));
     }
 
     #[test]
