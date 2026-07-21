@@ -1571,6 +1571,117 @@ fn resolve_transition_sync(
     }
 }
 
+/// Default re-entry cap for required-region gating: how many times a stage is
+/// re-run to populate an empty `required` region before proceeding anyway (with a
+/// warning). Overridable per stage via `max_revisits`.
+const DEFAULT_REQUIRED_REENTRY_CAP: usize = 3;
+
+/// Counts how many times the current stage has been re-run to satisfy required
+/// context regions. Absent ⇒ 0; reset when a new stage is entered.
+#[derive(Component, Debug, Clone, Copy)]
+pub struct RequiredReentries(pub usize);
+
+/// Required regions (from the stage's effective layout) still empty at stage end,
+/// as `(name, optional custom message)`. Empty when the stage has no
+/// context-writing tool (gating a stage that can't populate the region would loop
+/// pointlessly). Ported from the imperative `unmet_required_regions`.
+fn unmet_required_regions(
+    blueprint: &leviath_core::Blueprint,
+    stage: &leviath_core::Stage,
+    window: &ContextWindow,
+) -> Vec<(String, Option<String>)> {
+    let can_write = stage
+        .available_tools
+        .iter()
+        .any(|t| t == "context_write" || t == "context_append");
+    if !can_write {
+        return Vec::new();
+    }
+    let layout = stage
+        .context_layout
+        .as_ref()
+        .unwrap_or(&blueprint.context_layout);
+    layout
+        .regions
+        .iter()
+        .filter(|r| r.required)
+        .filter(|r| {
+            window
+                .get_region(&r.name)
+                .map(|reg| reg.content.is_empty())
+                .unwrap_or(true)
+        })
+        .map(|r| (r.name.clone(), r.required_message.clone()))
+        .collect()
+}
+
+/// Inject a `[System]` nudge into the conversation region for each unmet required
+/// region, so the stage re-run tells the agent exactly what to populate.
+fn inject_required_region_nudges(window: &mut ContextWindow, unmet: &[(String, Option<String>)]) {
+    for (name, msg) in unmet {
+        let text = msg.clone().unwrap_or_else(|| {
+            format!(
+                "Required context region '{name}' is still empty. You must populate it \
+                 (e.g. via context_write with region=\"{name}\") before this stage can complete."
+            )
+        });
+        let content = format!("[System] {text}");
+        let tokens = content.len() / 4 + 1;
+        let _ = window.add_to_region("conversation", content, tokens);
+    }
+}
+
+/// Required-region gate: before a normally-completed stage transitions, if it can
+/// write context and a `required` region is still empty, inject a nudge and re-run
+/// the stage (loop back to `ReadyToInfer`) instead of transitioning — bounded by
+/// the stage's `max_revisits` (or a default cap), after which
+/// it proceeds with a warning. Skipped when the stage ended on an error / max-iter
+/// outcome (those transitions take precedence). Ported from the imperative gate.
+#[allow(clippy::type_complexity)]
+pub fn require_context_regions(
+    mut agents: Query<
+        (
+            Entity,
+            &AgentBlueprint,
+            &StageCursor,
+            &mut ContextWindow,
+            Option<&RequiredReentries>,
+            Option<&StageOutcome>,
+        ),
+        With<ResolveTransition>,
+    >,
+    mut commands: Commands,
+) {
+    for (entity, bp, cursor, mut window, reentries, outcome) in agents.iter_mut() {
+        if outcome.is_some() {
+            continue; // error / max-iterations transition takes precedence
+        }
+        let stage = &bp.0.stages[cursor.index];
+        let unmet = unmet_required_regions(&bp.0, stage, &window);
+        if unmet.is_empty() {
+            continue;
+        }
+        let cap = stage.max_revisits.unwrap_or(DEFAULT_REQUIRED_REENTRY_CAP);
+        let round = reentries.map_or(0, |r| r.0);
+        if round >= cap {
+            let names: Vec<&str> = unmet.iter().map(|(n, _)| n.as_str()).collect();
+            tracing::warn!(
+                stage = %stage.name,
+                regions = ?names,
+                attempts = cap,
+                "required context regions still empty after re-run attempts; proceeding"
+            );
+            continue; // proceed with the transition despite the unmet regions
+        }
+        inject_required_region_nudges(&mut window, &unmet);
+        commands
+            .entity(entity)
+            .remove::<ResolveTransition>()
+            .insert(ReadyToInfer)
+            .insert(RequiredReentries(round + 1));
+    }
+}
+
 /// Transition-resolution system: for each `ResolveTransition` agent, resolve the
 /// next stage. Terminal ⇒ mark the agent `Complete`. A single/linear target ⇒
 /// enter the new stage (swap its `StageInference`, reset stage progress, bump the
@@ -1774,9 +1885,10 @@ fn attach_stage_components(
             index: stage_index,
             name: stage_name,
         })
-        // A fresh stage re-arms its interaction points from the start.
+        // A fresh stage re-arms its interaction points + required-region gate.
         .remove::<crate::interaction_points::InteractionPointCursor>()
         .remove::<crate::interaction_points::InteractionPointRounds>()
+        .remove::<RequiredReentries>()
         .insert(ReadyToInfer);
     match &setup.routing {
         Some(routing) => {
@@ -5334,6 +5446,176 @@ mod tests {
         run_transition(&mut world2);
         assert_eq!(world2.get::<StageCursor>(e2).unwrap().index, 1); // linear fall-through
         assert!(world2.get::<StageOutcome>(e2).is_none());
+    }
+
+    // ── required-region gating (#5) ──
+
+    fn required_bp(tools: &[&str], custom_msg: Option<&str>) -> AgentBlueprint {
+        let region = leviath_core::layout::RegionDefinition::new(
+            "plan".to_string(),
+            RegionKind::Pinned,
+            4000,
+        )
+        .with_required(true, custom_msg.map(str::to_string));
+        let layout = leviath_core::layout::ContextLayout::new(vec![region], 10_000);
+        let mut stage = stage_named("a", None, false, None);
+        stage.available_tools = tools.iter().map(|s| s.to_string()).collect();
+        stage.context_layout = Some(layout.clone());
+        AgentBlueprint(leviath_core::Blueprint::new(
+            "t".to_string(),
+            "d".to_string(),
+            vec![stage],
+            layout,
+        ))
+    }
+
+    fn window_with_plan(filled: bool) -> ContextWindow {
+        let mut w = ContextWindow::new(100_000);
+        w.add_region(Region::new("plan".to_string(), RegionKind::Pinned, 4000));
+        w.add_region(Region::new(
+            "conversation".to_string(),
+            RegionKind::Clearable,
+            10_000,
+        ));
+        if filled {
+            w.add_to_region("plan", "the plan".to_string(), 5).unwrap();
+        }
+        w
+    }
+
+    #[test]
+    fn unmet_required_regions_flags_empty_clears_when_filled_and_skips_without_tool() {
+        let bp = required_bp(&["context_write"], None);
+        assert_eq!(
+            unmet_required_regions(&bp.0, &bp.0.stages[0], &window_with_plan(false)).len(),
+            1
+        );
+        assert!(unmet_required_regions(&bp.0, &bp.0.stages[0], &window_with_plan(true)).is_empty());
+        // No context-writing tool ⇒ never gated (would loop pointlessly).
+        let no_tool = required_bp(&["read_file"], None);
+        assert!(
+            unmet_required_regions(&no_tool.0, &no_tool.0.stages[0], &window_with_plan(false))
+                .is_empty()
+        );
+        // A required region absent from the window entirely counts as unmet.
+        let mut bare = ContextWindow::new(100_000);
+        bare.add_region(Region::new(
+            "conversation".to_string(),
+            RegionKind::Clearable,
+            10_000,
+        ));
+        assert_eq!(
+            unmet_required_regions(&bp.0, &bp.0.stages[0], &bare).len(),
+            1
+        );
+    }
+
+    #[test]
+    fn unmet_required_regions_falls_back_to_blueprint_layout() {
+        // The stage has no per-stage layout, so the blueprint's layout is used.
+        let mut bp = required_bp(&["context_write"], None);
+        bp.0.stages[0].context_layout = None;
+        assert_eq!(
+            unmet_required_regions(&bp.0, &bp.0.stages[0], &window_with_plan(false)).len(),
+            1
+        );
+    }
+
+    fn run_require(world: &mut World) {
+        let mut s = Schedule::default();
+        s.add_systems(require_context_regions);
+        s.run(world);
+    }
+
+    #[test]
+    fn require_context_regions_reruns_stage_on_unmet() {
+        let mut world = World::new();
+        let e = world
+            .spawn((
+                required_bp(&["context_write"], Some("write the plan!")),
+                StageCursor { index: 0 },
+                window_with_plan(false),
+                ResolveTransition,
+            ))
+            .id();
+        run_require(&mut world);
+        assert!(world.get::<ReadyToInfer>(e).is_some());
+        assert!(world.get::<ResolveTransition>(e).is_none());
+        assert_eq!(world.get::<RequiredReentries>(e).unwrap().0, 1);
+        // The custom nudge was injected into conversation.
+        assert!(
+            world
+                .get::<ContextWindow>(e)
+                .unwrap()
+                .get_region("conversation")
+                .unwrap()
+                .current_tokens
+                > 0
+        );
+    }
+
+    #[test]
+    fn require_context_regions_injects_default_message() {
+        // No custom required_message ⇒ the default nudge text is used.
+        let mut world = World::new();
+        let e = world
+            .spawn((
+                required_bp(&["context_write"], None),
+                StageCursor { index: 0 },
+                window_with_plan(false),
+                ResolveTransition,
+            ))
+            .id();
+        run_require(&mut world);
+        let conv = world
+            .get::<ContextWindow>(e)
+            .unwrap()
+            .get_region("conversation")
+            .unwrap()
+            .content
+            .iter()
+            .map(|entry| entry.content.clone())
+            .collect::<String>();
+        assert!(conv.contains("Required context region 'plan' is still empty"));
+    }
+
+    #[test]
+    fn require_context_regions_proceeds_when_met_capped_or_errored() {
+        let mut world = World::new();
+        // met ⇒ proceed
+        let met = world
+            .spawn((
+                required_bp(&["context_write"], None),
+                StageCursor { index: 0 },
+                window_with_plan(true),
+                ResolveTransition,
+            ))
+            .id();
+        // unmet but at the cap ⇒ proceed with a warning
+        let capped = world
+            .spawn((
+                required_bp(&["context_write"], None),
+                StageCursor { index: 0 },
+                window_with_plan(false),
+                RequiredReentries(DEFAULT_REQUIRED_REENTRY_CAP),
+                ResolveTransition,
+            ))
+            .id();
+        // unmet but the stage errored ⇒ the error transition takes precedence
+        let errored = world
+            .spawn((
+                required_bp(&["context_write"], None),
+                StageCursor { index: 0 },
+                window_with_plan(false),
+                StageOutcome::Errored("boom".to_string()),
+                ResolveTransition,
+            ))
+            .id();
+        run_require(&mut world);
+        for e in [met, capped, errored] {
+            assert!(world.get::<ResolveTransition>(e).is_some());
+            assert!(world.get::<ReadyToInfer>(e).is_none());
+        }
     }
 
     fn world_with_compaction_results() -> (World, mpsc::UnboundedSender<CompactionOutcome>) {
