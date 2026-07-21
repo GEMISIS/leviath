@@ -41,8 +41,9 @@ use crate::pipeline::{
     ResolveTransition, ToolResults, ToolService, ToolServiceRes, ToolStage, TransitionResults,
     collect_compaction, collect_inference, collect_tools, collect_transition_choice,
     deliver_messages, dispatch_compaction, dispatch_edge_compact, dispatch_inference,
-    dispatch_persistence, dispatch_tools, dispatch_transition_choice, handle_empty_response,
-    process_response, reflect_interaction_status, resolve_transition, sync_tool_stages,
+    dispatch_persistence, dispatch_tools, dispatch_transition_choice, enforce_max_iterations,
+    handle_empty_response, process_response, reflect_interaction_status, resolve_transition,
+    sync_tool_stages,
 };
 use crate::providers::ProviderRegistry;
 use crate::tool_bridge::tool_worker;
@@ -133,6 +134,8 @@ impl PipelineWorld {
                 // before the threshold-based pass.
                 dispatch_edge_compact,
                 dispatch_compaction,
+                // Cap a stage at its max_iterations before running more inference.
+                enforce_max_iterations,
                 dispatch_inference,
                 collect_inference,
                 // Intercept a fan-out stage's split response before normal routing.
