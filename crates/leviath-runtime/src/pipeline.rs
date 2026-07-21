@@ -3934,6 +3934,36 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn dispatch_tools_falls_through_for_a_resolved_agents_unprompted_call() {
+        // An agent still carrying GateResolved, with a call that is in neither
+        // `approved` nor `denied` (it was allowed on the first pass and never
+        // prompted), falls through the resolution bypass to the normal gate
+        // check — which allows the inbound `read_file` and sends it to the lane.
+        let (jtx, mut jrx) = mpsc::unbounded_channel();
+        let mut world = World::new();
+        world.insert_resource(ToolServiceRes(Arc::new(EchoService)));
+        world.insert_resource(ToolStage(jtx));
+        let e = world
+            .spawn((
+                agent_state(),
+                infer_with(vec![tc("c_read", "read_file")]),
+                tainted_conv_window(),
+                ReadyForTools,
+                enabled_gate(),
+                crate::gate_prompt::GateResolved::default(),
+            ))
+            .id();
+        let mut s = Schedule::default();
+        s.add_systems(dispatch_tools);
+        s.run(&mut world);
+        // Inbound read_file is gate-allowed ⇒ reaches the lane.
+        let job = jrx.try_recv().expect("allowed call enqueued");
+        assert_eq!(job.entity, e);
+        // GateResolved is consumed once the batch dispatches.
+        assert!(world.get::<crate::gate_prompt::GateResolved>(e).is_none());
+    }
+
+    #[tokio::test]
     async fn dispatch_tools_gate_allows_outbound_via_allowlist() {
         let (jtx, mut jrx) = mpsc::unbounded_channel();
         let mut world = World::new();
