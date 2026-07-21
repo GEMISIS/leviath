@@ -116,6 +116,19 @@ impl Dashboard {
         };
     }
 
+    /// Whether the user is actively editing a document (an `EditText`
+    /// interaction). When true the editable textarea is rendered inline in the
+    /// content pane — where the current text is shown — rather than in the bottom
+    /// input bar, so editing happens in place over the document being revised.
+    pub(in crate::commands::dashboard) fn editing_document(&self) -> bool {
+        use interaction::InteractionKind;
+        self.input_mode
+            && self
+                .selected_agent()
+                .and_then(|a| a.pending_request.as_ref())
+                .is_some_and(|r| r.kind == InteractionKind::EditText)
+    }
+
     /// Whether the pending request carries a scrollable review document.
     /// `EditText` also uses `body`, but for editing (not scrolling), so it is
     /// explicitly excluded here.
@@ -1122,6 +1135,37 @@ mod tests {
             dash.input_textarea.lines(),
             vec!["line A".to_string(), "line B".to_string()]
         );
+    }
+
+    #[test]
+    fn editing_document_true_only_while_editing_an_edit_text() {
+        let mut dash = make_test_dashboard();
+        let mut agent = make_test_agent("run-1", AgentDisplayStatus::Waiting);
+        agent.pending_request = Some(leviath_core::interaction::InteractionRequest::edit_text(
+            "et1", "Edit", "main", "body",
+        ));
+        dash.agents.push(agent);
+        dash.update_display_indices();
+
+        // Pending EditText but not in input mode ⇒ not editing yet.
+        assert!(!dash.editing_document());
+        // Entering input mode over an EditText ⇒ editing inline.
+        dash.input_mode = true;
+        assert!(dash.editing_document());
+    }
+
+    #[test]
+    fn editing_document_false_for_non_edit_text_prompt() {
+        let mut dash = make_test_dashboard();
+        let mut agent = make_test_agent("run-1", AgentDisplayStatus::Waiting);
+        agent.pending_request = Some(leviath_core::interaction::InteractionRequest::free_text(
+            "ft1", "Q?", "main", true,
+        ));
+        dash.agents.push(agent);
+        dash.update_display_indices();
+        dash.input_mode = true;
+        // FreeText input mode is a bottom-bar response, not a document edit.
+        assert!(!dash.editing_document());
     }
 
     #[test]
