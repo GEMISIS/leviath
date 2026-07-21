@@ -93,6 +93,9 @@ async fn append_stage_line(run_dir: &Path, stage_idx: usize, file: &str, line: &
             let mut bytes = line.as_bytes().to_vec();
             bytes.push(b'\n');
             let _ = handle.write_all(&bytes).await;
+            // tokio::fs::File buffers; flush so a reader (dashboard / a sync test)
+            // sees the line before the handle is dropped.
+            let _ = handle.flush().await;
         }
         Err(e) => {
             tracing::warn!(run_id = %run_id, error = %e, "persistence: stage log open failed");

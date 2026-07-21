@@ -1656,6 +1656,9 @@ fn attach_stage_components(
             index: stage_index,
             name: stage_name,
         })
+        // A fresh stage re-arms its interaction points from the start.
+        .remove::<crate::interaction_points::InteractionPointCursor>()
+        .remove::<crate::interaction_points::InteractionPointRounds>()
         .insert(ReadyToInfer);
     match &setup.routing {
         Some(routing) => {
