@@ -10,6 +10,7 @@ pub mod compaction_bridge;
 pub mod components;
 pub mod context_setup;
 pub mod context_tools;
+pub mod context_transform;
 pub mod control_socket;
 pub mod dynamic_interaction;
 pub mod fanout;
