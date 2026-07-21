@@ -3,8 +3,6 @@
 use bevy_ecs::prelude::*;
 use leviath_core::Region;
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Agent execution state component.
 ///
@@ -99,16 +97,6 @@ pub struct EvictionResult {
     pub tokens_freed: usize,
     /// Region names that need LLM-based compaction (phase 3).
     pub needs_compaction: Vec<String>,
-}
-
-/// Marker component added by the eviction system when regions need async LLM compaction.
-///
-/// The inference loop or engine tick checks for this component and performs
-/// compaction asynchronously, since ECS systems are synchronous.
-#[derive(Component, Debug, Clone)]
-pub struct NeedsCompaction {
-    /// Region names that need compaction.
-    pub regions: Vec<String>,
 }
 
 /// Per-stage inference configuration overrides.
@@ -777,11 +765,6 @@ impl ContextWindow {
         max_taint
     }
 
-    /// Get the taint level of a specific region.
-    pub fn region_taint(&self, region_name: &str) -> Option<leviath_core::TaintLevel> {
-        self.get_region(region_name).and_then(|r| r.taint_level())
-    }
-
     /// Get a summary of taint levels across all regions (for dashboard/audit).
     pub fn taint_summary(&self) -> Vec<(String, leviath_core::TaintLevel)> {
         self.regions
@@ -789,24 +772,6 @@ impl ContextWindow {
             .filter_map(|r| r.taint_level().map(|t| (r.name.clone(), t)))
             .collect()
     }
-}
-
-/// Task assignment component.
-///
-/// Represents a task that has been assigned to an agent for execution.
-#[derive(Component, Debug, Clone)]
-pub struct TaskAssignment {
-    /// Unique task identifier
-    pub task_id: String,
-
-    /// Task description or prompt
-    pub prompt: String,
-
-    /// Task priority (higher = more important)
-    pub priority: i32,
-
-    /// Timestamp when task was assigned
-    pub assigned_at: i64,
 }
 
 /// Inference result component.
@@ -839,40 +804,6 @@ pub struct ToolCall {
 
     /// Tool arguments
     pub arguments: serde_json::Value,
-}
-
-/// Cancellation token for interrupting running agents.
-///
-/// Thread-safe flag that can be checked during inference loops
-/// to allow early termination of agent execution.
-#[derive(Component, Debug, Clone)]
-pub struct CancellationToken {
-    cancelled: Arc<AtomicBool>,
-}
-
-impl CancellationToken {
-    /// Create a new cancellation token (not cancelled).
-    pub fn new() -> Self {
-        Self {
-            cancelled: Arc::new(AtomicBool::new(false)),
-        }
-    }
-
-    /// Signal cancellation.
-    pub fn cancel(&self) {
-        self.cancelled.store(true, Ordering::SeqCst);
-    }
-
-    /// Check if cancellation has been requested.
-    pub fn is_cancelled(&self) -> bool {
-        self.cancelled.load(Ordering::SeqCst)
-    }
-}
-
-impl Default for CancellationToken {
-    fn default() -> Self {
-        Self::new()
-    }
 }
 
 /// A message that can be sent to a running agent.
@@ -1118,34 +1049,6 @@ mod tests {
     }
 
     #[test]
-    fn test_cancellation_token() {
-        let token = CancellationToken::new();
-        assert!(!token.is_cancelled());
-
-        token.cancel();
-        assert!(token.is_cancelled());
-    }
-
-    fn assert_clone_shares_atomic_state(is_cancelled: bool) {
-        assert!(is_cancelled, "Clone should share atomic state");
-    }
-
-    #[test]
-    fn test_cancellation_token_clone() {
-        let token = CancellationToken::new();
-        let clone = token.clone();
-
-        token.cancel();
-        assert_clone_shares_atomic_state(clone.is_cancelled());
-    }
-
-    #[test]
-    #[should_panic(expected = "Clone should share atomic state")]
-    fn test_cancellation_token_clone_panics_on_false() {
-        assert_clone_shares_atomic_state(false);
-    }
-
-    #[test]
     fn test_message_inbox() {
         let mut inbox = MessageInbox::new();
         assert!(inbox.messages.is_empty());
@@ -1286,16 +1189,6 @@ mod tests {
     }
 
     #[test]
-    fn test_needs_compaction_component() {
-        let comp = NeedsCompaction {
-            regions: vec!["impl".to_string(), "analysis".to_string()],
-        };
-        assert_eq!(comp.regions.len(), 2);
-        assert_eq!(comp.regions[0], "impl");
-        assert_eq!(comp.regions[1], "analysis");
-    }
-
-    #[test]
     fn test_agent_status_cancelled() {
         assert_eq!(AgentStatus::Cancelled, AgentStatus::Cancelled);
     }
@@ -1415,20 +1308,6 @@ mod tests {
     }
 
     #[test]
-    fn test_cancellation_token_default() {
-        let token = CancellationToken::default();
-        assert!(!token.is_cancelled());
-    }
-
-    #[test]
-    fn test_cancellation_token_cancel_idempotent() {
-        let token = CancellationToken::new();
-        token.cancel();
-        token.cancel();
-        assert!(token.is_cancelled());
-    }
-
-    #[test]
     fn test_message_inbox_default() {
         let inbox = MessageInbox::default();
         assert!(inbox.messages.is_empty());
@@ -1506,19 +1385,6 @@ mod tests {
     }
 
     #[test]
-    fn test_task_assignment_fields() {
-        let ta = TaskAssignment {
-            task_id: "task-1".to_string(),
-            prompt: "Do something".to_string(),
-            priority: 5,
-            assigned_at: 12345,
-        };
-        assert_eq!(ta.task_id, "task-1");
-        assert_eq!(ta.priority, 5);
-        assert_eq!(ta.assigned_at, 12345);
-    }
-
-    #[test]
     fn test_inference_result_fields() {
         let ir = InferenceResult {
             response: "Hello".to_string(),
@@ -1533,15 +1399,6 @@ mod tests {
         assert_eq!(ir.response, "Hello");
         assert_eq!(ir.tool_calls.len(), 1);
         assert_eq!(ir.tokens_used, 100);
-    }
-
-    #[test]
-    fn test_needs_compaction_clone() {
-        let nc = NeedsCompaction {
-            regions: vec!["a".to_string(), "b".to_string()],
-        };
-        let cloned = nc.clone();
-        assert_eq!(cloned.regions.len(), 2);
     }
 
     #[test]
@@ -1625,7 +1482,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(
-            window.region_taint("tools"),
+            window.get_region("tools").and_then(|r| r.taint_level()),
             Some(leviath_core::TaintLevel::Private)
         );
         assert_eq!(
@@ -1700,12 +1557,6 @@ mod tests {
     }
 
     #[test]
-    fn test_region_taint_for_unknown_region() {
-        let window = ContextWindow::new(10000);
-        assert_eq!(window.region_taint("nope"), None);
-    }
-
-    #[test]
     fn test_taint_recovery_through_eviction() {
         with_tracing(|| {});
         let mut window = ContextWindow::new(100);
@@ -1730,7 +1581,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(
-            window.region_taint("temp"),
+            window.get_region("temp").and_then(|r| r.taint_level()),
             Some(leviath_core::TaintLevel::Private)
         );
 
@@ -1741,7 +1592,7 @@ mod tests {
 
         // After evicting the private entry, taint should recover
         assert_eq!(
-            window.region_taint("temp"),
+            window.get_region("temp").and_then(|r| r.taint_level()),
             Some(leviath_core::TaintLevel::Public)
         );
     }
@@ -2978,7 +2829,7 @@ mod tests {
 
         assert_eq!(window.current_tokens, 100);
         assert_eq!(
-            window.region_taint("conv"),
+            window.get_region("conv").and_then(|r| r.taint_level()),
             Some(leviath_core::TaintLevel::Private)
         );
     }

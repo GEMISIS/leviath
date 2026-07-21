@@ -507,7 +507,6 @@ impl Dashboard {
                 self.agents.push(DashboardAgent {
                     id: run.run_id.clone(),
                     blueprint_name: run.agent_name.clone(),
-                    agent_path: run.agent_path.clone(),
                     stage: run.current_stage.clone(),
                     stage_index: run.stage_index,
                     num_stages: run.num_stages,
@@ -707,7 +706,6 @@ mod tests {
         DashboardAgent {
             id: id.to_string(),
             blueprint_name: "test-agent".to_string(),
-            agent_path: "/path".to_string(),
             stage: "main".to_string(),
             stage_index: 0,
             num_stages: 1,

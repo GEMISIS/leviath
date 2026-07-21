@@ -190,16 +190,10 @@ impl Config {
         Ok(config)
     }
 
-    /// Save configuration to the default location.
-    #[allow(dead_code)] // Public API for config editing (used by init, future commands)
-    pub fn save(&self) -> anyhow::Result<()> {
-        self.save_to_path(&Self::config_path())
-    }
-
-    /// Core of `save()`, parameterized by path so it can be exercised in
+    /// Save configuration to a path, parameterized so it can be exercised in
     /// tests against a tempfile instead of the real `~/.leviath/config.toml`.
-    /// `pub(crate)` so other in-crate callers (e.g. the `setup` wizard) can
-    /// also inject a path for testability.
+    /// `pub(crate)` so in-crate callers (e.g. the `setup` wizard) can inject a
+    /// path; production writes to [`Self::config_path`].
     pub(crate) fn save_to_path(&self, path: &std::path::Path) -> anyhow::Result<()> {
         // Create parent directory if needed
         if let Some(parent) = path.parent() {
@@ -277,16 +271,6 @@ pub fn leviath_home_dir() -> Option<PathBuf> {
         return Some(PathBuf::from(override_home));
     }
     dirs::home_dir()
-}
-
-/// Redact an API key for safe display, showing only first 4 and last 4 characters.
-#[allow(dead_code)] // Public API for use by future commands and display logic
-pub fn redact_key(key: &str) -> String {
-    if key.len() <= 8 {
-        "***".to_string()
-    } else {
-        format!("{}...{}", &key[..4], &key[key.len() - 4..])
-    }
 }
 
 /// Create the config directory with restrictive permissions.
@@ -716,25 +700,6 @@ google_api_key = "AIza-existing"
     }
 
     #[test]
-    fn save_writes_to_the_real_config_path_wrapper() {
-        // Covers the thin `save()` -> `save_to_path(&Self::config_path())`
-        // wrapper itself (every other test calls `save_to_path` directly),
-        // using `LEVIATH_CONFIG_PATH` to redirect the "real" path to a
-        // tempdir instead of the developer's actual `~/.leviath/config.toml`.
-        with_isolated_config_path("save-wrapper", |_fake_dir| {
-            let config = Config {
-                default_provider: "openai".to_string(),
-                ..Config::default()
-            };
-
-            with_tracing(|| config.save()).unwrap();
-
-            let loaded = with_tracing(|| Config::load_from_path(&Config::config_path())).unwrap();
-            assert_eq!(loaded.default_provider, "openai");
-        });
-    }
-
-    #[test]
     fn load_propagates_error_when_real_config_file_is_malformed() {
         // Every other `Config::load()` test sees either no file (defaults)
         // or a well-formed one, so `load()`'s `?` on `load_from_path(...)`
@@ -893,18 +858,6 @@ google_api_key = "AIza-existing"
         set_dir_permissions(dir.path());
         let mode = std::fs::metadata(dir.path()).unwrap().permissions().mode();
         assert_eq!(mode & 0o777, 0o700);
-    }
-
-    #[test]
-    fn test_redact_key_short() {
-        assert_eq!(redact_key("abc"), "***");
-        assert_eq!(redact_key("12345678"), "***");
-    }
-
-    #[test]
-    fn test_redact_key_long() {
-        assert_eq!(redact_key("sk-ant-abcdef1234"), "sk-a...1234");
-        assert_eq!(redact_key("123456789"), "1234...6789");
     }
 
     #[test]
@@ -1166,19 +1119,6 @@ max_output_tokens = 2048
         assert_eq!(warnings.len(), 2);
     }
 
-    // ─── redact_key edge cases ─────────────────────────────────────────────
-
-    #[test]
-    fn redact_key_exactly_9_chars() {
-        // 9 chars: should show first 4 + ... + last 4
-        assert_eq!(redact_key("123456789"), "1234...6789");
-    }
-
-    #[test]
-    fn redact_key_empty() {
-        assert_eq!(redact_key(""), "***");
-    }
-
     // ─── config_path ───────────────────────────────────────────────────────
 
     #[test]
@@ -1255,25 +1195,6 @@ max_output_tokens = 2048
         };
         // Google key has no prefix validation
         assert!(config.validate_keys().is_empty());
-    }
-
-    // ─── redact_key additional ───────────────────────────────────────────
-
-    #[test]
-    fn redact_key_typical_openai() {
-        let key = "sk-proj-abcdef12345678";
-        let redacted = redact_key(key);
-        assert!(redacted.starts_with("sk-p"));
-        assert!(redacted.ends_with("5678"));
-        assert!(redacted.contains("..."));
-    }
-
-    #[test]
-    fn redact_key_typical_anthropic() {
-        let key = "sk-ant-api03-abc123xyz";
-        let redacted = redact_key(key);
-        assert!(redacted.starts_with("sk-a"));
-        assert!(redacted.contains("..."));
     }
 
     // ─── Config TOML parsing: registries ─────────────────────────────────
@@ -1545,16 +1466,6 @@ anthropic_api_key = "sk-ant-test-key"
         );
         assert!(!deserialized.title.enabled);
         assert_eq!(deserialized.title.provider.as_deref(), Some("openai"));
-    }
-
-    #[test]
-    fn redact_key_matches_prefix_and_suffix() {
-        let key = "abcdefghijklmnop";
-        let redacted = redact_key(key);
-        // Should show first 4 and last 4
-        assert!(redacted.starts_with("abcd"));
-        assert!(redacted.ends_with("mnop"));
-        assert!(redacted.contains("..."));
     }
 
     // ─── Config with multiple model_capabilities ─────────────────────────

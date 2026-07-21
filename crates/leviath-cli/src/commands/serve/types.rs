@@ -32,7 +32,6 @@ pub struct ServeArgs {
 /// Events broadcast to WebSocket subscribers.
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
-#[allow(dead_code)]
 pub enum ServerEvent {
     AgentStatus {
         agent_id: String,
