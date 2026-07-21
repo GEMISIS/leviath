@@ -177,7 +177,7 @@ Message a running agent from the terminal or dashboard — input is injected bet
 </td>
 <td width="33%" valign="top">
 
-**🛡️ Taint-Tracked Data Flow (In Progress)**
+**🛡️ Taint-Tracked Data Flow**
 
 A deterministic sensitivity model (Public / Internal / Private) tags every context region — set by the runtime, never by model output. Tools declare a direction and clearance, so an outbound call carrying data above its level is blocked before it fires — returned as `[blocked]`, or, in the daemon, surfaced as an *allow once / allow for this session / deny* prompt — and taint recovers automatically as entries evict. Configure it with an opt-in `[security]` block, layer on allowlists and Rhai policy rules, and dry-run any tool with `lev policy test`.
 

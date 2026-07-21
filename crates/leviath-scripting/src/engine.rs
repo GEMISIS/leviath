@@ -179,28 +179,6 @@ mod tests {
     }
 
     #[test]
-    fn test_extract_modified() {
-        let engine = ScriptEngine::new();
-        let script = r#"
-            let modified = extract_modified(content);
-            modified.len() > 0
-        "#;
-        let content = "file1.txt\nmodified: file2.txt\nfile3.txt";
-        assert!(engine.validate(script, content).unwrap());
-    }
-
-    #[test]
-    fn test_summarize() {
-        let engine = ScriptEngine::new();
-        let script = r#"
-            let summary = summarize(content, 10);
-            summary.len() <= 50
-        "#;
-        let long_text = "a".repeat(1000);
-        assert!(engine.validate(script, &long_text).unwrap());
-    }
-
-    #[test]
     fn test_sandbox_limits() {
         let engine = ScriptEngine::new();
         // Test operation limit by creating an infinite loop

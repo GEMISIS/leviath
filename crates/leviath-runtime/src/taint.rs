@@ -1,12 +1,12 @@
 //! Taint gate checking for tool execution.
 //!
 //! Implements the gate check logic that runs before outbound tool calls.
-//! When taint tracking is enabled, the gate compares the relevant taint
-//! level (determined by input mode) against the tool's clearance level.
+//! When taint tracking is enabled, the gate compares the context window's
+//! overall taint level against the tool's clearance level.
 
 use leviath_core::taint::{
-    GateDecision, GateDecisionSource, GateEvent, InputMode, SecurityConfig, TaintLevel,
-    ToolClassification, builtin_tool_classification,
+    GateDecision, GateDecisionSource, GateEvent, SecurityConfig, TaintLevel, ToolClassification,
+    builtin_tool_classification,
 };
 use std::collections::HashMap;
 
@@ -68,7 +68,6 @@ impl TaintGate {
         Self {
             config: SecurityConfig {
                 taint_tracking: false,
-                ..SecurityConfig::default()
             },
             tool_overrides: HashMap::new(),
             audit_log: Vec::new(),
@@ -116,7 +115,6 @@ impl TaintGate {
             self.log_event(
                 agent_id,
                 tool_name,
-                InputMode::Traditional,
                 TaintLevel::Public,
                 TaintLevel::Public,
                 true,
@@ -132,7 +130,6 @@ impl TaintGate {
             self.log_event(
                 agent_id,
                 tool_name,
-                InputMode::Traditional,
                 TaintLevel::Public,
                 classification.clearance,
                 true,
@@ -148,7 +145,6 @@ impl TaintGate {
             self.log_event(
                 agent_id,
                 tool_name,
-                InputMode::Traditional,
                 taint,
                 classification.clearance,
                 true,
@@ -167,7 +163,6 @@ impl TaintGate {
             self.log_event(
                 agent_id,
                 tool_name,
-                InputMode::Traditional,
                 taint,
                 classification.clearance,
                 false,
@@ -178,115 +173,6 @@ impl TaintGate {
                 taint_level: taint,
                 clearance: classification.clearance,
                 source_regions,
-                tool_name: tool_name.to_string(),
-            }
-        }
-    }
-
-    /// Check the gate for a pointer-mode tool invocation.
-    ///
-    /// In pointer mode, only the taint of the referenced content is checked.
-    pub fn check_pointer(
-        &mut self,
-        agent_id: &str,
-        tool_name: &str,
-        reference_taint: TaintLevel,
-    ) -> GateDecision {
-        if !self.config.taint_tracking {
-            self.log_event(
-                agent_id,
-                tool_name,
-                InputMode::Pointer,
-                TaintLevel::Public,
-                TaintLevel::Public,
-                true,
-                GateDecisionSource::TaintDisabled,
-            );
-            return GateDecision::Allowed;
-        }
-
-        let classification = self.tool_classification(tool_name);
-
-        if !classification.is_outbound() || classification.check_clearance(reference_taint) {
-            self.log_event(
-                agent_id,
-                tool_name,
-                InputMode::Pointer,
-                reference_taint,
-                classification.clearance,
-                true,
-                GateDecisionSource::AutoAllow,
-            );
-            GateDecision::Allowed
-        } else {
-            self.log_event(
-                agent_id,
-                tool_name,
-                InputMode::Pointer,
-                reference_taint,
-                classification.clearance,
-                false,
-                GateDecisionSource::AutoBlock,
-            );
-            GateDecision::Blocked {
-                taint_level: reference_taint,
-                clearance: classification.clearance,
-                source_regions: vec![],
-                tool_name: tool_name.to_string(),
-            }
-        }
-    }
-
-    /// Check the gate for a filter-mode tool invocation.
-    ///
-    /// In filter mode, the taint of the source region is checked.
-    pub fn check_filter(
-        &mut self,
-        agent_id: &str,
-        tool_name: &str,
-        source_region_taint: TaintLevel,
-        source_region_name: &str,
-    ) -> GateDecision {
-        if !self.config.taint_tracking {
-            self.log_event(
-                agent_id,
-                tool_name,
-                InputMode::Filter,
-                TaintLevel::Public,
-                TaintLevel::Public,
-                true,
-                GateDecisionSource::TaintDisabled,
-            );
-            return GateDecision::Allowed;
-        }
-
-        let classification = self.tool_classification(tool_name);
-
-        if !classification.is_outbound() || classification.check_clearance(source_region_taint) {
-            self.log_event(
-                agent_id,
-                tool_name,
-                InputMode::Filter,
-                source_region_taint,
-                classification.clearance,
-                true,
-                GateDecisionSource::AutoAllow,
-            );
-            GateDecision::Allowed
-        } else {
-            self.log_event(
-                agent_id,
-                tool_name,
-                InputMode::Filter,
-                source_region_taint,
-                classification.clearance,
-                false,
-                GateDecisionSource::AutoBlock,
-            );
-            GateDecision::Blocked {
-                taint_level: source_region_taint,
-                clearance: classification.clearance,
-                source_regions: vec![source_region_name.to_string()],
                 tool_name: tool_name.to_string(),
             }
         }
@@ -326,7 +212,6 @@ impl TaintGate {
             self.log_event(
                 agent_id,
                 tool_name,
-                InputMode::Traditional,
                 taint,
                 clearance,
                 true,
@@ -344,7 +229,6 @@ impl TaintGate {
             self.log_event(
                 agent_id,
                 tool_name,
-                InputMode::Traditional,
                 taint,
                 clearance,
                 true,
@@ -361,14 +245,11 @@ impl TaintGate {
         &mut self,
         agent_id: &str,
         tool_name: &str,
-        input_mode: InputMode,
         taint: TaintLevel,
         clearance: TaintLevel,
         source: GateDecisionSource,
     ) {
-        self.log_event(
-            agent_id, tool_name, input_mode, taint, clearance, true, source,
-        );
+        self.log_event(agent_id, tool_name, taint, clearance, true, source);
     }
 
     /// Record a deny decision (the user or a default policy denied the call).
@@ -376,14 +257,11 @@ impl TaintGate {
         &mut self,
         agent_id: &str,
         tool_name: &str,
-        input_mode: InputMode,
         taint: TaintLevel,
         clearance: TaintLevel,
         source: GateDecisionSource,
     ) {
-        self.log_event(
-            agent_id, tool_name, input_mode, taint, clearance, false, source,
-        );
+        self.log_event(agent_id, tool_name, taint, clearance, false, source);
     }
 
     /// Apply the user's resolution of a blocked outbound call: record the
@@ -407,7 +285,6 @@ impl TaintGate {
                 self.record_allow(
                     agent_id,
                     tool_name,
-                    InputMode::Traditional,
                     taint,
                     clearance,
                     GateDecisionSource::UserAllowOnce,
@@ -418,7 +295,6 @@ impl TaintGate {
                 self.record_allow(
                     agent_id,
                     tool_name,
-                    InputMode::Traditional,
                     taint,
                     clearance,
                     GateDecisionSource::UserAlwaysAllow,
@@ -432,7 +308,6 @@ impl TaintGate {
                 self.record_deny(
                     agent_id,
                     tool_name,
-                    InputMode::Traditional,
                     taint,
                     clearance,
                     GateDecisionSource::UserDenied,
@@ -454,17 +329,11 @@ impl TaintGate {
         &self.audit_log
     }
 
-    /// Clear the audit log.
-    pub fn clear_audit_log(&mut self) {
-        self.audit_log.clear();
-    }
-
     #[allow(clippy::too_many_arguments)]
     fn log_event(
         &mut self,
         agent_id: &str,
         tool_name: &str,
-        input_mode: InputMode,
         taint_level: TaintLevel,
         clearance: TaintLevel,
         allowed: bool,
@@ -474,303 +343,11 @@ impl TaintGate {
             timestamp: chrono::Utc::now().timestamp(),
             agent_id: agent_id.to_string(),
             tool_name: tool_name.to_string(),
-            input_mode,
             taint_level,
             clearance,
             allowed,
             decision_source,
         });
-    }
-}
-
-/// Pointer reference resolver — resolves PointerRef to actual content
-/// and its taint level from a ContextWindow.
-#[derive(Debug)]
-pub struct PointerResolver;
-
-/// Result of resolving a pointer reference.
-#[derive(Debug, Clone)]
-pub struct ResolvedPointer {
-    /// The resolved content.
-    pub content: String,
-    /// The taint level of the resolved content.
-    pub taint_level: TaintLevel,
-}
-
-/// Error when resolving a pointer reference.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum PointerError {
-    /// Region not found.
-    RegionNotFound(String),
-    /// Chunk ID not found in region.
-    ChunkNotFound { region: String, chunk_id: String },
-    /// Offset range out of bounds.
-    OffsetOutOfBounds {
-        region: String,
-        start: usize,
-        end: usize,
-    },
-    /// Taint tracking not enabled on region.
-    TaintNotEnabled(String),
-}
-
-impl std::fmt::Display for PointerError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            PointerError::RegionNotFound(r) => write!(f, "Region not found: {}", r),
-            PointerError::ChunkNotFound { region, chunk_id } => {
-                write!(f, "Chunk '{}' not found in region '{}'", chunk_id, region)
-            }
-            PointerError::OffsetOutOfBounds { region, start, end } => {
-                write!(
-                    f,
-                    "Offset range {}..{} out of bounds in region '{}'",
-                    start, end, region
-                )
-            }
-            PointerError::TaintNotEnabled(r) => {
-                write!(f, "Taint tracking not enabled on region '{}'", r)
-            }
-        }
-    }
-}
-
-impl PointerResolver {
-    /// Resolve a PointerRef against a ContextWindow.
-    pub fn resolve(
-        window: &ContextWindow,
-        pointer: &leviath_core::taint::PointerRef,
-    ) -> Result<ResolvedPointer, PointerError> {
-        use leviath_core::taint::PointerRef;
-
-        match pointer {
-            PointerRef::ChunkId { region, chunk_id } => {
-                let reg = window
-                    .get_region(region)
-                    .ok_or_else(|| PointerError::RegionNotFound(region.clone()))?;
-
-                // Chunk IDs are entry metadata with "chunk_id" key
-                let (idx, entry) = reg
-                    .content
-                    .iter()
-                    .enumerate()
-                    .find(|(_, e)| {
-                        e.metadata
-                            .as_ref()
-                            .and_then(|m| m.get("chunk_id"))
-                            .and_then(|v| v.as_str())
-                            == Some(chunk_id.as_str())
-                    })
-                    .ok_or_else(|| PointerError::ChunkNotFound {
-                        region: region.clone(),
-                        chunk_id: chunk_id.clone(),
-                    })?;
-
-                let taint = reg
-                    .taint
-                    .as_ref()
-                    .ok_or_else(|| PointerError::TaintNotEnabled(region.clone()))?
-                    .entry_taint(idx)
-                    .unwrap_or(TaintLevel::Public);
-
-                Ok(ResolvedPointer {
-                    content: entry.content.clone(),
-                    taint_level: taint,
-                })
-            }
-            PointerRef::OffsetRange { region, start, end } => {
-                let reg = window
-                    .get_region(region)
-                    .ok_or_else(|| PointerError::RegionNotFound(region.clone()))?;
-
-                if *start >= reg.content.len() || *end > reg.content.len() || start >= end {
-                    return Err(PointerError::OffsetOutOfBounds {
-                        region: region.clone(),
-                        start: *start,
-                        end: *end,
-                    });
-                }
-
-                let content: String = reg.content[*start..*end]
-                    .iter()
-                    .map(|e| e.content.as_str())
-                    .collect::<Vec<_>>()
-                    .join("\n");
-
-                let taint = reg
-                    .taint
-                    .as_ref()
-                    .ok_or_else(|| PointerError::TaintNotEnabled(region.clone()))?
-                    .range_taint(*start, *end);
-
-                Ok(ResolvedPointer {
-                    content,
-                    taint_level: taint,
-                })
-            }
-        }
-    }
-}
-
-/// Filter input resolver — resolves a FilterInput against a ContextWindow.
-///
-/// In a full system, this would spawn a scoped sub-agent. Here we provide
-/// the resolution logic that determines the taint level and validates the
-/// filter configuration.
-#[derive(Debug)]
-pub struct FilterResolver;
-
-/// Result of resolving a filter input.
-#[derive(Debug, Clone)]
-pub struct ResolvedFilter {
-    /// Content from the source region (for the sub-agent to process).
-    pub source_content: String,
-    /// Taint level of the source region (output inherits this).
-    pub taint_level: TaintLevel,
-    /// The filter operation to apply.
-    pub operation: leviath_core::taint::FilterOperation,
-}
-
-/// Error when resolving a filter input.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum FilterError {
-    /// Source region not found.
-    RegionNotFound(String),
-    /// Taint tracking not enabled on source region.
-    TaintNotEnabled(String),
-    /// Filter mode is disabled.
-    FilterDisabled,
-    /// Freeform mode not enabled (user tried freeform but config says structured).
-    FreeformNotEnabled,
-}
-
-impl std::fmt::Display for FilterError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            FilterError::RegionNotFound(r) => write!(f, "Source region not found: {}", r),
-            FilterError::TaintNotEnabled(r) => {
-                write!(f, "Taint tracking not enabled on region '{}'", r)
-            }
-            FilterError::FilterDisabled => write!(f, "Filter mode is disabled"),
-            FilterError::FreeformNotEnabled => {
-                write!(
-                    f,
-                    "Freeform filter mode not enabled (config says structured)"
-                )
-            }
-        }
-    }
-}
-
-impl FilterResolver {
-    /// Resolve a FilterInput against a ContextWindow.
-    pub fn resolve(
-        window: &ContextWindow,
-        filter: &leviath_core::taint::FilterInput,
-        config: &SecurityConfig,
-    ) -> Result<ResolvedFilter, FilterError> {
-        // Check filter mode is enabled
-        if config.filter_mode.is_none() {
-            return Err(FilterError::FilterDisabled);
-        }
-
-        let region = window
-            .get_region(&filter.source_region)
-            .ok_or_else(|| FilterError::RegionNotFound(filter.source_region.clone()))?;
-
-        let taint = region
-            .taint_level()
-            .ok_or_else(|| FilterError::TaintNotEnabled(filter.source_region.clone()))?;
-
-        let source_content: String = region
-            .content
-            .iter()
-            .map(|e| e.content.as_str())
-            .collect::<Vec<_>>()
-            .join("\n\n");
-
-        Ok(ResolvedFilter {
-            source_content,
-            taint_level: taint,
-            operation: filter.operation.clone(),
-        })
-    }
-}
-
-/// Degradation engine — manages fallback when a higher-precision input mode fails.
-#[derive(Debug)]
-pub struct DegradationEngine;
-
-/// Error produced by the degradation engine.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum DegradationError {
-    /// The current mode failed and no fallback is configured.
-    NoFallback { current_mode: InputMode },
-    /// All modes in the degradation path have been exhausted.
-    AllModesExhausted,
-    /// A specific mode error with message.
-    ModeError { mode: InputMode, message: String },
-}
-
-impl std::fmt::Display for DegradationError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            DegradationError::NoFallback { current_mode } => {
-                write!(
-                    f,
-                    "Input mode '{}' failed: no fallback configured in degradation path",
-                    current_mode
-                )
-            }
-            DegradationError::AllModesExhausted => {
-                write!(f, "All input modes in degradation path have been exhausted")
-            }
-            DegradationError::ModeError { mode, message } => {
-                write!(f, "Input mode '{}' failed: {}", mode, message)
-            }
-        }
-    }
-}
-
-impl DegradationEngine {
-    /// Get the next mode to try after the given mode fails.
-    /// Returns a descriptive error message for the user alongside the next mode.
-    pub fn degrade(
-        config: &SecurityConfig,
-        current_mode: &InputMode,
-    ) -> Result<(InputMode, String), DegradationError> {
-        match config.next_fallback(current_mode) {
-            Some(next) => {
-                let message = format!(
-                    "Input mode '{}' failed. Degrading to '{}' mode per configured degradation path.",
-                    current_mode, next
-                );
-                Ok((next.clone(), message))
-            }
-            None => Err(DegradationError::NoFallback {
-                current_mode: current_mode.clone(),
-            }),
-        }
-    }
-
-    /// Run through the full degradation path, returning the first available mode.
-    pub fn first_available(config: &SecurityConfig) -> Option<InputMode> {
-        config
-            .degradation
-            .iter()
-            .find(|mode| config.mode_available(mode))
-            .cloned()
-    }
-
-    /// Validate that the degradation path is valid (all modes are available).
-    /// Returns modes in the path that are not available.
-    pub fn validate_path(config: &SecurityConfig) -> Vec<InputMode> {
-        config
-            .degradation
-            .iter()
-            .filter(|mode| !config.mode_available(mode))
-            .cloned()
-            .collect()
     }
 }
 
@@ -890,64 +467,6 @@ mod tests {
     }
 
     #[test]
-    fn gate_pointer_mode_allows_clean_reference() {
-        let mut gate = TaintGate::new(SecurityConfig::default());
-        let decision = gate.check_pointer("agent-1", "shell", TaintLevel::Public);
-        assert!(decision.is_allowed());
-    }
-
-    #[test]
-    fn gate_pointer_mode_blocks_tainted_reference() {
-        let mut gate = TaintGate::new(SecurityConfig::default());
-        let decision = gate.check_pointer("agent-1", "shell", TaintLevel::Internal);
-        assert!(!decision.is_allowed());
-    }
-
-    #[test]
-    fn gate_pointer_mode_non_outbound_allows() {
-        let mut gate = TaintGate::new(SecurityConfig::default());
-        let decision = gate.check_pointer("agent-1", "read_file", TaintLevel::Private);
-        assert!(decision.is_allowed());
-    }
-
-    #[test]
-    fn gate_filter_mode_allows_clean_region() {
-        let mut gate = TaintGate::new(SecurityConfig::default());
-        let decision = gate.check_filter("agent-1", "shell", TaintLevel::Public, "research");
-        assert!(decision.is_allowed());
-    }
-
-    #[test]
-    fn gate_filter_mode_blocks_tainted_region() {
-        let mut gate = TaintGate::new(SecurityConfig::default());
-        let decision = gate.check_filter("agent-1", "shell", TaintLevel::Private, "conversation");
-        assert!(!decision.is_allowed());
-        assert_eq!(
-            decision,
-            GateDecision::Blocked {
-                taint_level: TaintLevel::Private,
-                clearance: TaintLevel::Public,
-                source_regions: vec!["conversation".to_string()],
-                tool_name: "shell".to_string(),
-            }
-        );
-    }
-
-    #[test]
-    fn gate_filter_mode_disabled_allows() {
-        let mut gate = TaintGate::disabled();
-        let decision = gate.check_filter("agent-1", "shell", TaintLevel::Private, "conversation");
-        assert!(decision.is_allowed());
-    }
-
-    #[test]
-    fn gate_pointer_mode_disabled_allows() {
-        let mut gate = TaintGate::disabled();
-        let decision = gate.check_pointer("agent-1", "shell", TaintLevel::Private);
-        assert!(decision.is_allowed());
-    }
-
-    #[test]
     fn gate_audit_log_records_events() {
         let mut gate = TaintGate::new(SecurityConfig::default());
         let window = make_window_with_taint(TaintLevel::Public);
@@ -961,22 +480,11 @@ mod tests {
     }
 
     #[test]
-    fn gate_clear_audit_log() {
-        let mut gate = TaintGate::new(SecurityConfig::default());
-        let window = make_window_with_taint(TaintLevel::Public);
-        gate.check_traditional("agent-1", "shell", &window);
-        assert_eq!(gate.audit_log().len(), 1);
-        gate.clear_audit_log();
-        assert_eq!(gate.audit_log().len(), 0);
-    }
-
-    #[test]
     fn gate_record_allow() {
         let mut gate = TaintGate::new(SecurityConfig::default());
         gate.record_allow(
             "agent-1",
             "shell",
-            InputMode::Traditional,
             TaintLevel::Private,
             TaintLevel::Public,
             GateDecisionSource::UserAllowOnce,
@@ -1012,418 +520,10 @@ mod tests {
     fn gate_new_and_config() {
         let config = SecurityConfig {
             taint_tracking: true,
-            pointer_mode: true,
-            ..SecurityConfig::default()
         };
         let gate = TaintGate::new(config.clone());
         assert!(gate.is_enabled());
-        assert!(gate.config().pointer_mode);
-    }
-
-    // ─── PointerResolver ────────────────────────────────────────────────────
-
-    fn make_window_with_chunks() -> ContextWindow {
-        let mut window = ContextWindow::new(10000);
-        let mut region =
-            Region::new("research".to_string(), RegionKind::Temporary, 5000).with_taint_tracking();
-
-        // Add entries with chunk_id metadata
-        region
-            .add_entry_with_metadata(
-                "public search results".to_string(),
-                10,
-                serde_json::json!({"chunk_id": "chunk-1"}),
-            )
-            .unwrap();
-        // Manually track taint (add_entry_with_metadata tracks as Public)
-
-        region
-            .add_entry_with_metadata(
-                "private calendar data".to_string(),
-                10,
-                serde_json::json!({"chunk_id": "chunk-2"}),
-            )
-            .unwrap();
-
-        // Override taint for second entry.
-        // First entry is Public (default from add_entry_with_metadata); remove
-        // both Public entries and re-add with correct taints.
-        let taint = region
-            .taint
-            .as_mut()
-            .expect("region was created with taint tracking");
-        taint.clear();
-        taint.add_entry(TaintLevel::Public);
-        taint.add_entry(TaintLevel::Private);
-
-        window.add_region(region);
-        window
-    }
-
-    #[test]
-    fn pointer_resolve_chunk_id_public() {
-        let window = make_window_with_chunks();
-        let pointer = leviath_core::taint::PointerRef::ChunkId {
-            region: "research".into(),
-            chunk_id: "chunk-1".into(),
-        };
-        let result = PointerResolver::resolve(&window, &pointer).unwrap();
-        assert_eq!(result.content, "public search results");
-        assert_eq!(result.taint_level, TaintLevel::Public);
-    }
-
-    #[test]
-    fn pointer_resolve_chunk_id_private() {
-        let window = make_window_with_chunks();
-        let pointer = leviath_core::taint::PointerRef::ChunkId {
-            region: "research".into(),
-            chunk_id: "chunk-2".into(),
-        };
-        let result = PointerResolver::resolve(&window, &pointer).unwrap();
-        assert_eq!(result.content, "private calendar data");
-        assert_eq!(result.taint_level, TaintLevel::Private);
-    }
-
-    #[test]
-    fn pointer_resolve_chunk_not_found() {
-        let window = make_window_with_chunks();
-        let pointer = leviath_core::taint::PointerRef::ChunkId {
-            region: "research".into(),
-            chunk_id: "nonexistent".into(),
-        };
-        let err = PointerResolver::resolve(&window, &pointer).unwrap_err();
-        assert_eq!(
-            err,
-            PointerError::ChunkNotFound {
-                region: "research".into(),
-                chunk_id: "nonexistent".into()
-            }
-        );
-    }
-
-    #[test]
-    fn pointer_resolve_region_not_found() {
-        let window = make_window_with_chunks();
-        let pointer = leviath_core::taint::PointerRef::ChunkId {
-            region: "nope".into(),
-            chunk_id: "chunk-1".into(),
-        };
-        let err = PointerResolver::resolve(&window, &pointer).unwrap_err();
-        assert_eq!(err, PointerError::RegionNotFound("nope".into()));
-    }
-
-    #[test]
-    fn pointer_resolve_offset_range() {
-        let window = make_window_with_chunks();
-        let pointer = leviath_core::taint::PointerRef::OffsetRange {
-            region: "research".into(),
-            start: 0,
-            end: 1,
-        };
-        let result = PointerResolver::resolve(&window, &pointer).unwrap();
-        assert_eq!(result.content, "public search results");
-        assert_eq!(result.taint_level, TaintLevel::Public);
-    }
-
-    #[test]
-    fn pointer_resolve_offset_range_multi() {
-        let window = make_window_with_chunks();
-        let pointer = leviath_core::taint::PointerRef::OffsetRange {
-            region: "research".into(),
-            start: 0,
-            end: 2,
-        };
-        let result = PointerResolver::resolve(&window, &pointer).unwrap();
-        assert!(result.content.contains("public search results"));
-        assert!(result.content.contains("private calendar data"));
-        assert_eq!(result.taint_level, TaintLevel::Private);
-    }
-
-    #[test]
-    fn pointer_resolve_offset_out_of_bounds() {
-        let window = make_window_with_chunks();
-        let pointer = leviath_core::taint::PointerRef::OffsetRange {
-            region: "research".into(),
-            start: 5,
-            end: 10,
-        };
-        let err = PointerResolver::resolve(&window, &pointer).unwrap_err();
-        assert_eq!(
-            err,
-            PointerError::OffsetOutOfBounds {
-                region: "research".into(),
-                start: 5,
-                end: 10
-            }
-        );
-    }
-
-    #[test]
-    fn pointer_resolve_taint_not_enabled() {
-        let mut window = ContextWindow::new(10000);
-        let mut region = Region::new("data".to_string(), RegionKind::Temporary, 5000);
-        region
-            .add_entry_with_metadata(
-                "content".to_string(),
-                10,
-                serde_json::json!({"chunk_id": "c1"}),
-            )
-            .unwrap();
-        window.add_region(region);
-
-        let pointer = leviath_core::taint::PointerRef::ChunkId {
-            region: "data".into(),
-            chunk_id: "c1".into(),
-        };
-        let err = PointerResolver::resolve(&window, &pointer).unwrap_err();
-        assert_eq!(err, PointerError::TaintNotEnabled("data".into()));
-    }
-
-    #[test]
-    fn pointer_error_display() {
-        let err = PointerError::RegionNotFound("test".into());
-        assert!(err.to_string().contains("Region not found"));
-
-        let err = PointerError::ChunkNotFound {
-            region: "r".into(),
-            chunk_id: "c".into(),
-        };
-        assert!(err.to_string().contains("Chunk"));
-
-        let err = PointerError::OffsetOutOfBounds {
-            region: "r".into(),
-            start: 1,
-            end: 5,
-        };
-        assert!(err.to_string().contains("out of bounds"));
-
-        let err = PointerError::TaintNotEnabled("r".into());
-        assert!(err.to_string().contains("Taint tracking not enabled"));
-    }
-
-    // ─── FilterResolver ─────────────────────────────────────────────────────
-
-    #[test]
-    fn filter_resolve_success() {
-        let mut window = ContextWindow::new(10000);
-        let mut region =
-            Region::new("research".to_string(), RegionKind::Temporary, 5000).with_taint_tracking();
-        region
-            .add_tainted_entry("fact 1".to_string(), 5, TaintLevel::Public)
-            .unwrap();
-        region
-            .add_tainted_entry("fact 2".to_string(), 5, TaintLevel::Public)
-            .unwrap();
-        window.add_region(region);
-
-        let config = SecurityConfig {
-            filter_mode: Some(leviath_core::FilterMode::Structured),
-            ..SecurityConfig::default()
-        };
-        let filter = leviath_core::taint::FilterInput {
-            source_region: "research".into(),
-            operation: leviath_core::taint::FilterOperation::Summarize,
-            output_format: None,
-        };
-
-        let result = FilterResolver::resolve(&window, &filter, &config).unwrap();
-        assert!(result.source_content.contains("fact 1"));
-        assert!(result.source_content.contains("fact 2"));
-        assert_eq!(result.taint_level, TaintLevel::Public);
-    }
-
-    #[test]
-    fn filter_resolve_disabled() {
-        let window = ContextWindow::new(10000);
-        let config = SecurityConfig::default(); // filter_mode is None
-        let filter = leviath_core::taint::FilterInput {
-            source_region: "research".into(),
-            operation: leviath_core::taint::FilterOperation::Summarize,
-            output_format: None,
-        };
-
-        let err = FilterResolver::resolve(&window, &filter, &config).unwrap_err();
-        assert_eq!(err, FilterError::FilterDisabled);
-    }
-
-    #[test]
-    fn filter_resolve_region_not_found() {
-        let window = ContextWindow::new(10000);
-        let config = SecurityConfig {
-            filter_mode: Some(leviath_core::FilterMode::Structured),
-            ..SecurityConfig::default()
-        };
-        let filter = leviath_core::taint::FilterInput {
-            source_region: "nope".into(),
-            operation: leviath_core::taint::FilterOperation::Summarize,
-            output_format: None,
-        };
-
-        let err = FilterResolver::resolve(&window, &filter, &config).unwrap_err();
-        assert_eq!(err, FilterError::RegionNotFound("nope".into()));
-    }
-
-    #[test]
-    fn filter_resolve_taint_not_enabled() {
-        let mut window = ContextWindow::new(10000);
-        let region = Region::new("data".to_string(), RegionKind::Temporary, 5000);
-        window.add_region(region);
-
-        let config = SecurityConfig {
-            filter_mode: Some(leviath_core::FilterMode::Structured),
-            ..SecurityConfig::default()
-        };
-        let filter = leviath_core::taint::FilterInput {
-            source_region: "data".into(),
-            operation: leviath_core::taint::FilterOperation::Summarize,
-            output_format: None,
-        };
-
-        let err = FilterResolver::resolve(&window, &filter, &config).unwrap_err();
-        assert_eq!(err, FilterError::TaintNotEnabled("data".into()));
-    }
-
-    #[test]
-    fn filter_error_display() {
-        assert!(
-            FilterError::RegionNotFound("r".into())
-                .to_string()
-                .contains("region not found")
-        );
-        assert!(
-            FilterError::TaintNotEnabled("r".into())
-                .to_string()
-                .contains("Taint tracking not enabled")
-        );
-        assert!(FilterError::FilterDisabled.to_string().contains("disabled"));
-        assert!(
-            FilterError::FreeformNotEnabled
-                .to_string()
-                .contains("Freeform")
-        );
-    }
-
-    // ─── DegradationEngine ──────────────────────────────────────────────────
-
-    #[test]
-    fn degradation_full_path() {
-        let config = SecurityConfig {
-            pointer_mode: true,
-            filter_mode: Some(leviath_core::FilterMode::Structured),
-            degradation: vec![
-                InputMode::Pointer,
-                InputMode::Filter,
-                InputMode::Traditional,
-            ],
-            ..SecurityConfig::default()
-        };
-
-        let (next, msg) = DegradationEngine::degrade(&config, &InputMode::Pointer).unwrap();
-        assert_eq!(next, InputMode::Filter);
-        assert!(msg.contains("Degrading to 'filter'"));
-
-        let (next2, _) = DegradationEngine::degrade(&config, &InputMode::Filter).unwrap();
-        assert_eq!(next2, InputMode::Traditional);
-
-        let err = DegradationEngine::degrade(&config, &InputMode::Traditional).unwrap_err();
-        assert_eq!(
-            err,
-            DegradationError::NoFallback {
-                current_mode: InputMode::Traditional
-            }
-        );
-    }
-
-    #[test]
-    fn degradation_skip_filter() {
-        let config = SecurityConfig {
-            pointer_mode: true,
-            degradation: vec![InputMode::Pointer, InputMode::Traditional],
-            ..SecurityConfig::default()
-        };
-
-        let (next, _) = DegradationEngine::degrade(&config, &InputMode::Pointer).unwrap();
-        assert_eq!(next, InputMode::Traditional);
-    }
-
-    #[test]
-    fn degradation_strict_single_mode() {
-        let config = SecurityConfig {
-            pointer_mode: true,
-            degradation: vec![InputMode::Pointer],
-            ..SecurityConfig::default()
-        };
-
-        let err = DegradationEngine::degrade(&config, &InputMode::Pointer).unwrap_err();
-        assert_eq!(
-            err,
-            DegradationError::NoFallback {
-                current_mode: InputMode::Pointer
-            }
-        );
-    }
-
-    #[test]
-    fn degradation_first_available() {
-        let config = SecurityConfig {
-            pointer_mode: true,
-            filter_mode: Some(leviath_core::FilterMode::Structured),
-            degradation: vec![
-                InputMode::Pointer,
-                InputMode::Filter,
-                InputMode::Traditional,
-            ],
-            ..SecurityConfig::default()
-        };
-        assert_eq!(
-            DegradationEngine::first_available(&config),
-            Some(InputMode::Pointer)
-        );
-
-        let config2 = SecurityConfig {
-            degradation: vec![InputMode::Pointer, InputMode::Traditional],
-            ..SecurityConfig::default()
-        };
-        // pointer_mode is false, so first available is Traditional
-        assert_eq!(
-            DegradationEngine::first_available(&config2),
-            Some(InputMode::Traditional)
-        );
-    }
-
-    #[test]
-    fn degradation_validate_path() {
-        let config = SecurityConfig {
-            pointer_mode: false,
-            filter_mode: None,
-            degradation: vec![
-                InputMode::Pointer,
-                InputMode::Filter,
-                InputMode::Traditional,
-            ],
-            ..SecurityConfig::default()
-        };
-        let unavailable = DegradationEngine::validate_path(&config);
-        assert!(unavailable.contains(&InputMode::Pointer));
-        assert!(unavailable.contains(&InputMode::Filter));
-        assert!(!unavailable.contains(&InputMode::Traditional));
-    }
-
-    #[test]
-    fn degradation_error_display() {
-        let err = DegradationError::NoFallback {
-            current_mode: InputMode::Pointer,
-        };
-        assert!(err.to_string().contains("no fallback"));
-
-        let err = DegradationError::AllModesExhausted;
-        assert!(err.to_string().contains("exhausted"));
-
-        let err = DegradationError::ModeError {
-            mode: InputMode::Filter,
-            message: "sub-agent failed".into(),
-        };
-        assert!(err.to_string().contains("sub-agent failed"));
+        assert!(gate.config().taint_tracking);
     }
 
     // ─── Policy-aware gate check ────────────────────────────────────────────
@@ -1543,256 +643,6 @@ mod tests {
         assert!(!decision2.is_allowed());
     }
 
-    // ─── Additional PointerResolver edge-case tests ────────────────────────
-
-    #[test]
-    fn pointer_resolve_offset_range_start_equals_end() {
-        let window = make_window_with_chunks();
-        let pointer = leviath_core::taint::PointerRef::OffsetRange {
-            region: "research".into(),
-            start: 1,
-            end: 1,
-        };
-        let err = PointerResolver::resolve(&window, &pointer).unwrap_err();
-        assert_eq!(
-            err,
-            PointerError::OffsetOutOfBounds {
-                region: "research".into(),
-                start: 1,
-                end: 1
-            }
-        );
-    }
-
-    #[test]
-    fn pointer_resolve_offset_range_start_greater_than_end() {
-        let window = make_window_with_chunks();
-        let pointer = leviath_core::taint::PointerRef::OffsetRange {
-            region: "research".into(),
-            start: 1,
-            end: 0,
-        };
-        let err = PointerResolver::resolve(&window, &pointer).unwrap_err();
-        assert_eq!(
-            err,
-            PointerError::OffsetOutOfBounds {
-                region: "research".into(),
-                start: 1,
-                end: 0
-            }
-        );
-    }
-
-    #[test]
-    fn pointer_resolve_offset_range_end_exceeds_len() {
-        let window = make_window_with_chunks();
-        // Window has 2 entries, so end=3 is out of bounds
-        let pointer = leviath_core::taint::PointerRef::OffsetRange {
-            region: "research".into(),
-            start: 0,
-            end: 3,
-        };
-        let err = PointerResolver::resolve(&window, &pointer).unwrap_err();
-        assert_eq!(
-            err,
-            PointerError::OffsetOutOfBounds {
-                region: "research".into(),
-                start: 0,
-                end: 3
-            }
-        );
-    }
-
-    #[test]
-    fn pointer_resolve_offset_region_not_found() {
-        let window = make_window_with_chunks();
-        let pointer = leviath_core::taint::PointerRef::OffsetRange {
-            region: "missing".into(),
-            start: 0,
-            end: 1,
-        };
-        let err = PointerResolver::resolve(&window, &pointer).unwrap_err();
-        assert_eq!(err, PointerError::RegionNotFound("missing".into()));
-    }
-
-    #[test]
-    fn pointer_resolve_offset_range_taint_not_enabled() {
-        let mut window = ContextWindow::new(10000);
-        let mut region = Region::new("data".to_string(), RegionKind::Temporary, 5000);
-        region.add_entry("entry1".to_string(), 10).unwrap();
-        region.add_entry("entry2".to_string(), 10).unwrap();
-        window.add_region(region);
-
-        let pointer = leviath_core::taint::PointerRef::OffsetRange {
-            region: "data".into(),
-            start: 0,
-            end: 1,
-        };
-        let err = PointerResolver::resolve(&window, &pointer).unwrap_err();
-        assert_eq!(err, PointerError::TaintNotEnabled("data".into()));
-    }
-
-    // ─── Additional FilterResolver tests ───────────────────────────────────
-
-    #[test]
-    fn filter_resolve_with_private_taint() {
-        let mut window = ContextWindow::new(10000);
-        let mut region =
-            Region::new("emails".to_string(), RegionKind::Temporary, 5000).with_taint_tracking();
-        region
-            .add_tainted_entry("email content".to_string(), 10, TaintLevel::Private)
-            .unwrap();
-        window.add_region(region);
-
-        let config = SecurityConfig {
-            filter_mode: Some(leviath_core::FilterMode::Structured),
-            ..SecurityConfig::default()
-        };
-        let filter = leviath_core::taint::FilterInput {
-            source_region: "emails".into(),
-            operation: leviath_core::taint::FilterOperation::Extract {
-                extract_type: "subject".into(),
-            },
-            output_format: Some("json".into()),
-        };
-
-        let result = FilterResolver::resolve(&window, &filter, &config).unwrap();
-        assert!(result.source_content.contains("email content"));
-        assert_eq!(result.taint_level, TaintLevel::Private);
-        assert_eq!(result.operation.name(), "extract");
-    }
-
-    #[test]
-    fn filter_resolve_with_mixed_taint_entries() {
-        let mut window = ContextWindow::new(10000);
-        let mut region =
-            Region::new("mixed".to_string(), RegionKind::Temporary, 5000).with_taint_tracking();
-        region
-            .add_tainted_entry("public data".to_string(), 5, TaintLevel::Public)
-            .unwrap();
-        region
-            .add_tainted_entry("internal data".to_string(), 5, TaintLevel::Internal)
-            .unwrap();
-        region
-            .add_tainted_entry("private data".to_string(), 5, TaintLevel::Private)
-            .unwrap();
-        window.add_region(region);
-
-        let config = SecurityConfig {
-            filter_mode: Some(leviath_core::FilterMode::Structured),
-            ..SecurityConfig::default()
-        };
-        let filter = leviath_core::taint::FilterInput {
-            source_region: "mixed".into(),
-            operation: leviath_core::taint::FilterOperation::Summarize,
-            output_format: None,
-        };
-
-        let result = FilterResolver::resolve(&window, &filter, &config).unwrap();
-        // Region taint should be max across entries
-        assert_eq!(result.taint_level, TaintLevel::Private);
-        assert!(result.source_content.contains("public data"));
-        assert!(result.source_content.contains("private data"));
-    }
-
-    #[test]
-    fn filter_resolve_with_freeform_mode() {
-        let mut window = ContextWindow::new(10000);
-        let mut region =
-            Region::new("data".to_string(), RegionKind::Temporary, 5000).with_taint_tracking();
-        region
-            .add_tainted_entry("content".to_string(), 5, TaintLevel::Public)
-            .unwrap();
-        window.add_region(region);
-
-        let config = SecurityConfig {
-            filter_mode: Some(leviath_core::FilterMode::Freeform),
-            ..SecurityConfig::default()
-        };
-        let filter = leviath_core::taint::FilterInput {
-            source_region: "data".into(),
-            operation: leviath_core::taint::FilterOperation::Custom {
-                name: "my_filter".into(),
-                params: Default::default(),
-            },
-            output_format: None,
-        };
-
-        let result = FilterResolver::resolve(&window, &filter, &config).unwrap();
-        assert_eq!(result.taint_level, TaintLevel::Public);
-        assert_eq!(result.operation.name(), "my_filter");
-    }
-
-    // ─── Additional DegradationEngine tests ────────────────────────────────
-
-    #[test]
-    fn degradation_empty_path() {
-        let config = SecurityConfig {
-            degradation: vec![],
-            ..SecurityConfig::default()
-        };
-        let err = DegradationEngine::degrade(&config, &InputMode::Traditional).unwrap_err();
-        assert_eq!(
-            err,
-            DegradationError::NoFallback {
-                current_mode: InputMode::Traditional
-            }
-        );
-    }
-
-    #[test]
-    fn degradation_first_available_empty_path() {
-        let config = SecurityConfig {
-            degradation: vec![],
-            ..SecurityConfig::default()
-        };
-        assert_eq!(DegradationEngine::first_available(&config), None);
-    }
-
-    #[test]
-    fn degradation_first_available_skips_unavailable() {
-        let config = SecurityConfig {
-            pointer_mode: false,
-            filter_mode: None,
-            degradation: vec![
-                InputMode::Pointer,
-                InputMode::Filter,
-                InputMode::Traditional,
-            ],
-            ..SecurityConfig::default()
-        };
-        // Pointer and Filter are unavailable, so Traditional is first available
-        assert_eq!(
-            DegradationEngine::first_available(&config),
-            Some(InputMode::Traditional)
-        );
-    }
-
-    #[test]
-    fn degradation_validate_path_all_available() {
-        let config = SecurityConfig {
-            pointer_mode: true,
-            filter_mode: Some(leviath_core::FilterMode::Structured),
-            degradation: vec![
-                InputMode::Pointer,
-                InputMode::Filter,
-                InputMode::Traditional,
-            ],
-            ..SecurityConfig::default()
-        };
-        let unavailable = DegradationEngine::validate_path(&config);
-        assert!(unavailable.is_empty());
-    }
-
-    #[test]
-    fn degradation_validate_path_empty() {
-        let config = SecurityConfig {
-            degradation: vec![],
-            ..SecurityConfig::default()
-        };
-        assert!(DegradationEngine::validate_path(&config).is_empty());
-    }
-
     // ─── Additional TaintGate tests ────────────────────────────────────────
 
     #[test]
@@ -1814,31 +664,6 @@ mod tests {
     }
 
     #[test]
-    fn gate_pointer_mode_blocks_with_internal_taint() {
-        let mut gate = TaintGate::new(SecurityConfig::default());
-        let decision = gate.check_pointer("agent-1", "shell", TaintLevel::Private);
-        assert!(!decision.is_allowed());
-        // Pointer mode reports empty source regions.
-        assert_eq!(
-            decision,
-            GateDecision::Blocked {
-                taint_level: TaintLevel::Private,
-                clearance: TaintLevel::Public,
-                source_regions: vec![],
-                tool_name: "shell".to_string(),
-            }
-        );
-    }
-
-    #[test]
-    fn gate_filter_mode_non_outbound_allows() {
-        let mut gate = TaintGate::new(SecurityConfig::default());
-        let decision =
-            gate.check_filter("agent-1", "read_file", TaintLevel::Private, "conversation");
-        assert!(decision.is_allowed());
-    }
-
-    #[test]
     fn gate_audit_log_records_blocked_events() {
         let mut gate = TaintGate::new(SecurityConfig::default());
         let window = make_window_with_taint(TaintLevel::Private);
@@ -1848,28 +673,11 @@ mod tests {
         assert!(!gate.audit_log()[0].allowed);
         assert_eq!(gate.audit_log()[0].tool_name, "shell");
         assert_eq!(gate.audit_log()[0].taint_level, TaintLevel::Private);
-        assert_eq!(gate.audit_log()[0].input_mode, InputMode::Traditional);
         // A clearance block is an automatic decision, not a user denial: the
         // user's choice (if any) is logged later by `apply_resolution`.
         assert_eq!(
             gate.audit_log()[0].decision_source,
             GateDecisionSource::AutoBlock,
-        );
-    }
-
-    #[test]
-    fn gate_check_filter_blocked_includes_source_region_name() {
-        let mut gate = TaintGate::new(SecurityConfig::default());
-        let decision = gate.check_filter("agent-1", "shell", TaintLevel::Internal, "emails");
-        assert!(!decision.is_allowed());
-        assert_eq!(
-            decision,
-            GateDecision::Blocked {
-                taint_level: TaintLevel::Internal,
-                clearance: TaintLevel::Public,
-                source_regions: vec!["emails".to_string()],
-                tool_name: "shell".to_string(),
-            }
         );
     }
 

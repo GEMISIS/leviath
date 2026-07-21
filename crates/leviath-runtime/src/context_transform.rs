@@ -93,12 +93,10 @@ fn apply_content_transform(content: &str, transform: &Option<ContentTransform>) 
     match transform {
         None | Some(ContentTransform::Direct) => content.to_string(),
         Some(ContentTransform::Extract { fields }) => extract_fields(content, fields),
-        // Summarize (LLM) and Custom (Rhai) need async/scripting infra that isn't
-        // available at spawn time; fall back to a direct copy so the data still
-        // transfers. (Follow-up: route through the compaction / script lanes.)
-        Some(ContentTransform::Summarize) | Some(ContentTransform::Custom { .. }) => {
-            content.to_string()
-        }
+        // Summarize needs an async LLM call that isn't available at spawn time;
+        // fall back to a direct copy so the data still transfers. (Follow-up:
+        // route through the compaction lane — tracked separately.)
+        Some(ContentTransform::Summarize) => content.to_string(),
     }
 }
 
@@ -177,15 +175,6 @@ mod tests {
         );
         assert_eq!(
             apply_content_transform("x", &Some(ContentTransform::Summarize)),
-            "x"
-        );
-        assert_eq!(
-            apply_content_transform(
-                "x",
-                &Some(ContentTransform::Custom {
-                    function: "f".to_string()
-                })
-            ),
             "x"
         );
         let out = apply_content_transform(

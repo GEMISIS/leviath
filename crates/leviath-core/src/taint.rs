@@ -261,187 +261,17 @@ impl Default for RegionTaint {
     }
 }
 
-/// Input mode for tool invocations — determines taint checking precision.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum InputMode {
-    /// Pointer mode: reference specific content by ID or offset range.
-    /// Taint checked per-reference. Experimental.
-    Pointer,
-    /// Filter mode: delegate to a scoped sub-agent from a single region.
-    /// Taint checked per source region.
-    Filter,
-    /// Traditional mode: LLM generates tool inputs directly.
-    /// Taint checked against entire context (max across all regions).
-    Traditional,
-}
-
-impl InputMode {
-    /// Parse from a string (case-insensitive).
-    pub fn from_str_loose(s: &str) -> Option<InputMode> {
-        match s.to_lowercase().as_str() {
-            "pointer" => Some(InputMode::Pointer),
-            "filter" => Some(InputMode::Filter),
-            "traditional" => Some(InputMode::Traditional),
-            _ => None,
-        }
-    }
-
-    /// Returns the string representation.
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            InputMode::Pointer => "pointer",
-            InputMode::Filter => "filter",
-            InputMode::Traditional => "traditional",
-        }
-    }
-}
-
-impl fmt::Display for InputMode {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-
-/// Pointer reference — how an LLM references specific content in a region.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum PointerRef {
-    /// Reference a content chunk by its runtime-assigned ID.
-    ChunkId {
-        /// Region containing the chunk.
-        region: String,
-        /// Runtime-assigned chunk identifier.
-        chunk_id: String,
-    },
-    /// Reference a byte/line range within a region.
-    OffsetRange {
-        /// Region containing the content.
-        region: String,
-        /// Start entry index (inclusive).
-        start: usize,
-        /// End entry index (exclusive).
-        end: usize,
-    },
-}
-
-/// Filter operation for scoped sub-agent invocation (structured mode).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum FilterOperation {
-    /// Condense content into key points.
-    Summarize,
-    /// Pull specific information by type.
-    Extract {
-        /// What to extract (e.g., "dates", "names", "facts").
-        extract_type: String,
-    },
-    /// Reformat content.
-    Format {
-        /// Target format (e.g., "email", "report", "bullet_points").
-        output_format: String,
-    },
-    /// Generate new content based on region context.
-    Compose {
-        /// Target audience or style.
-        target_audience: Option<String>,
-    },
-    /// Translate to a specified language.
-    Translate {
-        /// Target language.
-        language: String,
-    },
-    /// Custom operation defined by blueprint.
-    Custom {
-        /// Operation name.
-        name: String,
-        /// Additional parameters.
-        params: HashMap<String, String>,
-    },
-}
-
-use std::collections::HashMap;
-
-impl FilterOperation {
-    /// Returns the operation name as a string.
-    pub fn name(&self) -> &str {
-        match self {
-            FilterOperation::Summarize => "summarize",
-            FilterOperation::Extract { .. } => "extract",
-            FilterOperation::Format { .. } => "format",
-            FilterOperation::Compose { .. } => "compose",
-            FilterOperation::Translate { .. } => "translate",
-            FilterOperation::Custom { name, .. } => name,
-        }
-    }
-}
-
-/// Filter mode configuration.
-#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum FilterMode {
-    /// Template-based filter prompts (default, deterministic).
-    #[default]
-    Structured,
-    /// Natural language filter instructions (opt-in, more flexible).
-    Freeform,
-}
-
-impl FilterMode {
-    /// Parse from a string.
-    pub fn from_str_loose(s: &str) -> Option<FilterMode> {
-        match s.to_lowercase().as_str() {
-            "structured" => Some(FilterMode::Structured),
-            "freeform" => Some(FilterMode::Freeform),
-            _ => None,
-        }
-    }
-}
-
-/// Filter input specification for a tool invocation.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct FilterInput {
-    /// Source region to scope the sub-agent to.
-    pub source_region: String,
-    /// Operation to apply.
-    pub operation: FilterOperation,
-    /// Optional output format hint.
-    pub output_format: Option<String>,
-}
-
 /// Security configuration for taint tracking.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SecurityConfig {
     /// Whether taint tracking is enabled.
     pub taint_tracking: bool,
-    /// Whether pointer mode is enabled (experimental).
-    pub pointer_mode: bool,
-    /// Filter mode setting. None = disabled.
-    pub filter_mode: Option<FilterMode>,
-    /// Degradation path — fallback order when higher-precision modes fail.
-    pub degradation: Vec<InputMode>,
-}
-
-impl SecurityConfig {
-    /// Check if a given input mode is available per this config.
-    pub fn mode_available(&self, mode: &InputMode) -> bool {
-        match mode {
-            InputMode::Pointer => self.pointer_mode,
-            InputMode::Filter => self.filter_mode.is_some(),
-            InputMode::Traditional => true, // always available
-        }
-    }
-
-    /// Get the next fallback mode in the degradation path after the given mode.
-    pub fn next_fallback(&self, current: &InputMode) -> Option<&InputMode> {
-        let pos = self.degradation.iter().position(|m| m == current)?;
-        self.degradation.get(pos + 1)
-    }
 }
 
 impl Default for SecurityConfig {
     fn default() -> Self {
         Self {
             taint_tracking: true,
-            pointer_mode: false,
-            filter_mode: None,
-            degradation: vec![InputMode::Traditional],
         }
     }
 }
@@ -476,7 +306,6 @@ pub fn resolve_security(
     }
     SecurityConfig {
         taint_tracking: global,
-        ..SecurityConfig::default()
     }
 }
 
@@ -527,8 +356,6 @@ pub struct GateEvent {
     pub agent_id: String,
     /// Tool being invoked.
     pub tool_name: String,
-    /// Input mode used.
-    pub input_mode: InputMode,
     /// Taint level at time of check.
     pub taint_level: TaintLevel,
     /// Tool's clearance level.
@@ -908,221 +735,22 @@ mod tests {
         assert_eq!(back.entry_count(), 2);
     }
 
-    // ─── InputMode ──────────────────────────────────────────────────────────
-
-    #[test]
-    fn input_mode_from_str_loose() {
-        assert_eq!(
-            InputMode::from_str_loose("pointer"),
-            Some(InputMode::Pointer)
-        );
-        assert_eq!(InputMode::from_str_loose("FILTER"), Some(InputMode::Filter));
-        assert_eq!(
-            InputMode::from_str_loose("Traditional"),
-            Some(InputMode::Traditional)
-        );
-        assert_eq!(InputMode::from_str_loose("nope"), None);
-    }
-
-    #[test]
-    fn input_mode_display() {
-        assert_eq!(format!("{}", InputMode::Pointer), "pointer");
-        assert_eq!(format!("{}", InputMode::Filter), "filter");
-        assert_eq!(format!("{}", InputMode::Traditional), "traditional");
-    }
-
-    #[test]
-    fn input_mode_serde_roundtrip() {
-        for mode in [
-            InputMode::Pointer,
-            InputMode::Filter,
-            InputMode::Traditional,
-        ] {
-            let json = serde_json::to_string(&mode).unwrap();
-            let back: InputMode = serde_json::from_str(&json).unwrap();
-            assert_eq!(mode, back);
-        }
-    }
-
-    // ─── PointerRef ─────────────────────────────────────────────────────────
-
-    #[test]
-    fn pointer_ref_chunk_id() {
-        let pr = PointerRef::ChunkId {
-            region: "research".into(),
-            chunk_id: "abc123".into(),
-        };
-        let json = serde_json::to_string(&pr).unwrap();
-        let back: PointerRef = serde_json::from_str(&json).unwrap();
-        assert_eq!(pr, back);
-    }
-
-    #[test]
-    fn pointer_ref_offset_range() {
-        let pr = PointerRef::OffsetRange {
-            region: "data".into(),
-            start: 0,
-            end: 5,
-        };
-        let json = serde_json::to_string(&pr).unwrap();
-        let back: PointerRef = serde_json::from_str(&json).unwrap();
-        assert_eq!(pr, back);
-    }
-
-    // ─── FilterOperation ────────────────────────────────────────────────────
-
-    #[test]
-    fn filter_operation_names() {
-        assert_eq!(FilterOperation::Summarize.name(), "summarize");
-        assert_eq!(
-            FilterOperation::Extract {
-                extract_type: "dates".into()
-            }
-            .name(),
-            "extract"
-        );
-        assert_eq!(
-            FilterOperation::Format {
-                output_format: "email".into()
-            }
-            .name(),
-            "format"
-        );
-        assert_eq!(
-            FilterOperation::Compose {
-                target_audience: None
-            }
-            .name(),
-            "compose"
-        );
-        assert_eq!(
-            FilterOperation::Translate {
-                language: "es".into()
-            }
-            .name(),
-            "translate"
-        );
-        assert_eq!(
-            FilterOperation::Custom {
-                name: "my_op".into(),
-                params: HashMap::new(),
-            }
-            .name(),
-            "my_op"
-        );
-    }
-
-    #[test]
-    fn filter_operation_serde_roundtrip() {
-        let op = FilterOperation::Extract {
-            extract_type: "names".into(),
-        };
-        let json = serde_json::to_string(&op).unwrap();
-        let back: FilterOperation = serde_json::from_str(&json).unwrap();
-        assert_eq!(op, back);
-    }
-
-    // ─── FilterMode ─────────────────────────────────────────────────────────
-
-    #[test]
-    fn filter_mode_from_str_loose() {
-        assert_eq!(
-            FilterMode::from_str_loose("structured"),
-            Some(FilterMode::Structured)
-        );
-        assert_eq!(
-            FilterMode::from_str_loose("FREEFORM"),
-            Some(FilterMode::Freeform)
-        );
-        assert_eq!(FilterMode::from_str_loose("nope"), None);
-    }
-
-    #[test]
-    fn filter_mode_default() {
-        assert_eq!(FilterMode::default(), FilterMode::Structured);
-    }
-
-    // ─── FilterInput ────────────────────────────────────────────────────────
-
-    #[test]
-    fn filter_input_serde_roundtrip() {
-        let fi = FilterInput {
-            source_region: "research".into(),
-            operation: FilterOperation::Summarize,
-            output_format: Some("email".into()),
-        };
-        let json = serde_json::to_string(&fi).unwrap();
-        let back: FilterInput = serde_json::from_str(&json).unwrap();
-        assert_eq!(fi, back);
-    }
-
     // ─── SecurityConfig ─────────────────────────────────────────────────────
 
     #[test]
     fn security_config_default() {
         let sc = SecurityConfig::default();
         assert!(sc.taint_tracking);
-        assert!(!sc.pointer_mode);
-        assert!(sc.filter_mode.is_none());
-        assert_eq!(sc.degradation, vec![InputMode::Traditional]);
-    }
-
-    #[test]
-    fn security_config_mode_available() {
-        let sc = SecurityConfig {
-            taint_tracking: true,
-            pointer_mode: true,
-            filter_mode: Some(FilterMode::Structured),
-            degradation: vec![
-                InputMode::Pointer,
-                InputMode::Filter,
-                InputMode::Traditional,
-            ],
-        };
-        assert!(sc.mode_available(&InputMode::Pointer));
-        assert!(sc.mode_available(&InputMode::Filter));
-        assert!(sc.mode_available(&InputMode::Traditional));
-
-        let sc2 = SecurityConfig::default();
-        assert!(!sc2.mode_available(&InputMode::Pointer));
-        assert!(!sc2.mode_available(&InputMode::Filter));
-        assert!(sc2.mode_available(&InputMode::Traditional));
-    }
-
-    #[test]
-    fn security_config_next_fallback() {
-        let sc = SecurityConfig {
-            degradation: vec![
-                InputMode::Pointer,
-                InputMode::Filter,
-                InputMode::Traditional,
-            ],
-            ..SecurityConfig::default()
-        };
-        assert_eq!(
-            sc.next_fallback(&InputMode::Pointer),
-            Some(&InputMode::Filter)
-        );
-        assert_eq!(
-            sc.next_fallback(&InputMode::Filter),
-            Some(&InputMode::Traditional)
-        );
-        assert_eq!(sc.next_fallback(&InputMode::Traditional), None);
     }
 
     #[test]
     fn security_config_serde_roundtrip() {
         let sc = SecurityConfig {
-            taint_tracking: true,
-            pointer_mode: true,
-            filter_mode: Some(FilterMode::Freeform),
-            degradation: vec![InputMode::Pointer, InputMode::Traditional],
+            taint_tracking: false,
         };
         let json = serde_json::to_string(&sc).unwrap();
         let back: SecurityConfig = serde_json::from_str(&json).unwrap();
-        assert!(back.taint_tracking);
-        assert!(back.pointer_mode);
-        assert_eq!(back.filter_mode, Some(FilterMode::Freeform));
+        assert!(!back.taint_tracking);
     }
 
     // ─── GateDecision ───────────────────────────────────────────────────────
@@ -1152,7 +780,6 @@ mod tests {
             timestamp: 1234567890,
             agent_id: "agent-1".into(),
             tool_name: "send_email".into(),
-            input_mode: InputMode::Traditional,
             taint_level: TaintLevel::Private,
             clearance: TaintLevel::Public,
             allowed: false,
@@ -1274,7 +901,6 @@ mod tests {
     fn sec(taint: bool) -> SecurityConfig {
         SecurityConfig {
             taint_tracking: taint,
-            ..SecurityConfig::default()
         }
     }
 
@@ -1350,36 +976,5 @@ mod tests {
         // An out-of-range index is a no-op.
         rt.remove_at(99);
         assert_eq!(rt.entry_count(), 2);
-    }
-
-    #[test]
-    fn test_security_config_next_fallback() {
-        let config = SecurityConfig {
-            taint_tracking: true,
-            pointer_mode: true,
-            filter_mode: None,
-            degradation: vec![
-                InputMode::Pointer,
-                InputMode::Filter,
-                InputMode::Traditional,
-            ],
-        };
-        assert_eq!(
-            config.next_fallback(&InputMode::Pointer),
-            Some(&InputMode::Filter)
-        );
-        assert_eq!(
-            config.next_fallback(&InputMode::Filter),
-            Some(&InputMode::Traditional)
-        );
-        // The last mode in the path has no fallback.
-        assert_eq!(config.next_fallback(&InputMode::Traditional), None);
-
-        // A mode absent from the degradation path has no fallback.
-        let cfg2 = SecurityConfig {
-            degradation: vec![InputMode::Traditional],
-            ..SecurityConfig::default()
-        };
-        assert_eq!(cfg2.next_fallback(&InputMode::Pointer), None);
     }
 }

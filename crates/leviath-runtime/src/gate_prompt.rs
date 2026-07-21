@@ -280,7 +280,6 @@ mod tests {
     fn gate() -> TaintGate {
         TaintGate::new(SecurityConfig {
             taint_tracking: true,
-            ..Default::default()
         })
     }
 
