@@ -18,19 +18,6 @@ pub(crate) fn configure_detached(cmd: &mut Command) {
     cmd.process_group(0);
 }
 
-/// Send `SIGTERM` to `pid`, guarding against the `kill(0, …)` process-group case.
-pub(crate) fn terminate(pid: u32) -> bool {
-    if pid == 0 {
-        return false;
-    }
-    use nix::sys::signal::{Signal, kill};
-    use nix::unistd::Pid;
-    // Best-effort: any error (e.g. `ESRCH` when the process has already exited)
-    // is intentionally ignored.
-    let _ = kill(Pid::from_raw(pid as i32), Signal::SIGTERM);
-    true
-}
-
 /// Set the exact permission bits on `path`.
 pub(crate) fn set_mode(path: &Path, mode: u32) -> io::Result<()> {
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))
@@ -120,18 +107,5 @@ mod tests {
         // takes effect on a later spawn(), which this test deliberately omits.
         let mut cmd = Command::new("true");
         configure_detached(&mut cmd);
-    }
-
-    #[test]
-    fn terminate_rejects_pid_zero() {
-        assert!(!terminate(0));
-    }
-
-    #[test]
-    fn terminate_dispatches_to_nonexistent_pid() {
-        // A pid far beyond any real PID_MAX: kill() returns ESRCH, which we
-        // ignore, so terminate reports the signal as dispatched. Deliberately
-        // huge so the test never signals a real, unrelated process.
-        assert!(terminate(2_000_000_000));
     }
 }

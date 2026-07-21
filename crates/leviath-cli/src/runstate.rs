@@ -268,12 +268,6 @@ pub fn tail_file(path: &std::path::Path, max_bytes: u64) -> String {
     }
 }
 
-/// Read the last `max_bytes` of a run's combined output log (legacy).
-#[allow(dead_code)]
-pub fn tail_log(run_id: &str, max_bytes: u64) -> String {
-    tail_file(&run_dir(run_id).join("output.log"), max_bytes)
-}
-
 // ─── Per-stage persistence ────────────────────────────────────────────────────
 
 /// Directory for per-stage files within a run.
@@ -1366,21 +1360,6 @@ mod tests {
         // either of the two `Err(_) => return String::new()` early returns.
         let dir = tempfile::tempdir().unwrap();
         assert_eq!(tail_file(dir.path(), 4), "");
-    }
-
-    #[test]
-    fn tail_log_reads_output_log_for_run_id() {
-        // tail_log() itself (as opposed to tail_file(), which every other
-        // test here calls directly) had zero coverage -- it's a one-line
-        // wrapper joining run_dir(run_id) with "output.log".
-        with_isolated_runs_dir("tail-log-reads-output-log-for-run-id", |_d| {
-            let run_id = "test-tail-log-run";
-            let dir = run_dir(run_id);
-            std::fs::create_dir_all(&dir).unwrap();
-            std::fs::write(dir.join("output.log"), "hello from output.log").unwrap();
-
-            assert_eq!(tail_log(run_id, 1024), "hello from output.log");
-        });
     }
 
     #[cfg(unix)]
