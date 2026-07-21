@@ -286,7 +286,7 @@ pub fn build_agent(
         workdir: args.workdir.clone(),
         num_stages,
         started_at: now_secs,
-        parent_run_id: None,
+        parent_run_id: args.parent_run_id.clone(),
         metadata: args.metadata.clone(),
         callback_url: args.callback_url.clone(),
         title: None,
@@ -560,6 +560,7 @@ mod tests {
             yolo: false,
             allow: Vec::new(),
             max_depth: None,
+            parent_run_id: None,
         }
     }
 

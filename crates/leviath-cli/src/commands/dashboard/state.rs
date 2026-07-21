@@ -62,6 +62,10 @@ pub(crate) struct Dashboard {
     pub(super) list_search_query: String,
     /// Sorted + filtered indices into self.agents (drives both display and selection).
     pub(super) display_indices: Vec<usize>,
+    /// Tree-connector prefix for each `display_indices` row (parent → child
+    /// nesting), parallel to `display_indices`. Empty strings when filtering (the
+    /// list is flat then).
+    pub(super) tree_prefixes: Vec<String>,
     /// Filesystem path this dashboard appends its activity log to. Production
     /// construction resolves the real [`runstate::dashboard_log_path`]; tests
     /// (`make_test_dashboard`) inject a temp path so no test ever writes to the
@@ -134,6 +138,7 @@ impl Dashboard {
             list_search_mode: false,
             list_search_query: String::new(),
             display_indices: Vec::new(),
+            tree_prefixes: Vec::new(),
         }
     }
 
@@ -206,6 +211,30 @@ impl Dashboard {
             pa.cmp(&pb)
                 .then(self.agents[b].started_at.cmp(&self.agents[a].started_at))
         });
+        // With no filter, re-order into a parent → child tree so sub-agents and
+        // fan-out workers nest under their parent (roots keep their recency order);
+        // a filter keeps the flat sorted list (a partial match can't form a tree).
+        let prefixes: Vec<String> = if query.is_empty() {
+            // Roots keep the status-sorted order; an agent whose parent is absent
+            // is treated as a root so it can't disappear from the list.
+            let present: std::collections::HashSet<&str> =
+                self.agents.iter().map(|a| a.id.as_str()).collect();
+            let roots: Vec<usize> = indices
+                .iter()
+                .copied()
+                .filter(|&i| {
+                    self.agents[i]
+                        .parent_id
+                        .as_deref()
+                        .is_none_or(|p| !present.contains(p))
+                })
+                .collect();
+            let tree = self.build_tree_order(&roots);
+            indices = tree.iter().map(|(i, _)| *i).collect();
+            tree.into_iter().map(|(_, prefix)| prefix).collect()
+        } else {
+            vec![String::new(); indices.len()]
+        };
         // Preserve selection: try to keep the same agent highlighted after recompute
         let prev_id = self
             .display_indices
@@ -213,6 +242,7 @@ impl Dashboard {
             .and_then(|&i| self.agents.get(i))
             .map(|a| a.id.clone());
         self.display_indices = indices;
+        self.tree_prefixes = prefixes;
         if let Some(id) = prev_id {
             if let Some(pos) = self
                 .display_indices
@@ -482,7 +512,7 @@ impl Dashboard {
                     task: run.task.clone(),
                     title: run.title.clone(),
                     model: run.model.clone(),
-                    parent_id: None,
+                    parent_id: run.parent_run_id.clone(),
                     depth: 0,
                     started_at: run.started_at,
                     // Freeze the elapsed timer for agents that are already waiting
@@ -594,28 +624,17 @@ impl Dashboard {
 
     /// Build a tree-ordered list of agent indices with tree connector prefixes.
     ///
-    /// Returns Vec<(original_index, tree_prefix)> in depth-first tree order.
-    #[allow(dead_code)]
-    pub(super) fn build_tree_order(&self) -> Vec<(usize, String)> {
+    /// Depth-first tree order over the given root agent indices (in the order
+    /// supplied — the caller sorts them), nesting each root's children beneath it.
+    /// Returns `Vec<(original_index, tree_prefix)>`.
+    pub(super) fn build_tree_order(&self, root_order: &[usize]) -> Vec<(usize, String)> {
         let mut result = Vec::new();
-
-        // Find root agents (no parent_id)
-        let root_indices: Vec<usize> = self
-            .agents
-            .iter()
-            .enumerate()
-            .filter(|(_, a)| a.parent_id.is_none())
-            .map(|(i, _)| i)
-            .collect();
-
-        for &idx in &root_indices {
+        for &idx in root_order {
             self.collect_tree_children(idx, "", &mut result, true);
         }
-
         result
     }
 
-    #[allow(dead_code)]
     fn collect_tree_children(
         &self,
         idx: usize,
@@ -659,6 +678,17 @@ mod tests {
     use super::*;
 
     use crate::commands::dashboard::test_support::make_test_dashboard;
+
+    /// Root agent indices (no parent), in agent order — the input the production
+    /// path feeds to `build_tree_order` (there it's the status-sorted roots).
+    fn roots_of(dash: &Dashboard) -> Vec<usize> {
+        dash.agents
+            .iter()
+            .enumerate()
+            .filter(|(_, a)| a.parent_id.is_none())
+            .map(|(i, _)| i)
+            .collect()
+    }
 
     fn make_test_agent(id: &str, status: AgentDisplayStatus) -> DashboardAgent {
         DashboardAgent {
@@ -749,6 +779,38 @@ mod tests {
         assert_eq!(dash.agents[dash.display_indices[0]].id, "run-2"); // Active
         assert_eq!(dash.agents[dash.display_indices[1]].id, "run-3"); // Waiting
         assert_eq!(dash.agents[dash.display_indices[2]].id, "run-1"); // Complete
+    }
+
+    #[test]
+    fn update_display_indices_nests_children_under_their_parent() {
+        let mut dash = make_test_dashboard();
+        dash.agents
+            .push(make_test_agent("parent", AgentDisplayStatus::Active));
+        let mut child = make_test_agent("child", AgentDisplayStatus::Active);
+        child.parent_id = Some("parent".to_string());
+        dash.agents.push(child);
+        dash.update_display_indices();
+
+        // Parent then child, with the child nested under it via a tree connector.
+        assert_eq!(dash.display_indices.len(), 2);
+        assert_eq!(dash.agents[dash.display_indices[0]].id, "parent");
+        assert_eq!(dash.agents[dash.display_indices[1]].id, "child");
+        assert_eq!(dash.tree_prefixes[0], ""); // root: no prefix
+        assert!(dash.tree_prefixes[1].contains('─')); // child: tree connector
+    }
+
+    #[test]
+    fn update_display_indices_shows_an_orphan_child_as_a_root() {
+        let mut dash = make_test_dashboard();
+        let mut orphan = make_test_agent("orphan", AgentDisplayStatus::Active);
+        orphan.parent_id = Some("gone".to_string()); // parent not in the list
+        dash.agents.push(orphan);
+        dash.update_display_indices();
+
+        // A child whose parent is absent is treated as a root, not dropped.
+        assert_eq!(dash.display_indices.len(), 1);
+        assert_eq!(dash.agents[dash.display_indices[0]].id, "orphan");
+        assert_eq!(dash.tree_prefixes[0], "");
     }
 
     #[test]
@@ -886,7 +948,7 @@ mod tests {
     #[test]
     fn build_tree_order_empty() {
         let dash = make_test_dashboard();
-        assert!(dash.build_tree_order().is_empty());
+        assert!(dash.build_tree_order(&roots_of(&dash)).is_empty());
     }
 
     #[test]
@@ -894,7 +956,7 @@ mod tests {
         let mut dash = make_test_dashboard();
         dash.agents
             .push(make_test_agent("root", AgentDisplayStatus::Active));
-        let tree = dash.build_tree_order();
+        let tree = dash.build_tree_order(&roots_of(&dash));
         assert_eq!(tree.len(), 1);
         assert_eq!(tree[0].0, 0);
         assert!(tree[0].1.is_empty()); // root has no prefix
@@ -908,7 +970,7 @@ mod tests {
         let mut child = make_test_agent("child", AgentDisplayStatus::Active);
         child.parent_id = Some("parent".to_string());
         dash.agents.push(child);
-        let tree = dash.build_tree_order();
+        let tree = dash.build_tree_order(&roots_of(&dash));
         assert_eq!(tree.len(), 2);
         assert_eq!(tree[0].0, 0); // parent
         assert_eq!(tree[1].0, 1); // child
@@ -1005,7 +1067,7 @@ mod tests {
         dash.agents.push(child1);
         dash.agents.push(child2);
 
-        let tree = dash.build_tree_order();
+        let tree = dash.build_tree_order(&roots_of(&dash));
         assert_eq!(tree.len(), 3);
         assert_eq!(tree[0].0, 0); // parent
         assert!(tree[0].1.is_empty()); // root has no prefix
@@ -1029,7 +1091,7 @@ mod tests {
         grandchild.parent_id = Some("child".to_string());
         dash.agents.push(grandchild);
 
-        let tree = dash.build_tree_order();
+        let tree = dash.build_tree_order(&roots_of(&dash));
         assert_eq!(tree.len(), 3);
         assert_eq!(tree[0].0, 0); // root
         assert_eq!(tree[1].0, 1); // child
@@ -1124,7 +1186,7 @@ mod tests {
         gc.parent_id = Some("child1".to_string());
         dash.agents.push(gc);
 
-        let tree = dash.build_tree_order();
+        let tree = dash.build_tree_order(&roots_of(&dash));
         assert_eq!(tree.len(), 4);
         assert_eq!(tree[0].0, 0); // root
         assert!(tree[0].1.is_empty()); // root has no prefix
@@ -1150,7 +1212,7 @@ mod tests {
         child.parent_id = Some("root1".to_string());
         dash.agents.push(child);
 
-        let tree = dash.build_tree_order();
+        let tree = dash.build_tree_order(&roots_of(&dash));
         assert_eq!(tree.len(), 3);
         // root1 and child-of-1 should be adjacent
         assert_eq!(tree[0].0, 0); // root1

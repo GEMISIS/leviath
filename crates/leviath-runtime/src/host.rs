@@ -60,6 +60,11 @@ pub struct SpawnArgs {
     /// Override the blueprint's max sub-agent tree depth.
     #[serde(default)]
     pub max_depth: Option<usize>,
+    /// The run id of this agent's parent, when it is a sub-agent / fan-out
+    /// worker. Persisted in the run metadata so observers (dashboard, `serve`
+    /// tree) can nest children under their parent. `None` for a top-level run.
+    #[serde(default)]
+    pub parent_run_id: Option<String>,
 }
 
 /// The daemon-installed function that turns [`SpawnArgs`] into a live agent:
@@ -569,10 +574,12 @@ impl WorldHost {
     /// live, the depth limit is reached, or the spawner rejects it.
     fn spawn_child(
         &mut self,
-        args: SpawnArgs,
+        mut args: SpawnArgs,
         parent_run_id: &str,
         max_depth: usize,
     ) -> Result<String, String> {
+        // Record the parentage so the child's run metadata nests it in the tree.
+        args.parent_run_id = Some(parent_run_id.to_string());
         let parent = self
             .live_entity(parent_run_id)
             .ok_or_else(|| format!("parent run '{parent_run_id}' is not live"))?;

@@ -542,6 +542,7 @@ mod tests {
                 yolo: false,
                 allow: Vec::new(),
                 max_depth: None,
+                parent_run_id: None,
             },
         })
         .await;

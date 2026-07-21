@@ -53,18 +53,18 @@ impl FanOutSpawner for DaemonFanOutSpawner {
         item_id: &str,
         item_context: &serde_json::Value,
     ) -> Result<Entity, String> {
-        // The parent supplies the worker's workdir and (for `worker_stage`) its
-        // blueprint path.
-        let (parent_path, workdir) = world
+        // The parent supplies the worker's workdir, run id (parentage), and (for
+        // `worker_stage`) its blueprint path.
+        let (parent_path, workdir, parent_run_id) = world
             .get::<RunMetadata>(parent)
-            .map(|md| (md.agent_path.clone(), md.workdir.clone()))
+            .map(|md| (md.agent_path.clone(), md.workdir.clone(), md.run_id.clone()))
             .ok_or_else(|| "fan-out parent has no run metadata".to_string())?;
 
         let (resolve_path, entry_stage) =
             resolve_worker_source(config, &parent_path, self.agents_dir.as_deref())?;
 
         let task = format_worker_task(item_id, item_context);
-        let args = resolve_spawn_args(
+        let mut args = resolve_spawn_args(
             &resolve_path,
             &task,
             None,
@@ -74,6 +74,8 @@ impl FanOutSpawner for DaemonFanOutSpawner {
             None,
         )
         .map_err(|e| format!("resolve worker blueprint: {e}"))?;
+        // Nest the worker under its fan-out parent in the run tree.
+        args.parent_run_id = Some(parent_run_id);
 
         let child = build_agent(
             world,
@@ -337,6 +339,7 @@ mod tests {
             yolo: false,
             allow: Vec::new(),
             max_depth: None,
+            parent_run_id: None,
         };
         let parent = build_agent(
             world.world_mut(),
