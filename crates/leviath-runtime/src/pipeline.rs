@@ -868,6 +868,7 @@ pub fn collect_tools(
             Option<&StageCursor>,
             Option<&mut StageIoBuffer>,
             Option<&AgentBlueprint>,
+            Option<&mut crate::repetition::RepetitionDetector>,
         ),
         With<AwaitingTools>,
     >,
@@ -883,6 +884,7 @@ pub fn collect_tools(
             cursor,
             buffer,
             blueprint,
+            repetition,
         )) = agents.get_mut(outcome.entity)
         else {
             continue; // stale: agent cancelled/despawned since dispatch
@@ -918,6 +920,20 @@ pub fn collect_tools(
             routing.map(|c| &c.routing),
             sensitivities.map(|s| &s.0),
         );
+        // Repetition detection: record each call and inject a `[System]` nudge
+        // when the agent is looping (same tool+args, or a long read-only streak).
+        if let Some(mut detector) = repetition {
+            let nudges: Vec<String> = infer
+                .tool_calls
+                .iter()
+                .filter_map(|call| detector.record_call(&call.name, &call.arguments.to_string()))
+                .collect();
+            for nudge in nudges {
+                let content = format!("[System] {nudge}");
+                let tokens = content.len() / 4 + 1;
+                let _ = window.add_to_region("conversation", content, tokens);
+            }
+        }
         commands
             .entity(outcome.entity)
             .remove::<AwaitingTools>()
@@ -2269,6 +2285,12 @@ pub fn spawn_agent(
             .collect(),
     );
 
+    // Repetition detection is opt-in per blueprint.
+    let repetition = blueprint
+        .repetition_detection
+        .as_ref()
+        .map(crate::repetition::RepetitionDetector::from_detection_config);
+
     let entity = world
         .spawn((
             AgentBlueprint(blueprint),
@@ -2297,6 +2319,9 @@ pub fn spawn_agent(
     world
         .entity_mut(entity)
         .insert((ledger, StageIoBuffer::default()));
+    if let Some(detector) = repetition {
+        world.entity_mut(entity).insert(detector);
+    }
     if let Some(routing) = stage0_routing {
         world
             .entity_mut(entity)
@@ -3195,7 +3220,12 @@ mod tests {
                 leviath_core::blueprint::ModelConfig::new("p".to_string(), "m".to_string()),
             )
         };
-        let bp = blueprint(vec![mk("plan"), mk("build")]);
+        let mut bp = blueprint(vec![mk("plan"), mk("build")]);
+        bp.repetition_detection = Some(leviath_core::blueprint::RepetitionDetectionConfig {
+            max_repeat_calls: Some(2),
+            max_readonly_streak: None,
+            enabled: Some(true),
+        });
         let mut world = World::new();
         let e = spawn_agent(
             &mut world,
@@ -3210,6 +3240,12 @@ mod tests {
         assert_eq!(led.0[0].name, "plan");
         assert_eq!(led.0[1].name, "build");
         assert!(world.get::<StageIoBuffer>(e).is_some());
+        // The repetition detector was seeded from the blueprint config.
+        assert!(
+            world
+                .get::<crate::repetition::RepetitionDetector>(e)
+                .is_some()
+        );
     }
 
     #[test]
@@ -5963,6 +5999,50 @@ mod tests {
                 .content
                 .len(),
             1
+        );
+    }
+
+    // ── repetition detection (#8) ──
+
+    #[test]
+    fn collect_tools_injects_repetition_nudge_when_looping() {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let mut world = World::new();
+        world.insert_resource(ToolResults(rx));
+        let e = world
+            .spawn((
+                ctx(&[("conversation", 10_000)]),
+                // Two identical read_file calls (args are Null for both).
+                infer_with(vec![tc("c1", "read_file"), tc("c2", "read_file")]),
+                AwaitingTools,
+                crate::repetition::RepetitionDetector::new(crate::repetition::RepetitionConfig {
+                    max_repeat_calls: 1,
+                    max_readonly_streak: 100,
+                    enabled: true,
+                }),
+            ))
+            .id();
+        tx.send(ToolOutcome {
+            entity: e,
+            results: vec![
+                ("c1".to_string(), "body".to_string()),
+                ("c2".to_string(), "body".to_string()),
+            ],
+        })
+        .unwrap();
+        run_collect_tools(&mut world);
+        let joined: String = world
+            .get::<ContextWindow>(e)
+            .unwrap()
+            .get_region("conversation")
+            .unwrap()
+            .content
+            .iter()
+            .map(|entry| entry.content.clone())
+            .collect();
+        assert!(
+            joined.contains("[System]"),
+            "expected a nudge, got: {joined}"
         );
     }
 
