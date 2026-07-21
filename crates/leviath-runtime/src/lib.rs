@@ -40,7 +40,7 @@ pub use components::{
     InferenceResult, MessageInbox, ParentRef, SubAgentChildren, ToolResultRoutingComponent,
 };
 pub use fanout::{FanOutSpawner, FanOutSpawnerRes, WorkItem, parse_work_items};
-pub use inference_bridge::{InferenceJob, InferenceOutcome, run_inference_job};
+pub use inference_bridge::{InferenceJob, InferenceOutcome, RetryPolicy, run_inference_job};
 pub use inference_pool::{InferencePermit, InferencePoolConfig, InferencePools};
 pub use provider_creds::{ProviderCreds, build_provider_registry};
 pub use providers::ProviderRegistry;
