@@ -19,10 +19,13 @@ use leviath_providers::{InferenceRequest, Provider, Tool};
 
 use crate::compaction_bridge::{CompactionJob, CompactionOutcome, run_compaction_job};
 use crate::components::{
-    AgentMessage, AgentState, AgentStatus, ContextWindow, InferenceConfig, MessageInbox,
+    AgentMessage, AgentState, AgentStatus, AwaitingInteraction, ContextWindow, InferenceConfig,
+    MessageInbox,
 };
+use crate::fanout::FanOutWaiting;
 use crate::inference_bridge::{InferenceJob, InferenceOutcome, run_inference_job};
 use crate::inference_pool::InferencePools;
+use crate::interaction_hub::InteractionHub;
 use crate::persistence::{RunMetadata, TokenTotals, build_context_snapshot, build_run_meta};
 use crate::persistence_bridge::PersistJob;
 use crate::providers::ProviderRegistry;
@@ -1094,6 +1097,51 @@ pub struct PersistenceStage(pub UnboundedSender<PersistJob>);
 /// lane. Fire-and-forget — no result to collect; the single-worker lane keeps a
 /// given agent's writes ordered. Agents without [`RunMetadata`] aren't persisted.
 #[allow(clippy::type_complexity)]
+/// Interaction-status reflection system: mirror the shared [`InteractionHub`]'s
+/// open requests into agent status so a blocked agent shows as `Waiting` (and
+/// the dashboard / `lev ps` surface its prompt) instead of a silent `Active`.
+///
+/// An agent's `ask_user_*` / tool-approval / plan-approval call blocks deep in
+/// the async tool lane, invisible to the ECS — which otherwise leaves the agent
+/// `Active` with meta.json written `running`, so the dashboard (gated on
+/// `WaitingInput`) never shows the prompt and the run looks frozen. This system
+/// closes that gap: an agent whose id has an open hub request flips
+/// `Active → Waiting` (tagged [`AwaitingInteraction`]); when the request clears
+/// it flips back `Waiting → Active`. Fan-out waiting ([`FanOutWaiting`]) is left
+/// untouched. No-op when the world has no hub resource (test worlds).
+pub fn reflect_interaction_status(
+    hub: Option<Res<InteractionHub>>,
+    mut agents: Query<
+        (Entity, &mut AgentState, Option<&AwaitingInteraction>),
+        Without<FanOutWaiting>,
+    >,
+    mut commands: Commands,
+) {
+    let Some(hub) = hub else { return };
+    let pending: std::collections::HashSet<String> =
+        hub.pending().into_iter().map(|(id, _)| id).collect();
+    for (entity, mut state, marked) in agents.iter_mut() {
+        match (pending.contains(&state.agent_id), marked.is_some()) {
+            // Newly blocked on a prompt: surface it as Waiting.
+            (true, false) => {
+                if state.status == AgentStatus::Active {
+                    state.status = AgentStatus::Waiting;
+                    commands.entity(entity).insert(AwaitingInteraction);
+                }
+            }
+            // Request cleared (answered / cancelled): return to Active, unless
+            // the agent has since reached a terminal status.
+            (false, true) => {
+                commands.entity(entity).remove::<AwaitingInteraction>();
+                if state.status == AgentStatus::Waiting {
+                    state.status = AgentStatus::Active;
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
 pub fn dispatch_persistence(
     mut agents: Query<(
         &RunMetadata,
@@ -4636,6 +4684,150 @@ mod tests {
         let mut s = Schedule::default();
         s.add_systems(dispatch_persistence);
         s.run(world);
+    }
+
+    // ── interaction-status reflection ──
+
+    fn run_reflect(world: &mut World) {
+        let mut s = Schedule::default();
+        s.add_systems(reflect_interaction_status);
+        s.run(world);
+    }
+
+    fn reflect_state(id: &str, status: AgentStatus) -> AgentState {
+        AgentState {
+            agent_id: id.to_string(),
+            status,
+            ..agent_state()
+        }
+    }
+
+    /// Register an open request for `agent_id` and wait for it to land in the
+    /// hub. Returns the join handle for the still-awaiting `ask` so the caller
+    /// can drop it at the end.
+    async fn open_request(
+        hub: &InteractionHub,
+        agent_id: &str,
+        request_id: &str,
+    ) -> tokio::task::JoinHandle<leviath_core::interaction::InteractionResponse> {
+        use crate::dynamic_interaction::InteractionBackend;
+        let backend = hub.backend_for(agent_id.to_string());
+        let rid = request_id.to_string();
+        let handle = tokio::spawn(async move {
+            backend
+                .ask(leviath_core::interaction::InteractionRequest::free_text(
+                    rid, "p", "s", true,
+                ))
+                .await
+        });
+        for _ in 0..8 {
+            tokio::task::yield_now().await;
+        }
+        handle
+    }
+
+    #[tokio::test]
+    async fn reflect_flips_active_to_waiting_and_back_when_prompt_clears() {
+        let hub = InteractionHub::new();
+        let asking = open_request(&hub, "a", "q1").await;
+
+        let mut world = World::new();
+        world.insert_resource(hub.clone());
+        let e = world.spawn(reflect_state("a", AgentStatus::Active)).id();
+
+        // Open prompt ⇒ Active → Waiting, tagged AwaitingInteraction.
+        run_reflect(&mut world);
+        assert_eq!(
+            world.get::<AgentState>(e).unwrap().status,
+            AgentStatus::Waiting
+        );
+        assert!(world.get::<AwaitingInteraction>(e).is_some());
+
+        // Still pending, already marked ⇒ no-op (the `(true, true)` arm).
+        run_reflect(&mut world);
+        assert_eq!(
+            world.get::<AgentState>(e).unwrap().status,
+            AgentStatus::Waiting
+        );
+
+        // Answered ⇒ Waiting → Active, marker removed.
+        assert!(
+            hub.answer(leviath_core::interaction::InteractionResponse::text(
+                "q1", "ok"
+            ))
+        );
+        run_reflect(&mut world);
+        assert_eq!(
+            world.get::<AgentState>(e).unwrap().status,
+            AgentStatus::Active
+        );
+        assert!(world.get::<AwaitingInteraction>(e).is_none());
+
+        // No pending, no marker ⇒ no-op (the `(false, false)` arm).
+        run_reflect(&mut world);
+        assert_eq!(
+            world.get::<AgentState>(e).unwrap().status,
+            AgentStatus::Active
+        );
+        let _ = asking.await;
+    }
+
+    #[tokio::test]
+    async fn reflect_does_not_flip_a_non_active_agent_with_an_open_prompt() {
+        // A terminal agent that happens to still have an open hub entry is left
+        // as-is (the inner `status == Active` guard) — no spurious Waiting.
+        let hub = InteractionHub::new();
+        let asking = open_request(&hub, "a", "q1").await;
+
+        let mut world = World::new();
+        world.insert_resource(hub.clone());
+        let e = world.spawn(reflect_state("a", AgentStatus::Complete)).id();
+
+        run_reflect(&mut world);
+        assert_eq!(
+            world.get::<AgentState>(e).unwrap().status,
+            AgentStatus::Complete
+        );
+        assert!(world.get::<AwaitingInteraction>(e).is_none());
+        hub.cancel("q1");
+        let _ = asking.await;
+    }
+
+    #[test]
+    fn reflect_clears_a_stale_marker_without_reviving_a_terminal_agent() {
+        // Marker present, request gone, but the agent has since gone terminal:
+        // remove the marker but leave the terminal status untouched (the
+        // `status == Waiting` guard on the restore path).
+        let hub = InteractionHub::new(); // empty ⇒ nothing pending
+        let mut world = World::new();
+        world.insert_resource(hub);
+        let e = world
+            .spawn((
+                reflect_state("a", AgentStatus::Cancelled),
+                AwaitingInteraction,
+            ))
+            .id();
+
+        run_reflect(&mut world);
+        assert_eq!(
+            world.get::<AgentState>(e).unwrap().status,
+            AgentStatus::Cancelled
+        );
+        assert!(world.get::<AwaitingInteraction>(e).is_none());
+    }
+
+    #[test]
+    fn reflect_is_a_noop_without_a_hub_resource() {
+        // Test worlds don't install the hub; the system must not panic and must
+        // leave agents untouched.
+        let mut world = World::new();
+        let e = world.spawn(reflect_state("a", AgentStatus::Active)).id();
+        run_reflect(&mut world);
+        assert_eq!(
+            world.get::<AgentState>(e).unwrap().status,
+            AgentStatus::Active
+        );
+        assert!(world.get::<AwaitingInteraction>(e).is_none());
     }
 
     fn spawn_persistable(world: &mut World) -> Entity {

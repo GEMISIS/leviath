@@ -13,10 +13,11 @@
 //! agents, which is acceptable (the lane becomes a pool later).
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 
+use bevy_ecs::prelude::Resource;
 use leviath_core::interaction::{InteractionRequest, InteractionResponse};
-use tokio::sync::oneshot;
+use tokio::sync::{Notify, oneshot};
 
 use crate::dynamic_interaction::InteractionBackend;
 
@@ -31,16 +32,36 @@ struct PendingEntry {
 }
 
 /// A process-wide registry of open interactions, keyed by request id. Cheap to
-/// clone (shared `Arc`).
-#[derive(Clone, Default)]
+/// clone (shared `Arc`). Also a bevy [`Resource`] so the tick loop's
+/// [`reflect_interaction_status`](crate::pipeline::reflect_interaction_status)
+/// system can mirror open requests into agent status.
+#[derive(Clone, Default, Resource)]
 pub struct InteractionHub {
     pending: Arc<Mutex<HashMap<String, PendingEntry>>>,
+    /// The tick-loop wake handle, attached once by
+    /// [`PipelineWorld::insert_interaction_hub`](crate::world::PipelineWorld::insert_interaction_hub).
+    /// Opening, answering, or cancelling a request nudges it so the loop ticks
+    /// (while otherwise parked) and reflects the change into agent status.
+    wake: Arc<OnceLock<Arc<Notify>>>,
 }
 
 impl InteractionHub {
     /// A fresh, empty hub.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Attach the tick-loop wake handle so registry changes wake the driver.
+    /// Idempotent: a second call is ignored (the handle is set once at startup).
+    pub fn attach_wake(&self, wake: Arc<Notify>) {
+        let _ = self.wake.set(wake);
+    }
+
+    /// Wake the tick loop if a handle is attached (no-op otherwise).
+    fn nudge(&self) {
+        if let Some(wake) = self.wake.get() {
+            wake.notify_one();
+        }
     }
 
     /// Register a request from `agent_id` and await its answer. Returns a neutral
@@ -56,6 +77,9 @@ impl InteractionHub {
                 responder,
             },
         );
+        // Wake the driver so it ticks and reflects this open request into the
+        // agent's status (Active → Waiting) for the dashboard to surface.
+        self.nudge();
         // The lock is released before awaiting; answer()/cancel() can run.
         rx.await
             .unwrap_or_else(|_| InteractionResponse::text(id, ""))
@@ -81,6 +105,9 @@ impl InteractionHub {
                 // The awaiting `submit` may have gone away (agent despawned); a
                 // failed send is harmless.
                 let _ = entry.responder.send(response);
+                // Wake the driver so it reflects the now-cleared request back
+                // into the agent's status (Waiting → Active).
+                self.nudge();
                 true
             }
             None => false,
@@ -91,7 +118,11 @@ impl InteractionHub {
     /// Returns `false` if no such request is open.
     pub fn cancel(&self, request_id: &str) -> bool {
         // Dropping the entry drops its responder, waking `submit` with an error.
-        self.pending.lock().unwrap().remove(request_id).is_some()
+        let removed = self.pending.lock().unwrap().remove(request_id).is_some();
+        if removed {
+            self.nudge();
+        }
+        removed
     }
 
     /// A per-agent [`InteractionBackend`] backed by this hub.
@@ -158,6 +189,43 @@ mod tests {
     async fn answer_unknown_request_is_false() {
         let hub = InteractionHub::new();
         assert!(!hub.answer(InteractionResponse::text("nope", "x")));
+    }
+
+    #[tokio::test]
+    async fn submit_and_answer_nudge_the_attached_wake() {
+        let hub = InteractionHub::new();
+        let wake = Arc::new(Notify::new());
+        hub.attach_wake(wake.clone());
+        // A second attach is ignored — the handle is set once at startup.
+        hub.attach_wake(Arc::new(Notify::new()));
+
+        let backend = hub.backend_for("agent-a");
+        let asking = tokio::spawn(async move { backend.ask(req("q1")).await });
+        settle().await;
+
+        // submit() nudged the original wake.
+        wake.notified().await;
+
+        // answer() nudges it again (consume the submit permit first).
+        assert!(hub.answer(InteractionResponse::text("q1", "hi")));
+        wake.notified().await;
+        assert_eq!(asking.await.unwrap().value.as_deref(), Some("hi"));
+    }
+
+    #[tokio::test]
+    async fn cancel_nudges_the_attached_wake() {
+        let hub = InteractionHub::new();
+        let wake = Arc::new(Notify::new());
+        hub.attach_wake(wake.clone());
+
+        let backend = hub.backend_for("agent-a");
+        let asking = tokio::spawn(async move { backend.ask(req("q2")).await });
+        settle().await;
+        wake.notified().await; // drain the submit nudge
+
+        assert!(hub.cancel("q2"));
+        wake.notified().await; // cancel nudged the wake
+        let _ = asking.await.unwrap();
     }
 
     #[tokio::test]
