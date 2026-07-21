@@ -544,6 +544,8 @@ pub struct GateEvent {
 pub enum GateDecisionSource {
     /// Taint was within clearance — automatic allow.
     AutoAllow,
+    /// Taint exceeded clearance — automatic block, before any user decision.
+    AutoBlock,
     /// Matched a static allowlist rule.
     AllowlistRule { rule_index: usize },
     /// Matched a scripted (Rhai) rule.

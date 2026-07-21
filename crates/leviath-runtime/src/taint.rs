@@ -171,7 +171,7 @@ impl TaintGate {
                 taint,
                 classification.clearance,
                 false,
-                GateDecisionSource::UserDenied, // placeholder — caller decides
+                GateDecisionSource::AutoBlock,
             );
 
             GateDecision::Blocked {
@@ -226,7 +226,7 @@ impl TaintGate {
                 reference_taint,
                 classification.clearance,
                 false,
-                GateDecisionSource::UserDenied,
+                GateDecisionSource::AutoBlock,
             );
             GateDecision::Blocked {
                 taint_level: reference_taint,
@@ -281,7 +281,7 @@ impl TaintGate {
                 source_region_taint,
                 classification.clearance,
                 false,
-                GateDecisionSource::UserDenied,
+                GateDecisionSource::AutoBlock,
             );
             GateDecision::Blocked {
                 taint_level: source_region_taint,
@@ -1849,6 +1849,12 @@ mod tests {
         assert_eq!(gate.audit_log()[0].tool_name, "shell");
         assert_eq!(gate.audit_log()[0].taint_level, TaintLevel::Private);
         assert_eq!(gate.audit_log()[0].input_mode, InputMode::Traditional);
+        // A clearance block is an automatic decision, not a user denial: the
+        // user's choice (if any) is logged later by `apply_resolution`.
+        assert_eq!(
+            gate.audit_log()[0].decision_source,
+            GateDecisionSource::AutoBlock,
+        );
     }
 
     #[test]
