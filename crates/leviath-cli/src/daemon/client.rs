@@ -38,6 +38,8 @@ pub fn resolve_spawn_args(
         yolo,
         allow,
         max_depth,
+        // A top-level run (sub-agents/fan-out set this on the host side).
+        parent_run_id: None,
     })
 }
 

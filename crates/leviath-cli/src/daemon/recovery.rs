@@ -119,6 +119,7 @@ fn reload_one(
         yolo: false,
         allow: Vec::new(),
         max_depth: None,
+        parent_run_id: meta.parent_run_id.clone(),
     };
     let entity = build_agent(
         world.world_mut(),
@@ -166,7 +167,7 @@ fn reload_one(
     md.started_at = meta.started_at;
     md.title = meta.title.clone();
     md.callback_url = meta.callback_url.clone();
-    md.parent_run_id = meta.parent_run_id.clone();
+    // `parent_run_id` was already restored via `args` into build_agent's metadata.
 
     Ok(entity)
 }

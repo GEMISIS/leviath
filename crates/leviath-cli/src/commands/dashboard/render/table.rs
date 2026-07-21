@@ -52,8 +52,11 @@ impl Dashboard {
         let rows: Vec<Row> = self
             .display_indices
             .iter()
-            .map(|&idx| {
+            .enumerate()
+            .map(|(pos, &idx)| {
                 let agent = &self.agents[idx];
+                // Tree-connector prefix (parent → child nesting); empty when flat.
+                let tree_prefix = self.tree_prefixes.get(pos).cloned().unwrap_or_default();
                 let status_color = agent.status.color();
                 let started_str = relative_time(agent.started_at);
                 let title_str = agent
@@ -87,6 +90,7 @@ impl Dashboard {
                 };
                 let short_id = agent.id.split('-').next_back().unwrap_or("").to_string();
                 let title_cell = Cell::from(Line::from(vec![
+                    Span::styled(tree_prefix, Style::default().fg(C_DIM)),
                     Span::styled(title_str, Style::default().fg(C_WHITE)),
                     Span::styled(format!(" #{}", short_id), Style::default().fg(C_DIM)),
                 ]));

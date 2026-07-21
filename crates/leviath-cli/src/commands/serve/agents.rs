@@ -53,6 +53,8 @@ pub(super) async fn spawn_agent(
         yolo: body.yolo,
         allow: body.allow.clone(),
         max_depth: body.max_depth,
+        // Serve spawns are top-level runs.
+        parent_run_id: None,
     };
 
     match state.control.spawn(args).await {
