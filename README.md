@@ -252,13 +252,14 @@ At 10 concurrent agents, Leviath uses **18 MB** of device RAM vs. **3,209 MB** f
 
 ## 🤖 Pre-built Agents
 
-Nine agents ship out of the box — each a multi-stage graph with model fallback (Anthropic → OpenAI → local) and error recovery:
+Ten agents ship out of the box — each a multi-stage graph with model fallback (Anthropic → OpenAI → local) and error recovery:
 
 | Agent | Workflow | Best for |
 |-------|----------|----------|
 | **software-engineer** | plan ⇄ implement ⇄ review | Full coding workflow with human-approved planning *(default)* |
 | **coder** | analyze → implement ⇄ review | Focused implementation with a review loop |
 | **reviewer** | scan → deep_review → report | Code review and audit |
+| **parallel-fixer** | validate → fan-out → merge | Fixing many failing tests at once — one worker per failure |
 | **deep-researcher** | gather ⇄ analyze → synthesize | Thorough single-topic investigation |
 | **wide-researcher** | survey ⇄ compare → summarize | Broad multi-topic landscape survey |
 | **researcher** | gather ⇄ analyze → summarize | General-purpose research |
