@@ -89,11 +89,13 @@ impl PipelineWorld {
         let (tool_res_tx, tool_res_rx) = unbounded_channel();
         let (persist_tx, persist_rx) = unbounded_channel();
         let (msg_tx, msg_rx) = unbounded_channel();
+        let (ip_tx, ip_rx) = unbounded_channel();
 
         let tool_task = runtime.spawn(tool_worker(tool_job_rx, tool_res_tx, wake.clone()));
         // Fire-and-forget: the persistence worker exits when the world (and thus
         // its PersistenceStage sender) is dropped.
         runtime.spawn(persistence_worker(runs_dir, persist_rx));
+        let ip_runtime = runtime.clone();
 
         let mut world = World::new();
         world.insert_resource(Providers(providers));
@@ -105,6 +107,12 @@ impl PipelineWorld {
             wake: wake.clone(),
             runtime,
         });
+        world.insert_resource(crate::interaction_points::InteractionPointStage {
+            outcomes: ip_tx,
+            wake: wake.clone(),
+            runtime: ip_runtime,
+        });
+        world.insert_resource(crate::interaction_points::InteractionPointResults(ip_rx));
         world.insert_resource(InferenceResults(inf_rx));
         world.insert_resource(TransitionResults(trans_rx));
         world.insert_resource(CompactionResults(compact_rx));
@@ -114,6 +122,8 @@ impl PipelineWorld {
         world.insert_resource(PersistenceStage(persist_tx));
         world.insert_resource(MessageIntake(msg_rx));
 
+        // The tick chain is split into two `.chain()`ed groups (bevy caps a
+        // system tuple at 20); the second group runs strictly after the first.
         let mut schedule = Schedule::default();
         schedule.add_systems(
             (
@@ -130,7 +140,19 @@ impl PipelineWorld {
                 process_response,
                 dispatch_tools,
                 collect_tools,
+                // Apply any resolved stage-boundary interaction-point answers
+                // before the stage decides its transition.
+                crate::interaction_points::collect_interaction_point,
+            )
+                .chain(),
+        );
+        schedule.add_systems(
+            (
                 handle_empty_response,
+                // Intercept a would-be transition for an interactive-points stage
+                // (e.g. plan_approval) and drive the interaction-point lane.
+                crate::interaction_points::gate_interaction_points,
+                crate::interaction_points::dispatch_interaction_point,
                 resolve_transition,
                 dispatch_transition_choice,
                 collect_transition_choice,
@@ -143,7 +165,8 @@ impl PipelineWorld {
                 reflect_interaction_status,
                 dispatch_persistence,
             )
-                .chain(),
+                .chain()
+                .after(crate::interaction_points::collect_interaction_point),
         );
 
         Self {
