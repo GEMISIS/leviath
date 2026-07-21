@@ -149,7 +149,8 @@ impl Dashboard {
                     .border_type(BorderType::Rounded)
                     .border_style(Style::default().fg(C_SUCCESS))
                     .title(Span::styled(
-                        " ✎ Editing — [Enter] save  [Alt+↵] newline  [Esc] cancel ",
+                        " ✎ Editing this document — your changes replace it  ·  [Enter] save  \
+                         [Alt+↵] newline  [Esc] cancel ",
                         Style::default().fg(C_SUCCESS).add_modifier(Modifier::BOLD),
                     )),
             );
@@ -649,7 +650,13 @@ impl Dashboard {
         render_width: u16,
     ) -> Vec<Line<'static>> {
         let content = if is_output {
-            runstate::tail_stage_output(&agent.id, self.selected_stage, 131_072)
+            // When a document is up for review (a pending interaction's body,
+            // e.g. the plan being approved), show just that current instance —
+            // not the full accumulated output history. `[l]` still shows logs.
+            match self.reviewing_body() {
+                Some(body) => body,
+                None => runstate::tail_stage_output(&agent.id, self.selected_stage, 131_072),
+            }
         } else {
             runstate::tail_stage_log(&agent.id, self.selected_stage, 131_072)
         };
@@ -854,6 +861,34 @@ mod tests {
         let mut dash = make_test_dashboard();
         dash.stage_content_mode = StageContentMode::Output;
         let agent = make_test_agent("run-out", AgentDisplayStatus::Active);
+        terminal
+            .draw(|f| {
+                let area = Rect::new(0, 0, 100, 20);
+                dash.render_content_pane(f, area, &agent, 100);
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn render_content_pane_shows_pending_review_body() {
+        // Output mode with a pending interaction body shows just that document
+        // (the current plan) instead of the accumulated output history.
+        let backend = TestBackend::new(120, 40);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut dash = make_test_dashboard();
+        dash.stage_content_mode = StageContentMode::Output;
+        let mut agent = make_test_agent("run-review", AgentDisplayStatus::Waiting);
+        let mut req = leviath_core::interaction::InteractionRequest::multiple_choice(
+            "mc1",
+            "Approve?",
+            vec!["Approve".to_string()],
+            "plan_approval",
+        );
+        req.body = Some("## Plan\n1. write the script".to_string());
+        agent.pending_request = Some(req);
+        dash.agents.push(agent.clone());
+        dash.update_display_indices();
+        assert!(dash.reviewing_body().is_some());
         terminal
             .draw(|f| {
                 let area = Rect::new(0, 0, 100, 20);

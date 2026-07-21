@@ -109,8 +109,12 @@ impl Dashboard {
         // Review body: shown when the pending interaction carries markdown for
         // review. `EditText` also uses `body`, but that is the editable document
         // (rendered in the seeded textarea once the user starts editing), not a
-        // read-only review doc — so it is excluded here.
-        let review_body = if !self.input_mode && has_prompt {
+        // read-only review doc — so it is excluded here. When the output pane is
+        // already showing the document (output mode), the separate review pane is
+        // suppressed to avoid rendering it twice.
+        let content_shows_body =
+            self.stage_content_mode == StageContentMode::Output && self.reviewing_body().is_some();
+        let review_body = if !self.input_mode && has_prompt && !content_shows_body {
             pending_req
                 .as_ref()
                 .filter(|r| r.kind != InteractionKind::EditText)
@@ -332,6 +336,60 @@ mod tests {
         dash.update_display_indices();
         dash.detail_view = true;
         dash.input_mode = true;
+
+        terminal.draw(|f| dash.draw(f)).unwrap();
+    }
+
+    #[test]
+    fn draw_detail_view_review_body_shows_when_not_output_mode() {
+        // Logs mode + a pending review body ⇒ the output pane is not showing the
+        // body, so the separate review pane renders it (review_body Some path).
+        let backend = TestBackend::new(120, 40);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut dash = make_test_dashboard();
+        dash.stage_content_mode = StageContentMode::Logs;
+        let mut agent = make_test_agent("run-review-logs", AgentDisplayStatus::Waiting);
+        agent.stages = vec![crate::runstate::StageRecord::new("main".to_string(), 0)];
+        let mut req = leviath_core::interaction::InteractionRequest::multiple_choice(
+            "mc1",
+            "Approve?",
+            vec!["Approve".to_string()],
+            "plan_approval",
+        );
+        req.body = Some("## Plan\n1. write it\n2. test it".to_string());
+        agent.pending_request = Some(req);
+        dash.agents.push(agent);
+        dash.update_display_indices();
+        dash.detail_view = true;
+        dash.input_mode = false;
+        dash.selected_stage = 0;
+
+        terminal.draw(|f| dash.draw(f)).unwrap();
+    }
+
+    #[test]
+    fn draw_detail_view_output_body_suppresses_review_pane() {
+        // Output mode + a pending review body ⇒ the output pane shows the body,
+        // so the separate review pane is suppressed (content_shows_body branch).
+        let backend = TestBackend::new(120, 40);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut dash = make_test_dashboard();
+        dash.stage_content_mode = StageContentMode::Output;
+        let mut agent = make_test_agent("run-review-detail", AgentDisplayStatus::Waiting);
+        agent.stages = vec![crate::runstate::StageRecord::new("main".to_string(), 0)];
+        let mut req = leviath_core::interaction::InteractionRequest::multiple_choice(
+            "mc1",
+            "Approve?",
+            vec!["Approve".to_string()],
+            "plan_approval",
+        );
+        req.body = Some("## Plan\n1. write it".to_string());
+        agent.pending_request = Some(req);
+        dash.agents.push(agent);
+        dash.update_display_indices();
+        dash.detail_view = true;
+        dash.input_mode = false;
+        dash.selected_stage = 0;
 
         terminal.draw(|f| dash.draw(f)).unwrap();
     }

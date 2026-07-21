@@ -179,16 +179,19 @@ impl Dashboard {
                     }
                 }
                 lines.push(Line::from(""));
-                let hint = if matches!(agent.status, AgentDisplayStatus::CompleteInteractive) {
-                    " [i] respond"
-                } else {
-                    " [i] respond  [k] kill"
+                // An EditText opens the document for in-place editing in the pane
+                // above, so label it as editing rather than a generic response.
+                let is_edit = matches!(kind, Some(InteractionKind::EditText));
+                let hint = match (is_edit, &agent.status) {
+                    (true, _) => " [i] edit the document above  [k] kill",
+                    (false, AgentDisplayStatus::CompleteInteractive) => " [i] respond",
+                    (false, _) => " [i] respond  [k] kill",
                 };
                 lines.push(Line::from(Span::styled(hint, Style::default().fg(C_DIM))));
-                let title = if matches!(agent.status, AgentDisplayStatus::CompleteInteractive) {
-                    " Input Allowed "
-                } else {
-                    " Input Required "
+                let title = match (is_edit, &agent.status) {
+                    (true, _) => " Edit Document ",
+                    (false, AgentDisplayStatus::CompleteInteractive) => " Input Allowed ",
+                    (false, _) => " Input Required ",
                 };
                 (title, lines)
             };
@@ -426,6 +429,26 @@ mod tests {
         let agent = make_test_agent("run-noinput", AgentDisplayStatus::Waiting);
         let pending = Some(make_pending_req(interaction::InteractionKind::FreeText));
         let kind = Some(interaction::InteractionKind::FreeText);
+        let options: Vec<String> = vec![];
+        terminal
+            .draw(|f| {
+                let area = Rect::new(0, 0, 80, 8);
+                dash.render_input_pane(f, area, &agent, &pending, &kind, &options);
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn render_input_pane_edit_text_preview_labels_editing() {
+        // A pending EditText (not yet editing) shows the "Edit Document" title and
+        // the edit-the-document hint, not the generic response labels.
+        let backend = TestBackend::new(120, 40);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut dash = make_test_dashboard();
+        dash.input_mode = false;
+        let agent = make_test_agent("run-edit-preview", AgentDisplayStatus::Waiting);
+        let pending = Some(make_pending_req(interaction::InteractionKind::EditText));
+        let kind = Some(interaction::InteractionKind::EditText);
         let options: Vec<String> = vec![];
         terminal
             .draw(|f| {
