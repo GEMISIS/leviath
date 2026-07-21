@@ -1385,10 +1385,12 @@ pub fn dispatch_persistence(
         &mut PersistWatermark,
         Option<&mut StageLedger>,
         Option<&mut StageIoBuffer>,
+        Option<&crate::taint::TaintGate>,
     )>,
     stage: Res<PersistenceStage>,
 ) {
-    for (md, state, window, cursor, totals, mut watermark, mut ledger, buffer) in agents.iter_mut()
+    for (md, state, window, cursor, totals, mut watermark, mut ledger, buffer, taint_gate) in
+        agents.iter_mut()
     {
         let now = chrono::Utc::now().timestamp();
 
@@ -1421,6 +1423,15 @@ pub fn dispatch_persistence(
         let meta = build_run_meta(md, state, totals, cursor.index, now);
         let context = build_context_snapshot(window, &state.current_stage);
         let stages = ledger.as_deref().map(|l| l.0.clone()).unwrap_or_default();
+        // Persist the taint gate's audit log (per-stage) when it has events, so
+        // security decisions are inspectable after the fact.
+        let taint_audit = taint_gate.filter(|g| !g.audit_log().is_empty()).map(|g| {
+            (
+                cursor.index,
+                serde_json::to_string_pretty(g.audit_log())
+                    .expect("GateEvent slice always serializes"),
+            )
+        });
         let _ = stage.0.send(PersistJob {
             run_id: md.run_id.clone(),
             meta,
@@ -1428,6 +1439,7 @@ pub fn dispatch_persistence(
             stages,
             output_appends,
             log_appends,
+            taint_audit,
         });
     }
 }
@@ -3210,6 +3222,53 @@ mod tests {
         run_dispatch_persistence(&mut world);
         let job = rx.try_recv().expect("append-triggered job");
         assert_eq!(job.log_appends, vec![(0, "late log".to_string())]);
+    }
+
+    #[test]
+    fn dispatch_persistence_persists_taint_audit_when_the_gate_has_events() {
+        let (mut world, mut prx) = world_with_persistence();
+        let (jtx, _jrx) = mpsc::unbounded_channel();
+        world.insert_resource(ToolServiceRes(std::sync::Arc::new(EchoService)));
+        world.insert_resource(ToolStage(jtx));
+        world.spawn((
+            run_metadata(),
+            agent_state(),
+            infer_with(vec![tc("c_shell", "shell")]),
+            tainted_conv_window(),
+            ReadyForTools,
+            enabled_gate(),
+            StageCursor { index: 1 },
+            TokenTotals::default(),
+            PersistWatermark::default(),
+        ));
+        // Run the tool dispatch so the gate blocks the outbound call and records
+        // an audit event, then persist.
+        let mut s = Schedule::default();
+        s.add_systems(dispatch_tools);
+        s.run(&mut world);
+        run_dispatch_persistence(&mut world);
+
+        let job = prx.try_recv().expect("persist job");
+        let (idx, json) = job.taint_audit.expect("taint audit persisted");
+        assert_eq!(idx, 1);
+        assert!(json.contains("shell"));
+    }
+
+    #[test]
+    fn dispatch_persistence_skips_taint_audit_when_the_gate_is_empty() {
+        let (mut world, mut prx) = world_with_persistence();
+        world.spawn((
+            run_metadata(),
+            agent_state(),
+            conv_window(),
+            StageCursor { index: 0 },
+            TokenTotals::default(),
+            PersistWatermark::default(),
+            enabled_gate(), // no events recorded
+        ));
+        run_dispatch_persistence(&mut world);
+        let job = prx.try_recv().expect("persist job");
+        assert!(job.taint_audit.is_none());
     }
 
     #[test]

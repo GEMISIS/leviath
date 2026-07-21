@@ -30,6 +30,9 @@ pub struct PersistJob {
     pub output_appends: Vec<(usize, String)>,
     /// Operational log lines to append to `stages/<idx>/logs.log`.
     pub log_appends: Vec<(usize, String)>,
+    /// `(stage_index, serialized GateEvent log)` to write to
+    /// `stages/<idx>/taint_audit.json`. `None` ⇒ no audit to persist.
+    pub taint_audit: Option<(usize, String)>,
 }
 
 /// The single-lane persistence worker: writes each [`PersistJob`]'s files under
@@ -73,6 +76,17 @@ async fn write_snapshot(runs_dir: &Path, job: &PersistJob) {
     }
     for (idx, line) in &job.log_appends {
         append_stage_line(&dir, *idx, "logs.log", line, &job.run_id).await;
+    }
+    // Per-stage taint audit (whole-file, atomic).
+    if let Some((idx, json)) = &job.taint_audit {
+        let stage_dir = dir.join("stages").join(idx.to_string());
+        let _ = tokio::fs::create_dir_all(&stage_dir).await;
+        write_bytes_atomic(
+            &stage_dir.join("taint_audit.json"),
+            json.as_bytes(),
+            &job.run_id,
+        )
+        .await;
     }
 }
 
@@ -155,6 +169,7 @@ mod tests {
             stages: vec![],
             output_appends: vec![],
             log_appends: vec![],
+            taint_audit: None,
         })
         .unwrap();
         drop(tx); // close so the worker loop ends
@@ -182,6 +197,7 @@ mod tests {
                 stages: vec![StageRecord::new("plan".to_string(), 0)],
                 output_appends: vec![(0, "the plan".to_string())],
                 log_appends: vec![(0, "[tool] list_dir: .".to_string())],
+                taint_audit: None,
             },
         )
         .await;
@@ -198,6 +214,27 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn worker_writes_taint_audit_to_the_stage_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        write_snapshot(
+            dir.path(),
+            &PersistJob {
+                run_id: "r".to_string(),
+                meta: meta("r"),
+                context: context(),
+                stages: vec![],
+                output_appends: vec![],
+                log_appends: vec![],
+                taint_audit: Some((2, r#"[{"tool_name":"shell"}]"#.to_string())),
+            },
+        )
+        .await;
+        let audit =
+            std::fs::read_to_string(dir.path().join("r/stages/2/taint_audit.json")).unwrap();
+        assert!(audit.contains("shell"));
+    }
+
+    #[tokio::test]
     async fn empty_stages_are_not_written() {
         let dir = tempfile::tempdir().unwrap();
         write_snapshot(
@@ -209,6 +246,7 @@ mod tests {
                 stages: vec![],
                 output_appends: vec![],
                 log_appends: vec![],
+                taint_audit: None,
             },
         )
         .await;
@@ -241,6 +279,7 @@ mod tests {
                 stages: vec![],
                 output_appends: vec![],
                 log_appends: vec![],
+                taint_audit: None,
             },
         )
         .await;
@@ -264,6 +303,7 @@ mod tests {
                 stages: vec![],
                 output_appends: vec![],
                 log_appends: vec![],
+                taint_audit: None,
             },
         )
         .await;
@@ -291,6 +331,7 @@ mod tests {
                 stages: vec![],
                 output_appends: vec![],
                 log_appends: vec![],
+                taint_audit: None,
             },
         )
         .await;
