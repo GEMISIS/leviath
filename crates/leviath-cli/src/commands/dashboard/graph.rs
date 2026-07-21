@@ -18,7 +18,6 @@ pub(super) struct GraphEdge {
     pub(super) target: String,
     pub(super) hint: Option<String>,
     pub(super) condition: String,
-    #[allow(dead_code)]
     pub(super) transform: String,
 }
 

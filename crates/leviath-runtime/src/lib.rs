@@ -36,9 +36,8 @@ pub mod world;
 mod test_support;
 
 pub use components::{
-    AgentMessage, AgentState, AgentStatus, CancellationToken, ContextWindow, EvictionResult,
-    InferenceConfig, InferenceResult, MessageInbox, NeedsCompaction, ParentRef, SubAgentChildren,
-    TaskAssignment, ToolResultRoutingComponent,
+    AgentMessage, AgentState, AgentStatus, ContextWindow, EvictionResult, InferenceConfig,
+    InferenceResult, MessageInbox, ParentRef, SubAgentChildren, ToolResultRoutingComponent,
 };
 pub use fanout::{FanOutSpawner, FanOutSpawnerRes, WorkItem, parse_work_items};
 pub use inference_bridge::{InferenceJob, InferenceOutcome, run_inference_job};

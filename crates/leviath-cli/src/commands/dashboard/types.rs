@@ -67,9 +67,6 @@ impl AgentDisplayStatus {
 pub struct DashboardAgent {
     pub id: String,
     pub blueprint_name: String,
-    /// Path to the agent manifest directory (blueprint source)
-    #[allow(dead_code)]
-    pub agent_path: String,
     pub stage: String,
     pub stage_index: usize,
     pub num_stages: usize,
@@ -98,7 +95,6 @@ pub struct DashboardAgent {
     /// Auto-generated short title (None until the worker generates it).
     pub title: Option<String>,
     /// Original model override
-    #[allow(dead_code)]
     pub model: Option<String>,
     /// Parent agent ID (if this is a sub-agent)
     pub parent_id: Option<String>,
@@ -258,7 +254,6 @@ mod tests {
         let agent = DashboardAgent {
             id: "run-1".to_string(),
             blueprint_name: "coder".to_string(),
-            agent_path: "/path".to_string(),
             stage: "plan".to_string(),
             stage_index: 0,
             num_stages: 2,

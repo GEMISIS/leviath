@@ -3,8 +3,7 @@
 use bevy_ecs::prelude::*;
 use leviath_core::{EvictionStrategy, Region, RegionKind};
 use leviath_runtime::{
-    AgentState, AgentStatus, CancellationToken, ContextWindow, MessageInbox, ParentRef,
-    SubAgentChildren,
+    AgentState, AgentStatus, ContextWindow, MessageInbox, ParentRef, SubAgentChildren,
 };
 
 #[test]
@@ -288,29 +287,6 @@ fn test_eviction_clears_then_identifies_compaction() {
     assert_eq!(result.needs_compaction, vec!["impl"]);
 }
 
-#[test]
-fn test_needs_compaction_component_in_ecs() {
-    use leviath_runtime::NeedsCompaction;
-
-    let mut world = World::new();
-    let entity = world.spawn_empty().id();
-
-    // Initially no NeedsCompaction
-    assert!(world.get::<NeedsCompaction>(entity).is_none());
-
-    // Add it
-    world.entity_mut(entity).insert(NeedsCompaction {
-        regions: vec!["analysis".to_string()],
-    });
-
-    let comp = world.get::<NeedsCompaction>(entity).unwrap();
-    assert_eq!(comp.regions, vec!["analysis"]);
-
-    // Remove it
-    world.entity_mut(entity).remove::<NeedsCompaction>();
-    assert!(world.get::<NeedsCompaction>(entity).is_none());
-}
-
 // ─── Sub-agent tests ─────────────────────────────────────────────────────────
 
 #[test]
@@ -329,7 +305,6 @@ fn test_parent_ref_and_children_components() {
                 pending_wait: None,
                 accepts_messages: true,
             },
-            CancellationToken::new(),
             MessageInbox::new(),
         ))
         .id();
@@ -351,7 +326,6 @@ fn test_parent_ref_and_children_components() {
                 parent_agent_id: "coder-01".to_string(),
                 depth: 1,
             },
-            CancellationToken::new(),
             MessageInbox::new(),
         ))
         .id();
@@ -394,68 +368,6 @@ fn test_spawn_depth_validation() {
 }
 
 #[test]
-fn test_cascade_kill_parent_to_children() {
-    let mut world = World::new();
-
-    let parent = world
-        .spawn((
-            AgentState {
-                agent_id: "parent-01".to_string(),
-                current_stage: "main".to_string(),
-                iteration: 0,
-                status: AgentStatus::Cancelled,
-                spawned_children_ids: vec!["child-01".to_string()],
-                pending_wait: None,
-                accepts_messages: true,
-            },
-            CancellationToken::new(),
-            MessageInbox::new(),
-        ))
-        .id();
-
-    let child_token = CancellationToken::new();
-    let child = world
-        .spawn((
-            AgentState {
-                agent_id: "child-01".to_string(),
-                current_stage: "main".to_string(),
-                iteration: 0,
-                status: AgentStatus::Active,
-                spawned_children_ids: Vec::new(),
-                pending_wait: None,
-                accepts_messages: true,
-            },
-            ParentRef {
-                parent_entity: parent,
-                parent_agent_id: "parent-01".to_string(),
-                depth: 1,
-            },
-            child_token.clone(),
-            MessageInbox::new(),
-        ))
-        .id();
-
-    world.entity_mut(parent).insert(SubAgentChildren {
-        children: vec![child],
-        max_child_depth: 3,
-    });
-
-    // Parent is cancelled — manually simulate cascade
-    let parent_state = world.get::<AgentState>(parent).unwrap();
-    assert!(matches!(parent_state.status, AgentStatus::Cancelled));
-
-    let children_comp = world.get::<SubAgentChildren>(parent).unwrap();
-    for &child_entity in &children_comp.children {
-        if let Some(token) = world.get::<CancellationToken>(child_entity) {
-            token.cancel();
-        }
-    }
-
-    // Verify child was cancelled
-    assert!(child_token.is_cancelled());
-}
-
-#[test]
 fn test_child_completion_notifies_parent() {
     let mut world = World::new();
 
@@ -482,7 +394,6 @@ fn test_child_completion_notifies_parent() {
                 accepts_messages: true,
             },
             parent_window,
-            CancellationToken::new(),
             MessageInbox::new(),
         ))
         .id();
@@ -504,7 +415,6 @@ fn test_child_completion_notifies_parent() {
                 parent_agent_id: "parent-01".to_string(),
                 depth: 1,
             },
-            CancellationToken::new(),
             MessageInbox::new(),
         ))
         .id();

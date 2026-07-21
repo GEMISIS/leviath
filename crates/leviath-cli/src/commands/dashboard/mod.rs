@@ -392,7 +392,6 @@ mod tests {
         let agent = DashboardAgent {
             id: "run-test".to_string(),
             blueprint_name: "tester".to_string(),
-            agent_path: "/path".to_string(),
             stage: "init".to_string(),
             stage_index: 0,
             num_stages: 1,
