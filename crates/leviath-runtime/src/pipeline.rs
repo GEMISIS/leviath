@@ -784,6 +784,73 @@ fn apply_tool_results(
     }
 }
 
+/// Truncate a file body to `max_tokens` (≈4 chars/token) with a marker, or return
+/// it unchanged when no cap is set or it already fits.
+fn truncate_file(content: String, max_tokens: Option<usize>) -> String {
+    match max_tokens {
+        Some(max) => {
+            let approx_chars = max * 4;
+            if content.len() > approx_chars {
+                let head: String = content.chars().take(approx_chars).collect();
+                format!("{head}\n\n[... truncated at {max} tokens ...]")
+            } else {
+                content
+            }
+        }
+        None => content,
+    }
+}
+
+/// File tracking: for each `read_file`/`write_file` result (per the stage's
+/// [`FileTrackingConfig`](leviath_core::blueprint::FileTrackingConfig)), upsert
+/// the file body into the configured HashMap region (keyed by path, so re-reads
+/// de-dup) and replace the inline tool result with a short reference — keeping
+/// large file bodies out of the rolling conversation. No-op unless the region
+/// exists and is a HashMap. `read_file`'s body is the result; `write_file`'s is
+/// its `content` argument (no re-read needed in the ECS).
+fn apply_file_tracking(
+    window: &mut ContextWindow,
+    ft: &leviath_core::blueprint::FileTrackingConfig,
+    tool_calls: &[crate::components::ToolCall],
+    merged: &mut [(String, String)],
+) {
+    let is_hashmap = window
+        .get_region(&ft.region)
+        .is_some_and(|r| matches!(r.kind, leviath_core::RegionKind::HashMap { .. }));
+    if !is_hashmap {
+        return;
+    }
+    for (call, (_id, result)) in tool_calls.iter().zip(merged.iter_mut()) {
+        if result.starts_with("[error]") || result.starts_with("[denied]") {
+            continue;
+        }
+        let Some(path) = call.arguments.get("path").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        let (body, verb) = match call.name.as_str() {
+            "read_file" if ft.track_reads => (result.clone(), "stored"),
+            "write_file" if ft.track_writes => {
+                match call.arguments.get("content").and_then(|v| v.as_str()) {
+                    Some(c) => (c.to_string(), "written"),
+                    None => continue,
+                }
+            }
+            _ => continue,
+        };
+        let body = truncate_file(body, ft.max_file_tokens);
+        let tokens = body.len() / 4 + 1;
+        window
+            .get_region_mut(&ft.region)
+            .expect("region presence checked above")
+            .upsert_by_key(path, body, tokens)
+            .ok();
+        *result = format!(
+            "File {verb} in [{}] → ### [{}] ({} tokens). Reference it there; do not re-read this path.",
+            ft.region, path, tokens
+        );
+    }
+}
+
 /// Tool-collect system: drain finished tool batches and apply them. Results are
 /// written into the agent's context window (routing/truncation/taint honored)
 /// and the agent loops back to `ReadyToInfer`. Outcomes for agents no longer
@@ -800,14 +867,23 @@ pub fn collect_tools(
             Option<&ContextToolResults>,
             Option<&StageCursor>,
             Option<&mut StageIoBuffer>,
+            Option<&AgentBlueprint>,
         ),
         With<AwaitingTools>,
     >,
     mut commands: Commands,
 ) {
     while let Ok(outcome) = results.0.try_recv() {
-        let Ok((mut window, infer, routing, sensitivities, context_results, cursor, buffer)) =
-            agents.get_mut(outcome.entity)
+        let Ok((
+            mut window,
+            infer,
+            routing,
+            sensitivities,
+            context_results,
+            cursor,
+            buffer,
+            blueprint,
+        )) = agents.get_mut(outcome.entity)
         else {
             continue; // stale: agent cancelled/despawned since dispatch
         };
@@ -817,7 +893,12 @@ pub fn collect_tools(
         if let Some(ctx) = context_results {
             parts.extend(ctx.0.iter().cloned());
         }
-        let merged = merge_in_call_order(&infer.tool_calls, &parts);
+        let mut merged = merge_in_call_order(&infer.tool_calls, &parts);
+        // File tracking: sync read/write results into the configured HashMap
+        // region and replace the inline result with a reference (de-dup context).
+        if let Some(ft) = blueprint.and_then(|bp| bp.0.file_tracking.as_ref()) {
+            apply_file_tracking(&mut window, ft, &infer.tool_calls, &mut merged);
+        }
         // Buffer one readable `[tool] name: result` line per call for the stage's
         // logs (merged is in call order, so it zips with the calls by index).
         if let Some(mut buffer) = buffer {
@@ -5704,6 +5785,185 @@ mod tests {
             assert!(world.get::<ResolveTransition>(e).is_some());
             assert!(world.get::<ReadyToInfer>(e).is_none());
         }
+    }
+
+    // ── file tracking (#6) ──
+
+    fn ftc(
+        reads: bool,
+        writes: bool,
+        max: Option<usize>,
+    ) -> leviath_core::blueprint::FileTrackingConfig {
+        leviath_core::blueprint::FileTrackingConfig {
+            region: "files".to_string(),
+            track_reads: reads,
+            track_writes: writes,
+            max_file_tokens: max,
+        }
+    }
+
+    fn fcall(id: &str, name: &str, args: serde_json::Value) -> crate::components::ToolCall {
+        crate::components::ToolCall {
+            tool_id: id.to_string(),
+            name: name.to_string(),
+            arguments: args,
+        }
+    }
+
+    fn hashmap_window() -> ContextWindow {
+        let mut w = ContextWindow::new(100_000);
+        w.add_region(Region::new(
+            "files".to_string(),
+            RegionKind::HashMap { max_entries: None },
+            40_000,
+        ));
+        w
+    }
+
+    #[test]
+    fn truncate_file_caps_only_when_over_the_limit() {
+        assert_eq!(truncate_file("short".to_string(), Some(100)), "short");
+        assert_eq!(truncate_file("short".to_string(), None), "short");
+        let out = truncate_file("x".repeat(500), Some(10)); // 10*4 = 40 chars
+        assert!(out.contains("truncated at 10 tokens"));
+        assert!(out.len() < 500);
+    }
+
+    #[test]
+    fn apply_file_tracking_tracks_reads_and_writes() {
+        let ft = ftc(true, true, Some(2)); // small cap to also exercise truncation
+        let mut w = hashmap_window();
+        let calls = vec![
+            fcall("1", "read_file", serde_json::json!({"path": "a.rs"})),
+            fcall(
+                "2",
+                "write_file",
+                serde_json::json!({"path": "b.rs", "content": "fn b() {}"}),
+            ),
+        ];
+        let mut merged = vec![
+            ("1".to_string(), "fn a() { /* long body */ }".to_string()),
+            ("2".to_string(), "written ok".to_string()),
+        ];
+        apply_file_tracking(&mut w, &ft, &calls, &mut merged);
+        assert!(merged[0].1.contains("Reference it there"));
+        assert!(merged[1].1.contains("Reference it there"));
+        assert_eq!(w.get_region("files").unwrap().content.len(), 2);
+    }
+
+    #[test]
+    fn apply_file_tracking_noop_without_a_hashmap_region() {
+        let ft = ftc(true, true, None);
+        let calls = vec![fcall("1", "read_file", serde_json::json!({"path": "a"}))];
+        let mut merged = vec![("1".to_string(), "body".to_string())];
+        // No "files" region at all.
+        let mut w1 = ContextWindow::new(100_000);
+        apply_file_tracking(&mut w1, &ft, &calls, &mut merged);
+        assert_eq!(merged[0].1, "body");
+        // "files" region exists but isn't a HashMap.
+        let mut w2 = ContextWindow::new(100_000);
+        w2.add_region(Region::new(
+            "files".to_string(),
+            RegionKind::Clearable,
+            40_000,
+        ));
+        apply_file_tracking(&mut w2, &ft, &calls, &mut merged);
+        assert_eq!(merged[0].1, "body");
+    }
+
+    #[test]
+    fn apply_file_tracking_skips_errors_missing_path_other_tools_and_flags() {
+        let mut w = hashmap_window();
+        let ft = ftc(true, true, None);
+        let calls = vec![
+            fcall("1", "read_file", serde_json::json!({"path": "a"})), // result is an error
+            fcall("2", "read_file", serde_json::json!({})),            // no path
+            fcall("3", "list_dir", serde_json::json!({"path": "d"})),  // untracked tool
+            fcall("4", "write_file", serde_json::json!({"path": "e"})), // no content
+            fcall("5", "read_file", serde_json::json!({"path": "f"})), // result is denied
+        ];
+        let mut merged = vec![
+            ("1".to_string(), "[error] boom".to_string()),
+            ("2".to_string(), "body".to_string()),
+            ("3".to_string(), "listing".to_string()),
+            ("4".to_string(), "written".to_string()),
+            ("5".to_string(), "[denied] nope".to_string()),
+        ];
+        apply_file_tracking(&mut w, &ft, &calls, &mut merged);
+        for (_, r) in &merged {
+            assert!(!r.contains("Reference it there"));
+        }
+        assert_eq!(w.get_region("files").unwrap().content.len(), 0);
+
+        // With tracking flags off, read/write are also skipped.
+        let off = ftc(false, false, None);
+        let calls2 = vec![
+            fcall("1", "read_file", serde_json::json!({"path": "a"})),
+            fcall(
+                "2",
+                "write_file",
+                serde_json::json!({"path": "b", "content": "x"}),
+            ),
+        ];
+        let mut merged2 = vec![
+            ("1".to_string(), "body".to_string()),
+            ("2".to_string(), "written".to_string()),
+        ];
+        apply_file_tracking(&mut w, &off, &calls2, &mut merged2);
+        for (_, r) in &merged2 {
+            assert!(!r.contains("Reference it there"));
+        }
+    }
+
+    #[test]
+    fn collect_tools_applies_file_tracking_from_blueprint() {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let mut world = World::new();
+        world.insert_resource(ToolResults(rx));
+        let mut w = hashmap_window();
+        w.add_region(Region::new(
+            "conversation".to_string(),
+            RegionKind::Clearable,
+            10_000,
+        ));
+        // A blueprint carrying a file_tracking config.
+        let layout = leviath_core::layout::ContextLayout::new(vec![], 10_000);
+        let mut bp = leviath_core::Blueprint::new(
+            "t".to_string(),
+            "d".to_string(),
+            vec![stage_named("a", None, false, None)],
+            layout,
+        );
+        bp.file_tracking = Some(ftc(true, true, None));
+        let e = world
+            .spawn((
+                w,
+                infer_with(vec![fcall(
+                    "c1",
+                    "read_file",
+                    serde_json::json!({"path": "a.rs"}),
+                )]),
+                AwaitingTools,
+                AgentBlueprint(bp),
+            ))
+            .id();
+        tx.send(ToolOutcome {
+            entity: e,
+            results: vec![("c1".to_string(), "fn a() {}".to_string())],
+        })
+        .unwrap();
+        run_collect_tools(&mut world);
+        // The file body landed in the HashMap region.
+        assert_eq!(
+            world
+                .get::<ContextWindow>(e)
+                .unwrap()
+                .get_region("files")
+                .unwrap()
+                .content
+                .len(),
+            1
+        );
     }
 
     // ── requires_children gate (#7) ──
