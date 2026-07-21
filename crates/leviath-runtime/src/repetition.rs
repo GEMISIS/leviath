@@ -8,6 +8,8 @@
 use std::collections::HashMap;
 use std::hash::{DefaultHasher, Hash, Hasher};
 
+use bevy_ecs::prelude::Component;
+
 /// Configuration for repetition detection thresholds.
 #[derive(Debug, Clone)]
 pub struct RepetitionConfig {
@@ -29,8 +31,9 @@ impl Default for RepetitionConfig {
     }
 }
 
-/// Tracks tool call patterns and detects repetitive loops.
-#[derive(Debug)]
+/// Tracks tool call patterns and detects repetitive loops. A per-agent ECS
+/// component (seeded from the blueprint's repetition config at spawn).
+#[derive(Debug, Component)]
 pub struct RepetitionDetector {
     config: RepetitionConfig,
     /// Counts keyed by (tool_name, args_hash).
@@ -93,6 +96,18 @@ impl RepetitionDetector {
         Self::new(RepetitionConfig::default())
     }
 
+    /// Build a detector from a blueprint's
+    /// [`RepetitionDetectionConfig`](leviath_core::blueprint::RepetitionDetectionConfig),
+    /// filling any unset field from the [`RepetitionConfig`] defaults.
+    pub fn from_detection_config(cfg: &leviath_core::blueprint::RepetitionDetectionConfig) -> Self {
+        let d = RepetitionConfig::default();
+        Self::new(RepetitionConfig {
+            max_repeat_calls: cfg.max_repeat_calls.unwrap_or(d.max_repeat_calls),
+            max_readonly_streak: cfg.max_readonly_streak.unwrap_or(d.max_readonly_streak),
+            enabled: cfg.enabled.unwrap_or(d.enabled),
+        })
+    }
+
     /// Record a tool call and return a nudge message if a threshold is hit.
     ///
     /// Returns `Some(nudge_message)` when the agent should be nudged to break
@@ -149,6 +164,30 @@ impl RepetitionDetector {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn from_detection_config_maps_set_fields_and_defaults_unset() {
+        use leviath_core::blueprint::RepetitionDetectionConfig;
+        let all = RepetitionDetectionConfig {
+            max_repeat_calls: Some(1),
+            max_readonly_streak: Some(2),
+            enabled: Some(false),
+        };
+        let d = RepetitionDetector::from_detection_config(&all);
+        assert_eq!(d.config.max_repeat_calls, 1);
+        assert_eq!(d.config.max_readonly_streak, 2);
+        assert!(!d.config.enabled);
+
+        let unset = RepetitionDetectionConfig {
+            max_repeat_calls: None,
+            max_readonly_streak: None,
+            enabled: None,
+        };
+        let d2 = RepetitionDetector::from_detection_config(&unset);
+        assert_eq!(d2.config.max_repeat_calls, 3);
+        assert_eq!(d2.config.max_readonly_streak, 10);
+        assert!(d2.config.enabled);
+    }
 
     #[test]
     fn test_repeat_triggers_nudge_at_threshold() {
