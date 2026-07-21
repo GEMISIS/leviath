@@ -133,7 +133,12 @@ impl Dashboard {
             (review_lines.len() + 2).min(max_review) as u16
         };
 
-        let prompt_height: u16 = if has_prompt
+        // While editing a document the textarea is rendered in the content pane,
+        // so the bottom input bar is suppressed (no double render).
+        let editing_doc = self.editing_document();
+        let prompt_height: u16 = if editing_doc {
+            0
+        } else if has_prompt
             || (self.input_mode && is_waiting && self.selected_stage_can_respond())
             || (self.input_mode && accepts_messages)
         {
@@ -327,6 +332,29 @@ mod tests {
         dash.update_display_indices();
         dash.detail_view = true;
         dash.input_mode = true;
+
+        terminal.draw(|f| dash.draw(f)).unwrap();
+    }
+
+    #[test]
+    fn draw_detail_view_inline_document_edit_suppresses_bottom_input() {
+        // Editing an EditText renders the textarea in the content pane, so the
+        // bottom input bar is suppressed (prompt_height == 0 branch).
+        let backend = TestBackend::new(120, 40);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut dash = make_test_dashboard();
+        let mut agent = make_test_agent("run-edit-detail", AgentDisplayStatus::Waiting);
+        agent.pending_request = Some(leviath_core::interaction::InteractionRequest::edit_text(
+            "et1",
+            "Edit",
+            "main",
+            "the current plan text",
+        ));
+        dash.agents.push(agent);
+        dash.update_display_indices();
+        dash.detail_view = true;
+        dash.input_mode = true;
+        assert!(dash.editing_document());
 
         terminal.draw(|f| dash.draw(f)).unwrap();
     }

@@ -138,6 +138,31 @@ impl Dashboard {
         agent: &DashboardAgent,
         _area_width: u16,
     ) {
+        // Editing a document (an `EditText` interaction) takes over the content
+        // pane: the editable textarea is rendered here, over the current text,
+        // instead of the read-only stage output — so the user revises the plan
+        // in place rather than in the bottom input bar.
+        if self.editing_document() {
+            self.input_textarea.set_block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_type(BorderType::Rounded)
+                    .border_style(Style::default().fg(C_SUCCESS))
+                    .title(Span::styled(
+                        " ✎ Editing — [Enter] save  [Alt+↵] newline  [Esc] cancel ",
+                        Style::default().fg(C_SUCCESS).add_modifier(Modifier::BOLD),
+                    )),
+            );
+            self.input_textarea.set_style(Style::default().fg(C_WHITE));
+            self.input_textarea.set_cursor_style(
+                Style::default()
+                    .fg(ratatui::style::Color::Black)
+                    .bg(C_ACCENT),
+            );
+            frame.render_widget(&self.input_textarea, content_area);
+            return;
+        }
+
         let inner_h = content_area.height.saturating_sub(2) as usize;
         let render_width = content_area.width.saturating_sub(2);
         let is_context = self.stage_content_mode == StageContentMode::Context;
@@ -829,6 +854,31 @@ mod tests {
         let mut dash = make_test_dashboard();
         dash.stage_content_mode = StageContentMode::Output;
         let agent = make_test_agent("run-out", AgentDisplayStatus::Active);
+        terminal
+            .draw(|f| {
+                let area = Rect::new(0, 0, 100, 20);
+                dash.render_content_pane(f, area, &agent, 100);
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn render_content_pane_inline_document_edit() {
+        let backend = TestBackend::new(120, 40);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut dash = make_test_dashboard();
+        let mut agent = make_test_agent("run-edit", AgentDisplayStatus::Waiting);
+        agent.pending_request = Some(leviath_core::interaction::InteractionRequest::edit_text(
+            "et1",
+            "Edit",
+            "plan",
+            "line A\nline B",
+        ));
+        dash.agents.push(agent.clone());
+        dash.update_display_indices();
+        dash.input_mode = true;
+        // The editable textarea takes over the content pane instead of output.
+        assert!(dash.editing_document());
         terminal
             .draw(|f| {
                 let area = Rect::new(0, 0, 100, 20);
