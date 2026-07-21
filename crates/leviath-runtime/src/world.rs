@@ -92,6 +92,7 @@ impl PipelineWorld {
         let (msg_tx, msg_rx) = unbounded_channel();
         let (ip_tx, ip_rx) = unbounded_channel();
         let (gp_tx, gp_rx) = unbounded_channel();
+        let (cs_tx, cs_rx) = unbounded_channel();
 
         let tool_task = runtime.spawn(tool_worker(tool_job_rx, tool_res_tx, wake.clone()));
         // Fire-and-forget: the persistence worker exits when the world (and thus
@@ -107,9 +108,11 @@ impl PipelineWorld {
             outcomes: inf_tx,
             transition_outcomes: trans_tx,
             compaction_outcomes: compact_tx,
+            content_summary_outcomes: cs_tx,
             wake: wake.clone(),
             runtime,
         });
+        world.insert_resource(crate::context_transform::ContentSummaryResults(cs_rx));
         world.insert_resource(crate::interaction_points::InteractionPointStage {
             outcomes: ip_tx,
             wake: wake.clone(),
@@ -138,6 +141,10 @@ impl PipelineWorld {
             (
                 deliver_messages,
                 collect_compaction,
+                // Apply any completed Summarize context-transform summaries into
+                // the child's regions, then dispatch newly-queued ones.
+                crate::context_transform::collect_content_summary,
+                crate::context_transform::dispatch_content_summary,
                 // Route edge-transform compaction through the compaction lane
                 // before the threshold-based pass.
                 dispatch_edge_compact,

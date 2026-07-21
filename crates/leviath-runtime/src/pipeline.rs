@@ -94,6 +94,9 @@ pub struct InferenceStage {
     /// Where completed *compaction* jobs (LLM context summarization) are
     /// reported — again a separate lane so a summary isn't mistaken for a turn.
     pub compaction_outcomes: UnboundedSender<crate::compaction_bridge::CompactionOutcome>,
+    /// Where completed *content-summary transform* jobs are reported (the
+    /// Summarize context-transform lane — see [`crate::context_transform`]).
+    pub content_summary_outcomes: UnboundedSender<crate::compaction_bridge::CompactionOutcome>,
     /// Signalled when an inference completes, to wake the tick loop.
     pub wake: Arc<Notify>,
     /// Runtime the worker tasks are spawned onto.
@@ -1165,7 +1168,7 @@ pub fn collect_compaction(
 }
 
 /// Build the summarize [`InferenceRequest`] for one region's content.
-fn compaction_request(
+pub(crate) fn compaction_request(
     config: &leviath_core::CompactionConfig,
     content: &str,
     region_name: &str,
@@ -2875,11 +2878,13 @@ mod tests {
         world.insert_resource(Providers(registry));
         let (ttx, _trx) = mpsc::unbounded_channel();
         let (ctx, _crx) = mpsc::unbounded_channel();
+        let (cstx, _csrx) = mpsc::unbounded_channel();
         world.insert_resource(InferenceStage {
             pools: Arc::new(pools),
             outcomes: tx,
             transition_outcomes: ttx,
             compaction_outcomes: ctx,
+            content_summary_outcomes: cstx,
             wake: Arc::new(Notify::new()),
             runtime: Handle::current(),
         });
