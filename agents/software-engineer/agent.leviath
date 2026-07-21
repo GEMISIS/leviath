@@ -88,6 +88,12 @@ required = true
 style    = "multiple_choice"
 options  = ["Approve — proceed to implementation", "Revise — I'll describe changes", "Add detail — expand a section", "Abort — cancel this run"]
 
+# The pinned region that holds the authoritative plan. Each time this point is
+# presented, the current plan — the model's output, or the user's direct edit —
+# REPLACES this region, so revisions build on the current version (the user's
+# edits included) instead of regenerating the plan from the task.
+document_region = "plan"
+
 # "Abort" ends the run immediately (engine-level, deterministic) — no further
 # inference, no transition.
 abort_options = ["Abort — cancel this run"]
@@ -101,7 +107,7 @@ edit_options = ["Add detail — expand a section"]
 # stage and injects the directive into the agent's context so it drives the
 # next step via a tool call (deterministic routing, agent-driven capture).
 [stages.plan.interaction_points.directives]
-"Revise — I'll describe changes" = "The user wants to revise the plan. Call the ask_user_text tool to ask exactly what they want changed, then produce an updated plan ending with the '## Plan' and '## Files' sections so it can be re-approved."
+"Revise — I'll describe changes" = "The user wants to revise the plan. Call the ask_user_text tool to ask exactly what they want changed. Then start from the CURRENT plan (in the 'plan' section of your context — it already includes any edits the user made directly) and apply ONLY the requested change, preserving every other detail verbatim (wording, file names, and exact strings the user chose). Do not revert earlier user edits or 'correct' them back to defaults. End with the '## Plan' and '## Files' sections so it can be re-approved."
 
 # ─── Stage 2: Implement ──────────────────────────────────────────────────────
 # Executes the approved plan. Write/edit/bash require tool-approval unless

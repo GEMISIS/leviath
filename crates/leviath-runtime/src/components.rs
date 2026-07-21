@@ -216,6 +216,21 @@ impl ContextWindow {
         }
     }
 
+    /// Replace a region's entire content with a single entry (clear, then add).
+    /// Returns `false` (no-op) if the region does not exist. Used to keep an
+    /// authoritative document region (e.g. the plan) holding only its current
+    /// version, so revisions build on it instead of accumulating stale copies.
+    pub fn replace_region(&mut self, region_name: &str, content: String, tokens: usize) -> bool {
+        if let Some(region) = self.get_region_mut(region_name) {
+            region.clear();
+            let _ = region.add_entry(content, tokens);
+            self.current_tokens = self.calculate_tokens();
+            true
+        } else {
+            false
+        }
+    }
+
     /// Add a typed entry to a specific region.
     ///
     /// Like [`add_to_region`](Self::add_to_region) but the entry carries an
@@ -936,6 +951,23 @@ mod tests {
         let region = Region::new("test".to_string(), RegionKind::Pinned, 1000);
         window.add_region(region);
         assert_eq!(window.regions.len(), 1);
+    }
+
+    #[test]
+    fn replace_region_overwrites_existing_and_reports_missing() {
+        let mut window = ContextWindow::new(10000);
+        let mut region = Region::new("plan".to_string(), RegionKind::Pinned, 6000);
+        region.add_entry("old plan".to_string(), 3).unwrap();
+        window.add_region(region);
+
+        // Replacing an existing region overwrites its content wholesale.
+        assert!(window.replace_region("plan", "new plan".to_string(), 3));
+        let plan = window.get_region("plan").unwrap();
+        assert_eq!(plan.content.len(), 1);
+        assert_eq!(plan.content[0].content, "new plan");
+
+        // A missing region is a no-op that reports false.
+        assert!(!window.replace_region("nope", "x".to_string(), 1));
     }
 
     #[test]

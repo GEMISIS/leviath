@@ -543,6 +543,15 @@ pub struct InteractionPoint {
     /// choosing to call an edit tool. Matched with the same normalization.
     #[serde(default)]
     pub edit_options: Vec<String>,
+
+    /// Optional pinned region to hold this point's authoritative document (e.g.
+    /// `"plan"`). When set, each time the point is presented the current
+    /// document — the produced text, or the user's direct edit — *replaces* that
+    /// region's content, so later revisions and downstream stages build on the
+    /// current version rather than regenerating from the task. `None` ⇒ the
+    /// document lives only in the rolling conversation / output.
+    #[serde(default)]
+    pub document_region: Option<String>,
 }
 
 /// A single execution stage in an agent's workflow.
@@ -1216,6 +1225,7 @@ mod tests {
             directives: HashMap::new(),
             abort_options: Vec::new(),
             edit_options: Vec::new(),
+            document_region: None,
         };
         assert!(point.directives.is_empty());
         assert!(point.abort_options.is_empty());
@@ -1238,6 +1248,7 @@ mod tests {
             directives,
             abort_options: vec!["Abort".to_string()],
             edit_options: vec!["Add detail".to_string()],
+            document_region: Some("plan".to_string()),
         };
         let json = serde_json::to_string(&point).unwrap();
         let back: InteractionPoint = serde_json::from_str(&json).unwrap();

@@ -326,13 +326,14 @@ pub fn gate_interaction_points(
 /// world) ⇒ no-op; a non-interactive stage ⇒ fall back to the transition.
 #[allow(clippy::type_complexity)]
 pub fn dispatch_interaction_point(
-    agents: Query<
+    mut agents: Query<
         (
             Entity,
             &AgentState,
             &AgentBlueprint,
             &StageCursor,
             &InferenceResult,
+            &mut ContextWindow,
             Option<&InteractionPointCursor>,
             Option<&InteractionPointRounds>,
             Option<&PlanBodyOverride>,
@@ -346,7 +347,9 @@ pub fn dispatch_interaction_point(
     let (Some(hub), Some(stage)) = (hub, stage) else {
         return; // no lane wired (test world)
     };
-    for (entity, state, bp, cursor, infer, pc, rounds, plan_override) in agents.iter() {
+    for (entity, state, bp, cursor, infer, mut window, pc, rounds, plan_override) in
+        agents.iter_mut()
+    {
         if state.status != AgentStatus::Active {
             continue; // paused / cancelled — don't open a prompt
         }
@@ -362,9 +365,25 @@ pub fn dispatch_interaction_point(
         };
         // The document to review: a direct edit (override) takes precedence over
         // the last inference response, so a re-presented approval reflects it.
+        let user_revised = plan_override.is_some();
         let body = plan_override
             .map(|o| o.0.clone())
             .unwrap_or_else(|| infer.response.clone());
+        // Make this the authoritative document in its pinned region (replacing
+        // any prior version), so revisions build on the current text — the
+        // user's edit included — rather than regenerating from the task. A
+        // user edit is marked so the model preserves it deliberately.
+        if let Some(region) = &point.document_region
+            && !body.trim().is_empty()
+        {
+            let content = if user_revised {
+                format!("[revised by user — keep these changes]\n{body}")
+            } else {
+                body.clone()
+            };
+            let tokens = content.len() / 4 + 1;
+            window.replace_region(region, content, tokens);
+        }
         stage.runtime.spawn(run_interaction_point(
             entity,
             hub.clone(),
@@ -526,6 +545,7 @@ mod tests {
             directives: HashMap::new(),
             abort_options: Vec::new(),
             edit_options: Vec::new(),
+            document_region: None,
         }
     }
 
@@ -540,6 +560,7 @@ mod tests {
             .insert("Revise".to_string(), "revise the plan".to_string());
         p.abort_options = vec!["Abort".to_string()];
         p.edit_options = vec!["Add detail".to_string()];
+        p.document_region = Some("plan".to_string());
         p
     }
 
@@ -589,6 +610,12 @@ mod tests {
             RegionKind::Clearable,
             10_000,
         ));
+        w
+    }
+
+    fn window_with_plan() -> ContextWindow {
+        let mut w = window();
+        w.add_region(Region::new("plan".to_string(), RegionKind::Pinned, 6_000));
         w
     }
 
@@ -829,6 +856,7 @@ mod tests {
             .spawn((
                 agent_state(AgentStatus::Waiting),
                 blueprint_with(vec![plan_point()]),
+                window_with_plan(),
                 StageCursor { index: 0 },
                 infer("plan"),
                 ReadyForInteractionPoint,
@@ -848,6 +876,7 @@ mod tests {
             .spawn((
                 agent_state(AgentStatus::Active),
                 blueprint_with(vec![plan_point()]),
+                window_with_plan(),
                 StageCursor { index: 0 },
                 InteractionPointCursor(5),
                 infer("plan"),
@@ -868,6 +897,7 @@ mod tests {
             .spawn((
                 agent_state(AgentStatus::Active),
                 blueprint_with(vec![plan_point()]),
+                window_with_plan(),
                 StageCursor { index: 0 },
                 infer("the plan"),
                 ReadyForInteractionPoint,
@@ -886,6 +916,67 @@ mod tests {
         let pending = hub.pending();
         assert_eq!(pending.len(), 1);
         assert_eq!(pending[0].1.body.as_deref(), Some("the plan"));
+        // The produced plan became the authoritative content of the pinned
+        // `plan` region (no user-edit marker, since it came from inference).
+        let plan = world
+            .get::<ContextWindow>(e)
+            .unwrap()
+            .get_region("plan")
+            .unwrap();
+        assert_eq!(plan.content.len(), 1);
+        assert_eq!(plan.content[0].content, "the plan");
+    }
+
+    #[tokio::test]
+    async fn dispatch_without_document_region_skips_region_write() {
+        // A point with no `document_region` still asks, but writes no region.
+        let (mut world, _hub) = dispatch_world();
+        let e = world
+            .spawn((
+                agent_state(AgentStatus::Active),
+                blueprint_with(vec![point("p", InteractionStyle::Confirm, &[])]),
+                window_with_plan(),
+                StageCursor { index: 0 },
+                infer("some output"),
+                ReadyForInteractionPoint,
+            ))
+            .id();
+        let mut s = Schedule::default();
+        s.add_systems(dispatch_interaction_point);
+        s.run(&mut world);
+        assert!(world.get::<AwaitingInteractionPoint>(e).is_some());
+        // The plan region is untouched (the point declared no document region).
+        let plan = world
+            .get::<ContextWindow>(e)
+            .unwrap()
+            .get_region("plan")
+            .unwrap();
+        assert!(plan.content.is_empty());
+    }
+
+    #[tokio::test]
+    async fn dispatch_with_empty_document_skips_region_write() {
+        // An empty produced document is not written to the region.
+        let (mut world, _hub) = dispatch_world();
+        let e = world
+            .spawn((
+                agent_state(AgentStatus::Active),
+                blueprint_with(vec![plan_point()]),
+                window_with_plan(),
+                StageCursor { index: 0 },
+                infer("   "),
+                ReadyForInteractionPoint,
+            ))
+            .id();
+        let mut s = Schedule::default();
+        s.add_systems(dispatch_interaction_point);
+        s.run(&mut world);
+        let plan = world
+            .get::<ContextWindow>(e)
+            .unwrap()
+            .get_region("plan")
+            .unwrap();
+        assert!(plan.content.is_empty());
     }
 
     #[tokio::test]
@@ -895,6 +986,7 @@ mod tests {
             .spawn((
                 agent_state(AgentStatus::Active),
                 blueprint_with(vec![plan_point()]),
+                window_with_plan(),
                 StageCursor { index: 0 },
                 infer("the stale pre-edit plan"),
                 PlanBodyOverride("the edited plan".to_string()),
@@ -906,6 +998,16 @@ mod tests {
         s.run(&mut world);
         // The override is consumed once dispatched.
         assert!(world.get::<PlanBodyOverride>(e).is_none());
+        // The edited text replaced the plan region, marked as user-revised so
+        // the model preserves it on later revisions.
+        let plan = world
+            .get::<ContextWindow>(e)
+            .unwrap()
+            .get_region("plan")
+            .unwrap();
+        assert_eq!(plan.content.len(), 1);
+        assert!(plan.content[0].content.contains("[revised by user"));
+        assert!(plan.content[0].content.contains("the edited plan"));
         for _ in 0..8 {
             tokio::task::yield_now().await;
         }

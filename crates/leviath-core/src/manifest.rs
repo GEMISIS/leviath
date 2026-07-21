@@ -225,6 +225,12 @@ pub fn parse_manifest(content: &str) -> Result<Blueprint> {
                                             .collect()
                                     })
                                     .unwrap_or_default();
+                                // Pinned region that holds the authoritative
+                                // document: document_region = "plan"
+                                let pt_document_region: Option<String> = pt
+                                    .get("document_region")
+                                    .and_then(|v| v.as_str())
+                                    .map(|s| s.to_string());
                                 points.push(crate::blueprint::InteractionPoint {
                                     name: pt_name,
                                     prompt: pt_prompt,
@@ -234,6 +240,7 @@ pub fn parse_manifest(content: &str) -> Result<Blueprint> {
                                     directives: pt_directives,
                                     abort_options: pt_abort_options,
                                     edit_options: pt_edit_options,
+                                    document_region: pt_document_region,
                                 });
                             }
                         }
@@ -1288,6 +1295,7 @@ prompt = "Review the output"
 required = true
 style = "multiple_choice"
 options = ["approve", "reject", "revise"]
+document_region = "plan"
 
 [[stages.main.interaction_points]]
 name = "feedback"
@@ -1313,6 +1321,9 @@ style = "confirm"
             crate::blueprint::InteractionStyle::MultipleChoice
         );
         assert_eq!(points[0].options, vec!["approve", "reject", "revise"]);
+        assert_eq!(points[0].document_region.as_deref(), Some("plan"));
+        // A point that omits it parses to None.
+        assert_eq!(points[1].document_region, None);
 
         assert_eq!(points[1].name, "feedback");
         assert!(!points[1].required);
