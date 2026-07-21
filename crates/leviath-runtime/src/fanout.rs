@@ -283,6 +283,9 @@ fn start_worker(
             });
         }
     }
+    // Seed the worker's context from the parent per any declared blueprint
+    // context transform (when a fan-out worker runs a different blueprint).
+    crate::context_transform::apply_context_transforms(world, parent, child);
     Ok(child)
 }
 

@@ -614,6 +614,9 @@ impl WorldHost {
                 });
             }
         }
+        // Seed the child's context from the parent per any declared blueprint
+        // context transform (planner→coder region mapping, etc.).
+        crate::context_transform::apply_context_transforms(world, parent, child);
         self.by_run_id.insert(run_id.clone(), child);
         Ok(run_id)
     }
