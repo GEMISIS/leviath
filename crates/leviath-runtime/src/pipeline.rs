@@ -540,7 +540,7 @@ fn merge_in_call_order(
 /// immediately and the agent loops straight back to `ReadyToInfer`. The lane
 /// serializes execution, so there is no permit gate — every ready agent is
 /// enqueued in turn.
-#[allow(clippy::type_complexity)]
+#[allow(clippy::type_complexity, clippy::too_many_arguments)]
 pub fn dispatch_tools(
     mut agents: Query<
         (
@@ -551,6 +551,7 @@ pub fn dispatch_tools(
             Option<&crate::components::ToolResultRoutingComponent>,
             Option<&ToolSensitivities>,
             Option<&mut crate::taint::TaintGate>,
+            Option<&crate::gate_prompt::GateResolved>,
         ),
         With<ReadyForTools>,
     >,
@@ -558,28 +559,58 @@ pub fn dispatch_tools(
     stage: Res<ToolStage>,
     policy: Option<Res<PolicyGate>>,
     script_rules: Option<Res<GateScriptRules>>,
+    hub: Option<Res<InteractionHub>>,
+    gate_stage: Option<Res<crate::gate_prompt::GatePromptStage>>,
     mut commands: Commands,
 ) {
     let default_policy = leviath_core::PolicyConfig::default();
     let policy_ref = policy.as_ref().map(|p| &p.0).unwrap_or(&default_policy);
     let script_checker = script_rules.as_ref().map(|r| r.0.as_ref());
-    for (entity, state, result, mut window, routing, sensitivities, mut gate) in agents.iter_mut() {
+    // Interactive gate prompting is available only when both the hub and the
+    // gate-prompt lane are wired (the daemon); otherwise blocks are returned as
+    // `[blocked]` immediately, preserving the headless/non-interactive behavior.
+    let interactive = hub.as_ref().zip(gate_stage.as_ref());
+    for (entity, state, result, mut window, routing, sensitivities, mut gate, resolved) in
+        agents.iter_mut()
+    {
         if state.status != AgentStatus::Active {
             continue; // paused / waiting / cancelled — don't start new work
         }
 
         // Apply context_* tools inline (they need world access); collect the rest
-        // for the async lane. A taint-gated agent's outbound calls that would leak
-        // over-cleared data (and aren't allowlisted) are blocked here with a
-        // `[blocked]` result instead of reaching the executor.
+        // for the async lane. A taint-gated agent's outbound call that would leak
+        // over-cleared data (and isn't allowlisted) is blocked — either returned
+        // as `[blocked]`, or (interactive) held for a user gate prompt.
         let mut context_results = Vec::new();
         let mut lane_calls = Vec::new();
+        // (tool_id, name, taint, clearance) for blocked calls awaiting a prompt.
+        let mut pending_prompts: Vec<(
+            String,
+            String,
+            leviath_core::TaintLevel,
+            leviath_core::TaintLevel,
+        )> = Vec::new();
         for c in &result.tool_calls {
             if crate::context_tools::is_context_tool(&c.name) {
                 let text =
                     crate::context_tools::handle_context_tool(&c.name, &c.arguments, &mut window);
                 context_results.push((c.tool_id.clone(), text));
                 continue;
+            }
+            // A call the user already resolved in a prior prompt round.
+            if let Some(resolved) = resolved {
+                if let Some(msg) = resolved.denied.get(&c.tool_id) {
+                    context_results.push((c.tool_id.clone(), msg.clone()));
+                    continue;
+                }
+                if resolved.approved.contains(&c.tool_id) {
+                    lane_calls.push(leviath_providers::ToolCall {
+                        id: c.tool_id.clone(),
+                        name: c.name.clone(),
+                        arguments: c.arguments.clone(),
+                    });
+                    continue;
+                }
             }
             if let Some(gate) = gate.as_deref_mut() {
                 let decision = gate.check_with_policy(
@@ -591,7 +622,20 @@ pub fn dispatch_tools(
                     script_checker,
                 );
                 if !decision.is_allowed() {
-                    context_results.push((c.tool_id.clone(), taint_block_message(&decision)));
+                    match (interactive, decision.blocked_levels()) {
+                        (Some(_), Some((taint, clearance))) => {
+                            pending_prompts.push((
+                                c.tool_id.clone(),
+                                c.name.clone(),
+                                taint,
+                                clearance,
+                            ));
+                        }
+                        _ => {
+                            context_results
+                                .push((c.tool_id.clone(), taint_block_message(&decision)));
+                        }
+                    }
                     continue;
                 }
             }
@@ -601,6 +645,37 @@ pub fn dispatch_tools(
                 arguments: c.arguments.clone(),
             });
         }
+
+        // Hold the batch and ask the user about each blocked call.
+        if let (false, Some((hub, gate_stage))) = (pending_prompts.is_empty(), interactive) {
+            let n = pending_prompts.len();
+            for (tool_id, name, taint, clearance) in pending_prompts {
+                gate_stage
+                    .runtime
+                    .spawn(crate::gate_prompt::run_gate_prompt(
+                        entity,
+                        (*hub).clone(),
+                        state.agent_id.clone(),
+                        tool_id,
+                        name,
+                        taint,
+                        clearance,
+                        gate_stage.outcomes.clone(),
+                        gate_stage.wake.clone(),
+                    ));
+            }
+            commands
+                .entity(entity)
+                .remove::<ReadyForTools>()
+                .insert(crate::gate_prompt::AwaitingGatePrompt(n))
+                .insert(crate::gate_prompt::GateResolved::default());
+            continue; // re-run after the prompts resolve
+        }
+
+        // Dispatching the batch consumes any resolution state from a prior round.
+        commands
+            .entity(entity)
+            .remove::<crate::gate_prompt::GateResolved>();
 
         if lane_calls.is_empty() {
             // Nothing async to run — apply the context results now and loop back.
@@ -3776,6 +3851,86 @@ mod tests {
         );
         let job = jrx.try_recv().expect("read_file enqueued to the lane");
         assert_eq!(job.entity, e);
+    }
+
+    #[tokio::test]
+    async fn dispatch_tools_holds_batch_for_an_interactive_gate_prompt() {
+        let (jtx, _jrx) = mpsc::unbounded_channel();
+        let (gtx, _grx) = mpsc::unbounded_channel();
+        let mut world = World::new();
+        world.insert_resource(ToolServiceRes(std::sync::Arc::new(EchoService)));
+        world.insert_resource(ToolStage(jtx));
+        world.insert_resource(crate::interaction_hub::InteractionHub::new());
+        world.insert_resource(crate::gate_prompt::GatePromptStage {
+            outcomes: gtx,
+            wake: std::sync::Arc::new(tokio::sync::Notify::new()),
+            runtime: tokio::runtime::Handle::current(),
+        });
+        let e = world
+            .spawn((
+                agent_state(),
+                infer_with(vec![tc("c_shell", "shell")]),
+                tainted_conv_window(),
+                ReadyForTools,
+                enabled_gate(),
+            ))
+            .id();
+        let mut s = Schedule::default();
+        s.add_systems(dispatch_tools);
+        s.run(&mut world);
+        // Blocked + interactive ⇒ held for a prompt, not dispatched or [blocked].
+        assert_eq!(
+            world
+                .get::<crate::gate_prompt::AwaitingGatePrompt>(e)
+                .unwrap()
+                .0,
+            1
+        );
+        assert!(world.get::<crate::gate_prompt::GateResolved>(e).is_some());
+        assert!(world.get::<ReadyForTools>(e).is_none());
+        assert!(world.get::<AwaitingTools>(e).is_none());
+    }
+
+    #[tokio::test]
+    async fn dispatch_tools_executes_a_gate_approved_call_and_blocks_a_denied_one() {
+        // approved ⇒ reaches the lane; denied ⇒ its stored message, no lane call.
+        let (jtx, mut jrx) = mpsc::unbounded_channel();
+        let mut world = World::new();
+        world.insert_resource(ToolServiceRes(std::sync::Arc::new(EchoService)));
+        world.insert_resource(ToolStage(jtx));
+        let mut resolved = crate::gate_prompt::GateResolved::default();
+        resolved.approved.insert("c_ok".to_string());
+        resolved
+            .denied
+            .insert("c_no".to_string(), "[blocked] user denied".to_string());
+        let e = world
+            .spawn((
+                agent_state(),
+                infer_with(vec![tc("c_ok", "shell"), tc("c_no", "shell")]),
+                tainted_conv_window(),
+                ReadyForTools,
+                enabled_gate(),
+                resolved,
+            ))
+            .id();
+        let mut s = Schedule::default();
+        s.add_systems(dispatch_tools);
+        s.run(&mut world);
+
+        // The approved call was enqueued to the lane; the denied one was not.
+        let job = jrx.try_recv().expect("approved call enqueued");
+        assert_eq!(job.entity, e);
+        assert!(world.get::<AwaitingTools>(e).is_some());
+        // The denied message is stashed for merge with the lane results.
+        let stashed = world.get::<ContextToolResults>(e).unwrap();
+        assert!(
+            stashed
+                .0
+                .iter()
+                .any(|(id, msg)| id == "c_no" && msg.contains("user denied"))
+        );
+        // The resolution state was consumed.
+        assert!(world.get::<crate::gate_prompt::GateResolved>(e).is_none());
     }
 
     #[tokio::test]
