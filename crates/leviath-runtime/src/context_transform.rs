@@ -16,9 +16,11 @@
 
 use bevy_ecs::prelude::*;
 use leviath_core::blueprint::{ContentTransform, RegionMapping};
+use tokio::sync::mpsc::UnboundedReceiver;
 
-use crate::components::ContextWindow;
-use crate::pipeline::AgentBlueprint;
+use crate::compaction_bridge::{CompactionJob, CompactionOutcome, run_compaction_job};
+use crate::components::{AgentState, AgentStatus, ContextWindow};
+use crate::pipeline::{AgentBlueprint, CompactionSettings, InferenceStage, Providers};
 
 /// Seed `child`'s context from `parent`'s per a declared blueprint transform.
 /// No-op unless both carry an [`AgentBlueprint`] with different names and a
@@ -30,6 +32,9 @@ pub fn apply_context_transforms(world: &mut World, parent: Entity, child: Entity
     // Read the parent's mapped regions into owned, already-transformed content
     // (immutable borrow of the parent), then write them into the child.
     let mut writes: Vec<(String, String)> = Vec::new();
+    // Summarize mappings write their raw content now (fallback) and are queued
+    // for deferred LLM summarization, which replaces the region on a later tick.
+    let mut to_summarize: Vec<(String, String)> = Vec::new();
     if let Some(parent_window) = world.get::<ContextWindow>(parent) {
         for m in &mappings {
             if let Some(region) = parent_window.get_region(&m.from_region) {
@@ -40,19 +45,133 @@ pub fn apply_context_transforms(world: &mut World, parent: Entity, child: Entity
                     .collect::<Vec<_>>()
                     .join("\n");
                 if !joined.is_empty() {
-                    writes.push((
-                        m.to_region.clone(),
-                        apply_content_transform(&joined, &m.transform),
-                    ));
+                    let content = apply_content_transform(&joined, &m.transform);
+                    if matches!(m.transform, Some(ContentTransform::Summarize)) {
+                        to_summarize.push((m.to_region.clone(), content.clone()));
+                    }
+                    writes.push((m.to_region.clone(), content));
                 }
             }
         }
     }
+    let mut wrote_to_child = false;
     if let Some(mut child_window) = world.get_mut::<ContextWindow>(child) {
         for (to_region, content) in writes {
             let tokens = content.len() / 4 + 1;
             let _ = child_window.add_to_region(&to_region, content, tokens);
         }
+        wrote_to_child = true;
+    }
+    // Queue any Summarize regions for the deferred summary lane (raw content is
+    // already in place as a fallback if summarization can't run).
+    if wrote_to_child && !to_summarize.is_empty() {
+        world
+            .entity_mut(child)
+            .insert(PendingContentSummary(to_summarize));
+    }
+}
+
+// ─── Summarize transform lane (deferred LLM summarization) ───────────────────
+
+/// A freshly-spawned child's `Summarize`-transform regions, queued for LLM
+/// summarization as `(child_region, raw_content)` pairs. The raw content is
+/// already in each region (a fallback); the summary replaces it once ready.
+#[derive(Component, Debug, Clone)]
+pub struct PendingContentSummary(pub Vec<(String, String)>);
+
+/// A child's content-summary job is in flight on the summary lane.
+#[derive(Component, Debug, Clone, Copy)]
+pub struct AwaitingContentSummary;
+
+/// The receiving side of the content-summary lane, drained by
+/// [`collect_content_summary`]. (The sending side is
+/// `InferenceStage::content_summary_outcomes`.)
+#[derive(Resource)]
+pub struct ContentSummaryResults(pub UnboundedReceiver<CompactionOutcome>);
+
+/// Dispatch: for each child with queued [`PendingContentSummary`] regions, build
+/// one summarize request per region and run it on the summary lane. Mirrors
+/// [`dispatch_compaction`](crate::pipeline::dispatch_compaction), reusing the
+/// same worker + per-model pool. A child with no [`CompactionSettings`] or no
+/// registered provider can't summarize, so it keeps its raw content; a full pool
+/// just retries next tick.
+pub fn dispatch_content_summary(
+    agents: Query<(
+        Entity,
+        &AgentState,
+        &PendingContentSummary,
+        Option<&CompactionSettings>,
+    )>,
+    stage: Res<InferenceStage>,
+    providers: Res<Providers>,
+    mut commands: Commands,
+) {
+    for (entity, state, pending, settings) in agents.iter() {
+        if state.status != AgentStatus::Active {
+            continue; // paused / cancelled — don't start new work
+        }
+        let Some(settings) = settings else {
+            // No compaction config ⇒ can't summarize; keep the raw content.
+            commands.entity(entity).remove::<PendingContentSummary>();
+            continue;
+        };
+        let config = &settings.0;
+        let Some(provider) = providers.0.get(&config.provider).cloned() else {
+            // Provider not registered ⇒ keep the raw content.
+            commands.entity(entity).remove::<PendingContentSummary>();
+            continue;
+        };
+        let Some(permit) = stage.pools.try_acquire(&config.model) else {
+            continue; // pool full — retry next tick (keep the pending marker)
+        };
+        let requests = pending
+            .0
+            .iter()
+            .map(|(region, content)| {
+                (
+                    region.clone(),
+                    crate::pipeline::compaction_request(config, content, region),
+                )
+            })
+            .collect();
+        stage.runtime.spawn(run_compaction_job(
+            CompactionJob {
+                entity,
+                provider,
+                requests,
+                permit,
+            },
+            stage.content_summary_outcomes.clone(),
+            stage.wake.clone(),
+        ));
+        commands
+            .entity(entity)
+            .remove::<PendingContentSummary>()
+            .insert(AwaitingContentSummary);
+    }
+}
+
+/// Collect: apply each completed content summary, replacing the child region's
+/// raw content with the summary. A provider error leaves the raw content in
+/// place (best-effort, like compaction).
+pub fn collect_content_summary(
+    mut results: ResMut<ContentSummaryResults>,
+    mut agents: Query<&mut ContextWindow, With<AwaitingContentSummary>>,
+    mut commands: Commands,
+) {
+    while let Ok(outcome) = results.0.try_recv() {
+        let Ok(mut window) = agents.get_mut(outcome.entity) else {
+            continue; // stale: child cancelled/despawned since dispatch
+        };
+        if let Ok(summaries) = outcome.result {
+            for (region, summary) in summaries {
+                let tokens = summary.len() / 4 + 1;
+                window.replace_region(&region, summary, tokens);
+            }
+        }
+        commands
+            .entity(outcome.entity)
+            .remove::<AwaitingContentSummary>();
     }
 }
 
@@ -377,5 +496,336 @@ mod tests {
         let c3 = w3.spawn(bp_with_transforms("b", vec![])).id(); // no window
         apply_context_transforms(&mut w3, p3, c3);
         assert!(w3.get::<ContextWindow>(c3).is_none());
+    }
+
+    // ── Summarize transform lane ──
+
+    use crate::components::AgentStatus;
+    use crate::inference_pool::{InferencePoolConfig, InferencePools};
+    use crate::providers::ProviderRegistry;
+    use leviath_providers::{
+        FinishReason, InferenceRequest, InferenceResponse, ModelCapabilities, Provider,
+        ProviderError, TokenUsage,
+    };
+    use std::sync::Arc;
+    use tokio::runtime::Handle;
+    use tokio::sync::Notify;
+    use tokio::sync::mpsc;
+
+    struct FakeProvider {
+        reply: String,
+        fail: bool,
+    }
+
+    #[async_trait::async_trait]
+    impl Provider for FakeProvider {
+        async fn infer(
+            &self,
+            _req: InferenceRequest,
+        ) -> leviath_providers::Result<InferenceResponse> {
+            if self.fail {
+                return Err(ProviderError::Other("boom".to_string()));
+            }
+            Ok(InferenceResponse {
+                content: self.reply.clone(),
+                tool_calls: vec![],
+                tokens_used: TokenUsage {
+                    prompt_tokens: 1,
+                    completion_tokens: 1,
+                    total_tokens: 2,
+                    cached_tokens: 0,
+                    cache_write_tokens: 0,
+                },
+                finish_reason: FinishReason::Complete,
+            })
+        }
+        fn count_tokens(&self, _t: &str, _m: &str) -> usize {
+            1
+        }
+        fn max_context_tokens(&self, _m: &str) -> usize {
+            100_000
+        }
+        fn name(&self) -> &str {
+            "fake"
+        }
+        fn capabilities(&self, _m: &str) -> ModelCapabilities {
+            ModelCapabilities::default()
+        }
+    }
+
+    fn agent_state(status: AgentStatus) -> AgentState {
+        AgentState {
+            agent_id: "child".to_string(),
+            current_stage: "s".to_string(),
+            iteration: 0,
+            status,
+            spawned_children_ids: vec![],
+            pending_wait: None,
+            accepts_messages: true,
+        }
+    }
+
+    fn settings() -> CompactionSettings {
+        CompactionSettings(leviath_core::CompactionConfig {
+            provider: "p".to_string(),
+            model: "m".to_string(),
+            system_prompt: None,
+            user_prompt_template: None,
+            max_summary_tokens: 200,
+            temperature: 0.2,
+        })
+    }
+
+    /// A world with the summary lane wired: a `Providers` registry (with the
+    /// fake provider registered iff `register`), an `InferenceStage` over
+    /// `pools`, and the returned receiver for the content-summary outcomes.
+    fn summary_world(
+        register: bool,
+        fail: bool,
+        pools: InferencePools,
+    ) -> (World, mpsc::UnboundedReceiver<CompactionOutcome>) {
+        let mut registry = ProviderRegistry::new();
+        if register {
+            registry.register(
+                "p".to_string(),
+                Arc::new(FakeProvider {
+                    reply: "SUMMARY".to_string(),
+                    fail,
+                }),
+            );
+        }
+        let (cs_tx, cs_rx) = mpsc::unbounded_channel();
+        let (a, _a) = mpsc::unbounded_channel();
+        let (b, _b) = mpsc::unbounded_channel();
+        let (c, _c) = mpsc::unbounded_channel();
+        let mut world = World::new();
+        world.insert_resource(Providers(registry));
+        world.insert_resource(InferenceStage {
+            pools: Arc::new(pools),
+            outcomes: a,
+            transition_outcomes: b,
+            compaction_outcomes: c,
+            content_summary_outcomes: cs_tx,
+            wake: Arc::new(Notify::new()),
+            runtime: Handle::current(),
+        });
+        (world, cs_rx)
+    }
+
+    fn run_dispatch(world: &mut World) {
+        let mut s = Schedule::default();
+        s.add_systems(dispatch_content_summary);
+        s.run(world);
+    }
+
+    #[test]
+    fn fake_provider_metadata_is_exercised() {
+        let p = FakeProvider {
+            reply: String::new(),
+            fail: false,
+        };
+        assert_eq!(p.name(), "fake");
+        assert_eq!(p.count_tokens("t", "m"), 1);
+        assert_eq!(p.max_context_tokens("m"), 100_000);
+        let _ = p.capabilities("m");
+    }
+
+    #[test]
+    fn apply_context_transforms_queues_a_summarize_mapping() {
+        let mut w = World::new();
+        let parent = w
+            .spawn((
+                bp_with_transforms(
+                    "planner",
+                    vec![transform(
+                        "planner",
+                        "coder",
+                        vec![mapping("plan", "task", Some(ContentTransform::Summarize))],
+                    )],
+                ),
+                window_with(&[("plan", "the long plan")]),
+            ))
+            .id();
+        let child = w
+            .spawn((
+                bp_with_transforms("coder", vec![]),
+                window_with(&[("task", "")]),
+            ))
+            .id();
+
+        apply_context_transforms(&mut w, parent, child);
+
+        // Raw content is written now (fallback)...
+        assert_eq!(
+            w.get::<ContextWindow>(child)
+                .unwrap()
+                .get_region("task")
+                .unwrap()
+                .content[0]
+                .content,
+            "the long plan"
+        );
+        // ...and the region is queued for deferred summarization.
+        let pending = w.get::<PendingContentSummary>(child).unwrap();
+        assert_eq!(
+            pending.0,
+            vec![("task".to_string(), "the long plan".to_string())]
+        );
+    }
+
+    #[tokio::test]
+    async fn dispatch_summarizes_and_marks_awaiting() {
+        let (mut world, mut rx) =
+            summary_world(true, false, InferencePools::new(InferencePoolConfig::new()));
+        let e = world
+            .spawn((
+                agent_state(AgentStatus::Active),
+                settings(),
+                PendingContentSummary(vec![("task".to_string(), "raw".to_string())]),
+            ))
+            .id();
+        run_dispatch(&mut world);
+        assert!(world.get::<PendingContentSummary>(e).is_none());
+        assert!(world.get::<AwaitingContentSummary>(e).is_some());
+        for _ in 0..8 {
+            tokio::task::yield_now().await;
+        }
+        let outcome = rx.try_recv().expect("summary job ran");
+        assert_eq!(outcome.entity, e);
+        assert_eq!(
+            outcome.result.unwrap(),
+            vec![("task".to_string(), "SUMMARY".to_string())]
+        );
+    }
+
+    #[tokio::test]
+    async fn dispatch_without_settings_or_provider_drops_pending() {
+        // No CompactionSettings ⇒ can't summarize ⇒ drop pending, keep raw.
+        let (mut world, _rx) =
+            summary_world(true, false, InferencePools::new(InferencePoolConfig::new()));
+        let e = world
+            .spawn((
+                agent_state(AgentStatus::Active),
+                PendingContentSummary(vec![("task".to_string(), "raw".to_string())]),
+            ))
+            .id();
+        run_dispatch(&mut world);
+        assert!(world.get::<PendingContentSummary>(e).is_none());
+        assert!(world.get::<AwaitingContentSummary>(e).is_none());
+
+        // Provider not registered ⇒ drop pending too.
+        let (mut world2, _rx2) = summary_world(
+            false,
+            false,
+            InferencePools::new(InferencePoolConfig::new()),
+        );
+        let e2 = world2
+            .spawn((
+                agent_state(AgentStatus::Active),
+                settings(),
+                PendingContentSummary(vec![("task".to_string(), "raw".to_string())]),
+            ))
+            .id();
+        run_dispatch(&mut world2);
+        assert!(world2.get::<PendingContentSummary>(e2).is_none());
+        assert!(world2.get::<AwaitingContentSummary>(e2).is_none());
+    }
+
+    #[tokio::test]
+    async fn dispatch_keeps_pending_on_full_pool_and_skips_non_active() {
+        // Full pool (limit 0) ⇒ retry next tick (pending stays, no awaiting).
+        let (mut world, _rx) = summary_world(
+            true,
+            false,
+            InferencePools::new(InferencePoolConfig::new().with_default(Some(0))),
+        );
+        let e = world
+            .spawn((
+                agent_state(AgentStatus::Active),
+                settings(),
+                PendingContentSummary(vec![("task".to_string(), "raw".to_string())]),
+            ))
+            .id();
+        run_dispatch(&mut world);
+        assert!(world.get::<PendingContentSummary>(e).is_some());
+        assert!(world.get::<AwaitingContentSummary>(e).is_none());
+
+        // A non-active child is skipped entirely.
+        let (mut world2, _rx2) =
+            summary_world(true, false, InferencePools::new(InferencePoolConfig::new()));
+        let e2 = world2
+            .spawn((
+                agent_state(AgentStatus::Waiting),
+                settings(),
+                PendingContentSummary(vec![("task".to_string(), "raw".to_string())]),
+            ))
+            .id();
+        run_dispatch(&mut world2);
+        assert!(world2.get::<PendingContentSummary>(e2).is_some());
+    }
+
+    fn run_collect(world: &mut World) {
+        let mut s = Schedule::default();
+        s.add_systems(collect_content_summary);
+        s.run(world);
+    }
+
+    #[test]
+    fn collect_replaces_region_with_summary_and_leaves_raw_on_error() {
+        let mut world = World::new();
+        let (tx, rx) = mpsc::unbounded_channel();
+        world.insert_resource(ContentSummaryResults(rx));
+        let e = world
+            .spawn((
+                AwaitingContentSummary,
+                window_with(&[("task", "raw content")]),
+            ))
+            .id();
+        // A successful summary replaces the region's content.
+        tx.send(CompactionOutcome {
+            entity: e,
+            result: Ok(vec![("task".to_string(), "SHORT".to_string())]),
+        })
+        .unwrap();
+        run_collect(&mut world);
+        assert_eq!(
+            world
+                .get::<ContextWindow>(e)
+                .unwrap()
+                .get_region("task")
+                .unwrap()
+                .content[0]
+                .content,
+            "SHORT"
+        );
+        assert!(world.get::<AwaitingContentSummary>(e).is_none());
+
+        // An error leaves the raw content in place.
+        let e2 = world
+            .spawn((AwaitingContentSummary, window_with(&[("task", "keep me")])))
+            .id();
+        tx.send(CompactionOutcome {
+            entity: e2,
+            result: Err(leviath_providers::ProviderError::Other("x".to_string())),
+        })
+        .unwrap();
+        // A stale (despawned) entity is skipped without panic.
+        tx.send(CompactionOutcome {
+            entity: Entity::from_raw(9999),
+            result: Ok(vec![("task".to_string(), "ignored".to_string())]),
+        })
+        .unwrap();
+        run_collect(&mut world);
+        assert_eq!(
+            world
+                .get::<ContextWindow>(e2)
+                .unwrap()
+                .get_region("task")
+                .unwrap()
+                .content[0]
+                .content,
+            "keep me"
+        );
+        assert!(world.get::<AwaitingContentSummary>(e2).is_none());
     }
 }
