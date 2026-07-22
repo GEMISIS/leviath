@@ -30,9 +30,6 @@ pub struct Blueprint {
     /// Context window layout defining memory regions
     pub context_layout: ContextLayout,
 
-    /// Tool filters controlling which tools are available
-    pub tools: Vec<ToolFilter>,
-
     /// Context transforms for inter-agent communication
     pub transforms: Vec<ContextTransform>,
 
@@ -77,7 +74,6 @@ impl Blueprint {
             description,
             stages,
             context_layout,
-            tools: Vec::new(),
             transforms: Vec::new(),
             version: "0.1.0".to_string(),
             compaction_config: None,
@@ -106,12 +102,6 @@ impl Blueprint {
                 ))
             })
             .collect()
-    }
-
-    /// Add tool filters to this blueprint.
-    pub fn with_tools(mut self, tools: Vec<ToolFilter>) -> Self {
-        self.tools = tools;
-        self
     }
 
     /// Add context transforms to this blueprint.
@@ -809,31 +799,6 @@ impl ModelConfig {
     }
 }
 
-/// Filter controlling which tools an agent can access.
-///
-/// Tool filters can include or exclude specific tools, tool categories,
-/// or apply more complex rules for tool access.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ToolFilter {
-    /// Name or pattern for tools
-    pub pattern: String,
-
-    /// Whether this is an include or exclude filter
-    pub filter_type: FilterType,
-
-    /// Optional stage restriction
-    pub stage: Option<String>,
-}
-
-/// Type of tool filter.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum FilterType {
-    /// Include matching tools
-    Include,
-    /// Exclude matching tools
-    Exclude,
-}
-
 /// Context transform for converting between agent types.
 ///
 /// When spawning a sub-agent with a different blueprint, transforms define
@@ -1049,14 +1014,9 @@ mod tests {
     }
 
     #[test]
-    fn test_blueprint_with_tools_transforms_version() {
+    fn test_blueprint_with_transforms_version() {
         let stages = vec![Stage::new("plan".to_string(), make_model())];
         let bp = Blueprint::new("t".into(), "d".into(), stages, make_layout())
-            .with_tools(vec![ToolFilter {
-                pattern: "bash".to_string(),
-                filter_type: FilterType::Exclude,
-                stage: None,
-            }])
             .with_transforms(vec![ContextTransform {
                 from_blueprint: "a".to_string(),
                 to_blueprint: "b".to_string(),
@@ -1064,7 +1024,6 @@ mod tests {
             }])
             .with_version("2.0.0".to_string());
 
-        assert_eq!(bp.tools.len(), 1);
         assert_eq!(bp.transforms.len(), 1);
         assert_eq!(bp.version, "2.0.0");
     }
