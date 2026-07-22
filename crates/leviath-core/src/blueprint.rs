@@ -90,6 +90,24 @@ impl Blueprint {
         }
     }
 
+    /// Agent-level tool permissions, keyed by tool name.
+    ///
+    /// The manifest parser records a top-level `[tool_permissions]` block as
+    /// `tool_perm:<tool>` → policy-string entries in [`Self::metadata`]. This
+    /// projects them back into a tool-keyed map for the runtime's agent-level
+    /// permission layer. Non-`tool_perm:` keys and non-string values are ignored.
+    pub fn agent_tool_permissions(&self) -> HashMap<String, String> {
+        self.metadata
+            .iter()
+            .filter_map(|(k, v)| {
+                Some((
+                    k.strip_prefix("tool_perm:")?.to_string(),
+                    v.as_str()?.to_string(),
+                ))
+            })
+            .collect()
+    }
+
     /// Add tool filters to this blueprint.
     pub fn with_tools(mut self, tools: Vec<ToolFilter>) -> Self {
         self.tools = tools;
@@ -1049,6 +1067,29 @@ mod tests {
         assert_eq!(bp.tools.len(), 1);
         assert_eq!(bp.transforms.len(), 1);
         assert_eq!(bp.version, "2.0.0");
+    }
+
+    #[test]
+    fn agent_tool_permissions_projects_only_string_tool_perm_entries() {
+        let stages = vec![Stage::new("plan".to_string(), make_model())];
+        let mut bp = Blueprint::new("t".into(), "d".into(), stages, make_layout());
+        // A well-formed tool_perm string entry — included.
+        bp.metadata.insert(
+            "tool_perm:bash".to_string(),
+            serde_json::Value::String("deny".to_string()),
+        );
+        // A non-`tool_perm:` key — skipped (strip_prefix returns None).
+        bp.metadata
+            .insert("title".to_string(), serde_json::Value::String("x".into()));
+        // A tool_perm key whose value isn't a string — skipped (as_str is None).
+        bp.metadata
+            .insert("tool_perm:weird".to_string(), serde_json::Value::Bool(true));
+
+        let perms = bp.agent_tool_permissions();
+        assert_eq!(perms.get("bash").map(String::as_str), Some("deny"));
+        assert!(!perms.contains_key("title"));
+        assert!(!perms.contains_key("weird"));
+        assert_eq!(perms.len(), 1);
     }
 
     #[test]

@@ -109,10 +109,15 @@ pub fn build_host(
 ) -> WorldHost {
     let hub = InteractionHub::new();
     let tool_service = Arc::new(CliToolService::new());
+    // The configured global fallback bounds concurrent inference for any model
+    // without its own per-model pool entry (defaults to a small cap so a fresh
+    // install can't fan out unbounded requests against provider rate limits).
+    let pool_config =
+        InferencePoolConfig::new().with_default(config.limits.max_concurrent_inferences);
     let mut world = PipelineWorld::new(
         providers,
         tool_service.clone(),
-        InferencePoolConfig::new(),
+        pool_config,
         runs_dir.clone(),
         runtime,
     );
