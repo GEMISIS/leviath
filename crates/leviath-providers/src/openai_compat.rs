@@ -83,97 +83,92 @@ pub async fn send_chat_request(
 }
 
 /// Build the JSON request body for the OpenAI Chat Completions API.
-pub fn build_openai_request_body(request: &InferenceRequest) -> serde_json::Value {
-    let mut messages: Vec<serde_json::Value> = Vec::new();
+/// Convert one message's content into one or more OpenAI-format messages. A
+/// [`MessageContent::Blocks`] message carrying tool calls/results expands to
+/// several (an assistant `tool_calls` message, or one `tool`-role message per
+/// result), so tool history round-trips correctly on OpenAI-compatible APIs
+/// instead of being serialized raw in Anthropic block form.
+pub fn message_to_openai(role: &str, content: &MessageContent) -> Vec<serde_json::Value> {
+    match content {
+        MessageContent::Text(text) => {
+            vec![serde_json::json!({ "role": role, "content": text })]
+        }
+        MessageContent::Blocks(blocks) => {
+            let text_parts: Vec<&str> = blocks
+                .iter()
+                .filter_map(|b| match b {
+                    ContentBlock::Text { text } => Some(text.as_str()),
+                    _ => None,
+                })
+                .collect();
+            let tool_results: Vec<(&str, &str)> = blocks
+                .iter()
+                .filter_map(|b| match b {
+                    ContentBlock::ToolResult {
+                        tool_use_id,
+                        content,
+                        ..
+                    } => Some((tool_use_id.as_str(), content.as_str())),
+                    _ => None,
+                })
+                .collect();
+            let tool_calls: Vec<serde_json::Value> = blocks
+                .iter()
+                .filter_map(|b| match b {
+                    ContentBlock::ToolUse { id, name, input } => Some(serde_json::json!({
+                        "id": id,
+                        "type": "function",
+                        "function": { "name": name, "arguments": input.to_string() }
+                    })),
+                    _ => None,
+                })
+                .collect();
 
-    // Prepend system blocks as system-role messages
-    for block in &request.system {
-        messages.push(serde_json::json!({
-            "role": "system",
-            "content": block.text,
-        }));
-    }
-
-    // Convert conversation messages to OpenAI format
-    for msg in &request.messages {
-        match &msg.content {
-            MessageContent::Text(text) => {
-                messages.push(serde_json::json!({
-                    "role": msg.role,
-                    "content": text,
-                }));
-            }
-            MessageContent::Blocks(blocks) => {
-                // Separate text, tool_use, and tool_result blocks
-                let text_parts: Vec<&str> = blocks
+            if !tool_calls.is_empty() {
+                let content = text_parts.join("");
+                let mut msg_json = serde_json::json!({
+                    "role": "assistant",
+                    "tool_calls": tool_calls,
+                });
+                if !content.is_empty() {
+                    msg_json["content"] = serde_json::Value::String(content);
+                }
+                vec![msg_json]
+            } else if !tool_results.is_empty() {
+                tool_results
                     .iter()
-                    .filter_map(|b| match b {
-                        ContentBlock::Text { text } => Some(text.as_str()),
-                        _ => None,
-                    })
-                    .collect();
-                // Extract (tool_use_id, content) directly; the filter_map's
-                // `None` arm also runs for non-ToolResult blocks, so there is
-                // no unreachable match arm.
-                let tool_results: Vec<(&str, &str)> = blocks
-                    .iter()
-                    .filter_map(|b| match b {
-                        ContentBlock::ToolResult {
-                            tool_use_id,
-                            content,
-                            ..
-                        } => Some((tool_use_id.as_str(), content.as_str())),
-                        _ => None,
-                    })
-                    .collect();
-                // Build OpenAI tool_calls directly from the ToolUse blocks. The
-                // filter_map's `None` arm also runs for non-ToolUse blocks, so
-                // there is no unreachable match arm.
-                let tool_calls: Vec<serde_json::Value> = blocks
-                    .iter()
-                    .filter_map(|b| match b {
-                        ContentBlock::ToolUse { id, name, input } => Some(serde_json::json!({
-                            "id": id,
-                            "type": "function",
-                            "function": {
-                                "name": name,
-                                "arguments": input.to_string(),
-                            }
-                        })),
-                        _ => None,
-                    })
-                    .collect();
-
-                if !tool_calls.is_empty() {
-                    // Assistant message with tool calls
-                    let content = text_parts.join("");
-                    let mut msg_json = serde_json::json!({
-                        "role": "assistant",
-                        "tool_calls": tool_calls,
-                    });
-                    if !content.is_empty() {
-                        msg_json["content"] = serde_json::Value::String(content);
-                    }
-                    messages.push(msg_json);
-                } else if !tool_results.is_empty() {
-                    // Each tool result becomes a separate "tool" role message
-                    for (tool_use_id, content) in &tool_results {
-                        messages.push(serde_json::json!({
+                    .map(|(tool_use_id, content)| {
+                        serde_json::json!({
                             "role": "tool",
                             "tool_call_id": tool_use_id,
                             "content": content,
-                        }));
-                    }
-                } else {
-                    // Text-only blocks
-                    messages.push(serde_json::json!({
-                        "role": msg.role,
-                        "content": text_parts.join(""),
-                    }));
-                }
+                        })
+                    })
+                    .collect()
+            } else {
+                vec![serde_json::json!({ "role": role, "content": text_parts.join("") })]
             }
         }
     }
+}
+
+/// The full OpenAI-format message array for a request: `request.system` blocks
+/// prepended as `system`-role messages, then each conversation message
+/// converted via [`message_to_openai`]. Reused by every OpenAI-compatible
+/// provider so system prompts and tool history are handled uniformly.
+pub fn openai_messages(request: &InferenceRequest) -> Vec<serde_json::Value> {
+    let mut messages: Vec<serde_json::Value> = Vec::new();
+    for block in &request.system {
+        messages.push(serde_json::json!({ "role": "system", "content": block.text }));
+    }
+    for msg in &request.messages {
+        messages.extend(message_to_openai(&msg.role, &msg.content));
+    }
+    messages
+}
+
+pub fn build_openai_request_body(request: &InferenceRequest) -> serde_json::Value {
+    let messages = openai_messages(request);
 
     let mut body = serde_json::json!({
         "model": request.model,

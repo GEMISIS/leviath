@@ -153,16 +153,10 @@ impl OllamaProvider {
 
     /// Build request body for the Ollama API.
     fn build_request_body(&self, request: &InferenceRequest) -> serde_json::Value {
-        let messages: Vec<serde_json::Value> = request
-            .messages
-            .iter()
-            .map(|msg| {
-                serde_json::json!({
-                    "role": msg.role,
-                    "content": msg.content,
-                })
-            })
-            .collect();
+        // System blocks prepended + tool_use/tool_result history converted to
+        // OpenAI format (Ollama speaks the OpenAI chat shape). Previously the
+        // system prompt was dropped and blocks were serialized as raw JSON.
+        let messages = crate::openai_compat::openai_messages(request);
 
         let caps = self.capabilities(&request.model);
         let options = if caps.supports_temperature {
@@ -933,6 +927,84 @@ mod tests {
         let temp = body["options"]["temperature"].as_f64().unwrap();
         assert!((temp - 0.8).abs() < 0.001);
         assert_eq!(body["options"]["num_predict"], 512);
+    }
+
+    #[test]
+    fn test_build_request_body_prepends_system_blocks() {
+        let provider = OllamaProvider::new();
+        let request = InferenceRequest {
+            system: vec![crate::provider::SystemBlock {
+                text: "You are a local assistant.".to_string(),
+                cache_hint: leviath_core::CacheHint::Never,
+            }],
+            messages: vec![crate::provider::Message {
+                role: "user".to_string(),
+                content: "Hi".into(),
+                cache_breakpoint: false,
+            }],
+            model: "llama3-8b".to_string(),
+            max_tokens: 512,
+            temperature: 0.8,
+            tools: vec![],
+            extra: serde_json::Value::Null,
+        };
+
+        let body = provider.build_request_body(&request);
+        let messages = body["messages"].as_array().unwrap();
+        // The system block is delivered as the first message rather than dropped.
+        assert_eq!(messages[0]["role"], "system");
+        assert_eq!(messages[0]["content"], "You are a local assistant.");
+        assert_eq!(messages[1]["role"], "user");
+    }
+
+    #[test]
+    fn test_build_request_body_serializes_tool_history() {
+        let provider = OllamaProvider::new();
+        let request = InferenceRequest {
+            system: vec![],
+            messages: vec![
+                crate::provider::Message {
+                    role: "assistant".to_string(),
+                    content: crate::provider::MessageContent::Blocks(vec![
+                        crate::provider::ContentBlock::ToolUse {
+                            id: "call_1".to_string(),
+                            name: "list_files".to_string(),
+                            input: serde_json::json!({ "dir": "." }),
+                        },
+                    ]),
+                    cache_breakpoint: false,
+                },
+                crate::provider::Message {
+                    role: "user".to_string(),
+                    content: crate::provider::MessageContent::Blocks(vec![
+                        crate::provider::ContentBlock::ToolResult {
+                            tool_use_id: "call_1".to_string(),
+                            content: "a.txt\nb.txt".to_string(),
+                            is_error: false,
+                        },
+                    ]),
+                    cache_breakpoint: false,
+                },
+            ],
+            model: "llama3-8b".to_string(),
+            max_tokens: 512,
+            temperature: 0.8,
+            tools: vec![],
+            extra: serde_json::Value::Null,
+        };
+
+        let body = provider.build_request_body(&request);
+        let messages = body["messages"].as_array().unwrap();
+        // Tool call round-trips as an assistant `tool_calls` message …
+        assert_eq!(messages[0]["role"], "assistant");
+        assert_eq!(
+            messages[0]["tool_calls"][0]["function"]["name"],
+            "list_files"
+        );
+        // … and the result as a `tool`-role message, not raw block JSON.
+        assert_eq!(messages[1]["role"], "tool");
+        assert_eq!(messages[1]["tool_call_id"], "call_1");
+        assert_eq!(messages[1]["content"], "a.txt\nb.txt");
     }
 
     #[test]

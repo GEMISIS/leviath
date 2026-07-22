@@ -82,28 +82,37 @@ impl OpenRouterProvider {
         let is_anthropic = request.model.contains("claude");
         let mut breakpoint_count = 0usize;
 
-        let messages: Vec<serde_json::Value> = request
-            .messages
-            .iter()
-            .map(|msg| {
-                if is_anthropic && msg.cache_breakpoint && breakpoint_count < 4 {
+        let mut messages: Vec<serde_json::Value> = Vec::new();
+        // System blocks first (previously dropped).
+        for block in &request.system {
+            messages.push(serde_json::json!({ "role": "system", "content": block.text }));
+        }
+        for msg in &request.messages {
+            match &msg.content {
+                // A cache-breakpointed text turn (Anthropic-via-OpenRouter) keeps
+                // its ephemeral cache_control wrapper.
+                crate::provider::MessageContent::Text(text)
+                    if is_anthropic && msg.cache_breakpoint && breakpoint_count < 4 =>
+                {
                     breakpoint_count += 1;
-                    serde_json::json!({
+                    messages.push(serde_json::json!({
                         "role": msg.role,
                         "content": [{
                             "type": "text",
-                            "text": msg.content,
+                            "text": text,
                             "cache_control": { "type": "ephemeral" }
                         }],
-                    })
-                } else {
-                    serde_json::json!({
-                        "role": msg.role,
-                        "content": msg.content,
-                    })
+                    }));
                 }
-            })
-            .collect();
+                // Everything else — including tool_use/tool_result block history —
+                // goes through the OpenAI-format conversion so it round-trips on
+                // non-Anthropic models instead of being sent as raw block JSON.
+                _ => messages.extend(crate::openai_compat::message_to_openai(
+                    &msg.role,
+                    &msg.content,
+                )),
+            }
+        }
 
         let caps = self.capabilities(&request.model);
         let mut body = if caps.supports_temperature {
@@ -223,8 +232,11 @@ impl Provider for OpenRouterProvider {
         text.len() / 4
     }
 
-    fn max_context_tokens(&self, _model: &str) -> usize {
-        128_000
+    fn max_context_tokens(&self, model: &str) -> usize {
+        // Delegate to the per-model capabilities table rather than a flat 128K,
+        // which badly under-budgeted large-context models (Llama-4 ~10M, several
+        // ~1M) and over-budgeted small ones.
+        self.capabilities(model).max_context_tokens
     }
 
     fn name(&self) -> &str {
@@ -496,6 +508,86 @@ mod tests {
         assert_eq!(body["model"], "anthropic/claude-sonnet-4");
     }
 
+    #[test]
+    fn test_build_request_body_prepends_system_blocks() {
+        let provider = OpenRouterProvider::new("test-key".to_string());
+        let request = InferenceRequest {
+            system: vec![crate::provider::SystemBlock {
+                text: "You are a helpful assistant.".to_string(),
+                cache_hint: leviath_core::CacheHint::Never,
+            }],
+            messages: vec![crate::provider::Message {
+                role: "user".to_string(),
+                content: "Hello".into(),
+                cache_breakpoint: false,
+            }],
+            model: "openai/gpt-4o".to_string(),
+            max_tokens: 1024,
+            temperature: 0.7,
+            tools: vec![],
+            extra: serde_json::Value::Null,
+        };
+
+        let body = provider.build_request_body(&request);
+        let messages = body["messages"].as_array().unwrap();
+        // System block is delivered as the first message, not dropped.
+        assert_eq!(messages[0]["role"], "system");
+        assert_eq!(messages[0]["content"], "You are a helpful assistant.");
+        assert_eq!(messages[1]["role"], "user");
+        assert_eq!(messages[1]["content"], "Hello");
+    }
+
+    #[test]
+    fn test_build_request_body_serializes_tool_history() {
+        let provider = OpenRouterProvider::new("test-key".to_string());
+        let request = InferenceRequest {
+            system: vec![],
+            messages: vec![
+                crate::provider::Message {
+                    role: "assistant".to_string(),
+                    content: crate::provider::MessageContent::Blocks(vec![
+                        crate::provider::ContentBlock::ToolUse {
+                            id: "call_1".to_string(),
+                            name: "get_weather".to_string(),
+                            input: serde_json::json!({ "city": "Paris" }),
+                        },
+                    ]),
+                    cache_breakpoint: false,
+                },
+                crate::provider::Message {
+                    role: "user".to_string(),
+                    content: crate::provider::MessageContent::Blocks(vec![
+                        crate::provider::ContentBlock::ToolResult {
+                            tool_use_id: "call_1".to_string(),
+                            content: "sunny".to_string(),
+                            is_error: false,
+                        },
+                    ]),
+                    cache_breakpoint: false,
+                },
+            ],
+            model: "openai/gpt-4o".to_string(),
+            max_tokens: 1024,
+            temperature: 0.7,
+            tools: vec![],
+            extra: serde_json::Value::Null,
+        };
+
+        let body = provider.build_request_body(&request);
+        let messages = body["messages"].as_array().unwrap();
+        // Tool call → assistant message with an OpenAI `tool_calls` array.
+        assert_eq!(messages[0]["role"], "assistant");
+        assert_eq!(messages[0]["tool_calls"][0]["id"], "call_1");
+        assert_eq!(
+            messages[0]["tool_calls"][0]["function"]["name"],
+            "get_weather"
+        );
+        // Tool result → a `tool`-role message keyed by the call id.
+        assert_eq!(messages[1]["role"], "tool");
+        assert_eq!(messages[1]["tool_call_id"], "call_1");
+        assert_eq!(messages[1]["content"], "sunny");
+    }
+
     // ── Additional coverage tests ──────────────────────────────────────────
 
     #[test]
@@ -520,7 +612,17 @@ mod tests {
     #[test]
     fn test_max_context_tokens() {
         let provider = OpenRouterProvider::new("key".to_string());
+        // Unknown model ⇒ the conservative fallback.
         assert_eq!(provider.max_context_tokens("any-model"), 128_000);
+        // A known large-context model reports its real size (not a flat 128K) —
+        // it now delegates to the per-model capabilities table.
+        assert_eq!(
+            provider.max_context_tokens("meta-llama/llama-4-scout"),
+            provider
+                .capabilities("meta-llama/llama-4-scout")
+                .max_context_tokens
+        );
+        assert!(provider.max_context_tokens("meta-llama/llama-4-scout") > 128_000);
     }
 
     #[test]

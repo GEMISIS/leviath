@@ -54,6 +54,12 @@ impl ProviderError {
             ProviderError::ApiError(msg) => {
                 let m = msg.to_ascii_lowercase();
                 [
+                    // Rate limiting (a provider that maps 429 to ApiError rather
+                    // than RateLimitExceeded, e.g. Ollama).
+                    "429",
+                    "too many requests",
+                    "rate limit",
+                    // Server-side 5xx (and Anthropic's 529 "overloaded").
                     "500",
                     "502",
                     "503",
@@ -574,6 +580,8 @@ mod tests {
         assert!(ProviderError::RequestFailed("connection reset".into()).is_transient());
         assert!(ProviderError::RateLimitExceeded.is_transient());
         assert!(ProviderError::ApiError("HTTP 503 Service Unavailable".into()).is_transient());
+        assert!(ProviderError::ApiError("HTTP 429 Too Many Requests".into()).is_transient());
+        assert!(ProviderError::ApiError("rate limit exceeded".into()).is_transient());
         assert!(ProviderError::ApiError("500 internal server error".into()).is_transient());
         assert!(ProviderError::ApiError("529 overloaded".into()).is_transient());
         assert!(ProviderError::ApiError("502 Bad Gateway".into()).is_transient());
