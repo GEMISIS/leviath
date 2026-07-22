@@ -217,9 +217,19 @@ impl ToolDiscovery {
         &mut self,
         config: &MCPServerConfig,
     ) -> anyhow::Result<(Vec<ToolMetadata>, MCPClient)> {
+        self.discover_from_config_with_auth(config, None).await
+    }
+
+    /// [`Self::discover_from_config`] with a resolved `Authorization` header for
+    /// an HTTP server (see [`MCPClient::from_config_with_auth`]).
+    pub async fn discover_from_config_with_auth(
+        &mut self,
+        config: &MCPServerConfig,
+        auth_header: Option<(String, String)>,
+    ) -> anyhow::Result<(Vec<ToolMetadata>, MCPClient)> {
         tracing::info!(server = %config.name, "Connecting MCP server from config");
 
-        let mut client = MCPClient::from_config(config).await?;
+        let mut client = MCPClient::from_config_with_auth(config, auth_header).await?;
         client.connect().await?;
 
         let tools = self.discover_from_client(&config.name, &mut client).await?;

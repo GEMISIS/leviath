@@ -34,8 +34,32 @@ impl ToolRegistry {
 
         if !config.mcp_servers.is_empty() {
             let mut discovery = ToolDiscovery::new();
+            let oauth = leviath_mcp::OAuthClient::new();
+            let store_path = leviath_mcp::AuthStore::default_path();
+            let now = unix_now_secs();
             for server_cfg in &config.mcp_servers {
-                match discovery.discover_from_config(server_cfg).await {
+                // For an HTTP server, resolve a stored OAuth token (refreshing
+                // it non-interactively if it has lapsed) and inject it as the
+                // bearer. `None` covers stdio servers, unauthenticated HTTP
+                // servers, and ones using a static `headers` token.
+                let auth_header = match resolve_bearer(
+                    &oauth,
+                    &server_cfg.name,
+                    store_path.as_deref(),
+                    now,
+                )
+                .await
+                {
+                    Ok(header) => header,
+                    Err(e) => {
+                        tracing::warn!(server = %server_cfg.name, error = %e, "MCP auth unavailable — skipping");
+                        continue;
+                    }
+                };
+                match discovery
+                    .discover_from_config_with_auth(server_cfg, auth_header)
+                    .await
+                {
                     Ok((tool_metas, client)) => {
                         mcp_executor.add_client(server_cfg.name.clone(), client);
                         for meta in tool_metas {
@@ -86,6 +110,33 @@ impl ToolRegistry {
         // We discard the result here rather than branch on a gap that can
         // never be exercised without modifying `leviath-mcp` itself.
         let _ = mcp.shutdown_all().await;
+    }
+}
+
+/// Current Unix time in seconds, for token-expiry checks. `0` if the clock is
+/// somehow before the epoch — which reads every token as expired and forces a
+/// refresh attempt, the safe direction.
+fn unix_now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// Resolve the `Authorization` header for one server, or `None` when there is
+/// no store (no home directory) or no stored auth for it.
+///
+/// Split out of [`ToolRegistry::build`] so the store-present / store-absent and
+/// refresh-failure paths are unit-testable without the real home directory.
+async fn resolve_bearer(
+    oauth: &leviath_mcp::OAuthClient,
+    server_name: &str,
+    store_path: Option<&std::path::Path>,
+    now: u64,
+) -> anyhow::Result<Option<(String, String)>> {
+    match store_path {
+        Some(path) => oauth.authorization_header(server_name, path, now).await,
+        None => Ok(None),
     }
 }
 
@@ -197,9 +248,9 @@ for line in sys.stdin:
     elif method == "tools/call":
         args = req.get("params", {}).get("arguments", {})
         if args.get("fail"):
-            respond(id_, {"content": [{"type": "text", "text": "it broke"}], "is_error": True})
+            respond(id_, {"content": [{"type": "text", "text": "it broke"}], "isError": True})
         else:
-            respond(id_, {"content": [{"type": "text", "text": "echoed!"}], "is_error": False})
+            respond(id_, {"content": [{"type": "text", "text": "echoed!"}], "isError": False})
     else:
         respond(id_, {"error": {"code": -32601, "message": "method not found"}})
 "#;
@@ -215,11 +266,30 @@ for line in sys.stdin:
         }
     }
 
+    /// Run `body` with `LEVIATH_HOME` pointed at a fresh temp dir, so the MCP
+    /// auth store resolves to an empty, hermetic location rather than the real
+    /// `~/.leviath`.
+    async fn with_temp_home<F, Fut, T>(body: F) -> T
+    where
+        F: FnOnce() -> Fut,
+        Fut: std::future::Future<Output = T>,
+    {
+        let dir = tempfile::tempdir().unwrap();
+        temp_env::async_with_vars(
+            [("LEVIATH_HOME", Some(dir.path().to_str().unwrap()))],
+            body(),
+        )
+        .await
+    }
+
     #[tokio::test]
     async fn build_connects_mcp_server_and_registers_its_tools() {
         with_tracing(|| {});
-        let config = config_with_mcp_server("python3", vec!["-c", STUB_INIT_AND_LIST]);
-        let registry = ToolRegistry::build(std::env::temp_dir(), &config).await;
+        let registry = with_temp_home(|| async {
+            let config = config_with_mcp_server("python3", vec!["-c", STUB_INIT_AND_LIST]);
+            ToolRegistry::build(std::env::temp_dir(), &config).await
+        })
+        .await;
 
         assert_eq!(registry.mcp_tool_defs.len(), 1);
         assert_eq!(registry.mcp_tool_defs[0].name, "echo");
@@ -233,10 +303,54 @@ for line in sys.stdin:
         // ("Failed to connect MCP server -- skipping") instead of the
         // success arm above.
         with_tracing(|| {});
-        let config = config_with_mcp_server("definitely-not-a-real-binary-xyz", vec![]);
-        let registry = ToolRegistry::build(std::env::temp_dir(), &config).await;
+        let registry = with_temp_home(|| async {
+            let config = config_with_mcp_server("definitely-not-a-real-binary-xyz", vec![]);
+            ToolRegistry::build(std::env::temp_dir(), &config).await
+        })
+        .await;
 
         assert!(registry.mcp_tool_defs.is_empty());
+    }
+
+    #[tokio::test]
+    async fn build_skips_http_server_whose_token_cannot_be_refreshed() {
+        // An HTTP server with a stored-but-expired token whose refresh endpoint
+        // is dead: `resolve_bearer` errors, so build logs and skips it rather
+        // than connecting unauthenticated. Exercises the auth `Err(e) => continue`
+        // arm.
+        with_tracing(|| {});
+        let registry = with_temp_home(|| async {
+            // Seed an expired token with an unreachable refresh endpoint.
+            let mut store = leviath_mcp::AuthStore::default();
+            store.set(
+                "remote",
+                leviath_mcp::ServerAuth {
+                    token_endpoint: "http://127.0.0.1:1/token".to_string(),
+                    access_token: "expired".to_string(),
+                    refresh_token: Some("good".to_string()),
+                    expires_at: 1,
+                    ..Default::default()
+                },
+            );
+            store
+                .save(&leviath_mcp::AuthStore::default_path().unwrap())
+                .unwrap();
+
+            let config = Config {
+                mcp_servers: vec![MCPServerConfig::http("remote", "http://127.0.0.1:1/mcp")],
+                ..Config::default()
+            };
+            ToolRegistry::build(std::env::temp_dir(), &config).await
+        })
+        .await;
+        assert!(registry.mcp_tool_defs.is_empty());
+    }
+
+    #[tokio::test]
+    async fn resolve_bearer_without_a_store_is_none() {
+        let oauth = leviath_mcp::OAuthClient::new();
+        let header = resolve_bearer(&oauth, "srv", None, 0).await.unwrap();
+        assert!(header.is_none());
     }
 
     #[tokio::test]

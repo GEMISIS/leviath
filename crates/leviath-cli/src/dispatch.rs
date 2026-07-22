@@ -80,6 +80,9 @@ pub enum Commands {
 
     /// Show a run's context-window history (from its run.lvr archive)
     Context(commands::context::ContextArgs),
+
+    /// Manage MCP tool servers and their authentication
+    Mcp(commands::mcp::McpArgs),
 }
 
 /// The subset of commands whose real execution performs I/O that a unit test
@@ -110,6 +113,8 @@ pub trait RiskyExecutors {
     async fn serve(&self, args: commands::serve::ServeArgs) -> anyhow::Result<()>;
     /// `lev daemon` — binds the control socket and serves the shared world.
     async fn daemon(&self, args: commands::daemon::DaemonArgs) -> anyhow::Result<()>;
+    /// `lev mcp` — rewrites config, opens a browser for OAuth, touches the token store.
+    async fn mcp(&self, args: commands::mcp::McpArgs) -> anyhow::Result<()>;
 }
 
 /// Route a parsed subcommand to its executor. Safe commands are called
@@ -136,6 +141,7 @@ pub async fn dispatch(command: Commands, ex: &impl RiskyExecutors) -> anyhow::Re
         Commands::Serve(args) => ex.serve(args).await,
         Commands::Daemon(args) => ex.daemon(args).await,
         Commands::Context(args) => commands::context::execute(args).await,
+        Commands::Mcp(args) => ex.mcp(args).await,
     }
 }
 
@@ -174,6 +180,9 @@ mod tests {
             Ok(())
         }
         async fn daemon(&self, _args: commands::daemon::DaemonArgs) -> anyhow::Result<()> {
+            Ok(())
+        }
+        async fn mcp(&self, _args: commands::mcp::McpArgs) -> anyhow::Result<()> {
             Ok(())
         }
     }
@@ -258,6 +267,13 @@ mod tests {
             socket: None,
         };
         let result = dispatch(Commands::Daemon(args), &MockRisky).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn dispatch_mcp_variant_is_routed_through_the_executor() {
+        let args = commands::mcp::McpArgs::list_for_test();
+        let result = dispatch(Commands::Mcp(args), &MockRisky).await;
         assert!(result.is_ok());
     }
 

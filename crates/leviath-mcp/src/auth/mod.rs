@@ -192,6 +192,46 @@ impl OAuthClient {
         Ok(refreshed)
     }
 
+    /// Resolve the `Authorization` header for a stored server, refreshing the
+    /// token first if it is at or near expiry.
+    ///
+    /// Non-interactive: a dead refresh returns an error naming the login
+    /// command rather than opening a browser, so the daemon can call this
+    /// safely. A refreshed token is written back to `store_path`. Returns
+    /// `None` when the server has no stored auth (e.g. an unauthenticated
+    /// server, or one using a static header).
+    pub async fn authorization_header(
+        &self,
+        server_name: &str,
+        store_path: &std::path::Path,
+        now: u64,
+    ) -> anyhow::Result<Option<(String, String)>> {
+        let mut store = AuthStore::load(store_path)?;
+        let Some(auth) = store.get(server_name) else {
+            return Ok(None);
+        };
+
+        let token = if auth.is_expired_at(now) {
+            let refreshed = self.refresh(auth, now).await.map_err(|e| {
+                anyhow::anyhow!(
+                    "MCP server '{server_name}' token expired and could not be \
+                     refreshed ({e}); re-authenticate with `lev mcp login {server_name}`"
+                )
+            })?;
+            let access = refreshed.access_token.clone();
+            store.set(server_name, refreshed);
+            store.save(store_path)?;
+            access
+        } else {
+            auth.access_token.clone()
+        };
+
+        Ok(Some((
+            "Authorization".to_string(),
+            format!("Bearer {token}"),
+        )))
+    }
+
     /// Discover the resource identifier and authorization-server metadata.
     async fn discover(
         &self,
@@ -1144,6 +1184,138 @@ mod tests {
         assert_eq!(refreshed.refresh_token.as_deref(), Some("keep-me"));
         assert_eq!(refreshed.scope, "openid");
         assert_eq!(refreshed.expires_at, 0);
+    }
+
+    #[tokio::test]
+    async fn authorization_header_is_none_without_stored_auth() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = dir.path().join("mcp-auth.json");
+        let header = OAuthClient::new()
+            .authorization_header("unknown", &store, 0)
+            .await
+            .unwrap();
+        assert!(header.is_none());
+    }
+
+    #[tokio::test]
+    async fn authorization_header_returns_a_fresh_token_unchanged() {
+        let dir = tempfile::tempdir().unwrap();
+        let store_path = dir.path().join("mcp-auth.json");
+        let mut store = AuthStore::default();
+        store.set(
+            "srv",
+            ServerAuth {
+                access_token: "still-good".to_string(),
+                expires_at: 10_000,
+                ..Default::default()
+            },
+        );
+        store.save(&store_path).unwrap();
+
+        let header = OAuthClient::new()
+            .authorization_header("srv", &store_path, 1_000)
+            .await
+            .unwrap()
+            .expect("a stored token yields a header");
+        assert_eq!(
+            header,
+            ("Authorization".to_string(), "Bearer still-good".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn authorization_header_refreshes_an_expired_token_and_persists_it() {
+        let server = mock_auth_server("default").await;
+        let dir = tempfile::tempdir().unwrap();
+        let store_path = dir.path().join("mcp-auth.json");
+        let mut store = AuthStore::default();
+        store.set(
+            "srv",
+            ServerAuth {
+                token_endpoint: format!("{}/token", server.base),
+                access_token: "expired".to_string(),
+                refresh_token: Some("good".to_string()),
+                expires_at: 100,
+                ..Default::default()
+            },
+        );
+        store.save(&store_path).unwrap();
+
+        let header = OAuthClient::new()
+            .authorization_header("srv", &store_path, 1_000)
+            .await
+            .unwrap()
+            .expect("an expired token is refreshed");
+        assert_eq!(header.1, "Bearer new-access");
+        // The rotated token is written back for next time.
+        let reloaded = AuthStore::load(&store_path).unwrap();
+        assert_eq!(reloaded.get("srv").unwrap().access_token, "new-access");
+    }
+
+    #[tokio::test]
+    async fn authorization_header_names_the_login_command_when_refresh_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let store_path = dir.path().join("mcp-auth.json");
+        let mut store = AuthStore::default();
+        store.set(
+            "srv",
+            ServerAuth {
+                token_endpoint: "http://127.0.0.1:1/token".to_string(),
+                access_token: "expired".to_string(),
+                refresh_token: Some("good".to_string()),
+                expires_at: 100,
+                ..Default::default()
+            },
+        );
+        store.save(&store_path).unwrap();
+
+        let err = OAuthClient::new()
+            .authorization_header("srv", &store_path, 1_000)
+            .await
+            .expect_err("a dead refresh must fail");
+        assert!(err.to_string().contains("lev mcp login srv"), "got: {err}");
+    }
+
+    #[tokio::test]
+    async fn authorization_header_surfaces_an_unreadable_store() {
+        // The store path is a directory, so loading it fails.
+        let dir = tempfile::tempdir().unwrap();
+        assert!(
+            OAuthClient::new()
+                .authorization_header("srv", dir.path(), 0)
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn authorization_header_surfaces_an_unwritable_store_after_refresh() {
+        // Refresh succeeds, but the read-only store can't persist the rotated
+        // token.
+        let server = mock_auth_server("default").await;
+        let dir = tempfile::tempdir().unwrap();
+        let store_path = dir.path().join("mcp-auth.json");
+        let mut store = AuthStore::default();
+        store.set(
+            "srv",
+            ServerAuth {
+                token_endpoint: format!("{}/token", server.base),
+                refresh_token: Some("good".to_string()),
+                expires_at: 100,
+                ..Default::default()
+            },
+        );
+        store.save(&store_path).unwrap();
+        let mut perms = std::fs::metadata(&store_path).unwrap().permissions();
+        perms.set_readonly(true);
+        std::fs::set_permissions(&store_path, perms).unwrap();
+
+        assert!(
+            OAuthClient::new()
+                .authorization_header("srv", &store_path, 1_000)
+                .await
+                .is_err()
+        );
     }
 
     #[tokio::test]

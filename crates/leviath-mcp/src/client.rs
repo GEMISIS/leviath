@@ -194,12 +194,33 @@ impl MCPClient {
     /// Callers above this point — discovery, execution, the tool registry —
     /// never learn which one it turned out to be.
     pub async fn from_config(config: &MCPServerConfig) -> anyhow::Result<Self> {
+        Self::from_config_with_auth(config, None).await
+    }
+
+    /// [`Self::from_config`] with a resolved `Authorization` header injected for
+    /// an HTTP server.
+    ///
+    /// `auth_header` is the `(name, value)` pair from
+    /// [`crate::OAuthClient::authorization_header`]; it is layered on top of the
+    /// config's static headers (and wins on a clash, since a live token should
+    /// override a stale hard-coded one). Ignored for stdio servers, which carry
+    /// no HTTP headers.
+    pub async fn from_config_with_auth(
+        config: &MCPServerConfig,
+        auth_header: Option<(String, String)>,
+    ) -> anyhow::Result<Self> {
         match config.resolve()? {
             ResolvedTransport::Stdio { command, args, env } => {
                 let args: Vec<&str> = args.iter().map(String::as_str).collect();
                 Self::spawn(command, &args, env).await
             }
-            ResolvedTransport::Http { url, headers } => Self::connect_http(url, headers),
+            ResolvedTransport::Http { url, headers } => {
+                let mut headers = headers.clone();
+                if let Some((name, value)) = auth_header {
+                    headers.insert(name, value);
+                }
+                Self::connect_http(url, &headers)
+            }
         }
     }
 
@@ -1510,6 +1531,19 @@ for line in sys.stdin:
     async fn from_config_builds_the_http_transport() {
         let config = MCPServerConfig::http("s", "http://127.0.0.1:1/mcp");
         assert!(MCPClient::from_config(&config).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn from_config_with_auth_injects_a_bearer_for_http() {
+        // The header-injection arm: construction succeeds without a network
+        // round-trip (connecting happens later).
+        let config = MCPServerConfig::http("s", "http://127.0.0.1:1/mcp");
+        let header = Some(("Authorization".to_string(), "Bearer tok".to_string()));
+        assert!(
+            MCPClient::from_config_with_auth(&config, header)
+                .await
+                .is_ok()
+        );
     }
 
     #[tokio::test]

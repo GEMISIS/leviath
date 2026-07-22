@@ -264,6 +264,17 @@ impl Config {
         Ok(())
     }
 
+    /// Load a config from an explicit path (`lev mcp` uses this to read the
+    /// file it is about to rewrite). Public wrapper over the tested `load_from_path`.
+    pub fn load_from_path_public(path: &std::path::Path) -> anyhow::Result<Self> {
+        Self::load_from_path(path)
+    }
+
+    /// Save a config to an explicit path. Public wrapper over `save_to_path`, for `lev mcp` rewriting the config file.
+    pub fn save_to_path_public(&self, path: &std::path::Path) -> anyhow::Result<()> {
+        self.save_to_path(path)
+    }
+
     /// Get the path to the config file.
     ///
     /// `LEVIATH_CONFIG_PATH` overrides this when set (mirrors the
