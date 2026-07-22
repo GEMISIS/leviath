@@ -41,9 +41,14 @@ struct Cli {
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
-    // Initialize tracing
+    // Initialize tracing. Logs go to stderr, never stdout: `lev agent-client`
+    // uses stdout as its JSON-RPC protocol channel, and a stray log line there
+    // would corrupt the stream a host is parsing.
     let level = if cli.verbose { "debug" } else { "info" };
-    tracing_subscriber::fmt().with_env_filter(level).init();
+    tracing_subscriber::fmt()
+        .with_env_filter(level)
+        .with_writer(std::io::stderr)
+        .init();
 
     info!("Leviath CLI v{}", env!("CARGO_PKG_VERSION"));
 
@@ -91,6 +96,26 @@ impl RiskyExecutors for RealExecutors {
         // running, then serve, routing agent actions through its control socket.
         ensure_daemon_running().await?;
         commands::serve::execute(args, control_client()?).await
+    }
+
+    async fn agent_client(
+        &self,
+        args: commands::agent_client::AgentClientArgs,
+    ) -> anyhow::Result<()> {
+        // Like `serve`, this is a client of the shared-world daemon — ensure it's
+        // running, then speak the Agent Client Protocol over real stdio, routing
+        // agent actions through its control socket. The protocol loop
+        // (`agent_client::serve_over`) is fully unit-tested over an in-memory
+        // duplex; only the real stdio + socket wiring lives here.
+        ensure_daemon_running().await?;
+        commands::agent_client::serve_over(
+            tokio::io::BufReader::new(tokio::io::stdin()),
+            tokio::io::stdout(),
+            control_client()?,
+            args,
+            leviath_cli::runstate::runs_dir(),
+        )
+        .await
     }
 
     async fn daemon(&self, args: commands::daemon::DaemonArgs) -> anyhow::Result<()> {
@@ -169,7 +194,12 @@ async fn ensure_daemon_running() -> anyhow::Result<()> {
         // restart it cleanly — it reloads its persisted agents on startup, so
         // in-flight runs survive the swap.
         eprintln!("leviath daemon is on an older build; restarting to load {CURRENT_BUILD}…");
-        let _ = commands::daemon::send_shutdown(&control_client()?).await;
+        // Shut down quietly (straight over the control socket) rather than via
+        // `daemon::send_shutdown`, whose stdout "daemon shutting down" line would
+        // corrupt `lev agent-client`'s JSON-RPC protocol channel.
+        let _ = control_client()?
+            .request(&leviath_runtime::control_socket::ControlRequest::Shutdown)
+            .await;
         for _ in 0..100 {
             if !is_daemon_running(&id) {
                 break;

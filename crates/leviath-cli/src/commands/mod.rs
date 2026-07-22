@@ -1,6 +1,7 @@
 //! CLI command implementations.
 
 pub mod add;
+pub mod agent_client;
 pub mod context;
 pub mod create;
 pub mod ctl;

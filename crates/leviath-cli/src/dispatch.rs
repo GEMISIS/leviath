@@ -75,6 +75,10 @@ pub enum Commands {
     /// Start the REST + WebSocket API server
     Serve(commands::serve::ServeArgs),
 
+    /// Serve this agent over the Agent Client Protocol (JSON-RPC over stdio)
+    #[command(name = "agent-client")]
+    AgentClient(commands::agent_client::AgentClientArgs),
+
     /// Run the shared-world daemon in the foreground
     Daemon(commands::daemon::DaemonArgs),
 
@@ -111,6 +115,12 @@ pub trait RiskyExecutors {
     async fn dashboard(&self, args: commands::dashboard::DashboardArgs) -> anyhow::Result<()>;
     /// `lev serve` — binds a real port and serves indefinitely.
     async fn serve(&self, args: commands::serve::ServeArgs) -> anyhow::Result<()>;
+    /// `lev agent-client` — takes over real stdin/stdout to speak the Agent
+    /// Client Protocol against the shared-world daemon.
+    async fn agent_client(
+        &self,
+        args: commands::agent_client::AgentClientArgs,
+    ) -> anyhow::Result<()>;
     /// `lev daemon` — binds the control socket and serves the shared world.
     async fn daemon(&self, args: commands::daemon::DaemonArgs) -> anyhow::Result<()>;
     /// `lev mcp` — rewrites config, opens a browser for OAuth, touches the token store.
@@ -139,6 +149,7 @@ pub async fn dispatch(command: Commands, ex: &impl RiskyExecutors) -> anyhow::Re
         Commands::Validate(args) => commands::validate::execute(args).await,
         Commands::Policy(args) => commands::policy::execute(args).await,
         Commands::Serve(args) => ex.serve(args).await,
+        Commands::AgentClient(args) => ex.agent_client(args).await,
         Commands::Daemon(args) => ex.daemon(args).await,
         Commands::Context(args) => commands::context::execute(args).await,
         Commands::Mcp(args) => ex.mcp(args).await,
@@ -177,6 +188,12 @@ mod tests {
             Ok(())
         }
         async fn serve(&self, _args: commands::serve::ServeArgs) -> anyhow::Result<()> {
+            Ok(())
+        }
+        async fn agent_client(
+            &self,
+            _args: commands::agent_client::AgentClientArgs,
+        ) -> anyhow::Result<()> {
             Ok(())
         }
         async fn daemon(&self, _args: commands::daemon::DaemonArgs) -> anyhow::Result<()> {
@@ -288,6 +305,13 @@ mod tests {
             token: Some("test-token".to_string()),
         };
         let result = dispatch(Commands::Serve(args), &MockRisky).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn dispatch_agent_client_variant_is_routed_through_the_executor() {
+        let args = commands::agent_client::AgentClientArgs::default();
+        let result = dispatch(Commands::AgentClient(args), &MockRisky).await;
         assert!(result.is_ok());
     }
 
