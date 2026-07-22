@@ -206,6 +206,13 @@ impl Config {
             let c: Self = toml::from_str(&content)
                 .map_err(|e| anyhow::anyhow!("Failed to parse config: {}", e))?;
 
+            // Catch a malformed MCP server entry here, at load, rather than at
+            // the first tool call: a typo that drops a server's tools should
+            // fail loudly and immediately.
+            for server in &c.mcp_servers {
+                server.validate()?;
+            }
+
             let path_display = path.display();
             tracing::debug!("Loaded config from {}", path_display);
             c
@@ -1162,6 +1169,60 @@ args = ["hello"]
         let config: Config = toml::from_str(toml_content).unwrap();
         assert_eq!(config.mcp_servers.len(), 1);
         assert_eq!(config.mcp_servers[0].name, "test-server");
+    }
+
+    #[test]
+    fn load_rejects_a_malformed_mcp_server_entry() {
+        // An entry with neither `command` nor `url` can never connect, so it
+        // must fail at load — naming the server — rather than silently drop its
+        // tools until the first call.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            r#"
+default_provider = "anthropic"
+registries = []
+agent_paths = []
+
+[providers]
+
+[[mcp_servers]]
+name = "broken"
+"#,
+        )
+        .unwrap();
+
+        let err = Config::load_from_path(&path).expect_err("malformed entry must fail load");
+        let msg = err.to_string();
+        assert!(msg.contains("broken"), "must name the server: {msg}");
+    }
+
+    #[test]
+    fn load_accepts_a_well_formed_http_mcp_server() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            r#"
+default_provider = "anthropic"
+registries = []
+agent_paths = []
+
+[providers]
+
+[[mcp_servers]]
+name = "remote"
+url = "https://mcp.example.com/mcp"
+"#,
+        )
+        .unwrap();
+
+        let config = Config::load_from_path(&path).expect("valid http entry should load");
+        assert_eq!(
+            config.mcp_servers[0].url.as_deref(),
+            Some("https://mcp.example.com/mcp")
+        );
     }
 
     #[test]

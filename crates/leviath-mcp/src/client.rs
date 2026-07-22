@@ -10,7 +10,8 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-use crate::discovery::ToolMetadata;
+use crate::discovery::{MCPServerConfig, ResolvedTransport, ToolMetadata};
+use crate::transport::http::HttpTransport;
 use crate::transport::stdio::StdioTransport;
 use crate::transport::{
     DEFAULT_CONNECT_TIMEOUT, DEFAULT_REQUEST_TIMEOUT, JsonRpcRequest, Transport,
@@ -181,6 +182,27 @@ impl MCPClient {
         Ok(Self::new(Box::new(transport)))
     }
 
+    /// Connect to an MCP server over HTTP.
+    pub fn connect_http(url: &str, headers: &HashMap<String, String>) -> anyhow::Result<Self> {
+        let transport = HttpTransport::new(url, headers)?;
+        Ok(Self::new(Box::new(transport)))
+    }
+
+    /// Build a client for a configured server, over whichever transport the
+    /// entry describes.
+    ///
+    /// Callers above this point — discovery, execution, the tool registry —
+    /// never learn which one it turned out to be.
+    pub async fn from_config(config: &MCPServerConfig) -> anyhow::Result<Self> {
+        match config.resolve()? {
+            ResolvedTransport::Stdio { command, args, env } => {
+                let args: Vec<&str> = args.iter().map(String::as_str).collect();
+                Self::spawn(command, &args, env).await
+            }
+            ResolvedTransport::Http { url, headers } => Self::connect_http(url, headers),
+        }
+    }
+
     /// Connect to the MCP server by sending initialize and initialized messages.
     pub async fn connect(&mut self) -> anyhow::Result<()> {
         tracing::info!("Initializing MCP connection");
@@ -208,16 +230,14 @@ impl MCPClient {
             ServerCapabilities::default()
         };
         self.capabilities = Some(capabilities);
-        self.protocol_version = Some(negotiated_version(result.get("protocolVersion")));
+        let version = negotiated_version(result.get("protocolVersion"));
+        self.protocol_version = Some(version.clone());
 
         // Send initialized notification
         self.send_notification("notifications/initialized", serde_json::json!({}))
             .await?;
 
-        tracing::info!(
-            version = %self.protocol_version.as_deref().unwrap_or_default(),
-            "MCP connection established"
-        );
+        tracing::info!(version = %version, "MCP connection established");
         Ok(())
     }
 
@@ -263,7 +283,11 @@ impl MCPClient {
         }
 
         self.cached_tools = tools.clone();
-        tracing::debug!(count = tools.len(), "Discovered MCP tools");
+        // Bound in a plain `let` rather than inlined as a tracing field: as a
+        // field it is only evaluated when a subscriber is installed, so its
+        // coverage would depend on test ordering (see discovery.rs).
+        let count = tools.len();
+        tracing::debug!(count, "Discovered MCP tools");
         Ok(tools)
     }
 
@@ -1451,5 +1475,53 @@ for line in sys.stdin:
     async fn protocol_version_is_none_before_connect() {
         let client = spawn_stub_client(STUB_INIT_LIST_CALL).await;
         assert!(client.protocol_version().is_none());
+    }
+
+    // ─── construction over HTTP ───────────────────────────────────────────
+
+    #[test]
+    fn connect_http_builds_a_client_without_touching_the_network() {
+        // No server is listening; construction must still succeed, because
+        // the first request is what connects.
+        assert!(MCPClient::connect_http("http://127.0.0.1:1/mcp", &HashMap::new()).is_ok());
+    }
+
+    #[test]
+    fn connect_http_rejects_an_unparseable_url() {
+        assert!(MCPClient::connect_http("not a url", &HashMap::new()).is_err());
+    }
+
+    #[tokio::test]
+    async fn from_config_builds_the_stdio_transport() {
+        let _guard = always_on_tracing_guard();
+        let config = MCPServerConfig::stdio(
+            "s",
+            "python3",
+            vec!["-c".into(), STUB_INIT_LIST_CALL.into()],
+        );
+        let mut client = MCPClient::from_config(&config)
+            .await
+            .expect("stdio config should connect");
+        client.connect().await.expect("handshake should succeed");
+        assert_eq!(client.list_tools().await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn from_config_builds_the_http_transport() {
+        let config = MCPServerConfig::http("s", "http://127.0.0.1:1/mcp");
+        assert!(MCPClient::from_config(&config).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn from_config_rejects_an_unresolvable_entry() {
+        let config = MCPServerConfig {
+            name: "broken".to_string(),
+            ..Default::default()
+        };
+        let err = MCPClient::from_config(&config)
+            .await
+            .err()
+            .expect("an entry with neither command nor url cannot connect");
+        assert!(err.to_string().contains("either a `command`"), "got: {err}");
     }
 }

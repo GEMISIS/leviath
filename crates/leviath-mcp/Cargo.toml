@@ -8,13 +8,21 @@ authors.workspace = true
 
 [dependencies]
 leviath-core = { workspace = true }
-tokio = { workspace = true, features = ["process", "io-util"] }
+tokio = { workspace = true, features = ["process", "io-util", "sync", "macros", "rt"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }
 async-trait = { workspace = true }
+reqwest = { workspace = true }
+futures = { workspace = true }
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+toml = { workspace = true }
+async-stream = "0.3"
+axum = { workspace = true }
+temp-env = { workspace = true }

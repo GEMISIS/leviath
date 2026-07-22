@@ -167,7 +167,6 @@ mod mcp_registry_tests {
     use super::*;
     use crate::test_support::with_tracing;
     use leviath_mcp::MCPServerConfig;
-    use std::collections::HashMap as Map;
 
     // A minimal MCP server speaking just enough JSON-RPC over stdio to
     // satisfy `initialize` / `notifications/initialized` / `tools/list`,
@@ -207,12 +206,11 @@ for line in sys.stdin:
 
     fn config_with_mcp_server(command: &str, args: Vec<&str>) -> Config {
         Config {
-            mcp_servers: vec![MCPServerConfig {
-                name: "stub-server".to_string(),
-                command: command.to_string(),
-                args: args.into_iter().map(String::from).collect(),
-                env: Map::new(),
-            }],
+            mcp_servers: vec![MCPServerConfig::stdio(
+                "stub-server",
+                command,
+                args.into_iter().map(String::from).collect(),
+            )],
             ..Config::default()
         }
     }
@@ -814,14 +812,12 @@ mod policy_tests {
     #[tokio::test]
     async fn test_tool_registry_build_with_failing_mcp_server() {
         use leviath_mcp::MCPServerConfig;
-        use std::collections::HashMap as StdHashMap;
 
-        let bad_server = MCPServerConfig {
-            name: "bad-server".to_string(),
-            command: "/nonexistent/binary/that/does/not/exist".to_string(),
-            args: vec![],
-            env: StdHashMap::new(),
-        };
+        let bad_server = MCPServerConfig::stdio(
+            "bad-server",
+            "/nonexistent/binary/that/does/not/exist",
+            vec![],
+        );
         let config = Config {
             mcp_servers: vec![bad_server],
             ..Config::default()

@@ -328,7 +328,7 @@ graph TD
     RT["leviath-runtime<br/><i>ECS engine (bevy_ecs) + stage-run orchestration seams</i>"]
     CORE["leviath-core<br/><i>Regions, layouts, blueprints, manifest, run metadata</i>"]
     PROV["leviath-providers<br/><i>Anthropic · OpenAI · Google<br/>OpenRouter · Ollama · Claude Code</i>"]
-    MCP["leviath-mcp<br/><i>MCP tool integration (JSON-RPC)</i>"]
+    MCP["leviath-mcp<br/><i>MCP tool integration (stdio + HTTP/SSE)</i>"]
     SCRIPT["leviath-scripting<br/><i>Rhai sandbox</i>"]
     PKG["leviath-package<br/><i>Bundling & registry</i>"]
     TOOLS["leviath-tools<br/><i>Built-in tool implementations</i>"]
