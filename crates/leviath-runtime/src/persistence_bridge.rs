@@ -57,8 +57,25 @@ pub async fn persistence_worker(runs_dir: PathBuf, mut jobs: UnboundedReceiver<P
     while let Some(job) = jobs.recv().await {
         let prev = last_context.get(&job.run_id);
         write_snapshot(&runs_dir, &job, &machine_id, &world_id, prev).await;
-        last_context.insert(job.run_id.clone(), job.context.clone());
+        // Drop a fully-terminal run's cached context (it won't be written again),
+        // so the map stays bounded by the set of *live* runs rather than every
+        // run the daemon has ever seen.
+        if is_terminal_run(&job.meta.status) {
+            last_context.remove(&job.run_id);
+        } else {
+            last_context.insert(job.run_id.clone(), job.context.clone());
+        }
     }
+}
+
+/// Whether a run status is fully terminal (no further snapshots expected).
+/// `CompleteInteractive` is excluded — such an agent stays live for follow-up.
+fn is_terminal_run(status: &leviath_core::run_meta::RunStatus) -> bool {
+    use leviath_core::run_meta::RunStatus;
+    matches!(
+        status,
+        RunStatus::Complete | RunStatus::Error | RunStatus::Cancelled
+    )
 }
 
 /// A short opaque id derived from the current time + pid. Not cryptographic — it
@@ -468,6 +485,30 @@ mod tests {
             })
             .expect("ownership handoff recorded");
         assert_eq!(owned, ("m2".to_string(), "w2".to_string()));
+    }
+
+    #[test]
+    fn is_terminal_run_classifies_statuses() {
+        use leviath_core::run_meta::RunStatus;
+        assert!(is_terminal_run(&RunStatus::Complete));
+        assert!(is_terminal_run(&RunStatus::Error));
+        assert!(is_terminal_run(&RunStatus::Cancelled));
+        assert!(!is_terminal_run(&RunStatus::Running));
+        assert!(!is_terminal_run(&RunStatus::CompleteInteractive));
+    }
+
+    #[tokio::test]
+    async fn worker_drops_terminal_runs_from_the_context_cache() {
+        // A terminal job exercises the cache-cleanup branch; the run is still
+        // written. (Non-terminal jobs exercise the insert branch elsewhere.)
+        let dir = tempfile::tempdir().unwrap();
+        let (tx, rx) = mpsc::unbounded_channel();
+        let mut terminal = job("run-term");
+        terminal.meta.status = leviath_core::run_meta::RunStatus::Complete;
+        tx.send(terminal).unwrap();
+        drop(tx);
+        persistence_worker(dir.path().to_path_buf(), rx).await;
+        assert!(dir.path().join("run-term").join("meta.json").exists());
     }
 
     #[tokio::test]

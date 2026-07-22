@@ -373,6 +373,9 @@ impl WorldHost {
             .iter()
             .map(|(k, &v)| (k.clone(), v))
             .collect();
+        // Terminal agents to unload from memory this pass (their disk state is
+        // preserved and still viewable). Collected during the loop, reaped after.
+        let mut to_reap: Vec<(String, Entity)> = Vec::new();
         for (run_id, entity) in pairs {
             let Some(state) = self.world.world().get::<AgentState>(entity) else {
                 continue; // reaped between registration and now
@@ -481,15 +484,30 @@ impl WorldHost {
                 });
             }
 
-            if cur.terminal && prev.as_ref().map(|e| e.terminal) != Some(true) {
+            let was_terminal = prev.as_ref().map(|e| e.terminal) == Some(true);
+            if cur.terminal && !was_terminal {
                 let _ = self.events.send(WorldEvent::Completed {
                     run_id: run_id.clone(),
                     agent_id: agent_id.clone(),
                     status: status.to_string(),
                 });
             }
+            // Unload a terminal agent once its terminal state has been emitted (a
+            // prior pass already saw it terminal, so the event went out and the
+            // persistence lane captured it) and no live parent still needs it.
+            if cur.terminal && was_terminal && self.no_live_parent(entity) {
+                to_reap.push((run_id.clone(), entity));
+            }
 
             self.emitted.insert(run_id, cur);
+        }
+
+        // Reap: despawn the entity and erase its host-map entries. Iterating a
+        // snapshot of `by_run_id` above means removing here is safe.
+        for (run_id, entity) in to_reap {
+            self.world.world_mut().despawn(entity);
+            self.by_run_id.remove(&run_id);
+            self.emitted.remove(&run_id);
         }
 
         for (agent_id, request) in self.interactions.pending() {
@@ -500,6 +518,24 @@ impl WorldHost {
                     request,
                 });
             }
+        }
+    }
+
+    /// Whether a terminal agent is safe to unload: it has no **live** parent that
+    /// might still be waiting on it. True for a root (no `ParentRef`), or when its
+    /// parent has been despawned or is itself terminal; false while a non-terminal
+    /// parent could still be gating on this child.
+    fn no_live_parent(&self, entity: Entity) -> bool {
+        let world = self.world.world();
+        match world.get::<crate::components::ParentRef>(entity) {
+            None => true,
+            Some(parent_ref) => match world.get::<AgentState>(parent_ref.parent_entity) {
+                None => true,
+                Some(state) => matches!(
+                    state.status,
+                    AgentStatus::Complete | AgentStatus::Error { .. } | AgentStatus::Cancelled
+                ),
+            },
         }
     }
 
@@ -1510,6 +1546,105 @@ mod tests {
                 .collect::<Vec<_>>()
                 .is_empty()
         );
+    }
+
+    #[tokio::test]
+    async fn emit_events_unloads_terminal_agents_when_safe() {
+        let mut host = host_with(vec![]);
+
+        // A terminal root: emitted on the first pass, unloaded on the second.
+        let root = {
+            let mut s = agent_state("root");
+            s.status = AgentStatus::Complete;
+            host.world.world_mut().spawn(s).id()
+        };
+        host.register("root", root);
+        host.emit_events();
+        assert!(
+            host.live_entity("root").is_some(),
+            "not reaped on the first terminal pass (event must go out first)"
+        );
+        host.emit_events();
+        assert!(host.live_entity("root").is_none(), "reaped after emit");
+        assert!(
+            host.world.world().get::<AgentState>(root).is_none(),
+            "entity despawned"
+        );
+
+        // A terminal child under a LIVE (Active) parent is deferred.
+        let parent = host.world.world_mut().spawn(agent_state("parent")).id();
+        host.register("parent", parent);
+        let child = {
+            let mut s = agent_state("child");
+            s.status = AgentStatus::Complete;
+            host.world
+                .world_mut()
+                .spawn((
+                    s,
+                    ParentRef {
+                        parent_entity: parent,
+                        parent_agent_id: "parent".to_string(),
+                        depth: 1,
+                    },
+                ))
+                .id()
+        };
+        host.register("child", child);
+        host.emit_events();
+        host.emit_events();
+        assert!(
+            host.live_entity("child").is_some(),
+            "not reaped while its parent is live"
+        );
+
+        // Once the parent is terminal, the child becomes reapable.
+        host.world
+            .world_mut()
+            .get_mut::<AgentState>(parent)
+            .unwrap()
+            .status = AgentStatus::Complete;
+        host.emit_events();
+        host.emit_events();
+        assert!(
+            host.live_entity("child").is_none(),
+            "reaped once its parent is terminal"
+        );
+
+        // A terminal child whose parent entity was despawned is also reapable.
+        let ghost = host.world.world_mut().spawn_empty().id();
+        host.world.world_mut().despawn(ghost);
+        let orphan = {
+            let mut s = agent_state("orphan");
+            s.status = AgentStatus::Complete;
+            host.world
+                .world_mut()
+                .spawn((
+                    s,
+                    ParentRef {
+                        parent_entity: ghost,
+                        parent_agent_id: "gone".to_string(),
+                        depth: 1,
+                    },
+                ))
+                .id()
+        };
+        host.register("orphan", orphan);
+        host.emit_events();
+        host.emit_events();
+        assert!(
+            host.live_entity("orphan").is_none(),
+            "reaped: parent entity despawned"
+        );
+    }
+
+    #[tokio::test]
+    async fn emit_events_does_not_reap_non_terminal_agents() {
+        let mut host = host_with(vec![]);
+        let active = host.world.world_mut().spawn(agent_state("active")).id();
+        host.register("active", active);
+        host.emit_events();
+        host.emit_events();
+        assert!(host.live_entity("active").is_some());
     }
 
     #[tokio::test]
