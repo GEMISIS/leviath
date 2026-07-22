@@ -65,6 +65,7 @@ mod tests {
             config: Arc::new(Config::default()),
             event_tx: tx,
             control: crate::commands::serve::testutil::no_daemon_client(),
+            mcp: crate::commands::serve::mcp::McpAdmin::default(),
         }
     }
 
@@ -84,6 +85,7 @@ mod tests {
             }),
             event_tx: tx,
             control: crate::commands::serve::testutil::no_daemon_client(),
+            mcp: crate::commands::serve::mcp::McpAdmin::default(),
         }
     }
 
@@ -152,6 +154,7 @@ mod tests {
             }),
             event_tx: tx,
             control: crate::commands::serve::testutil::no_daemon_client(),
+            mcp: crate::commands::serve::mcp::McpAdmin::default(),
         };
         let app = Router::new()
             .route("/api/config", get(get_config))

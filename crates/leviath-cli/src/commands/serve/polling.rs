@@ -181,6 +181,7 @@ mod tests {
                 config: Arc::new(Config::default()),
                 event_tx: tx,
                 control,
+                mcp: crate::commands::serve::mcp::McpAdmin::default(),
             },
             rx,
         )
