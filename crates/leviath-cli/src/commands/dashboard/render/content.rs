@@ -35,9 +35,18 @@ impl Dashboard {
         ctx_area: Rect,
         agent: &DashboardAgent,
     ) {
-        // Use per-stage context if available, else fall back to global snapshot
-        let snap_opt = runstate::read_stage_context(&agent.id, self.selected_stage)
+        // When browsing archived history, show that point; else the live window.
+        let snap_opt = self
+            .browsed_context_point()
+            .map(|p| p.context.clone())
+            .or_else(|| runstate::read_stage_context(&agent.id, self.selected_stage))
             .or_else(|| agent.context_snapshot.clone());
+
+        // The card title shows the browsed history position (or a plain " ctx ").
+        let title = match self.context_history_idx {
+            Some(i) => format!(" ctx {}/{} ", i + 1, self.context_history.len()),
+            None => " ctx ".to_string(),
+        };
 
         // Constrain context card to at most 60 cols, left-aligned
         let card_w = ctx_area.width.min(64);
@@ -106,7 +115,7 @@ impl Dashboard {
             frame.render_widget(
                 Paragraph::new(vec![bar_line, info_line]).block(
                     Block::default()
-                        .title(Span::styled(" ctx ", Style::default().fg(C_DIM)))
+                        .title(Span::styled(title.clone(), Style::default().fg(C_DIM)))
                         .borders(Borders::ALL)
                         .border_type(BorderType::Rounded)
                         .border_style(Style::default().fg(C_BORDER)),
@@ -121,7 +130,7 @@ impl Dashboard {
                 )))
                 .block(
                     Block::default()
-                        .title(Span::styled(" ctx ", Style::default().fg(C_DIM)))
+                        .title(Span::styled(title.clone(), Style::default().fg(C_DIM)))
                         .borders(Borders::ALL)
                         .border_type(BorderType::Rounded)
                         .border_style(Style::default().fg(C_BORDER)),
@@ -405,7 +414,12 @@ impl Dashboard {
     }
 
     fn build_context_lines(&self, agent: &DashboardAgent, render_width: u16) -> Vec<Line<'static>> {
-        let snap_opt = runstate::read_stage_context(&agent.id, self.selected_stage)
+        // When browsing the run's archived context history, show that point's
+        // window; otherwise the live current window for the selected stage.
+        let snap_opt = self
+            .browsed_context_point()
+            .map(|p| p.context.clone())
+            .or_else(|| runstate::read_stage_context(&agent.id, self.selected_stage))
             .or_else(|| agent.context_snapshot.clone());
         if let Some(snap) = snap_opt {
             let mut lines: Vec<Line> = Vec::new();
@@ -1949,6 +1963,75 @@ mod tests {
                 dash.render_context_bar(f, area, &agent);
             })
             .unwrap();
+    }
+
+    /// A one-point context history for the browsing render tests.
+    fn one_point_history(
+        context: runstate::ContextSnapshot,
+    ) -> Vec<leviath_core::run_archive::RunPoint> {
+        vec![leviath_core::run_archive::RunPoint {
+            meta: leviath_core::run_meta::RunMeta::new(
+                "r".to_string(),
+                "a".to_string(),
+                "/p".to_string(),
+                "t".to_string(),
+                None,
+                "/w".to_string(),
+                1,
+            ),
+            context,
+            at: 1,
+        }]
+    }
+
+    #[test]
+    fn render_context_bar_shows_history_position_when_browsing() {
+        let backend = TestBackend::new(120, 10);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut dash = make_test_dashboard();
+        let agent = make_test_agent("run-hist-bar", AgentDisplayStatus::Active);
+        dash.context_history = one_point_history(make_context_snapshot(1000, 8000));
+        dash.context_history_idx = Some(0);
+        terminal
+            .draw(|f| {
+                let area = Rect::new(0, 0, 80, 5);
+                dash.render_context_bar(f, area, &agent);
+            })
+            .unwrap();
+        let text: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|c| c.symbol())
+            .collect();
+        assert!(
+            text.contains("ctx 1/1"),
+            "history position in title: {text}"
+        );
+    }
+
+    #[test]
+    fn build_context_lines_uses_browsed_history_point() {
+        let mut dash = make_test_dashboard();
+        // No live snapshot on the agent → the browsed point is the only source.
+        let agent = make_test_agent("run-hist-lines-xyzzy", AgentDisplayStatus::Active);
+        dash.context_history = one_point_history(runstate::ContextSnapshot {
+            stage_name: "browsed-stage".to_string(),
+            total_tokens: 42,
+            max_tokens: 100,
+            regions: vec![runstate::RegionSnapshot {
+                name: "hist-region".to_string(),
+                kind: "pinned".to_string(),
+                current_tokens: 42,
+                max_tokens: 100,
+                entries: vec![],
+            }],
+        });
+        dash.context_history_idx = Some(0);
+        let lines = dash.build_context_lines(&agent, 80);
+        let text: String = lines.iter().map(|l| format!("{l:?}")).collect();
+        assert!(text.contains("hist-region"), "browsed region rendered");
     }
 
     // ─── render_content_pane: Context mode with is_run_state (disk fallback)
