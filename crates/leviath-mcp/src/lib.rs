@@ -9,6 +9,7 @@
 //! in [`transport`] — stdio to a spawned child process, or HTTP to a remote
 //! server. Everything above the transport layer is identical either way.
 
+pub mod auth;
 pub mod client;
 pub mod discovery;
 pub mod execution;
@@ -17,6 +18,7 @@ pub mod transport;
 #[cfg(test)]
 mod test_support;
 
+pub use auth::{AuthStore, BrowserOpener, OAuthClient, ServerAuth};
 pub use client::{
     EmbeddedResource, MCPClient, PREFERRED_PROTOCOL_VERSION, SUPPORTED_PROTOCOL_VERSIONS,
     ServerCapabilities, ToolResult, ToolResultContent, ToolsCapability,
