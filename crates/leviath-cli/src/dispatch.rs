@@ -212,6 +212,8 @@ mod tests {
             openrouter_key: None,
             ollama_url: None,
             default_model: None,
+            claude_code: None,
+            claude_code_effort: None,
         };
         let result = dispatch(Commands::Setup(args), &MockRisky).await;
         assert!(result.is_ok());

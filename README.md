@@ -32,11 +32,13 @@ Pick a pre-built agent or write your own, run it, and watch it actually remember
 
 ## 📋 Requirements
 
-- An API key from [Anthropic](https://console.anthropic.com/), [OpenAI](https://platform.openai.com/), [Google AI](https://aistudio.google.com/), or [OpenRouter](https://openrouter.ai/) — or run [Ollama](https://ollama.com) locally (free, no key)
+- An API key from [Anthropic](https://console.anthropic.com/), [OpenAI](https://platform.openai.com/), [Google AI](https://aistudio.google.com/), or [OpenRouter](https://openrouter.ai/) — or, with no key at all, run [Ollama](https://ollama.com) locally or use the Claude Code transport below
 - macOS, Linux, or Windows
 - No runtime dependencies — a single binary, no Node/Python/Docker required
 
-> **Claude Code Agent SDK:** Leviath works with the [Claude Code agent SDK](https://docs.anthropic.com/en/docs/claude-code/sdk) as a provider, but that routes inference through Claude Code's own context management and bypasses Leviath's structured regions — the whole point. Use a direct provider (Anthropic, OpenAI, …) for the full experience.
+> **Claude Code transport (opt-in):** if you have [Claude Code](https://claude.com/claude-code) installed and signed in, enable it in `lev setup` to run Leviath on your Claude subscription with no API key. Leviath's structured regions work normally — it drives the CLI as a plain inference relay, keeping the context window, the tool loop, and the iteration count on Leviath's side.
+>
+> Caveats, measured rather than estimated: the CLI adds ~130 tokens of its own context to **every** call, including **your account email address** and the current date. This cannot be disabled — every flag that suppresses it also disables subscription auth. There is no prompt caching, and each call spawns a subprocess (~200 ms). Anthropic models only. For full control over what reaches the model, use a direct provider.
 
 ## 🚀 Quick Start
 

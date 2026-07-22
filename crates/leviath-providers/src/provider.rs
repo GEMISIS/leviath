@@ -1175,6 +1175,14 @@ mod tests {
         assert_eq!(content.as_text(), "hello world");
     }
 
+    // ─── MessageContent::as_text for Text variant ──────────────────────────
+
+    #[test]
+    fn message_content_as_text_plain_string() {
+        let content = MessageContent::Text("just words".to_string());
+        assert_eq!(content.as_text(), "just words");
+    }
+
     // ─── MessageContent::from &str ─────────────────────────────────────────
 
     #[test]

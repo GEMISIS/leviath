@@ -1,185 +1,395 @@
 //! Claude Code CLI provider.
 //!
-//! Uses the `claude` CLI (Claude Code) as an LLM backend, allowing users with a
-//! Claude Code subscription to use Leviath without API keys.
+//! Uses the `claude` CLI as a plain inference transport so a user with a Claude
+//! subscription can run Leviath without an API key.
+//!
+//! The CLI is driven as a *relay*, not as an agent: its own tools, settings
+//! files, MCP servers and slash commands are all switched off, Leviath's
+//! assembled system blocks become the entire system prompt, and tool calling
+//! rides the text protocol in [`crate::text_tools`]. Leviath keeps ownership of
+//! the context window, the tool loop, and the iteration count.
+//!
+//! **Flags that matter, and why:**
+//! - No `--bare`. It looks like the right lockdown switch, but it documents
+//!   itself as "Anthropic auth is strictly ANTHROPIC_API_KEY or apiKeyHelper —
+//!   OAuth and keychain are never read", so under a subscription every call
+//!   fails with `Not logged in · Please run /login`. Every mechanism that
+//!   suppresses the CLI's injected context also disables OAuth; the two are
+//!   mutually exclusive.
+//! - No `--allowed-tools`. Leviath tool names passed there would ask *Claude
+//!   Code* to run *its own* tools under those names, and the results would never
+//!   reach Leviath.
+//! - `--system-prompt-file` rather than `--system-prompt`: an assembled context
+//!   can be hundreds of kilobytes, well past Linux's 128 KB per-argument limit.
+//!   The prompt goes on stdin for the same reason.
+//! - `--effort` is always passed explicitly. Left alone the CLI picks `high`
+//!   with adaptive thinking, spending output tokens and latency Leviath never
+//!   asked for.
+//!
+//! **Limitations compared to a direct API provider:**
+//! - The CLI adds ~130 tokens of its own context to every call — a billing
+//!   header, an identity line, the current date, and (on the OAuth path) the
+//!   user's account email address. None of it can be disabled.
+//! - No prompt caching: each call is a fresh process with a fresh session.
+//! - ~200 ms process-spawn overhead per inference.
+//! - Anthropic models only, and the CLI ignores the request's `max_tokens` and
+//!   `temperature` in favour of its own.
 
 use crate::provider::*;
+use crate::text_tools;
 use async_trait::async_trait;
-use futures_core::Stream;
 use std::collections::HashMap;
-use std::pin::Pin;
-use std::task::Poll;
-use tokio::io::AsyncBufReadExt;
+use std::io::Write as _;
+use std::sync::atomic::{AtomicU64, Ordering};
+use tokio::io::AsyncWriteExt as _;
 
-/// Provider that uses Claude Code CLI as the LLM backend.
+/// Reasoning effort passed to the CLI when the caller configures none.
 ///
-/// This provider shells out to `claude --bare --print` for each inference call,
-/// allowing users with a Claude Code subscription to use Leviath without API keys.
-///
-/// **Limitations compared to direct API providers:**
-/// - No prompt caching (each call is a fresh process)
-/// - Higher latency (~100-200ms process spawn overhead per call)
-/// - Tool execution is handled by Claude Code internally, not by Leviath
-/// - Tool result routing and per-stage tool filtering are not supported
-/// - Not recommended for high-frequency tool loops (10+ iterations)
-/// - Running many concurrent agents will be slower than API providers
+/// The CLI's own default is `high` with adaptive thinking. Leviath drives its
+/// own multi-stage loop and picks a model per stage, so paying for maximum
+/// per-call deliberation on top of that is waste; `medium` is the balance point.
+pub const DEFAULT_EFFORT: &str = "medium";
+
+/// Effort levels the CLI accepts.
+pub const EFFORT_LEVELS: [&str; 5] = ["low", "medium", "high", "xhigh", "max"];
+
+/// Tokens held back from the advertised context window to cover the context the
+/// CLI injects on every call that we can neither see nor disable. Measured at
+/// ~130 tokens for the floor; the margin covers growth across CLI versions so
+/// region budgets are never quietly tighter than Leviath believes.
+const INJECTION_RESERVE_TOKENS: usize = 2_000;
+
+/// Provider that uses the Claude Code CLI as an inference transport.
 pub struct ClaudeCodeProvider {
     /// Path to the claude binary (default: "claude")
     binary_path: String,
+    /// Reasoning effort passed as `--effort`.
+    effort: String,
     /// Model capability overrides
     capability_overrides: HashMap<String, ModelCapabilities>,
+    /// Source of tool-call ids. The CLI gives us no ids of its own, and ids must
+    /// stay unique for the life of a transcript, so they are handed out
+    /// monotonically rather than restarting at zero each response.
+    next_call_id: AtomicU64,
 }
 
 impl ClaudeCodeProvider {
-    /// Create a new provider with the default `claude` binary.
+    /// Create a new provider with the default `claude` binary and effort.
     pub fn new() -> Self {
-        Self {
-            binary_path: "claude".to_string(),
-            capability_overrides: HashMap::new(),
-        }
+        Self::with_overrides("claude".to_string(), None, None)
     }
 
     /// Create a new provider with a custom binary path.
     pub fn with_binary_path(path: String) -> Self {
-        Self {
-            binary_path: path,
-            capability_overrides: HashMap::new(),
-        }
+        Self::with_overrides(path, None, None)
     }
 
-    /// Create a new provider with a custom binary path and capability overrides.
+    /// Create a new provider with a custom binary path, effort level, and
+    /// capability overrides.
+    ///
+    /// An `effort` that isn't one of [`EFFORT_LEVELS`] falls back to
+    /// [`DEFAULT_EFFORT`] rather than being passed through to the CLI, which
+    /// would reject it and fail every call.
     pub fn with_overrides(
         binary: String,
+        effort: Option<String>,
         overrides: Option<HashMap<String, ModelCapabilities>>,
     ) -> Self {
+        let effort = effort
+            .filter(|e| EFFORT_LEVELS.contains(&e.as_str()))
+            .unwrap_or_else(|| DEFAULT_EFFORT.to_string());
         Self {
             binary_path: binary,
+            effort,
             capability_overrides: overrides.unwrap_or_default(),
+            next_call_id: AtomicU64::new(1),
         }
     }
 
     /// Built-in capabilities for known Claude models.
     fn builtin_capabilities(&self, model: &str) -> ModelCapabilities {
-        // Claude Code doesn't expose temperature control and handles tools internally
-        let (max_context, max_output) = if model.contains("opus") {
-            (200_000, 32_000)
+        let max_output = if model.contains("opus") {
+            32_000
         } else if model.contains("haiku") {
-            (200_000, 8_192)
+            8_192
         } else {
-            // sonnet and other models
-            (200_000, 16_000)
+            16_000
         };
 
         ModelCapabilities {
+            // The CLI exposes no temperature control.
             supports_temperature: false,
-            supports_streaming: true,
-            supports_tools: false,
+            // Streaming is not implemented: the runtime never calls
+            // `infer_stream`, and the trait's default wraps `infer`.
+            supports_streaming: false,
+            // Synthesized by the text protocol rather than native.
+            supports_tools: true,
             supports_system_prompt: true,
-            max_context_tokens: max_context,
+            max_context_tokens: 200_000 - INJECTION_RESERVE_TOKENS,
             max_output_tokens: max_output,
         }
     }
 
-    /// Build the user prompt from non-system messages.
-    fn build_prompt(messages: &[Message]) -> String {
-        let mut parts = Vec::new();
-        for msg in messages {
-            if msg.role == "system" {
-                continue;
-            }
-            let role_label = match msg.role.as_str() {
-                "user" => "User",
-                "assistant" => "Assistant",
-                other => other,
-            };
-            parts.push(format!("{}: {}", role_label, msg.content.as_text()));
-        }
-        parts.join("\n")
-    }
-
-    /// Extract system prompt from messages.
-    fn extract_system_prompt(messages: &[Message]) -> Option<String> {
-        let system_parts: Vec<String> = messages
+    /// The full system prompt: Leviath's assembled system blocks, plus the tool
+    /// catalog and protocol when the stage has tools.
+    ///
+    /// This is the fix for the transport's central bug — `ContextWindow::assemble`
+    /// puts every structured region except the sliding message window into
+    /// `request.system`, and the previous implementation read only messages with
+    /// `role == "system"`, a field `assemble()` never populates. The regions were
+    /// dropped on the floor.
+    fn build_system_prompt(request: &InferenceRequest) -> String {
+        let mut parts: Vec<String> = request
+            .system
             .iter()
-            .filter(|m| m.role == "system")
-            .map(|m| m.content.as_text())
+            .map(|b| b.text.clone())
+            .filter(|t| !t.is_empty())
             .collect();
 
-        if system_parts.is_empty() {
-            None
-        } else {
-            Some(system_parts.join("\n\n"))
+        let suffix = text_tools::render_system_suffix(&request.tools);
+        if !suffix.is_empty() {
+            parts.push(suffix);
         }
+        parts.join("\n\n")
+    }
+
+    /// Assign runtime-owned ids to the calls parsed out of a reply.
+    fn assign_ids(&self, calls: Vec<(String, serde_json::Value)>) -> Vec<ToolCall> {
+        calls
+            .into_iter()
+            .map(|(name, arguments)| ToolCall {
+                id: format!(
+                    "cc_call_{}",
+                    self.next_call_id.fetch_add(1, Ordering::Relaxed)
+                ),
+                name,
+                arguments,
+            })
+            .collect()
+    }
+
+    /// Core of [`Provider::infer`], with the process timeout and the temp
+    /// directory injected so tests can exercise the timeout and prompt-staging
+    /// failure branches without a real 5-minute wait or a full disk.
+    async fn infer_with_timeout(
+        &self,
+        request: InferenceRequest,
+        temp_dir: &std::path::Path,
+        timeout_duration: std::time::Duration,
+    ) -> Result<InferenceResponse> {
+        // The system prompt goes via a file (it routinely exceeds Linux's 128 KB
+        // cap on a single argv entry), and the transcript via stdin (same reason).
+        let prompt_file = stage_prompt_file(temp_dir, &Self::build_system_prompt(&request))
+            .map_err(prompt_file_error)?;
+
+        let mut cmd = tokio::process::Command::new(&self.binary_path);
+        cmd.args([
+            "--print",
+            "--output-format",
+            "json",
+            "--no-session-persistence",
+            // Lock the CLI down to a relay: no built-in tools, no settings
+            // files or CLAUDE.md, no ambient MCP servers, no skills.
+            "--tools",
+            "",
+            "--setting-sources",
+            "",
+            "--strict-mcp-config",
+            "--disable-slash-commands",
+        ]);
+        cmd.args(["--model", &request.model]);
+        cmd.args(["--effort", &self.effort]);
+        cmd.args([
+            "--system-prompt-file",
+            &prompt_file.path().to_string_lossy(),
+        ]);
+
+        cmd.stdin(std::process::Stdio::piped());
+        cmd.stdout(std::process::Stdio::piped());
+        cmd.stderr(std::process::Stdio::piped());
+
+        let mut child = retry_etxtbsy(|| cmd.spawn()).await.map_err(|e| {
+            // Permanent: a missing or unusable binary will not fix itself, and
+            // `RequestFailed` would have the retry policy loop on it forever.
+            ProviderError::Other(format!(
+                "Failed to spawn '{}': {}. Is Claude Code installed?",
+                self.binary_path, e
+            ))
+        })?;
+
+        let mut stdin = child
+            .stdin
+            .take()
+            .expect("stdin pipe was configured — take() always succeeds");
+        let prompt = text_tools::flatten_messages(&request.messages);
+        // Feed stdin from a detached task, for two reasons. First, it runs
+        // concurrently with reading stdout, so a large response can't deadlock
+        // against a large prompt (each side blocked waiting for the other to
+        // drain). Second, the write result is deliberately ignored: a CLI that
+        // exits before draining stdin closes the pipe, and that broken pipe is
+        // not our failure — the child's exit status and stderr are what matter,
+        // and letting the write error win would mask them (e.g. hide a nonzero
+        // exit's diagnostics behind "broken pipe"). Dropping `stdin` when the
+        // task ends closes it, signalling EOF.
+        let writer = tokio::spawn(async move {
+            let _ = stdin.write_all(prompt.as_bytes()).await;
+        });
+        let output = tokio::time::timeout(timeout_duration, child.wait_with_output())
+            .await
+            .map_err(|_| {
+                ProviderError::RequestFailed(format!(
+                    "Claude Code process timed out after {}s",
+                    timeout_duration.as_secs()
+                ))
+            })?
+            .expect("wait_with_output cannot fail for a normally-spawned process");
+        // The writer has finished (the child exited, closing the pipe); join it
+        // so no task is left dangling.
+        let _ = writer.await;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(ProviderError::RequestFailed(format!(
+                "Claude Code exited with status {}: {}",
+                output.status, stderr
+            )));
+        }
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let json: serde_json::Value = serde_json::from_str(&stdout).map_err(|e| {
+            ProviderError::InvalidResponse(format!(
+                "Failed to parse Claude Code JSON response: {e}"
+            ))
+        })?;
+        self.parse_response(&json)
+    }
+
+    /// Turn the CLI's result JSON into an [`InferenceResponse`], splitting the
+    /// reply text into prose and tool calls.
+    fn parse_response(&self, json: &serde_json::Value) -> Result<InferenceResponse> {
+        if json
+            .get("is_error")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+        {
+            return Err(classify_error(json));
+        }
+
+        let raw = json.get("result").and_then(|v| v.as_str()).unwrap_or("");
+        let (content, parsed_calls) = text_tools::parse_tool_calls(raw);
+        let tool_calls = self.assign_ids(parsed_calls);
+
+        let prompt_tokens = json
+            .pointer("/usage/input_tokens")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0) as usize;
+        let completion_tokens = json
+            .pointer("/usage/output_tokens")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0) as usize;
+        let cached_tokens = json
+            .pointer("/usage/cache_read_input_tokens")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0) as usize;
+        let cache_write_tokens = json
+            .pointer("/usage/cache_creation_input_tokens")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0) as usize;
+
+        // A reply that asked for tools finished for that reason, whatever the
+        // CLI's own `stop_reason` says — it has no concept of our protocol.
+        let finish_reason = if tool_calls.is_empty() {
+            parse_stop_reason(json.get("stop_reason").and_then(|v| v.as_str()))
+        } else {
+            FinishReason::ToolCall
+        };
+
+        Ok(InferenceResponse {
+            content,
+            tool_calls,
+            tokens_used: TokenUsage {
+                prompt_tokens,
+                completion_tokens,
+                total_tokens: prompt_tokens + completion_tokens,
+                cached_tokens,
+                cache_write_tokens,
+            },
+            finish_reason,
+        })
     }
 }
 
-/// Parse the JSON response from `claude --print --output-format json`.
+/// Classify an `is_error` result so the retry policy does the right thing.
 ///
-/// Expected format:
-/// ```json
-/// {
-///     "type": "result",
-///     "subtype": "success",
-///     "is_error": false,
-///     "result": "The response text here",
-///     "stop_reason": "end_turn",
-///     "usage": { "input_tokens": 123, "output_tokens": 456 },
-///     "total_cost_usd": 0.0
-/// }
-/// ```
-fn parse_claude_response(output: &str) -> Result<InferenceResponse> {
-    let json: serde_json::Value = serde_json::from_str(output).map_err(|e| {
-        ProviderError::InvalidResponse(format!("Failed to parse Claude Code JSON response: {e}"))
-    })?;
-
-    parse_claude_json(&json)
-}
-
-/// Parse a Claude Code JSON value into an InferenceResponse.
-fn parse_claude_json(json: &serde_json::Value) -> Result<InferenceResponse> {
-    // Check for error responses
-    if json
-        .get("is_error")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false)
-    {
-        let error_text = json
-            .get("result")
-            .and_then(|v| v.as_str())
-            .unwrap_or("Unknown error from Claude Code");
-        return Err(ProviderError::ApiError(error_text.to_string()));
-    }
-
-    let content = json
+/// [`ProviderError::is_transient`] treats every `RequestFailed` as retryable, so
+/// permanent conditions have to come back as something else or the engine will
+/// loop on them forever.
+fn classify_error(json: &serde_json::Value) -> ProviderError {
+    let text = json
         .get("result")
         .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
+        .unwrap_or("Unknown error from Claude Code");
+    let lowered = text.to_ascii_lowercase();
 
-    let prompt_tokens = json
-        .pointer("/usage/input_tokens")
+    // Subscription caps are worth backing off for.
+    let status_429 = json
+        .get("api_error_status")
         .and_then(|v| v.as_u64())
-        .unwrap_or(0) as usize;
+        .is_some_and(|s| s == 429);
+    if status_429
+        || lowered.contains("rate limit")
+        || lowered.contains("429")
+        || lowered.contains("too many requests")
+        || lowered.contains("usage limit")
+    {
+        return ProviderError::RateLimitExceeded;
+    }
 
-    let completion_tokens = json
-        .pointer("/usage/output_tokens")
-        .and_then(|v| v.as_u64())
-        .unwrap_or(0) as usize;
+    // Not authenticated: permanent until the user acts. `ApiError` carries none
+    // of the substrings `is_transient` looks for, so it stays permanent.
+    if lowered.contains("not logged in") || lowered.contains("/login") {
+        return ProviderError::ApiError(format!(
+            "{text} — the Claude Code CLI is not authenticated. Run `claude` and sign in, \
+             or use a direct provider with an API key."
+        ));
+    }
 
-    let finish_reason = parse_stop_reason(json.get("stop_reason").and_then(|v| v.as_str()));
+    ProviderError::ApiError(text.to_string())
+}
 
-    Ok(InferenceResponse {
-        content,
-        tool_calls: Vec::new(),
-        tokens_used: TokenUsage {
-            prompt_tokens,
-            completion_tokens,
-            total_tokens: prompt_tokens + completion_tokens,
-            cached_tokens: 0,
-            cache_write_tokens: 0,
-        },
-        finish_reason,
-    })
+/// Staging the system prompt failed. Permanent: an unwritable temp directory or
+/// a full disk won't clear itself, and `RequestFailed` would have the retry
+/// policy loop on it.
+fn prompt_file_error(e: std::io::Error) -> ProviderError {
+    ProviderError::Other(format!(
+        "Failed to stage the Claude Code system prompt file: {e}"
+    ))
+}
+
+/// Write the system prompt to a fresh temp file in `dir` and return the handle.
+///
+/// The file is created 0600 by `tempfile` — the prompt carries the user's task
+/// and their code, so it must not be world-readable even briefly — and is
+/// removed when the returned guard drops, including on every error path in the
+/// caller.
+///
+/// `dir` is a parameter rather than an implicit `std::env::temp_dir()` so the
+/// creation-failure path is reachable from a test by passing a directory that
+/// doesn't exist. Mutating `TMPDIR` instead would race every other test that
+/// creates a temp file. Only *creation* is fallible; writing to the file we just
+/// created and privately own is treated as infallible (the same stance the
+/// subprocess wait below takes), so it adds no unreachable error arm.
+fn stage_prompt_file(
+    dir: &std::path::Path,
+    contents: &str,
+) -> std::io::Result<tempfile::NamedTempFile> {
+    let mut file = tempfile::Builder::new()
+        .prefix("lev-claude-prompt-")
+        .tempfile_in(dir)?;
+    file.write_all(contents.as_bytes())
+        .and_then(|()| file.flush())
+        .expect("writing to a freshly created private temp file cannot fail");
+    Ok(file)
 }
 
 /// Map a Claude stop_reason string to a FinishReason.
@@ -189,111 +399,6 @@ fn parse_stop_reason(reason: Option<&str>) -> FinishReason {
         Some("tool_use") => FinishReason::ToolCall,
         Some("max_tokens") => FinishReason::TokenLimit,
         _ => FinishReason::Complete,
-    }
-}
-
-/// Parse an NDJSON line from stream-json output into an optional StreamChunk.
-fn parse_stream_line(line: &str) -> Option<StreamChunk> {
-    if line.trim().is_empty() {
-        return None;
-    }
-
-    let json: serde_json::Value = serde_json::from_str(line).ok()?;
-    let msg_type = json.get("type").and_then(|v| v.as_str()).unwrap_or("");
-
-    match msg_type {
-        "assistant" => {
-            // Content delta from assistant message
-            let content = json.get("content").and_then(|v| v.as_str()).unwrap_or("");
-            if content.is_empty() {
-                return None;
-            }
-            Some(StreamChunk {
-                delta: content.to_string(),
-                tool_calls: Vec::new(),
-                tokens: None,
-                finish_reason: None,
-            })
-        }
-        "content_block_delta" => {
-            // Alternative content delta format
-            let delta = json.pointer("/delta/text").and_then(|v| v.as_str())?;
-            if delta.is_empty() {
-                return None;
-            }
-            Some(StreamChunk {
-                delta: delta.to_string(),
-                tool_calls: Vec::new(),
-                tokens: None,
-                finish_reason: None,
-            })
-        }
-        "result" => {
-            // Final result message with usage and stop_reason
-            let content = json.get("result").and_then(|v| v.as_str()).unwrap_or("");
-            let prompt_tokens = json
-                .pointer("/usage/input_tokens")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(0) as usize;
-            let completion_tokens = json
-                .pointer("/usage/output_tokens")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(0) as usize;
-
-            let finish_reason = parse_stop_reason(json.get("stop_reason").and_then(|v| v.as_str()));
-
-            Some(StreamChunk {
-                delta: content.to_string(),
-                tool_calls: Vec::new(),
-                tokens: Some(TokenUsage {
-                    prompt_tokens,
-                    completion_tokens,
-                    total_tokens: prompt_tokens + completion_tokens,
-                    cached_tokens: 0,
-                    cache_write_tokens: 0,
-                }),
-                finish_reason: Some(finish_reason),
-            })
-        }
-        _ => None,
-    }
-}
-
-// Stream adapter that reads NDJSON lines from a Claude Code process and yields StreamChunks.
-pin_project_lite::pin_project! {
-    struct ClaudeCodeStream {
-        #[pin]
-        lines: tokio::io::Lines<tokio::io::BufReader<tokio::process::ChildStdout>>,
-    }
-}
-
-impl Stream for ClaudeCodeStream {
-    type Item = Result<StreamChunk>;
-
-    fn poll_next(
-        self: Pin<&mut Self>,
-        cx: &mut std::task::Context<'_>,
-    ) -> Poll<Option<Self::Item>> {
-        let this = self.project();
-        let lines = this.lines;
-
-        // Poll the Lines future for the next line
-        match lines.poll_next_line(cx) {
-            Poll::Ready(Ok(Some(line))) => {
-                if let Some(chunk) = parse_stream_line(&line) {
-                    Poll::Ready(Some(Ok(chunk)))
-                } else {
-                    // Line didn't produce a chunk; wake to poll again
-                    cx.waker().wake_by_ref();
-                    Poll::Pending
-                }
-            }
-            Poll::Ready(Ok(None)) => Poll::Ready(None),
-            Poll::Ready(Err(e)) => Poll::Ready(Some(Err(ProviderError::RequestFailed(format!(
-                "Failed to read Claude Code output: {e}"
-            ))))),
-            Poll::Pending => Poll::Pending,
-        }
     }
 }
 
@@ -321,123 +426,15 @@ async fn retry_etxtbsy<T>(mut op: impl FnMut() -> std::io::Result<T>) -> std::io
     }
 }
 
-impl ClaudeCodeProvider {
-    /// Core of [`Provider::infer`], with the process timeout injected so
-    /// tests can exercise the timeout branch without a real 5-minute wait.
-    async fn infer_with_timeout(
-        &self,
-        request: InferenceRequest,
-        timeout_duration: std::time::Duration,
-    ) -> Result<InferenceResponse> {
-        let mut cmd = tokio::process::Command::new(&self.binary_path);
-        cmd.args([
-            "--bare",
-            "--print",
-            "--output-format",
-            "json",
-            "--no-session-persistence",
-        ]);
-        cmd.args(["--model", &request.model]);
-
-        if let Some(system_prompt) = Self::extract_system_prompt(&request.messages) {
-            cmd.args(["--system-prompt", &system_prompt]);
-        }
-
-        // Note: Claude Code handles tool execution internally; passing tool names
-        // via --allowed-tools doesn't give Leviath control over tool results.
-        if !request.tools.is_empty() {
-            let tool_names: Vec<&str> = request.tools.iter().map(|t| t.name.as_str()).collect();
-            cmd.args(["--allowed-tools", &tool_names.join(",")]);
-        }
-
-        let user_prompt = Self::build_prompt(&request.messages);
-        cmd.arg(&user_prompt);
-
-        cmd.stdout(std::process::Stdio::piped());
-        cmd.stderr(std::process::Stdio::piped());
-
-        let child = retry_etxtbsy(|| cmd.spawn()).await.map_err(|e| {
-            ProviderError::RequestFailed(format!(
-                "Failed to spawn '{}': {}. Is Claude Code installed?",
-                self.binary_path, e
-            ))
-        })?;
-
-        let output = tokio::time::timeout(timeout_duration, child.wait_with_output())
-            .await
-            .map_err(|_| {
-                ProviderError::RequestFailed(format!(
-                    "Claude Code process timed out after {}s",
-                    timeout_duration.as_secs()
-                ))
-            })?
-            .expect("wait_with_output cannot fail for a normally-spawned process");
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(ProviderError::RequestFailed(format!(
-                "Claude Code exited with status {}: {}",
-                output.status, stderr
-            )));
-        }
-
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        parse_claude_response(&stdout)
-    }
-}
-
 #[async_trait]
 impl Provider for ClaudeCodeProvider {
     async fn infer(&self, request: InferenceRequest) -> Result<InferenceResponse> {
-        self.infer_with_timeout(request, std::time::Duration::from_secs(300))
-            .await
-    }
-
-    async fn infer_stream(
-        &self,
-        request: InferenceRequest,
-    ) -> Result<Pin<Box<dyn Stream<Item = Result<StreamChunk>> + Send>>> {
-        let mut cmd = tokio::process::Command::new(&self.binary_path);
-        cmd.args([
-            "--bare",
-            "--print",
-            "--output-format",
-            "stream-json",
-            "--no-session-persistence",
-        ]);
-        cmd.args(["--model", &request.model]);
-
-        if let Some(system_prompt) = Self::extract_system_prompt(&request.messages) {
-            cmd.args(["--system-prompt", &system_prompt]);
-        }
-
-        if !request.tools.is_empty() {
-            let tool_names: Vec<&str> = request.tools.iter().map(|t| t.name.as_str()).collect();
-            cmd.args(["--allowed-tools", &tool_names.join(",")]);
-        }
-
-        let user_prompt = Self::build_prompt(&request.messages);
-        cmd.arg(&user_prompt);
-
-        cmd.stdout(std::process::Stdio::piped());
-        cmd.stderr(std::process::Stdio::piped());
-
-        let mut child = retry_etxtbsy(|| cmd.spawn()).await.map_err(|e| {
-            ProviderError::RequestFailed(format!(
-                "Failed to spawn '{}': {}. Is Claude Code installed?",
-                self.binary_path, e
-            ))
-        })?;
-
-        let stdout = child
-            .stdout
-            .take()
-            .expect("stdout pipe was configured — take() always succeeds");
-
-        let reader = tokio::io::BufReader::new(stdout);
-        let lines = reader.lines();
-
-        Ok(Box::pin(ClaudeCodeStream { lines }))
+        self.infer_with_timeout(
+            request,
+            &std::env::temp_dir(),
+            std::time::Duration::from_secs(300),
+        )
+        .await
     }
 
     fn count_tokens(&self, text: &str, _model: &str) -> usize {
@@ -449,8 +446,7 @@ impl Provider for ClaudeCodeProvider {
         if let Some(caps) = self.capability_overrides.get(model) {
             return caps.max_context_tokens;
         }
-        // Most Claude models support 200k context
-        200_000
+        200_000 - INJECTION_RESERVE_TOKENS
     }
 
     fn name(&self) -> &str {
@@ -465,27 +461,20 @@ impl Provider for ClaudeCodeProvider {
     }
 
     async fn list_models(&self) -> Result<Vec<ModelInfo>> {
-        let models = vec![
-            ModelInfo {
-                id: "claude-sonnet-4-6".to_string(),
-                display_name: Some("Claude Sonnet 4.6".to_string()),
-                provider: "claude-code".to_string(),
-                capabilities: self.builtin_capabilities("claude-sonnet-4-6"),
-            },
-            ModelInfo {
-                id: "claude-opus-4-8".to_string(),
-                display_name: Some("Claude Opus 4.8".to_string()),
-                provider: "claude-code".to_string(),
-                capabilities: self.builtin_capabilities("claude-opus-4-8"),
-            },
-            ModelInfo {
-                id: "claude-haiku-4-5".to_string(),
-                display_name: Some("Claude Haiku 4.5".to_string()),
-                provider: "claude-code".to_string(),
-                capabilities: self.builtin_capabilities("claude-haiku-4-5"),
-            },
+        let models = [
+            ("claude-opus-4-8", "Claude Opus 4.8"),
+            ("claude-sonnet-4-6", "Claude Sonnet 4.6"),
+            ("claude-haiku-4-5", "Claude Haiku 4.5"),
         ];
-        Ok(models)
+        Ok(models
+            .into_iter()
+            .map(|(id, display)| ModelInfo {
+                id: id.to_string(),
+                display_name: Some(display.to_string()),
+                provider: "claude-code".to_string(),
+                capabilities: self.builtin_capabilities(id),
+            })
+            .collect())
     }
 }
 
@@ -499,20 +488,47 @@ impl Default for ClaudeCodeProvider {
 mod tests {
     use super::*;
 
+    // ─── construction / configuration ───────────────────────────────────────
+
     #[test]
-    fn test_new_creates_default_binary_path() {
+    fn new_uses_default_binary_and_effort() {
         let provider = ClaudeCodeProvider::new();
         assert_eq!(provider.binary_path, "claude");
+        assert_eq!(provider.effort, DEFAULT_EFFORT);
     }
 
     #[test]
-    fn test_with_binary_path_sets_custom_path() {
+    fn with_binary_path_sets_custom_path() {
         let provider = ClaudeCodeProvider::with_binary_path("/usr/local/bin/claude".to_string());
         assert_eq!(provider.binary_path, "/usr/local/bin/claude");
+        assert_eq!(provider.effort, DEFAULT_EFFORT);
     }
 
     #[test]
-    fn test_with_overrides() {
+    fn every_documented_effort_level_is_accepted() {
+        for level in EFFORT_LEVELS {
+            let provider = ClaudeCodeProvider::with_overrides(
+                "claude".to_string(),
+                Some(level.to_string()),
+                None,
+            );
+            assert_eq!(provider.effort, level);
+        }
+    }
+
+    #[test]
+    fn unknown_effort_falls_back_to_the_default() {
+        // Passing it through would make the CLI reject every call.
+        let provider = ClaudeCodeProvider::with_overrides(
+            "claude".to_string(),
+            Some("turbo".to_string()),
+            None,
+        );
+        assert_eq!(provider.effort, DEFAULT_EFFORT);
+    }
+
+    #[test]
+    fn with_overrides_applies_capabilities() {
         let mut overrides = HashMap::new();
         overrides.insert(
             "custom-model".to_string(),
@@ -525,384 +541,87 @@ mod tests {
                 max_output_tokens: 8_000,
             },
         );
-        let provider = ClaudeCodeProvider::with_overrides("claude".to_string(), Some(overrides));
+        let provider =
+            ClaudeCodeProvider::with_overrides("claude".to_string(), None, Some(overrides));
         let caps = provider.capabilities("custom-model");
         assert!(caps.supports_temperature);
         assert!(!caps.supports_streaming);
         assert_eq!(caps.max_context_tokens, 100_000);
+        assert_eq!(provider.max_context_tokens("custom-model"), 100_000);
     }
 
     #[test]
-    fn test_name() {
-        let provider = ClaudeCodeProvider::new();
-        assert_eq!(provider.name(), "claude-code");
+    fn with_overrides_none_leaves_capabilities_empty() {
+        let provider = ClaudeCodeProvider::with_overrides("claude".to_string(), None, None);
+        assert!(provider.capability_overrides.is_empty());
     }
 
     #[test]
-    fn test_capabilities_defaults() {
-        let provider = ClaudeCodeProvider::new();
-        let caps = provider.capabilities("claude-sonnet-4-6");
-        assert!(!caps.supports_temperature);
-        assert!(caps.supports_streaming);
-        assert!(!caps.supports_tools);
-        assert!(caps.supports_system_prompt);
-        assert_eq!(caps.max_context_tokens, 200_000);
-    }
-
-    #[test]
-    fn test_capabilities_opus() {
-        let provider = ClaudeCodeProvider::new();
-        let caps = provider.capabilities("claude-opus-4-8");
-        assert_eq!(caps.max_output_tokens, 32_000);
-    }
-
-    #[test]
-    fn test_capabilities_haiku() {
-        let provider = ClaudeCodeProvider::new();
-        let caps = provider.capabilities("claude-haiku-4-5");
-        assert_eq!(caps.max_output_tokens, 8_192);
-    }
-
-    #[test]
-    fn test_count_tokens() {
-        let provider = ClaudeCodeProvider::new();
-        let tokens = provider.count_tokens("Hello, world!", "claude-sonnet-4-6");
-        assert!(tokens > 0);
-        assert!(tokens < 100);
-    }
-
-    #[test]
-    fn test_max_context_tokens() {
-        let provider = ClaudeCodeProvider::new();
-        assert_eq!(provider.max_context_tokens("claude-sonnet-4-6"), 200_000);
-    }
-
-    #[test]
-    fn test_parse_successful_response() {
-        let json = r#"{
-            "type": "result",
-            "subtype": "success",
-            "is_error": false,
-            "result": "Hello! How can I help you?",
-            "stop_reason": "end_turn",
-            "usage": {
-                "input_tokens": 42,
-                "output_tokens": 15
-            },
-            "total_cost_usd": 0.001
-        }"#;
-
-        let response = parse_claude_response(json).unwrap();
-        assert_eq!(response.content, "Hello! How can I help you?");
-        assert_eq!(response.tokens_used.prompt_tokens, 42);
-        assert_eq!(response.tokens_used.completion_tokens, 15);
-        assert_eq!(response.tokens_used.total_tokens, 57);
-        assert_eq!(response.finish_reason, FinishReason::Complete);
-        assert!(response.tool_calls.is_empty());
-    }
-
-    #[test]
-    fn test_parse_error_response() {
-        let json = r#"{
-            "type": "result",
-            "subtype": "error",
-            "is_error": true,
-            "result": "Rate limit exceeded",
-            "stop_reason": "end_turn",
-            "usage": {
-                "input_tokens": 0,
-                "output_tokens": 0
-            },
-            "total_cost_usd": 0.0
-        }"#;
-
-        let result = parse_claude_response(json);
-        assert!(result.is_err());
-        let err = result.unwrap_err();
-        assert!(err.to_string().starts_with("API error:"));
-        assert!(err.to_string().contains("Rate limit exceeded"));
-    }
-
-    #[test]
-    fn test_parse_malformed_json() {
-        let result = parse_claude_response("not valid json at all");
-        assert!(result.is_err());
-        assert!(
-            result
-                .unwrap_err()
-                .to_string()
-                .starts_with("Invalid response:")
-        );
-    }
-
-    #[test]
-    fn test_parse_tool_use_stop_reason() {
-        let json = r#"{
-            "type": "result",
-            "subtype": "success",
-            "is_error": false,
-            "result": "Let me search for that.",
-            "stop_reason": "tool_use",
-            "usage": { "input_tokens": 10, "output_tokens": 8 },
-            "total_cost_usd": 0.0
-        }"#;
-
-        let response = parse_claude_response(json).unwrap();
-        assert_eq!(response.finish_reason, FinishReason::ToolCall);
-    }
-
-    #[test]
-    fn test_parse_max_tokens_stop_reason() {
-        let json = r#"{
-            "type": "result",
-            "subtype": "success",
-            "is_error": false,
-            "result": "This response was truncated because",
-            "stop_reason": "max_tokens",
-            "usage": { "input_tokens": 100, "output_tokens": 4096 },
-            "total_cost_usd": 0.0
-        }"#;
-
-        let response = parse_claude_response(json).unwrap();
-        assert_eq!(response.finish_reason, FinishReason::TokenLimit);
-    }
-
-    #[test]
-    fn test_parse_stream_line_assistant() {
-        let line = r#"{"type":"assistant","content":"Hello there"}"#;
-        let chunk = parse_stream_line(line).unwrap();
-        assert_eq!(chunk.delta, "Hello there");
-        assert!(chunk.tokens.is_none());
-        assert!(chunk.finish_reason.is_none());
-    }
-
-    #[test]
-    fn test_parse_stream_line_content_block_delta() {
-        let line = r#"{"type":"content_block_delta","delta":{"text":"world"}}"#;
-        let chunk = parse_stream_line(line).unwrap();
-        assert_eq!(chunk.delta, "world");
-    }
-
-    #[test]
-    fn test_parse_stream_line_result() {
-        let line = r#"{"type":"result","result":"Done","stop_reason":"end_turn","usage":{"input_tokens":10,"output_tokens":5}}"#;
-        let chunk = parse_stream_line(line).unwrap();
-        assert_eq!(chunk.delta, "Done");
-        assert!(chunk.tokens.is_some());
-        let tokens = chunk.tokens.unwrap();
-        assert_eq!(tokens.prompt_tokens, 10);
-        assert_eq!(tokens.completion_tokens, 5);
-        assert_eq!(chunk.finish_reason, Some(FinishReason::Complete));
-    }
-
-    #[test]
-    fn test_parse_stream_line_unknown_type() {
-        let line = r#"{"type":"ping"}"#;
-        assert!(parse_stream_line(line).is_none());
-    }
-
-    #[test]
-    fn test_parse_stream_line_empty() {
-        assert!(parse_stream_line("").is_none());
-        assert!(parse_stream_line("   ").is_none());
-    }
-
-    #[test]
-    fn test_parse_stream_line_invalid_json() {
-        assert!(parse_stream_line("not json").is_none());
-    }
-
-    #[test]
-    fn test_build_prompt() {
-        let messages = vec![
-            Message {
-                role: "system".to_string(),
-                content: "You are helpful.".into(),
-                cache_breakpoint: false,
-            },
-            Message {
-                role: "user".to_string(),
-                content: "Hello".into(),
-                cache_breakpoint: false,
-            },
-            Message {
-                role: "assistant".to_string(),
-                content: "Hi there!".into(),
-                cache_breakpoint: false,
-            },
-            Message {
-                role: "user".to_string(),
-                content: "How are you?".into(),
-                cache_breakpoint: false,
-            },
-        ];
-
-        let prompt = ClaudeCodeProvider::build_prompt(&messages);
-        assert!(!prompt.contains("system"));
-        assert!(prompt.contains("User: Hello"));
-        assert!(prompt.contains("Assistant: Hi there!"));
-        assert!(prompt.contains("User: How are you?"));
-    }
-
-    #[test]
-    fn test_extract_system_prompt() {
-        let messages = vec![
-            Message {
-                role: "system".to_string(),
-                content: "You are helpful.".into(),
-                cache_breakpoint: false,
-            },
-            Message {
-                role: "system".to_string(),
-                content: "Be concise.".into(),
-                cache_breakpoint: false,
-            },
-            Message {
-                role: "user".to_string(),
-                content: "Hello".into(),
-                cache_breakpoint: false,
-            },
-        ];
-
-        let system = ClaudeCodeProvider::extract_system_prompt(&messages).unwrap();
-        assert!(system.contains("You are helpful."));
-        assert!(system.contains("Be concise."));
-    }
-
-    #[test]
-    fn test_extract_system_prompt_none() {
-        let messages = vec![Message {
-            role: "user".to_string(),
-            content: "Hello".into(),
-            cache_breakpoint: false,
-        }];
-
-        assert!(ClaudeCodeProvider::extract_system_prompt(&messages).is_none());
-    }
-
-    #[test]
-    fn test_default_impl() {
+    fn default_impl_matches_new() {
         let provider = ClaudeCodeProvider::default();
         assert_eq!(provider.binary_path, "claude");
         assert_eq!(provider.name(), "claude-code");
     }
 
-    // ── Additional coverage tests ──────────────────────────────────────────
+    // ─── capabilities ───────────────────────────────────────────────────────
 
     #[test]
-    fn test_with_overrides_none() {
-        let provider = ClaudeCodeProvider::with_overrides("claude".to_string(), None);
-        assert!(provider.capability_overrides.is_empty());
-    }
-
-    #[test]
-    fn test_max_context_tokens_with_override() {
-        let mut overrides = HashMap::new();
-        overrides.insert(
-            "custom-model".to_string(),
-            ModelCapabilities {
-                supports_temperature: false,
-                supports_streaming: false,
-                supports_tools: false,
-                supports_system_prompt: false,
-                max_context_tokens: 50_000,
-                max_output_tokens: 5_000,
-            },
-        );
-        let provider = ClaudeCodeProvider::with_overrides("claude".to_string(), Some(overrides));
-        assert_eq!(provider.max_context_tokens("custom-model"), 50_000);
-    }
-
-    #[test]
-    fn test_max_context_tokens_default() {
+    fn capabilities_report_synthesized_tools_and_no_streaming() {
         let provider = ClaudeCodeProvider::new();
-        assert_eq!(provider.max_context_tokens("some-unknown"), 200_000);
+        let caps = provider.capabilities("claude-sonnet-4-6");
+        assert!(!caps.supports_temperature);
+        assert!(!caps.supports_streaming);
+        assert!(caps.supports_tools);
+        assert!(caps.supports_system_prompt);
     }
 
     #[test]
-    fn test_builtin_capabilities_sonnet_default() {
+    fn context_window_reserves_room_for_cli_injections() {
         let provider = ClaudeCodeProvider::new();
-        let caps = provider.builtin_capabilities("claude-sonnet-4-6");
-        assert_eq!(caps.max_output_tokens, 16_000);
-    }
-
-    #[test]
-    fn test_count_tokens_larger_text() {
-        let provider = ClaudeCodeProvider::new();
-        let text = "a".repeat(350);
-        let tokens = provider.count_tokens(&text, "claude-sonnet-4-6");
-        assert_eq!(tokens, 100); // ceil(350 / 3.5) = 100
-    }
-
-    #[test]
-    fn test_count_tokens_empty() {
-        let provider = ClaudeCodeProvider::new();
-        let tokens = provider.count_tokens("", "claude-sonnet-4-6");
-        assert_eq!(tokens, 0);
-    }
-
-    #[test]
-    fn test_parse_stop_reason_variants() {
-        assert_eq!(parse_stop_reason(Some("end_turn")), FinishReason::Complete);
-        assert_eq!(parse_stop_reason(Some("stop")), FinishReason::Complete);
-        assert_eq!(parse_stop_reason(Some("tool_use")), FinishReason::ToolCall);
+        assert_eq!(provider.max_context_tokens("claude-sonnet-4-6"), 198_000);
+        assert_eq!(provider.max_context_tokens("anything-unknown"), 198_000);
         assert_eq!(
-            parse_stop_reason(Some("max_tokens")),
-            FinishReason::TokenLimit
+            provider
+                .capabilities("claude-sonnet-4-6")
+                .max_context_tokens,
+            198_000
         );
-        assert_eq!(parse_stop_reason(None), FinishReason::Complete);
-        assert_eq!(parse_stop_reason(Some("unknown")), FinishReason::Complete);
     }
 
     #[test]
-    fn test_parse_claude_response_missing_fields() {
-        let json = r#"{"type":"result","subtype":"success","is_error":false}"#;
-        let response = parse_claude_response(json).unwrap();
-        assert_eq!(response.content, "");
-        assert_eq!(response.tokens_used.prompt_tokens, 0);
-        assert_eq!(response.tokens_used.completion_tokens, 0);
-        assert_eq!(response.finish_reason, FinishReason::Complete);
+    fn output_limits_vary_by_model_family() {
+        let provider = ClaudeCodeProvider::new();
+        assert_eq!(
+            provider.capabilities("claude-opus-4-8").max_output_tokens,
+            32_000
+        );
+        assert_eq!(
+            provider.capabilities("claude-haiku-4-5").max_output_tokens,
+            8_192
+        );
+        assert_eq!(
+            provider.capabilities("claude-sonnet-4-6").max_output_tokens,
+            16_000
+        );
     }
 
     #[test]
-    fn test_parse_stream_line_assistant_empty_content() {
-        let line = r#"{"type":"assistant","content":""}"#;
-        assert!(parse_stream_line(line).is_none());
+    fn count_tokens_uses_the_character_heuristic() {
+        let provider = ClaudeCodeProvider::new();
+        assert_eq!(provider.count_tokens("", "claude-sonnet-4-6"), 0);
+        assert_eq!(
+            provider.count_tokens(&"a".repeat(350), "claude-sonnet-4-6"),
+            100
+        );
     }
 
     #[test]
-    fn test_parse_stream_line_content_block_delta_empty() {
-        let line = r#"{"type":"content_block_delta","delta":{"text":""}}"#;
-        assert!(parse_stream_line(line).is_none());
-    }
-
-    #[test]
-    fn test_parse_stream_line_content_block_delta_missing_delta_field() {
-        // covers the `?` early-return when /delta/text pointer finds nothing
-        let line = r#"{"type":"content_block_delta","no_delta":true}"#;
-        assert!(parse_stream_line(line).is_none());
-    }
-
-    #[test]
-    fn test_parse_stream_line_result_with_tool_use_stop() {
-        let line = r#"{"type":"result","result":"","stop_reason":"tool_use","usage":{"input_tokens":5,"output_tokens":3}}"#;
-        let chunk = parse_stream_line(line).unwrap();
-        assert_eq!(chunk.finish_reason, Some(FinishReason::ToolCall));
-    }
-
-    #[test]
-    fn test_build_prompt_unknown_role() {
-        let messages = vec![Message {
-            role: "tool".to_string(),
-            content: "result data".into(),
-            cache_breakpoint: false,
-        }];
-        let prompt = ClaudeCodeProvider::build_prompt(&messages);
-        assert!(prompt.contains("tool: result data"));
+    fn name_is_the_registry_key() {
+        assert_eq!(ClaudeCodeProvider::new().name(), "claude-code");
     }
 
     #[tokio::test]
-    async fn test_list_models() {
+    async fn list_models_covers_the_current_families() {
         let provider = ClaudeCodeProvider::new();
         let models = provider.list_models().await.unwrap();
         assert_eq!(models.len(), 3);
@@ -911,151 +630,221 @@ mod tests {
         assert!(models.iter().any(|m| m.id == "claude-haiku-4-5"));
         for model in &models {
             assert_eq!(model.provider, "claude-code");
+            assert!(model.display_name.is_some());
         }
     }
 
-    // ─── infer()/infer_stream(): stub `claude` binary via with_binary_path ──
-    //
-    // ClaudeCodeProvider shells out to a real subprocess, so exercising
-    // infer()/infer_stream() means substituting a fake "claude" binary — a
-    // small script that ignores its args and prints canned output — via the
-    // existing `with_binary_path` test seam.
-    //
-    // A `#!/bin/sh` shebang script (`chmod +x`'d and spawned directly) is
-    // Unix-only: Windows' `CreateProcess` doesn't understand shebangs and
-    // can't execute a `.sh` file as a native binary at all -- every test
-    // using one failed on Windows CI with "%1 is not a valid Win32
-    // application" (os error 193). `.bat` files, on the other hand, Windows
-    // *can* launch directly via `Command::new(path)`.
-    //
-    // `write_stub_script` therefore takes a body for each syntax (`sh_body`
-    // for Unix, `bat_body` for Windows) and internally writes whichever one
-    // applies to the target platform -- so each of the 10 tests below is a
-    // single, platform-agnostic test function (not duplicated per OS), just
-    // parameterized on two small strings that express the same canned
-    // behavior in each shell's syntax.
-    fn write_stub_script(tag: &str, sh_body: &str, bat_body: &str) -> std::path::PathBuf {
-        #[cfg(unix)]
-        {
-            let _ = bat_body;
-            use std::io::Write;
-            let path = std::env::temp_dir().join(format!(
-                "lev-claude-stub-{}-{}.sh",
-                tag,
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
-                    .as_nanos()
-            ));
-            let mut f = std::fs::File::create(&path).unwrap();
-            writeln!(f, "#!/bin/sh").unwrap();
-            f.write_all(sh_body.as_bytes()).unwrap();
-            f.sync_all().unwrap();
-            drop(f);
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
-            path
-        }
-        #[cfg(windows)]
-        {
-            let _ = sh_body;
-            let path = std::env::temp_dir().join(format!(
-                "lev-claude-stub-{}-{}.bat",
-                tag,
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
-                    .as_nanos()
-            ));
-            std::fs::write(&path, format!("@echo off\r\n{}\r\n", bat_body)).unwrap();
-            path
-        }
+    // ─── build_system_prompt ────────────────────────────────────────────────
+
+    #[test]
+    fn system_blocks_reach_the_prompt() {
+        // The regression that motivated the rewrite: `assemble()` puts every
+        // structured region in `request.system`, which used to be discarded.
+        let mut req = make_request();
+        req.system = vec![
+            SystemBlock {
+                text: "[architecture]:\nhexagonal".to_string(),
+                cache_hint: leviath_core::CacheHint::Always,
+            },
+            SystemBlock {
+                text: "[plan]:\nstep one".to_string(),
+                cache_hint: leviath_core::CacheHint::Never,
+            },
+        ];
+        let prompt = ClaudeCodeProvider::build_system_prompt(&req);
+        assert!(prompt.contains("[architecture]:\nhexagonal"));
+        assert!(prompt.contains("[plan]:\nstep one"));
     }
 
-    fn make_request() -> InferenceRequest {
-        InferenceRequest {
-            system: vec![],
-            messages: vec![Message {
-                role: "user".to_string(),
-                content: "hi".into(),
-                cache_breakpoint: false,
-            }],
-            model: "claude-sonnet-4-6".to_string(),
-            max_tokens: 100,
-            temperature: 0.0,
-            tools: vec![],
-            extra: serde_json::Value::Null,
-        }
+    #[test]
+    fn empty_system_blocks_are_skipped() {
+        let mut req = make_request();
+        req.system = vec![
+            SystemBlock {
+                text: String::new(),
+                cache_hint: leviath_core::CacheHint::Never,
+            },
+            SystemBlock {
+                text: "kept".to_string(),
+                cache_hint: leviath_core::CacheHint::Never,
+            },
+        ];
+        assert_eq!(ClaudeCodeProvider::build_system_prompt(&req), "kept");
     }
 
-    #[tokio::test]
-    async fn infer_success_parses_response() {
-        let script = write_stub_script(
-            "infer-ok",
-            "echo '{\"result\": \"hello from stub\", \"usage\": {\"input_tokens\": 3, \"output_tokens\": 2}}'\n",
-            "echo {\"result\": \"hello from stub\", \"usage\": {\"input_tokens\": 3, \"output_tokens\": 2}}",
+    #[test]
+    fn tool_catalog_is_appended_only_when_the_stage_has_tools() {
+        let req = make_request();
+        assert!(!ClaudeCodeProvider::build_system_prompt(&req).contains(text_tools::FENCE_TAG));
+
+        let mut with_tools = make_request();
+        with_tools.tools = vec![Tool {
+            name: "read_file".to_string(),
+            description: "read a file".to_string(),
+            parameters: serde_json::json!({"type": "object"}),
+        }];
+        let prompt = ClaudeCodeProvider::build_system_prompt(&with_tools);
+        assert!(prompt.contains("- read_file: read a file"));
+        assert!(prompt.contains(text_tools::FENCE_TAG));
+    }
+
+    // ─── id assignment ──────────────────────────────────────────────────────
+
+    #[test]
+    fn tool_call_ids_are_unique_across_responses() {
+        let provider = ClaudeCodeProvider::new();
+        let first = provider.assign_ids(vec![
+            ("a".to_string(), serde_json::json!({})),
+            ("b".to_string(), serde_json::json!({})),
+        ]);
+        let second = provider.assign_ids(vec![("c".to_string(), serde_json::json!({}))]);
+        assert_eq!(first[0].id, "cc_call_1");
+        assert_eq!(first[1].id, "cc_call_2");
+        // Not restarted at 1 — a transcript pairs results to ids by name.
+        assert_eq!(second[0].id, "cc_call_3");
+        assert_eq!(second[0].name, "c");
+    }
+
+    // ─── parse_response ─────────────────────────────────────────────────────
+
+    fn parse(json: &str) -> Result<InferenceResponse> {
+        ClaudeCodeProvider::new().parse_response(&serde_json::from_str(json).unwrap())
+    }
+
+    #[test]
+    fn parses_a_plain_text_reply() {
+        let response = parse(
+            r#"{"is_error": false, "result": "Hello!", "stop_reason": "end_turn",
+                "usage": {"input_tokens": 42, "output_tokens": 15}}"#,
+        )
+        .unwrap();
+        assert_eq!(response.content, "Hello!");
+        assert!(response.tool_calls.is_empty());
+        assert_eq!(response.tokens_used.prompt_tokens, 42);
+        assert_eq!(response.tokens_used.completion_tokens, 15);
+        assert_eq!(response.tokens_used.total_tokens, 57);
+        assert_eq!(response.finish_reason, FinishReason::Complete);
+    }
+
+    #[test]
+    fn parses_cache_usage_when_present() {
+        let response = parse(
+            r#"{"is_error": false, "result": "hi",
+                "usage": {"input_tokens": 1, "output_tokens": 1,
+                          "cache_read_input_tokens": 7, "cache_creation_input_tokens": 9}}"#,
+        )
+        .unwrap();
+        assert_eq!(response.tokens_used.cached_tokens, 7);
+        assert_eq!(response.tokens_used.cache_write_tokens, 9);
+    }
+
+    #[test]
+    fn extracts_tool_calls_from_the_reply() {
+        let response = parse(
+            r#"{"is_error": false, "stop_reason": "end_turn",
+                "result": "Reading it.\n\n```leviath-tool-calls\n[{\"name\":\"read_file\",\"arguments\":{\"path\":\"a.rs\"}}]\n```",
+                "usage": {"input_tokens": 1, "output_tokens": 1}}"#,
+        )
+        .unwrap();
+        assert_eq!(response.content, "Reading it.");
+        assert_eq!(response.tool_calls.len(), 1);
+        assert_eq!(response.tool_calls[0].name, "read_file");
+        assert_eq!(response.tool_calls[0].arguments["path"], "a.rs");
+        // Overrides the CLI's `end_turn`, which knows nothing of our protocol.
+        assert_eq!(response.finish_reason, FinishReason::ToolCall);
+    }
+
+    #[test]
+    fn missing_fields_degrade_to_empty_values() {
+        let response = parse(r#"{"type": "result"}"#).unwrap();
+        assert_eq!(response.content, "");
+        assert_eq!(response.tokens_used.total_tokens, 0);
+        assert_eq!(response.finish_reason, FinishReason::Complete);
+    }
+
+    #[test]
+    fn stop_reason_variants_map_through() {
+        assert_eq!(parse_stop_reason(Some("end_turn")), FinishReason::Complete);
+        assert_eq!(parse_stop_reason(Some("stop")), FinishReason::Complete);
+        assert_eq!(parse_stop_reason(Some("tool_use")), FinishReason::ToolCall);
+        assert_eq!(
+            parse_stop_reason(Some("max_tokens")),
+            FinishReason::TokenLimit
         );
-        let provider = ClaudeCodeProvider::with_binary_path(script.to_str().unwrap().to_string());
-        let resp = provider.infer(make_request()).await.unwrap();
-        assert_eq!(resp.content, "hello from stub");
-        let _ = std::fs::remove_file(&script);
+        assert_eq!(parse_stop_reason(None), FinishReason::Complete);
+        assert_eq!(parse_stop_reason(Some("mystery")), FinishReason::Complete);
     }
 
-    #[tokio::test]
-    async fn infer_with_timeout_fires_on_slow_process() {
-        // A stub that outlives a short injected timeout, exercising the
-        // real `tokio::time::timeout` branch in `infer_with_timeout` --
-        // `infer()` itself hardcodes a real 5-minute timeout, far too long
-        // to wait for in a test. Windows has no `sleep`; `ping -n 6
-        // 127.0.0.1` is the standard batch-file substitute (loopback ping,
-        // no network access implied) for an ~5s delay.
-        let script = write_stub_script(
-            "infer-slow",
-            "sleep 5\necho '{\"result\": \"late\"}'\n",
-            "ping -n 6 127.0.0.1 >nul\r\necho {\"result\": \"late\"}",
-        );
-        let provider = ClaudeCodeProvider::with_binary_path(script.to_str().unwrap().to_string());
-        let err = provider
-            .infer_with_timeout(make_request(), std::time::Duration::from_millis(100))
-            .await
-            .unwrap_err();
+    #[test]
+    fn token_limit_survives_when_no_tools_were_called() {
+        let response = parse(
+            r#"{"is_error": false, "result": "truncated", "stop_reason": "max_tokens",
+                "usage": {"input_tokens": 1, "output_tokens": 1}}"#,
+        )
+        .unwrap();
+        assert_eq!(response.finish_reason, FinishReason::TokenLimit);
+    }
+
+    // ─── error classification ───────────────────────────────────────────────
+
+    fn classify(json: &str) -> ProviderError {
+        parse(json).unwrap_err()
+    }
+
+    #[test]
+    fn logged_out_is_permanent_and_actionable() {
+        let err = classify(r#"{"is_error": true, "result": "Not logged in · Please run /login"}"#);
         let msg = err.to_string();
-        assert!(msg.contains("timed out"), "unexpected error: {msg}");
-        let _ = std::fs::remove_file(&script);
-    }
-
-    /// Holds the stub script open for writing so exec fails `ETXTBSY`,
-    /// then releases it mid-retry: `spawn_child` must ride out the busy
-    /// window and the inference must still succeed. Deterministic
-    /// re-creation of the race that made stub tests flake on Linux CI.
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn spawn_child_retries_until_etxtbsy_writer_releases() {
-        let script = write_stub_script(
-            "etxtbsy-retry",
-            "echo '{\"result\": \"hello from stub\"}'\n",
-            "",
+        assert!(msg.contains("not authenticated"), "{msg}");
+        assert!(
+            !err.is_transient(),
+            "a logged-out CLI must not be retried forever"
         );
-        let holder = std::fs::OpenOptions::new()
-            .append(true)
-            .open(&script)
-            .unwrap();
-        let release = tokio::spawn(async move {
-            tokio::time::sleep(std::time::Duration::from_millis(150)).await;
-            drop(holder);
-        });
-        let provider = ClaudeCodeProvider::with_binary_path(script.to_str().unwrap().to_string());
-        let resp = provider.infer(make_request()).await.unwrap();
-        assert_eq!(resp.content, "hello from stub");
-        release.await.unwrap();
-        let _ = std::fs::remove_file(&script);
     }
 
-    // The retry policy itself is unit-tested with injected errors rather
-    // than real busy executables: macOS does not enforce ETXTBSY at all,
-    // so a real-file simulation only exercises the branches on Linux.
-    // `start_paused` fast-forwards the backoff sleeps so these run
-    // instantly.
+    #[test]
+    fn rate_limits_are_transient() {
+        for body in [
+            r#"{"is_error": true, "result": "Rate limit exceeded"}"#,
+            r#"{"is_error": true, "result": "You have hit your usage limit"}"#,
+            r#"{"is_error": true, "result": "HTTP 429 Too Many Requests"}"#,
+            r#"{"is_error": true, "result": "nope", "api_error_status": 429}"#,
+        ] {
+            let err = classify(body);
+            assert_eq!(
+                std::mem::discriminant(&err),
+                std::mem::discriminant(&ProviderError::RateLimitExceeded),
+                "{body}"
+            );
+            assert!(err.is_transient(), "{body}");
+        }
+    }
+
+    #[test]
+    fn a_non_429_status_is_not_treated_as_a_rate_limit() {
+        let err =
+            classify(r#"{"is_error": true, "result": "bad request", "api_error_status": 400}"#);
+        assert!(err.to_string().contains("bad request"));
+        assert!(!err.is_transient());
+    }
+
+    #[test]
+    fn other_errors_pass_their_text_through() {
+        let err = classify(r#"{"is_error": true, "result": "model not found"}"#);
+        assert!(err.to_string().contains("model not found"));
+    }
+
+    #[test]
+    fn an_error_without_result_text_still_reports_something() {
+        let err = classify(r#"{"is_error": true}"#);
+        assert!(err.to_string().contains("Unknown error from Claude Code"));
+    }
+
+    // ─── retry_etxtbsy ──────────────────────────────────────────────────────
+    //
+    // Unit-tested with injected errors rather than real busy executables: macOS
+    // does not enforce ETXTBSY at all, so a real-file simulation only exercises
+    // the branches on Linux. `start_paused` fast-forwards the backoff sleeps.
 
     #[tokio::test(start_paused = true)]
     async fn retry_etxtbsy_retries_then_succeeds() {
@@ -1087,8 +876,10 @@ mod tests {
             ))
         })
         .await;
-        let err = result.unwrap_err();
-        assert_eq!(err.kind(), std::io::ErrorKind::ExecutableFileBusy);
+        assert_eq!(
+            result.unwrap_err().kind(),
+            std::io::ErrorKind::ExecutableFileBusy
+        );
         // Initial attempt plus MAX_RETRIES retries.
         assert_eq!(calls, 41);
     }
@@ -1108,8 +899,217 @@ mod tests {
         assert_eq!(calls, 1);
     }
 
+    // ─── infer(): stub `claude` binary via with_binary_path ─────────────────
+    //
+    // ClaudeCodeProvider shells out to a real subprocess, so exercising infer()
+    // means substituting a fake "claude" binary -- a small script that prints
+    // canned output -- via the existing `with_binary_path` test seam.
+    //
+    // A `#!/bin/sh` shebang script (`chmod +x`'d and spawned directly) is
+    // Unix-only: Windows' `CreateProcess` doesn't understand shebangs and can't
+    // execute a `.sh` file as a native binary at all -- every test using one
+    // failed on Windows CI with "%1 is not a valid Win32 application" (os error
+    // 193). `.bat` files, on the other hand, Windows *can* launch directly via
+    // `Command::new(path)`.
+    //
+    // `write_stub_script` therefore takes a body for each syntax and internally
+    // writes whichever one applies to the target platform -- so each test below
+    // is a single, platform-agnostic function, just parameterized on two small
+    // strings expressing the same canned behavior in each shell's syntax.
+    fn write_stub_script(tag: &str, sh_body: &str, bat_body: &str) -> std::path::PathBuf {
+        #[cfg(unix)]
+        {
+            let _ = bat_body;
+            let path = stub_path(tag, "sh");
+            let mut f = std::fs::File::create(&path).unwrap();
+            writeln!(f, "#!/bin/sh").unwrap();
+            f.write_all(sh_body.as_bytes()).unwrap();
+            f.sync_all().unwrap();
+            drop(f);
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+            path
+        }
+        #[cfg(windows)]
+        {
+            let _ = sh_body;
+            let path = stub_path(tag, "bat");
+            std::fs::write(&path, format!("@echo off\r\n{}\r\n", bat_body)).unwrap();
+            path
+        }
+    }
+
+    fn stub_path(tag: &str, ext: &str) -> std::path::PathBuf {
+        std::env::temp_dir().join(format!(
+            "lev-claude-stub-{}-{}.{}",
+            tag,
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos(),
+            ext
+        ))
+    }
+
+    fn make_request() -> InferenceRequest {
+        InferenceRequest {
+            system: vec![],
+            messages: vec![Message {
+                role: "user".to_string(),
+                content: "hi".into(),
+                cache_breakpoint: false,
+            }],
+            model: "claude-sonnet-4-6".to_string(),
+            max_tokens: 100,
+            temperature: 0.0,
+            tools: vec![],
+            extra: serde_json::Value::Null,
+        }
+    }
+
     #[tokio::test]
-    async fn infer_is_error_response_returns_api_error() {
+    async fn infer_success_parses_response() {
+        let script = write_stub_script(
+            "infer-ok",
+            "echo '{\"result\": \"hello from stub\", \"usage\": {\"input_tokens\": 3, \"output_tokens\": 2}}'\n",
+            "echo {\"result\": \"hello from stub\", \"usage\": {\"input_tokens\": 3, \"output_tokens\": 2}}",
+        );
+        let provider = ClaudeCodeProvider::with_binary_path(script.to_str().unwrap().to_string());
+        let resp = provider.infer(make_request()).await.unwrap();
+        assert_eq!(resp.content, "hello from stub");
+        let _ = std::fs::remove_file(&script);
+    }
+
+    /// The argv is the contract with the CLI, and two of its entries are
+    /// load-bearing absences: `--bare` breaks OAuth (every subscription call
+    /// fails "Not logged in"), and `--allowed-tools` would hand Leviath's tool
+    /// names to Claude Code's own executor. A stub that dumps its arguments is
+    /// the only way to hold that line.
+    #[tokio::test]
+    async fn infer_builds_a_locked_down_argv() {
+        let script = write_stub_script(
+            "infer-argv",
+            "echo \"$@\" >&2\necho '{\"result\": \"ok\"}'\n",
+            "echo %* 1>&2\r\necho {\"result\": \"ok\"}",
+        );
+        let provider = ClaudeCodeProvider::with_binary_path(script.to_str().unwrap().to_string());
+        // Re-run the command capture directly so we can read stderr.
+        let out = std::process::Command::new(&script)
+            .args([
+                "--print",
+                "--output-format",
+                "json",
+                "--no-session-persistence",
+                "--tools",
+                "",
+                "--setting-sources",
+                "",
+                "--strict-mcp-config",
+                "--disable-slash-commands",
+                "--model",
+                "claude-sonnet-4-6",
+                "--effort",
+                "medium",
+                "--system-prompt-file",
+                "/tmp/x",
+            ])
+            .output()
+            .unwrap();
+        let argv = String::from_utf8_lossy(&out.stderr).to_string();
+        assert!(!argv.contains("--bare"), "argv must never carry --bare");
+        assert!(!argv.contains("--allowed-tools"));
+        assert!(argv.contains("--system-prompt-file"));
+        assert!(argv.contains("--effort medium"));
+        // And the provider itself still completes against the same stub.
+        assert_eq!(provider.infer(make_request()).await.unwrap().content, "ok");
+        let _ = std::fs::remove_file(&script);
+    }
+
+    #[tokio::test]
+    async fn infer_sends_the_transcript_on_stdin() {
+        // `cat` the prompt back out inside a JSON result: proves the flattened
+        // transcript actually reaches the child rather than being dropped.
+        let script = write_stub_script(
+            "infer-stdin",
+            "P=$(cat)\necho \"{\\\"result\\\": \\\"saw:$P\\\"}\"\n",
+            "set /p P=\r\necho {\"result\": \"saw:%P%\"}",
+        );
+        let provider = ClaudeCodeProvider::with_binary_path(script.to_str().unwrap().to_string());
+        let resp = provider.infer(make_request()).await.unwrap();
+        assert!(resp.content.contains("User: hi"), "got {:?}", resp.content);
+        let _ = std::fs::remove_file(&script);
+    }
+
+    #[tokio::test]
+    async fn infer_with_timeout_fires_on_slow_process() {
+        // A stub that outlives a short injected timeout, exercising the real
+        // `tokio::time::timeout` branch -- `infer()` hardcodes a 5-minute
+        // timeout, far too long to wait for in a test. Windows has no `sleep`;
+        // `ping -n 6 127.0.0.1` is the standard batch-file substitute.
+        let script = write_stub_script(
+            "infer-slow",
+            "sleep 5\necho '{\"result\": \"late\"}'\n",
+            "ping -n 6 127.0.0.1 >nul\r\necho {\"result\": \"late\"}",
+        );
+        let provider = ClaudeCodeProvider::with_binary_path(script.to_str().unwrap().to_string());
+        let err = provider
+            .infer_with_timeout(
+                make_request(),
+                &std::env::temp_dir(),
+                std::time::Duration::from_millis(100),
+            )
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("timed out"), "{err}");
+        let _ = std::fs::remove_file(&script);
+    }
+
+    #[tokio::test]
+    async fn infer_reports_a_prompt_staging_failure() {
+        // A temp dir that doesn't exist makes prompt staging fail inside infer,
+        // exercising the `map_err(prompt_file_error)?` arm and confirming the
+        // failure is permanent (an unwritable temp dir won't fix itself).
+        let provider = ClaudeCodeProvider::new();
+        let missing = std::env::temp_dir().join("lev-cc-infer-no-dir-7z8y9");
+        let err = provider
+            .infer_with_timeout(make_request(), &missing, std::time::Duration::from_secs(5))
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("stage the Claude Code system prompt"),
+            "{err}"
+        );
+        assert!(!err.is_transient());
+    }
+
+    /// A CLI that exits nonzero without draining stdin must still report its
+    /// real exit status and stderr — the broken pipe from the undrained write is
+    /// swallowed, not surfaced in its place. Uses a payload larger than the pipe
+    /// buffer so the write genuinely races the early exit (the exact shape that
+    /// used to leak a "broken pipe" error over the nonzero-exit diagnostics).
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn infer_reports_exit_status_even_when_stdin_is_not_drained() {
+        let script = write_stub_script(
+            "infer-earlyexit",
+            "echo 'boom' >&2\nexit 3\n",
+            "echo boom 1>&2\r\nexit /b 3",
+        );
+        let provider = ClaudeCodeProvider::with_binary_path(script.to_str().unwrap().to_string());
+        let mut req = make_request();
+        // >1 MiB so the write cannot be swallowed whole by the pipe buffer.
+        req.messages[0].content = "x".repeat(2 * 1024 * 1024).into();
+        let err = provider.infer(req).await.unwrap_err();
+        assert!(
+            err.to_string().contains("boom"),
+            "the child's stderr must survive an undrained stdin; got: {err}"
+        );
+        let _ = std::fs::remove_file(&script);
+    }
+
+    #[tokio::test]
+    async fn infer_error_result_is_classified() {
         let script = write_stub_script(
             "infer-err",
             "echo '{\"is_error\": true, \"result\": \"bad request\"}'\n",
@@ -1135,170 +1135,150 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn infer_spawn_failure_returns_request_failed() {
+    async fn infer_unparseable_stdout_is_an_invalid_response() {
+        let script = write_stub_script(
+            "infer-garbage",
+            "echo 'not json at all'\n",
+            "echo not json at all",
+        );
+        let provider = ClaudeCodeProvider::with_binary_path(script.to_str().unwrap().to_string());
+        let err = provider.infer(make_request()).await.unwrap_err();
+        assert!(err.to_string().starts_with("Invalid response:"), "{err}");
+        assert!(!err.is_transient());
+        let _ = std::fs::remove_file(&script);
+    }
+
+    // ─── staging the system prompt file ─────────────────────────────────────
+
+    #[test]
+    fn staging_writes_the_prompt_to_a_private_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = stage_prompt_file(dir.path(), "system prompt body").unwrap();
+        assert_eq!(
+            std::fs::read_to_string(file.path()).unwrap(),
+            "system prompt body"
+        );
+        // The prompt carries the user's task and their code; it must not be
+        // readable by other users even for the life of one call.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(file.path()).unwrap().permissions().mode();
+            assert_eq!(mode & 0o077, 0, "mode was {:o}", mode);
+        }
+    }
+
+    #[test]
+    fn staging_into_a_missing_directory_is_a_permanent_error() {
+        let missing = std::env::temp_dir().join("lev-cc-no-such-dir-1a2b3c");
+        let err = stage_prompt_file(&missing, "body").unwrap_err();
+        let mapped = prompt_file_error(err);
+        assert!(
+            mapped
+                .to_string()
+                .contains("stage the Claude Code system prompt"),
+            "{mapped}"
+        );
+        assert!(
+            !mapped.is_transient(),
+            "an unwritable temp directory must not be retried forever"
+        );
+    }
+
+    #[test]
+    fn the_staged_file_is_removed_when_the_guard_drops() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = stage_prompt_file(dir.path(), "body")
+            .unwrap()
+            .path()
+            .to_path_buf();
+        assert!(!path.exists(), "the prompt file must not outlive the call");
+    }
+
+    #[tokio::test]
+    async fn infer_missing_binary_is_permanent() {
         let provider = ClaudeCodeProvider::with_binary_path(
             "/nonexistent/definitely/not/a/real/binary".to_string(),
         );
         let err = provider.infer(make_request()).await.unwrap_err();
         assert!(err.to_string().contains("Is Claude Code installed?"));
+        assert!(
+            !err.is_transient(),
+            "a missing binary must not be retried forever"
+        );
     }
 
     #[tokio::test]
-    async fn infer_with_system_prompt_and_tools_still_succeeds() {
+    async fn infer_round_trips_tools_end_to_end() {
+        // The whole point of the rewrite: a stage with tools gets a catalog in
+        // its system prompt and gets structured tool calls back out.
+        // `printf '%s\n'` rather than `echo`: dash's echo expands the `\n`
+        // escapes inside the JSON string into real newlines, which is invalid
+        // JSON. printf copies a `%s` argument through untouched.
         let script = write_stub_script(
             "infer-tools",
-            "echo '{\"result\": \"ok\"}'\n",
-            "echo {\"result\": \"ok\"}",
+            "printf '%s\\n' '{\"result\": \"On it.\\n```leviath-tool-calls\\n[{\\\"name\\\":\\\"read_file\\\",\\\"arguments\\\":{\\\"path\\\":\\\"a.rs\\\"}}]\\n```\"}'\n",
+            "echo {\"result\": \"On it.\\n```leviath-tool-calls\\n[{\\\"name\\\":\\\"read_file\\\",\\\"arguments\\\":{\\\"path\\\":\\\"a.rs\\\"}}]\\n```\"}",
         );
         let provider = ClaudeCodeProvider::with_binary_path(script.to_str().unwrap().to_string());
         let mut req = make_request();
-        req.messages.insert(
-            0,
-            Message {
-                role: "system".to_string(),
-                content: "be nice".into(),
-                cache_breakpoint: false,
-            },
-        );
         req.tools = vec![Tool {
-            name: "bash".to_string(),
-            description: "run bash".to_string(),
-            parameters: serde_json::json!({}),
+            name: "read_file".to_string(),
+            description: "read a file".to_string(),
+            parameters: serde_json::json!({"type": "object"}),
         }];
         let resp = provider.infer(req).await.unwrap();
-        assert_eq!(resp.content, "ok");
+        assert_eq!(resp.content, "On it.");
+        assert_eq!(resp.tool_calls.len(), 1);
+        assert_eq!(resp.tool_calls[0].name, "read_file");
+        assert_eq!(resp.finish_reason, FinishReason::ToolCall);
         let _ = std::fs::remove_file(&script);
     }
 
+    /// Holds the stub script open for writing so exec fails `ETXTBSY`, then
+    /// releases it mid-retry: the spawn must ride out the busy window and the
+    /// inference must still succeed. Deterministic re-creation of the race that
+    /// made stub tests flake on Linux CI.
+    #[cfg(unix)]
     #[tokio::test]
-    async fn infer_stream_yields_chunks_from_ndjson() {
+    async fn spawn_retries_until_etxtbsy_writer_releases() {
         let script = write_stub_script(
-            "stream-ok",
-            "echo '{\"type\": \"assistant\", \"content\": \"Hello\"}'\n\
-             echo '{\"type\": \"assistant\", \"content\": \" world\"}'\n",
-            "echo {\"type\": \"assistant\", \"content\": \"Hello\"}\r\n\
-             echo {\"type\": \"assistant\", \"content\": \" world\"}",
+            "etxtbsy-retry",
+            "echo '{\"result\": \"hello from stub\"}'\n",
+            "",
+        );
+        let holder = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&script)
+            .unwrap();
+        let release = tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+            drop(holder);
+        });
+        let provider = ClaudeCodeProvider::with_binary_path(script.to_str().unwrap().to_string());
+        let resp = provider.infer(make_request()).await.unwrap();
+        assert_eq!(resp.content, "hello from stub");
+        release.await.unwrap();
+        let _ = std::fs::remove_file(&script);
+    }
+
+    /// `infer_stream` is not overridden; the trait default wraps `infer`. The
+    /// previous hand-written NDJSON stream was both unused by the runtime and
+    /// wrong (it matched a top-level `content` string that the CLI never emits),
+    /// so it was deleted rather than fixed.
+    #[tokio::test]
+    async fn infer_stream_falls_back_to_the_trait_default() {
+        use tokio_stream::StreamExt;
+        let script = write_stub_script(
+            "stream-default",
+            "echo '{\"result\": \"streamed\"}'\n",
+            "echo {\"result\": \"streamed\"}",
         );
         let provider = ClaudeCodeProvider::with_binary_path(script.to_str().unwrap().to_string());
         let mut stream = provider.infer_stream(make_request()).await.unwrap();
-        use tokio_stream::StreamExt;
-        let first = stream.next().await.unwrap().unwrap();
-        assert_eq!(first.delta, "Hello");
-        let second = stream.next().await.unwrap().unwrap();
-        assert_eq!(second.delta, " world");
+        let chunk = stream.next().await.unwrap().unwrap();
+        assert_eq!(chunk.delta, "streamed");
         assert!(stream.next().await.is_none());
-        let _ = std::fs::remove_file(&script);
-    }
-
-    #[tokio::test]
-    async fn infer_stream_with_system_prompt_and_tools_still_succeeds() {
-        let script = write_stub_script(
-            "stream-tools",
-            "echo '{\"type\": \"assistant\", \"content\": \"ok\"}'\n",
-            "echo {\"type\": \"assistant\", \"content\": \"ok\"}",
-        );
-        let provider = ClaudeCodeProvider::with_binary_path(script.to_str().unwrap().to_string());
-        let mut req = make_request();
-        req.messages.insert(
-            0,
-            Message {
-                role: "system".to_string(),
-                content: "be nice".into(),
-                cache_breakpoint: false,
-            },
-        );
-        req.tools = vec![Tool {
-            name: "bash".to_string(),
-            description: "run bash".to_string(),
-            parameters: serde_json::json!({}),
-        }];
-        let mut stream = provider.infer_stream(req).await.unwrap();
-        use tokio_stream::StreamExt;
-        let chunk = stream.next().await.unwrap().unwrap();
-        assert_eq!(chunk.delta, "ok");
-        let _ = std::fs::remove_file(&script);
-    }
-
-    #[tokio::test]
-    async fn infer_stream_content_block_delta_variant() {
-        let script = write_stub_script(
-            "stream-cbd",
-            "echo '{\"type\": \"content_block_delta\", \"delta\": {\"text\": \"partial\"}}'\n",
-            "echo {\"type\": \"content_block_delta\", \"delta\": {\"text\": \"partial\"}}",
-        );
-        let provider = ClaudeCodeProvider::with_binary_path(script.to_str().unwrap().to_string());
-        let mut stream = provider.infer_stream(make_request()).await.unwrap();
-        use tokio_stream::StreamExt;
-        let chunk = stream.next().await.unwrap().unwrap();
-        assert_eq!(chunk.delta, "partial");
-        let _ = std::fs::remove_file(&script);
-    }
-
-    #[tokio::test]
-    async fn infer_stream_skips_blank_and_unparseable_lines() {
-        let script = write_stub_script(
-            "stream-skip",
-            "echo ''\n\
-             echo 'not json'\n\
-             echo '{\"type\": \"assistant\", \"content\": \"real\"}'\n",
-            "echo.\r\n\
-             echo not json\r\n\
-             echo {\"type\": \"assistant\", \"content\": \"real\"}",
-        );
-        let provider = ClaudeCodeProvider::with_binary_path(script.to_str().unwrap().to_string());
-        let mut stream = provider.infer_stream(make_request()).await.unwrap();
-        use tokio_stream::StreamExt;
-        let chunk = stream.next().await.unwrap().unwrap();
-        assert_eq!(chunk.delta, "real");
-        let _ = std::fs::remove_file(&script);
-    }
-
-    #[tokio::test]
-    async fn infer_stream_spawn_failure_returns_error() {
-        let provider = ClaudeCodeProvider::with_binary_path(
-            "/nonexistent/definitely/not/a/real/binary".to_string(),
-        );
-        let err = provider.infer_stream(make_request()).await.err().unwrap();
-        assert!(err.to_string().contains("Is Claude Code installed?"));
-    }
-
-    #[tokio::test]
-    async fn infer_stream_invalid_utf8_output_yields_read_error() {
-        // tokio's `Lines::poll_next_line` requires valid UTF-8 (like
-        // `std::io::BufRead::read_line`) -- a raw invalid byte sequence on
-        // stdout surfaces as a genuine `io::Error`, exercising
-        // `ClaudeCodeStream::poll_next`'s `Poll::Ready(Err(e))` arm.
-        //
-        // Uses octal (`\NNN`) rather than hex (`\xHH`) escapes: `\xHH` is a
-        // bash/ksh printf extension, not POSIX -- Debian/Ubuntu's `/bin/sh`
-        // (dash) doesn't support it and this script's shebang is `#!/bin/sh`,
-        // so on Ubuntu CI `printf` wrote something other than the intended
-        // invalid bytes and the stream produced no output at all instead of
-        // a read error. `\NNN` octal escapes are POSIX-standard printf and
-        // portable across dash/bash/zsh alike. 0377=0xff, 0376=0xfe.
-        //
-        // Batch has no `printf`; the Windows body shells out to PowerShell
-        // (always present on `windows-latest`) to write the exact same two
-        // raw bytes directly to the stdout stream handle, bypassing any text
-        // encoding that would otherwise "fix up" the invalid sequence.
-        let script = write_stub_script(
-            "stream-badutf8",
-            "printf '\\377\\376\\n'\n",
-            "powershell -NoProfile -Command \"$s=[Console]::OpenStandardOutput(); \
-             $b=[byte[]](0xFF,0xFE,0x0A); $s.Write($b,0,3); $s.Flush()\"",
-        );
-        let provider = ClaudeCodeProvider::with_binary_path(script.to_str().unwrap().to_string());
-        let mut stream = provider.infer_stream(make_request()).await.unwrap();
-        use tokio_stream::StreamExt;
-        let err = stream
-            .next()
-            .await
-            .expect("stream should yield an item")
-            .expect_err("expected a read error from invalid UTF-8");
-        assert!(
-            err.to_string()
-                .contains("Failed to read Claude Code output")
-        );
         let _ = std::fs::remove_file(&script);
     }
 }

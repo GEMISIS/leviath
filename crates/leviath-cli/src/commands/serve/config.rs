@@ -77,6 +77,9 @@ mod tests {
                     anthropic_api_key: Some("sk-ant-test".to_string()),
                     openai_api_key: Some("sk-openai-test".to_string()),
                     google_api_key: None,
+                    claude_code_enabled: false,
+                    claude_code_binary: None,
+                    claude_code_effort: None,
                 },
                 openrouter_api_key: Some("sk-or-test".to_string()),
                 ollama_base_url: Some("http://localhost:11434".to_string()),
@@ -173,6 +176,25 @@ mod tests {
 
     // ─── get_models endpoint ──────────────────────────────────────────────────
 
+    /// AppState whose registry has a provider that actually enumerates models,
+    /// so the `/api/models` handler's list-building loop runs. `claude-code`
+    /// needs no API key and `list_models` returns its three known models.
+    fn test_state_listing_models() -> AppState {
+        let (tx, _) = broadcast::channel::<ServerEvent>(64);
+        AppState {
+            config: Arc::new(Config {
+                providers: crate::config::ProviderConfig {
+                    claude_code_enabled: true,
+                    ..Config::default().providers
+                },
+                ..Config::default()
+            }),
+            event_tx: tx,
+            control: crate::commands::serve::testutil::no_daemon_client(),
+            mcp: crate::commands::serve::mcp::McpAdmin::default(),
+        }
+    }
+
     #[tokio::test]
     async fn get_models_returns_ok() {
         let app = Router::new()
@@ -188,9 +210,31 @@ mod tests {
             .await
             .unwrap();
         let models: Vec<serde_json::Value> = serde_json::from_slice(&body).unwrap();
-        // With default config (no API keys), providers may return empty lists,
-        // but the endpoint itself should succeed
+        // With default config (no API keys, claude-code off), providers may
+        // return empty lists, but the endpoint itself should succeed.
         let _ = models;
+    }
+
+    #[tokio::test]
+    async fn get_models_enumerates_when_a_provider_lists_models() {
+        let app = Router::new()
+            .route("/api/models", get(get_models))
+            .with_state(test_state_listing_models());
+        let req = Request::builder()
+            .uri("/api/models")
+            .body(Body::empty())
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), axum::http::StatusCode::OK);
+        let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let models: Vec<serde_json::Value> = serde_json::from_slice(&body).unwrap();
+        // claude-code enumerates its three known models, so the handler's
+        // per-model mapping loop actually runs and produces entries.
+        assert!(!models.is_empty());
+        assert!(models.iter().any(|m| m["provider"] == "claude-code"));
+        assert!(models.iter().all(|m| m["id"].is_string()));
     }
 
     #[test]
