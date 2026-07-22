@@ -292,6 +292,29 @@ curl -X POST http://localhost:3000/api/agents \
 
 Covers agent lifecycle, human-in-the-loop interaction, blueprint management, per-agent WebSocket streaming, and webhook callbacks on completion. [Full API reference →](https://leviath.dev/docs/api)
 
+## 🔗 Agent Client Protocol (Gas City, Zed, …)
+
+`lev agent-client` serves a Leviath agent over the [Agent **Client** Protocol](https://agentclientprotocol.com) — JSON-RPC 2.0 over stdio, the protocol agent hosts like [Gas City](https://github.com/gastownhall/gascity) and [Zed](https://zed.dev) use to drive a headless agent as a child process. A `session/prompt` runs the blueprint in the shared-world daemon and streams its output back as `session/update` notifications.
+
+```bash
+lev agent-client --agent coder            # speaks the protocol on stdin/stdout
+```
+
+To drive a Leviath agent from Gas City, add a provider and point an agent at it — **no Gas City code change is needed**, just config:
+
+```toml
+# Gas City provider declaration
+[providers.leviath]
+command      = "lev agent-client --agent coder"
+supports_acp = true
+
+# agents/reviewer/agent.toml
+provider = "leviath"
+session  = "acp"          # Gas City's key name for the Agent Client Protocol
+```
+
+> **Two protocols, one acronym.** "ACP" is claimed by two unrelated things: the **Agent Client Protocol** (JSON-RPC/stdio, implemented here — this is the Gas City integration) and the **Agent Communication Protocol** (a REST API from the BeeAI project, not implemented in Leviath). This repo never writes the bare acronym unqualified. Hosts that implement `session/request_permission` get interactive tool approval; hosts that don't (Gas City today) should run with `--yolo`, since tool-approval prompts otherwise pause the run.
+
 ## ⌨️ CLI
 
 | Command | Description |
@@ -304,7 +327,8 @@ Covers agent lifecycle, human-in-the-loop interaction, blueprint management, per
 | `lev respond [req-id] [value]` | List or answer pending `ask_user` interactions |
 | `lev daemon` | Run the shared-world daemon in the foreground |
 | `lev dash` | TUI dashboard |
-| `lev serve` | API server |
+| `lev serve` | REST + WebSocket API server |
+| `lev agent-client` | Serve an agent over the Agent Client Protocol (stdio; Gas City / Zed) |
 | `lev validate [path]` | Validate an agent blueprint |
 | `lev pack` / `lev add` / `lev remove` | Package management |
 | `lev list` | List installed agents |
@@ -356,6 +380,7 @@ graph TD
     CLI["leviath-cli<br/><i>CLI binary (lev): args, TUI, serve, run adapters</i>"]
     RT["leviath-runtime<br/><i>ECS engine (bevy_ecs) + stage-run orchestration seams</i>"]
     CORE["leviath-core<br/><i>Regions, layouts, blueprints, manifest, run metadata</i>"]
+    ACP["leviath-agent-client<br/><i>Agent Client Protocol wire types (JSON-RPC/stdio)</i>"]
     PROV["leviath-providers<br/><i>Anthropic · OpenAI · Google<br/>OpenRouter · Ollama · Claude Code</i>"]
     MCP["leviath-mcp<br/><i>MCP tool integration (stdio + HTTP/SSE)</i>"]
     SCRIPT["leviath-scripting<br/><i>Rhai sandbox</i>"]
@@ -364,6 +389,8 @@ graph TD
     SYS["leviath-sys<br/><i>All OS-specific syscalls (perms, signals, TTY)</i>"]
 
     CLI --> RT
+    CLI --> ACP
+    ACP --> CORE
     CLI --> SCRIPT
     CLI --> PKG
     CLI --> TOOLS

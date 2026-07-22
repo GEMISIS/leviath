@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/leviath-core",
+    "crates/leviath-agent-client",
     "crates/leviath-runtime",
     "crates/leviath-providers",
     "crates/leviath-mcp",
@@ -31,6 +32,7 @@ unsafe_code = "forbid"
 [workspace.dependencies]
 # Core crates
 leviath-core = { path = "crates/leviath-core" }
+leviath-agent-client = { path = "crates/leviath-agent-client" }
 leviath-runtime = { path = "crates/leviath-runtime" }
 leviath-providers = { path = "crates/leviath-providers" }
 leviath-mcp = { path = "crates/leviath-mcp" }

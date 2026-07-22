@@ -1,0 +1,380 @@
+//! Pure translations between Leviath's own types and the Agent Client Protocol.
+//!
+//! Everything here is a total function over plain data — no I/O, no daemon, no
+//! async — so the stdio server in `leviath-cli` is left with only sequencing to
+//! do, and every mapping decision is unit-testable in isolation.
+
+use leviath_core::interaction::{InteractionKind, InteractionRequest};
+use leviath_core::run_meta::RunStatus;
+
+use crate::protocol::{
+    ContentBlock, PermissionOption, PermissionOptionKind, RequestPermissionParams, StopReason,
+    ToolCallRef, ToolCallStatus, ToolKind,
+};
+
+/// The option id returned when the user approves a single tool call.
+pub const OPTION_ALLOW_ONCE: &str = "allow-once";
+/// The option id returned when the user approves this tool for the whole session.
+pub const OPTION_ALLOW_ALWAYS: &str = "allow-always";
+/// The option id returned when the user rejects a tool call.
+pub const OPTION_REJECT_ONCE: &str = "reject-once";
+
+/// Flatten a prompt's content blocks into the single task/message string Leviath
+/// agents consume.
+///
+/// `text` blocks contribute their text. `resource` blocks (the `embeddedContext`
+/// capability) contribute their inlined text under a `--- <uri> ---` header, so
+/// the model can tell attached context from the instruction itself. Every other
+/// block kind — `image`, `audio`, `resource_link` — is dropped: we advertise no
+/// support for them, and silently ignoring one block is far better than failing
+/// the whole prompt.
+///
+/// Blocks are joined with a blank line and the result is trimmed, so a prompt of
+/// only unsupported blocks yields `""` (which the caller treats as an error
+/// rather than spawning an agent with an empty task).
+pub fn flatten_prompt(blocks: &[ContentBlock]) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    for block in blocks {
+        match block.kind.as_str() {
+            "text" => {
+                if let Some(text) = block
+                    .text
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|t| !t.is_empty())
+                {
+                    parts.push(text.to_string());
+                }
+            }
+            "resource" => {
+                if let Some(resource) = &block.resource
+                    && let Some(text) = resource.text.as_deref()
+                {
+                    parts.push(format!("--- {} ---\n{}", resource.uri, text));
+                }
+            }
+            _ => {}
+        }
+    }
+    parts.join("\n\n").trim().to_string()
+}
+
+/// The stop reason to report for a run that has reached `status`.
+///
+/// `Error` maps to `refusal` rather than inventing a failure code: the protocol
+/// has no "the agent broke" reason, and `refusal` is the only one that tells the
+/// host the turn produced no usable answer. Non-terminal statuses map to
+/// `end_turn` — the agent has stopped talking and is waiting on the host, which
+/// is exactly what ends a turn.
+pub fn stop_reason_for(status: &RunStatus) -> StopReason {
+    match status {
+        RunStatus::Cancelled => StopReason::Cancelled,
+        RunStatus::Error => StopReason::Refusal,
+        RunStatus::Starting
+        | RunStatus::Running
+        | RunStatus::WaitingInput
+        | RunStatus::Complete
+        | RunStatus::CompleteInteractive => StopReason::EndTurn,
+    }
+}
+
+/// Build a `session/request_permission` request from a Leviath tool-approval
+/// interaction.
+///
+/// The offered options mirror what Leviath's own approval prompt supports:
+/// approve once, approve for the rest of the session
+/// ([`leviath_core::interaction::ApprovalScope::Session`]), or reject. There is
+/// deliberately no "reject always" — Leviath has no persistent per-tool denylist
+/// to record it in, and offering a choice we cannot honour would be a lie.
+pub fn permission_request(
+    session_id: &str,
+    request: &InteractionRequest,
+) -> RequestPermissionParams {
+    RequestPermissionParams {
+        session_id: session_id.to_string(),
+        tool_call: ToolCallRef {
+            tool_call_id: request.id.clone(),
+            title: permission_title(request),
+            kind: tool_kind_for(request.tool_name.as_deref()),
+            status: ToolCallStatus::Pending,
+        },
+        options: vec![
+            PermissionOption {
+                option_id: OPTION_ALLOW_ONCE.to_string(),
+                name: "Allow once".to_string(),
+                kind: PermissionOptionKind::AllowOnce,
+            },
+            PermissionOption {
+                option_id: OPTION_ALLOW_ALWAYS.to_string(),
+                name: "Allow for this session".to_string(),
+                kind: PermissionOptionKind::AllowAlways,
+            },
+            PermissionOption {
+                option_id: OPTION_REJECT_ONCE.to_string(),
+                name: "Reject".to_string(),
+                kind: PermissionOptionKind::RejectOnce,
+            },
+        ],
+    }
+}
+
+/// A one-line summary of the tool call awaiting approval: the tool name when the
+/// request carries one, else the prompt Leviath would have shown a human.
+fn permission_title(request: &InteractionRequest) -> String {
+    match request.tool_name.as_deref() {
+        Some(name) => name.to_string(),
+        None => request.prompt.clone(),
+    }
+}
+
+/// Classify a Leviath tool name into the protocol's tool-kind taxonomy, so hosts
+/// can pick an icon and phrase the approval prompt.
+///
+/// Unrecognised names — including every MCP tool, whose names are arbitrary —
+/// fall back to [`ToolKind::Other`].
+fn tool_kind_for(tool_name: Option<&str>) -> ToolKind {
+    match tool_name {
+        Some("read_file" | "read_files" | "list_files" | "grep") => ToolKind::Read,
+        Some("write_file" | "edit_file" | "apply_patch") => ToolKind::Edit,
+        Some("delete_file") => ToolKind::Delete,
+        Some("move_file") => ToolKind::Move,
+        Some("search" | "web_search") => ToolKind::Search,
+        Some("bash" | "run_command" | "shell") => ToolKind::Execute,
+        Some("fetch" | "web_fetch" | "http_get") => ToolKind::Fetch,
+        _ => ToolKind::Other,
+    }
+}
+
+/// Whether an interaction can be answered over the protocol at all.
+///
+/// Only [`InteractionKind::ToolApproval`] maps onto
+/// `session/request_permission`. Free-text questions, multiple choice, confirms
+/// and in-place document edits have no protocol equivalent, so the server
+/// surfaces those as agent output and lets the next `session/prompt` carry the
+/// answer.
+pub fn is_permission_request(request: &InteractionRequest) -> bool {
+    matches!(request.kind, InteractionKind::ToolApproval)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::protocol::EmbeddedResource;
+
+    fn text_block(text: &str) -> ContentBlock {
+        ContentBlock::text(text)
+    }
+
+    fn resource_block(uri: &str, text: Option<&str>) -> ContentBlock {
+        ContentBlock {
+            kind: "resource".to_string(),
+            text: None,
+            resource: Some(EmbeddedResource {
+                uri: uri.to_string(),
+                mime_type: None,
+                text: text.map(str::to_string),
+            }),
+        }
+    }
+
+    fn approval(id: &str, tool: Option<&str>) -> InteractionRequest {
+        InteractionRequest {
+            id: id.to_string(),
+            kind: InteractionKind::ToolApproval,
+            prompt: "Run this?".to_string(),
+            options: vec![],
+            tool_name: tool.map(str::to_string),
+            tool_arguments: None,
+            required: true,
+            stage_name: "implement".to_string(),
+            body: None,
+            body_format: Default::default(),
+        }
+    }
+
+    // ─── flatten_prompt ──────────────────────────────────────────────────────
+
+    #[test]
+    fn flatten_joins_text_blocks_with_a_blank_line() {
+        assert_eq!(
+            flatten_prompt(&[text_block("first"), text_block("second")]),
+            "first\n\nsecond"
+        );
+    }
+
+    #[test]
+    fn flatten_of_a_single_block_is_just_its_text() {
+        assert_eq!(flatten_prompt(&[text_block("only")]), "only");
+    }
+
+    #[test]
+    fn flatten_skips_blank_and_whitespace_only_text_blocks() {
+        assert_eq!(
+            flatten_prompt(&[text_block(""), text_block("  \n "), text_block("real")]),
+            "real"
+        );
+    }
+
+    #[test]
+    fn flatten_trims_each_text_block() {
+        assert_eq!(flatten_prompt(&[text_block("  padded  ")]), "padded");
+    }
+
+    #[test]
+    fn flatten_skips_a_text_block_with_no_text_field() {
+        let block = ContentBlock {
+            kind: "text".to_string(),
+            text: None,
+            resource: None,
+        };
+        assert_eq!(flatten_prompt(&[block, text_block("kept")]), "kept");
+    }
+
+    #[test]
+    fn flatten_headers_resource_blocks_with_their_uri() {
+        assert_eq!(
+            flatten_prompt(&[
+                text_block("review this"),
+                resource_block("file:///a.rs", Some("fn main() {}")),
+            ]),
+            "review this\n\n--- file:///a.rs ---\nfn main() {}"
+        );
+    }
+
+    #[test]
+    fn flatten_skips_a_resource_block_with_no_inlined_text() {
+        assert_eq!(
+            flatten_prompt(&[resource_block("file:///a.rs", None), text_block("kept")]),
+            "kept"
+        );
+    }
+
+    #[test]
+    fn flatten_skips_a_resource_block_with_no_resource_field() {
+        let block = ContentBlock {
+            kind: "resource".to_string(),
+            text: None,
+            resource: None,
+        };
+        assert_eq!(flatten_prompt(&[block, text_block("kept")]), "kept");
+    }
+
+    #[test]
+    fn flatten_drops_unsupported_block_kinds() {
+        let image = ContentBlock {
+            kind: "image".to_string(),
+            text: Some("ignored".to_string()),
+            resource: None,
+        };
+        assert_eq!(flatten_prompt(&[image, text_block("kept")]), "kept");
+    }
+
+    #[test]
+    fn flatten_of_nothing_usable_is_empty() {
+        assert_eq!(flatten_prompt(&[]), "");
+        let audio = ContentBlock {
+            kind: "audio".to_string(),
+            text: None,
+            resource: None,
+        };
+        assert_eq!(flatten_prompt(&[audio]), "");
+    }
+
+    // ─── stop_reason_for ─────────────────────────────────────────────────────
+
+    #[test]
+    fn stop_reason_maps_every_run_status() {
+        for (status, expected) in [
+            (RunStatus::Starting, StopReason::EndTurn),
+            (RunStatus::Running, StopReason::EndTurn),
+            (RunStatus::WaitingInput, StopReason::EndTurn),
+            (RunStatus::Complete, StopReason::EndTurn),
+            (RunStatus::CompleteInteractive, StopReason::EndTurn),
+            (RunStatus::Error, StopReason::Refusal),
+            (RunStatus::Cancelled, StopReason::Cancelled),
+        ] {
+            assert_eq!(stop_reason_for(&status), expected, "status {status}");
+        }
+    }
+
+    // ─── permission_request ──────────────────────────────────────────────────
+
+    #[test]
+    fn permission_request_offers_once_session_and_reject() {
+        let params = permission_request("s1", &approval("q1", Some("bash")));
+        assert_eq!(params.session_id, "s1");
+        assert_eq!(params.tool_call.tool_call_id, "q1");
+        assert_eq!(params.tool_call.title, "bash");
+        assert_eq!(params.tool_call.kind, ToolKind::Execute);
+        assert_eq!(params.tool_call.status, ToolCallStatus::Pending);
+        let ids: Vec<&str> = params
+            .options
+            .iter()
+            .map(|o| o.option_id.as_str())
+            .collect();
+        assert_eq!(
+            ids,
+            [OPTION_ALLOW_ONCE, OPTION_ALLOW_ALWAYS, OPTION_REJECT_ONCE]
+        );
+        let kinds: Vec<PermissionOptionKind> = params.options.iter().map(|o| o.kind).collect();
+        assert_eq!(
+            kinds,
+            [
+                PermissionOptionKind::AllowOnce,
+                PermissionOptionKind::AllowAlways,
+                PermissionOptionKind::RejectOnce,
+            ]
+        );
+    }
+
+    #[test]
+    fn permission_request_falls_back_to_the_prompt_when_there_is_no_tool_name() {
+        let params = permission_request("s1", &approval("q1", None));
+        assert_eq!(params.tool_call.title, "Run this?");
+        assert_eq!(params.tool_call.kind, ToolKind::Other);
+    }
+
+    #[test]
+    fn tool_kinds_cover_every_classification_arm() {
+        for (name, expected) in [
+            ("read_file", ToolKind::Read),
+            ("read_files", ToolKind::Read),
+            ("list_files", ToolKind::Read),
+            ("grep", ToolKind::Read),
+            ("write_file", ToolKind::Edit),
+            ("edit_file", ToolKind::Edit),
+            ("apply_patch", ToolKind::Edit),
+            ("delete_file", ToolKind::Delete),
+            ("move_file", ToolKind::Move),
+            ("search", ToolKind::Search),
+            ("web_search", ToolKind::Search),
+            ("bash", ToolKind::Execute),
+            ("run_command", ToolKind::Execute),
+            ("shell", ToolKind::Execute),
+            ("fetch", ToolKind::Fetch),
+            ("web_fetch", ToolKind::Fetch),
+            ("http_get", ToolKind::Fetch),
+            ("mcp__whatever__thing", ToolKind::Other),
+        ] {
+            assert_eq!(tool_kind_for(Some(name)), expected, "tool {name}");
+        }
+        assert_eq!(tool_kind_for(None), ToolKind::Other);
+    }
+
+    // ─── is_permission_request ───────────────────────────────────────────────
+
+    #[test]
+    fn only_tool_approvals_are_permission_requests() {
+        assert!(is_permission_request(&approval("q", Some("bash"))));
+        for kind in [
+            InteractionKind::FreeText,
+            InteractionKind::MultipleChoice,
+            InteractionKind::Confirm,
+            InteractionKind::EditText,
+        ] {
+            let mut req = approval("q", None);
+            req.kind = kind;
+            assert!(!is_permission_request(&req));
+        }
+    }
+}
