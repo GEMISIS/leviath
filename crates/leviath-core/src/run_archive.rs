@@ -243,6 +243,18 @@ pub enum RunRecord {
         /// Unix seconds.
         at: i64,
     },
+    /// A step forward: the updated metadata plus a *diff* of the context window
+    /// since the previous point. This is the compact per-tick record the writer
+    /// emits between full checkpoints — meta is small, and the context (the bulk)
+    /// is carried as a [`ContextDelta`] rather than a full snapshot.
+    Progress {
+        /// The run metadata as of this step.
+        meta: Box<RunMeta>,
+        /// The context change since the previous recorded point.
+        delta: ContextDelta,
+        /// Unix seconds.
+        at: i64,
+    },
 }
 
 // ─── context diffing ────────────────────────────────────────────────────────
@@ -484,9 +496,95 @@ pub fn fold(records: &[RunRecord]) -> Option<FoldedRun> {
                 folded.meta = (**meta).clone();
                 folded.context = context.clone();
             }
+            RunRecord::Progress { meta, delta, .. } => {
+                folded.meta = (**meta).clone();
+                apply_delta(&mut folded.context, delta);
+            }
         }
     }
     Some(folded)
+}
+
+/// A run's context window at one recorded point in time, with the metadata
+/// (stage, iteration, status, …) in effect then. Produced by [`replay_points`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct RunPoint {
+    /// The run metadata at this point.
+    pub meta: RunMeta,
+    /// The full context window at this point.
+    pub context: ContextSnapshot,
+    /// Unix seconds this point was recorded.
+    pub at: i64,
+}
+
+/// Replay a run journal into the sequence of context-window snapshots over time,
+/// one [`RunPoint`] per record that changes the context (a checkpoint, diff, or
+/// progress step). This is what the context-history views (TUI/CLI/API) consume
+/// to show the window "at each stage and point". Returns an empty vec if the
+/// records don't start with a [`RunRecord::Header`].
+pub fn replay_points(records: &[RunRecord]) -> Vec<RunPoint> {
+    let mut iter = records.iter();
+    let mut meta = match iter.next() {
+        Some(RunRecord::Header { meta, .. }) => (**meta).clone(),
+        _ => return Vec::new(),
+    };
+    let mut context = ContextSnapshot {
+        stage_name: String::new(),
+        total_tokens: 0,
+        max_tokens: 0,
+        regions: Vec::new(),
+    };
+    let mut points = Vec::new();
+    for record in iter {
+        match record {
+            RunRecord::Header { meta: m, .. } => meta = (**m).clone(),
+            RunRecord::StatusChanged { status, .. } => meta.status = status.clone(),
+            RunRecord::ContextCheckpoint { snapshot, at } => {
+                context = snapshot.clone();
+                points.push(RunPoint {
+                    meta: meta.clone(),
+                    context: context.clone(),
+                    at: *at,
+                });
+            }
+            RunRecord::ContextDiff { delta, at } => {
+                apply_delta(&mut context, delta);
+                points.push(RunPoint {
+                    meta: meta.clone(),
+                    context: context.clone(),
+                    at: *at,
+                });
+            }
+            RunRecord::Checkpoint {
+                meta: m,
+                context: c,
+                at,
+            } => {
+                meta = (**m).clone();
+                context = c.clone();
+                points.push(RunPoint {
+                    meta: meta.clone(),
+                    context: context.clone(),
+                    at: *at,
+                });
+            }
+            RunRecord::Progress { meta: m, delta, at } => {
+                meta = (**m).clone();
+                apply_delta(&mut context, delta);
+                points.push(RunPoint {
+                    meta: meta.clone(),
+                    context: context.clone(),
+                    at: *at,
+                });
+            }
+            // Non-context records don't add a timeline point.
+            RunRecord::OwnershipChanged { .. }
+            | RunRecord::Inference { .. }
+            | RunRecord::ToolBatch { .. }
+            | RunRecord::Message { .. } => {}
+        }
+    }
+    points
 }
 
 #[cfg(test)]
@@ -765,6 +863,20 @@ mod tests {
                 context: snapshot("plan", vec![region("conv", vec![entry("hi", 1)])]),
                 at: 108,
             },
+            RunRecord::Progress {
+                meta: Box::new(meta()),
+                delta: ContextDelta {
+                    stage_name: "plan".to_string(),
+                    total_tokens: 3,
+                    max_tokens: 10_000,
+                    regions: vec![RegionDelta::Append {
+                        name: "conv".to_string(),
+                        entries: vec![entry("step", 2)],
+                        current_tokens: 3,
+                    }],
+                },
+                at: 109,
+            },
         ]
     }
 
@@ -942,11 +1054,11 @@ mod tests {
         // One inbound message recorded.
         assert_eq!(folded.messages.len(), 1);
         assert_eq!(folded.messages[0].content, "another");
-        // The Checkpoint is the last context-affecting record, so the folded
-        // window matches its snapshot (the earlier diff was superseded).
+        // The Progress step is the last context-affecting record: it layers its
+        // append diff onto the preceding Checkpoint's window (hi + step).
         assert_eq!(folded.context.regions[0].name, "conv");
-        assert_eq!(folded.context.regions[0].entries.len(), 1);
-        // Status came from the Checkpoint's meta (Starting), after StatusChanged.
+        assert_eq!(folded.context.regions[0].entries.len(), 2);
+        assert_eq!(folded.context.total_tokens, 3);
         assert_eq!(folded.meta.run_id, "run-1");
     }
 
@@ -998,5 +1110,173 @@ mod tests {
         let folded = fold(&records).unwrap();
         assert_eq!(folded.identity.machine_id, "machine-c");
         assert_eq!(folded.meta.status, RunStatus::Running);
+    }
+
+    #[test]
+    fn fold_progress_applies_meta_and_context_diff() {
+        let mut advanced = meta();
+        advanced.status = RunStatus::Running;
+        advanced.iteration = 5;
+        let records = vec![
+            header(),
+            RunRecord::ContextCheckpoint {
+                snapshot: snapshot("plan", vec![region("conv", vec![entry("hi", 1)])]),
+                at: 1,
+            },
+            RunRecord::Progress {
+                meta: Box::new(advanced),
+                delta: ContextDelta {
+                    stage_name: "plan".to_string(),
+                    total_tokens: 3,
+                    max_tokens: 10_000,
+                    regions: vec![RegionDelta::Append {
+                        name: "conv".to_string(),
+                        entries: vec![entry("there", 2)],
+                        current_tokens: 3,
+                    }],
+                },
+                at: 2,
+            },
+        ];
+        let folded = fold(&records).unwrap();
+        assert_eq!(folded.meta.iteration, 5);
+        assert_eq!(folded.meta.status, RunStatus::Running);
+        assert_eq!(folded.context.regions[0].entries.len(), 2);
+    }
+
+    // ── replay_points (context-window history) ──
+
+    #[test]
+    fn replay_points_requires_a_header() {
+        assert!(replay_points(&[]).is_empty());
+        assert!(
+            replay_points(&[RunRecord::Message {
+                message: MessageRecord {
+                    role: "user".to_string(),
+                    content: "x".to_string(),
+                },
+                at: 1,
+            }])
+            .is_empty()
+        );
+    }
+
+    #[test]
+    fn replay_points_emits_a_snapshot_per_context_change() {
+        // Header (no point) → checkpoint (point 1) → status (no point, but tracked)
+        // → progress diff (point 2). Non-context records don't add points.
+        let mut running = meta();
+        running.status = RunStatus::Running;
+        let records = vec![
+            header(),
+            RunRecord::Inference {
+                stage: "plan".to_string(),
+                iteration: 0,
+                request: InferenceRequestRecord {
+                    model: "m".to_string(),
+                    system: vec![],
+                    messages: vec![],
+                    tool_names: vec![],
+                    temperature: 0.7,
+                    max_tokens: 10,
+                },
+                response: InferenceResponseRecord {
+                    content: "ok".to_string(),
+                    tool_calls: vec![],
+                    prompt_tokens: 1,
+                    completion_tokens: 1,
+                    cached_tokens: 0,
+                    cache_write_tokens: 0,
+                },
+                at: 1,
+            },
+            RunRecord::ContextCheckpoint {
+                snapshot: snapshot("plan", vec![region("conv", vec![entry("hi", 1)])]),
+                at: 2,
+            },
+            RunRecord::StatusChanged {
+                status: RunStatus::Running,
+                at: 3,
+            },
+            RunRecord::Progress {
+                meta: Box::new(running),
+                delta: ContextDelta {
+                    stage_name: "implement".to_string(),
+                    total_tokens: 3,
+                    max_tokens: 10_000,
+                    regions: vec![RegionDelta::Append {
+                        name: "conv".to_string(),
+                        entries: vec![entry("more", 2)],
+                        current_tokens: 3,
+                    }],
+                },
+                at: 4,
+            },
+        ];
+        let points = replay_points(&records);
+        assert_eq!(points.len(), 2, "one point per context change");
+        // First point: the checkpoint window.
+        assert_eq!(points[0].at, 2);
+        assert_eq!(points[0].context.regions[0].entries.len(), 1);
+        // Second point: the progress diff layered on, with the running status
+        // carried from the StatusChanged + the progress meta.
+        assert_eq!(points[1].at, 4);
+        assert_eq!(points[1].context.regions[0].entries.len(), 2);
+        assert_eq!(points[1].context.stage_name, "implement");
+        assert_eq!(points[1].meta.status, RunStatus::Running);
+    }
+
+    #[test]
+    fn replay_points_handles_context_diff_and_a_later_header() {
+        // A standalone ContextDiff is a point; a second Header refreshes meta
+        // without adding a point.
+        let mut relabeled = meta();
+        relabeled.agent_name = "renamed".to_string();
+        let records = vec![
+            header(),
+            RunRecord::ContextCheckpoint {
+                snapshot: snapshot("plan", vec![region("conv", vec![entry("hi", 1)])]),
+                at: 1,
+            },
+            RunRecord::Header {
+                identity: identity(),
+                meta: Box::new(relabeled),
+            },
+            RunRecord::ContextDiff {
+                delta: ContextDelta {
+                    stage_name: "plan".to_string(),
+                    total_tokens: 3,
+                    max_tokens: 10_000,
+                    regions: vec![RegionDelta::Append {
+                        name: "conv".to_string(),
+                        entries: vec![entry("more", 2)],
+                        current_tokens: 3,
+                    }],
+                },
+                at: 2,
+            },
+        ];
+        let points = replay_points(&records);
+        assert_eq!(points.len(), 2); // checkpoint + diff (header adds no point)
+        assert_eq!(points[1].context.regions[0].entries.len(), 2);
+        // The later Header's meta is in effect at the diff point.
+        assert_eq!(points[1].meta.agent_name, "renamed");
+    }
+
+    #[test]
+    fn replay_points_over_a_full_checkpoint() {
+        // A `Checkpoint` (full meta+context) is also a point.
+        let records = vec![
+            header(),
+            RunRecord::Checkpoint {
+                meta: Box::new(meta()),
+                context: snapshot("review", vec![region("conv", vec![entry("x", 4)])]),
+                at: 9,
+            },
+        ];
+        let points = replay_points(&records);
+        assert_eq!(points.len(), 1);
+        assert_eq!(points[0].context.stage_name, "review");
+        assert_eq!(points[0].context.regions[0].entries[0].tokens, 4);
     }
 }
