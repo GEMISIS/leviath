@@ -314,9 +314,6 @@ struct Emitted {
     cache_write_tokens: usize,
     context_tokens: usize,
     terminal: bool,
-    /// The agent is parked and quiescent (safe to unload from memory — see
-    /// [`WorldHost::is_idle_unloadable`]).
-    idle: bool,
 }
 
 /// Owns the world and the run-id map; drives the world and services control ops.
@@ -400,7 +397,6 @@ impl WorldHost {
                 state.status,
                 AgentStatus::Complete | AgentStatus::Error { .. } | AgentStatus::Cancelled
             );
-            let idle = self.is_idle_unloadable(entity, &state.status);
             let cur = {
                 let totals = self
                     .world
@@ -426,7 +422,6 @@ impl WorldHost {
                     cache_write_tokens: totals.cache_write_tokens,
                     context_tokens,
                     terminal,
-                    idle,
                 }
             };
             let max_tokens = self
@@ -514,14 +509,13 @@ impl WorldHost {
             if cur.terminal && was_terminal && self.no_live_parent(entity) {
                 to_reap.push((run_id.clone(), entity));
             }
-            // Unload a quiescent idle agent (parked, no in-flight work) once it has
-            // stayed idle for a full pass — a grace so an agent that just parked and
-            // is about to receive a message isn't churned. It is paged back in from
-            // disk on the next op that targets it.
-            let was_idle = prev.as_ref().map(|e| e.idle) == Some(true);
-            if cur.idle && was_idle {
-                to_reap.push((run_id.clone(), entity));
-            }
+            // NOTE: non-terminal `Waiting` agents are intentionally NOT unloaded.
+            // Every `Waiting` state carries a live, unpersisted continuation — a
+            // blocked `ask` future (`AwaitingInteraction`), running fan-out workers
+            // (`FanOutWaiting`), or pending children (`WaitingForChildren`) — so
+            // flushing one to disk and paging it back cannot resume it (in-flight
+            // interactions aren't persisted; the blocked future is gone). Only
+            // terminal agents, whose full state is on disk, are safe to reap.
 
             self.emitted.insert(run_id, cur);
         }
@@ -561,34 +555,6 @@ impl WorldHost {
                 ),
             },
         }
-    }
-
-    /// Whether a **non-terminal** agent is safe to unload from memory: it is
-    /// `Waiting` (parked for input), has no in-flight async work (no
-    /// `Awaiting*`), no pending sync step (no `ReadyToInfer`/`ReadyForTools`/
-    /// `ReadyForTransition`/`ProcessResponse`), is not gated on children (no
-    /// `WaitingForChildren` — those stay loaded to collect results), and has no
-    /// live parent that might still need it. A control/sub-agent op pages it back
-    /// in on demand (see [`Self::resolve_or_reload`]).
-    fn is_idle_unloadable(&self, entity: Entity, status: &AgentStatus) -> bool {
-        use crate::pipeline::{
-            AwaitingCompaction, AwaitingInference, AwaitingTools, AwaitingTransitionResponse,
-            ProcessResponse, ReadyForTools, ReadyForTransition, ReadyToInfer, WaitingForChildren,
-        };
-        if !matches!(status, AgentStatus::Waiting) {
-            return false;
-        }
-        let world = self.world.world();
-        let busy = world.get::<AwaitingInference>(entity).is_some()
-            || world.get::<AwaitingTools>(entity).is_some()
-            || world.get::<AwaitingTransitionResponse>(entity).is_some()
-            || world.get::<AwaitingCompaction>(entity).is_some()
-            || world.get::<ReadyToInfer>(entity).is_some()
-            || world.get::<ReadyForTools>(entity).is_some()
-            || world.get::<ReadyForTransition>(entity).is_some()
-            || world.get::<ProcessResponse>(entity).is_some()
-            || world.get::<WaitingForChildren>(entity).is_some();
-        !busy && self.no_live_parent(entity)
     }
 
     /// Install the spawner used to service `Spawn` control ops. Without one, a
@@ -1732,51 +1698,42 @@ mod tests {
         e
     }
 
+    /// Regression: a `Waiting` agent must NEVER be unloaded. Every `Waiting`
+    /// state carries a live, unpersisted continuation, so flushing it to disk
+    /// strands the run. The worst case is an agent parked on a human approval
+    /// (`AwaitingInteraction`): unloading it means the answer has no entity to
+    /// wake and the run hangs in "waiting" forever.
     #[tokio::test]
-    async fn emit_events_unloads_idle_parked_agents_but_keeps_busy_ones() {
+    async fn emit_events_never_unloads_waiting_agents() {
+        use crate::components::AwaitingInteraction;
+
         let mut host = host_with(vec![]);
 
-        // A parked Waiting agent with no pending work → unloaded after the grace.
-        let parked = register_waiting(&mut host, "parked");
-        let _ = parked;
-        host.emit_events();
-        assert!(
-            host.live_entity("parked").is_some(),
-            "grace: not on first pass"
-        );
-        host.emit_events();
-        assert!(
-            host.live_entity("parked").is_none(),
-            "unloaded after a full idle pass"
-        );
-
-        // A Waiting agent with a pending sync step (`ReadyToInfer`) is kept.
-        let mut busy_s = agent_state("busy");
-        busy_s.status = AgentStatus::Waiting;
-        let busy = host.world.world_mut().spawn((busy_s, ReadyToInfer)).id();
-        host.register("busy", busy);
-        host.emit_events();
-        host.emit_events();
-        assert!(
-            host.live_entity("busy").is_some(),
-            "not unloaded: pending work"
-        );
-
-        // A Waiting agent gated on children is kept (it must collect their results).
-        let mut gated_s = agent_state("gated");
-        gated_s.status = AgentStatus::Waiting;
-        let gated = host
-            .world
+        // Parked on a human prompt (`AwaitingInteraction`) — the reported bug:
+        // the blocked `ask` future is unpersisted, so unloading strands the run.
+        let asking = register_waiting(&mut host, "asking");
+        host.world
             .world_mut()
-            .spawn((gated_s, WaitingForChildren))
-            .id();
-        host.register("gated", gated);
-        host.emit_events();
-        host.emit_events();
-        assert!(
-            host.live_entity("gated").is_some(),
-            "not unloaded: gated on children"
-        );
+            .entity_mut(asking)
+            .insert(AwaitingInteraction);
+        // Gated on children, and a plain parked agent.
+        let gated = register_waiting(&mut host, "gated");
+        host.world
+            .world_mut()
+            .entity_mut(gated)
+            .insert(WaitingForChildren);
+        register_waiting(&mut host, "parked");
+
+        // Many serve passes — none of them may reap a Waiting agent.
+        for _ in 0..5 {
+            host.emit_events();
+        }
+        for run_id in ["asking", "gated", "parked"] {
+            assert!(
+                host.live_entity(run_id).is_some(),
+                "a Waiting agent was unloaded and can no longer be resumed"
+            );
+        }
     }
 
     #[tokio::test]
