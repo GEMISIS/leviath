@@ -263,6 +263,7 @@ mod tests {
             port: 0,
             host: "127.0.0.1".to_string(),
             cors: "*".to_string(),
+            token: Some("test-token".to_string()),
         };
         let result = dispatch(Commands::Serve(args), &MockRisky).await;
         assert!(result.is_ok());
