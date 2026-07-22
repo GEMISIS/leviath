@@ -194,6 +194,14 @@ impl OllamaProvider {
             body["tools"] = serde_json::Value::Array(tools);
         }
 
+        // Pass through extra model parameters (top_p, top_k, stop, seed, …).
+        // Ollama's sampling knobs live under `options`, so merge there.
+        crate::openai_compat::merge_extra_params(
+            body.get_mut("options")
+                .and_then(|v| v.as_object_mut())
+                .expect("ollama request body always has an `options` object"),
+            &request.extra,
+        );
         body
     }
 
@@ -927,6 +935,28 @@ mod tests {
         let temp = body["options"]["temperature"].as_f64().unwrap();
         assert!((temp - 0.8).abs() < 0.001);
         assert_eq!(body["options"]["num_predict"], 512);
+    }
+
+    #[test]
+    fn test_build_request_body_passes_extra_params_into_options() {
+        let provider = OllamaProvider::new();
+        let request = InferenceRequest {
+            system: vec![],
+            messages: vec![crate::provider::Message {
+                role: "user".to_string(),
+                content: "Hi".into(),
+                cache_breakpoint: false,
+            }],
+            model: "llama3-8b".to_string(),
+            max_tokens: 512,
+            temperature: 0.8,
+            tools: vec![],
+            extra: serde_json::json!({ "top_k": 40, "top_p": 0.95 }),
+        };
+        let body = provider.build_request_body(&request);
+        // Ollama's sampling knobs live under `options`.
+        assert_eq!(body["options"]["top_k"], serde_json::json!(40));
+        assert_eq!(body["options"]["top_p"], serde_json::json!(0.95));
     }
 
     #[test]

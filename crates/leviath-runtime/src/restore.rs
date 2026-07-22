@@ -110,6 +110,7 @@ mod tests {
             inference_config: InferenceConfig {
                 temperature: temp,
                 max_output_tokens: None,
+                extra_params: Default::default(),
             },
             routing: None,
             accepts_messages: true,

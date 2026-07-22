@@ -390,6 +390,12 @@ impl AnthropicProvider {
             body["tools"] = serde_json::Value::Array(tools);
         }
 
+        // Pass through extra model parameters (top_p, top_k, stop_sequences, …).
+        crate::openai_compat::merge_extra_params(
+            body.as_object_mut()
+                .expect("an Anthropic request body is always a JSON object"),
+            &request.extra,
+        );
         body
     }
 
@@ -1043,6 +1049,27 @@ mod tests {
         assert_eq!(system[0]["text"], "You are helpful.");
         assert!(system[0].get("cache_control").is_some());
         assert_eq!(body["messages"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn test_build_request_body_passes_through_extra_params() {
+        let provider = AnthropicProvider::new("test-key".to_string());
+        let request = InferenceRequest {
+            system: vec![],
+            messages: vec![crate::provider::Message {
+                role: "user".to_string(),
+                content: "Hello".into(),
+                cache_breakpoint: false,
+            }],
+            model: "claude-sonnet-4-6".to_string(),
+            max_tokens: 1024,
+            temperature: 0.7,
+            tools: vec![],
+            extra: serde_json::json!({ "top_p": 0.9, "top_k": 40 }),
+        };
+        let body = provider.build_request_body(&request);
+        assert_eq!(body["top_p"], serde_json::json!(0.9));
+        assert_eq!(body["top_k"], serde_json::json!(40));
     }
 
     #[test]
