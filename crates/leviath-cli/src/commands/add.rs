@@ -81,36 +81,15 @@ async fn execute_with(
             installed.path.display()
         );
     } else {
-        // Registry installation
-        let config = crate::config::Config::load()?;
-        let registry_url = args
-            .registry
-            .clone()
-            .or(config.registries.first().cloned())
-            .unwrap_or("https://leviath.dev/registry".to_string());
-
-        println!(
-            "Searching registry {} for '{}'...",
-            registry_url, args.package
-        );
-
-        let registry = leviath_package::PackageRegistry::new(registry_url);
-
-        let info = registry.get_info(&args.package).await?;
-        println!(
-            "Found: {} v{} - {}",
-            info.name, info.version, info.description
-        );
-
-        println!("Downloading...");
-        let data = registry.download(&info.name, &info.version).await?;
-
-        let installed = installer.install_from_bytes(&info.name, &data)?;
-        println!(
-            "Installed agent '{}' v{} to {}",
-            installed.name,
-            installed.version,
-            installed.path.display()
+        // Installing from the online registry is cut for v1 — only local agent
+        // directories and `.leviath-bundle` files are supported. Fail with a
+        // clear message rather than reaching out to a registry that isn't part
+        // of this release (`--registry` / `[registries]` are reserved for later).
+        anyhow::bail!(
+            "'{}' is not a local agent directory or a .leviath-bundle file. \
+             Installing agents from the online registry is not available in v1 — \
+             pass a path to an agent directory or a .leviath-bundle file instead.",
+            args.package
         );
     }
 
@@ -653,261 +632,29 @@ description = "test"
         });
     }
 
-    // ─── execute_with: registry path (raw-TCP mock server) ─────────────────
-
-    async fn spawn_mock_registry(
-        get_info_body: &'static [u8],
-        download_body: &'static [u8],
-    ) -> String {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
-        use tokio::net::TcpListener;
-
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-
-        tokio::spawn(async move {
-            // First request: GET .../packages/<name> (get_info)
-            let (mut socket, _) = listener.accept().await.unwrap();
-            let mut buf = [0u8; 8192];
-            let _ = socket.read(&mut buf).await;
-            let resp = format!(
-                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                get_info_body.len()
-            );
-            let _ = socket.write_all(resp.as_bytes()).await;
-            let _ = socket.write_all(get_info_body).await;
-            let _ = socket.shutdown().await;
-
-            // Second request: GET .../download (download)
-            let (mut socket, _) = listener.accept().await.unwrap();
-            let mut buf = [0u8; 8192];
-            let _ = socket.read(&mut buf).await;
-            let resp = format!(
-                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                download_body.len()
-            );
-            let _ = socket.write_all(resp.as_bytes()).await;
-            let _ = socket.write_all(download_body).await;
-            let _ = socket.shutdown().await;
-        });
-
-        format!("http://{}", addr)
-    }
-
     #[test]
-    fn execute_with_registry_package_installs() {
+    fn execute_with_registry_name_reports_v1_cut() {
+        // A package that is neither a local directory nor a .leviath-bundle file
+        // would previously hit the registry; in v1 it must fail with a clear
+        // "not available in v1" message instead of any network attempt.
         let rt = tokio::runtime::Runtime::new().unwrap();
         with_tracing(|| {
             rt.block_on(async {
-                // Isolates `Config::load()` (called unconditionally at the
-                // top of the registry branch) from a real `~/.leviath/config.toml`
-                // *and* from other tests elsewhere in the crate that use this
-                // same `LEVIATH_CONFIG_PATH` seam to point it at a
-                // deliberately-malformed file -- without this, this test can
-                // flakily observe that other test's mid-flight override.
-                crate::config::with_isolated_config_path_async(
-                    "add-registry-installs",
-                    |_fake_dir| async move {
-                        let project_dir = tempfile::tempdir().unwrap();
-                        std::fs::write(
-                    project_dir.path().join("agent.leviath"),
-                    "[agent]\nname = \"reg-pkg\"\nversion = \"1.0.0\"\ndescription = \"d\"\n",
-                )
-                .unwrap();
-                        let bundle_bytes = leviath_package::AgentBundler::new()
-                            .bundle(project_dir.path())
-                            .unwrap();
-
-                        let info_json =
-                    br#"{"name":"reg-pkg","version":"1.0.0","description":"A registry package"}"#;
-                        let url = spawn_mock_registry(
-                            info_json,
-                            Box::leak(bundle_bytes.into_boxed_slice()),
-                        )
-                        .await;
-
-                        let agents_dir = tempfile::tempdir().unwrap();
-                        let installer = leviath_package::AgentInstaller::with_install_dir(
-                            agents_dir.path().to_path_buf(),
-                        );
-                        let args = AddArgs {
-                            package: "reg-pkg".to_string(),
-                            registry: Some(url),
-                        };
-
-                        execute_with(&args, &installer, agents_dir.path())
-                            .await
-                            .unwrap();
-
-                        assert!(agents_dir.path().join("reg-pkg").exists());
-                    },
-                )
-                .await;
-            })
-        });
-    }
-
-    async fn spawn_mock_registry_download_error(get_info_body: &'static [u8]) -> String {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
-        use tokio::net::TcpListener;
-
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-
-        tokio::spawn(async move {
-            // First request: get_info -- succeeds.
-            let (mut socket, _) = listener.accept().await.unwrap();
-            let mut buf = [0u8; 8192];
-            let _ = socket.read(&mut buf).await;
-            let resp = format!(
-                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                get_info_body.len()
-            );
-            let _ = socket.write_all(resp.as_bytes()).await;
-            let _ = socket.write_all(get_info_body).await;
-            let _ = socket.shutdown().await;
-
-            // Second request: download -- fails with a non-success status.
-            let (mut socket, _) = listener.accept().await.unwrap();
-            let mut buf = [0u8; 8192];
-            let _ = socket.read(&mut buf).await;
-            let resp = "HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
-            let _ = socket.write_all(resp.as_bytes()).await;
-            let _ = socket.shutdown().await;
-        });
-
-        format!("http://{}", addr)
-    }
-
-    #[test]
-    fn execute_with_registry_config_load_error_propagates() {
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        with_tracing(|| {
-            rt.block_on(async {
-                crate::config::with_isolated_config_path_async(
-                    "add-registry-config-error",
-                    |fake_dir| async move {
-                        std::fs::write(fake_dir.join("config.toml"), "not valid toml [[[").unwrap();
-
-                        let agents_dir = tempfile::tempdir().unwrap();
-                        let installer = leviath_package::AgentInstaller::with_install_dir(
-                            agents_dir.path().to_path_buf(),
-                        );
-                        let args = AddArgs {
-                            package: "some-registry-package".to_string(),
-                            registry: None,
-                        };
-
-                        let result = execute_with(&args, &installer, agents_dir.path()).await;
-                        assert!(result.is_err());
-                    },
-                )
-                .await;
-            })
-        });
-    }
-
-    #[test]
-    fn execute_with_registry_get_info_connection_refused_errors() {
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        with_tracing(|| {
-            rt.block_on(async {
-                // See `execute_with_registry_package_installs` for why this
-                // guard is needed even though this test never writes a
-                // config file of its own.
-                crate::config::with_isolated_config_path_async(
-                    "add-registry-get-info-refused",
-                    |_fake_dir| async move {
-                        // Fixed, never-bound high port (same pattern used in
-                        // leviath-package's own connection-refused tests) --
-                        // deterministic, unlike bind-then-drop which races against
-                        // other parallel tests' ephemeral-port allocations.
-                        let agents_dir = tempfile::tempdir().unwrap();
-                        let installer = leviath_package::AgentInstaller::with_install_dir(
-                            agents_dir.path().to_path_buf(),
-                        );
-                        let args = AddArgs {
-                            package: "some-registry-package".to_string(),
-                            registry: Some("http://127.0.0.1:19999".to_string()),
-                        };
-
-                        let err = execute_with(&args, &installer, agents_dir.path())
-                            .await
-                            .unwrap_err();
-                        assert!(err.to_string().contains("Failed to get package info"));
-                    },
-                )
-                .await;
-            })
-        });
-    }
-
-    #[test]
-    fn execute_with_registry_download_failure_errors() {
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        with_tracing(|| {
-            rt.block_on(async {
-                // See `execute_with_registry_package_installs` for why this
-                // guard is needed even though this test never writes a
-                // config file of its own.
-                crate::config::with_isolated_config_path_async(
-                    "add-registry-download-failure",
-                    |_fake_dir| async move {
-                        let info_json =
-                            br#"{"name":"reg-pkg-dl-fail","version":"1.0.0","description":"d"}"#;
-                        let url = spawn_mock_registry_download_error(info_json).await;
-
-                        let agents_dir = tempfile::tempdir().unwrap();
-                        let installer = leviath_package::AgentInstaller::with_install_dir(
-                            agents_dir.path().to_path_buf(),
-                        );
-                        let args = AddArgs {
-                            package: "reg-pkg-dl-fail".to_string(),
-                            registry: Some(url),
-                        };
-
-                        let err = execute_with(&args, &installer, agents_dir.path())
-                            .await
-                            .unwrap_err();
-                        assert!(err.to_string().contains("Package download failed"));
-                    },
-                )
-                .await;
-            })
-        });
-    }
-
-    #[test]
-    fn execute_with_registry_install_from_bytes_invalid_data_errors() {
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        with_tracing(|| {
-            rt.block_on(async {
-                // See `execute_with_registry_package_installs` for why this
-                // guard is needed even though this test never writes a
-                // config file of its own.
-                crate::config::with_isolated_config_path_async(
-                    "add-registry-invalid-data",
-                    |_fake_dir| async move {
-                        let info_json =
-                            br#"{"name":"reg-pkg-bad-data","version":"1.0.0","description":"d"}"#;
-                        let url = spawn_mock_registry(info_json, b"not a valid gzip archive").await;
-
-                        let agents_dir = tempfile::tempdir().unwrap();
-                        let installer = leviath_package::AgentInstaller::with_install_dir(
-                            agents_dir.path().to_path_buf(),
-                        );
-                        let args = AddArgs {
-                            package: "reg-pkg-bad-data".to_string(),
-                            registry: Some(url),
-                        };
-
-                        let err = execute_with(&args, &installer, agents_dir.path())
-                            .await
-                            .unwrap_err();
-                        assert!(err.to_string().contains("Failed to extract package"));
-                    },
-                )
-                .await;
+                let agents_dir = tempfile::tempdir().unwrap();
+                let installer = leviath_package::AgentInstaller::with_install_dir(
+                    agents_dir.path().to_path_buf(),
+                );
+                let args = AddArgs {
+                    package: "some-registry-agent".to_string(),
+                    registry: None,
+                };
+                let err = execute_with(&args, &installer, agents_dir.path())
+                    .await
+                    .unwrap_err();
+                assert!(
+                    err.to_string().contains("not available in v1"),
+                    "expected the v1-cut message, got: {err}"
+                );
             })
         });
     }
