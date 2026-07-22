@@ -614,6 +614,14 @@ impl WorldHost {
                 });
             }
         }
+        // Record the child's run-id on the parent's serializable state so the
+        // tree is persisted (and restart can rebuild `SubAgentChildren`). A
+        // spawning parent always carries `AgentState`.
+        world
+            .get_mut::<crate::components::AgentState>(parent)
+            .expect("a spawning parent always has AgentState")
+            .spawned_children_ids
+            .push(run_id.clone());
         // Seed the child's context from the parent per any declared blueprint
         // context transform (planner→coder region mapping, etc.).
         crate::context_transform::apply_context_transforms(world, parent, child);

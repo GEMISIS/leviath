@@ -414,6 +414,9 @@ mod tests {
             metadata: Default::default(),
             callback_url: None,
             parent_run_id: None,
+            children: Vec::new(),
+            depth: 0,
+            max_child_depth: 0,
         };
         std::fs::write(
             run_dir.join("meta.json"),

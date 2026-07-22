@@ -149,6 +149,8 @@ pub fn build_run_meta(
     totals: &TokenTotals,
     stage_index: usize,
     now_secs: i64,
+    depth: usize,
+    max_child_depth: usize,
 ) -> RunMeta {
     RunMeta {
         run_id: md.run_id.clone(),
@@ -178,6 +180,10 @@ pub fn build_run_meta(
         metadata: md.metadata.clone(),
         callback_url: md.callback_url.clone(),
         parent_run_id: md.parent_run_id.clone(),
+        // The tree links, so restart can rebuild the exact parent→children graph.
+        children: state.spawned_children_ids.clone(),
+        depth,
+        max_child_depth,
     }
 }
 
@@ -302,7 +308,9 @@ mod tests {
             cache_write_tokens: 5,
             tool_calls: 7,
         };
-        let meta = build_run_meta(&md, &state(AgentStatus::Active), &totals, 1, 2000);
+        let mut st = state(AgentStatus::Active);
+        st.spawned_children_ids = vec!["child-a".to_string(), "child-b".to_string()];
+        let meta = build_run_meta(&md, &st, &totals, 1, 2000, 1, 4);
 
         assert_eq!(meta.run_id, "run-1");
         assert_eq!(meta.status, RunStatus::Running);
@@ -314,6 +322,13 @@ mod tests {
         assert_eq!(meta.updated_at, 2000);
         assert_eq!(meta.parent_run_id.as_deref(), Some("parent"));
         assert!(meta.error.is_none());
+        // The tree links are carried through from the agent's live state.
+        assert_eq!(
+            meta.children,
+            vec!["child-a".to_string(), "child-b".to_string()]
+        );
+        assert_eq!(meta.depth, 1);
+        assert_eq!(meta.max_child_depth, 4);
     }
 
     #[test]
@@ -326,6 +341,8 @@ mod tests {
             &TokenTotals::default(),
             2,
             3000,
+            0,
+            0,
         );
         assert_eq!(meta.status, RunStatus::Error);
         assert_eq!(meta.error.as_deref(), Some("boom"));

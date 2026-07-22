@@ -85,6 +85,19 @@ pub struct RunMeta {
     /// Links sub-agent runs to their parent run.
     #[serde(default)]
     pub parent_run_id: Option<String>,
+    /// Run-ids of this agent's direct sub-agents (sub-agent-tool spawns and
+    /// fan-out workers). Persisted so the daemon can rebuild the exact
+    /// parent→children tree on restart rather than reload children as orphans.
+    #[serde(default)]
+    pub children: Vec<String>,
+    /// This agent's depth in the sub-agent tree (0 for a top-level run).
+    /// Persisted so a reloaded child enforces its remaining spawn-depth budget.
+    #[serde(default)]
+    pub depth: usize,
+    /// The sub-agent depth cap this agent imposes on its own children
+    /// (0 when it has none). Restores `SubAgentChildren::max_child_depth`.
+    #[serde(default)]
+    pub max_child_depth: usize,
 }
 
 impl RunMeta {
@@ -123,6 +136,9 @@ impl RunMeta {
             metadata: HashMap::new(),
             callback_url: None,
             parent_run_id: None,
+            children: Vec::new(),
+            depth: 0,
+            max_child_depth: 0,
         }
     }
 
@@ -271,6 +287,9 @@ mod tests {
         assert!(m.metadata.is_empty());
         assert!(m.callback_url.is_none());
         assert!(m.parent_run_id.is_none());
+        assert!(m.children.is_empty());
+        assert_eq!(m.depth, 0);
+        assert_eq!(m.max_child_depth, 0);
         assert!(m.current_stage.is_empty());
         assert_eq!(m.started_at, m.updated_at);
     }
@@ -289,12 +308,23 @@ mod tests {
         m.status = RunStatus::Running;
         m.metadata.insert("k".to_string(), "v".to_string());
         m.title = Some("A title".to_string());
+        m.parent_run_id = Some("parent-1".to_string());
+        m.children = vec!["child-a".to_string(), "child-b".to_string()];
+        m.depth = 2;
+        m.max_child_depth = 5;
         let json = serde_json::to_string(&m).unwrap();
         let back: RunMeta = serde_json::from_str(&json).unwrap();
         assert_eq!(back.run_id, m.run_id);
         assert_eq!(back.status, RunStatus::Running);
         assert_eq!(back.metadata.get("k").map(String::as_str), Some("v"));
         assert_eq!(back.title.as_deref(), Some("A title"));
+        assert_eq!(back.parent_run_id.as_deref(), Some("parent-1"));
+        assert_eq!(
+            back.children,
+            vec!["child-a".to_string(), "child-b".to_string()]
+        );
+        assert_eq!(back.depth, 2);
+        assert_eq!(back.max_child_depth, 5);
     }
 
     #[test]
