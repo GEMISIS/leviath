@@ -104,12 +104,17 @@ pub struct EvictionResult {
 /// Set on the agent entity before each stage to override default inference
 /// parameters like temperature and max output tokens. When absent, defaults
 /// are used (temperature 0.7, max output 4096).
-#[derive(Component, Debug, Clone)]
+#[derive(Component, Debug, Clone, Default)]
 pub struct InferenceConfig {
     /// Temperature override. If None, uses 0.7 (or 0.0 if model doesn't support it).
     pub temperature: Option<f32>,
     /// Max output tokens override. If None, caps at model's max_output_tokens capability.
     pub max_output_tokens: Option<usize>,
+    /// Extra provider parameters from `[stages.<name>.model.parameters]` beyond
+    /// `temperature`/`max_output_tokens` (e.g. `top_p`, `stop`, `seed`,
+    /// `frequency_penalty`). Passed through to the provider request so models can
+    /// be tuned from the manifest. Empty when none are set.
+    pub extra_params: serde_json::Map<String, serde_json::Value>,
 }
 
 /// Per-entity tool result routing configuration.

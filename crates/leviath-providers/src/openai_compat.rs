@@ -195,7 +195,28 @@ pub fn build_openai_request_body(request: &InferenceRequest) -> serde_json::Valu
         body["tools"] = serde_json::Value::Array(tools);
     }
 
+    merge_extra_params(
+        body.as_object_mut()
+            .expect("an OpenAI request body is always a JSON object"),
+        &request.extra,
+    );
     body
+}
+
+/// Merge a request's pass-through `extra` params (the manifest's
+/// `[model.parameters]` beyond temperature/max_output_tokens — `top_p`, `stop`,
+/// `seed`, `frequency_penalty`, …) into an OpenAI-shaped request `target`.
+/// A non-object `extra` (e.g. `Null` when none are set) is a no-op, and keys the
+/// builder already set are not overwritten (explicit request fields win).
+pub fn merge_extra_params(
+    target: &mut serde_json::Map<String, serde_json::Value>,
+    extra: &serde_json::Value,
+) {
+    if let serde_json::Value::Object(params) = extra {
+        for (key, value) in params {
+            target.entry(key.clone()).or_insert_with(|| value.clone());
+        }
+    }
 }
 
 /// Parse a Chat Completions response body into an `InferenceResponse`.
@@ -500,6 +521,41 @@ mod tests {
             tools: vec![],
             extra: serde_json::json!({}),
         }
+    }
+
+    // ─── merge_extra_params ─────────────────────────────────────────────────
+
+    #[test]
+    fn merge_extra_params_adds_object_keys_without_overwriting() {
+        let mut target = serde_json::Map::new();
+        target.insert("temperature".to_string(), serde_json::json!(0.5));
+        merge_extra_params(
+            &mut target,
+            &serde_json::json!({ "top_p": 0.9, "temperature": 0.1, "seed": 7 }),
+        );
+        // New keys added …
+        assert_eq!(target["top_p"], serde_json::json!(0.9));
+        assert_eq!(target["seed"], serde_json::json!(7));
+        // … but an existing key (an explicit request field) is not overwritten.
+        assert_eq!(target["temperature"], serde_json::json!(0.5));
+    }
+
+    #[test]
+    fn merge_extra_params_ignores_non_object_extra() {
+        let mut target = serde_json::Map::new();
+        target.insert("a".to_string(), serde_json::json!(1));
+        merge_extra_params(&mut target, &serde_json::Value::Null);
+        merge_extra_params(&mut target, &serde_json::json!("string"));
+        assert_eq!(target.len(), 1);
+    }
+
+    #[test]
+    fn build_openai_request_body_passes_through_extra_params() {
+        let mut req = sample_request();
+        req.extra = serde_json::json!({ "top_p": 0.8, "stop": ["END"] });
+        let body = build_openai_request_body(&req);
+        assert_eq!(body["top_p"], serde_json::json!(0.8));
+        assert_eq!(body["stop"], serde_json::json!(["END"]));
     }
 
     // ─── build_openai_request_body ──────────────────────────────────────────

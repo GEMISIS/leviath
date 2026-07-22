@@ -148,6 +148,12 @@ impl OpenRouterProvider {
             body["tools"] = serde_json::Value::Array(tools);
         }
 
+        // Pass through extra model parameters (top_p, stop, seed, …).
+        crate::openai_compat::merge_extra_params(
+            body.as_object_mut()
+                .expect("an OpenRouter request body is always a JSON object"),
+            &request.extra,
+        );
         body
     }
 }
@@ -506,6 +512,27 @@ mod tests {
 
         let body = provider.build_request_body(&request);
         assert_eq!(body["model"], "anthropic/claude-sonnet-4");
+    }
+
+    #[test]
+    fn test_build_request_body_passes_through_extra_params() {
+        let provider = OpenRouterProvider::new("test-key".to_string());
+        let request = InferenceRequest {
+            system: vec![],
+            messages: vec![crate::provider::Message {
+                role: "user".to_string(),
+                content: "Hello".into(),
+                cache_breakpoint: false,
+            }],
+            model: "openai/gpt-4o".to_string(),
+            max_tokens: 1024,
+            temperature: 0.7,
+            tools: vec![],
+            extra: serde_json::json!({ "top_p": 0.9, "seed": 3 }),
+        };
+        let body = provider.build_request_body(&request);
+        assert_eq!(body["top_p"], serde_json::json!(0.9));
+        assert_eq!(body["seed"], serde_json::json!(3));
     }
 
     #[test]

@@ -143,6 +143,13 @@ fn build_request(
         0.0
     };
 
+    // Pass through any extra model parameters (top_p, stop, seed, …) so the
+    // provider can apply them; `Null` when there are none.
+    let extra = match config.map(|c| &c.extra_params) {
+        Some(params) if !params.is_empty() => serde_json::Value::Object(params.clone()),
+        _ => serde_json::Value::Null,
+    };
+
     InferenceRequest {
         system: assembled.system_blocks,
         messages: assembled.messages,
@@ -150,7 +157,7 @@ fn build_request(
         max_tokens,
         temperature,
         tools: filtered_tools,
-        extra: serde_json::Value::Null,
+        extra,
     }
 }
 
@@ -2297,6 +2304,16 @@ fn stage_setup_from(stage: &leviath_core::Stage) -> StageSetup {
         .get("temperature")
         .and_then(|v| v.as_f64())
         .map(|t| t as f32);
+    // Every other model parameter (top_p, stop, seed, frequency_penalty, …) is
+    // passed through to the provider verbatim; only temperature/max_output_tokens
+    // are consumed specially above.
+    let extra_params: serde_json::Map<String, serde_json::Value> = stage
+        .model
+        .parameters
+        .iter()
+        .filter(|(k, _)| k.as_str() != "temperature" && k.as_str() != "max_output_tokens")
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
     let max_output_tokens = stage
         .model
         .parameters
@@ -2326,6 +2343,7 @@ fn stage_setup_from(stage: &leviath_core::Stage) -> StageSetup {
         inference_config: InferenceConfig {
             temperature,
             max_output_tokens,
+            extra_params,
         },
         routing: stage.tool_result_routing.clone(),
         accepts_messages: stage.accepts_messages,
@@ -2844,6 +2862,7 @@ mod tests {
         let cfg = InferenceConfig {
             temperature: Some(0.1),
             max_output_tokens: Some(42),
+            extra_params: Default::default(),
         };
         let si = stage(
             "m",
@@ -2855,6 +2874,21 @@ mod tests {
         assert_eq!(req.tools[0].name, "keep");
         assert_eq!(req.max_tokens, 42); // config output cap wins
         assert_eq!(req.temperature, 0.1); // config temperature
+        assert_eq!(req.extra, serde_json::Value::Null); // no extra params → Null
+    }
+
+    #[test]
+    fn build_request_passes_through_extra_params() {
+        let mut extra_params = serde_json::Map::new();
+        extra_params.insert("top_p".to_string(), serde_json::json!(0.9));
+        let cfg = InferenceConfig {
+            temperature: None,
+            max_output_tokens: None,
+            extra_params,
+        };
+        let si = stage("m", vec![], None);
+        let req = build_request(&window(), Some(&cfg), &si, &provider(true, 500));
+        assert_eq!(req.extra, serde_json::json!({ "top_p": 0.9 }));
     }
 
     #[test]
@@ -4616,6 +4650,7 @@ mod tests {
             inference_config: InferenceConfig {
                 temperature: None,
                 max_output_tokens: None,
+                extra_params: Default::default(),
             },
             routing: None,
             accepts_messages: true,
@@ -4922,6 +4957,7 @@ mod tests {
         s.inference_config = InferenceConfig {
             temperature: Some(0.3),
             max_output_tokens: Some(99),
+            extra_params: Default::default(),
         };
         s.accepts_messages = false;
         let mut world = World::new();
@@ -5198,6 +5234,34 @@ mod tests {
         let mut s3 = stage_named("fan", None, false, None);
         s3.mode = fanout("   ");
         assert_eq!(stage_setup_from(&s3).system_prompt, None);
+    }
+
+    #[test]
+    fn stage_setup_from_collects_extra_model_parameters() {
+        let mut s = stage_named("plan", None, false, None);
+        // temperature/max_output_tokens are consumed specially; everything else
+        // is collected as pass-through extra_params.
+        s.model
+            .parameters
+            .insert("temperature".to_string(), serde_json::json!(0.3));
+        s.model
+            .parameters
+            .insert("max_output_tokens".to_string(), serde_json::json!(256));
+        s.model
+            .parameters
+            .insert("top_p".to_string(), serde_json::json!(0.9));
+        s.model
+            .parameters
+            .insert("seed".to_string(), serde_json::json!(11));
+
+        let setup = stage_setup_from(&s);
+        assert_eq!(setup.inference_config.temperature, Some(0.3));
+        assert_eq!(setup.inference_config.max_output_tokens, Some(256));
+        let extra = &setup.inference_config.extra_params;
+        assert_eq!(extra.len(), 2);
+        assert_eq!(extra["top_p"], serde_json::json!(0.9));
+        assert_eq!(extra["seed"], serde_json::json!(11));
+        assert!(!extra.contains_key("temperature"));
     }
 
     #[test]
