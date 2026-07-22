@@ -312,9 +312,20 @@ impl PipelineWorld {
         self.set_status(entity, AgentStatus::Cancelled)
     }
 
-    /// Run one schedule tick over every agent.
-    pub fn tick(&mut self) {
-        self.schedule.run(&mut self.world);
+    /// Run one schedule tick over every agent. Returns `false` if a system
+    /// panicked — the panic is caught so one bad agent can't crash the daemon
+    /// and take down every other hosted agent with it.
+    pub fn tick(&mut self) -> bool {
+        run_isolated(&mut self.schedule, &mut self.world)
+    }
+
+    /// Append a system to the schedule (test-only, for panic-isolation tests).
+    #[cfg(test)]
+    pub(crate) fn add_test_system<M>(
+        &mut self,
+        system: impl bevy_ecs::schedule::IntoSystemConfigs<M>,
+    ) {
+        self.schedule.add_systems(system);
     }
 
     fn count<F: QueryFilter>(&mut self) -> usize {
@@ -352,7 +363,13 @@ impl PipelineWorld {
     pub fn run_to_fixed_point(&mut self) {
         let mut prev = self.fingerprint();
         loop {
-            self.tick();
+            if !self.tick() {
+                // A system panicked; stop driving this round. The daemon stays
+                // alive, other agents keep running, and the wedged agent can be
+                // cancelled via the control socket (dispatch systems skip
+                // non-Active agents once cancelled).
+                break;
+            }
             let now = self.fingerprint();
             if now == prev {
                 break;
@@ -390,9 +407,49 @@ impl PipelineWorld {
     }
 }
 
+/// Run a schedule over a world, catching a panic from any system so it can't
+/// unwind the daemon's drive loop and take down every hosted agent. Returns
+/// `true` on a clean tick, `false` (logged) if a system panicked. The world may
+/// be partially updated after a panic; the offending agent stays as-is and can
+/// be cancelled via the control socket.
+fn run_isolated(schedule: &mut Schedule, world: &mut World) -> bool {
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| schedule.run(world)));
+    if result.is_err() {
+        tracing::error!(
+            "a pipeline system panicked; the daemon survived (an agent may be \
+             wedged — cancel it via `lev cancel <run-id>`)"
+        );
+    }
+    result.is_ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn run_isolated_catches_a_system_panic() {
+        fn ok_system() {}
+        fn boom_system() {
+            panic!("simulated system panic");
+        }
+        let mut world = World::new();
+
+        // A clean schedule ticks normally.
+        let mut ok = Schedule::default();
+        ok.add_systems(ok_system);
+        assert!(run_isolated(&mut ok, &mut world));
+
+        // A panicking system is caught (the daemon would survive).
+        let mut bad = Schedule::default();
+        bad.add_systems(boom_system);
+        let prev_hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {})); // silence the expected panic
+        let survived = run_isolated(&mut bad, &mut world);
+        std::panic::set_hook(prev_hook);
+        assert!(!survived);
+    }
+
     use crate::components::{AgentState, ContextWindow, InferenceConfig};
     use crate::pipeline::{
         AgentBlueprint, MessageIntake, StageCursor, StageInference, StageInferences, StageProgress,
@@ -568,6 +625,21 @@ mod tests {
             std::env::temp_dir(),
             Handle::current(),
         )
+    }
+
+    #[tokio::test]
+    async fn run_to_fixed_point_survives_a_panicking_system() {
+        // A system that panics must not hang or crash the drive loop — it's
+        // caught and the loop breaks (the daemon survives).
+        fn boom_system() {
+            panic!("simulated system panic");
+        }
+        let mut world = build_world(ProviderRegistry::new());
+        world.add_test_system(boom_system);
+        let prev_hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        world.run_to_fixed_point(); // returns (breaks on the caught panic)
+        std::panic::set_hook(prev_hook);
     }
 
     fn registry_with(responses: Vec<InferenceResponse>) -> ProviderRegistry {
