@@ -45,8 +45,14 @@ pub struct PersistJob {
 pub async fn persistence_worker(runs_dir: PathBuf, mut jobs: UnboundedReceiver<PersistJob>) {
     let machine_id = load_or_create_machine_id(&runs_dir);
     let world_id = generate_id();
+    // The last context window archived per run, so the next write can be stored
+    // as a compact diff rather than a full snapshot.
+    let mut last_context: std::collections::HashMap<String, ContextSnapshot> =
+        std::collections::HashMap::new();
     while let Some(job) = jobs.recv().await {
-        write_snapshot(&runs_dir, &job, &machine_id, &world_id).await;
+        let prev = last_context.get(&job.run_id);
+        write_snapshot(&runs_dir, &job, &machine_id, &world_id, prev).await;
+        last_context.insert(job.run_id.clone(), job.context.clone());
     }
 }
 
@@ -83,13 +89,19 @@ fn load_or_create_machine_id(runs_dir: &Path) -> String {
 /// each via a temp file + atomic rename. Best-effort: logs and returns on any
 /// error. Serialization is infallible for these plain serde structs, so a
 /// serialize error is a bug rather than a runtime condition (`.expect`).
-async fn write_snapshot(runs_dir: &Path, job: &PersistJob, machine_id: &str, world_id: &str) {
+async fn write_snapshot(
+    runs_dir: &Path,
+    job: &PersistJob,
+    machine_id: &str,
+    world_id: &str,
+    prev_context: Option<&ContextSnapshot>,
+) {
     let dir = runs_dir.join(&job.run_id);
     if let Err(e) = tokio::fs::create_dir_all(&dir).await {
         tracing::warn!(run_id = %job.run_id, error = %e, "persistence: create run dir failed");
         return;
     }
-    append_run_archive(&dir, job, machine_id, world_id).await;
+    append_run_archive(&dir, job, machine_id, world_id, prev_context).await;
     let meta_json = serde_json::to_string_pretty(&job.meta).expect("RunMeta always serializes");
     write_bytes_atomic(&dir.join("meta.json"), meta_json.as_bytes(), &job.run_id).await;
     let ctx_json =
@@ -129,42 +141,75 @@ async fn write_snapshot(runs_dir: &Path, job: &PersistJob, machine_id: &str, wor
 
 /// Append this snapshot to the run's portable archive (`<run_dir>/run.lvr`).
 ///
-/// The first write for a run lays down the archive preamble + a `Header` (the
-/// run's identity + metadata); every write (including the first) appends a
-/// `Checkpoint` carrying the full metadata + context window, so the archive
-/// always folds to the run's latest resumable state. Best-effort — a failed
-/// write is logged and swallowed like the rest of the persistence lane.
+/// The context window (the bulk) is stored as a diff between writes:
+/// - **new archive** (file absent): preamble + a `Header` (identity + metadata)
+///   + a full `ContextCheckpoint` the diffs rebase on;
+/// - **resumed** (file present, but this worker has no prior context for the run
+///   — e.g. after a daemon restart): an `OwnershipChanged` recording this
+///   world/machine took over + a fresh `ContextCheckpoint` re-anchor;
+/// - **ongoing** (a prior context is known): a compact `Progress` step carrying
+///   the updated metadata + a `ContextDiff` since the previous point.
 ///
-/// (Context is carried in full per checkpoint for now; storing it as a
-/// [`run_archive::ContextDiff`] between checkpoints is a follow-up efficiency.)
-async fn append_run_archive(dir: &Path, job: &PersistJob, machine_id: &str, world_id: &str) {
+/// The archive always folds to the run's latest resumable state. Best-effort —
+/// a failed write is logged and swallowed like the rest of the persistence lane.
+async fn append_run_archive(
+    dir: &Path,
+    job: &PersistJob,
+    machine_id: &str,
+    world_id: &str,
+    prev_context: Option<&ContextSnapshot>,
+) {
     use leviath_core::run_archive::{self, RunIdentity, RunRecord};
 
     let path = dir.join("run.lvr");
-    let is_new = !tokio::fs::try_exists(&path).await.unwrap_or(false);
+    let file_exists = tokio::fs::try_exists(&path).await.unwrap_or(false);
+    let at = job.meta.updated_at;
 
     // Encode into a buffer via the sync codec, then append in one async write.
     let mut buf: Vec<u8> = Vec::new();
-    if is_new {
-        run_archive::write_archive_start(&mut buf, run_archive::RUN_ARCHIVE_VERSION)
-            .expect("writing to a Vec never fails");
-        let header = RunRecord::Header {
-            identity: RunIdentity {
-                run_id: job.run_id.clone(),
-                machine_id: machine_id.to_string(),
-                world_id: world_id.to_string(),
-                created_at: job.meta.started_at,
-            },
-            meta: Box::new(job.meta.clone()),
-        };
-        run_archive::write_record(&mut buf, &header).expect("writing to a Vec never fails");
+    match prev_context {
+        // A known prior context → the compact per-step record.
+        Some(prev) => {
+            let progress = RunRecord::Progress {
+                meta: Box::new(job.meta.clone()),
+                delta: run_archive::diff_context(prev, &job.context),
+                at,
+            };
+            run_archive::write_record(&mut buf, &progress).expect("writing to a Vec never fails");
+        }
+        // No prior context this process.
+        None => {
+            if file_exists {
+                // Resumed run: record the ownership handoff to this world.
+                let owned = RunRecord::OwnershipChanged {
+                    machine_id: machine_id.to_string(),
+                    world_id: world_id.to_string(),
+                    at,
+                };
+                run_archive::write_record(&mut buf, &owned).expect("writing to a Vec never fails");
+            } else {
+                // Brand-new archive: preamble + Header.
+                run_archive::write_archive_start(&mut buf, run_archive::RUN_ARCHIVE_VERSION)
+                    .expect("writing to a Vec never fails");
+                let header = RunRecord::Header {
+                    identity: RunIdentity {
+                        run_id: job.run_id.clone(),
+                        machine_id: machine_id.to_string(),
+                        world_id: world_id.to_string(),
+                        created_at: job.meta.started_at,
+                    },
+                    meta: Box::new(job.meta.clone()),
+                };
+                run_archive::write_record(&mut buf, &header).expect("writing to a Vec never fails");
+            }
+            // Either way, anchor with a full context snapshot the diffs rebase on.
+            let checkpoint = RunRecord::ContextCheckpoint {
+                snapshot: job.context.clone(),
+                at,
+            };
+            run_archive::write_record(&mut buf, &checkpoint).expect("writing to a Vec never fails");
+        }
     }
-    let checkpoint = RunRecord::Checkpoint {
-        meta: Box::new(job.meta.clone()),
-        context: job.context.clone(),
-        at: job.meta.updated_at,
-    };
-    run_archive::write_record(&mut buf, &checkpoint).expect("writing to a Vec never fails");
 
     match tokio::fs::OpenOptions::new()
         .create(true)
@@ -289,16 +334,45 @@ mod tests {
         }
     }
 
+    /// A job whose context window has one region with the given entries (for
+    /// exercising context diffs across writes).
+    fn job_with_context(run_id: &str, entries: usize) -> PersistJob {
+        let ctx = ContextSnapshot {
+            stage_name: "s".to_string(),
+            total_tokens: entries,
+            max_tokens: 100,
+            regions: vec![leviath_core::run_meta::RegionSnapshot {
+                name: "conv".to_string(),
+                kind: "clearable".to_string(),
+                current_tokens: entries,
+                max_tokens: 100,
+                entries: (0..entries)
+                    .map(|i| leviath_core::run_meta::RegionEntrySnapshot {
+                        content: format!("line {i}"),
+                        tokens: 1,
+                        kind: leviath_core::region::EntryKind::Text,
+                        metadata: None,
+                        key: None,
+                    })
+                    .collect(),
+            }],
+        };
+        PersistJob {
+            context: ctx,
+            ..job(run_id)
+        }
+    }
+
     #[tokio::test]
     async fn write_snapshot_creates_a_readable_run_archive() {
         use leviath_core::run_archive::{RunRecord, fold, read_archive};
         let dir = tempfile::tempdir().unwrap();
-        write_snapshot(dir.path(), &job("run-1"), "machine-x", "world-y").await;
+        write_snapshot(dir.path(), &job("run-1"), "machine-x", "world-y", None).await;
 
         let bytes = std::fs::read(dir.path().join("run-1").join("run.lvr")).unwrap();
         let (version, records) = read_archive(&mut bytes.as_slice()).unwrap();
         assert_eq!(version, leviath_core::run_archive::RUN_ARCHIVE_VERSION);
-        // First write lays down a Header then a Checkpoint.
+        // A brand-new archive: a Header then a full ContextCheckpoint.
         assert!(
             records
                 .iter()
@@ -307,7 +381,7 @@ mod tests {
         assert!(
             records
                 .iter()
-                .any(|r| matches!(r, RunRecord::Checkpoint { .. }))
+                .any(|r| matches!(r, RunRecord::ContextCheckpoint { .. }))
         );
         // The archive folds to the run's identity + state.
         let folded = fold(&records).unwrap();
@@ -318,24 +392,66 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn run_archive_appends_a_checkpoint_per_write_with_one_header() {
-        use leviath_core::run_archive::{RunRecord, read_archive};
+    async fn run_archive_stores_subsequent_writes_as_progress_diffs() {
+        use leviath_core::run_archive::{RunRecord, read_archive, replay_points};
         let dir = tempfile::tempdir().unwrap();
-        write_snapshot(dir.path(), &job("run-1"), "m", "w").await;
-        write_snapshot(dir.path(), &job("run-1"), "m", "w").await;
+        let first = job_with_context("run-1", 1);
+        let second = job_with_context("run-1", 3); // grew by 2 entries
+        write_snapshot(dir.path(), &first, "m", "w", None).await;
+        write_snapshot(dir.path(), &second, "m", "w", Some(&first.context)).await;
 
         let bytes = std::fs::read(dir.path().join("run-1").join("run.lvr")).unwrap();
         let (_v, records) = read_archive(&mut bytes.as_slice()).unwrap();
-        let headers = records
+        let count = |pred: fn(&RunRecord) -> bool| records.iter().filter(|r| pred(r)).count();
+        assert_eq!(count(|r| matches!(r, RunRecord::Header { .. })), 1);
+        assert_eq!(
+            count(|r| matches!(r, RunRecord::ContextCheckpoint { .. })),
+            1
+        );
+        assert_eq!(
+            count(|r| matches!(r, RunRecord::Progress { .. })),
+            1,
+            "the second write is a compact Progress diff, not a full checkpoint"
+        );
+        // Replaying yields the growing window at each point (1 entry → 3).
+        let points = replay_points(&records);
+        assert_eq!(points.len(), 2);
+        assert_eq!(points[0].context.regions[0].entries.len(), 1);
+        assert_eq!(points[1].context.regions[0].entries.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn run_archive_records_ownership_handoff_on_resume() {
+        use leviath_core::run_archive::{RunRecord, read_archive};
+        let dir = tempfile::tempdir().unwrap();
+        // First process writes the archive.
+        write_snapshot(dir.path(), &job("run-1"), "m1", "w1", None).await;
+        // A "restarted" worker (no prior context) writes to the existing archive:
+        // it records an ownership handoff + a fresh context re-anchor, not a Header.
+        write_snapshot(dir.path(), &job("run-1"), "m2", "w2", None).await;
+
+        let bytes = std::fs::read(dir.path().join("run-1").join("run.lvr")).unwrap();
+        let (_v, records) = read_archive(&mut bytes.as_slice()).unwrap();
+        assert_eq!(
+            records
+                .iter()
+                .filter(|r| matches!(r, RunRecord::Header { .. }))
+                .count(),
+            1,
+            "no second Header on resume"
+        );
+        let owned = records
             .iter()
-            .filter(|r| matches!(r, RunRecord::Header { .. }))
-            .count();
-        let checkpoints = records
-            .iter()
-            .filter(|r| matches!(r, RunRecord::Checkpoint { .. }))
-            .count();
-        assert_eq!(headers, 1, "header only written once");
-        assert_eq!(checkpoints, 2, "a checkpoint per write");
+            .find_map(|r| match r {
+                RunRecord::OwnershipChanged {
+                    machine_id,
+                    world_id,
+                    ..
+                } => Some((machine_id.clone(), world_id.clone())),
+                _ => None,
+            })
+            .expect("ownership handoff recorded");
+        assert_eq!(owned, ("m2".to_string(), "w2".to_string()));
     }
 
     #[tokio::test]
@@ -345,7 +461,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let run_dir = dir.path().join("run-1");
         std::fs::create_dir_all(run_dir.join("run.lvr")).unwrap();
-        write_snapshot(dir.path(), &job("run-1"), "m", "w").await;
+        write_snapshot(dir.path(), &job("run-1"), "m", "w", None).await;
         // meta.json still written despite the archive failure.
         assert!(run_dir.join("meta.json").exists());
     }
@@ -396,6 +512,7 @@ mod tests {
             },
             "machine-test",
             "world-test",
+            None,
         )
         .await;
 
@@ -426,6 +543,7 @@ mod tests {
             },
             "machine-test",
             "world-test",
+            None,
         )
         .await;
         let audit =
@@ -449,6 +567,7 @@ mod tests {
             },
             "machine-test",
             "world-test",
+            None,
         )
         .await;
         // No stages.json, no stages dir when there's nothing to write.
@@ -484,6 +603,7 @@ mod tests {
             },
             "machine-test",
             "world-test",
+            None,
         )
         .await;
     }
@@ -510,6 +630,7 @@ mod tests {
             },
             "machine-test",
             "world-test",
+            None,
         )
         .await;
 
@@ -540,6 +661,7 @@ mod tests {
             },
             "machine-test",
             "world-test",
+            None,
         )
         .await;
 
