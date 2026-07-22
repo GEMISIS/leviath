@@ -34,6 +34,17 @@ pub struct SetupArgs {
     /// Default model override (e.g. claude-sonnet-4-6)
     #[arg(long)]
     pub default_model: Option<String>,
+
+    /// Enable the Claude Code CLI transport (runs on your Claude subscription
+    /// instead of an API key). Off unless set: the CLI adds its own context to
+    /// every call, including your account email address.
+    #[arg(long)]
+    pub claude_code: Option<bool>,
+
+    /// Reasoning effort for the Claude Code transport
+    /// (low, medium, high, xhigh, max)
+    #[arg(long)]
+    pub claude_code_effort: Option<String>,
 }
 
 /// `lev setup`: load the config, then either apply flags non-interactively or
@@ -135,6 +146,40 @@ fn run_interactive_setup<R: io::BufRead>(
         Some(ollama_input)
     };
 
+    // Claude Code transport — offered, never selected for the user. The shown
+    // default is the stored value, so on a fresh install this reads `[no]` and
+    // pressing Enter through the whole wizard leaves it disabled.
+    println!();
+    println!("  Claude Code transport: run Leviath on your Claude subscription, no API key.");
+    println!("  Caveat: the CLI adds ~130 tokens of its own context to every call, including");
+    println!("  your account email address and the current date. This cannot be disabled.");
+    let enabled_before = config.providers.claude_code_enabled;
+    let cc_input = prompt_plain(
+        reader,
+        "Enable Claude Code provider",
+        yes_no(enabled_before),
+    );
+    config.providers.claude_code_enabled = parse_yes_no(&cc_input, enabled_before);
+
+    if config.providers.claude_code_enabled {
+        let current_effort = config
+            .providers
+            .claude_code_effort
+            .as_deref()
+            .unwrap_or(leviath_providers::claude_code::DEFAULT_EFFORT);
+        let effort_input = prompt_plain(
+            reader,
+            "  Claude Code effort (low/medium/high/xhigh/max)",
+            current_effort,
+        );
+        if !effort_input.is_empty() {
+            config.providers.claude_code_effort = Some(effort_input);
+        }
+        if !enabled_before {
+            println!("  Enabled. Sign in with `claude` if you haven't already.");
+        }
+    }
+
     // Default model
     let current_model = config
         .default_model
@@ -191,6 +236,12 @@ fn apply_flags(config: &mut Config, args: &SetupArgs) {
     if let Some(ref m) = args.default_model {
         config.default_model = Some(m.clone());
     }
+    if let Some(enabled) = args.claude_code {
+        config.providers.claude_code_enabled = enabled;
+    }
+    if let Some(ref e) = args.claude_code_effort {
+        config.providers.claude_code_effort = Some(e.clone());
+    }
 }
 
 /// Prompt for a secret value. Returns `None` if the user clears the value;
@@ -226,6 +277,23 @@ fn prompt_plain<R: io::BufRead>(reader: &mut R, label: &str, current: &str) -> S
     let mut input = String::new();
     let _ = reader.read_line(&mut input);
     input.trim().to_string()
+}
+
+/// The bracketed default shown for a yes/no prompt.
+fn yes_no(value: bool) -> &'static str {
+    if value { "yes" } else { "no" }
+}
+
+/// Interpret a yes/no answer, keeping `current` on empty or unrecognized input.
+///
+/// Unrecognized input keeps the current value rather than guessing: for a prompt
+/// whose default is "off", a typo must never read as consent.
+fn parse_yes_no(input: &str, current: bool) -> bool {
+    match input.trim().to_ascii_lowercase().as_str() {
+        "y" | "yes" | "true" | "1" | "on" => true,
+        "n" | "no" | "false" | "0" | "off" => false,
+        _ => current,
+    }
 }
 
 /// Redact an API key for display: show first 8 chars + "...".
@@ -273,6 +341,8 @@ mod tests {
             openrouter_key: None,
             ollama_url: None,
             default_model: None,
+            claude_code: None,
+            claude_code_effort: None,
         };
         apply_flags(&mut config, &args);
         assert_eq!(
@@ -292,6 +362,8 @@ mod tests {
             openrouter_key: Some("or-key".to_string()),
             ollama_url: Some("http://my-ollama:11434".to_string()),
             default_model: Some("my-model".to_string()),
+            claude_code: None,
+            claude_code_effort: None,
         };
         apply_flags(&mut config, &args);
         assert_eq!(
@@ -309,6 +381,49 @@ mod tests {
     }
 
     #[test]
+    fn apply_flags_sets_claude_code_enable_and_effort() {
+        // The non-interactive `--claude-code`/`--claude-code-effort` arms.
+        let mut config = Config::default();
+        let args = SetupArgs {
+            non_interactive: true,
+            anthropic_key: None,
+            openai_key: None,
+            google_key: None,
+            openrouter_key: None,
+            ollama_url: None,
+            default_model: None,
+            claude_code: Some(true),
+            claude_code_effort: Some("xhigh".to_string()),
+        };
+        apply_flags(&mut config, &args);
+        assert!(config.providers.claude_code_enabled);
+        assert_eq!(
+            config.providers.claude_code_effort.as_deref(),
+            Some("xhigh")
+        );
+    }
+
+    #[test]
+    fn apply_flags_can_disable_claude_code() {
+        // `--claude-code false` turns an enabled provider back off.
+        let mut config = Config::default();
+        config.providers.claude_code_enabled = true;
+        let args = SetupArgs {
+            non_interactive: true,
+            anthropic_key: None,
+            openai_key: None,
+            google_key: None,
+            openrouter_key: None,
+            ollama_url: None,
+            default_model: None,
+            claude_code: Some(false),
+            claude_code_effort: None,
+        };
+        apply_flags(&mut config, &args);
+        assert!(!config.providers.claude_code_enabled);
+    }
+
+    #[test]
     fn apply_flags_preserves_existing_on_none() {
         let mut config = Config::default();
         config.providers.anthropic_api_key = Some("existing-key".to_string());
@@ -320,6 +435,8 @@ mod tests {
             openrouter_key: None,
             ollama_url: None,
             default_model: None,
+            claude_code: None,
+            claude_code_effort: None,
         };
         apply_flags(&mut config, &args);
         assert_eq!(
@@ -341,6 +458,9 @@ mod tests {
                 anthropic_api_key: Some("sk-ant-test-key".to_string()),
                 openai_api_key: None,
                 google_api_key: None,
+                claude_code_enabled: false,
+                claude_code_binary: None,
+                claude_code_effort: None,
             },
             ..Config::default()
         };
@@ -370,6 +490,8 @@ mod tests {
             openrouter_key: None,
             ollama_url: None,
             default_model: None,
+            claude_code: None,
+            claude_code_effort: None,
         };
         apply_flags(&mut config, &args);
         assert!(config.providers.anthropic_api_key.is_none());
@@ -390,6 +512,8 @@ mod tests {
             openrouter_key: None,
             ollama_url: None,
             default_model: None,
+            claude_code: None,
+            claude_code_effort: None,
         };
         apply_flags(&mut config, &args);
         assert_eq!(
@@ -409,6 +533,8 @@ mod tests {
             openrouter_key: Some("sk-or-key".to_string()),
             ollama_url: None,
             default_model: None,
+            claude_code: None,
+            claude_code_effort: None,
         };
         apply_flags(&mut config, &args);
         assert_eq!(config.openrouter_api_key.as_deref(), Some("sk-or-key"));
@@ -425,6 +551,8 @@ mod tests {
             openrouter_key: None,
             ollama_url: Some("http://custom:1234".to_string()),
             default_model: None,
+            claude_code: None,
+            claude_code_effort: None,
         };
         apply_flags(&mut config, &args);
         assert_eq!(
@@ -444,6 +572,8 @@ mod tests {
             openrouter_key: None,
             ollama_url: None,
             default_model: Some("gpt-5".to_string()),
+            claude_code: None,
+            claude_code_effort: None,
         };
         apply_flags(&mut config, &args);
         assert_eq!(config.default_model.as_deref(), Some("gpt-5"));
@@ -483,6 +613,8 @@ mod tests {
             openrouter_key: None,
             ollama_url: None,
             default_model: None,
+            claude_code: None,
+            claude_code_effort: None,
         };
         apply_flags(&mut config, &args);
         assert_eq!(
@@ -506,6 +638,8 @@ mod tests {
             openrouter_key: None,
             ollama_url: None,
             default_model: Some("new-model".to_string()),
+            claude_code: None,
+            claude_code_effort: None,
         };
         apply_flags(&mut config, &args);
         // Anthropic key preserved
@@ -618,6 +752,9 @@ mod tests {
 
     // ─── run_interactive_setup (mocked stdin + tempfile save path) ─────────
 
+    /// One line per prompt, in order: anthropic, openai, google, openrouter,
+    /// ollama URL, enable-claude-code, default model, default provider.
+    /// (Answering yes to claude-code adds an effort prompt after it.)
     fn all_prompts_input(lines: &[&str]) -> Cursor<Vec<u8>> {
         reader_from(&lines.join("\n"))
     }
@@ -630,13 +767,122 @@ mod tests {
 
         // 7 prompts: anthropic, openai, google, openrouter, ollama, model, provider.
         // Empty answers to all of them.
-        let mut reader = all_prompts_input(&["", "", "", "", "", "", ""]);
+        let mut reader = all_prompts_input(&["", "", "", "", "", "", "", ""]);
         run_interactive_setup(&mut config, &mut reader, &save_path).unwrap();
 
         assert!(save_path.exists());
         assert!(config.providers.anthropic_api_key.is_none());
         assert!(config.ollama_base_url.is_none());
         assert_eq!(config.default_provider, "anthropic");
+        // The requirement that motivated the prompt's shape: pressing Enter
+        // through the whole wizard must never turn Claude Code on, because
+        // doing so starts sending the user's account email to Anthropic.
+        assert!(!config.providers.claude_code_enabled);
+    }
+
+    // ─── Claude Code opt-in prompt ──────────────────────────────────────────
+
+    /// Run the wizard answering only the claude-code prompt (index 5); everything
+    /// else is left at its default. Returns the resulting config.
+    fn setup_answering_claude_code(answers: &[&str]) -> Config {
+        let dir = tempfile::tempdir().unwrap();
+        let save_path = dir.path().join("config.toml");
+        let mut config = Config::default();
+        let mut lines = vec!["", "", "", "", ""];
+        lines.extend_from_slice(answers);
+        lines.extend_from_slice(&["", ""]); // model, provider
+        let mut reader = all_prompts_input(&lines);
+        run_interactive_setup(&mut config, &mut reader, &save_path).unwrap();
+        config
+    }
+
+    #[test]
+    fn answering_yes_enables_claude_code_with_the_default_effort() {
+        // "yes" then Enter at the effort prompt.
+        let config = setup_answering_claude_code(&["yes", ""]);
+        assert!(config.providers.claude_code_enabled);
+        // Enter keeps the shown default rather than storing it explicitly.
+        assert!(config.providers.claude_code_effort.is_none());
+        // Enabling the transport must not hijack the default provider.
+        assert_eq!(config.default_provider, "anthropic");
+    }
+
+    #[test]
+    fn answering_yes_can_set_an_effort_level() {
+        let config = setup_answering_claude_code(&["y", "xhigh"]);
+        assert!(config.providers.claude_code_enabled);
+        assert_eq!(
+            config.providers.claude_code_effort.as_deref(),
+            Some("xhigh")
+        );
+    }
+
+    #[test]
+    fn declining_leaves_claude_code_off_and_skips_the_effort_prompt() {
+        // Only one answer consumed: no effort prompt is shown when declined.
+        let config = setup_answering_claude_code(&["no"]);
+        assert!(!config.providers.claude_code_enabled);
+        assert!(config.providers.claude_code_effort.is_none());
+    }
+
+    #[test]
+    fn an_unrecognized_answer_keeps_the_current_setting() {
+        // A typo at a prompt whose default is "off" must not read as consent.
+        let config = setup_answering_claude_code(&["mabye"]);
+        assert!(!config.providers.claude_code_enabled);
+    }
+
+    #[test]
+    fn an_enabled_provider_can_be_turned_back_off() {
+        let dir = tempfile::tempdir().unwrap();
+        let save_path = dir.path().join("config.toml");
+        let mut config = Config {
+            providers: crate::config::ProviderConfig {
+                claude_code_enabled: true,
+                claude_code_effort: Some("high".to_string()),
+                ..Config::default().providers
+            },
+            ..Config::default()
+        };
+        let mut reader = all_prompts_input(&["", "", "", "", "", "n", "", ""]);
+        run_interactive_setup(&mut config, &mut reader, &save_path).unwrap();
+        assert!(!config.providers.claude_code_enabled);
+    }
+
+    #[test]
+    fn an_enabled_provider_keeps_its_settings_on_enter() {
+        let dir = tempfile::tempdir().unwrap();
+        let save_path = dir.path().join("config.toml");
+        let mut config = Config {
+            providers: crate::config::ProviderConfig {
+                claude_code_enabled: true,
+                claude_code_effort: Some("high".to_string()),
+                ..Config::default().providers
+            },
+            ..Config::default()
+        };
+        // Enter at both the enable prompt and the effort prompt.
+        let mut reader = all_prompts_input(&["", "", "", "", "", "", "", "", ""]);
+        run_interactive_setup(&mut config, &mut reader, &save_path).unwrap();
+        assert!(config.providers.claude_code_enabled);
+        assert_eq!(config.providers.claude_code_effort.as_deref(), Some("high"));
+    }
+
+    #[test]
+    fn yes_no_rendering_and_parsing_round_trip() {
+        assert_eq!(yes_no(true), "yes");
+        assert_eq!(yes_no(false), "no");
+        for affirmative in ["y", "YES", "true", "1", "on", " Yes "] {
+            assert!(parse_yes_no(affirmative, false), "{affirmative}");
+        }
+        for negative in ["n", "NO", "false", "0", "off"] {
+            assert!(!parse_yes_no(negative, true), "{negative}");
+        }
+        // Empty and unrecognized both keep the current value.
+        assert!(parse_yes_no("", true));
+        assert!(!parse_yes_no("", false));
+        assert!(parse_yes_no("wat", true));
+        assert!(!parse_yes_no("wat", false));
     }
 
     #[test]
@@ -651,6 +897,7 @@ mod tests {
             "AIza-new",
             "sk-or-new",
             "http://custom-ollama:9999",
+            "", // claude-code: declined
             "gpt-5",
             "openai",
         ]);
@@ -687,12 +934,15 @@ mod tests {
                 anthropic_api_key: Some("old-ant".to_string()),
                 openai_api_key: Some("old-oai".to_string()),
                 google_api_key: Some("old-goog".to_string()),
+                claude_code_enabled: false,
+                claude_code_binary: None,
+                claude_code_effort: None,
             },
             openrouter_api_key: Some("old-or".to_string()),
             ..Config::default()
         };
 
-        let mut reader = all_prompts_input(&["clear", "clear", "clear", "clear", "", "", ""]);
+        let mut reader = all_prompts_input(&["clear", "clear", "clear", "clear", "", "", "", ""]);
         run_interactive_setup(&mut config, &mut reader, &save_path).unwrap();
 
         assert!(config.providers.anthropic_api_key.is_none());
@@ -710,7 +960,7 @@ mod tests {
             ..Config::default()
         };
 
-        let mut reader = all_prompts_input(&["", "", "", "", "http://localhost:11434", "", ""]);
+        let mut reader = all_prompts_input(&["", "", "", "", "http://localhost:11434", "", "", ""]);
         run_interactive_setup(&mut config, &mut reader, &save_path).unwrap();
 
         assert!(config.ollama_base_url.is_none());
@@ -725,7 +975,7 @@ mod tests {
             ..Config::default()
         };
 
-        let mut reader = all_prompts_input(&["", "", "", "", "", "clear", ""]);
+        let mut reader = all_prompts_input(&["", "", "", "", "", "", "clear", ""]);
         run_interactive_setup(&mut config, &mut reader, &save_path).unwrap();
 
         assert!(config.default_model.is_none());
@@ -743,7 +993,7 @@ mod tests {
             ..Config::default()
         };
 
-        let mut reader = all_prompts_input(&["", "", "", "", "", "(provider default)", ""]);
+        let mut reader = all_prompts_input(&["", "", "", "", "", "", "(provider default)", ""]);
         run_interactive_setup(&mut config, &mut reader, &save_path).unwrap();
 
         assert_eq!(config.default_model.as_deref(), Some("existing-model"));
@@ -756,7 +1006,8 @@ mod tests {
         let mut config = Config::default();
 
         // Anthropic key that doesn't start with "sk-ant-" triggers a warning.
-        let mut reader = all_prompts_input(&["not-a-valid-anthropic-key", "", "", "", "", "", ""]);
+        let mut reader =
+            all_prompts_input(&["not-a-valid-anthropic-key", "", "", "", "", "", "", ""]);
         run_interactive_setup(&mut config, &mut reader, &save_path).unwrap();
 
         let warnings = config.validate_keys();
@@ -785,7 +1036,7 @@ mod tests {
         std::fs::write(&blocking, "").unwrap();
         let bad_save = blocking.join("config.toml");
         let mut config = Config::default();
-        let mut reader = all_prompts_input(&["", "", "", "", "", "", ""]);
+        let mut reader = all_prompts_input(&["", "", "", "", "", "", "", ""]);
         let result = run_interactive_setup(&mut config, &mut reader, &bad_save);
         assert!(result.is_err());
     }
@@ -805,6 +1056,8 @@ mod tests {
             openrouter_key: None,
             ollama_url: None,
             default_model: None,
+            claude_code: None,
+            claude_code_effort: None,
         };
 
         run_non_interactive_setup(&mut config, &args, &save_path).unwrap();
@@ -832,6 +1085,8 @@ mod tests {
             openrouter_key: None,
             ollama_url: None,
             default_model: None,
+            claude_code: None,
+            claude_code_effort: None,
         };
         let result = run_non_interactive_setup(&mut config, &args, &bad_save);
         assert!(result.is_err());
@@ -865,6 +1120,9 @@ mod tests {
                 anthropic_api_key: Some("existing".to_string()),
                 openai_api_key: None,
                 google_api_key: None,
+                claude_code_enabled: false,
+                claude_code_binary: None,
+                claude_code_effort: None,
             },
             ..Config::default()
         };
@@ -876,6 +1134,8 @@ mod tests {
             openrouter_key: None,
             ollama_url: None,
             default_model: None,
+            claude_code: None,
+            claude_code_effort: None,
         };
         apply_flags(&mut config, &args);
         assert_eq!(
@@ -906,6 +1166,9 @@ mod tests {
                 anthropic_api_key: Some("sk-ant-key".to_string()),
                 openai_api_key: Some("sk-oai-key".to_string()),
                 google_api_key: Some("AIza-key".to_string()),
+                claude_code_enabled: false,
+                claude_code_binary: None,
+                claude_code_effort: None,
             },
             openrouter_api_key: Some("sk-or-key".to_string()),
             ollama_base_url: Some("http://custom:11434".to_string()),
@@ -957,6 +1220,8 @@ mod tests {
                 openrouter_key: None,
                 ollama_url: None,
                 default_model: None,
+                claude_code: None,
+                claude_code_effort: None,
             };
 
             run_non_interactive_setup(&mut config, &args, &Config::config_path()).unwrap();
@@ -993,6 +1258,8 @@ mod tests {
                     openrouter_key: None,
                     ollama_url: None,
                     default_model: None,
+                    claude_code: None,
+                    claude_code_effort: None,
                 };
                 // `--non-interactive` short-circuits before the reader factory runs.
                 execute_with(&args, seven_blank_lines).unwrap();
@@ -1019,6 +1286,8 @@ mod tests {
                 openrouter_key: None,
                 ollama_url: None,
                 default_model: None,
+                claude_code: None,
+                claude_code_effort: None,
             };
             execute_with(&args, seven_blank_lines).unwrap();
         });

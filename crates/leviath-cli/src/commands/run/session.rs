@@ -302,10 +302,10 @@ fn launch_editor_with(
     anyhow::bail!("No editor found. Set $VISUAL or $EDITOR, or install vim/nano/notepad.")
 }
 
-/// Build the list of [`ProviderCreds`] a [`Config`] implies. `ollama` and
-/// `claude-code` are always present (they need no key); the API-key providers
-/// are included only when their key is configured. This is the sole point that
-/// reads provider settings out of `Config`.
+/// Build the list of [`ProviderCreds`] a [`Config`] implies. `ollama` is always
+/// present (it needs no key); the API-key providers are included only when their
+/// key is configured, and `claude-code` only when explicitly enabled. This is the
+/// sole point that reads provider settings out of `Config`.
 pub fn provider_creds_from_config(config: &Config) -> Vec<ProviderCreds> {
     let caps = &config.model_capabilities;
     let timeout = config.request_timeout_secs;
@@ -325,6 +325,7 @@ pub fn provider_creds_from_config(config: &Config) -> Vec<ProviderCreds> {
                 base_url: None,
                 model_capabilities: caps.clone(),
                 request_timeout_secs: timeout,
+                options: std::collections::HashMap::new(),
             });
         }
     }
@@ -342,16 +343,31 @@ pub fn provider_creds_from_config(config: &Config) -> Vec<ProviderCreds> {
         ),
         model_capabilities: caps.clone(),
         request_timeout_secs: timeout,
+        options: std::collections::HashMap::new(),
     });
 
-    // Claude Code provider (no API key needed - uses claude CLI subscription).
-    creds.push(ProviderCreds {
-        name: "claude-code".to_string(),
-        api_key: None,
-        base_url: None,
-        model_capabilities: std::collections::HashMap::new(),
-        request_timeout_secs: None,
-    });
+    // Claude Code needs no API key, but it is opt-in rather than always-on: the
+    // CLI puts the user's account email address into every call and that cannot
+    // be turned off. Leaving it unregistered is also how it stays out of an
+    // agent's model fallback chain — `resolve_stage_model` skips any provider
+    // the registry doesn't have.
+    if config.providers.claude_code_enabled {
+        let mut options = std::collections::HashMap::new();
+        if let Some(binary) = &config.providers.claude_code_binary {
+            options.insert("binary".to_string(), binary.clone());
+        }
+        if let Some(effort) = &config.providers.claude_code_effort {
+            options.insert("effort".to_string(), effort.clone());
+        }
+        creds.push(ProviderCreds {
+            name: "claude-code".to_string(),
+            api_key: None,
+            base_url: None,
+            model_capabilities: caps.clone(),
+            request_timeout_secs: None,
+            options,
+        });
+    }
 
     creds
 }
@@ -523,9 +539,12 @@ mod tests {
     fn build_provider_registry_with_empty_config() {
         let config = Config::default();
         let registry = build_provider_registry_from_config(&config);
-        // Should always have ollama and claude-code registered
+        // Ollama needs no key and is always on.
         assert!(registry.has("ollama"));
-        assert!(registry.has("claude-code"));
+        // Claude Code needs no key either, but is opt-in — a default config
+        // must not reach the user's Claude subscription (or send their account
+        // email to it) without them having said yes.
+        assert!(!registry.has("claude-code"));
         // Should NOT have anthropic, openai, google without keys
         assert!(!registry.has("anthropic"));
         assert!(!registry.has("openai"));
@@ -563,6 +582,9 @@ mod tests {
         let config = Config {
             providers: crate::config::ProviderConfig {
                 google_api_key: Some("AIzatest12345".to_string()),
+                claude_code_enabled: false,
+                claude_code_binary: None,
+                claude_code_effort: None,
                 ..Config::default().providers
             },
             ..Config::default()
@@ -600,6 +622,9 @@ mod tests {
                 anthropic_api_key: Some("sk-ant-test".to_string()),
                 openai_api_key: Some("sk-test".to_string()),
                 google_api_key: Some("AIza-test".to_string()),
+                claude_code_enabled: false,
+                claude_code_binary: None,
+                claude_code_effort: None,
             },
             openrouter_api_key: Some("sk-or-test".to_string()),
             ollama_base_url: Some("http://custom:11434".to_string()),
@@ -611,7 +636,8 @@ mod tests {
         assert!(registry.has("google"));
         assert!(registry.has("openrouter"));
         assert!(registry.has("ollama"));
-        assert!(registry.has("claude-code"));
+        // Every key in the world doesn't enable Claude Code — only opting in does.
+        assert!(!registry.has("claude-code"));
     }
 
     // ─── ProviderCreds seam ─────────────────────────────────────────────
@@ -628,10 +654,11 @@ mod tests {
         };
         let creds = provider_creds_from_config(&config);
         let names: Vec<&str> = creds.iter().map(|c| c.name.as_str()).collect();
-        // anthropic (keyed) + ollama + claude-code, but not openai/google/openrouter.
+        // anthropic (keyed) + ollama, but not openai/google/openrouter, and not
+        // claude-code (opt-in, not enabled here).
         assert!(names.contains(&"anthropic"));
         assert!(names.contains(&"ollama"));
-        assert!(names.contains(&"claude-code"));
+        assert!(!names.contains(&"claude-code"));
         assert!(!names.contains(&"openai"));
         assert!(!names.contains(&"google"));
         assert!(!names.contains(&"openrouter"));
@@ -680,15 +707,54 @@ mod tests {
     // ─── build_provider_registry: no providers except defaults ──────────
 
     #[test]
-    fn build_provider_registry_defaults_always_have_ollama_and_claude_code() {
+    fn build_provider_registry_defaults_have_ollama_only() {
         let config = Config::default();
         let registry = build_provider_registry_from_config(&config);
-        // These should always be present regardless of key configuration
-        let provider_count = ["ollama", "claude-code"]
+        // Ollama is present regardless of key configuration; claude-code is not,
+        // until the user opts in.
+        assert!(registry.has("ollama"));
+        assert!(!registry.has("claude-code"));
+    }
+
+    #[test]
+    fn enabling_claude_code_registers_it_with_its_options() {
+        let config = Config {
+            providers: crate::config::ProviderConfig {
+                claude_code_enabled: true,
+                claude_code_binary: Some("/opt/bin/claude".to_string()),
+                claude_code_effort: Some("low".to_string()),
+                ..Config::default().providers
+            },
+            ..Config::default()
+        };
+        let creds = provider_creds_from_config(&config);
+        let cc = creds
             .iter()
-            .filter(|name| registry.has(name))
-            .count();
-        assert_eq!(provider_count, 2);
+            .find(|c| c.name == "claude-code")
+            .expect("enabled ⇒ present");
+        assert_eq!(
+            cc.options.get("binary").map(String::as_str),
+            Some("/opt/bin/claude")
+        );
+        assert_eq!(cc.options.get("effort").map(String::as_str), Some("low"));
+        assert!(cc.api_key.is_none());
+        assert!(build_provider_registry_from_config(&config).has("claude-code"));
+    }
+
+    #[test]
+    fn enabling_claude_code_without_options_carries_none() {
+        let config = Config {
+            providers: crate::config::ProviderConfig {
+                claude_code_enabled: true,
+                ..Config::default().providers
+            },
+            ..Config::default()
+        };
+        let creds = provider_creds_from_config(&config);
+        let cc = creds.iter().find(|c| c.name == "claude-code").unwrap();
+        // Absent settings stay absent so the provider applies its own defaults
+        // (the `claude` binary on PATH, DEFAULT_EFFORT).
+        assert!(cc.options.is_empty());
     }
 
     // ─── resolve_task: file with only comments in editor-like format ────
@@ -743,6 +809,9 @@ mod tests {
                 anthropic_api_key: Some("sk-ant-test".to_string()),
                 openai_api_key: None,
                 google_api_key: None,
+                claude_code_enabled: false,
+                claude_code_binary: None,
+                claude_code_effort: None,
             },
             ..crate::config::Config::default()
         };

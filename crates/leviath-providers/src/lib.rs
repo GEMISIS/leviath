@@ -21,6 +21,7 @@ pub mod openai_compat;
 pub mod openrouter;
 pub mod provider;
 pub mod rate_limit;
+pub mod text_tools;
 pub mod tokenizer;
 
 #[cfg(test)]

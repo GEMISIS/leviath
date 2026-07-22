@@ -142,6 +142,29 @@ pub struct ProviderConfig {
 
     /// Google AI (Gemini) API key
     pub google_api_key: Option<String>,
+
+    /// Whether the Claude Code CLI transport is enabled.
+    ///
+    /// **Opt-in, and never selected for the user.** The CLI injects its own
+    /// context into every call — including the account email address on the
+    /// OAuth (subscription) path — which cannot be disabled. `lev setup` offers
+    /// it and defaults to declining, so a user who presses Enter through the
+    /// wizard ends up with it off.
+    #[serde(default)]
+    pub claude_code_enabled: bool,
+
+    /// Path to the `claude` executable. `None` resolves `claude` on `PATH`.
+    #[serde(default)]
+    pub claude_code_binary: Option<String>,
+
+    /// Reasoning effort for the Claude Code transport: `low` | `medium` |
+    /// `high` | `xhigh` | `max`.
+    ///
+    /// Always sent explicitly. Left to itself the CLI picks `high` with adaptive
+    /// thinking, spending output tokens and latency Leviath never asked for.
+    /// `None` uses [`leviath_providers::claude_code::DEFAULT_EFFORT`].
+    #[serde(default)]
+    pub claude_code_effort: Option<String>,
 }
 
 impl Default for Config {
@@ -152,6 +175,9 @@ impl Default for Config {
                 anthropic_api_key: None,
                 openai_api_key: None,
                 google_api_key: None,
+                claude_code_enabled: false,
+                claude_code_binary: None,
+                claude_code_effort: None,
             },
             agent_paths: Vec::new(),
             registries: vec!["https://leviath.dev/registry".to_string()],
@@ -971,6 +997,9 @@ google_api_key = "AIza-existing"
                 anthropic_api_key: Some("sk-ant-test123".to_string()),
                 openai_api_key: None,
                 google_api_key: None,
+                claude_code_enabled: false,
+                claude_code_binary: None,
+                claude_code_effort: None,
             },
             ..Config::default()
         };
@@ -984,6 +1013,9 @@ google_api_key = "AIza-existing"
                 anthropic_api_key: Some("bad-key".to_string()),
                 openai_api_key: None,
                 google_api_key: None,
+                claude_code_enabled: false,
+                claude_code_binary: None,
+                claude_code_effort: None,
             },
             ..Config::default()
         };
@@ -999,6 +1031,9 @@ google_api_key = "AIza-existing"
                 anthropic_api_key: None,
                 openai_api_key: Some("sk-test123".to_string()),
                 google_api_key: None,
+                claude_code_enabled: false,
+                claude_code_binary: None,
+                claude_code_effort: None,
             },
             ..Config::default()
         };
@@ -1012,6 +1047,9 @@ google_api_key = "AIza-existing"
                 anthropic_api_key: None,
                 openai_api_key: Some("bad-key".to_string()),
                 google_api_key: None,
+                claude_code_enabled: false,
+                claude_code_binary: None,
+                claude_code_effort: None,
             },
             ..Config::default()
         };
@@ -1270,6 +1308,9 @@ max_output_tokens = 2048
                 anthropic_api_key: Some("bad".to_string()),
                 openai_api_key: Some("bad".to_string()),
                 google_api_key: None,
+                claude_code_enabled: false,
+                claude_code_binary: None,
+                claude_code_effort: None,
             },
             ..Config::default()
         };
@@ -1302,6 +1343,9 @@ max_output_tokens = 2048
                 anthropic_api_key: Some("sk-ant-key".to_string()),
                 openai_api_key: None,
                 google_api_key: None,
+                claude_code_enabled: false,
+                claude_code_binary: None,
+                claude_code_effort: None,
             },
             tool_permissions: {
                 let mut m = HashMap::new();
@@ -1333,6 +1377,9 @@ max_output_tokens = 2048
                 anthropic_api_key: Some("sk-ant-good-key".to_string()),
                 openai_api_key: Some("sk-good-key".to_string()),
                 google_api_key: None,
+                claude_code_enabled: false,
+                claude_code_binary: None,
+                claude_code_effort: None,
             },
             ..Config::default()
         };
@@ -1348,6 +1395,9 @@ max_output_tokens = 2048
                 anthropic_api_key: None,
                 openai_api_key: None,
                 google_api_key: Some("anything-goes".to_string()),
+                claude_code_enabled: false,
+                claude_code_binary: None,
+                claude_code_effort: None,
             },
             ..Config::default()
         };
@@ -1532,6 +1582,9 @@ anthropic_api_key = "sk-ant-test-key"
                 anthropic_api_key: Some("sk-ant-test".to_string()),
                 openai_api_key: Some("sk-test".to_string()),
                 google_api_key: None,
+                claude_code_enabled: false,
+                claude_code_binary: None,
+                claude_code_effort: None,
             },
             openrouter_api_key: Some("sk-or-test".to_string()),
             default_model: Some("gpt-5".to_string()),
@@ -1590,6 +1643,9 @@ anthropic_api_key = "sk-ant-test-key"
                 anthropic_api_key: Some("sk-ant-key".to_string()),
                 openai_api_key: None,
                 google_api_key: None,
+                claude_code_enabled: false,
+                claude_code_binary: None,
+                claude_code_effort: None,
             },
             agent_paths: vec![std::path::PathBuf::from("/my/agents")],
             registries: vec!["https://registry.example.com".to_string()],
