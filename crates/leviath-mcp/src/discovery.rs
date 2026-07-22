@@ -28,19 +28,148 @@ fn empty_object_schema() -> serde_json::Value {
     serde_json::json!({"type": "object"})
 }
 
+/// Which transport reaches a configured MCP server.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum MCPTransport {
+    /// Spawn the server as a child process and speak over its pipes.
+    Stdio,
+    /// Reach the server over HTTP.
+    Http,
+}
+
 /// Configuration for an MCP server connection.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// ```toml
+/// [[mcp_servers]]              # stdio
+/// name = "local"
+/// command = "npx"
+/// args = ["-y", "@my/mcp-server"]
+///
+/// [[mcp_servers]]              # http
+/// name = "remote"
+/// url = "https://mcp.example.com/mcp"
+/// headers = { Authorization = "Bearer ${MY_TOKEN}" }
+/// ```
+///
+/// `transport` may be omitted whenever exactly one of `command`/`url` is set;
+/// see [`MCPServerConfig::resolve`].
+///
+/// Field order matters: the scalar and array fields are declared before the
+/// map fields because this struct is round-tripped through
+/// `toml::to_string_pretty` when the CLI rewrites the config, and TOML rejects
+/// bare values emitted after a table.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct MCPServerConfig {
     /// Server name (used as an identifier)
     pub name: String,
-    /// Command to launch the server
-    pub command: String,
+    /// Transport to use. Inferred from `command`/`url` when omitted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transport: Option<MCPTransport>,
+    /// Command to launch the server (stdio transport)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
+    /// Endpoint to connect to (http transport)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
     /// Arguments to pass to the command
     #[serde(default)]
     pub args: Vec<String>,
-    /// Environment variables to set
+    /// Environment variables to set for the spawned command
     #[serde(default)]
     pub env: HashMap<String, String>,
+    /// Extra HTTP headers to send. Values may reference environment variables
+    /// as `${NAME}`, so a token need not be written into the config file.
+    #[serde(default)]
+    pub headers: HashMap<String, String>,
+}
+
+/// A validated [`MCPServerConfig`], narrowed to the fields its transport uses.
+#[derive(Debug, PartialEq, Eq)]
+pub enum ResolvedTransport<'a> {
+    /// Spawn `command` with `args` and `env`.
+    Stdio {
+        command: &'a str,
+        args: &'a [String],
+        env: &'a HashMap<String, String>,
+    },
+    /// Connect to `url` with `headers`.
+    Http {
+        url: &'a str,
+        headers: &'a HashMap<String, String>,
+    },
+}
+
+impl MCPServerConfig {
+    /// A stdio server definition.
+    pub fn stdio(name: impl Into<String>, command: impl Into<String>, args: Vec<String>) -> Self {
+        Self {
+            name: name.into(),
+            command: Some(command.into()),
+            args,
+            ..Self::default()
+        }
+    }
+
+    /// An HTTP server definition.
+    pub fn http(name: impl Into<String>, url: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            url: Some(url.into()),
+            ..Self::default()
+        }
+    }
+
+    /// Decide which transport this entry describes, rejecting ambiguity.
+    ///
+    /// With `transport` omitted the choice is inferred from whichever of
+    /// `command`/`url` is present — but only when exactly one is. Guessing
+    /// when both or neither are set would silently connect somewhere the user
+    /// did not intend, so those are errors.
+    pub fn resolve(&self) -> anyhow::Result<ResolvedTransport<'_>> {
+        let stdio = || match self.command.as_deref() {
+            Some(command) => Ok(ResolvedTransport::Stdio {
+                command,
+                args: &self.args,
+                env: &self.env,
+            }),
+            None => Err(anyhow::anyhow!(
+                "transport = \"stdio\" requires a `command`"
+            )),
+        };
+        let http = || match self.url.as_deref() {
+            Some(url) => Ok(ResolvedTransport::Http {
+                url,
+                headers: &self.headers,
+            }),
+            None => Err(anyhow::anyhow!("transport = \"http\" requires a `url`")),
+        };
+
+        match (self.transport, self.command.is_some(), self.url.is_some()) {
+            (Some(MCPTransport::Stdio), _, _) => stdio(),
+            (Some(MCPTransport::Http), _, _) => http(),
+            (None, true, false) => stdio(),
+            (None, false, true) => http(),
+            (None, true, true) => Err(anyhow::anyhow!(
+                "has both `command` and `url`; set `transport` to \"stdio\" or \
+                 \"http\" to say which one to use"
+            )),
+            (None, false, false) => Err(anyhow::anyhow!(
+                "needs either a `command` (stdio) or a `url` (http)"
+            )),
+        }
+    }
+
+    /// Validate this entry, discarding the resolved value.
+    ///
+    /// For callers that only want to know whether the config is usable — a
+    /// broken entry should be caught when the config loads, not at the first
+    /// tool call.
+    pub fn validate(&self) -> anyhow::Result<()> {
+        self.resolve()
+            .map(|_| ())
+            .map_err(|e| anyhow::anyhow!("mcp_servers entry '{}' {}", self.name, e))
+    }
 }
 
 /// Tool discovery service that aggregates tools from multiple MCP servers.
@@ -88,10 +217,9 @@ impl ToolDiscovery {
         &mut self,
         config: &MCPServerConfig,
     ) -> anyhow::Result<(Vec<ToolMetadata>, MCPClient)> {
-        tracing::info!(server = %config.name, command = %config.command, "Spawning MCP server from config");
+        tracing::info!(server = %config.name, "Connecting MCP server from config");
 
-        let args: Vec<&str> = config.args.iter().map(|s| s.as_str()).collect();
-        let mut client = MCPClient::spawn(&config.command, &args, &config.env).await?;
+        let mut client = MCPClient::from_config(config).await?;
         client.connect().await?;
 
         let tools = self.discover_from_client(&config.name, &mut client).await?;
@@ -183,14 +311,15 @@ mod tests {
     fn mcp_server_config_serde_roundtrip() {
         let config = MCPServerConfig {
             name: "server1".to_string(),
-            command: "node".to_string(),
+            command: Some("node".to_string()),
             args: vec!["index.js".to_string()],
             env: HashMap::from([("KEY".to_string(), "VAL".to_string())]),
+            ..Default::default()
         };
         let json = serde_json::to_string(&config).unwrap();
         let deserialized: MCPServerConfig = serde_json::from_str(&json).unwrap();
         assert_eq!(deserialized.name, "server1");
-        assert_eq!(deserialized.command, "node");
+        assert_eq!(deserialized.command.as_deref(), Some("node"));
         assert_eq!(deserialized.args, vec!["index.js"]);
         assert_eq!(deserialized.env.get("KEY").unwrap(), "VAL");
     }
@@ -200,7 +329,7 @@ mod tests {
         let json = r#"{"name": "s", "command": "cmd"}"#;
         let config: MCPServerConfig = serde_json::from_str(json).unwrap();
         assert_eq!(config.name, "s");
-        assert_eq!(config.command, "cmd");
+        assert_eq!(config.command.as_deref(), Some("cmd"));
         assert!(config.args.is_empty());
         assert!(config.env.is_empty());
     }
@@ -320,9 +449,10 @@ for line in sys.stdin:
     async fn discover_from_config_spawns_connects_and_discovers() {
         let config = MCPServerConfig {
             name: "configured-server".to_string(),
-            command: "python3".to_string(),
+            command: Some("python3".to_string()),
             args: vec!["-c".to_string(), STUB_INIT_AND_LIST.to_string()],
             env: HashMap::new(),
+            ..Default::default()
         };
 
         let mut discovery = ToolDiscovery::new();
@@ -345,9 +475,10 @@ for line in sys.stdin:
     async fn discover_from_config_invalid_command_propagates_error() {
         let config = MCPServerConfig {
             name: "bad-server".to_string(),
-            command: "this-command-does-not-exist-anywhere".to_string(),
+            command: Some("this-command-does-not-exist-anywhere".to_string()),
             args: vec![],
             env: HashMap::new(),
+            ..Default::default()
         };
 
         let mut discovery = ToolDiscovery::new();
@@ -435,9 +566,10 @@ for line in sys.stdin:
     async fn discover_from_config_connect_error_propagates() {
         let config = MCPServerConfig {
             name: "server1".to_string(),
-            command: "python3".to_string(),
+            command: Some("python3".to_string()),
             args: vec!["-c".to_string(), STUB_INIT_ERRORS.to_string()],
             env: HashMap::new(),
+            ..Default::default()
         };
 
         let mut discovery = ToolDiscovery::new();
@@ -450,14 +582,209 @@ for line in sys.stdin:
     async fn discover_from_config_discover_error_propagates() {
         let config = MCPServerConfig {
             name: "server1".to_string(),
-            command: "python3".to_string(),
+            command: Some("python3".to_string()),
             args: vec!["-c".to_string(), STUB_INIT_OK_LIST_ERRORS.to_string()],
             env: HashMap::new(),
+            ..Default::default()
         };
 
         let mut discovery = ToolDiscovery::new();
         let result = discovery.discover_from_config(&config).await;
         assert!(result.is_err());
         assert_eq!(discovery.server_count(), 0);
+    }
+
+    // ─── transport resolution ─────────────────────────────────────────────
+    //
+    // Every row of the inference table. Getting this wrong means silently
+    // connecting somewhere the user did not ask for, so ambiguity is an error
+    // rather than a guess.
+
+    fn cfg(
+        transport: Option<MCPTransport>,
+        command: Option<&str>,
+        url: Option<&str>,
+    ) -> MCPServerConfig {
+        MCPServerConfig {
+            name: "s".to_string(),
+            transport,
+            command: command.map(str::to_string),
+            url: url.map(str::to_string),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn command_alone_infers_stdio() {
+        let config = cfg(None, Some("npx"), None);
+        assert_eq!(
+            config.resolve().unwrap(),
+            ResolvedTransport::Stdio {
+                command: "npx",
+                args: &[],
+                env: &HashMap::new(),
+            }
+        );
+    }
+
+    #[test]
+    fn url_alone_infers_http() {
+        let config = cfg(None, None, Some("https://e.com/mcp"));
+        assert_eq!(
+            config.resolve().unwrap(),
+            ResolvedTransport::Http {
+                url: "https://e.com/mcp",
+                headers: &HashMap::new(),
+            }
+        );
+    }
+
+    #[test]
+    fn both_command_and_url_is_ambiguous() {
+        let err = cfg(None, Some("npx"), Some("https://e.com/mcp"))
+            .resolve()
+            .expect_err("ambiguous config must not resolve");
+        assert!(err.to_string().contains("set `transport`"), "got: {err}");
+    }
+
+    #[test]
+    fn neither_command_nor_url_is_incomplete() {
+        let err = cfg(None, None, None)
+            .resolve()
+            .expect_err("empty config must not resolve");
+        assert!(err.to_string().contains("either a `command`"), "got: {err}");
+    }
+
+    #[test]
+    fn explicit_stdio_wins_over_a_url() {
+        // The explicit setting is exactly how a user disambiguates.
+        let config = cfg(
+            Some(MCPTransport::Stdio),
+            Some("npx"),
+            Some("https://e.com"),
+        );
+        assert!(matches!(
+            config.resolve().unwrap(),
+            ResolvedTransport::Stdio { command, .. } if command == "npx"
+        ));
+    }
+
+    #[test]
+    fn explicit_http_wins_over_a_command() {
+        let config = cfg(Some(MCPTransport::Http), Some("npx"), Some("https://e.com"));
+        assert!(matches!(
+            config.resolve().unwrap(),
+            ResolvedTransport::Http { url, .. } if url == "https://e.com"
+        ));
+    }
+
+    #[test]
+    fn explicit_stdio_without_a_command_is_an_error() {
+        let err = cfg(Some(MCPTransport::Stdio), None, Some("https://e.com"))
+            .resolve()
+            .expect_err("stdio needs a command");
+        assert!(
+            err.to_string().contains("requires a `command`"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn explicit_http_without_a_url_is_an_error() {
+        let err = cfg(Some(MCPTransport::Http), Some("npx"), None)
+            .resolve()
+            .expect_err("http needs a url");
+        assert!(err.to_string().contains("requires a `url`"), "got: {err}");
+    }
+
+    #[test]
+    fn validate_names_the_offending_server() {
+        // The message has to identify *which* entry is broken; a config can
+        // hold many.
+        let err = cfg(None, None, None)
+            .validate()
+            .expect_err("empty config must not validate");
+        assert!(err.to_string().contains("'s'"), "got: {err}");
+    }
+
+    #[test]
+    fn validate_accepts_a_usable_entry() {
+        assert!(cfg(None, Some("npx"), None).validate().is_ok());
+    }
+
+    // ─── constructors and serde shape ─────────────────────────────────────
+
+    #[test]
+    fn stdio_constructor_sets_only_stdio_fields() {
+        let config = MCPServerConfig::stdio("local", "npx", vec!["-y".to_string()]);
+        assert_eq!(config.command.as_deref(), Some("npx"));
+        assert_eq!(config.args, vec!["-y"]);
+        assert!(config.url.is_none());
+        assert!(config.transport.is_none());
+    }
+
+    #[test]
+    fn http_constructor_sets_only_http_fields() {
+        let config = MCPServerConfig::http("remote", "https://e.com/mcp");
+        assert_eq!(config.url.as_deref(), Some("https://e.com/mcp"));
+        assert!(config.command.is_none());
+    }
+
+    #[test]
+    fn transport_serializes_as_a_lowercase_string() {
+        assert_eq!(
+            serde_json::to_string(&MCPTransport::Stdio).unwrap(),
+            "\"stdio\""
+        );
+        assert_eq!(
+            serde_json::to_string(&MCPTransport::Http).unwrap(),
+            "\"http\""
+        );
+        let parsed: MCPTransport = serde_json::from_str("\"http\"").unwrap();
+        assert_eq!(parsed, MCPTransport::Http);
+    }
+
+    #[test]
+    fn absent_optional_fields_are_omitted_when_serialized() {
+        // These round-trip through `toml::to_string_pretty` when the CLI
+        // rewrites the config; emitting explicit nulls would not parse back.
+        let json = serde_json::to_string(&MCPServerConfig::stdio("s", "npx", vec![])).unwrap();
+        assert!(!json.contains("url"), "got: {json}");
+        assert!(!json.contains("transport"), "got: {json}");
+    }
+
+    #[test]
+    fn an_http_entry_parses_from_toml() {
+        let config: MCPServerConfig = toml::from_str(
+            r#"
+name = "remote"
+url = "https://mcp.example.com/mcp"
+headers = { Authorization = "Bearer tok" }
+"#,
+        )
+        .unwrap();
+        assert_eq!(config.url.as_deref(), Some("https://mcp.example.com/mcp"));
+        assert_eq!(config.headers.get("Authorization").unwrap(), "Bearer tok");
+        assert_eq!(
+            config.resolve().unwrap(),
+            ResolvedTransport::Http {
+                url: "https://mcp.example.com/mcp",
+                headers: &config.headers,
+            }
+        );
+    }
+
+    #[test]
+    fn a_config_round_trips_through_toml() {
+        // Field order matters: TOML rejects bare values emitted after a table,
+        // so the scalar fields must be declared before `env`/`headers`.
+        let mut config = MCPServerConfig::http("remote", "https://e.com/mcp");
+        config
+            .headers
+            .insert("Authorization".to_string(), "Bearer tok".to_string());
+        let text = toml::to_string_pretty(&config).expect("must serialize");
+        let back: MCPServerConfig = toml::from_str(&text).expect("must parse back");
+        assert_eq!(back.url, config.url);
+        assert_eq!(back.headers, config.headers);
     }
 }

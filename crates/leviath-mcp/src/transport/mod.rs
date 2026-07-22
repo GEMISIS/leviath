@@ -10,7 +10,9 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 
+pub(crate) mod http;
 pub(crate) mod jsonrpc;
+pub(crate) mod sse;
 pub mod stdio;
 
 pub(crate) use jsonrpc::{JsonRpcRequest, JsonRpcResponse};
