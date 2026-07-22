@@ -5,7 +5,8 @@
 //! `leviath-cli`, since it depends on cli-only path helpers.
 
 use crate::blueprint::{
-    EdgeTransform, ModelConfig, ModelEntry, StageMode, TransitionCondition, TransitionEdge,
+    ContentTransform, ContextTransform, EdgeTransform, ModelConfig, ModelEntry, RegionMapping,
+    StageMode, TransitionCondition, TransitionEdge,
 };
 use crate::error::{Error, Result};
 use crate::layout::RegionDefinition;
@@ -719,7 +720,78 @@ pub fn parse_manifest(content: &str) -> Result<Blueprint> {
         });
     }
 
+    // Parse repetition-detection config: [repetition_detection]
+    if let Some(rd_table) = parsed
+        .get("repetition_detection")
+        .and_then(|v| v.as_table())
+    {
+        blueprint.repetition_detection = Some(crate::RepetitionDetectionConfig {
+            max_repeat_calls: rd_table
+                .get("max_repeat_calls")
+                .and_then(|v| v.as_integer())
+                .map(|v| v as usize),
+            max_readonly_streak: rd_table
+                .get("max_readonly_streak")
+                .and_then(|v| v.as_integer())
+                .map(|v| v as usize),
+            enabled: rd_table.get("enabled").and_then(|v| v.as_bool()),
+        });
+    }
+
+    // Parse cross-blueprint context transforms: [[transforms]]. Each maps a
+    // parent (`from_blueprint`) region onto a child (`to_blueprint`) region when
+    // a sub-agent is spawned, optionally transforming the content en route.
+    if let Some(transforms_arr) = parsed.get("transforms").and_then(|v| v.as_array()) {
+        for t in transforms_arr {
+            let mappings = t
+                .get("mappings")
+                .and_then(|v| v.as_array())
+                .map(|arr| arr.iter().map(parse_region_mapping).collect())
+                .unwrap_or_default();
+            blueprint.transforms.push(ContextTransform {
+                from_blueprint: str_field(t, "from_blueprint"),
+                to_blueprint: str_field(t, "to_blueprint"),
+                mappings,
+            });
+        }
+    }
+
     Ok(blueprint)
+}
+
+/// A required-shaped string field, defaulting to empty when absent (the value's
+/// meaning is validated later by `Blueprint::validate`).
+fn str_field(v: &toml::Value, key: &str) -> String {
+    v.get(key)
+        .and_then(|x| x.as_str())
+        .unwrap_or_default()
+        .to_string()
+}
+
+/// Parse one `[[transforms.mappings]]` entry. An omitted or unrecognized
+/// `transform` yields `None` (a plain region copy at apply time).
+fn parse_region_mapping(v: &toml::Value) -> RegionMapping {
+    let transform = match v.get("transform").and_then(|x| x.as_str()) {
+        Some("direct") => Some(ContentTransform::Direct),
+        Some("summarize") => Some(ContentTransform::Summarize),
+        Some("extract") => Some(ContentTransform::Extract {
+            fields: v
+                .get("fields")
+                .and_then(|x| x.as_array())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|x| x.as_str().map(String::from))
+                        .collect()
+                })
+                .unwrap_or_default(),
+        }),
+        _ => None,
+    };
+    RegionMapping {
+        from_region: str_field(v, "from_region"),
+        to_region: str_field(v, "to_region"),
+        transform,
+    }
 }
 
 /// Parse a `[security]` / `[stages.X.security]` table into a `SecurityConfig`.
@@ -1063,6 +1135,151 @@ conversation = { kind = "sliding_window", max_items = 20, max_tokens = 10000 }
         let conv = bp.context_layout.get_region("conversation").unwrap();
         assert!(!conv.required, "unmarked region defaults to not required");
         assert!(conv.required_message.is_none());
+    }
+
+    #[test]
+    fn parse_manifest_reads_repetition_detection() {
+        let toml = r#"
+[agent]
+name = "rep-test"
+
+[stages.main.model]
+provider = "anthropic"
+model = "claude-sonnet-5"
+
+[repetition_detection]
+max_repeat_calls = 4
+max_readonly_streak = 12
+enabled = true
+"#;
+        let bp = parse_manifest(toml).unwrap();
+        let rd = bp
+            .repetition_detection
+            .expect("repetition_detection parsed");
+        assert_eq!(rd.max_repeat_calls, Some(4));
+        assert_eq!(rd.max_readonly_streak, Some(12));
+        assert_eq!(rd.enabled, Some(true));
+    }
+
+    #[test]
+    fn parse_manifest_repetition_detection_absent_and_partial() {
+        // Absent → None.
+        let base = r#"
+[agent]
+name = "rep2"
+
+[stages.main.model]
+provider = "anthropic"
+model = "claude-sonnet-5"
+"#;
+        assert!(parse_manifest(base).unwrap().repetition_detection.is_none());
+        // A partial block leaves the unset fields as None.
+        let partial = format!("{base}\n[repetition_detection]\nenabled = false\n");
+        let rd = parse_manifest(&partial)
+            .unwrap()
+            .repetition_detection
+            .unwrap();
+        assert_eq!(rd.enabled, Some(false));
+        assert_eq!(rd.max_repeat_calls, None);
+        assert_eq!(rd.max_readonly_streak, None);
+    }
+
+    #[test]
+    fn parse_manifest_reads_transforms_with_all_mapping_kinds() {
+        use crate::blueprint::ContentTransform;
+        let toml = r#"
+[agent]
+name = "xform-test"
+
+[stages.main.model]
+provider = "anthropic"
+model = "claude-sonnet-5"
+
+[[transforms]]
+from_blueprint = "planner"
+to_blueprint = "coder"
+
+[[transforms.mappings]]
+from_region = "plan"
+to_region = "plan"
+transform = "direct"
+
+[[transforms.mappings]]
+from_region = "notes"
+to_region = "summary"
+transform = "summarize"
+
+[[transforms.mappings]]
+from_region = "spec"
+to_region = "fields"
+transform = "extract"
+fields = ["title", "owner"]
+
+[[transforms.mappings]]
+from_region = "misc"
+to_region = "misc"
+"#;
+        // Render each parsed transform to a stable tag (ContentTransform has no
+        // PartialEq); the four mappings exercise every arm.
+        fn tag(t: &Option<ContentTransform>) -> String {
+            match t {
+                None => "none".to_string(),
+                Some(ContentTransform::Direct) => "direct".to_string(),
+                Some(ContentTransform::Summarize) => "summarize".to_string(),
+                Some(ContentTransform::Extract { fields }) => {
+                    format!("extract:{}", fields.join(","))
+                }
+            }
+        }
+        let bp = parse_manifest(toml).unwrap();
+        assert_eq!(bp.transforms.len(), 1);
+        let xf = &bp.transforms[0];
+        assert_eq!(xf.from_blueprint, "planner");
+        assert_eq!(xf.to_blueprint, "coder");
+        assert_eq!(xf.mappings.len(), 4);
+        assert_eq!(tag(&xf.mappings[0].transform), "direct");
+        assert_eq!(tag(&xf.mappings[1].transform), "summarize");
+        assert_eq!(tag(&xf.mappings[2].transform), "extract:title,owner");
+        // A mapping with no `transform` key → None (plain copy at apply time).
+        assert_eq!(tag(&xf.mappings[3].transform), "none");
+        assert_eq!(xf.mappings[3].from_region, "misc");
+    }
+
+    #[test]
+    fn parse_manifest_transform_unknown_kind_is_none() {
+        let toml = r#"
+[agent]
+name = "xform-unknown"
+
+[stages.main.model]
+provider = "anthropic"
+model = "claude-sonnet-5"
+
+[[transforms]]
+from_blueprint = "a"
+to_blueprint = "b"
+
+[[transforms.mappings]]
+from_region = "r"
+to_region = "r"
+transform = "bogus"
+"#;
+        let bp = parse_manifest(toml).unwrap();
+        // An unrecognized transform is treated as a plain copy (None), never a panic.
+        assert!(bp.transforms[0].mappings[0].transform.is_none());
+    }
+
+    #[test]
+    fn parse_manifest_transforms_absent_is_empty() {
+        let toml = r#"
+[agent]
+name = "no-xform"
+
+[stages.main.model]
+provider = "anthropic"
+model = "claude-sonnet-5"
+"#;
+        assert!(parse_manifest(toml).unwrap().transforms.is_empty());
     }
 
     #[test]
