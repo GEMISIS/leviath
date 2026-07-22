@@ -20,6 +20,7 @@ pub mod lifecycle;
 pub mod manifest;
 pub mod policy;
 pub mod region;
+pub mod run_archive;
 pub mod run_meta;
 pub mod taint;
 

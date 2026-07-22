@@ -40,7 +40,7 @@ impl std::fmt::Display for RunStatus {
 }
 
 /// Metadata for a single background agent run.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct RunMeta {
     pub run_id: String,
     pub agent_name: String,
@@ -148,7 +148,7 @@ impl RunMeta {
 }
 
 /// One content entry within a region, captured at snapshot time.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct RegionEntrySnapshot {
     pub content: String,
     pub tokens: usize,
@@ -164,7 +164,7 @@ pub struct RegionEntrySnapshot {
 }
 
 /// Per-region token snapshot written by the background worker after each inference.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct RegionSnapshot {
     pub name: String,
     /// Stringified kind: "pinned", "temporary", "clearable", "sliding", "compacting", "history"
@@ -177,7 +177,7 @@ pub struct RegionSnapshot {
 }
 
 /// Snapshot of the full context window, written to `context.json` alongside `meta.json`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ContextSnapshot {
     pub stage_name: String,
     pub total_tokens: usize,
