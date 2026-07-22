@@ -4,6 +4,7 @@
 //! HTTP. No web UI — the frontend lives in a separate repo.
 
 mod agents;
+mod auth;
 mod blueprints;
 mod config;
 mod interactions;
@@ -72,6 +73,17 @@ async fn execute_with_shutdown(
     shutdown: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>,
     ready: Option<tokio::sync::oneshot::Sender<SocketAddr>>,
 ) -> anyhow::Result<()> {
+    // Resolve the API token before binding — refuse to start unauthenticated.
+    let auth_token = std::sync::Arc::new(auth::resolve_token(args.token.as_deref())?);
+    // The API can spawn tool-executing agents; loudly warn if bound off-host.
+    if args.host != "127.0.0.1" && args.host != "localhost" && args.host != "::1" {
+        tracing::warn!(
+            host = %args.host,
+            "serving the agent API on a non-local address — anyone who can reach \
+             this host and holds the token can spawn agents"
+        );
+    }
+
     let cfg = Config::load()?;
     for warning in cfg.validate_keys() {
         tracing::warn!("{}", warning);
@@ -159,6 +171,12 @@ async fn execute_with_shutdown(
         // WebSocket
         .route("/ws", get(websocket::ws_global))
         .route("/ws/agents/{id}", get(websocket::ws_agent))
+        // Require a valid token on every route; CORS stays outermost so browser
+        // preflight (OPTIONS) is answered before the auth check.
+        .layer(axum::middleware::from_fn_with_state(
+            auth_token,
+            auth::require_auth,
+        ))
         .layer(cors)
         .with_state(state);
 
@@ -745,6 +763,7 @@ prompt = "Run"
             port: 3000,
             host: "127.0.0.1".to_string(),
             cors: "*".to_string(),
+            token: Some("test-token".to_string()),
         };
         assert_eq!(args.port, 3000);
         assert_eq!(args.host, "127.0.0.1");
@@ -839,6 +858,7 @@ prompt = "Run"
                     port: 0,
                     host: "127.0.0.1".to_string(),
                     cors: "*".to_string(),
+                    token: Some("test-token".to_string()),
                 };
                 let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
                 let handle = tokio::spawn(execute_with_shutdown(
@@ -856,7 +876,8 @@ prompt = "Run"
                 use tokio::io::{AsyncReadExt, AsyncWriteExt};
                 stream
                     .write_all(
-                        b"GET /api/config HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+                        b"GET /api/config HTTP/1.1\r\nHost: localhost\r\n\
+                          Authorization: Bearer test-token\r\nConnection: close\r\n\r\n",
                     )
                     .await
                     .unwrap();
@@ -864,6 +885,21 @@ prompt = "Run"
                 stream.read_to_end(&mut resp).await.unwrap();
                 let resp_str = String::from_utf8_lossy(&resp);
                 assert_response_ok(&resp_str);
+
+                // Without the token the same request is rejected.
+                let mut unauth = tokio::net::TcpStream::connect(addr).await.unwrap();
+                unauth
+                    .write_all(
+                        b"GET /api/config HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+                    )
+                    .await
+                    .unwrap();
+                let mut resp2 = Vec::new();
+                unauth.read_to_end(&mut resp2).await.unwrap();
+                assert!(
+                    String::from_utf8_lossy(&resp2).starts_with("HTTP/1.1 401"),
+                    "unauthenticated request should be 401"
+                );
 
                 handle.abort();
             },
@@ -880,6 +916,7 @@ prompt = "Run"
                     port: 0,
                     host: "127.0.0.1".to_string(),
                     cors: "https://example.com".to_string(),
+                    token: Some("test-token".to_string()),
                 };
                 let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
                 let handle = tokio::spawn(execute_with_shutdown(
@@ -907,6 +944,7 @@ prompt = "Run"
             port: 0,
             host: "not a valid host".to_string(),
             cors: "*".to_string(),
+            token: Some("test-token".to_string()),
         };
         let result = execute(args, no_daemon_control()).await;
         assert!(result.is_err());
@@ -937,6 +975,7 @@ prompt = "Run"
                     port: 0,
                     host: "127.0.0.1".to_string(),
                     cors: "*".to_string(),
+                    token: Some("test-token".to_string()),
                 };
                 let result = execute(args, no_daemon_control()).await;
                 assert_execute_failed_on_malformed_config(&result);
@@ -963,6 +1002,7 @@ prompt = "Run"
             port: 0,
             host: "127.0.0.1".to_string(),
             cors: "*".to_string(),
+            token: Some("test-token".to_string()),
         };
 
         let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
@@ -1005,9 +1045,26 @@ prompt = "Run"
             port: 8080,
             host: "192.0.2.1".to_string(),
             cors: "*".to_string(),
+            token: Some("test-token".to_string()),
         };
         let result = execute(args, no_daemon_control()).await;
         assert_execute_failed_on_port_in_use(&result);
+    }
+
+    #[tokio::test]
+    async fn execute_refuses_to_start_without_a_token() {
+        // No --token and no LEVIATH_API_TOKEN ⇒ the server won't start.
+        temp_env::async_with_vars([("LEVIATH_API_TOKEN", None::<&str>)], async {
+            let args = ServeArgs {
+                port: 0,
+                host: "127.0.0.1".to_string(),
+                cors: "*".to_string(),
+                token: None,
+            };
+            let result = execute(args, no_daemon_control()).await;
+            assert!(result.is_err(), "must refuse to start unauthenticated");
+        })
+        .await;
     }
 
     /// Covers `axum::serve(...).await?` Ok path (lines 117, 119) by running
@@ -1021,6 +1078,7 @@ prompt = "Run"
                     port: 0,
                     host: "127.0.0.1".to_string(),
                     cors: "*".to_string(),
+                    token: Some("test-token".to_string()),
                 };
 
                 let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
@@ -1065,6 +1123,7 @@ prompt = "Run"
                     port: 0,
                     host: "127.0.0.1".to_string(),
                     cors: "*".to_string(),
+                    token: Some("test-token".to_string()),
                 };
 
                 let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();

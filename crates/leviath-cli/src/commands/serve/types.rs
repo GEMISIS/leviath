@@ -25,6 +25,12 @@ pub struct ServeArgs {
     /// Allow CORS from origin (default: *)
     #[arg(long, default_value = "*")]
     pub cors: String,
+
+    /// API token clients must present (`Authorization: Bearer <token>`, or
+    /// `?token=` for WebSockets). Overrides the LEVIATH_API_TOKEN env var; the
+    /// server refuses to start if neither is set.
+    #[arg(long)]
+    pub token: Option<String>,
 }
 
 // ─── Shared state ────────────────────────────────────────────────────────────
