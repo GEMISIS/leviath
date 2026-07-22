@@ -307,7 +307,34 @@ Covers agent lifecycle, human-in-the-loop interaction, blueprint management, per
 | `lev pack` / `lev add` / `lev remove` | Package management |
 | `lev list` | List installed agents |
 | `lev test` | Run agent tests |
+| `lev mcp add\|list\|remove\|login\|logout\|test` | Manage MCP tool servers (auto-logs in on `add`) |
 | `lev setup` / `lev models` | Configuration |
+
+### 🧩 MCP tool servers
+
+Leviath connects to [Model Context Protocol](https://modelcontextprotocol.io)
+servers over **stdio** (a spawned process) or **HTTP** (streamable, with a
+legacy HTTP+SSE fallback). Configure them in `~/.leviath/config.toml`:
+
+```toml
+# stdio — a locally spawned server
+[[mcp_servers]]
+name = "filesystem"
+command = "npx"
+args = ["-y", "@modelcontextprotocol/server-filesystem", "/path"]
+
+# HTTP — a remote server (static token optional; ${VAR} keeps it out of the file)
+[[mcp_servers]]
+name = "navigator"
+url = "https://mcp.example.com/mcp"
+headers = { Authorization = "Bearer ${MY_MCP_TOKEN}" }
+```
+
+Servers that authenticate via the browser (OAuth) need no token in the config —
+`lev mcp add navigator --url https://mcp.example.com/mcp` detects the login
+requirement and opens your browser automatically. Tokens are stored in
+`~/.leviath/mcp-auth.json` (mode `0600`) and refreshed non-interactively as the
+daemon runs.
 
 ## 🔌 Providers
 

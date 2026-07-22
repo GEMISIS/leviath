@@ -7,6 +7,7 @@ pub mod ctl;
 pub mod daemon;
 pub mod dashboard;
 pub mod list;
+pub mod mcp;
 pub mod models;
 pub mod pack;
 pub mod policy;

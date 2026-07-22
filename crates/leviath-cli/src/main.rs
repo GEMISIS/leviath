@@ -103,6 +103,23 @@ impl RiskyExecutors for RealExecutors {
             Some(DaemonAction::Restart) => real_daemon_restart().await,
         }
     }
+
+    async fn mcp(&self, args: commands::mcp::McpArgs) -> anyhow::Result<()> {
+        // The command logic is the tested `mcp::execute_with`; only the real
+        // paths, browser launcher, and clock are composed here.
+        let env = commands::mcp::McpEnv {
+            config_path: leviath_cli::config::Config::config_path(),
+            store_path: leviath_mcp::AuthStore::default_path().ok_or_else(|| {
+                anyhow::anyhow!("could not resolve a home directory for the MCP auth store")
+            })?,
+            opener: leviath_sys::open_url,
+            now: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0),
+        };
+        commands::mcp::execute_with(args, &env).await
+    }
 }
 
 /// Real `lev run`: ensure the daemon is running (auto-start it detached if not),
