@@ -1,13 +1,20 @@
-//! MCP client for connecting to tool providers via JSON-RPC 2.0 over stdin/stdout.
+//! MCP client: the protocol layer, over any transport.
+//!
+//! Framing and connection lifecycle live in [`crate::transport`]; this module
+//! owns the MCP conversation itself — the handshake, tool discovery, tool
+//! calls, and the wire types they exchange.
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
-use tokio::io::{AsyncBufReadExt, AsyncWrite, AsyncWriteExt, BufReader, BufWriter};
-use tokio::process::{Child, ChildStdin, ChildStdout, Command};
+use std::time::Duration;
 
 use crate::discovery::ToolMetadata;
+use crate::transport::stdio::StdioTransport;
+use crate::transport::{
+    DEFAULT_CONNECT_TIMEOUT, DEFAULT_REQUEST_TIMEOUT, JsonRpcRequest, Transport,
+};
 
 /// Upper bound on `tools/list` pages followed, so a server that always returns
 /// a `nextCursor` can't spin the discovery loop forever.
@@ -122,87 +129,56 @@ pub enum ToolResultContent {
     #[serde(other)]
     Unknown,
 }
+/// MCP protocol revisions this client understands, newest first.
+///
+/// The client offers the newest and adopts whatever the server echoes back.
+/// Pinning a single old revision — as this used to, with `2024-11-05`
+/// hardcoded — locks every connection to the oldest dialect and, on HTTP,
+/// actively misdeclares the connection: the streamable transport postdates
+/// that revision entirely.
+pub const SUPPORTED_PROTOCOL_VERSIONS: &[&str] =
+    &["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"];
 
-/// Client for communicating with MCP tool providers via JSON-RPC 2.0 over stdin/stdout.
+/// The revision offered in `initialize`.
+pub const PREFERRED_PROTOCOL_VERSION: &str = SUPPORTED_PROTOCOL_VERSIONS[0];
+
+/// Client for communicating with MCP tool providers over any transport.
 pub struct MCPClient {
-    /// Child process handle
-    child: Child,
-    /// Stdin writer for sending JSON-RPC requests
-    writer: BufWriter<ChildStdin>,
-    /// Reader for receiving JSON-RPC responses
-    reader: BufReader<ChildStdout>,
+    /// The underlying message channel (stdio or HTTP).
+    transport: Box<dyn Transport>,
     /// Next request ID
     next_id: AtomicU64,
+    /// How long to wait for a response to an ordinary request.
+    request_timeout: Duration,
     /// Server capabilities after initialization
     capabilities: Option<ServerCapabilities>,
+    /// The protocol revision agreed during `initialize`.
+    protocol_version: Option<String>,
     /// Cached tool list from the server
     cached_tools: Vec<ToolMetadata>,
 }
 
-#[derive(Serialize)]
-struct JsonRpcRequest {
-    jsonrpc: &'static str,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    id: Option<u64>,
-    method: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    params: Option<Value>,
-}
-
-#[derive(Deserialize)]
-struct JsonRpcResponse {
-    #[allow(dead_code)]
-    jsonrpc: String,
-    #[allow(dead_code)]
-    id: Option<Value>,
-    result: Option<Value>,
-    error: Option<JsonRpcError>,
-}
-
-#[derive(Deserialize)]
-struct JsonRpcError {
-    #[allow(dead_code)]
-    code: i64,
-    message: String,
-}
-
 impl MCPClient {
-    /// Spawn an MCP server as a child process.
+    /// Build a client over an already-constructed transport.
+    pub(crate) fn new(transport: Box<dyn Transport>) -> Self {
+        Self {
+            transport,
+            next_id: AtomicU64::new(1),
+            request_timeout: DEFAULT_REQUEST_TIMEOUT,
+            capabilities: None,
+            protocol_version: None,
+            cached_tools: Vec::new(),
+        }
+    }
+
+    /// Spawn an MCP server as a child process and talk to it over stdio.
     pub async fn spawn(
         command: &str,
         args: &[&str],
         env: &HashMap<String, String>,
     ) -> anyhow::Result<Self> {
-        tracing::info!(command = %command, "Spawning MCP server process");
-
-        let mut cmd = Command::new(command);
-
-        // Build clean environment - strip sensitive keys from parent env
-        cmd.env_clear()
-            .envs(Self::filter_env(&std::env::vars().collect::<Vec<_>>()));
-        // Add explicitly configured env vars (intentional, from MCP config)
-        cmd.envs(env);
-
-        cmd.args(args)
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::null());
-
-        let mut child = cmd
-            .spawn()
-            .map_err(|e| anyhow::anyhow!("Failed to spawn MCP server '{}': {}", command, e))?;
-
-        let stdin = child.stdin.take().expect("stdin piped at spawn");
-        let stdout = child.stdout.take().expect("stdout piped at spawn");
-
-        Ok(Self {
-            child,
-            writer: BufWriter::new(stdin),
-            reader: BufReader::new(stdout),
-            next_id: AtomicU64::new(1),
-            capabilities: None,
-            cached_tools: Vec::new(),
-        })
+        let transport = StdioTransport::spawn(command, args, env).await?;
+        Ok(Self::new(Box::new(transport)))
     }
 
     /// Connect to the MCP server by sending initialize and initialized messages.
@@ -210,7 +186,7 @@ impl MCPClient {
         tracing::info!("Initializing MCP connection");
 
         let init_params = serde_json::json!({
-            "protocolVersion": "2024-11-05",
+            "protocolVersion": PREFERRED_PROTOCOL_VERSION,
             "capabilities": {},
             "clientInfo": {
                 "name": "leviath",
@@ -218,7 +194,12 @@ impl MCPClient {
             }
         });
 
-        let result = self.send_request("initialize", init_params).await?;
+        // Tighter than an ordinary request: a server that hasn't finished its
+        // handshake in this long is broken, not busy, and it is holding up an
+        // agent's startup.
+        let result = self
+            .request_with_timeout("initialize", init_params, DEFAULT_CONNECT_TIMEOUT)
+            .await?;
 
         // Parse server capabilities
         let capabilities: ServerCapabilities = if let Some(caps) = result.get("capabilities") {
@@ -227,12 +208,16 @@ impl MCPClient {
             ServerCapabilities::default()
         };
         self.capabilities = Some(capabilities);
+        self.protocol_version = Some(negotiated_version(result.get("protocolVersion")));
 
         // Send initialized notification
         self.send_notification("notifications/initialized", serde_json::json!({}))
             .await?;
 
-        tracing::info!("MCP connection established");
+        tracing::info!(
+            version = %self.protocol_version.as_deref().unwrap_or_default(),
+            "MCP connection established"
+        );
         Ok(())
     }
 
@@ -300,21 +285,22 @@ impl MCPClient {
     }
 
     /// Shutdown the MCP server.
+    ///
+    /// Always succeeds: a dead or unresponsive server must never block cleanup.
     pub async fn shutdown(&mut self) -> anyhow::Result<()> {
         tracing::info!("Shutting down MCP server");
-
-        // Try to send a cancellation, but don't fail if the process is already gone
-        let _ = self
-            .send_notification("notifications/cancelled", serde_json::json!({}))
-            .await;
-        let _ = self.child.kill().await;
-
+        let _ = self.transport.close().await;
         Ok(())
     }
 
     /// Get the server capabilities (available after connect).
     pub fn capabilities(&self) -> Option<&ServerCapabilities> {
         self.capabilities.as_ref()
+    }
+
+    /// The protocol revision agreed with the server (available after connect).
+    pub fn protocol_version(&self) -> Option<&str> {
+        self.protocol_version.as_deref()
     }
 
     /// Get the cached tool list.
@@ -324,129 +310,55 @@ impl MCPClient {
 
     /// Send a JSON-RPC request and wait for a response.
     async fn send_request(&mut self, method: &str, params: Value) -> anyhow::Result<Value> {
-        let id = self.next_id.fetch_add(1, Ordering::SeqCst);
-
-        let request = JsonRpcRequest {
-            jsonrpc: "2.0",
-            id: Some(id),
-            method: method.to_string(),
-            params: Some(params),
-        };
-
-        let mut request_json =
-            serde_json::to_string(&request).expect("JsonRpcRequest is always serializable");
-        request_json.push('\n');
-
-        tracing::trace!(method = %method, id = id, "Sending JSON-RPC request");
-
-        // Write request line (newline already appended)
-        Self::write_line(
-            &mut self.writer,
-            &request_json,
-            "Failed to write to MCP server stdin",
-            "Failed to flush MCP server stdin",
-        )
-        .await?;
-
-        // Read response line
-        let mut line = String::new();
-        self.reader
-            .read_line(&mut line)
+        self.request_with_timeout(method, params, self.request_timeout)
             .await
-            .expect("failed to read from MCP server stdout");
-
-        if line.is_empty() {
-            return Err(anyhow::anyhow!("MCP server closed connection unexpectedly"));
-        }
-
-        let response: JsonRpcResponse = serde_json::from_str(line.trim())
-            .map_err(|e| anyhow::anyhow!("Failed to parse JSON-RPC response: {}", e))?;
-
-        if let Some(error) = response.error {
-            return Err(anyhow::anyhow!("MCP server error: {}", error.message));
-        }
-
-        response
-            .result
-            .ok_or_else(|| anyhow::anyhow!("MCP server returned no result"))
     }
 
-    /// Filter environment variables, stripping sensitive keys.
-    ///
-    /// Used internally by `spawn()` to build a clean environment for child processes.
-    pub fn filter_env(vars: &[(String, String)]) -> HashMap<String, String> {
-        let sensitive_patterns = [
-            "API_KEY",
-            "API_SECRET",
-            "SECRET_KEY",
-            "ACCESS_TOKEN",
-            "AUTH_TOKEN",
-            "PRIVATE_KEY",
-            "PASSWORD",
-        ];
-        vars.iter()
-            .filter(|(key, _)| {
-                let key_upper = key.to_uppercase();
-                !sensitive_patterns.iter().any(|p| key_upper.contains(p))
-            })
-            .cloned()
-            .collect()
+    /// [`Self::send_request`] with an explicit deadline.
+    async fn request_with_timeout(
+        &mut self,
+        method: &str,
+        params: Value,
+        timeout: Duration,
+    ) -> anyhow::Result<Value> {
+        let id = self.next_id.fetch_add(1, Ordering::SeqCst);
+        let request = JsonRpcRequest::request(id, method, params);
+        self.transport
+            .send_request(&request, timeout)
+            .await?
+            .into_result()
     }
 
     /// Send a JSON-RPC notification (fire-and-forget, no response expected).
     async fn send_notification(&mut self, method: &str, params: Value) -> anyhow::Result<()> {
-        let request = JsonRpcRequest {
-            jsonrpc: "2.0",
-            id: None,
-            method: method.to_string(),
-            params: Some(params),
-        };
-
-        let mut request_json =
-            serde_json::to_string(&request).expect("JsonRpcRequest is always serializable");
-        request_json.push('\n');
-
-        tracing::trace!(method = %method, "Sending JSON-RPC notification");
-
-        Self::write_line(
-            &mut self.writer,
-            &request_json,
-            "Failed to write notification",
-            "Failed to flush notification",
-        )
-        .await?;
-
-        Ok(())
+        let request = JsonRpcRequest::notification(method, params);
+        self.transport.send_notification(&request).await
     }
+}
 
-    /// Write `line` to `writer` and flush it, mapping I/O errors to context-
-    /// tagged `anyhow` errors.
-    ///
-    /// Split out (behavior-preserving) from [`Self::send_request`] and
-    /// [`Self::send_notification`] so the write / flush error arms can be
-    /// exercised against an injectable writer on every platform. The real
-    /// `BufWriter<ChildStdin>` path buffers differently per OS (a >8KB write
-    /// to a broken pipe surfaces the error in `write_all` on Unix but is
-    /// absorbed by the OS pipe buffer on Windows, deferring it to `flush`), so
-    /// a broken-pipe integration test can't deterministically hit the
-    /// `write_all` error arm on Windows. `writer` is a trait object rather
-    /// than `impl AsyncWrite` so production and each test share one
-    /// monomorphization (avoids the generic coverage-attribution artifact).
-    async fn write_line(
-        writer: &mut (dyn AsyncWrite + Unpin + Send),
-        line: &str,
-        write_err: &str,
-        flush_err: &str,
-    ) -> anyhow::Result<()> {
-        writer
-            .write_all(line.as_bytes())
-            .await
-            .map_err(|e| anyhow::anyhow!("{}: {}", write_err, e))?;
-        writer
-            .flush()
-            .await
-            .map_err(|e| anyhow::anyhow!("{}: {}", flush_err, e))?;
-        Ok(())
+/// Decide which protocol revision is in force after `initialize`.
+///
+/// A server that echoes a revision we know wins outright. One that echoes
+/// something unrecognized is *still* honored rather than rejected: the value
+/// only feeds the `MCP-Protocol-Version` header, and refusing to talk to a
+/// server that speaks a newer revision than this client was compiled against
+/// would break connections that otherwise work fine.
+fn negotiated_version(echoed: Option<&Value>) -> String {
+    match echoed.and_then(Value::as_str) {
+        Some(version) => {
+            if !SUPPORTED_PROTOCOL_VERSIONS.contains(&version) {
+                tracing::warn!(
+                    version = %version,
+                    "MCP server negotiated an unrecognized protocol revision — continuing"
+                );
+            }
+            version.to_string()
+        }
+        None => {
+            // Servers predating version negotiation omit the field.
+            tracing::debug!("MCP server echoed no protocolVersion — assuming the offered one");
+            PREFERRED_PROTOCOL_VERSION.to_string()
+        }
     }
 }
 
@@ -454,160 +366,8 @@ impl MCPClient {
 mod tests {
     use super::*;
     use crate::test_support::always_on_tracing_guard;
-    use std::pin::Pin;
-    use std::task::{Context, Poll};
-
-    /// Configurable in-memory writer used to exercise `write_line`'s
-    /// write/flush error arms deterministically on every platform (the real
-    /// broken-pipe path can't reliably hit the write_all arm on Windows).
-    struct FakeWriter {
-        fail_write: bool,
-        fail_flush: bool,
-    }
-
-    impl AsyncWrite for FakeWriter {
-        fn poll_write(
-            self: Pin<&mut Self>,
-            _cx: &mut Context<'_>,
-            buf: &[u8],
-        ) -> Poll<std::io::Result<usize>> {
-            if self.fail_write {
-                Poll::Ready(Err(std::io::Error::new(
-                    std::io::ErrorKind::BrokenPipe,
-                    "write boom",
-                )))
-            } else {
-                Poll::Ready(Ok(buf.len()))
-            }
-        }
-        fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
-            if self.fail_flush {
-                Poll::Ready(Err(std::io::Error::new(
-                    std::io::ErrorKind::BrokenPipe,
-                    "flush boom",
-                )))
-            } else {
-                Poll::Ready(Ok(()))
-            }
-        }
-        fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
-            Poll::Ready(Ok(()))
-        }
-    }
-
-    #[tokio::test]
-    async fn write_line_maps_write_error() {
-        let mut writer = FakeWriter {
-            fail_write: true,
-            fail_flush: false,
-        };
-        let err = MCPClient::write_line(&mut writer, "payload\n", "WCTX", "FCTX")
-            .await
-            .expect_err("write should fail");
-        let msg = err.to_string();
-        assert!(msg.contains("WCTX"), "got: {msg}");
-        assert!(msg.contains("write boom"), "got: {msg}");
-    }
-
-    #[tokio::test]
-    async fn write_line_maps_flush_error() {
-        let mut writer = FakeWriter {
-            fail_write: false,
-            fail_flush: true,
-        };
-        let err = MCPClient::write_line(&mut writer, "payload\n", "WCTX", "FCTX")
-            .await
-            .expect_err("flush should fail");
-        let msg = err.to_string();
-        assert!(msg.contains("FCTX"), "got: {msg}");
-        assert!(msg.contains("flush boom"), "got: {msg}");
-    }
-
-    #[tokio::test]
-    async fn write_line_success_then_shutdown() {
-        let mut writer = FakeWriter {
-            fail_write: false,
-            fail_flush: false,
-        };
-        // Exercises the write-OK + flush-OK arms; the trailing shutdown covers
-        // poll_shutdown.
-        MCPClient::write_line(&mut writer, "payload\n", "WCTX", "FCTX")
-            .await
-            .expect("write should succeed");
-        writer.shutdown().await.expect("shutdown should succeed");
-    }
-
-    #[test]
-    fn test_filter_env_strips_api_keys() {
-        let vars = vec![
-            ("HOME".to_string(), "/home/user".to_string()),
-            ("ANTHROPIC_API_KEY".to_string(), "sk-ant-secret".to_string()),
-            ("OPENAI_API_KEY".to_string(), "sk-secret".to_string()),
-            ("PATH".to_string(), "/usr/bin".to_string()),
-            ("MY_PASSWORD".to_string(), "hunter2".to_string()),
-            ("DB_ACCESS_TOKEN".to_string(), "tok123".to_string()),
-            ("SOME_AUTH_TOKEN".to_string(), "auth456".to_string()),
-            ("SSH_PRIVATE_KEY".to_string(), "key789".to_string()),
-            ("MY_API_SECRET".to_string(), "sec000".to_string()),
-            ("SECRET_KEY_BASE".to_string(), "skb111".to_string()),
-        ];
-
-        let filtered = MCPClient::filter_env(&vars);
-
-        assert_eq!(filtered.get("HOME"), Some(&"/home/user".to_string()));
-        assert_eq!(filtered.get("PATH"), Some(&"/usr/bin".to_string()));
-        assert!(!filtered.contains_key("ANTHROPIC_API_KEY"));
-        assert!(!filtered.contains_key("OPENAI_API_KEY"));
-        assert!(!filtered.contains_key("MY_PASSWORD"));
-        assert!(!filtered.contains_key("DB_ACCESS_TOKEN"));
-        assert!(!filtered.contains_key("SOME_AUTH_TOKEN"));
-        assert!(!filtered.contains_key("SSH_PRIVATE_KEY"));
-        assert!(!filtered.contains_key("MY_API_SECRET"));
-        assert!(!filtered.contains_key("SECRET_KEY_BASE"));
-    }
-
-    #[test]
-    fn test_filter_env_keeps_safe_vars() {
-        let vars = vec![
-            ("EDITOR".to_string(), "vim".to_string()),
-            ("RUST_LOG".to_string(), "debug".to_string()),
-            ("TERM".to_string(), "xterm".to_string()),
-        ];
-
-        let filtered = MCPClient::filter_env(&vars);
-        assert_eq!(filtered.len(), 3);
-    }
 
     // ── Additional coverage tests ──────────────────────────────────────────
-
-    #[test]
-    fn test_filter_env_empty_input() {
-        let vars: Vec<(String, String)> = vec![];
-        let filtered = MCPClient::filter_env(&vars);
-        assert!(filtered.is_empty());
-    }
-
-    #[test]
-    fn test_filter_env_case_insensitive_matching() {
-        let vars = vec![
-            ("my_api_key".to_string(), "secret".to_string()),
-            ("My_Password".to_string(), "pass".to_string()),
-        ];
-        let filtered = MCPClient::filter_env(&vars);
-        assert!(filtered.is_empty());
-    }
-
-    #[test]
-    fn test_filter_env_partial_match() {
-        // "API_KEY" pattern should match anything containing it
-        let vars = vec![
-            ("CUSTOM_API_KEY_VALUE".to_string(), "val".to_string()),
-            ("SAFE_VAR".to_string(), "ok".to_string()),
-        ];
-        let filtered = MCPClient::filter_env(&vars);
-        assert_eq!(filtered.len(), 1);
-        assert!(filtered.contains_key("SAFE_VAR"));
-    }
 
     #[test]
     fn test_server_capabilities_default() {
@@ -907,99 +667,9 @@ mod tests {
 
     // ─── filter_env additional ────────────────────────────────────────────
 
-    #[test]
-    fn test_filter_env_preserves_path_and_home() {
-        let vars = vec![
-            ("PATH".to_string(), "/usr/bin:/bin".to_string()),
-            ("HOME".to_string(), "/Users/test".to_string()),
-            ("SHELL".to_string(), "/bin/zsh".to_string()),
-            ("TERM".to_string(), "xterm-256color".to_string()),
-        ];
-        let filtered = MCPClient::filter_env(&vars);
-        assert_eq!(filtered.len(), 4);
-    }
-
-    #[test]
-    fn test_filter_env_all_sensitive() {
-        let vars = vec![
-            ("API_KEY".to_string(), "key".to_string()),
-            ("API_SECRET".to_string(), "secret".to_string()),
-            ("SECRET_KEY".to_string(), "sk".to_string()),
-            ("ACCESS_TOKEN".to_string(), "at".to_string()),
-            ("AUTH_TOKEN".to_string(), "auth".to_string()),
-            ("PRIVATE_KEY".to_string(), "pk".to_string()),
-            ("PASSWORD".to_string(), "pass".to_string()),
-        ];
-        let filtered = MCPClient::filter_env(&vars);
-        assert!(filtered.is_empty());
-    }
-
     // ─── JsonRpcRequest serialization ───────────────────────────────────
 
-    #[test]
-    fn test_jsonrpc_request_serialization_with_id() {
-        let req = JsonRpcRequest {
-            jsonrpc: "2.0",
-            id: Some(42),
-            method: "tools/list".to_string(),
-            params: Some(serde_json::json!({})),
-        };
-        let json = serde_json::to_string(&req).unwrap();
-        assert!(json.contains("\"jsonrpc\":\"2.0\""));
-        assert!(json.contains("\"id\":42"));
-        assert!(json.contains("\"method\":\"tools/list\""));
-    }
-
-    #[test]
-    fn test_jsonrpc_request_notification_no_id() {
-        let req = JsonRpcRequest {
-            jsonrpc: "2.0",
-            id: None,
-            method: "notifications/initialized".to_string(),
-            params: Some(serde_json::json!({})),
-        };
-        let json = serde_json::to_string(&req).unwrap();
-        assert!(!json.contains("\"id\""));
-    }
-
-    #[test]
-    fn test_jsonrpc_request_no_params() {
-        let req = JsonRpcRequest {
-            jsonrpc: "2.0",
-            id: Some(1),
-            method: "test".to_string(),
-            params: None,
-        };
-        let json = serde_json::to_string(&req).unwrap();
-        assert!(!json.contains("\"params\""));
-    }
-
     // ─── JsonRpcResponse deserialization ─────────────────────────────────
-
-    #[test]
-    fn test_jsonrpc_response_with_result() {
-        let json = r#"{"jsonrpc":"2.0","id":1,"result":{"tools":[]}}"#;
-        let resp: JsonRpcResponse = serde_json::from_str(json).unwrap();
-        assert!(resp.result.is_some());
-        assert!(resp.error.is_none());
-    }
-
-    #[test]
-    fn test_jsonrpc_response_with_error() {
-        let json =
-            r#"{"jsonrpc":"2.0","id":1,"error":{"code":-32600,"message":"Invalid request"}}"#;
-        let resp: JsonRpcResponse = serde_json::from_str(json).unwrap();
-        assert!(resp.result.is_none());
-        assert!(resp.error.is_some());
-        assert_eq!(resp.error.unwrap().message, "Invalid request");
-    }
-
-    #[test]
-    fn test_jsonrpc_response_null_id() {
-        let json = r#"{"jsonrpc":"2.0","id":null,"result":"ok"}"#;
-        let resp: JsonRpcResponse = serde_json::from_str(json).unwrap();
-        assert!(resp.result.is_some());
-    }
 
     // ─── ToolResult complex cases ───────────────────────────────────────
 
@@ -1033,22 +703,6 @@ mod tests {
     }
 
     // ─── filter_env: mixed sensitive and safe ───────────────────────────
-
-    #[test]
-    fn test_filter_env_mixed_with_duplicates() {
-        let vars = vec![
-            ("SAFE_VAR".to_string(), "safe".to_string()),
-            ("MY_API_KEY".to_string(), "secret".to_string()),
-            ("ANOTHER_SAFE".to_string(), "ok".to_string()),
-            ("DB_PASSWORD".to_string(), "pass".to_string()),
-            ("THIRD_SAFE".to_string(), "fine".to_string()),
-        ];
-        let filtered = MCPClient::filter_env(&vars);
-        assert_eq!(filtered.len(), 3);
-        assert!(filtered.contains_key("SAFE_VAR"));
-        assert!(filtered.contains_key("ANOTHER_SAFE"));
-        assert!(filtered.contains_key("THIRD_SAFE"));
-    }
 
     // ─── ServerCapabilities with empty tools ────────────────────────────
 
@@ -1310,58 +964,6 @@ for line in sys.stdin:
     // exceed `BufWriter`'s default 8KB capacity forces `write_all` itself to
     // bypass buffering and write directly, surfacing the error there instead.
 
-    async fn spawn_and_kill_stub_client() -> MCPClient {
-        let mut client = spawn_stub_client(STUB_INIT_LIST_CALL).await;
-        client.child.kill().await.expect("kill should succeed");
-        let _ = client.child.wait().await; // reap so the pipe's read end is fully gone
-        // Empirically, a *tiny* buffered write's subsequent flush() doesn't
-        // reliably surface EPIPE immediately after reaping on this platform
-        // (unlike a >8KB write, which bypasses BufWriter's buffer and hits
-        // the OS directly in write_all() itself -- see the write_all tests
-        // below, which are deterministic). A short delay lets the kernel
-        // fully settle the closed pipe state before flush() is attempted.
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        client
-    }
-
-    #[tokio::test]
-    async fn test_send_notification_flush_after_child_killed_returns_error() {
-        let mut client = spawn_and_kill_stub_client().await;
-        let result = client
-            .send_notification("notifications/test", serde_json::json!({}))
-            .await;
-        assert!(result.is_err());
-    }
-
-    #[tokio::test]
-    async fn test_send_notification_write_all_after_child_killed_returns_error() {
-        let mut client = spawn_and_kill_stub_client().await;
-        // >8KB payload exceeds BufWriter's default capacity, forcing write_all
-        // to write directly rather than buffer.
-        let huge = "x".repeat(20_000);
-        let result = client
-            .send_notification("notifications/test", serde_json::json!({"data": huge}))
-            .await;
-        assert!(result.is_err());
-    }
-
-    #[tokio::test]
-    async fn test_send_request_flush_after_child_killed_returns_error() {
-        let mut client = spawn_and_kill_stub_client().await;
-        let result = client.connect().await;
-        assert!(result.is_err());
-    }
-
-    #[tokio::test]
-    async fn test_send_request_write_all_after_child_killed_returns_error() {
-        let mut client = spawn_and_kill_stub_client().await;
-        let huge = "x".repeat(20_000);
-        let result = client
-            .call_tool("echo", serde_json::json!({"data": huge}))
-            .await;
-        assert!(result.is_err());
-    }
-
     #[tokio::test]
     async fn test_mcp_client_server_error_propagates() {
         let mut client = spawn_stub_client(STUB_ERROR_SERVER).await;
@@ -1369,49 +971,6 @@ for line in sys.stdin:
         let err = client.connect().await;
         assert!(err.is_err());
         assert!(err.unwrap_err().to_string().contains("server error"));
-    }
-
-    #[tokio::test]
-    async fn test_mcp_client_empty_response_is_error() {
-        // A script that writes nothing (closes stdout) causes "closed connection" error
-        let script = r#"
-import sys
-# Read one line then close -- simulates EOF during request
-for line in sys.stdin:
-    break
-sys.stdout.close()
-"#;
-        let mut client = spawn_stub_client(script).await;
-        let err = client.connect().await;
-        assert!(err.is_err());
-    }
-
-    #[tokio::test]
-    async fn test_mcp_client_malformed_json_response_is_error() {
-        let script = r#"
-import sys
-for line in sys.stdin:
-    sys.stdout.write("this is not json\n")
-    sys.stdout.flush()
-    break
-"#;
-        let mut client = spawn_stub_client(script).await;
-        let err = client.connect().await;
-        assert!(err.is_err());
-        assert!(err.unwrap_err().to_string().contains("parse"));
-    }
-
-    #[tokio::test]
-    async fn test_mcp_client_spawn_invalid_command_fails() {
-        let result = MCPClient::spawn(
-            "/nonexistent/command/that/does/not/exist",
-            &[],
-            &HashMap::new(),
-        )
-        .await;
-        assert!(result.is_err());
-        let err_msg = result.err().unwrap().to_string();
-        assert!(err_msg.contains("Failed to spawn"));
     }
 
     #[tokio::test]
@@ -1809,5 +1368,88 @@ for line in sys.stdin:
             .await
             .expect("list_tools should succeed");
         assert_eq!(tools.len(), MAX_TOOL_PAGES);
+    }
+
+    #[tokio::test]
+    async fn transport_failure_propagates_out_of_a_request() {
+        let _guard = always_on_tracing_guard();
+        // A server that exits immediately: the transport itself fails, as
+        // distinct from a server that answers with a JSON-RPC `error` member.
+        // Both must surface as errors, by different paths.
+        let mut client = spawn_stub_client("import sys\nsys.exit(0)\n").await;
+        assert!(client.connect().await.is_err());
+    }
+
+    // ─── protocol version negotiation ─────────────────────────────────────
+
+    #[test]
+    fn preferred_version_is_the_newest_supported() {
+        assert_eq!(PREFERRED_PROTOCOL_VERSION, SUPPORTED_PROTOCOL_VERSIONS[0]);
+        // Sorted newest-first, so [0] really is the newest.
+        let mut sorted = SUPPORTED_PROTOCOL_VERSIONS.to_vec();
+        sorted.sort_unstable_by(|a, b| b.cmp(a));
+        assert_eq!(sorted, SUPPORTED_PROTOCOL_VERSIONS);
+    }
+
+    #[test]
+    fn negotiation_adopts_a_recognized_echo() {
+        let _guard = always_on_tracing_guard();
+        let echoed = serde_json::json!("2025-06-18");
+        assert_eq!(negotiated_version(Some(&echoed)), "2025-06-18");
+    }
+
+    #[test]
+    fn negotiation_honors_an_unrecognized_echo() {
+        let _guard = always_on_tracing_guard();
+        // Refusing a revision newer than this client was compiled against
+        // would break connections that otherwise work perfectly well.
+        let echoed = serde_json::json!("2099-01-01");
+        assert_eq!(negotiated_version(Some(&echoed)), "2099-01-01");
+    }
+
+    #[test]
+    fn negotiation_falls_back_when_the_server_omits_the_field() {
+        let _guard = always_on_tracing_guard();
+        assert_eq!(negotiated_version(None), PREFERRED_PROTOCOL_VERSION);
+    }
+
+    #[test]
+    fn negotiation_falls_back_when_the_echo_is_not_a_string() {
+        let _guard = always_on_tracing_guard();
+        let echoed = serde_json::json!(20251125);
+        assert_eq!(
+            negotiated_version(Some(&echoed)),
+            PREFERRED_PROTOCOL_VERSION
+        );
+    }
+
+    #[tokio::test]
+    async fn connect_offers_the_preferred_version_and_records_the_echo() {
+        let _guard = always_on_tracing_guard();
+        // Echoes back a *different* supported revision than the one offered,
+        // which is exactly what a server one step behind does.
+        let script = r#"
+import sys, json
+for line in sys.stdin:
+    line = line.strip()
+    if not line:
+        continue
+    req = json.loads(line)
+    if req.get("method") == "initialize":
+        offered = req["params"]["protocolVersion"]
+        assert offered == "2025-11-25", offered
+        sys.stdout.write(json.dumps({"jsonrpc": "2.0", "id": req.get("id"),
+            "result": {"capabilities": {}, "protocolVersion": "2025-03-26"}}) + "\n")
+        sys.stdout.flush()
+"#;
+        let mut client = spawn_stub_client(script).await;
+        client.connect().await.expect("connect should succeed");
+        assert_eq!(client.protocol_version(), Some("2025-03-26"));
+    }
+
+    #[tokio::test]
+    async fn protocol_version_is_none_before_connect() {
+        let client = spawn_stub_client(STUB_INIT_LIST_CALL).await;
+        assert!(client.protocol_version().is_none());
     }
 }
