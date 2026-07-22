@@ -33,6 +33,11 @@ pub struct PersistJob {
     /// `(stage_index, serialized GateEvent log)` to write to
     /// `stages/<idx>/taint_audit.json`. `None` ⇒ no audit to persist.
     pub taint_audit: Option<(usize, String)>,
+    /// Serialized [`FanOutState`](crate::fanout::FanOutState) for a parent parked
+    /// mid fan-out, written to `fanout.json` so the split/merge resumes after a
+    /// restart. `None` ⇒ the agent isn't waiting on a fan-out (any stale file is
+    /// removed).
+    pub fanout: Option<String>,
 }
 
 /// The single-lane persistence worker: writes each [`PersistJob`]'s files under
@@ -136,6 +141,15 @@ async fn write_snapshot(
             &job.run_id,
         )
         .await;
+    }
+    // Fan-out waiting state (whole-file), or remove any stale file once the
+    // parent is no longer parked on a fan-out.
+    let fanout_path = dir.join("fanout.json");
+    match &job.fanout {
+        Some(json) => write_bytes_atomic(&fanout_path, json.as_bytes(), &job.run_id).await,
+        None => {
+            let _ = tokio::fs::remove_file(&fanout_path).await;
+        }
     }
 }
 
@@ -307,6 +321,7 @@ mod tests {
             output_appends: vec![],
             log_appends: vec![],
             taint_audit: None,
+            fanout: None,
         })
         .unwrap();
         drop(tx); // close so the worker loop ends
@@ -331,6 +346,7 @@ mod tests {
             output_appends: vec![],
             log_appends: vec![],
             taint_audit: None,
+            fanout: None,
         }
     }
 
@@ -455,6 +471,20 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn write_snapshot_writes_then_removes_fanout_json() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("run-1").join("fanout.json");
+        // A job carrying fan-out state writes fanout.json.
+        let mut fo_job = job("run-1");
+        fo_job.fanout = Some(r#"{"resume":"me"}"#.to_string());
+        write_snapshot(dir.path(), &fo_job, "m", "w", None).await;
+        assert!(path.exists());
+        // A later job without fan-out state removes the now-stale file.
+        write_snapshot(dir.path(), &job("run-1"), "m", "w", Some(&fo_job.context)).await;
+        assert!(!path.exists());
+    }
+
+    #[tokio::test]
     async fn run_archive_open_failure_is_swallowed() {
         // Pre-create `run.lvr` as a directory so opening it for append fails; the
         // best-effort archive write must not panic (and the rest still runs).
@@ -509,6 +539,7 @@ mod tests {
                 output_appends: vec![(0, "the plan".to_string())],
                 log_appends: vec![(0, "[tool] list_dir: .".to_string())],
                 taint_audit: None,
+                fanout: None,
             },
             "machine-test",
             "world-test",
@@ -540,6 +571,7 @@ mod tests {
                 output_appends: vec![],
                 log_appends: vec![],
                 taint_audit: Some((2, r#"[{"tool_name":"shell"}]"#.to_string())),
+                fanout: None,
             },
             "machine-test",
             "world-test",
@@ -564,6 +596,7 @@ mod tests {
                 output_appends: vec![],
                 log_appends: vec![],
                 taint_audit: None,
+                fanout: None,
             },
             "machine-test",
             "world-test",
@@ -600,6 +633,7 @@ mod tests {
                 output_appends: vec![],
                 log_appends: vec![],
                 taint_audit: None,
+                fanout: None,
             },
             "machine-test",
             "world-test",
@@ -627,6 +661,7 @@ mod tests {
                 output_appends: vec![],
                 log_appends: vec![],
                 taint_audit: None,
+                fanout: None,
             },
             "machine-test",
             "world-test",
@@ -658,6 +693,7 @@ mod tests {
                 output_appends: vec![],
                 log_appends: vec![],
                 taint_audit: None,
+                fanout: None,
             },
             "machine-test",
             "world-test",

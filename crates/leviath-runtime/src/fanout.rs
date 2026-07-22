@@ -31,7 +31,7 @@ use crate::pipeline::{AgentBlueprint, ProcessResponse, ResolveTransition, StageC
 const DEFAULT_FANOUT_DEPTH: usize = 3;
 
 /// One unit of work produced by a fan-out split.
-#[derive(serde::Deserialize, Debug, Clone, Default)]
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone, Default)]
 pub struct WorkItem {
     /// Stable id (used to label the worker in the consolidated report).
     #[serde(default)]
@@ -76,17 +76,96 @@ pub trait FanOutSpawner: Send + Sync {
 #[derive(Resource, Clone)]
 pub struct FanOutSpawnerRes(pub Arc<dyn FanOutSpawner>);
 
+/// A currently-running fan-out worker: its work-item id, its live entity, and
+/// its run-id (kept so the waiting state can be persisted/restored without a
+/// cross-entity lookup — see [`FanOutState`]).
+struct ActiveWorker {
+    item_id: String,
+    entity: Entity,
+    run_id: String,
+}
+
 /// A parent parked while its fan-out workers run. Holds the not-yet-started
-/// `pending` items, the currently-`active` `(item_id, worker)` pairs, and the
-/// accumulated worker results.
+/// `pending` items, the currently-`active` workers, and the accumulated results.
 #[derive(Component)]
 pub struct FanOutWaiting {
     config: FanOutConfig,
     max_workers: usize,
     pending: VecDeque<WorkItem>,
-    active: Vec<(String, Entity)>,
+    active: Vec<ActiveWorker>,
     summaries: Vec<(String, String)>,
     failures: Vec<(String, String)>,
+}
+
+/// The serializable form of [`FanOutWaiting`], written to `<run_dir>/fanout.json`
+/// so a parent interrupted mid-split resumes its merge after a restart. `active`
+/// carries worker **run-ids** (not entities); recovery maps them back to the
+/// reloaded worker entities.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct FanOutState {
+    /// The fan-out configuration.
+    pub config: FanOutConfig,
+    /// The concurrency cap.
+    pub max_workers: usize,
+    /// Work items not yet started.
+    pub pending: Vec<WorkItem>,
+    /// In-flight workers as `(item_id, run_id)`.
+    pub active: Vec<(String, String)>,
+    /// Completed worker results as `(item_id, summary)`.
+    pub summaries: Vec<(String, String)>,
+    /// Failed worker results as `(item_id, message)`.
+    pub failures: Vec<(String, String)>,
+}
+
+impl FanOutWaiting {
+    /// Project to the serializable [`FanOutState`] (workers by run-id).
+    pub(crate) fn to_state(&self) -> FanOutState {
+        FanOutState {
+            config: self.config.clone(),
+            max_workers: self.max_workers,
+            pending: self.pending.iter().cloned().collect(),
+            active: self
+                .active
+                .iter()
+                .map(|w| (w.item_id.clone(), w.run_id.clone()))
+                .collect(),
+            summaries: self.summaries.clone(),
+            failures: self.failures.clone(),
+        }
+    }
+}
+
+/// Rebuild a parent's [`FanOutWaiting`] from a persisted [`FanOutState`] and
+/// insert it, mapping each active worker's run-id back to its reloaded entity
+/// via `resolve`. Workers whose entity didn't reload are treated as failures so
+/// the merge still completes rather than waiting forever. Used by restart
+/// recovery to resume an interrupted fan-out.
+pub fn restore_fan_out_waiting(
+    world: &mut World,
+    parent: Entity,
+    state: FanOutState,
+    resolve: &dyn Fn(&str) -> Option<Entity>,
+) {
+    let mut active = Vec::new();
+    let mut failures = state.failures;
+    for (item_id, run_id) in state.active {
+        match resolve(&run_id) {
+            Some(entity) => active.push(ActiveWorker {
+                item_id,
+                entity,
+                run_id,
+            }),
+            None => failures.push((item_id, "worker did not reload after restart".to_string())),
+        }
+    }
+    world.entity_mut(parent).insert(FanOutWaiting {
+        config: state.config,
+        max_workers: state.max_workers,
+        pending: state.pending.into_iter().collect(),
+        active,
+        summaries: state.summaries,
+        failures,
+    });
 }
 
 /// Fan-out split system (exclusive): for each `ProcessResponse` agent whose
@@ -171,11 +250,11 @@ pub fn fan_out_collect(world: &mut World) {
 
         // 1. Reap workers that have reached a terminal state.
         let mut still_active = Vec::with_capacity(w.active.len());
-        for (id, worker) in std::mem::take(&mut w.active) {
-            match worker_terminal_result(world, worker) {
-                Some(Ok(content)) => w.summaries.push((id, content)),
-                Some(Err(message)) => w.failures.push((id, message)),
-                None => still_active.push((id, worker)),
+        for aw in std::mem::take(&mut w.active) {
+            match worker_terminal_result(world, aw.entity) {
+                Some(Ok(content)) => w.summaries.push((aw.item_id, content)),
+                Some(Err(message)) => w.failures.push((aw.item_id, message)),
+                None => still_active.push(aw),
             }
         }
         w.active = still_active;
@@ -186,7 +265,18 @@ pub fn fan_out_collect(world: &mut World) {
                 break;
             };
             match start_worker(world, parent, &w.config, &item) {
-                Ok(child) => w.active.push((item.id, child)),
+                Ok(child) => {
+                    // Capture the worker's run-id so the waiting state persists.
+                    let run_id = world
+                        .get::<crate::persistence::RunMetadata>(child)
+                        .map(|m| m.run_id.clone())
+                        .unwrap_or_default();
+                    w.active.push(ActiveWorker {
+                        item_id: item.id,
+                        entity: child,
+                        run_id,
+                    });
+                }
                 Err(message) => w.failures.push((item.id, message)),
             }
         }
@@ -732,6 +822,58 @@ mod tests {
         fan_out_collect(&mut world);
         assert!(world.get::<FanOutWaiting>(e).is_none());
         assert_eq!(world.get::<StageCursor>(e).unwrap().index, 1);
+    }
+
+    #[test]
+    fn fan_out_state_roundtrips_and_unresolved_workers_become_failures() {
+        let mut world = World::new();
+        install(&mut world, TestSpawner::ok());
+        let e = spawn_parent(
+            &mut world,
+            fanout_blueprint(cfg(Some("merge"), 2, WorkerFailurePolicy::Continue)),
+            r#"[{"id":"a"},{"id":"b"}]"#,
+        );
+        fan_out_split(&mut world);
+        fan_out_collect(&mut world); // starts both workers → active
+
+        // Projecting to the serializable state captures each worker's run-id.
+        let state = world.get::<FanOutWaiting>(e).unwrap().to_state();
+        assert_eq!(state.active.len(), 2);
+        assert!(state.active.iter().all(|(_id, run_id)| !run_id.is_empty()));
+
+        // Restore onto a fresh parent, resolving run-ids back to entities.
+        let by_run: std::collections::HashMap<String, Entity> = world
+            .get::<SubAgentChildren>(e)
+            .unwrap()
+            .children
+            .iter()
+            .filter_map(|&c| {
+                world
+                    .get::<crate::persistence::RunMetadata>(c)
+                    .map(|m| (m.run_id.clone(), c))
+            })
+            .collect();
+        let fresh = world.spawn_empty().id();
+        restore_fan_out_waiting(&mut world, fresh, state.clone(), &|rid| {
+            by_run.get(rid).copied()
+        });
+        assert_eq!(
+            world
+                .get::<FanOutWaiting>(fresh)
+                .unwrap()
+                .to_state()
+                .active
+                .len(),
+            2
+        );
+
+        // A resolver that can't map the workers → they become failures, so the
+        // merge still completes rather than waiting forever.
+        let orphaned = world.spawn_empty().id();
+        restore_fan_out_waiting(&mut world, orphaned, state, &|_| None);
+        let s = world.get::<FanOutWaiting>(orphaned).unwrap().to_state();
+        assert!(s.active.is_empty());
+        assert_eq!(s.failures.len(), 2);
     }
 
     #[test]

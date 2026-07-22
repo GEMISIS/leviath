@@ -1474,6 +1474,7 @@ pub fn dispatch_persistence(
         Option<&crate::taint::TaintGate>,
         Option<&crate::components::ParentRef>,
         Option<&crate::components::SubAgentChildren>,
+        Option<&crate::fanout::FanOutWaiting>,
     )>,
     stage: Res<PersistenceStage>,
 ) {
@@ -1489,6 +1490,7 @@ pub fn dispatch_persistence(
         taint_gate,
         parent_ref,
         children,
+        fan_out_waiting,
     ) in agents.iter_mut()
     {
         let now = chrono::Utc::now().timestamp();
@@ -1534,6 +1536,11 @@ pub fn dispatch_persistence(
                     .expect("GateEvent slice always serializes"),
             )
         });
+        // A parent parked mid fan-out: persist its waiting state so the
+        // split/merge resumes after a restart (removed once it's no longer
+        // waiting — see the writer).
+        let fanout = fan_out_waiting
+            .map(|w| serde_json::to_string(&w.to_state()).expect("FanOutState always serializes"));
         let _ = stage.0.send(PersistJob {
             run_id: md.run_id.clone(),
             meta,
@@ -1542,6 +1549,7 @@ pub fn dispatch_persistence(
             output_appends,
             log_appends,
             taint_audit,
+            fanout,
         });
     }
 }
@@ -3389,6 +3397,48 @@ mod tests {
         assert_eq!(job.meta.children, vec!["kid-1".to_string()]);
         assert_eq!(job.meta.depth, 3);
         assert_eq!(job.meta.max_child_depth, 6);
+    }
+
+    #[test]
+    fn dispatch_persistence_serializes_fan_out_waiting() {
+        use leviath_core::blueprint::{FanOutConfig, WorkerFailurePolicy};
+        let (mut world, mut rx) = world_with_persistence();
+        let e = world
+            .spawn((
+                run_metadata(),
+                agent_state(),
+                conv_window(),
+                StageCursor { index: 0 },
+                TokenTotals::default(),
+                PersistWatermark::default(),
+            ))
+            .id();
+        // Attach a (minimal) FanOutWaiting via the public restore path.
+        crate::fanout::restore_fan_out_waiting(
+            &mut world,
+            e,
+            crate::fanout::FanOutState {
+                config: FanOutConfig {
+                    worker_agent: None,
+                    worker_stage: Some("w".to_string()),
+                    worker_query: None,
+                    merge_stage: None,
+                    max_workers: 1,
+                    on_worker_failure: WorkerFailurePolicy::Continue,
+                    split_prompt: "s".to_string(),
+                },
+                max_workers: 1,
+                pending: vec![],
+                active: vec![],
+                summaries: vec![],
+                failures: vec![],
+            },
+            &|_| None,
+        );
+
+        run_dispatch_persistence(&mut world);
+        let job = rx.try_recv().expect("job sent");
+        assert!(job.fanout.is_some(), "fan-out waiting state persisted");
     }
 
     #[test]
