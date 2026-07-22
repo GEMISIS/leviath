@@ -866,7 +866,7 @@ pub struct TransitionEdge {
 }
 
 /// Condition that determines when a transition edge is available.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TransitionCondition {
     /// Always available (LLM chooses)
@@ -878,24 +878,7 @@ pub enum TransitionCondition {
     MaxIterations,
     /// LLM picks from available transitions (default for multi-transition stages)
     LlmChoice,
-    /// Custom condition string (future: Rhai expression)
-    Custom(String),
 }
-
-impl PartialEq for TransitionCondition {
-    #[inline(never)]
-    fn eq(&self, other: &Self) -> bool {
-        match (self, other) {
-            (Self::Always, Self::Always)
-            | (Self::Error, Self::Error)
-            | (Self::MaxIterations, Self::MaxIterations)
-            | (Self::LlmChoice, Self::LlmChoice) => true,
-            (Self::Custom(a), Self::Custom(b)) => a == b,
-            _ => false,
-        }
-    }
-}
-impl Eq for TransitionCondition {}
 
 /// How context transforms when crossing a transition edge.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -1572,10 +1555,11 @@ mod tests {
     }
 
     #[test]
-    fn test_transition_condition_custom_equality() {
-        let a = TransitionCondition::Custom("x".to_string());
-        let b = TransitionCondition::Custom("x".to_string());
-        assert_eq!(a, b);
+    fn test_transition_condition_equality() {
+        assert_eq!(
+            TransitionCondition::LlmChoice,
+            TransitionCondition::LlmChoice
+        );
         assert_ne!(TransitionCondition::Always, TransitionCondition::Error);
     }
 

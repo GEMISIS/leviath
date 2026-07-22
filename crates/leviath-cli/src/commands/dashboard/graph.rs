@@ -47,7 +47,6 @@ pub(super) fn load_graph_info(agent_path: &str) -> Option<GraphTransitionInfo> {
                         TransitionCondition::Error => "error".to_string(),
                         TransitionCondition::MaxIterations => "max_iterations".to_string(),
                         TransitionCondition::LlmChoice => "llm_choice".to_string(),
-                        TransitionCondition::Custom(s) => s.clone(),
                     };
                     let transform = match &edge.transform {
                         EdgeTransform::Direct => "direct".to_string(),
@@ -341,7 +340,7 @@ condition = "max_iterations"
 mode = "autonomous"
 
 [stages.review.transitions.implement]
-condition = "custom_flag"
+condition = "always"
 transform = "custom"
 
 [stages.review.transitions.implement.transform_config]
@@ -386,7 +385,7 @@ hint = "retry"
         assert_eq!(plan_edge.transform, "direct"); // default when omitted
 
         let review_edges = info.edges.get("review").unwrap();
-        assert_eq!(review_edges[0].condition, "custom_flag");
+        assert_eq!(review_edges[0].condition, "always");
         assert_eq!(review_edges[0].transform, "custom");
 
         let error_recovery_edges = info.edges.get("error_recovery").unwrap();

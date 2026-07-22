@@ -435,7 +435,14 @@ pub fn parse_manifest(content: &str) -> Result<Blueprint> {
                         Some("max_iterations") => TransitionCondition::MaxIterations,
                         Some("llm_choice") => TransitionCondition::LlmChoice,
                         Some("always") | None => TransitionCondition::Always,
-                        Some(custom) => TransitionCondition::Custom(custom.to_string()),
+                        // Reject unknown conditions rather than silently building a
+                        // `Custom(..)` edge the runtime never evaluates (a dead edge).
+                        Some(other) => {
+                            return Err(Error::Other(format!(
+                                "transition to '{target_name}' has unknown condition \
+                                 '{other}' (valid: always, error, max_iterations, llm_choice)"
+                            )));
+                        }
                     };
 
                     let transform = match edge_value.get("transform").and_then(|v| v.as_str()) {
@@ -485,7 +492,14 @@ pub fn parse_manifest(content: &str) -> Result<Blueprint> {
                             }
                         }
                         Some("direct") | None => EdgeTransform::Direct,
-                        Some(_) => EdgeTransform::Direct,
+                        // Reject unknown transforms rather than silently downgrading
+                        // to a plain `Direct` copy (a typo would pass unnoticed).
+                        Some(other) => {
+                            return Err(Error::Other(format!(
+                                "transition to '{target_name}' has unknown transform \
+                                 '{other}' (valid: direct, clear, compact, summarize, custom)"
+                            )));
+                        }
                     };
 
                     transitions.insert(
@@ -935,9 +949,6 @@ transform = "compact"
 condition = "llm_choice"
 hint = "LLM chooses this"
 
-[stages.analyze.transitions.custom_stage]
-condition = "my_custom_condition"
-
 [stages.implement]
 mode = "autonomous"
 
@@ -949,9 +960,6 @@ mode = "autonomous"
 
 [stages.choice_stage]
 mode = "autonomous"
-
-[stages.custom_stage]
-mode = "autonomous"
 "#;
         let bp = parse_manifest(toml).unwrap();
         let analyze = bp.find_stage("analyze").unwrap();
@@ -960,7 +968,7 @@ mode = "autonomous"
             Some("Pick the next stage".to_string())
         );
         let transitions = analyze.transitions.as_ref().unwrap();
-        assert_eq!(transitions.len(), 5);
+        assert_eq!(transitions.len(), 4);
 
         let impl_edge = transitions.get("implement").unwrap();
         assert_eq!(impl_edge.condition, TransitionCondition::Always);
@@ -980,12 +988,46 @@ mode = "autonomous"
 
         let choice_edge = transitions.get("choice_stage").unwrap();
         assert_eq!(choice_edge.condition, TransitionCondition::LlmChoice);
+    }
 
-        let custom_edge = transitions.get("custom_stage").unwrap();
-        assert_eq!(
-            custom_edge.condition,
-            TransitionCondition::Custom("my_custom_condition".to_string())
-        );
+    #[test]
+    fn parse_manifest_rejects_unknown_transition_condition() {
+        let toml = r#"
+[agent]
+name = "bad-cond"
+
+[stages.analyze]
+mode = "autonomous"
+
+[stages.analyze.transitions.next]
+condition = "whenever_i_feel_like_it"
+
+[stages.next]
+mode = "autonomous"
+"#;
+        let err = parse_manifest(toml).unwrap_err().to_string();
+        assert!(err.contains("unknown condition"), "got: {err}");
+        assert!(err.contains("whenever_i_feel_like_it"), "got: {err}");
+    }
+
+    #[test]
+    fn parse_manifest_rejects_unknown_edge_transform() {
+        let toml = r#"
+[agent]
+name = "bad-xform"
+
+[stages.analyze]
+mode = "autonomous"
+
+[stages.analyze.transitions.next]
+transform = "teleport"
+
+[stages.next]
+mode = "autonomous"
+"#;
+        let err = parse_manifest(toml).unwrap_err().to_string();
+        assert!(err.contains("unknown transform"), "got: {err}");
+        assert!(err.contains("teleport"), "got: {err}");
     }
 
     #[test]
@@ -2007,28 +2049,6 @@ mode = "autonomous"
         let transitions = stage_a.transitions.as_ref().unwrap();
         let edge = transitions.get("b").unwrap();
         assert_eq!(edge.transform, EdgeTransform::Compact { prompt: None });
-    }
-
-    #[test]
-    fn parse_manifest_unrecognized_transform_defaults_to_direct() {
-        let toml = r#"
-[agent]
-name = "unknown-transform"
-
-[stages.a]
-mode = "autonomous"
-
-[stages.a.transitions.b]
-transform = "some_unrecognized_value"
-
-[stages.b]
-mode = "autonomous"
-"#;
-        let bp = parse_manifest(toml).unwrap();
-        let stage_a = bp.find_stage("a").unwrap();
-        let transitions = stage_a.transitions.as_ref().unwrap();
-        let edge = transitions.get("b").unwrap();
-        assert_eq!(edge.transform, EdgeTransform::Direct);
     }
 
     // ─── Regression: shipped software-engineer agent must branch on plan_approval ──
