@@ -507,7 +507,7 @@ pub fn fold(records: &[RunRecord]) -> Option<FoldedRun> {
 
 /// A run's context window at one recorded point in time, with the metadata
 /// (stage, iteration, status, …) in effect then. Produced by [`replay_points`].
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RunPoint {
     /// The run metadata at this point.
     pub meta: RunMeta,

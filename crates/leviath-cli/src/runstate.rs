@@ -57,6 +57,24 @@ pub fn read_context_snapshot(run_id: &str) -> Option<ContextSnapshot> {
     serde_json::from_str(&json).ok()
 }
 
+/// Read + parse a run's portable archive (`<run_dir>/run.lvr`), returning its
+/// records, or `None` if the archive is missing or unreadable.
+pub fn read_run_archive(run_id: &str) -> Option<Vec<leviath_core::run_archive::RunRecord>> {
+    let path = run_dir(run_id).join("run.lvr");
+    let bytes = std::fs::read(&path).ok()?;
+    leviath_core::run_archive::read_archive(&mut bytes.as_slice())
+        .ok()
+        .map(|(_version, records)| records)
+}
+
+/// A run's context-window history: the full window (+ metadata) at each recorded
+/// point over time, oldest first. Empty when there's no readable archive.
+pub fn context_history(run_id: &str) -> Vec<leviath_core::run_archive::RunPoint> {
+    read_run_archive(run_id)
+        .map(|records| leviath_core::run_archive::replay_points(&records))
+        .unwrap_or_default()
+}
+
 fn now_secs() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -873,6 +891,74 @@ mod tests {
     #[test]
     fn read_context_snapshot_missing_returns_none() {
         assert!(read_context_snapshot("nonexistent-ctx-run").is_none());
+    }
+
+    #[test]
+    fn read_run_archive_roundtrips_and_context_history_replays() {
+        with_isolated_runs_dir("read-run-archive-roundtrip", |_d| {
+            use leviath_core::run_archive::{self, RunIdentity, RunRecord};
+            let run_id = "archive-unit";
+            std::fs::create_dir_all(run_dir(run_id)).unwrap();
+            let mut buf = Vec::new();
+            run_archive::write_archive_start(&mut buf, run_archive::RUN_ARCHIVE_VERSION).unwrap();
+            let meta = RunMeta::new(
+                run_id.to_string(),
+                "a".to_string(),
+                "/p".to_string(),
+                "t".to_string(),
+                None,
+                "/w".to_string(),
+                1,
+            );
+            run_archive::write_record(
+                &mut buf,
+                &RunRecord::Header {
+                    identity: RunIdentity {
+                        run_id: run_id.to_string(),
+                        machine_id: "m".to_string(),
+                        world_id: "w".to_string(),
+                        created_at: 0,
+                    },
+                    meta: Box::new(meta),
+                },
+            )
+            .unwrap();
+            run_archive::write_record(
+                &mut buf,
+                &RunRecord::ContextCheckpoint {
+                    snapshot: ContextSnapshot {
+                        stage_name: "plan".to_string(),
+                        total_tokens: 3,
+                        max_tokens: 100,
+                        regions: vec![],
+                    },
+                    at: 1,
+                },
+            )
+            .unwrap();
+            std::fs::write(run_dir(run_id).join("run.lvr"), &buf).unwrap();
+
+            let records = read_run_archive(run_id).expect("archive read");
+            assert_eq!(records.len(), 2);
+            let history = context_history(run_id);
+            assert_eq!(history.len(), 1);
+            assert_eq!(history[0].context.stage_name, "plan");
+        });
+    }
+
+    #[test]
+    fn read_run_archive_missing_or_corrupt_returns_none() {
+        with_isolated_runs_dir("read-run-archive-corrupt", |_d| {
+            // Missing archive.
+            assert!(read_run_archive("no-such-archive-run").is_none());
+            assert!(context_history("no-such-archive-run").is_empty());
+            // Corrupt archive (bad magic) → None, not a panic.
+            let run_id = "corrupt-archive-unit";
+            std::fs::create_dir_all(run_dir(run_id)).unwrap();
+            std::fs::write(run_dir(run_id).join("run.lvr"), b"not an archive").unwrap();
+            assert!(read_run_archive(run_id).is_none());
+            assert!(context_history(run_id).is_empty());
+        });
     }
 
     // ─── stage_dir / append_stage_output / append_stage_log ─────────────────

@@ -77,6 +77,9 @@ pub enum Commands {
 
     /// Run the shared-world daemon in the foreground
     Daemon(commands::daemon::DaemonArgs),
+
+    /// Show a run's context-window history (from its run.lvr archive)
+    Context(commands::context::ContextArgs),
 }
 
 /// The subset of commands whose real execution performs I/O that a unit test
@@ -132,6 +135,7 @@ pub async fn dispatch(command: Commands, ex: &impl RiskyExecutors) -> anyhow::Re
         Commands::Policy(args) => commands::policy::execute(args).await,
         Commands::Serve(args) => ex.serve(args).await,
         Commands::Daemon(args) => ex.daemon(args).await,
+        Commands::Context(args) => commands::context::execute(args).await,
     }
 }
 
@@ -362,6 +366,18 @@ mod tests {
                 .to_string(),
         };
         let result = dispatch(Commands::Validate(args), &MockRisky).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn dispatch_context_variant_is_routed() {
+        // A run with no archive → the command errors (routing is exercised).
+        let args = commands::context::ContextArgs {
+            run_id: "no-such-run-xyzzy".to_string(),
+            json: false,
+            full: false,
+        };
+        let result = dispatch(Commands::Context(args), &MockRisky).await;
         assert!(result.is_err());
     }
 
