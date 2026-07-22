@@ -130,11 +130,23 @@ pub fn append_dashboard_log(msg: &str) {
 /// location, guaranteeing no dashboard-input test appends to the user's real
 /// `~/.leviath/dashboard.log` (see [`dashboard_log_path`]).
 pub fn append_dashboard_log_to(path: &Path, msg: &str) {
+    append_dashboard_log_capped(path, msg, DASHBOARD_LOG_MAX_BYTES);
+}
+
+/// The dashboard log is capped at this size; once the live file reaches it, the
+/// file is rolled (see [`roll_log_if_over_cap`]) so it can't grow without bound
+/// across a long-lived daemon's lifetime.
+const DASHBOARD_LOG_MAX_BYTES: u64 = 5 * 1024 * 1024;
+
+/// Append with an explicit cap (the public entry points use
+/// [`DASHBOARD_LOG_MAX_BYTES`]; tests pass a small cap to exercise rolling).
+fn append_dashboard_log_capped(path: &Path, msg: &str, max_bytes: u64) {
     use std::io::Write;
     // Ensure the parent directory exists (first-run case).
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
+    roll_log_if_over_cap(path, max_bytes);
     if let Ok(mut file) = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
@@ -142,6 +154,26 @@ pub fn append_dashboard_log_to(path: &Path, msg: &str) {
     {
         let timestamp = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
         let _ = writeln!(file, "{} {}", timestamp, msg);
+    }
+}
+
+/// The path the rolled (previous-generation) log is moved to: `<name>.1`.
+fn rolled_log_path(path: &Path) -> PathBuf {
+    let mut name = path.as_os_str().to_owned();
+    name.push(".1");
+    PathBuf::from(name)
+}
+
+/// Roll the live log to `<name>.1` once it reaches `max_bytes`, replacing any
+/// existing rolled file, so the live file restarts empty and at most one
+/// previous generation is retained (bounded ~2×cap on disk). Best-effort — a
+/// failed rename just leaves the log to keep growing rather than erroring.
+fn roll_log_if_over_cap(path: &Path, max_bytes: u64) {
+    let over = std::fs::metadata(path)
+        .map(|m| m.len() >= max_bytes)
+        .unwrap_or(false);
+    if over {
+        let _ = std::fs::rename(path, rolled_log_path(path));
     }
 }
 
@@ -935,6 +967,43 @@ mod tests {
             assert!(dashboard_log_path().parent().is_none());
             append_dashboard_log("this should not panic even with no parent");
         });
+    }
+
+    #[test]
+    fn dashboard_log_rolls_once_over_cap() {
+        // A tiny cap so a couple of lines trips the roll. The over-cap live file
+        // is moved to `<name>.1` and a fresh live file is started.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("dashboard.log");
+        append_dashboard_log_capped(&path, "first line well over the tiny cap", 8);
+        // First write created the file; it now exceeds the 8-byte cap.
+        assert!(path.exists());
+        assert!(!rolled_log_path(&path).exists());
+        // Second write sees the file over cap → rolls it and restarts.
+        append_dashboard_log_capped(&path, "second", 8);
+        let rolled = rolled_log_path(&path);
+        assert!(rolled.exists(), "previous generation rolled to <name>.1");
+        assert!(
+            std::fs::read_to_string(&rolled)
+                .unwrap()
+                .contains("first line")
+        );
+        // The live file was restarted with only the newest line.
+        let live = std::fs::read_to_string(&path).unwrap();
+        assert!(live.contains("second"));
+        assert!(!live.contains("first line"));
+    }
+
+    #[test]
+    fn dashboard_log_does_not_roll_under_cap() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("dashboard.log");
+        append_dashboard_log_capped(&path, "a", 1_000_000);
+        append_dashboard_log_capped(&path, "b", 1_000_000);
+        // Both lines are in the single live file; nothing was rolled.
+        assert!(!rolled_log_path(&path).exists());
+        let live = std::fs::read_to_string(&path).unwrap();
+        assert!(live.contains("a") && live.contains("b"));
     }
 
     // ─── dashboard_log_path ────────────────────────────────────────────────
