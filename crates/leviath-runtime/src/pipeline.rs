@@ -1465,11 +1465,24 @@ pub fn dispatch_persistence(
         Option<&mut StageLedger>,
         Option<&mut StageIoBuffer>,
         Option<&crate::taint::TaintGate>,
+        Option<&crate::components::ParentRef>,
+        Option<&crate::components::SubAgentChildren>,
     )>,
     stage: Res<PersistenceStage>,
 ) {
-    for (md, state, window, cursor, totals, mut watermark, mut ledger, buffer, taint_gate) in
-        agents.iter_mut()
+    for (
+        md,
+        state,
+        window,
+        cursor,
+        totals,
+        mut watermark,
+        mut ledger,
+        buffer,
+        taint_gate,
+        parent_ref,
+        children,
+    ) in agents.iter_mut()
     {
         let now = chrono::Utc::now().timestamp();
 
@@ -1499,7 +1512,10 @@ pub fn dispatch_persistence(
             watermark.last = Some(current);
         }
 
-        let meta = build_run_meta(md, state, totals, cursor.index, now);
+        // Tree links, for a deterministic restart-time rebuild of the graph.
+        let depth = parent_ref.map(|p| p.depth).unwrap_or(0);
+        let max_child_depth = children.map(|c| c.max_child_depth).unwrap_or(0);
+        let meta = build_run_meta(md, state, totals, cursor.index, now, depth, max_child_depth);
         let context = build_context_snapshot(window, &state.current_stage);
         let stages = ledger.as_deref().map(|l| l.0.clone()).unwrap_or_default();
         // Persist the taint gate's audit log (per-stage) when it has events, so
@@ -3305,6 +3321,40 @@ mod tests {
         assert_eq!(job.log_appends, vec![(0, "[tool] x: y".to_string())]);
         // The buffer was drained in place.
         assert!(world.get::<StageIoBuffer>(e).unwrap().output.is_empty());
+    }
+
+    #[test]
+    fn dispatch_persistence_records_tree_links() {
+        use crate::components::{ParentRef, SubAgentChildren};
+        let (mut world, mut rx) = world_with_persistence();
+        let child = world.spawn_empty().id();
+        let mut state = agent_state();
+        state.spawned_children_ids = vec!["kid-1".to_string()];
+        world.spawn((
+            run_metadata(),
+            state,
+            conv_window(),
+            StageCursor { index: 0 },
+            TokenTotals::default(),
+            PersistWatermark::default(),
+            ParentRef {
+                parent_entity: child,
+                parent_agent_id: "p".to_string(),
+                depth: 3,
+            },
+            SubAgentChildren {
+                children: vec![child],
+                max_child_depth: 6,
+            },
+        ));
+
+        run_dispatch_persistence(&mut world);
+
+        let job = rx.try_recv().expect("job sent");
+        // The persisted meta carries the tree links for a deterministic restore.
+        assert_eq!(job.meta.children, vec!["kid-1".to_string()]);
+        assert_eq!(job.meta.depth, 3);
+        assert_eq!(job.meta.max_child_depth, 6);
     }
 
     #[test]

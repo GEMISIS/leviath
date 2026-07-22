@@ -283,6 +283,19 @@ fn start_worker(
             });
         }
     }
+    // Record the worker's run-id on the parent's serializable state so the tree
+    // (fan-out workers included) is persisted for a deterministic restart rebuild.
+    // A freshly spawned worker always has run metadata; its parent always has state.
+    let worker_id = world
+        .get::<crate::persistence::RunMetadata>(child)
+        .expect("a fan-out worker always has run metadata")
+        .run_id
+        .clone();
+    world
+        .get_mut::<AgentState>(parent)
+        .expect("a fan-out parent always has AgentState")
+        .spawned_children_ids
+        .push(worker_id);
     // Seed the worker's context from the parent per any declared blueprint
     // context transform (when a fan-out worker runs a different blueprint).
     crate::context_transform::apply_context_transforms(world, parent, child);
@@ -394,15 +407,33 @@ mod tests {
                 return Err(format!("spawn refused for '{item_id}'"));
             }
             Ok(world
-                .spawn(AgentState {
-                    agent_id: format!("worker-{item_id}"),
-                    current_stage: "w".to_string(),
-                    iteration: 0,
-                    status: AgentStatus::Active,
-                    spawned_children_ids: vec![],
-                    pending_wait: None,
-                    accepts_messages: true,
-                })
+                .spawn((
+                    AgentState {
+                        agent_id: format!("worker-{item_id}"),
+                        current_stage: "w".to_string(),
+                        iteration: 0,
+                        status: AgentStatus::Active,
+                        spawned_children_ids: vec![],
+                        pending_wait: None,
+                        accepts_messages: true,
+                    },
+                    // A real worker carries run metadata (attached by build_agent);
+                    // mirror that so the parent can record the worker's run-id.
+                    crate::persistence::RunMetadata {
+                        run_id: format!("run-{item_id}"),
+                        agent_name: "worker".to_string(),
+                        agent_path: String::new(),
+                        task: String::new(),
+                        model: None,
+                        workdir: String::new(),
+                        num_stages: 1,
+                        started_at: 0,
+                        parent_run_id: None,
+                        metadata: std::collections::HashMap::new(),
+                        callback_url: None,
+                        title: None,
+                    },
+                ))
                 .id())
         }
     }

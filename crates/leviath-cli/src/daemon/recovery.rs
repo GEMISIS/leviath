@@ -43,9 +43,9 @@ pub fn reload_persisted_agents(
     now_secs: i64,
     subagent_tx: &UnboundedSender<SubAgentOp>,
 ) -> Vec<(String, Entity)> {
-    let mut restored = Vec::new();
+    let mut reloaded: Vec<(RunMeta, Entity)> = Vec::new();
     let Ok(dir_entries) = std::fs::read_dir(runs_dir) else {
-        return restored; // no runs dir yet — nothing to recover
+        return Vec::new(); // no runs dir yet — nothing to recover
     };
     for dir_entry in dir_entries.flatten() {
         let run_dir = dir_entry.path();
@@ -67,13 +67,72 @@ pub fn reload_persisted_agents(
             now_secs,
             subagent_tx,
         ) {
-            Ok(entity) => restored.push((meta.run_id.clone(), entity)),
+            Ok(entity) => reloaded.push((meta, entity)),
             Err(e) => {
                 tracing::warn!(run_id = %meta.run_id, error = %e, "skipping un-reloadable run");
             }
         }
     }
-    restored
+    // Second pass: every run is now an entity, so rebuild the parent→children
+    // tree deterministically from the persisted links (no heuristics).
+    relink_tree(world, &reloaded);
+    reloaded
+        .into_iter()
+        .map(|(meta, entity)| (meta.run_id, entity))
+        .collect()
+}
+
+/// Rebuild `ParentRef` / `SubAgentChildren` on the freshly reloaded entities from
+/// their persisted `parent_run_id` / `children` links, so a restarted daemon
+/// resumes the exact sub-agent tree (a waiting parent holds for its children;
+/// children aren't orphaned). Links whose counterpart didn't reload are logged
+/// and skipped. Idempotent: existing components are overwritten, not duplicated.
+fn relink_tree(world: &mut PipelineWorld, reloaded: &[(RunMeta, Entity)]) {
+    use leviath_runtime::components::{AgentState, ParentRef, SubAgentChildren};
+
+    let by_run_id: std::collections::HashMap<&str, Entity> = reloaded
+        .iter()
+        .map(|(m, e)| (m.run_id.as_str(), *e))
+        .collect();
+    let w = world.world_mut();
+    for (meta, entity) in reloaded {
+        // Child → parent edge.
+        if let Some(parent_id) = &meta.parent_run_id {
+            match by_run_id.get(parent_id.as_str()) {
+                Some(&parent_entity) => {
+                    w.entity_mut(*entity).insert(ParentRef {
+                        parent_entity,
+                        parent_agent_id: parent_id.clone(),
+                        depth: meta.depth,
+                    });
+                }
+                None => tracing::warn!(
+                    run_id = %meta.run_id, parent = %parent_id,
+                    "parent run did not reload; leaving child unlinked"
+                ),
+            }
+        }
+        // Parent → children edge (skip any child that didn't reload).
+        if !meta.children.is_empty() {
+            let children: Vec<Entity> = meta
+                .children
+                .iter()
+                .filter_map(|cid| by_run_id.get(cid.as_str()).copied())
+                .collect();
+            if !children.is_empty() {
+                w.entity_mut(*entity).insert(SubAgentChildren {
+                    children,
+                    max_child_depth: meta.max_child_depth,
+                });
+            }
+            // Keep the serializable child list consistent with the rebuilt
+            // component so the next snapshot re-persists the same tree. A reloaded
+            // agent always carries `AgentState`.
+            w.get_mut::<AgentState>(*entity)
+                .expect("a reloaded agent always has AgentState")
+                .spawned_children_ids = meta.children.clone();
+        }
+    }
 }
 
 /// Read + parse `<run_dir>/meta.json`, returning `None` if it is missing or
@@ -240,6 +299,33 @@ mod tests {
         status: RunStatus,
         context: Option<&ContextSnapshot>,
     ) {
+        write_run_tree(
+            runs_dir,
+            run_id,
+            agent_path,
+            status,
+            context,
+            None,
+            &[],
+            0,
+            0,
+        );
+    }
+
+    /// Like [`write_run`], but with explicit tree links so recovery's re-linking
+    /// pass can be exercised.
+    #[allow(clippy::too_many_arguments)]
+    fn write_run_tree(
+        runs_dir: &Path,
+        run_id: &str,
+        agent_path: &str,
+        status: RunStatus,
+        context: Option<&ContextSnapshot>,
+        parent_run_id: Option<&str>,
+        children: &[&str],
+        depth: usize,
+        max_child_depth: usize,
+    ) {
         let dir = runs_dir.join(run_id);
         std::fs::create_dir_all(&dir).unwrap();
         let meta = RunMeta {
@@ -266,7 +352,10 @@ mod tests {
             title: Some("Resume Me".to_string()),
             metadata: std::collections::HashMap::new(),
             callback_url: Some("http://cb".to_string()),
-            parent_run_id: None,
+            parent_run_id: parent_run_id.map(str::to_string),
+            children: children.iter().map(|s| s.to_string()).collect(),
+            depth,
+            max_child_depth,
         };
         std::fs::write(dir.join("meta.json"), serde_json::to_string(&meta).unwrap()).unwrap();
         if let Some(ctx) = context {
@@ -352,6 +441,174 @@ mod tests {
         let totals = world.world().get::<TokenTotals>(*entity).unwrap();
         assert_eq!(totals.prompt_tokens, 42);
         assert_eq!(totals.tool_calls, 3);
+    }
+
+    #[tokio::test]
+    async fn rebuilds_parent_child_tree_on_reload() {
+        use leviath_runtime::components::{ParentRef, SubAgentChildren};
+
+        let agent = agent_dir();
+        let manifest = agent.path().join("agent.leviath");
+        let mpath = manifest.to_str().unwrap();
+        let runs = tempfile::tempdir().unwrap();
+
+        // A parent with two children + a child that records its parent + depth.
+        write_run_tree(
+            runs.path(),
+            "parent",
+            mpath,
+            RunStatus::WaitingInput,
+            None,
+            None,
+            &["child-a", "child-b"],
+            0,
+            4,
+        );
+        write_run_tree(
+            runs.path(),
+            "child-a",
+            mpath,
+            RunStatus::Running,
+            None,
+            Some("parent"),
+            &[],
+            1,
+            0,
+        );
+        write_run_tree(
+            runs.path(),
+            "child-b",
+            mpath,
+            RunStatus::Running,
+            None,
+            Some("parent"),
+            &[],
+            1,
+            0,
+        );
+
+        let (mut world, cli) = test_world();
+        let hub = InteractionHub::new();
+        let mcp = Arc::new(Mutex::new(ToolExecutor::new()));
+        let restored = reload_persisted_agents(
+            &mut world,
+            cli.as_ref(),
+            &Config::default(),
+            mcp,
+            &[],
+            &hub,
+            runs.path(),
+            999,
+            &sub_tx(),
+        );
+        assert_eq!(restored.len(), 3);
+        let by_id: std::collections::HashMap<_, _> =
+            restored.iter().map(|(r, e)| (r.clone(), *e)).collect();
+        let parent = by_id["parent"];
+        let child_a = by_id["child-a"];
+        let child_b = by_id["child-b"];
+
+        // Parent's SubAgentChildren rebuilt with both children + the depth cap.
+        let kids = world.world().get::<SubAgentChildren>(parent).unwrap();
+        assert_eq!(kids.max_child_depth, 4);
+        assert_eq!(kids.children.len(), 2);
+        assert!(kids.children.contains(&child_a) && kids.children.contains(&child_b));
+        // Each child's ParentRef points back at the parent, at its stored depth.
+        let pr = world.world().get::<ParentRef>(child_a).unwrap();
+        assert_eq!(pr.parent_entity, parent);
+        assert_eq!(pr.parent_agent_id, "parent");
+        assert_eq!(pr.depth, 1);
+        // The serializable child list is kept in sync for the next snapshot.
+        let state = world
+            .world()
+            .get::<leviath_runtime::components::AgentState>(parent)
+            .unwrap();
+        assert_eq!(state.spawned_children_ids, vec!["child-a", "child-b"]);
+    }
+
+    #[tokio::test]
+    async fn relink_skips_children_and_parents_that_did_not_reload() {
+        use leviath_runtime::components::{ParentRef, SubAgentChildren};
+
+        let agent = agent_dir();
+        let manifest = agent.path().join("agent.leviath");
+        let mpath = manifest.to_str().unwrap();
+        let runs = tempfile::tempdir().unwrap();
+
+        // Parent lists a child that is terminal (won't reload) → no SubAgentChildren.
+        write_run_tree(
+            runs.path(),
+            "lonely-parent",
+            mpath,
+            RunStatus::WaitingInput,
+            None,
+            None,
+            &["gone-child"],
+            0,
+            2,
+        );
+        write_run_tree(
+            runs.path(),
+            "gone-child",
+            mpath,
+            RunStatus::Complete, // terminal → skipped by recovery
+            None,
+            Some("lonely-parent"),
+            &[],
+            1,
+            0,
+        );
+        // Child whose parent is terminal (won't reload) → left unlinked.
+        write_run_tree(
+            runs.path(),
+            "orphan",
+            mpath,
+            RunStatus::Running,
+            None,
+            Some("gone-parent"),
+            &[],
+            1,
+            0,
+        );
+        write_run_tree(
+            runs.path(),
+            "gone-parent",
+            mpath,
+            RunStatus::Error,
+            None,
+            None,
+            &["orphan"],
+            0,
+            2,
+        );
+
+        let (mut world, cli) = test_world();
+        let hub = InteractionHub::new();
+        let mcp = Arc::new(Mutex::new(ToolExecutor::new()));
+        let restored = reload_persisted_agents(
+            &mut world,
+            cli.as_ref(),
+            &Config::default(),
+            mcp,
+            &[],
+            &hub,
+            runs.path(),
+            999,
+            &sub_tx(),
+        );
+        // Only the two non-terminal runs reload.
+        assert_eq!(restored.len(), 2);
+        let by_id: std::collections::HashMap<_, _> =
+            restored.iter().map(|(r, e)| (r.clone(), *e)).collect();
+        // Parent listed a child that didn't reload → no SubAgentChildren attached.
+        assert!(
+            world
+                .world()
+                .get::<SubAgentChildren>(by_id["lonely-parent"])
+                .is_none()
+        );
+        // Orphan's parent didn't reload → no ParentRef attached.
+        assert!(world.world().get::<ParentRef>(by_id["orphan"]).is_none());
     }
 
     #[tokio::test]
