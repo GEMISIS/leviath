@@ -137,6 +137,21 @@ pub(super) async fn agent_context(
         })
 }
 
+pub(super) async fn agent_context_history(
+    AxumPath(id): AxumPath<String>,
+) -> Result<Json<Vec<leviath_core::run_archive::RunPoint>>, (StatusCode, Json<ErrorResponse>)> {
+    let history = runstate::context_history(&id);
+    if history.is_empty() {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse {
+                error: format!("No context history for run '{}'", id),
+            }),
+        ));
+    }
+    Ok(Json(history))
+}
+
 pub(super) async fn agent_logs(
     AxumPath(id): AxumPath<String>,
     Query(query): Query<LogsQuery>,
@@ -751,6 +766,102 @@ prompt = "Plan the work"
                     .with_state(test_state());
                 let req = Request::builder()
                     .uri(format!("/api/agents/{}/context", run_id))
+                    .body(Body::empty())
+                    .unwrap();
+                let resp = app.oneshot(req).await.unwrap();
+                assert_eq!(resp.status(), axum::http::StatusCode::NOT_FOUND);
+
+                let _ = std::fs::remove_dir_all(runstate::run_dir(&run_id));
+            },
+        )
+        .await;
+    }
+
+    /// Write a minimal `run.lvr` (Header + one ContextCheckpoint) for `run_id`.
+    fn write_archive_fixture(run_id: &str) {
+        use leviath_core::run_archive::{self, RunIdentity, RunRecord};
+        let mut buf = Vec::new();
+        run_archive::write_archive_start(&mut buf, run_archive::RUN_ARCHIVE_VERSION).unwrap();
+        run_archive::write_record(
+            &mut buf,
+            &RunRecord::Header {
+                identity: RunIdentity {
+                    run_id: run_id.to_string(),
+                    machine_id: "m".to_string(),
+                    world_id: "w".to_string(),
+                    created_at: 0,
+                },
+                meta: Box::new(make_run(run_id)),
+            },
+        )
+        .unwrap();
+        run_archive::write_record(
+            &mut buf,
+            &RunRecord::ContextCheckpoint {
+                snapshot: runstate::ContextSnapshot {
+                    stage_name: "plan".to_string(),
+                    total_tokens: 7,
+                    max_tokens: 100,
+                    regions: vec![],
+                },
+                at: 1,
+            },
+        )
+        .unwrap();
+        std::fs::write(runstate::run_dir(run_id).join("run.lvr"), &buf).unwrap();
+    }
+
+    #[tokio::test]
+    async fn agent_context_history_returns_ok() {
+        crate::runstate::with_isolated_runs_dir_async(
+            "agent_context_history_returns_ok",
+            |_d| async move {
+                let run_id = unique_run_id("ctx-hist");
+                create_run(&make_run(&run_id)).unwrap();
+                write_archive_fixture(&run_id);
+
+                let app = Router::new()
+                    .route(
+                        "/api/agents/{id}/context/history",
+                        get(agent_context_history),
+                    )
+                    .with_state(test_state());
+                let req = Request::builder()
+                    .uri(format!("/api/agents/{}/context/history", run_id))
+                    .body(Body::empty())
+                    .unwrap();
+                let resp = app.oneshot(req).await.unwrap();
+                assert_eq!(resp.status(), axum::http::StatusCode::OK);
+                let body = axum::body::to_bytes(resp.into_body(), usize::MAX)
+                    .await
+                    .unwrap();
+                let got: Vec<leviath_core::run_archive::RunPoint> =
+                    serde_json::from_slice(&body).unwrap();
+                assert_eq!(got.len(), 1);
+                assert_eq!(got[0].context.stage_name, "plan");
+
+                let _ = std::fs::remove_dir_all(runstate::run_dir(&run_id));
+            },
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn agent_context_history_no_archive_returns_404() {
+        crate::runstate::with_isolated_runs_dir_async(
+            "agent_context_history_no_archive_returns_404",
+            |_d| async move {
+                let run_id = unique_run_id("ctx-hist-none");
+                create_run(&make_run(&run_id)).unwrap();
+
+                let app = Router::new()
+                    .route(
+                        "/api/agents/{id}/context/history",
+                        get(agent_context_history),
+                    )
+                    .with_state(test_state());
+                let req = Request::builder()
+                    .uri(format!("/api/agents/{}/context/history", run_id))
                     .body(Body::empty())
                     .unwrap();
                 let resp = app.oneshot(req).await.unwrap();

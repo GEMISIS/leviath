@@ -155,6 +155,10 @@ async fn execute_with_shutdown(
         )
         .route("/api/agents/{id}/children", get(agents::agent_children))
         .route("/api/agents/{id}/context", get(agents::agent_context))
+        .route(
+            "/api/agents/{id}/context/history",
+            get(agents::agent_context_history),
+        )
         .route("/api/agents/{id}/logs", get(agents::agent_logs))
         .route("/api/agents/{id}/result", get(agents::agent_result))
         .route("/api/agents/{id}/tree-status", get(tree::agent_tree_status))
@@ -335,6 +339,10 @@ mod tests {
             .route("/api/agents/{id}", get(agents::get_agent))
             .route("/api/agents/{id}/children", get(agents::agent_children))
             .route("/api/agents/{id}/context", get(agents::agent_context))
+            .route(
+                "/api/agents/{id}/context/history",
+                get(agents::agent_context_history),
+            )
             .route("/api/agents/{id}/logs", get(agents::agent_logs))
             .route("/api/agents/{id}/result", get(agents::agent_result))
             .route("/api/agents/{id}/tree-status", get(tree::agent_tree_status))
@@ -649,6 +657,10 @@ model = "claude-sonnet-4-6"
             )
             .route("/api/agents/{id}/children", get(agents::agent_children))
             .route("/api/agents/{id}/context", get(agents::agent_context))
+            .route(
+                "/api/agents/{id}/context/history",
+                get(agents::agent_context_history),
+            )
             .route("/api/agents/{id}/logs", get(agents::agent_logs))
             .route("/api/agents/{id}/result", get(agents::agent_result))
             .route("/api/agents/{id}/tree-status", get(tree::agent_tree_status))
