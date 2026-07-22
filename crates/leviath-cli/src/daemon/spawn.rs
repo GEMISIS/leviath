@@ -153,6 +153,7 @@ fn build_tool_state(
     entry_stage: &str,
     entry_index: usize,
     stage_perms_by_index: Vec<HashMap<String, String>>,
+    agent_perms: HashMap<String, String>,
     launch_overrides: HashMap<String, crate::config::ToolPolicy>,
     subagent: Option<SubAgentHandle>,
 ) -> Arc<AgentToolState> {
@@ -168,7 +169,7 @@ fn build_tool_state(
         session_allows: Arc::new(Mutex::new(HashSet::new())),
         stage_perms: Arc::new(StdMutex::new(entry_perms)),
         stage_perms_by_index: Arc::new(stage_perms_by_index),
-        agent_perms: Arc::new(HashMap::new()),
+        agent_perms: Arc::new(agent_perms),
         global_perms: Arc::new(config.tool_permissions.clone()),
         interaction: hub.backend_for(run_id),
         stage_name: Arc::new(StdMutex::new(entry_stage.to_string())),
@@ -203,6 +204,15 @@ pub fn build_agent(
     // A request-level `--max-depth` overrides the blueprint's sub-agent depth cap.
     if let Some(md) = args.max_depth {
         blueprint.max_child_depth = Some(md);
+    }
+    // Apply the config's `default_max_iterations` to any stage that doesn't set
+    // its own, so an agent can't loop forever with no completion signal
+    // (`enforce_max_iterations` treats `None`/0 as unbounded). A stage's explicit
+    // `max_iterations` always wins.
+    if let Some(default_max) = config.limits.default_max_iterations {
+        for stage in &mut blueprint.stages {
+            stage.max_iterations.get_or_insert(default_max);
+        }
     }
 
     // 2. Per-agent built-in tools (over the agent's workdir).
@@ -268,6 +278,11 @@ pub fn build_agent(
         .iter()
         .position(|s| s.name == entry_stage)
         .unwrap_or(0);
+    // Agent-level tool permissions (the manifest's top-level `[tool_permissions]`,
+    // recorded in blueprint metadata). Populates the tool state's agent-level
+    // policy layer (between stage and global in `resolve_policy`), which was
+    // previously always empty.
+    let agent_perms = blueprint.agent_tool_permissions();
     let model_label = stages
         .first()
         .map(|s| format!("{}/{}", s.provider_name, s.model));
@@ -346,6 +361,7 @@ pub fn build_agent(
         &entry_stage,
         entry_index,
         stage_perms_by_index,
+        agent_perms,
         launch_overrides,
         Some(subagent),
     );
@@ -708,6 +724,150 @@ mod tests {
         )()
         .await;
         assert!(!out[0].1.contains("[denied]"));
+    }
+
+    #[tokio::test]
+    async fn build_agent_honors_agent_level_tool_permissions() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = dir.path().join("agent.leviath");
+        // A top-level `[tool_permissions]` block denying a builtin — no stage
+        // perms, no launch overrides, no global config deny. Only the agent-level
+        // layer can produce the deny, so this proves it is wired through.
+        std::fs::write(
+            &manifest,
+            "[agent]\nname = \"perm\"\nversion = \"0.1.0\"\ndescription = \"d\"\n\n\
+             [tool_permissions]\nread_file = \"deny\"\n\n\
+             [stages.main]\nmodel = { provider = \"anthropic\", model = \"m\" }\n",
+        )
+        .unwrap();
+
+        let (mut world, cli) = test_world();
+        let hub = InteractionHub::new();
+        let mcp = Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new()));
+        let entity = build_agent(
+            world.world_mut(),
+            cli.as_ref(),
+            &Config::default(),
+            mcp,
+            &[],
+            &hub,
+            &spawn_args(&manifest.to_string_lossy()),
+            100,
+            sub_tx(),
+        )
+        .expect("spawn succeeds");
+
+        let out = leviath_runtime::pipeline::ToolService::exec_for(
+            cli.as_ref(),
+            entity,
+            vec![leviath_providers::ToolCall {
+                id: "c1".to_string(),
+                name: "read_file".to_string(),
+                arguments: serde_json::json!({"path": "/no/such/file"}),
+            }],
+        )()
+        .await;
+        assert!(
+            out[0].1.contains("[denied]"),
+            "agent-level deny should block read_file"
+        );
+    }
+
+    #[tokio::test]
+    async fn build_agent_applies_default_max_iterations_only_when_stage_omits_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = dir.path().join("agent.leviath");
+        // Two stages: one omits max_iterations, one sets it explicitly to 3.
+        std::fs::write(
+            &manifest,
+            "[agent]\nname = \"iters\"\nversion = \"0.1.0\"\ndescription = \"d\"\n\n\
+             [stages.main]\nmodel = { provider = \"anthropic\", model = \"m\" }\n\n\
+             [stages.capped]\nmax_iterations = 3\n\
+             model = { provider = \"anthropic\", model = \"m\" }\n",
+        )
+        .unwrap();
+
+        let (mut world, cli) = test_world();
+        let hub = InteractionHub::new();
+        let mcp = Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new()));
+        // A non-default cap so the assertion can't accidentally match the built-in.
+        let config = Config {
+            limits: crate::config::LimitsConfig {
+                default_max_iterations: Some(42),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let entity = build_agent(
+            world.world_mut(),
+            cli.as_ref(),
+            &config,
+            mcp,
+            &[],
+            &hub,
+            &spawn_args(&manifest.to_string_lossy()),
+            100,
+            sub_tx(),
+        )
+        .expect("spawn succeeds");
+
+        let bp = world
+            .world()
+            .get::<leviath_runtime::pipeline::AgentBlueprint>(entity)
+            .expect("blueprint");
+        let by_name = |n: &str| {
+            bp.0.stages
+                .iter()
+                .find(|s| s.name == n)
+                .unwrap()
+                .max_iterations
+        };
+        // The stage that omitted it inherits the config default …
+        assert_eq!(by_name("main"), Some(42));
+        // … while an explicit per-stage cap is left untouched.
+        assert_eq!(by_name("capped"), Some(3));
+    }
+
+    #[tokio::test]
+    async fn build_agent_leaves_max_iterations_unset_when_config_default_is_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let manifest = dir.path().join("agent.leviath");
+        std::fs::write(
+            &manifest,
+            "[agent]\nname = \"nolimit\"\nversion = \"0.1.0\"\ndescription = \"d\"\n\n\
+             [stages.main]\nmodel = { provider = \"anthropic\", model = \"m\" }\n",
+        )
+        .unwrap();
+
+        let (mut world, cli) = test_world();
+        let hub = InteractionHub::new();
+        let mcp = Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new()));
+        // `None` disables the config default entirely — the stage stays uncapped.
+        let config = Config {
+            limits: crate::config::LimitsConfig {
+                default_max_iterations: None,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let entity = build_agent(
+            world.world_mut(),
+            cli.as_ref(),
+            &config,
+            mcp,
+            &[],
+            &hub,
+            &spawn_args(&manifest.to_string_lossy()),
+            100,
+            sub_tx(),
+        )
+        .expect("spawn succeeds");
+
+        let bp = world
+            .world()
+            .get::<leviath_runtime::pipeline::AgentBlueprint>(entity)
+            .expect("blueprint");
+        assert_eq!(bp.0.stages[0].max_iterations, None);
     }
 
     #[tokio::test]

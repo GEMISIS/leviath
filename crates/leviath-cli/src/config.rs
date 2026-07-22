@@ -88,6 +88,47 @@ pub struct Config {
     /// opts *in* by setting `taint_tracking = true` in its own `[security]`.
     #[serde(default)]
     pub taint_tracking: bool,
+
+    /// Runtime resource limits (inference concurrency + iteration caps).
+    #[serde(default)]
+    pub limits: LimitsConfig,
+}
+
+fn default_max_concurrent_inferences() -> Option<usize> {
+    Some(8)
+}
+
+fn default_default_max_iterations() -> Option<usize> {
+    Some(50)
+}
+
+/// Runtime resource limits with safe defaults baked in.
+///
+/// Both fields default to a bounded value so a fresh install can't accidentally
+/// run unbounded inference concurrency or an unbounded agent loop. Set a field
+/// explicitly in `[limits]` to raise or lower it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LimitsConfig {
+    /// Global fallback cap on concurrent inference requests for any model
+    /// without its own per-model pool entry. Defaults to `Some(8)`; omit or set
+    /// a large number to effectively unbound it.
+    #[serde(default = "default_max_concurrent_inferences")]
+    pub max_concurrent_inferences: Option<usize>,
+
+    /// Fallback `max_iterations` applied to a stage that does not set its own,
+    /// so an agent can't loop forever with no completion signal. Defaults to
+    /// `Some(50)`. A stage's explicit `max_iterations` always wins.
+    #[serde(default = "default_default_max_iterations")]
+    pub default_max_iterations: Option<usize>,
+}
+
+impl Default for LimitsConfig {
+    fn default() -> Self {
+        Self {
+            max_concurrent_inferences: default_max_concurrent_inferences(),
+            default_max_iterations: default_default_max_iterations(),
+        }
+    }
 }
 
 /// Provider configuration.
@@ -123,6 +164,7 @@ impl Default for Config {
             title: TitleConfig::default(),
             request_timeout_secs: None,
             taint_tracking: false,
+            limits: LimitsConfig::default(),
         }
     }
 }
@@ -540,6 +582,50 @@ mod tests {
         std::fs::write(&path, toml::to_string_pretty(&original).unwrap()).unwrap();
         let config = with_tracing(|| Config::load_from_path(&path)).unwrap();
         assert_eq!(config.default_provider, "openai");
+    }
+
+    #[test]
+    fn limits_default_to_bounded_values() {
+        let limits = LimitsConfig::default();
+        assert_eq!(limits.max_concurrent_inferences, Some(8));
+        assert_eq!(limits.default_max_iterations, Some(50));
+        // And the top-level Config carries the same defaults.
+        assert_eq!(Config::default().limits.max_concurrent_inferences, Some(8));
+    }
+
+    /// A valid full config-file body with the `[limits]` section removed, so
+    /// tests can simulate a config written before the section existed (robust to
+    /// unrelated fields being added). `[limits]` serializes as the final section.
+    #[cfg(test)]
+    fn config_toml_without_limits() -> String {
+        let full = toml::to_string_pretty(&Config::default()).unwrap();
+        format!("{}\n", full.split("[limits]").next().unwrap().trim_end())
+    }
+
+    #[test]
+    fn limits_absent_section_uses_defaults() {
+        // A config file with no `[limits]` table still gets the bounded defaults.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, config_toml_without_limits()).unwrap();
+        let config = with_tracing(|| Config::load_from_path(&path)).unwrap();
+        assert_eq!(config.limits.max_concurrent_inferences, Some(8));
+        assert_eq!(config.limits.default_max_iterations, Some(50));
+    }
+
+    #[test]
+    fn limits_partial_section_fills_the_other_default() {
+        // Setting only one field leaves the other at its per-field serde default.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let body = format!(
+            "{}\n[limits]\nmax_concurrent_inferences = 3\n",
+            config_toml_without_limits()
+        );
+        std::fs::write(&path, body).unwrap();
+        let config = with_tracing(|| Config::load_from_path(&path)).unwrap();
+        assert_eq!(config.limits.max_concurrent_inferences, Some(3));
+        assert_eq!(config.limits.default_max_iterations, Some(50));
     }
 
     #[test]
@@ -1448,12 +1534,18 @@ anthropic_api_key = "sk-ant-test-key"
             },
             request_timeout_secs: None,
             taint_tracking: false,
+            limits: LimitsConfig {
+                max_concurrent_inferences: Some(4),
+                default_max_iterations: Some(99),
+            },
         };
 
         let serialized = toml::to_string_pretty(&config).unwrap();
         let deserialized: Config = toml::from_str(&serialized).unwrap();
 
         assert_eq!(deserialized.default_provider, "anthropic");
+        assert_eq!(deserialized.limits.max_concurrent_inferences, Some(4));
+        assert_eq!(deserialized.limits.default_max_iterations, Some(99));
         assert_eq!(
             deserialized.providers.anthropic_api_key.as_deref(),
             Some("sk-ant-key")
