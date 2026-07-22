@@ -38,6 +38,13 @@ pub(crate) struct Dashboard {
     pub(super) selected_stage: usize,
     /// Whether the content pane shows Output or Logs — global across all stage tabs.
     pub(super) stage_content_mode: StageContentMode,
+    /// The selected run's context-window history (from its `run.lvr` archive),
+    /// loaded lazily when the user starts browsing it in the Context view. Empty
+    /// until then, and cleared when the browsed run changes.
+    pub(super) context_history: Vec<leviath_core::run_archive::RunPoint>,
+    /// Which historical context point is being viewed: `None` = the live current
+    /// window (the default), `Some(i)` = archived point `i` in `context_history`.
+    pub(super) context_history_idx: Option<usize>,
     /// True after the first sync completes; suppresses startup toasts for pre-existing state.
     pub(super) initial_sync_done: bool,
     /// Monotonic tick counter for animations (spinner, toast timeouts)
@@ -127,6 +134,8 @@ impl Dashboard {
             choice_selected: 0,
             selected_stage: 0,
             stage_content_mode: StageContentMode::Output,
+            context_history: Vec::new(),
+            context_history_idx: None,
             initial_sync_done: false,
             tick_count: 0,
             toasts: Vec::new(),
@@ -271,6 +280,56 @@ impl Dashboard {
 
     pub(super) fn selected_agent_raw_idx(&self) -> Option<usize> {
         self.display_indices.get(self.selected).copied()
+    }
+
+    /// Leave context-history browsing and go back to the live current window.
+    pub(super) fn reset_context_history(&mut self) {
+        self.context_history.clear();
+        self.context_history_idx = None;
+    }
+
+    /// Step through the selected run's archived context-window history in the
+    /// Context view: `delta > 0` moves to a later point, `delta < 0` to an
+    /// earlier one. The history is (re)loaded from the run's `run.lvr` archive
+    /// on each step; stepping past the newest point returns to the live window.
+    /// No-op if the run has no archived history.
+    pub(super) fn step_context_history(&mut self, delta: isize) {
+        let Some(run_id) = self.selected_agent().map(|a| a.id.clone()) else {
+            return;
+        };
+        let history = runstate::context_history(&run_id);
+        if history.is_empty() {
+            self.reset_context_history();
+            return;
+        }
+        let last = (history.len() - 1) as isize;
+        let new_idx = match self.context_history_idx {
+            // From the live window, a backward step enters at the newest point;
+            // a forward step stays live.
+            None => (delta < 0).then_some(last),
+            Some(i) => {
+                let target = i as isize + delta;
+                if target < 0 {
+                    Some(0)
+                } else if target > last {
+                    None // past the newest recorded point → live window
+                } else {
+                    Some(target)
+                }
+            }
+        };
+        self.context_history = history;
+        self.context_history_idx = new_idx.map(|i| i as usize);
+        self.stage_content_mode = StageContentMode::Context;
+        self.detail_scroll = 0;
+    }
+
+    /// The context snapshot to render in the Context view: the selected archived
+    /// history point when browsing, else `None` (callers fall back to the live
+    /// current window).
+    pub(super) fn browsed_context_point(&self) -> Option<&leviath_core::run_archive::RunPoint> {
+        self.context_history_idx
+            .and_then(|i| self.context_history.get(i))
     }
 
     pub(super) fn add_log(&mut self, msg: String) {
@@ -790,6 +849,112 @@ mod tests {
         assert_eq!(dash.agents[dash.display_indices[0]].id, "run-2"); // Active
         assert_eq!(dash.agents[dash.display_indices[1]].id, "run-3"); // Waiting
         assert_eq!(dash.agents[dash.display_indices[2]].id, "run-1"); // Complete
+    }
+
+    /// Write a `run.lvr` for `run_id` with `points` context checkpoints.
+    fn write_history_archive(run_id: &str, points: usize) {
+        use leviath_core::run_archive::{self, RunIdentity, RunRecord};
+        std::fs::create_dir_all(runstate::run_dir(run_id)).unwrap();
+        let mut buf = Vec::new();
+        run_archive::write_archive_start(&mut buf, run_archive::RUN_ARCHIVE_VERSION).unwrap();
+        run_archive::write_record(
+            &mut buf,
+            &RunRecord::Header {
+                identity: RunIdentity {
+                    run_id: run_id.to_string(),
+                    machine_id: "m".to_string(),
+                    world_id: "w".to_string(),
+                    created_at: 0,
+                },
+                meta: Box::new(leviath_core::run_meta::RunMeta::new(
+                    run_id.to_string(),
+                    "a".to_string(),
+                    "/p".to_string(),
+                    "t".to_string(),
+                    None,
+                    "/w".to_string(),
+                    1,
+                )),
+            },
+        )
+        .unwrap();
+        for i in 0..points {
+            run_archive::write_record(
+                &mut buf,
+                &RunRecord::ContextCheckpoint {
+                    snapshot: runstate::ContextSnapshot {
+                        stage_name: format!("stage{i}"),
+                        total_tokens: i,
+                        max_tokens: 100,
+                        regions: vec![],
+                    },
+                    at: i as i64,
+                },
+            )
+            .unwrap();
+        }
+        std::fs::write(runstate::run_dir(run_id).join("run.lvr"), &buf).unwrap();
+    }
+
+    #[test]
+    fn step_context_history_browses_then_returns_to_live() {
+        crate::runstate::with_isolated_runs_dir("dash-ctx-hist-browse", |_d| {
+            write_history_archive("run-h", 2);
+            let mut dash = make_test_dashboard();
+            dash.agents
+                .push(make_test_agent("run-h", AgentDisplayStatus::Active));
+            dash.update_display_indices();
+            dash.selected = 0;
+
+            assert_eq!(dash.context_history_idx, None);
+            assert!(dash.browsed_context_point().is_none());
+
+            // Back from live → newest point (index 1 of 2).
+            dash.step_context_history(-1);
+            assert_eq!(dash.context_history_idx, Some(1));
+            assert_eq!(dash.stage_content_mode, StageContentMode::Context);
+            assert!(dash.browsed_context_point().is_some());
+
+            // Back → index 0, then clamped at 0.
+            dash.step_context_history(-1);
+            assert_eq!(dash.context_history_idx, Some(0));
+            dash.step_context_history(-1);
+            assert_eq!(dash.context_history_idx, Some(0));
+
+            // Forward → index 1, then past newest → live.
+            dash.step_context_history(1);
+            assert_eq!(dash.context_history_idx, Some(1));
+            dash.step_context_history(1);
+            assert_eq!(dash.context_history_idx, None);
+            // Forward from live stays live.
+            dash.step_context_history(1);
+            assert_eq!(dash.context_history_idx, None);
+
+            // reset clears the cache + index.
+            dash.step_context_history(-1);
+            dash.reset_context_history();
+            assert_eq!(dash.context_history_idx, None);
+            assert!(dash.context_history.is_empty());
+        });
+    }
+
+    #[test]
+    fn step_context_history_noop_without_agent_or_archive() {
+        // No selected agent → no-op.
+        let mut dash = make_test_dashboard();
+        dash.step_context_history(-1);
+        assert_eq!(dash.context_history_idx, None);
+
+        // Agent whose run has no archive → resets to live.
+        crate::runstate::with_isolated_runs_dir("dash-ctx-hist-none", |_d| {
+            dash.agents
+                .push(make_test_agent("run-none", AgentDisplayStatus::Active));
+            dash.update_display_indices();
+            dash.selected = 0;
+            dash.step_context_history(-1);
+            assert_eq!(dash.context_history_idx, None);
+            assert!(dash.context_history.is_empty());
+        });
     }
 
     #[test]

@@ -218,6 +218,7 @@ impl Dashboard {
                     self.detail_view = false;
                     self.detail_scroll = 0;
                     self.review_scroll = 0;
+                    self.reset_context_history();
                 }
             }
             // Stage tab navigation
@@ -273,7 +274,13 @@ impl Dashboard {
             KeyCode::Char('c') => {
                 self.stage_content_mode = StageContentMode::Context;
                 self.detail_scroll = 0;
+                // `c` shows the live current window; leave any history browsing.
+                self.reset_context_history();
             }
+            // Browse the run's archived context-window history in the Context
+            // view: `,` = earlier point, `.` = later (past the newest → live).
+            KeyCode::Char(',') => self.step_context_history(-1),
+            KeyCode::Char('.') => self.step_context_history(1),
             KeyCode::Char('i') => {
                 // Respond to a pending interaction, or send a mid-run message to
                 // any active agent that accepts them — same key, same input area.
@@ -2363,6 +2370,70 @@ mod tests {
         assert!(!dash.search_mode);
         assert!(dash.search_query.is_empty());
         assert_eq!(dash.search_match_idx, 0);
+    }
+
+    /// A dashboard in detail view that is browsing a (fake) history point, for
+    /// the reset-to-live key tests.
+    fn browsing_detail_dashboard() -> Dashboard {
+        let mut dash = make_test_dashboard();
+        dash.agents
+            .push(make_test_agent("run-1", AgentDisplayStatus::Active));
+        dash.update_display_indices();
+        dash.detail_view = true;
+        dash.context_history = vec![leviath_core::run_archive::RunPoint {
+            meta: leviath_core::run_meta::RunMeta::new(
+                "run-1".to_string(),
+                "a".to_string(),
+                "/p".to_string(),
+                "t".to_string(),
+                None,
+                "/w".to_string(),
+                1,
+            ),
+            context: leviath_core::run_meta::ContextSnapshot {
+                stage_name: "s".to_string(),
+                total_tokens: 0,
+                max_tokens: 100,
+                regions: vec![],
+            },
+            at: 0,
+        }];
+        dash.context_history_idx = Some(0);
+        dash
+    }
+
+    #[test]
+    fn detail_view_comma_and_period_route_to_history_step() {
+        // With no archive on disk, stepping is a no-op — this exercises the
+        // `,`/`.` routing arms without needing a run.lvr fixture.
+        let mut dash = make_test_dashboard();
+        dash.agents.push(make_test_agent(
+            "run-no-archive",
+            AgentDisplayStatus::Active,
+        ));
+        dash.update_display_indices();
+        dash.detail_view = true;
+        dash.handle_key(key(KeyCode::Char(',')));
+        dash.handle_key(key(KeyCode::Char('.')));
+        assert_eq!(dash.context_history_idx, None);
+    }
+
+    #[test]
+    fn detail_view_c_returns_to_live_context() {
+        let mut dash = browsing_detail_dashboard();
+        dash.handle_key(key(KeyCode::Char('c')));
+        assert_eq!(dash.stage_content_mode, StageContentMode::Context);
+        assert_eq!(dash.context_history_idx, None); // back to live
+        assert!(dash.context_history.is_empty());
+    }
+
+    #[test]
+    fn detail_view_esc_resets_context_history() {
+        let mut dash = browsing_detail_dashboard();
+        dash.handle_key(key(KeyCode::Esc));
+        assert!(!dash.detail_view);
+        assert_eq!(dash.context_history_idx, None);
+        assert!(dash.context_history.is_empty());
     }
 
     #[test]
