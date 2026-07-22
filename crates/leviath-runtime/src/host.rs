@@ -73,6 +73,15 @@ pub struct SpawnArgs {
 /// with a human-readable message on failure.
 pub type Spawner = Box<dyn FnMut(&mut PipelineWorld, &SpawnArgs) -> Result<Entity, String> + Send>;
 
+/// The daemon-installed function that pages a previously-unloaded run back into
+/// the world from its on-disk state: given a run id, it reloads the agent (its
+/// blueprint, tool state, context, stage) and returns the new entity, or `None`
+/// if there is no such resumable run on disk. Used for reload-on-demand — a
+/// control/sub-agent op targeting a run that isn't currently in memory pages it
+/// in first via the host's internal resolve-or-reload step. Installed with
+/// [`WorldHost::set_reloader`].
+pub type Reloader = Box<dyn FnMut(&mut PipelineWorld, &str) -> Option<Entity> + Send>;
+
 /// A world-access request from an agent's tool lane. The sub-agent tools
 /// (`spawn_agent`/`check_agent`/`send_to_agent`/`kill_agent`) need the world and
 /// the [`Spawner`], which only the host holds — the tool lane runs async, off the
@@ -305,6 +314,9 @@ struct Emitted {
     cache_write_tokens: usize,
     context_tokens: usize,
     terminal: bool,
+    /// The agent is parked and quiescent (safe to unload from memory — see
+    /// [`WorldHost::is_idle_unloadable`]).
+    idle: bool,
 }
 
 /// Owns the world and the run-id map; drives the world and services control ops.
@@ -313,6 +325,7 @@ pub struct WorldHost {
     by_run_id: HashMap<String, Entity>,
     interactions: InteractionHub,
     spawner: Option<Spawner>,
+    reloader: Option<Reloader>,
     events: broadcast::Sender<WorldEvent>,
     emitted: HashMap<String, Emitted>,
     emitted_interactions: HashSet<String>,
@@ -338,6 +351,7 @@ impl WorldHost {
             by_run_id: HashMap::new(),
             interactions,
             spawner: None,
+            reloader: None,
             events,
             emitted: HashMap::new(),
             emitted_interactions: HashSet::new(),
@@ -386,6 +400,7 @@ impl WorldHost {
                 state.status,
                 AgentStatus::Complete | AgentStatus::Error { .. } | AgentStatus::Cancelled
             );
+            let idle = self.is_idle_unloadable(entity, &state.status);
             let cur = {
                 let totals = self
                     .world
@@ -411,6 +426,7 @@ impl WorldHost {
                     cache_write_tokens: totals.cache_write_tokens,
                     context_tokens,
                     terminal,
+                    idle,
                 }
             };
             let max_tokens = self
@@ -498,6 +514,14 @@ impl WorldHost {
             if cur.terminal && was_terminal && self.no_live_parent(entity) {
                 to_reap.push((run_id.clone(), entity));
             }
+            // Unload a quiescent idle agent (parked, no in-flight work) once it has
+            // stayed idle for a full pass — a grace so an agent that just parked and
+            // is about to receive a message isn't churned. It is paged back in from
+            // disk on the next op that targets it.
+            let was_idle = prev.as_ref().map(|e| e.idle) == Some(true);
+            if cur.idle && was_idle {
+                to_reap.push((run_id.clone(), entity));
+            }
 
             self.emitted.insert(run_id, cur);
         }
@@ -539,10 +563,56 @@ impl WorldHost {
         }
     }
 
+    /// Whether a **non-terminal** agent is safe to unload from memory: it is
+    /// `Waiting` (parked for input), has no in-flight async work (no
+    /// `Awaiting*`), no pending sync step (no `ReadyToInfer`/`ReadyForTools`/
+    /// `ReadyForTransition`/`ProcessResponse`), is not gated on children (no
+    /// `WaitingForChildren` — those stay loaded to collect results), and has no
+    /// live parent that might still need it. A control/sub-agent op pages it back
+    /// in on demand (see [`Self::resolve_or_reload`]).
+    fn is_idle_unloadable(&self, entity: Entity, status: &AgentStatus) -> bool {
+        use crate::pipeline::{
+            AwaitingCompaction, AwaitingInference, AwaitingTools, AwaitingTransitionResponse,
+            ProcessResponse, ReadyForTools, ReadyForTransition, ReadyToInfer, WaitingForChildren,
+        };
+        if !matches!(status, AgentStatus::Waiting) {
+            return false;
+        }
+        let world = self.world.world();
+        let busy = world.get::<AwaitingInference>(entity).is_some()
+            || world.get::<AwaitingTools>(entity).is_some()
+            || world.get::<AwaitingTransitionResponse>(entity).is_some()
+            || world.get::<AwaitingCompaction>(entity).is_some()
+            || world.get::<ReadyToInfer>(entity).is_some()
+            || world.get::<ReadyForTools>(entity).is_some()
+            || world.get::<ReadyForTransition>(entity).is_some()
+            || world.get::<ProcessResponse>(entity).is_some()
+            || world.get::<WaitingForChildren>(entity).is_some();
+        !busy && self.no_live_parent(entity)
+    }
+
     /// Install the spawner used to service `Spawn` control ops. Without one, a
     /// `Spawn` op replies with an error.
     pub fn set_spawner(&mut self, spawner: Spawner) {
         self.spawner = Some(spawner);
+    }
+
+    /// Install the reloader used to page an unloaded run back in on demand.
+    /// Without one, an op targeting a run that isn't in memory just misses.
+    pub fn set_reloader(&mut self, reloader: Reloader) {
+        self.reloader = Some(reloader);
+    }
+
+    /// Resolve a run id to a live entity, paging it in from disk if it has been
+    /// unloaded (and a reloader is installed). Returns `None` if the run is
+    /// neither live nor resumable from disk. Newly-reloaded runs are registered.
+    fn resolve_or_reload(&mut self, run_id: &str) -> Option<Entity> {
+        if let Some(entity) = self.live_entity(run_id) {
+            return Some(entity);
+        }
+        let entity = (self.reloader.as_mut()?)(&mut self.world, run_id)?;
+        self.by_run_id.insert(run_id.to_string(), entity);
+        Some(entity)
     }
 
     /// A clone of the interaction hub, for building per-agent backends.
@@ -588,6 +658,8 @@ impl WorldHost {
                 content,
                 reply,
             } => {
+                // Page the target in if it was unloaded, so delivery finds it.
+                self.resolve_or_reload(&run_id);
                 let ok = self
                     .world
                     .send_message(AgentMessage {
@@ -665,9 +737,10 @@ impl WorldHost {
         Ok(run_id)
     }
 
-    /// Cancel a run and every descendant. Returns whether the run was live.
+    /// Cancel a run and every descendant. Returns whether the run existed (paging
+    /// it in from disk first if it had been unloaded).
     fn cancel_tree(&mut self, run_id: &str) -> bool {
-        let Some(root) = self.live_entity(run_id) else {
+        let Some(root) = self.resolve_or_reload(run_id) else {
             return false;
         };
         // Collect the subtree (parent before children), then cancel each.
@@ -724,19 +797,19 @@ impl WorldHost {
             }
             ControlOp::Pause { run_id, reply } => {
                 let ok = self
-                    .live_entity(&run_id)
+                    .resolve_or_reload(&run_id)
                     .is_some_and(|e| self.world.pause(e));
                 let _ = reply.send(ok);
             }
             ControlOp::Resume { run_id, reply } => {
                 let ok = self
-                    .live_entity(&run_id)
+                    .resolve_or_reload(&run_id)
                     .is_some_and(|e| self.world.resume(e));
                 let _ = reply.send(ok);
             }
             ControlOp::Cancel { run_id, reply } => {
                 let ok = self
-                    .live_entity(&run_id)
+                    .resolve_or_reload(&run_id)
                     .is_some_and(|e| self.world.cancel(e));
                 let _ = reply.send(ok);
             }
@@ -749,6 +822,8 @@ impl WorldHost {
                 target_region,
                 reply,
             } => {
+                // Page the target in if it was unloaded, so delivery finds it.
+                self.resolve_or_reload(&agent_id);
                 let ok = self
                     .world
                     .send_message(AgentMessage {
@@ -810,7 +885,7 @@ mod tests {
     use crate::inference_pool::InferencePoolConfig;
     use crate::pipeline::{
         AgentBlueprint, ReadyToInfer, StageCursor, StageInference, StageInferences, StageProgress,
-        StageSetup, StageSetups, ToolService, VisitCounts,
+        StageSetup, StageSetups, ToolService, VisitCounts, WaitingForChildren,
     };
     use crate::tool_bridge::BoxedToolExec;
     use leviath_core::{Region, RegionKind};
@@ -1645,6 +1720,113 @@ mod tests {
         host.emit_events();
         host.emit_events();
         assert!(host.live_entity("active").is_some());
+    }
+
+    /// Spawn a `Waiting` agent (optionally with an extra marker component) and
+    /// register it under `run_id`.
+    fn register_waiting(host: &mut WorldHost, run_id: &str) -> Entity {
+        let mut s = agent_state(run_id);
+        s.status = AgentStatus::Waiting;
+        let e = host.world.world_mut().spawn(s).id();
+        host.register(run_id, e);
+        e
+    }
+
+    #[tokio::test]
+    async fn emit_events_unloads_idle_parked_agents_but_keeps_busy_ones() {
+        let mut host = host_with(vec![]);
+
+        // A parked Waiting agent with no pending work → unloaded after the grace.
+        let parked = register_waiting(&mut host, "parked");
+        let _ = parked;
+        host.emit_events();
+        assert!(
+            host.live_entity("parked").is_some(),
+            "grace: not on first pass"
+        );
+        host.emit_events();
+        assert!(
+            host.live_entity("parked").is_none(),
+            "unloaded after a full idle pass"
+        );
+
+        // A Waiting agent with a pending sync step (`ReadyToInfer`) is kept.
+        let mut busy_s = agent_state("busy");
+        busy_s.status = AgentStatus::Waiting;
+        let busy = host.world.world_mut().spawn((busy_s, ReadyToInfer)).id();
+        host.register("busy", busy);
+        host.emit_events();
+        host.emit_events();
+        assert!(
+            host.live_entity("busy").is_some(),
+            "not unloaded: pending work"
+        );
+
+        // A Waiting agent gated on children is kept (it must collect their results).
+        let mut gated_s = agent_state("gated");
+        gated_s.status = AgentStatus::Waiting;
+        let gated = host
+            .world
+            .world_mut()
+            .spawn((gated_s, WaitingForChildren))
+            .id();
+        host.register("gated", gated);
+        host.emit_events();
+        host.emit_events();
+        assert!(
+            host.live_entity("gated").is_some(),
+            "not unloaded: gated on children"
+        );
+    }
+
+    #[tokio::test]
+    async fn resolve_or_reload_pages_in_and_registers() {
+        let mut host = host_with(vec![]);
+        // No reloader installed → a miss stays a miss.
+        assert!(host.resolve_or_reload("ghost").is_none());
+
+        // A reloader that declines (run not resumable from disk) → still a miss,
+        // and nothing gets registered.
+        host.set_reloader(Box::new(|_world, _run_id| None));
+        assert!(host.resolve_or_reload("gone").is_none());
+        assert!(
+            host.live_entity("gone").is_none(),
+            "a declined reload registers nothing"
+        );
+
+        // With a reloader that resolves → an unloaded run is paged in and registered.
+        host.set_reloader(Box::new(|world, run_id| {
+            Some(world.spawn_agent((agent_state(run_id),)))
+        }));
+        let paged = host.resolve_or_reload("paged").expect("reloaded");
+        assert_eq!(
+            host.live_entity("paged"),
+            Some(paged),
+            "registered after reload"
+        );
+
+        // A live run is returned without invoking the reloader (no re-spawn).
+        assert_eq!(host.resolve_or_reload("paged"), Some(paged));
+    }
+
+    #[tokio::test]
+    async fn cancel_pages_in_an_unloaded_run() {
+        let mut host = host_with(vec![]);
+        host.set_reloader(Box::new(|world, run_id| {
+            Some(world.spawn_agent((agent_state(run_id),)))
+        }));
+        // Cancelling a run that isn't in memory pages it in, then cancels it.
+        let cancelled = ask(&mut host, |reply| ControlOp::Cancel {
+            run_id: "unloaded".to_string(),
+            reply,
+        })
+        .await;
+        assert!(cancelled, "reloaded then cancelled");
+        assert_eq!(
+            host.world
+                .agent_status(host.live_entity("unloaded").unwrap()),
+            Some(AgentStatus::Cancelled)
+        );
     }
 
     #[tokio::test]

@@ -180,6 +180,31 @@ pub fn build_host(
         .world_mut()
         .insert_resource(leviath_runtime::pipeline::GateScriptRules(script_checker));
 
+    // Reload-on-demand: an op targeting an unloaded run pages it back in from
+    // disk. Capture the shared context (cloned before the spawner moves the
+    // originals below).
+    let reload_tools = tool_service.clone();
+    let reload_config = config.clone();
+    let reload_mcp = shared_mcp.clone();
+    let reload_defs = mcp_tool_defs.clone();
+    let reload_hub = hub.clone();
+    let reload_tx = subagent_tx.clone();
+    let reload_runs = runs_dir.clone();
+    host.set_reloader(Box::new(move |world, run_id| {
+        crate::daemon::recovery::reload_run(
+            world,
+            reload_tools.as_ref(),
+            &reload_config,
+            reload_mcp.clone(),
+            &reload_defs,
+            &reload_hub,
+            run_id,
+            &reload_runs,
+            now_secs(),
+            &reload_tx,
+        )
+    }));
+
     // The spawner captures everything an agent needs; `now_secs` is called at
     // spawn time for the run's start timestamp.
     host.set_spawner(Box::new(move |world, args| {
@@ -444,6 +469,93 @@ mod tests {
             reply,
         });
         assert_eq!(rx.await.unwrap(), Some(AgentStatus::Active));
+    }
+
+    #[tokio::test]
+    async fn build_host_installs_a_reloader_that_pages_in_unloaded_runs() {
+        // A run that lands on disk *after* startup (so it is not auto-reloaded)
+        // must still be reachable: a control op targeting it fires the installed
+        // reloader, which pages it into the world on demand.
+        let agent = tempfile::tempdir().unwrap();
+        let manifest = agent.path().join("agent.leviath");
+        std::fs::write(
+            &manifest,
+            std::fs::read_to_string(
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("../../agents/coder/agent.leviath"),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+
+        let runs = tempfile::tempdir().unwrap();
+        let mut registry = ProviderRegistry::new();
+        registry.register("anthropic".to_string(), Arc::new(FakeProvider));
+        let mcp = Arc::new(Mutex::new(leviath_mcp::ToolExecutor::new()));
+        let mut host = build_host(
+            Config::default(),
+            registry,
+            runs.path().to_path_buf(),
+            mcp,
+            vec![],
+            Handle::current(),
+            || 100,
+        );
+
+        // Persist a running run only now — build_host's startup reload already ran,
+        // so it is on disk but absent from the world.
+        let run_dir = runs.path().join("late");
+        std::fs::create_dir_all(&run_dir).unwrap();
+        let meta = leviath_core::run_meta::RunMeta {
+            run_id: "late".to_string(),
+            agent_name: "coder".to_string(),
+            agent_path: manifest.to_string_lossy().to_string(),
+            task: "page me in".to_string(),
+            model: None,
+            pid: 0,
+            status: leviath_core::run_meta::RunStatus::Running,
+            current_stage: "implement".to_string(),
+            stage_index: 0,
+            num_stages: 1,
+            iteration: 1,
+            prompt_tokens: 0,
+            completion_tokens: 0,
+            cached_tokens: 0,
+            cache_write_tokens: 0,
+            tool_calls: 0,
+            workdir: std::env::temp_dir().to_string_lossy().to_string(),
+            started_at: 1,
+            updated_at: 1,
+            error: None,
+            title: None,
+            metadata: Default::default(),
+            callback_url: None,
+            parent_run_id: None,
+            children: Vec::new(),
+            depth: 0,
+            max_child_depth: 0,
+        };
+        std::fs::write(
+            run_dir.join("meta.json"),
+            serde_json::to_string(&meta).unwrap(),
+        )
+        .unwrap();
+
+        // It is not loaded yet: a read-only Status does not page it in.
+        let (reply, rx) = oneshot::channel();
+        host.handle(ControlOp::Status {
+            run_id: "late".to_string(),
+            reply,
+        });
+        assert_eq!(rx.await.unwrap(), None);
+
+        // A Cancel routes through the reloader, paging it in and acting on it.
+        let (reply, rx) = oneshot::channel();
+        host.handle(ControlOp::Cancel {
+            run_id: "late".to_string(),
+            reply,
+        });
+        assert!(rx.await.unwrap());
     }
 
     #[test]

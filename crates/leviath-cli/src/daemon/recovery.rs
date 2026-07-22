@@ -84,6 +84,44 @@ pub fn reload_persisted_agents(
         .collect()
 }
 
+/// Page a single unloaded run back into the world from disk, on demand. Reads
+/// its persisted metadata; if the run exists and is non-terminal, reloads it
+/// (blueprint + tool state + context/stage) and returns the new entity. `None`
+/// if there's no such resumable run. This is the host's reload-on-demand seam
+/// (an op targeting an unloaded run pages it in first).
+#[allow(clippy::too_many_arguments)]
+pub fn reload_run(
+    world: &mut PipelineWorld,
+    tool_service: &CliToolService,
+    config: &Config,
+    shared_mcp: Arc<Mutex<ToolExecutor>>,
+    mcp_tool_defs: &[Tool],
+    hub: &InteractionHub,
+    run_id: &str,
+    runs_dir: &std::path::Path,
+    now_secs: i64,
+    subagent_tx: &UnboundedSender<SubAgentOp>,
+) -> Option<Entity> {
+    let run_dir = runs_dir.join(run_id);
+    let meta = read_meta(&run_dir)?;
+    if is_terminal(&meta.status) {
+        return None; // a finished run isn't paged back in
+    }
+    reload_one(
+        world,
+        tool_service,
+        config,
+        shared_mcp,
+        mcp_tool_defs,
+        hub,
+        &meta,
+        &run_dir,
+        now_secs,
+        subagent_tx,
+    )
+    .ok()
+}
+
 /// Rebuild `FanOutWaiting` for any reloaded parent that was parked mid fan-out
 /// (a `<run_dir>/fanout.json` is present), so its split/merge resumes rather than
 /// hanging. Active workers are re-linked by run-id via the reloaded run→entity
@@ -470,6 +508,69 @@ mod tests {
         let totals = world.world().get::<TokenTotals>(*entity).unwrap();
         assert_eq!(totals.prompt_tokens, 42);
         assert_eq!(totals.tool_calls, 3);
+    }
+
+    #[tokio::test]
+    async fn reload_run_pages_in_nonterminal_only() {
+        let agent = agent_dir();
+        let manifest = agent.path().join("agent.leviath");
+        let mpath = manifest.to_str().unwrap();
+        let runs = tempfile::tempdir().unwrap();
+        write_run(runs.path(), "live", mpath, RunStatus::Running, None);
+        write_run(runs.path(), "done", mpath, RunStatus::Complete, None);
+
+        let (mut world, cli) = test_world();
+        let hub = InteractionHub::new();
+        let mcp = Arc::new(Mutex::new(ToolExecutor::new()));
+
+        // A non-terminal run is paged in.
+        assert!(
+            reload_run(
+                &mut world,
+                cli.as_ref(),
+                &Config::default(),
+                mcp.clone(),
+                &[],
+                &hub,
+                "live",
+                runs.path(),
+                1,
+                &sub_tx(),
+            )
+            .is_some()
+        );
+        // A terminal run is not.
+        assert!(
+            reload_run(
+                &mut world,
+                cli.as_ref(),
+                &Config::default(),
+                mcp.clone(),
+                &[],
+                &hub,
+                "done",
+                runs.path(),
+                1,
+                &sub_tx(),
+            )
+            .is_none()
+        );
+        // A run with no meta on disk is not.
+        assert!(
+            reload_run(
+                &mut world,
+                cli.as_ref(),
+                &Config::default(),
+                mcp,
+                &[],
+                &hub,
+                "no-such-run",
+                runs.path(),
+                1,
+                &sub_tx(),
+            )
+            .is_none()
+        );
     }
 
     #[tokio::test]
