@@ -13,9 +13,19 @@ pub struct ToolMetadata {
     /// Tool description
     #[serde(default)]
     pub description: String,
-    /// Parameter schema (JSON Schema)
-    #[serde(rename = "inputSchema", default)]
+    /// Parameter schema (JSON Schema).
+    ///
+    /// Defaults to an empty object schema rather than `Value::Null`: the spec
+    /// requires `inputSchema` to be a valid JSON Schema object and never null,
+    /// and providers reject a tool whose parameter schema is null.
+    #[serde(rename = "inputSchema", default = "empty_object_schema")]
     pub schema: serde_json::Value,
+}
+
+/// `{"type": "object"}` — the fallback parameter schema for a tool whose
+/// server omitted `inputSchema`.
+fn empty_object_schema() -> serde_json::Value {
+    serde_json::json!({"type": "object"})
 }
 
 /// Configuration for an MCP server connection.
@@ -150,7 +160,9 @@ mod tests {
         let meta: ToolMetadata = serde_json::from_str(json).unwrap();
         assert_eq!(meta.name, "minimal");
         assert_eq!(meta.description, "");
-        assert_eq!(meta.schema, serde_json::Value::Null);
+        // Never `Value::Null`: the spec requires a JSON Schema *object*, and
+        // providers reject a tool whose parameter schema is null.
+        assert_eq!(meta.schema, serde_json::json!({"type": "object"}));
     }
 
     #[test]

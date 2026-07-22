@@ -123,17 +123,38 @@ impl ToolExecutor {
     }
 
     /// Map a ToolResult into an ExecutionResult.
+    ///
+    /// Only the model-readable blocks contribute to `text`; binary payloads
+    /// (image/audio) and bare resource links do not, and an unmodelled block is
+    /// skipped with a warning rather than failing the call.
     fn map_result(tool_result: ToolResult) -> ExecutionResult {
-        let text = tool_result
-            .content
-            .iter()
-            .filter_map(|c| match c {
-                ToolResultContent::Text { text } => Some(text.as_str()),
-                ToolResultContent::Resource { text, .. } => text.as_deref(),
-                ToolResultContent::Image { .. } => None,
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
+        let mut parts: Vec<&str> = Vec::new();
+        for content in &tool_result.content {
+            match content {
+                ToolResultContent::Text { text } => parts.push(text.as_str()),
+                ToolResultContent::Resource { resource } => {
+                    if let Some(text) = resource.text.as_deref() {
+                        parts.push(text);
+                    }
+                }
+                ToolResultContent::Image { .. }
+                | ToolResultContent::Audio { .. }
+                | ToolResultContent::ResourceLink { .. } => {}
+                ToolResultContent::Unknown => {
+                    tracing::warn!("Skipping unrecognized MCP content block in tool result");
+                }
+            }
+        }
+        let mut text = parts.join("\n");
+
+        // A structured-only result would otherwise reach the model as an empty
+        // string. Servers *should* also mirror it into a text block, but not
+        // all do.
+        if text.is_empty()
+            && let Some(structured) = &tool_result.structured_content
+        {
+            text = structured.to_string();
+        }
 
         let data = serde_json::to_value(&tool_result.content).unwrap_or(Value::Null);
 
@@ -154,6 +175,7 @@ impl Default for ToolExecutor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::client::EmbeddedResource;
     use crate::test_support::always_on_tracing_guard;
 
     #[tokio::test]
@@ -192,6 +214,7 @@ mod tests {
             content: vec![ToolResultContent::Text {
                 text: "Hello world".to_string(),
             }],
+            structured_content: None,
             is_error: false,
         };
         let result = ToolExecutor::map_result(tool_result);
@@ -205,6 +228,7 @@ mod tests {
             content: vec![ToolResultContent::Text {
                 text: "Something failed".to_string(),
             }],
+            structured_content: None,
             is_error: true,
         };
         let result = ToolExecutor::map_result(tool_result);
@@ -216,6 +240,7 @@ mod tests {
     fn test_map_result_empty_content() {
         let tool_result = ToolResult {
             content: vec![],
+            structured_content: None,
             is_error: false,
         };
         let result = ToolExecutor::map_result(tool_result);
@@ -234,6 +259,7 @@ mod tests {
                     text: "line2".to_string(),
                 },
             ],
+            structured_content: None,
             is_error: false,
         };
         let result = ToolExecutor::map_result(tool_result);
@@ -255,6 +281,7 @@ mod tests {
                     text: "after".to_string(),
                 },
             ],
+            structured_content: None,
             is_error: false,
         };
         let result = ToolExecutor::map_result(tool_result);
@@ -265,9 +292,14 @@ mod tests {
     fn test_map_result_resource_with_text() {
         let tool_result = ToolResult {
             content: vec![ToolResultContent::Resource {
-                uri: "file:///test".to_string(),
-                text: Some("resource content".to_string()),
+                resource: EmbeddedResource {
+                    uri: "file:///test".to_string(),
+                    text: Some("resource content".to_string()),
+                    blob: None,
+                    mime_type: None,
+                },
             }],
+            structured_content: None,
             is_error: false,
         };
         let result = ToolExecutor::map_result(tool_result);
@@ -278,9 +310,14 @@ mod tests {
     fn test_map_result_resource_without_text() {
         let tool_result = ToolResult {
             content: vec![ToolResultContent::Resource {
-                uri: "file:///test".to_string(),
-                text: None,
+                resource: EmbeddedResource {
+                    uri: "file:///test".to_string(),
+                    text: None,
+                    blob: None,
+                    mime_type: None,
+                },
             }],
+            structured_content: None,
             is_error: false,
         };
         let result = ToolExecutor::map_result(tool_result);
@@ -293,6 +330,7 @@ mod tests {
             content: vec![ToolResultContent::Text {
                 text: "hi".to_string(),
             }],
+            structured_content: None,
             is_error: false,
         };
         let result = ToolExecutor::map_result(tool_result);
@@ -552,5 +590,112 @@ for line in sys.stdin:
                 .to_string()
                 .contains("tool execution failed")
         );
+    }
+
+    // ─── map_result over the full content-block set ───────────────────────
+
+    fn text_of(content: Vec<ToolResultContent>) -> String {
+        ToolExecutor::map_result(ToolResult {
+            content,
+            structured_content: None,
+            is_error: false,
+        })
+        .text
+    }
+
+    #[test]
+    fn map_result_reports_tool_execution_error_as_failure() {
+        // The end-to-end consequence of the `isError` rename: a failing tool
+        // must reach the model as a failure, not a success.
+        let result = ToolExecutor::map_result(ToolResult {
+            content: vec![ToolResultContent::Text {
+                text: "Invalid departure date".to_string(),
+            }],
+            structured_content: None,
+            is_error: true,
+        });
+        assert!(!result.success);
+        assert_eq!(result.text, "Invalid departure date");
+    }
+
+    #[test]
+    fn map_result_skips_binary_blocks() {
+        let text = text_of(vec![
+            ToolResultContent::Text {
+                text: "before".to_string(),
+            },
+            ToolResultContent::Image {
+                data: "YWJj".to_string(),
+                mime_type: "image/png".to_string(),
+            },
+            ToolResultContent::Audio {
+                data: "YWJj".to_string(),
+                mime_type: "audio/wav".to_string(),
+            },
+            ToolResultContent::Text {
+                text: "after".to_string(),
+            },
+        ]);
+        assert_eq!(text, "before\nafter");
+    }
+
+    #[test]
+    fn map_result_skips_resource_links() {
+        let text = text_of(vec![ToolResultContent::ResourceLink {
+            uri: "file:///x".to_string(),
+            name: "x".to_string(),
+            description: None,
+            mime_type: None,
+        }]);
+        assert_eq!(text, "");
+    }
+
+    #[test]
+    fn map_result_skips_unknown_blocks_without_losing_the_rest() {
+        let _guard = always_on_tracing_guard();
+        let text = text_of(vec![
+            ToolResultContent::Unknown,
+            ToolResultContent::Text {
+                text: "still here".to_string(),
+            },
+        ]);
+        assert_eq!(text, "still here");
+    }
+
+    #[test]
+    fn map_result_falls_back_to_structured_content_when_no_text() {
+        // Servers *should* mirror structured output into a text block; not all
+        // do, and without this the model would receive an empty string.
+        let result = ToolExecutor::map_result(ToolResult {
+            content: vec![],
+            structured_content: Some(serde_json::json!({"temperature": 22.5})),
+            is_error: false,
+        });
+        assert_eq!(result.text, r#"{"temperature":22.5}"#);
+    }
+
+    #[test]
+    fn map_result_prefers_text_blocks_over_structured_content() {
+        let result = ToolExecutor::map_result(ToolResult {
+            content: vec![ToolResultContent::Text {
+                text: "human readable".to_string(),
+            }],
+            structured_content: Some(serde_json::json!({"a": 1})),
+            is_error: false,
+        });
+        assert_eq!(result.text, "human readable");
+    }
+
+    #[test]
+    fn map_result_embedded_resource_blob_contributes_no_text() {
+        let text = text_of(vec![ToolResultContent::Resource {
+            resource: EmbeddedResource {
+                uri: "file:///a.png".to_string(),
+                text: None,
+                blob: Some("YWJj".to_string()),
+                mime_type: Some("image/png".to_string()),
+            },
+        }]);
+        assert_eq!(text, "");
     }
 }

@@ -547,6 +547,11 @@ for line in sys.stdin:
         respond(id_, {})
 "#;
 
+    /// Returns a tool *execution* error. The error flag's wire name is
+    /// `isError`; this stub previously wrote `is_error`, which only worked
+    /// because the client read the same wrong name — so the pair agreed and
+    /// the bug stayed invisible here while every real server's tool errors
+    /// were being reported to the model as successes.
     const MCP_STUB_ERROR: &str = r#"
 import sys, json
 def respond(id_, result):
@@ -561,7 +566,7 @@ for line in sys.stdin:
     elif method == "tools/list":
         respond(id_, {"tools": [{"name": "stub_mcp_tool", "description": "s", "inputSchema": {"type": "object", "properties": {}}}]})
     elif method == "tools/call":
-        respond(id_, {"content": [{"type": "text", "text": "boom"}], "is_error": True})
+        respond(id_, {"content": [{"type": "text", "text": "boom"}], "isError": True})
     elif method != "notifications/initialized" and method != "notifications/cancelled":
         respond(id_, {})
 "#;

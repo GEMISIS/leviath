@@ -9,6 +9,10 @@ use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 
 use crate::discovery::ToolMetadata;
 
+/// Upper bound on `tools/list` pages followed, so a server that always returns
+/// a `nextCursor` can't spin the discovery loop forever.
+const MAX_TOOL_PAGES: usize = 100;
+
 /// Server capabilities returned after initialization.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ServerCapabilities {
@@ -27,14 +31,53 @@ pub struct ToolsCapability {
 /// Result returned from a tool call.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolResult {
-    /// Content items in the result
-    pub content: Vec<ToolResultContent>,
-    /// Whether the result represents an error
+    /// Content items in the result.
+    ///
+    /// Defaulted: a server returning only `structuredContent` is still parsed
+    /// rather than rejected.
     #[serde(default)]
+    pub content: Vec<ToolResultContent>,
+    /// Structured output conforming to the tool's `outputSchema`, when the
+    /// server provides one (MCP 2025-06-18 and later).
+    #[serde(
+        rename = "structuredContent",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub structured_content: Option<Value>,
+    /// Whether the result represents a *tool execution* error (as opposed to a
+    /// JSON-RPC protocol error, which never reaches this type).
+    ///
+    /// The wire name is `isError`. Without the rename this never matched, so
+    /// every failing tool call was silently reported to the model as a success.
+    #[serde(rename = "isError", default)]
     pub is_error: bool,
 }
 
+/// The resource payload carried by an embedded `resource` content block.
+///
+/// The spec nests this under a `resource` key rather than inlining `uri`/`text`
+/// on the content block itself.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct EmbeddedResource {
+    /// URI identifying the resource.
+    pub uri: String,
+    /// Text contents, for text resources.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
+    /// Base64 contents, for binary resources.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blob: Option<String>,
+    /// MIME type of the resource.
+    #[serde(rename = "mimeType", default, skip_serializing_if = "Option::is_none")]
+    pub mime_type: Option<String>,
+}
+
 /// Content item in a tool result.
+///
+/// Every wire field name here is the spec's camelCase spelling (`mimeType`),
+/// not a Rust-style snake_case one — mismatches made whole tool results fail to
+/// deserialize.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type")]
 pub enum ToolResultContent {
@@ -43,10 +86,41 @@ pub enum ToolResultContent {
     Text { text: String },
     /// Image content (base64 encoded)
     #[serde(rename = "image")]
-    Image { data: String, mime_type: String },
-    /// Resource content
+    Image {
+        data: String,
+        #[serde(rename = "mimeType")]
+        mime_type: String,
+    },
+    /// Audio content (base64 encoded)
+    #[serde(rename = "audio")]
+    Audio {
+        data: String,
+        #[serde(rename = "mimeType")]
+        mime_type: String,
+    },
+    /// A link to a resource the client may fetch or subscribe to.
+    #[serde(rename = "resource_link")]
+    ResourceLink {
+        uri: String,
+        #[serde(default)]
+        name: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        description: Option<String>,
+        #[serde(rename = "mimeType", default, skip_serializing_if = "Option::is_none")]
+        mime_type: Option<String>,
+    },
+    /// An embedded resource, whose payload is nested under `resource`.
     #[serde(rename = "resource")]
-    Resource { uri: String, text: Option<String> },
+    Resource { resource: EmbeddedResource },
+    /// Any content block this client does not model.
+    ///
+    /// Internally-tagged enums can't carry the original payload in a catch-all
+    /// arm, so the block's data is dropped — but that is the point: without
+    /// this variant a single unrecognized block (a future content type, or a
+    /// vendor extension) fails the *entire* tool result. Callers skip these and
+    /// warn.
+    #[serde(other)]
+    Unknown,
 }
 
 /// Client for communicating with MCP tool providers via JSON-RPC 2.0 over stdin/stdout.
@@ -162,17 +236,46 @@ impl MCPClient {
         Ok(())
     }
 
-    /// List available tools from the server.
+    /// List available tools from the server, following `nextCursor` pagination.
+    ///
+    /// `tools/list` is a paginated operation. Reading only the first response
+    /// silently exposes just the first page of a large server's catalogue, so
+    /// this loops until the server stops returning a cursor, bounded by an
+    /// internal page limit so a server that returns a cursor forever can't spin
+    /// the loop.
     pub async fn list_tools(&mut self) -> anyhow::Result<Vec<ToolMetadata>> {
         tracing::debug!("Listing MCP tools");
 
-        let result = self
-            .send_request("tools/list", serde_json::json!({}))
-            .await?;
+        let mut tools: Vec<ToolMetadata> = Vec::new();
+        let mut cursor: Option<String> = None;
 
-        let tools_value = result.get("tools").cloned().unwrap_or(Value::Array(vec![]));
-        let tools: Vec<ToolMetadata> = serde_json::from_value(tools_value)
-            .map_err(|e| anyhow::anyhow!("Failed to parse tools list: {}", e))?;
+        for page in 0..MAX_TOOL_PAGES {
+            let params = match &cursor {
+                Some(c) => serde_json::json!({ "cursor": c }),
+                None => serde_json::json!({}),
+            };
+            let result = self.send_request("tools/list", params).await?;
+
+            let tools_value = result.get("tools").cloned().unwrap_or(Value::Array(vec![]));
+            let page_tools: Vec<ToolMetadata> = serde_json::from_value(tools_value)
+                .map_err(|e| anyhow::anyhow!("Failed to parse tools list: {}", e))?;
+            tools.extend(page_tools);
+
+            cursor = result
+                .get("nextCursor")
+                .and_then(Value::as_str)
+                .map(str::to_string);
+            if cursor.is_none() {
+                break;
+            }
+            if page + 1 == MAX_TOOL_PAGES {
+                tracing::warn!(
+                    pages = MAX_TOOL_PAGES,
+                    "MCP server still returned a tools/list cursor at the page \
+                     limit — stopping; some tools may be missing"
+                );
+            }
+        }
 
         self.cached_tools = tools.clone();
         tracing::debug!(count = tools.len(), "Discovered MCP tools");
@@ -539,11 +642,15 @@ mod tests {
             content: vec![ToolResultContent::Text {
                 text: "Hello".to_string(),
             }],
+            structured_content: None,
             is_error: false,
         };
         let json = serde_json::to_string(&result).unwrap();
         assert!(json.contains("Hello"));
-        assert!(json.contains("\"is_error\":false"));
+        // Wire name is `isError`, not `is_error` — a mismatch here meant every
+        // failing tool call deserialized as a success.
+        assert!(json.contains("\"isError\":false"), "got: {json}");
+        assert!(!json.contains("is_error"), "got: {json}");
     }
 
     #[test]
@@ -552,6 +659,7 @@ mod tests {
             content: vec![ToolResultContent::Text {
                 text: "Something went wrong".to_string(),
             }],
+            structured_content: None,
             is_error: true,
         };
         assert!(result.is_error);
@@ -582,8 +690,12 @@ mod tests {
     #[test]
     fn test_tool_result_content_resource() {
         let content = ToolResultContent::Resource {
-            uri: "file:///tmp/test.txt".to_string(),
-            text: Some("file contents".to_string()),
+            resource: EmbeddedResource {
+                uri: "file:///tmp/test.txt".to_string(),
+                text: Some("file contents".to_string()),
+                blob: None,
+                mime_type: None,
+            },
         };
         let json = serde_json::to_string(&content).unwrap();
         assert!(json.contains("file:///tmp/test.txt"));
@@ -593,8 +705,12 @@ mod tests {
     #[test]
     fn test_tool_result_content_resource_no_text() {
         let content = ToolResultContent::Resource {
-            uri: "file:///tmp/test.txt".to_string(),
-            text: None,
+            resource: EmbeddedResource {
+                uri: "file:///tmp/test.txt".to_string(),
+                text: None,
+                blob: None,
+                mime_type: None,
+            },
         };
         let json = serde_json::to_string(&content).unwrap();
         assert!(json.contains("file:///tmp/test.txt"));
@@ -626,6 +742,7 @@ mod tests {
                     text: "line 2".to_string(),
                 },
             ],
+            structured_content: None,
             is_error: false,
         };
         assert_eq!(result.content.len(), 2);
@@ -637,6 +754,7 @@ mod tests {
             content: vec![ToolResultContent::Text {
                 text: "test".to_string(),
             }],
+            structured_content: None,
             is_error: true,
         };
         let cloned = result.clone();
@@ -661,6 +779,7 @@ mod tests {
     fn test_tool_result_empty_content() {
         let result = ToolResult {
             content: vec![],
+            structured_content: None,
             is_error: false,
         };
         assert!(result.content.is_empty());
@@ -679,10 +798,15 @@ mod tests {
                     mime_type: "image/jpeg".to_string(),
                 },
                 ToolResultContent::Resource {
-                    uri: "file:///test".to_string(),
-                    text: Some("content".to_string()),
+                    resource: EmbeddedResource {
+                        uri: "file:///test".to_string(),
+                        text: Some("content".to_string()),
+                        blob: None,
+                        mime_type: None,
+                    },
                 },
             ],
+            structured_content: None,
             is_error: false,
         };
         assert_eq!(result.content.len(), 3);
@@ -751,7 +875,7 @@ mod tests {
 
     #[test]
     fn test_tool_result_content_image_deserialization() {
-        let json = r#"{"type":"image","data":"abc123","mime_type":"image/png"}"#;
+        let json = r#"{"type":"image","data":"abc123","mimeType":"image/png"}"#;
         let content: ToolResultContent = serde_json::from_str(json).unwrap();
         assert_eq!(
             content,
@@ -764,13 +888,19 @@ mod tests {
 
     #[test]
     fn test_tool_result_content_resource_deserialization() {
-        let json = r#"{"type":"resource","uri":"file:///tmp/x","text":"data"}"#;
+        // The spec nests the payload under `resource`; it is not inlined on the
+        // content block.
+        let json = r#"{"type":"resource","resource":{"uri":"file:///tmp/x","text":"data"}}"#;
         let content: ToolResultContent = serde_json::from_str(json).unwrap();
         assert_eq!(
             content,
             ToolResultContent::Resource {
-                uri: "file:///tmp/x".to_string(),
-                text: Some("data".to_string()),
+                resource: EmbeddedResource {
+                    uri: "file:///tmp/x".to_string(),
+                    text: Some("data".to_string()),
+                    blob: None,
+                    mime_type: None,
+                },
             }
         );
     }
@@ -885,10 +1015,15 @@ mod tests {
                     mime_type: "image/png".to_string(),
                 },
                 ToolResultContent::Resource {
-                    uri: "file:///x".to_string(),
-                    text: Some("data".to_string()),
+                    resource: EmbeddedResource {
+                        uri: "file:///x".to_string(),
+                        text: Some("data".to_string()),
+                        blob: None,
+                        mime_type: None,
+                    },
                 },
             ],
+            structured_content: None,
             is_error: false,
         };
         let json = serde_json::to_string(&result).unwrap();
@@ -955,8 +1090,12 @@ mod tests {
     #[test]
     fn test_tool_result_content_resource_empty_uri() {
         let content = ToolResultContent::Resource {
-            uri: "".to_string(),
-            text: None,
+            resource: EmbeddedResource {
+                uri: "".to_string(),
+                text: None,
+                blob: None,
+                mime_type: None,
+            },
         };
         let json = serde_json::to_string(&content).unwrap();
         assert!(json.contains("\"type\":\"resource\""));
@@ -1429,5 +1568,246 @@ for line in sys.stdin:
         let err = client.connect().await;
         assert!(err.is_err());
         assert!(err.unwrap_err().to_string().contains("no result"));
+    }
+
+    // ─── Spec wire-format conformance ─────────────────────────────────────
+    //
+    // Each test here pins a field name or shape that the client previously got
+    // wrong. The failures they guard against were mostly *silent* (a tool error
+    // read as success) or total (one unrecognized block failing an entire
+    // result), which is what made real servers appear not to work.
+
+    #[test]
+    fn tool_result_reads_is_error_from_camel_case_wire_name() {
+        // The regression that motivated all of this: the wire field is
+        // `isError`. Reading `is_error` never matched, so `#[serde(default)]`
+        // silently produced `false` and every failed tool call was handed to
+        // the model as a success.
+        let json = r#"{"content":[{"type":"text","text":"boom"}],"isError":true}"#;
+        let result: ToolResult = serde_json::from_str(json).unwrap();
+        assert!(result.is_error, "isError:true must deserialize as an error");
+    }
+
+    #[test]
+    fn tool_result_snake_case_is_error_is_not_honored() {
+        // Guards the inverse mistake: `is_error` is *not* a wire name, so a
+        // payload using it must fall back to the default rather than silently
+        // re-introducing the old behavior.
+        let json = r#"{"content":[],"is_error":true}"#;
+        let result: ToolResult = serde_json::from_str(json).unwrap();
+        assert!(!result.is_error);
+    }
+
+    #[test]
+    fn tool_result_content_defaults_to_empty() {
+        let json = r#"{"structuredContent":{"ok":true}}"#;
+        let result: ToolResult = serde_json::from_str(json).unwrap();
+        assert!(result.content.is_empty());
+        assert_eq!(
+            result.structured_content,
+            Some(serde_json::json!({"ok": true}))
+        );
+    }
+
+    #[test]
+    fn tool_result_structured_content_absent_is_none_and_omitted() {
+        let result = ToolResult {
+            content: vec![],
+            structured_content: None,
+            is_error: false,
+        };
+        let json = serde_json::to_string(&result).unwrap();
+        assert!(!json.contains("structuredContent"), "got: {json}");
+    }
+
+    #[test]
+    fn tool_result_content_image_uses_mime_type_wire_name() {
+        let content = ToolResultContent::Image {
+            data: "abc".to_string(),
+            mime_type: "image/png".to_string(),
+        };
+        let json = serde_json::to_string(&content).unwrap();
+        assert!(json.contains("\"mimeType\":\"image/png\""), "got: {json}");
+        assert!(!json.contains("mime_type"), "got: {json}");
+    }
+
+    #[test]
+    fn tool_result_content_audio_roundtrip() {
+        let json = r#"{"type":"audio","data":"YWJj","mimeType":"audio/wav"}"#;
+        let content: ToolResultContent = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            content,
+            ToolResultContent::Audio {
+                data: "YWJj".to_string(),
+                mime_type: "audio/wav".to_string(),
+            }
+        );
+        let back: ToolResultContent =
+            serde_json::from_str(&serde_json::to_string(&content).unwrap()).unwrap();
+        assert_eq!(back, content);
+    }
+
+    #[test]
+    fn tool_result_content_resource_link_full() {
+        let json = r#"{"type":"resource_link","uri":"file:///m.rs","name":"m.rs",
+                       "description":"entry point","mimeType":"text/x-rust"}"#;
+        let content: ToolResultContent = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            content,
+            ToolResultContent::ResourceLink {
+                uri: "file:///m.rs".to_string(),
+                name: "m.rs".to_string(),
+                description: Some("entry point".to_string()),
+                mime_type: Some("text/x-rust".to_string()),
+            }
+        );
+    }
+
+    #[test]
+    fn tool_result_content_resource_link_minimal_omits_optionals() {
+        let content: ToolResultContent =
+            serde_json::from_str(r#"{"type":"resource_link","uri":"file:///x"}"#).unwrap();
+        assert_eq!(
+            content,
+            ToolResultContent::ResourceLink {
+                uri: "file:///x".to_string(),
+                name: String::new(),
+                description: None,
+                mime_type: None,
+            }
+        );
+        let json = serde_json::to_string(&content).unwrap();
+        assert!(!json.contains("description"), "got: {json}");
+        assert!(!json.contains("mimeType"), "got: {json}");
+    }
+
+    #[test]
+    fn tool_result_content_embedded_resource_is_nested() {
+        let json = r#"{"type":"resource","resource":{"uri":"file:///m.rs",
+                       "mimeType":"text/x-rust","text":"fn main() {}"}}"#;
+        let content: ToolResultContent = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            content,
+            ToolResultContent::Resource {
+                resource: EmbeddedResource {
+                    uri: "file:///m.rs".to_string(),
+                    text: Some("fn main() {}".to_string()),
+                    blob: None,
+                    mime_type: Some("text/x-rust".to_string()),
+                }
+            }
+        );
+    }
+
+    #[test]
+    fn tool_result_content_embedded_resource_binary_blob() {
+        let json = r#"{"type":"resource","resource":{"uri":"file:///a.png","blob":"YWJj"}}"#;
+        let content: ToolResultContent = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            content,
+            ToolResultContent::Resource {
+                resource: EmbeddedResource {
+                    uri: "file:///a.png".to_string(),
+                    text: None,
+                    blob: Some("YWJj".to_string()),
+                    mime_type: None,
+                }
+            }
+        );
+        // Absent optionals stay absent on the way back out.
+        let json = serde_json::to_string(&content).unwrap();
+        assert!(!json.contains("text"), "got: {json}");
+        assert!(!json.contains("mimeType"), "got: {json}");
+    }
+
+    #[test]
+    fn unknown_content_type_degrades_instead_of_failing_the_result() {
+        // Without the catch-all arm a single unrecognized block — a future
+        // content type or a vendor extension — makes the *whole* tool result
+        // fail to parse, taking the usable blocks down with it.
+        let json = r#"{"content":[
+            {"type":"text","text":"keep me"},
+            {"type":"hologram","payload":{"deeply":["nested"]}}
+        ],"isError":false}"#;
+        let result: ToolResult = serde_json::from_str(json).unwrap();
+        assert_eq!(result.content.len(), 2);
+        assert_eq!(
+            result.content[0],
+            ToolResultContent::Text {
+                text: "keep me".to_string()
+            }
+        );
+        assert_eq!(result.content[1], ToolResultContent::Unknown);
+    }
+
+    #[test]
+    fn unknown_content_serializes_without_panicking() {
+        // The payload is unrecoverable by construction (internally-tagged
+        // enums can't carry data in a catch-all), so this only has to be
+        // lossy, not lossless.
+        let json = serde_json::to_string(&ToolResultContent::Unknown).unwrap();
+        assert!(json.contains("Unknown"), "got: {json}");
+    }
+
+    // ─── tools/list pagination ────────────────────────────────────────────
+
+    /// Serves `tools/list` in `pages` pages of one tool each, returning a
+    /// `nextCursor` on every page but the last.
+    fn paginated_stub(pages: usize) -> String {
+        format!(
+            r#"
+import sys, json
+PAGES = {pages}
+for line in sys.stdin:
+    line = line.strip()
+    if not line:
+        continue
+    req = json.loads(line)
+    method, id_ = req.get("method", ""), req.get("id")
+    if method == "initialize":
+        res = {{"capabilities": {{}}, "protocolVersion": "2024-11-05"}}
+    elif method == "tools/list":
+        cursor = int((req.get("params") or {{}}).get("cursor", "0"))
+        res = {{"tools": [{{"name": "tool%d" % cursor, "inputSchema": {{}}}}]}}
+        if cursor + 1 < PAGES:
+            res["nextCursor"] = str(cursor + 1)
+    else:
+        continue
+    sys.stdout.write(json.dumps({{"jsonrpc": "2.0", "id": id_, "result": res}}) + "\n")
+    sys.stdout.flush()
+"#
+        )
+    }
+
+    #[tokio::test]
+    async fn list_tools_follows_next_cursor_across_pages() {
+        let _guard = always_on_tracing_guard();
+        let script = paginated_stub(3);
+        let mut client = spawn_stub_client(&script).await;
+        client.connect().await.unwrap();
+
+        let tools = client
+            .list_tools()
+            .await
+            .expect("list_tools should succeed");
+        // Reading only the first response would have returned 1 of 3.
+        let names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
+        assert_eq!(names, vec!["tool0", "tool1", "tool2"]);
+        assert_eq!(client.cached_tools().len(), 3);
+    }
+
+    #[tokio::test]
+    async fn list_tools_stops_at_the_page_limit() {
+        let _guard = always_on_tracing_guard();
+        // Always returns a cursor: without the bound this never terminates.
+        let script = paginated_stub(MAX_TOOL_PAGES + 10);
+        let mut client = spawn_stub_client(&script).await;
+        client.connect().await.unwrap();
+
+        let tools = client
+            .list_tools()
+            .await
+            .expect("list_tools should succeed");
+        assert_eq!(tools.len(), MAX_TOOL_PAGES);
     }
 }
