@@ -223,6 +223,7 @@ mod tests {
             config: Arc::new(Config::default()),
             event_tx: tx,
             control: crate::commands::serve::testutil::no_daemon_client(),
+            mcp: crate::commands::serve::mcp::McpAdmin::default(),
         }
     }
 
@@ -510,6 +511,7 @@ mod tests {
             config: Arc::new(Config::default()),
             event_tx: tx.clone(),
             control: crate::commands::serve::testutil::no_daemon_client(),
+            mcp: crate::commands::serve::mcp::McpAdmin::default(),
         };
         let addr = spawn_test_server(state).await;
 
@@ -635,6 +637,7 @@ mod tests {
             config: Arc::new(Config::default()),
             event_tx: tx.clone(),
             control: crate::commands::serve::testutil::no_daemon_client(),
+            mcp: crate::commands::serve::mcp::McpAdmin::default(),
         };
         let (addr, shutdown_tx, handle) = spawn_test_server_with_shutdown(state).await;
 

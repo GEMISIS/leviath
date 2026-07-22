@@ -260,6 +260,7 @@ mod tests {
             config: Arc::new(Config::default()),
             event_tx: tx,
             control: no_daemon(),
+            mcp: crate::commands::serve::mcp::McpAdmin::default(),
         }
     }
 
@@ -291,6 +292,7 @@ mod tests {
             }),
             event_tx: tx,
             control,
+            mcp: crate::commands::serve::mcp::McpAdmin::default(),
         }
     }
 
@@ -1046,6 +1048,7 @@ prompt = "Plan the work"
             config: Arc::new(Config::default()),
             event_tx: tx,
             control,
+            mcp: crate::commands::serve::mcp::McpAdmin::default(),
         };
         let app = Router::new()
             .route("/api/agents/{id}", delete(kill_agent))

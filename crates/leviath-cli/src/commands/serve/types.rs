@@ -97,6 +97,8 @@ pub struct AppState {
     /// (spawn/cancel/message/interactions) go through this; read endpoints still
     /// observe the runs dir the daemon persists to.
     pub(super) control: leviath_runtime::control_socket::ControlClient,
+    /// Paths + seams for the MCP management endpoints.
+    pub(super) mcp: super::mcp::McpAdmin,
 }
 
 // ─── Error response ─────────────────────────────────────────────────────────

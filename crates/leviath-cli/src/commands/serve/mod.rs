@@ -8,6 +8,7 @@ mod auth;
 mod blueprints;
 mod config;
 mod interactions;
+mod mcp;
 mod polling;
 #[cfg(test)]
 mod testutil;
@@ -21,7 +22,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use axum::Router;
-use axum::routing::{get, post};
+use axum::routing::{delete, get, post};
 use tokio::sync::broadcast;
 use tower_http::cors::{Any, CorsLayer};
 
@@ -95,6 +96,7 @@ async fn execute_with_shutdown(
         config: Arc::new(cfg),
         event_tx: event_tx.clone(),
         control,
+        mcp: mcp::McpAdmin::default(),
     };
 
     // Background world-event consumer: subscribes to the daemon's pushed
@@ -169,6 +171,15 @@ async fn execute_with_shutdown(
             "/api/agents/{id}/interaction",
             get(interactions::get_interaction).post(interactions::submit_interaction),
         )
+        // MCP servers
+        .route(
+            "/api/mcp/servers",
+            get(mcp::list_servers).post(mcp::add_server),
+        )
+        .route("/api/mcp/servers/{name}", delete(mcp::remove_server))
+        .route("/api/mcp/servers/{name}/status", get(mcp::status))
+        .route("/api/mcp/servers/{name}/login", post(mcp::login))
+        .route("/api/mcp/servers/{name}/test", post(mcp::test_server))
         // Config
         .route("/api/config", get(config::get_config))
         .route("/api/models", get(config::get_models))
@@ -319,6 +330,7 @@ mod tests {
             config: Arc::new(Config::default()),
             event_tx: tx,
             control: no_daemon_control(),
+            mcp: crate::commands::serve::mcp::McpAdmin::default(),
         }
     }
 
