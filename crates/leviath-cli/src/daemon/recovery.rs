@@ -74,12 +74,41 @@ pub fn reload_persisted_agents(
         }
     }
     // Second pass: every run is now an entity, so rebuild the parent→children
-    // tree deterministically from the persisted links (no heuristics).
+    // tree deterministically from the persisted links (no heuristics), then
+    // resume any parent that was parked mid fan-out.
     relink_tree(world, &reloaded);
+    restore_fan_outs(world, &reloaded, runs_dir);
     reloaded
         .into_iter()
         .map(|(meta, entity)| (meta.run_id, entity))
         .collect()
+}
+
+/// Rebuild `FanOutWaiting` for any reloaded parent that was parked mid fan-out
+/// (a `<run_dir>/fanout.json` is present), so its split/merge resumes rather than
+/// hanging. Active workers are re-linked by run-id via the reloaded run→entity
+/// map; a worker that didn't reload is recorded as a failure so the merge still
+/// completes. A malformed/absent file is skipped.
+fn restore_fan_outs(world: &mut PipelineWorld, reloaded: &[(RunMeta, Entity)], runs_dir: &Path) {
+    let by_run_id: std::collections::HashMap<&str, Entity> = reloaded
+        .iter()
+        .map(|(m, e)| (m.run_id.as_str(), *e))
+        .collect();
+    for (meta, entity) in reloaded {
+        let path = runs_dir.join(&meta.run_id).join("fanout.json");
+        let Some(state) = std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|s| serde_json::from_str::<leviath_runtime::fanout::FanOutState>(&s).ok())
+        else {
+            continue;
+        };
+        leviath_runtime::fanout::restore_fan_out_waiting(
+            world.world_mut(),
+            *entity,
+            state,
+            &|rid| by_run_id.get(rid).copied(),
+        );
+    }
 }
 
 /// Rebuild `ParentRef` / `SubAgentChildren` on the freshly reloaded entities from
@@ -441,6 +470,86 @@ mod tests {
         let totals = world.world().get::<TokenTotals>(*entity).unwrap();
         assert_eq!(totals.prompt_tokens, 42);
         assert_eq!(totals.tool_calls, 3);
+    }
+
+    #[tokio::test]
+    async fn resumes_a_parent_parked_mid_fan_out() {
+        use leviath_core::blueprint::{FanOutConfig, WorkerFailurePolicy};
+        use leviath_runtime::fanout::{FanOutState, FanOutWaiting};
+
+        let agent = agent_dir();
+        let manifest = agent.path().join("agent.leviath");
+        let mpath = manifest.to_str().unwrap();
+        let runs = tempfile::tempdir().unwrap();
+
+        // A parent parked mid fan-out: a valid fanout.json alongside its meta.
+        write_run(
+            runs.path(),
+            "parent-fo",
+            mpath,
+            RunStatus::WaitingInput,
+            None,
+        );
+        let state = FanOutState {
+            config: FanOutConfig {
+                worker_agent: None,
+                worker_stage: Some("w".to_string()),
+                worker_query: None,
+                merge_stage: None,
+                max_workers: 1,
+                on_worker_failure: WorkerFailurePolicy::Continue,
+                split_prompt: "s".to_string(),
+            },
+            max_workers: 1,
+            pending: vec![],
+            // One in-flight worker, referenced by the run-id of another reloaded
+            // run so the resolver maps it back to an entity on restore.
+            active: vec![("item-1".to_string(), "worker-fo".to_string())],
+            summaries: vec![],
+            failures: vec![],
+        };
+        std::fs::write(
+            runs.path().join("parent-fo").join("fanout.json"),
+            serde_json::to_string(&state).unwrap(),
+        )
+        .unwrap();
+        // The referenced worker run, so the active worker re-links to a real entity.
+        write_run(runs.path(), "worker-fo", mpath, RunStatus::Running, None);
+
+        // A run with a malformed fanout.json → skipped (no FanOutWaiting).
+        write_run(runs.path(), "bad-fo", mpath, RunStatus::WaitingInput, None);
+        std::fs::write(runs.path().join("bad-fo").join("fanout.json"), b"garbage").unwrap();
+
+        let (mut world, cli) = test_world();
+        let hub = InteractionHub::new();
+        let mcp = Arc::new(Mutex::new(ToolExecutor::new()));
+        let restored = reload_persisted_agents(
+            &mut world,
+            cli.as_ref(),
+            &Config::default(),
+            mcp,
+            &[],
+            &hub,
+            runs.path(),
+            999,
+            &sub_tx(),
+        );
+        let by_id: std::collections::HashMap<_, _> =
+            restored.iter().map(|(r, e)| (r.clone(), *e)).collect();
+
+        // The parent's fan-out waiting state was rebuilt; the malformed one wasn't.
+        assert!(
+            world
+                .world()
+                .get::<FanOutWaiting>(by_id["parent-fo"])
+                .is_some()
+        );
+        assert!(
+            world
+                .world()
+                .get::<FanOutWaiting>(by_id["bad-fo"])
+                .is_none()
+        );
     }
 
     #[tokio::test]
