@@ -29,10 +29,12 @@
 
 mod platform;
 
+pub mod browser;
 pub mod perms;
 pub mod process;
 pub mod tty;
 
+pub use browser::{open_url, open_url_via};
 pub use perms::{ensure_file_private, secure_dir_perms, secure_file_perms};
 pub use process::configure_detached;
 pub use tty::osc52_write_via;
