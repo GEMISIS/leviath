@@ -63,6 +63,11 @@ pub struct AgentToolState {
     /// Handle for the sub-agent tools (spawn/check/wait/send/kill), or `None`
     /// when this agent can't reach the host (e.g. in unit tests).
     pub subagent: Option<crate::daemon::subagent::SubAgentHandle>,
+    /// The agent's sandbox manager, or `None` when no stage is sandboxed. Held
+    /// here so `sync_stage` can point it at the entered stage's sandbox; the same
+    /// `Arc` is also an ECS component (for teardown at reap) and is wired into
+    /// `builtins` as the shell tool's executor.
+    pub sandbox: Option<std::sync::Arc<crate::daemon::sandbox_manager::SandboxManager>>,
 }
 
 /// Execute a single (non-context) tool call against the built-in or MCP executor.
@@ -176,6 +181,24 @@ impl CliToolService {
     pub fn unregister(&self, entity: Entity) {
         self.states.lock().unwrap().remove(&entity);
     }
+
+    /// Remove an agent's tool state and return it, so the caller can run any
+    /// teardown it holds (e.g. sandbox destruction) before it is dropped. Used
+    /// by the daemon's reap hook.
+    pub fn take(&self, entity: Entity) -> Option<Arc<AgentToolState>> {
+        self.states.lock().unwrap().remove(&entity)
+    }
+
+    /// Reap an agent: drop its tool state (fixing the prior leak) and tear down
+    /// its sandbox (destroying any containers it started). Called from the
+    /// daemon's reap hook just before the entity is despawned.
+    pub fn reap(&self, entity: Entity) {
+        if let Some(state) = self.take(entity)
+            && let Some(sandbox) = &state.sandbox
+        {
+            sandbox.destroy_all();
+        }
+    }
 }
 
 impl ToolService for CliToolService {
@@ -185,6 +208,10 @@ impl ToolService for CliToolService {
                 *state.stage_perms.lock().unwrap() = perms.clone();
             }
             *state.stage_name.lock().unwrap() = stage_name.to_string();
+            // Point the shell tool at this stage's sandbox (per-stage override).
+            if let Some(sandbox) = &state.sandbox {
+                sandbox.set_stage(stage_index);
+            }
         }
     }
 
@@ -236,6 +263,7 @@ mod tests {
             interaction: hub.backend_for("agent-a"),
             stage_name: Arc::new(StdMutex::new("main".to_string())),
             subagent: None,
+            sandbox: None,
         })
     }
 
@@ -324,6 +352,7 @@ mod tests {
             interaction: hub.backend_for("a"),
             stage_name: Arc::new(StdMutex::new("main".to_string())),
             subagent: None,
+            sandbox: None,
         });
         service.register(e, state.clone());
 
@@ -339,6 +368,73 @@ mod tests {
 
         // An unregistered entity is a no-op (must not panic).
         service.sync_stage(Entity::from_raw(123), 0, "x");
+    }
+
+    #[test]
+    fn sync_stage_points_sandbox_at_the_entered_stage() {
+        use leviath_core::sandbox::{OnUnavailable, SandboxKind, ToolSandboxConfig};
+        let hub = InteractionHub::new();
+        let service = CliToolService::new();
+        let e = Entity::from_raw(11);
+        // Two namespace-warn stages → a manager builds on any platform without a
+        // runtime, so this exercises `sync_stage`'s per-stage sandbox branch.
+        let ns = ToolSandboxConfig {
+            kind: SandboxKind::Namespace,
+            on_unavailable: OnUnavailable::Warn,
+            ..Default::default()
+        };
+        let mgr = crate::daemon::sandbox_manager::SandboxManager::build(
+            "r",
+            vec![ns.clone(), ns],
+            &std::env::temp_dir().to_string_lossy(),
+            0,
+        )
+        .unwrap()
+        .expect("active sandbox yields a manager");
+        let mut state = state_with(&hub, leviath_mcp::ToolExecutor::new(), HashMap::new());
+        Arc::get_mut(&mut state).unwrap().sandbox = Some(Arc::new(mgr));
+        service.register(e, state);
+        // Entering stage 1 drives the sandbox branch (set_stage) without panic.
+        service.sync_stage(e, 1, "s2");
+        assert!(service.take(e).unwrap().sandbox.is_some());
+    }
+
+    #[test]
+    fn reap_drops_state_and_tears_down_sandbox() {
+        use leviath_core::sandbox::{OnUnavailable, SandboxKind, ToolSandboxConfig};
+        let hub = InteractionHub::new();
+        let service = CliToolService::new();
+
+        // With a sandbox: reap removes the state and tears the sandbox down
+        // (namespace → destroy_all is a no-op, so no runtime is needed).
+        let e = Entity::from_raw(21);
+        let ns = ToolSandboxConfig {
+            kind: SandboxKind::Namespace,
+            on_unavailable: OnUnavailable::Warn,
+            ..Default::default()
+        };
+        let mgr = crate::daemon::sandbox_manager::SandboxManager::build(
+            "r",
+            vec![ns],
+            &std::env::temp_dir().to_string_lossy(),
+            0,
+        )
+        .unwrap()
+        .unwrap();
+        let mut state = state_with(&hub, leviath_mcp::ToolExecutor::new(), HashMap::new());
+        Arc::get_mut(&mut state).unwrap().sandbox = Some(Arc::new(mgr));
+        service.register(e, state);
+        service.reap(e);
+        assert!(service.take(e).is_none(), "reap removed the state");
+
+        // Without a sandbox: reap still drops the state (the leak fix path).
+        let e2 = Entity::from_raw(22);
+        service.register(
+            e2,
+            state_with(&hub, leviath_mcp::ToolExecutor::new(), HashMap::new()),
+        );
+        service.reap(e2);
+        assert!(service.take(e2).is_none());
     }
 
     #[tokio::test]
@@ -434,6 +530,7 @@ mod tests {
             interaction: hub.backend_for("agent-a"),
             stage_name: Arc::new(StdMutex::new("main".to_string())),
             subagent: Some(handle),
+            sandbox: None,
         });
         let out = dispatch_tools(
             state,

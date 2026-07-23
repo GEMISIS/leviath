@@ -388,6 +388,11 @@ pub fn parse_manifest(content: &str) -> Result<Blueprint> {
                 stage.batch_tool_hint = Some(bth);
             }
 
+            // Parse per-stage sandbox override: [stages.<name>.sandbox]
+            if let Some(sandbox_table) = stage_value.get("sandbox").and_then(|v| v.as_table()) {
+                stage.sandbox = Some(parse_sandbox_config(sandbox_table)?);
+            }
+
             // Parse accepts_messages flag: whether mid-run user messages are
             // injected into context between inference calls. Defaults to true
             // (via the Stage constructor); set false for stages that shouldn't
@@ -707,6 +712,11 @@ pub fn parse_manifest(content: &str) -> Result<Blueprint> {
         blueprint.batch_tool_hint = Some(bth);
     }
 
+    // Parse agent-level sandbox config: [sandbox]
+    if let Some(sandbox_table) = parsed.get("sandbox").and_then(|v| v.as_table()) {
+        blueprint.sandbox = Some(parse_sandbox_config(sandbox_table)?);
+    }
+
     // Parse agent-level tool permissions: [tool_permissions]
     if let Some(tp_table) = parsed.get("tool_permissions").and_then(|v| v.as_table()) {
         for (tool_name, policy_val) in tp_table {
@@ -899,6 +909,62 @@ fn parse_security_config(security_table: &toml::value::Table) -> crate::Security
         sc.taint_tracking = tt;
     }
     sc
+}
+
+/// Parse a `[sandbox]` / `[stages.X.sandbox]` table into a `ToolSandboxConfig`.
+/// A present block with no `kind` means host passthrough; omit the block to
+/// inherit the broader (agent/global) sandbox. An unknown `kind` or
+/// `on_unavailable` value is a hard error rather than a silently-ignored
+/// misconfiguration (mirrors transition-condition/transform validation).
+fn parse_sandbox_config(table: &toml::value::Table) -> Result<crate::sandbox::ToolSandboxConfig> {
+    use crate::sandbox::{OnUnavailable, SandboxKind, ToolSandboxConfig};
+
+    let mut sc = ToolSandboxConfig::default();
+
+    if let Some(kind) = table.get("kind").and_then(|v| v.as_str()) {
+        sc.kind = match kind {
+            "none" => SandboxKind::None,
+            "namespace" => SandboxKind::Namespace,
+            "container" => SandboxKind::Container,
+            other => {
+                return Err(Error::Other(format!(
+                    "sandbox has unknown kind '{other}' \
+                     (valid: none, namespace, container)"
+                )));
+            }
+        };
+    }
+    if let Some(image) = table.get("image").and_then(|v| v.as_str()) {
+        sc.image = Some(image.to_string());
+    }
+    if let Some(engine) = table.get("engine").and_then(|v| v.as_str()) {
+        sc.engine = Some(engine.to_string());
+    }
+    if let Some(network) = table.get("network").and_then(|v| v.as_bool()) {
+        sc.network = network;
+    }
+    if let Some(persist) = table.get("persist").and_then(|v| v.as_bool()) {
+        sc.persist = persist;
+    }
+    if let Some(mounts) = table.get("mount").and_then(|v| v.as_array()) {
+        sc.mounts = mounts
+            .iter()
+            .filter_map(|m| m.as_str().map(str::to_string))
+            .collect();
+    }
+    if let Some(ou) = table.get("on_unavailable").and_then(|v| v.as_str()) {
+        sc.on_unavailable = match ou {
+            "error" => OnUnavailable::Error,
+            "warn" => OnUnavailable::Warn,
+            other => {
+                return Err(Error::Other(format!(
+                    "sandbox has unknown on_unavailable '{other}' \
+                     (valid: error, warn)"
+                )));
+            }
+        };
+    }
+    Ok(sc)
 }
 
 #[cfg(test)]
@@ -3091,5 +3157,134 @@ taint_tracking = true
         assert!(!bp.security.as_ref().unwrap().taint_tracking);
         let stage_a = bp.find_stage("a").unwrap();
         assert!(stage_a.security.as_ref().unwrap().taint_tracking);
+    }
+
+    #[test]
+    fn parse_manifest_sandbox_agent_and_stage() {
+        // Agent-level [sandbox] plus a tighter per-stage override, exercising
+        // every field and both call sites of parse_sandbox_config.
+        let toml = r#"
+[agent]
+name = "sandboxed"
+
+[sandbox]
+kind = "container"
+image = "ubuntu:24.04"
+
+[stages.implement]
+mode = "autonomous"
+
+[stages.implement.sandbox]
+kind = "container"
+image = "node:22-slim"
+engine = "podman"
+network = false
+mount = ["/data", "/cache"]
+persist = true
+on_unavailable = "warn"
+"#;
+        let bp = parse_manifest(toml).unwrap();
+        let agent = bp.sandbox.as_ref().unwrap();
+        assert_eq!(agent.kind, crate::SandboxKind::Container);
+        assert_eq!(agent.image.as_deref(), Some("ubuntu:24.04"));
+        assert!(agent.network); // default when omitted
+        assert_eq!(agent.engine, None); // auto-detect when omitted
+
+        let stage = bp.find_stage("implement").unwrap();
+        let sb = stage.sandbox.as_ref().unwrap();
+        assert_eq!(sb.image.as_deref(), Some("node:22-slim"));
+        assert_eq!(sb.engine.as_deref(), Some("podman"));
+        assert!(!sb.network);
+        assert_eq!(sb.mounts, vec!["/data".to_string(), "/cache".to_string()]);
+        assert!(sb.persist);
+        assert_eq!(sb.on_unavailable, crate::OnUnavailable::Warn);
+    }
+
+    #[test]
+    fn parse_manifest_sandbox_kind_variants_and_no_kind() {
+        // A `[sandbox]` block with no `kind` defaults to host (None); non-string
+        // mount entries are filtered out.
+        let bp = parse_manifest(
+            "[agent]\nname = \"a\"\n\n\
+             [sandbox]\nmount = [\"/ok\", 42]\n\n\
+             [stages.s]\nmodel = { provider = \"anthropic\", model = \"m\" }\n",
+        )
+        .unwrap();
+        let sb = bp.sandbox.unwrap();
+        assert_eq!(sb.kind, crate::SandboxKind::None);
+        assert_eq!(sb.mounts, vec!["/ok".to_string()]);
+
+        // `namespace` and `none` kind strings both parse.
+        let bp = parse_manifest(
+            "[agent]\nname = \"a\"\n\n\
+             [sandbox]\nkind = \"namespace\"\n\n\
+             [stages.s]\nmodel = { provider = \"anthropic\", model = \"m\" }\n",
+        )
+        .unwrap();
+        assert_eq!(bp.sandbox.unwrap().kind, crate::SandboxKind::Namespace);
+
+        let bp = parse_manifest(
+            "[agent]\nname = \"a\"\n\n\
+             [sandbox]\nkind = \"none\"\n\n\
+             [stages.s]\nmodel = { provider = \"anthropic\", model = \"m\" }\n",
+        )
+        .unwrap();
+        assert_eq!(bp.sandbox.unwrap().kind, crate::SandboxKind::None);
+    }
+
+    #[test]
+    fn parse_manifest_sandbox_explicit_error_policy_and_stage_error() {
+        // Explicit `on_unavailable = "error"` exercises that match arm.
+        let bp = parse_manifest(
+            "[agent]\nname = \"a\"\n\n\
+             [sandbox]\nkind = \"container\"\nimage = \"x\"\non_unavailable = \"error\"\n\n\
+             [stages.s]\nmodel = { provider = \"anthropic\", model = \"m\" }\n",
+        )
+        .unwrap();
+        assert_eq!(
+            bp.sandbox.unwrap().on_unavailable,
+            crate::OnUnavailable::Error
+        );
+
+        // An invalid *per-stage* sandbox propagates its error through the stage
+        // parse (the `?` on the stage-level `parse_sandbox_config`).
+        let err = parse_manifest(
+            "[agent]\nname = \"a\"\n\n\
+             [stages.s]\nmodel = { provider = \"anthropic\", model = \"m\" }\n\n\
+             [stages.s.sandbox]\nkind = \"vm\"\n",
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("unknown kind 'vm'"), "got: {err}");
+    }
+
+    #[test]
+    fn parse_manifest_sandbox_unknown_kind_errors() {
+        let toml = r#"
+[agent]
+name = "bad"
+
+[sandbox]
+kind = "vm"
+"#;
+        let err = parse_manifest(toml).unwrap_err().to_string();
+        assert!(err.contains("unknown kind 'vm'"), "got: {err}");
+    }
+
+    #[test]
+    fn parse_manifest_sandbox_unknown_on_unavailable_errors() {
+        let toml = r#"
+[agent]
+name = "bad"
+
+[sandbox]
+kind = "container"
+on_unavailable = "explode"
+"#;
+        let err = parse_manifest(toml).unwrap_err().to_string();
+        assert!(
+            err.contains("unknown on_unavailable 'explode'"),
+            "got: {err}"
+        );
     }
 }

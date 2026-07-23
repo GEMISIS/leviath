@@ -94,6 +94,14 @@ pub async fn setup_daemon_host(
     )
 }
 
+/// The reap hook installed on the host: drops a reaped agent's tool state and
+/// tears down its sandbox via [`CliToolService::reap`]. Factored out (rather than
+/// an inline closure) so its body is exercised by a unit test — the daemon itself
+/// only ever fires the reaper from the private `serve()` loop.
+fn make_reaper(tool_service: Arc<CliToolService>) -> leviath_runtime::host::Reaper {
+    Box::new(move |_world, entity| tool_service.reap(entity))
+}
+
 /// Build the daemon's [`WorldHost`]: one world hosting every agent, its tool
 /// service + interaction hub, and a `Spawn`-op spawner that loads blueprints and
 /// registers per-agent tool state. `shared_mcp` / `mcp_tool_defs` are the MCP
@@ -207,6 +215,12 @@ pub fn build_host(
         )
     }));
 
+    // Reap hook: when a terminal agent is reaped, tear down its sandbox and drop
+    // its per-agent tool state (the latter also fixing a prior leak where tool
+    // state was never released). Factored into `make_reaper` so the closure body
+    // is unit-testable — the daemon only ever drives it from `serve()`.
+    host.set_reaper(make_reaper(tool_service.clone()));
+
     // The spawner captures everything an agent needs; `now_secs` is called at
     // spawn time for the run's start timestamp.
     host.set_spawner(Box::new(move |world, args| {
@@ -231,6 +245,26 @@ mod tests {
     use leviath_runtime::components::AgentStatus;
     use leviath_runtime::host::{ControlOp, SpawnArgs};
     use tokio::sync::oneshot;
+
+    #[tokio::test]
+    async fn make_reaper_delegates_to_tool_service_reap() {
+        // Exercises the reaper closure body build_host installs. The daemon only
+        // fires it from the private `serve()` loop, so drive it directly here.
+        let tool_service = Arc::new(CliToolService::new());
+        let mut world = PipelineWorld::new(
+            ProviderRegistry::new(),
+            tool_service.clone(),
+            InferencePoolConfig::new(),
+            std::env::temp_dir(),
+            Handle::current(),
+        );
+        let mut reaper = make_reaper(tool_service.clone());
+        // No registered state for this entity → a clean no-op (the reap-branch
+        // logic itself is covered by CliToolService::reap's own unit test).
+        let entity = bevy_ecs::entity::Entity::from_raw(1);
+        reaper(&mut world, entity);
+        assert!(tool_service.take(entity).is_none());
+    }
 
     struct FakeProvider;
     #[async_trait::async_trait]

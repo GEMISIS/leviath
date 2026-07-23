@@ -108,6 +108,13 @@ pub struct Config {
     /// Completion-webhook delivery tuning (retry/backoff/timeout).
     #[serde(default)]
     pub webhook: WebhookConfig,
+
+    /// Machine-wide default sandbox for tool execution. An agent's own
+    /// `[sandbox]` (or a stage's) overrides this; when unset, agents run tools
+    /// on the host unless they opt in themselves. See
+    /// [`leviath_core::resolve_sandbox`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sandbox: Option<leviath_core::ToolSandboxConfig>,
 }
 
 fn default_true() -> bool {
@@ -279,6 +286,7 @@ impl Default for Config {
             limits: LimitsConfig::default(),
             batch_tool_hint: true,
             webhook: WebhookConfig::default(),
+            sandbox: None,
         }
     }
 }
@@ -1779,6 +1787,12 @@ anthropic_api_key = "sk-ant-test-key"
                 max_delay_ms: 10_000,
                 timeout_secs: 7,
             },
+            sandbox: Some(leviath_core::ToolSandboxConfig {
+                kind: leviath_core::SandboxKind::Container,
+                image: Some("ubuntu:24.04".to_string()),
+                network: false,
+                ..Default::default()
+            }),
         };
 
         let serialized = toml::to_string_pretty(&config).unwrap();
@@ -1803,6 +1817,10 @@ anthropic_api_key = "sk-ant-test-key"
         );
         assert!(!deserialized.title.enabled);
         assert_eq!(deserialized.title.provider.as_deref(), Some("openai"));
+        let sandbox = deserialized.sandbox.expect("sandbox round-trips");
+        assert_eq!(sandbox.kind, leviath_core::SandboxKind::Container);
+        assert_eq!(sandbox.image.as_deref(), Some("ubuntu:24.04"));
+        assert!(!sandbox.network);
     }
 
     // ─── Config with multiple model_capabilities ─────────────────────────

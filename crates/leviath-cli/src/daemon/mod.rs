@@ -8,6 +8,7 @@ pub mod client;
 pub mod fanout_spawner;
 pub mod gate_rules;
 pub mod recovery;
+pub mod sandbox_manager;
 pub mod setup;
 pub mod spawn;
 pub mod subagent;

@@ -177,6 +177,19 @@ pub fn canonical_tool_name(name: &str) -> &str {
     name
 }
 
+/// Redirects shell command execution off the host into a sandbox.
+///
+/// The default (no executor) runs the command directly on the host — the exact
+/// prior behavior. An implementor (the daemon's `SandboxManager`) returns a
+/// [`tokio::process::Command`] that runs `command` inside a container or Linux
+/// namespace instead. The implementor owns any per-stage sandbox state, so the
+/// same handle is used for the agent's whole life; only shell execution is
+/// affected (file tools stay on the host, over the bind-mounted workdir).
+pub trait ShellExecutor: Send + Sync {
+    /// Build the process that runs `command` via `shell flag` for `workdir`.
+    fn build_command(&self, shell: &str, flag: &str, command: &str, workdir: &Path) -> Command;
+}
+
 /// Built-in tools: read_file, write_file, edit_file, list_dir, shell.
 ///
 /// Carries the [`PlatformCapabilities`] of the current platform; tools whose
@@ -186,6 +199,8 @@ pub fn canonical_tool_name(name: &str) -> &str {
 pub struct BuiltinTools {
     ctx: ToolContext,
     platform: PlatformCapabilities,
+    /// When set, shell commands run through this sandbox instead of the host.
+    shell_executor: Option<Arc<dyn ShellExecutor>>,
 }
 
 impl BuiltinTools {
@@ -195,13 +210,25 @@ impl BuiltinTools {
         Self {
             ctx,
             platform: PlatformCapabilities::current(),
+            shell_executor: None,
         }
+    }
+
+    /// Route this agent's shell execution through `executor` (a container /
+    /// namespace sandbox) instead of the host.
+    pub fn with_shell_executor(mut self, executor: Arc<dyn ShellExecutor>) -> Self {
+        self.shell_executor = Some(executor);
+        self
     }
 
     /// Create a BuiltinTools instance with an explicit platform capability set,
     /// for tests or hosts that need to override the compile-time default.
     pub fn with_capabilities(ctx: ToolContext, platform: PlatformCapabilities) -> Self {
-        Self { ctx, platform }
+        Self {
+            ctx,
+            platform,
+            shell_executor: None,
+        }
     }
 
     /// Whether a built-in named `canonical_name` is available on this platform.
@@ -960,11 +987,18 @@ impl BuiltinTools {
         let workdir = self.ctx.workdir.clone();
         let (shell, flag) = Self::detect_shell();
 
-        let run = Command::new(shell)
-            .arg(flag)
-            .arg(command)
-            .current_dir(&workdir)
-            .output();
+        // When a sandbox executor is attached, it builds a command that runs
+        // inside a container / namespace (still targeting `workdir`); otherwise
+        // run the shell directly on the host — the exact prior behavior.
+        let mut cmd = match &self.shell_executor {
+            Some(executor) => executor.build_command(shell, flag, command, &workdir),
+            None => {
+                let mut c = Command::new(shell);
+                c.arg(flag).arg(command).current_dir(&workdir);
+                c
+            }
+        };
+        let run = cmd.output();
 
         match timeout(timeout_duration, run).await {
             Err(_) => format!("[timed out] Command exceeded 60s: {}", command),
@@ -1818,6 +1852,36 @@ mod tests {
         let tools = make_tools(dir.path());
         let result = tools.execute("shell", json!({})).await;
         assert!(result.contains("missing 'command'"));
+    }
+
+    /// A `ShellExecutor` that ignores the requested command and instead runs a
+    /// fixed marker command — proof that shell execution is routed through it.
+    struct RedirectExecutor;
+    impl ShellExecutor for RedirectExecutor {
+        fn build_command(
+            &self,
+            shell: &str,
+            flag: &str,
+            _command: &str,
+            workdir: &Path,
+        ) -> Command {
+            let mut c = Command::new(shell);
+            c.arg(flag).arg("echo SANDBOXED").current_dir(workdir);
+            c
+        }
+    }
+
+    #[tokio::test]
+    async fn shell_routes_through_executor_when_present() {
+        let dir = tempfile::tempdir().unwrap();
+        let tools = BuiltinTools::new(ToolContext::new(dir.path().to_path_buf()))
+            .with_shell_executor(Arc::new(RedirectExecutor));
+        // The agent asked for `echo host`, but the executor redirects it.
+        let result = tools
+            .execute("shell", json!({"command": "echo host"}))
+            .await;
+        assert!(result.contains("SANDBOXED"), "got: {result}");
+        assert!(!result.contains("host"));
     }
 
     #[tokio::test]
